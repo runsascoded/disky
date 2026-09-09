@@ -139,8 +139,8 @@ the walk carries the app's identity with no child-process caveat — the core v2
 ## Toolchain installed
 
 - Rust 1.93 / cargo 1.93 (pre-existing).
-- `tauri-cli` (Phase 2 — recorded here when installed).
-- Command Line Tools (pre-existing) for `codesign`.
+- `tauri-cli` **v2.11.4** — installed via `cargo install tauri-cli --version "^2.0" --locked`.
+- Command Line Tools (pre-existing) for `codesign`; `disk-tree-selfsigned` identity (pre-existing).
 - Node 26 / pnpm 10 (pre-existing) for the UI build.
 
 ## Phases
@@ -150,7 +150,13 @@ the walk carries the app's identity with no child-process caveat — the core v2
   - **Result:** byte-exact parity (0 mismatches on ~1.06M files across two trees); **1.58x**
     faster on `~/Library/Caches` (10.1s vs 16.0s, 580K files), **2.73x** on `~/c/oa/marin`
     (3.34s vs 9.10s, 480K files), both warm-cache. Harness: `crates/dt-walker/parity.py`.
-- **Phase 2** — Tauri v2 shell around `ui/dist`, Python sidecar.
+- **Phase 2** — Tauri v2 shell around `ui/dist`, Python sidecar. ✅ (host + window; sidecar TODO)
+  - `apps/tauri/src-tauri`: `disk-tree-app` opens a system-WKWebView window, spawns the Python
+    backend on a free loopback port, and links `dt-walker` in. **Runtime smoke verified:** the
+    window loaded the UI and made live API calls (`GET /` → 200, assets, `/api/scans`,
+    `/api/backend/available`, the progress SSE stream — all 200). Backend is spawned from PATH
+    (`disk-tree-server`) for now; the self-contained **PyInstaller sidecar** is the remaining
+    piece (see below).
 - **Phase 3** — `DISK_TREE_WALKER` seam in `local.py`; scan end-to-end through the native walker. ✅
   - `LocalBackend.list` swaps the source command to `dt-walker` when `DISK_TREE_WALKER` is set,
     feeding the *unchanged* `run_gfind` null-record parser; `PERMISSION_DENIED_RE` widened to
@@ -158,7 +164,33 @@ the walk carries the app's identity with no child-process caveat — the core v2
     aggregate → parquet → `du`) through the walker yields a **byte-identical scan** to the
     gfind path (`tests/test_backends.py::test_dt_walker_seam_matches_gfind`, exact DataFrame
     equality; skipped when the binary isn't built).
-- **Phase 4** — sign + bundle with `disk-tree-selfsigned`; FDA-grant verification steps.
+- **Phase 4** — sign + bundle with `disk-tree-selfsigned`; FDA-grant verification steps. ✅ (signing;
+  FDA grant is Ryan's GUI step)
+  - `cargo tauri build --bundles app` → `target/release/bundle/macos/disk-tree.app` (**6.4 MB** —
+    no bundled browser, vs v1's ~330 MB). `codesign -dvvv` confirms `Authority=disk-tree-selfsigned`
+    and `Identifier=com.runsascoded.disk-tree`; `codesign --verify --deep --strict` passes
+    ("satisfies its Designated Requirement"). Notarization intentionally skipped (personal use).
+  - **FDA grant + protected-folder verification** (Ryan's GUI step):
+    1. Move/keep `disk-tree.app` at a stable path (rebuilds keep the same cdhash-independent
+       Designated Requirement, so the grant survives).
+    2. System Settings → Privacy & Security → Full Disk Access → **+** → add `disk-tree.app`.
+       The list entry reads **"disk-tree"** (not "python3.13"), the whole point of v2.
+    3. Launch the app; run a scan over a protected folder (Desktop/Documents/Downloads/Photos).
+       It should read them with no per-file prompts and a low `error_count` — the same bar the
+       interpreter-FDA scan cleared, but now keyed to the stable app identity.
+
+## Remaining work (v2 not yet "real")
+
+1. **PyInstaller sidecar** — bundle the Python backend into the app (`externalBin` +
+   `--waitress`, reusing `packaging/macos/disk-tree.spec`) so it's self-contained; today the
+   host spawns `disk-tree-server` from PATH. Sign the sidecar with inheritance.
+2. **Ship `dt-walker` as a bundle resource** and confirm `locate_walker()` resolves it, so the
+   packaged backend scans via the native walker.
+3. **In-process walk → aggregation** — stream `native_walk_stats`'s records straight into the
+   Python aggregation (or a Rust port) instead of the subprocess seam, so the walk is fully
+   in-app (the strongest TCC form).
+4. Real app icon (current is a placeholder).
+5. Ryan's GUI FDA grant + protected-folder check (steps above).
 
 ## Open questions / risks
 
