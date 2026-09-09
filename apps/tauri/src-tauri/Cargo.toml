@@ -1,0 +1,22 @@
+[package]
+name = "disk-tree-app"
+version = "0.1.0"
+edition = "2021"
+description = "disk-tree — native macOS app (Tauri v2 host)"
+license = "MIT"
+
+[lib]
+# Tauri v2 convention: the app lives in a lib so mobile/desktop entrypoints share it.
+name = "disk_tree_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The native getattrlistbulk walker, compiled *into* the signed app binary so the
+# walk carries the app's TCC identity (no child process). See specs/tauri-native-app.md.
+dt-walker = { path = "../crates/dt-walker" }
