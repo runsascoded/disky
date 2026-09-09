@@ -151,7 +151,13 @@ the walk carries the app's identity with no child-process caveat — the core v2
     faster on `~/Library/Caches` (10.1s vs 16.0s, 580K files), **2.73x** on `~/c/oa/marin`
     (3.34s vs 9.10s, 480K files), both warm-cache. Harness: `crates/dt-walker/parity.py`.
 - **Phase 2** — Tauri v2 shell around `ui/dist`, Python sidecar.
-- **Phase 3** — `DISK_TREE_WALKER` seam in `local.py`; scan end-to-end through the native walker.
+- **Phase 3** — `DISK_TREE_WALKER` seam in `local.py`; scan end-to-end through the native walker. ✅
+  - `LocalBackend.list` swaps the source command to `dt-walker` when `DISK_TREE_WALKER` is set,
+    feeding the *unchanged* `run_gfind` null-record parser; `PERMISSION_DENIED_RE` widened to
+    match the walker's `dt-walker:` prefix. **Verified:** a full `disk-tree index` (parse →
+    aggregate → parquet → `du`) through the walker yields a **byte-identical scan** to the
+    gfind path (`tests/test_backends.py::test_dt_walker_seam_matches_gfind`, exact DataFrame
+    equality; skipped when the binary isn't built).
 - **Phase 4** — sign + bundle with `disk-tree-selfsigned`; FDA-grant verification steps.
 
 ## Open questions / risks

@@ -44,19 +44,34 @@ class LocalBackend(Backend):
         progress: bool = True,
     ) -> Iterator[dict]:
         path0 = abspath(url)
-        cmd = [FIND, path0]
 
         if excludes is None:
             excludes = CLOUDSTORAGE_PATHS
-        for pattern in excludes:
-            abs_pattern = abspath(os.path.expanduser(pattern))
+        applicable_excludes = [
+            abs_pattern
+            for pattern in excludes
+            for abs_pattern in [abspath(os.path.expanduser(pattern))]
             if (abs_pattern.startswith(path0 + '/')
-                    or path0.startswith(abs_pattern.rstrip('/') + '/')
-                    or abs_pattern == path0):
-                cmd.extend(['-path', abs_pattern, '-prune', '-o'])
+                or path0.startswith(abs_pattern.rstrip('/') + '/')
+                or abs_pattern == path0)
+        ]
 
-        # %b = 512-byte blocks actually allocated (handles sparse files correctly)
-        cmd.extend(['-printf', r'%y %b %T@ %p\0'])
+        # Opt-in native walker (see specs/tauri-native-app.md): a drop-in for the
+        # `gfind` subprocess that emits the same `%y %b %T@ %p\0` stream, so the
+        # `run_gfind` parser below consumes it unchanged. The gfind path stays the
+        # default; `DISK_TREE_WALKER=<path-to-dt-walker>` swaps only the source cmd.
+        walker = os.environ.get('DISK_TREE_WALKER')
+        if walker:
+            cmd = [walker, '--no-default-excludes']
+            for abs_pattern in applicable_excludes:
+                cmd.extend(['--exclude', abs_pattern])
+            cmd.append(path0)
+        else:
+            cmd = [FIND, path0]
+            for abs_pattern in applicable_excludes:
+                cmd.extend(['-path', abs_pattern, '-prune', '-o'])
+            # %b = 512-byte blocks actually allocated (handles sparse files correctly)
+            cmd.extend(['-printf', r'%y %b %T@ %p\0'])
         if sudo:
             cmd = ['sudo', *cmd]
 
