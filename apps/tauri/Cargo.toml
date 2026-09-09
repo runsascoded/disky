@@ -1,0 +1,10 @@
+# Cargo workspace for the disk-tree Tauri v2 native app.
+# Phase 1 member: the native getattrlistbulk walker. `src-tauri/` joins in Phase 2.
+[workspace]
+resolver = "2"
+members = ["crates/dt-walker"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

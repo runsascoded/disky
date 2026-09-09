@@ -1,0 +1,17 @@
+[package]
+name = "dt-walker"
+version = "0.1.0"
+edition = "2021"
+description = "Native macOS getattrlistbulk(2) directory walker emitting gfind-compatible records for disk-tree"
+license = "MIT"
+
+[lib]
+name = "dt_walker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dt-walker"
+path = "src/bin/dt-walker.rs"
+
+[dependencies]
+libc = "0.2"

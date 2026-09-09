@@ -76,14 +76,19 @@ consumes the native stream unchanged, so the native walker is a true drop-in.
   device, socket, fifo — the same letters GNU find uses (`b`/`c`/`s`/`p`), so the passthrough
   branch behaves identically. Type comes from `ATTR_CMN_OBJTYPE` (`fsobj_type_t`).
 - **`%b`**: GNU find's `%b` is `st_blocks` (512-byte units). getattrlistbulk exposes
-  `ATTR_FILE_ALLOCSIZE` (bytes) for file forks; `st_blocks*512` and `ALLOCSIZE` agree on APFS
-  for the data fork, but `st_blocks` also counts xattr/resource-fork blocks. To guarantee
-  parity we request **`ATTR_FILE_ALLOCSIZE` for files** and treat **dirs/symlinks as 0 blocks**
-  (APFS directories report `st_blocks == 0`, which is what `gfind %b` prints). The Phase-1
-  benchmark diffs the two streams sorted; any residual `%b` mismatch is characterized and
-  documented here (candidates: resource forks, compressed files where `ALLOCSIZE` diverges from
-  `st_blocks`). If bulk `ALLOCSIZE` proves unfaithful, the fallback is an `lstat` for the block
-  count on file rows only (still bulk-enumerated dirs) — slower but exact.
+  `ATTR_FILE_ALLOCSIZE` (bytes) for file forks; we request it for files and emit
+  `ALLOCSIZE / 512`, treating **dirs/symlinks as 0 blocks** (APFS directories report
+  `st_blocks == 0`, which is what `gfind %b` prints). **Verified empirically (Phase 1):**
+  `ALLOCSIZE/512` matches `gfind`'s `st_blocks` *exactly* — **0 `%b` mismatches across ~1.06M
+  files** (480,323 in `~/c/oa/marin` + 579,581 in `~/Library/Caches`). No resource-fork /
+  compressed-file divergence surfaced; the `lstat`-fallback contingency was not needed.
+  - **Layout gotcha (found & fixed in Phase 1):** `FSOPT_PACK_INVAL_ATTRS` does **not**
+    zero-pack the *file* attribute group for non-file entries — a directory entry omits
+    `ATTR_FILE_ALLOCSIZE` entirely, so blindly reading its buffer slot yields garbage (a dir
+    printed `%b = 603992378`). The parser now consults each entry's `returned` attribute_set
+    (`fileattr` word) and reads allocsize only when the `ATTR_FILE_ALLOCSIZE` bit is set;
+    dirs/symlinks get 0. Entries are advanced by the leading `length` field, so a shorter
+    (allocsize-less) entry is walked correctly.
 - **`%T@`**: `gfind` prints `<sec>.<frac>`; the parser only does `int(float(...))`, so the
   fractional part is discarded. The walker prints integer seconds — the parsed values are
   identical.
@@ -140,8 +145,11 @@ the walk carries the app's identity with no child-process caveat — the core v2
 
 ## Phases
 
-- **Phase 0** — this spec.
-- **Phase 1** — `dt-walker` crate + CLI; benchmark & parity-diff vs `gfind`.
+- **Phase 0** — this spec. ✅
+- **Phase 1** — `dt-walker` crate + CLI; benchmark & parity-diff vs `gfind`. ✅
+  - **Result:** byte-exact parity (0 mismatches on ~1.06M files across two trees); **1.58x**
+    faster on `~/Library/Caches` (10.1s vs 16.0s, 580K files), **2.73x** on `~/c/oa/marin`
+    (3.34s vs 9.10s, 480K files), both warm-cache. Harness: `crates/dt-walker/parity.py`.
 - **Phase 2** — Tauri v2 shell around `ui/dist`, Python sidecar.
 - **Phase 3** — `DISK_TREE_WALKER` seam in `local.py`; scan end-to-end through the native walker.
 - **Phase 4** — sign + bundle with `disk-tree-selfsigned`; FDA-grant verification steps.
@@ -153,4 +161,3 @@ the walk carries the app's identity with no child-process caveat — the core v2
   the stream seam keeps that door open).
 - Scheduled scans: does the LaunchAgent invoke the app (app identity on cron) or keep the CLI?
   Inherited from `macos-app.md`; not decided here.
-</content>
