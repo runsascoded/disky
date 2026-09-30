@@ -23,6 +23,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+mod agent;
+
 use serde::Serialize;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -106,6 +108,12 @@ fn spawn_backend(port: u16) -> std::io::Result<Child> {
         cmd.env("DISK_TREE_WALKER", walker);
     }
     cmd.spawn()
+}
+
+/// A headless mode (`agent`, `probe`) when `args` selects one: its exit code.
+/// Checked before `run()`, so launchd jobs never touch Tauri/AppKit.
+pub fn headless(args: &[std::ffi::OsString]) -> Option<i32> {
+    agent::dispatch(args)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

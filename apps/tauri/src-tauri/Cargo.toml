@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+libc = "0.2"
 # The native getattrlistbulk walker, compiled *into* the signed app binary so the
 # walk carries the app's TCC identity (no child process). See specs/tauri-native-app.md.
 dt-walker = { path = "../crates/dt-walker" }

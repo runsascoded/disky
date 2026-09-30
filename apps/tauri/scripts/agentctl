@@ -1,0 +1,189 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["click"]
+# ///
+"""Run the laptop's LaunchAgents under `disk-tree.app`'s TCC identity.
+
+`disk-tree-app agent -- CMD…` spawns CMD as a child of the signed app binary,
+so one Full Disk Access grant to the app covers every agent, whatever Python
+or venv it runs (spec `tauri-native-app.md`, "Scheduled scans").
+
+    agentctl install          # copy the built bundle to ~/Applications, verify its signature
+    agentctl check            # launchd probe: does the app (and its children) have FDA?
+    agentctl route LABEL…     # prefix LABEL's ProgramArguments with the app wrapper, reload
+    agentctl unroute LABEL…   # undo `route`
+    agentctl status           # each disk-tree agent: routed or not, last exit
+"""
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import time
+from functools import partial
+from pathlib import Path
+
+from click import argument, group, option
+
+err = partial(print, file=sys.stderr)
+
+TAURI = Path(__file__).resolve().parent.parent
+BUILT = TAURI / 'target' / 'release' / 'bundle' / 'macos' / 'disk-tree.app'
+APP = Path.home() / 'Applications' / 'disk-tree.app'
+EXE = APP / 'Contents' / 'MacOS' / 'disk-tree-app'
+AGENTS = Path.home() / 'Library' / 'LaunchAgents'
+LOGS = Path.home() / 'Library' / 'Logs' / 'disk-tree'
+PREFIX = 'com.runsascoded.disk-tree.'
+DOMAIN = f'gui/{os.getuid()}'
+
+
+def run(*cmd: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, check=check, text=True, capture_output=True)
+
+
+def plist_path(label: str) -> Path:
+    return AGENTS / f'{label if label.startswith(PREFIX) else PREFIX + label}.plist'
+
+
+def wrapper() -> list[str]:
+    return [str(EXE), 'agent', '--']
+
+
+def is_routed(args: list[str]) -> bool:
+    return args[:3] == wrapper()
+
+
+def last_exit(label: str) -> str | None:
+    r = run('launchctl', 'print', f'{DOMAIN}/{label}', check=False)
+    if r.returncode:
+        return None
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if line.startswith('last exit code = '):
+            return line.removeprefix('last exit code = ')
+    return None
+
+
+def reload(path: Path, label: str) -> None:
+    run('launchctl', 'bootout', f'{DOMAIN}/{label}', check=False)
+    run('launchctl', 'bootstrap', DOMAIN, str(path))
+
+
+@group()
+def cli():
+    pass
+
+
+@cli.command()
+def install():
+    """Copy the built bundle to ~/Applications (a stable path for the FDA grant)."""
+    if not BUILT.exists():
+        raise SystemExit(f'no bundle at {BUILT}; build it with `cargo tauri build --bundles app`')
+    run('codesign', '--verify', '--deep', '--strict', str(BUILT))
+    if APP.exists():
+        shutil.rmtree(APP)
+    run('ditto', str(BUILT), str(APP))
+    dr = run('codesign', '-d', '-r-', str(APP)).stdout.strip().splitlines()[-1]
+    err(f'installed {APP}')
+    err(f'  {dr}')
+
+
+PROBES = {
+    f'{PREFIX}probe': lambda: [str(EXE), 'probe'],
+    f'{PREFIX}probe-child': lambda: [*wrapper(), '/bin/ls', '-A', str(Path.home() / 'Library' / 'Mail')],
+}
+
+
+@cli.command()
+@option('-t', '--timeout', type=float, default=90, help='Seconds to wait for both probe jobs')
+def check(timeout: float):
+    """Run the probe as launchd jobs (so TCC sees the app, not this terminal).
+
+    Two jobs: `probe` reads protected dirs in the app's own process; `probe-child`
+    has the app spawn `/bin/ls` on one, the shape every routed agent takes.
+    Exit 0 only if both succeed.
+    """
+    LOGS.mkdir(parents=True, exist_ok=True)
+    tmp = Path('tmp')
+    tmp.mkdir(exist_ok=True)
+    for label, args in PROBES.items():
+        log = LOGS / f'{label}.log'
+        log.write_text('')
+        path = tmp / f'{label}.plist'
+        with open(path, 'wb') as f:
+            plistlib.dump({
+                'Label': label, 'ProgramArguments': args(), 'RunAtLoad': True,
+                'StandardOutPath': str(log), 'StandardErrorPath': str(log),
+            }, f)
+        reload(path, label)
+    deadline = time.monotonic() + timeout
+    codes: dict[str, str | None] = {}
+    while time.monotonic() < deadline:
+        codes = {label: last_exit(label) for label in PROBES}
+        if all(c and c[0].isdigit() for c in codes.values()):
+            break
+        time.sleep(0.5)
+    ok = True
+    for label, code in codes.items():
+        run('launchctl', 'bootout', f'{DOMAIN}/{label}', check=False)
+        print(f'== {label.removeprefix(PREFIX)}: exit {code}')
+        print((LOGS / f'{label}.log').read_text().rstrip())
+        ok &= code == '0'
+    print('FDA: granted' if ok else f'FDA: NOT granted to {APP} (System Settings → Privacy & Security → Full Disk Access → +)')
+    sys.exit(0 if ok else 3)
+
+
+def rewrite(labels: tuple[str, ...], routed: bool) -> None:
+    for label in labels:
+        path = plist_path(label)
+        with open(path, 'rb') as f:
+            pl = plistlib.load(f)
+        args = pl['ProgramArguments']
+        if is_routed(args) == routed:
+            err(f'{pl["Label"]}: already {"routed" if routed else "unrouted"}')
+            continue
+        pl['ProgramArguments'] = [*wrapper(), *args] if routed else args[3:]
+        backup = path.with_suffix(f'.plist.bak-{time.strftime("%Y%m%dT%H%M%S")}')
+        shutil.copy2(path, backup)
+        with open(path, 'wb') as f:
+            plistlib.dump(pl, f)
+        reload(path, pl['Label'])
+        err(f'{pl["Label"]}: {"routed through" if routed else "unrouted from"} {APP.name} (backup {backup.name})')
+
+
+@cli.command()
+@argument('labels', nargs=-1, required=True)
+def route(labels: tuple[str, ...]):
+    """Prefix each agent's ProgramArguments with `disk-tree-app agent --` and reload it.
+
+    LABEL may omit the `com.runsascoded.disk-tree.` prefix (`index`, `drain`).
+    Run `agentctl check` first: a routed agent without the app's FDA grant
+    silently scans less.
+    """
+    if not EXE.exists():
+        raise SystemExit(f'{EXE} missing; run `agentctl install`')
+    rewrite(labels, routed=True)
+
+
+@cli.command()
+@argument('labels', nargs=-1, required=True)
+def unroute(labels: tuple[str, ...]):
+    """Undo `route`: drop the app wrapper from each agent's ProgramArguments."""
+    rewrite(labels, routed=False)
+
+
+@cli.command()
+def status():
+    """Each `com.runsascoded.disk-tree.*` agent: routed or direct, and its last exit."""
+    for path in sorted(AGENTS.glob(f'{PREFIX}*.plist')):
+        with open(path, 'rb') as f:
+            pl = plistlib.load(f)
+        args = pl['ProgramArguments']
+        mode = 'app' if is_routed(args) else 'direct'
+        cmd = ' '.join(args[3:] if mode == 'app' else args)
+        print(f'{pl["Label"].removeprefix(PREFIX):<14} {mode:<7} exit={last_exit(pl["Label"])}  {cmd}')
+
+
+if __name__ == '__main__':
+    cli()
