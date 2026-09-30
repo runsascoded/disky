@@ -9,3 +9,10 @@ members = ["crates/dt-walker", "src-tauri"]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# Proc-macro dylibs and build scripts build under this profile. Cargo's default
+# release `strip = "debuginfo"` runs `strip` on them, and on macOS 27 dyld refuses
+# the stripped proc-macro dylibs ("mis-aligned LINKEDIT string pool"), which
+# rustc reports as E0463 "can't find crate for `phf_macros`" (Rust 1.93, ld-27037).
+[profile.release.build-override]
+strip = false
