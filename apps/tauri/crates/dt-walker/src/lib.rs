@@ -11,7 +11,7 @@ pub mod record;
 use std::io::{self, Write};
 use std::os::raw::c_void;
 
-use attrlist::{getattrlistbulk, Attrlist, FSOPT_PACK_INVAL_ATTRS};
+use attrlist::{getattrlistbulk, Attrlist, Request};
 use record::Record;
 
 /// Directories proxying to cloud services (macOS File Provider); walking them
@@ -51,8 +51,17 @@ impl ErrorStats {
 pub struct Walker<'a> {
     excludes: &'a [Vec<u8>],
     buf: Vec<u8>,
+    request: Request,
+    /// Don't descend into mount points (`find -xdev`); set via [`Walker::one_fs`].
+    one_fs: bool,
     pub records: u64,
     pub errors: ErrorStats,
+    /// Σ allocated bytes over files (`%b` × 512).
+    pub alloc_bytes: u64,
+    /// Σ `ATTR_CMNEXT_PRIVATESIZE` over files, when [`Walker::private`] is on.
+    pub private_bytes: u64,
+    /// Mount points skipped under [`Walker::one_fs`].
+    pub mounts_skipped: u64,
 }
 
 impl<'a> Walker<'a> {
@@ -62,9 +71,29 @@ impl<'a> Walker<'a> {
             // 256 KiB batches: big enough to amortize the syscall, small enough
             // to stay in cache and bound memory.
             buf: vec![0u8; 256 * 1024],
+            request: Request::default(),
+            one_fs: false,
             records: 0,
             errors: ErrorStats::new(),
+            alloc_bytes: 0,
+            private_bytes: 0,
+            mounts_skipped: 0,
         }
+    }
+
+    /// Stay on the root's filesystem: mount points are emitted (as gfind
+    /// `-xdev` does) but not descended into.
+    pub fn one_fs(mut self, on: bool) -> Self {
+        self.one_fs = on;
+        self.request.mount_status = on;
+        self
+    }
+
+    /// Also fetch each file's APFS private size (same syscall, one more
+    /// attribute), summed into `private_bytes`. The record stream is unchanged.
+    pub fn private(mut self, on: bool) -> Self {
+        self.request.private = on;
+        self
     }
 
     /// Walk `root` (an absolute path, no trailing slash except "/"), writing
@@ -112,7 +141,8 @@ impl<'a> Walker<'a> {
             return Ok(());
         }
 
-        let mut alist = Attrlist::request();
+        let mut alist = Attrlist::request(self.request);
+        let options = self.request.options();
         loop {
             let n = unsafe {
                 getattrlistbulk(
@@ -120,7 +150,7 @@ impl<'a> Walker<'a> {
                     &mut alist,
                     self.buf.as_mut_ptr() as *mut c_void,
                     self.buf.len(),
-                    FSOPT_PACK_INVAL_ATTRS,
+                    options,
                 )
             };
             if n < 0 {
@@ -134,15 +164,23 @@ impl<'a> Walker<'a> {
             // Collect children first (the parse borrows `self.buf`; emitting and
             // pushing need `&mut self`, so we can't do both inside the closure).
             let mut children: Vec<(Vec<u8>, u8, u64, i64, bool)> = Vec::with_capacity(n as usize);
+            let (mut private, mut skipped) = (0u64, 0u64);
+            let one_fs = self.one_fs;
             unsafe {
                 attrlist::parse_entries(&self.buf, n as usize, |e| {
                     let path = join(dir, e.name);
-                    children.push((path, e.kind, e.blocks, e.mtime_sec, e.is_dir));
+                    private += e.private.unwrap_or(0);
+                    let descend = e.is_dir && !(one_fs && e.mount_point);
+                    skipped += (e.is_dir && !descend) as u64;
+                    children.push((path, e.kind, e.blocks, e.mtime_sec, descend));
                 });
             }
-            for (path, kind, blocks, mtime, is_dir) in children {
+            self.private_bytes += private;
+            self.mounts_skipped += skipped;
+            for (path, kind, blocks, mtime, descend) in children {
+                self.alloc_bytes += if kind == b'f' { blocks * 512 } else { 0 };
                 self.emit(Record { kind, blocks, mtime, path: &path }, out)?;
-                if is_dir && !self.is_excluded(&path) {
+                if descend && !self.is_excluded(&path) {
                     stack.push(path);
                 }
             }
