@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Branch parity audit (specs/one-clone-layout.md "Monitoring"): for each
+# branch pair, diff-of-diffs (git-didi) per surface since the pair's
+# merge-base — files where the two branches' changes differ. Surfaces expected
+# at parity (react lib, python engine, site src + functions) should print
+# `parity`; anything else is either base-bound work not yet cherry-picked up,
+# or a regression from a merge. Run before and after every `git merge cloud`
+# on a deployment branch.
+#
+# Pairs and surfaces come from `.claude/cp.yml` (every peer vs `cloud`, plus
+# `gcs cw-s3`), so one config drives both `git cp` and this audit.
+#
+#   scripts/branch-audit                  # every configured pair, every surface
+#   scripts/branch-audit gcs cloud site/src   # one pair, one or more surfaces
+set -euo pipefail
+cd "$(dirname "$0")/.."
+command -v git-didi >/dev/null || { echo "git-didi missing: uv tool install git-didi" >&2; exit 1; }
+
+# A linked worktree has no `.claude/cp.yml` of its own: fall back to the main
+# worktree's (the git common dir's parent).
+CFG=.claude/cp.yml
+[ -f "$CFG" ] || CFG=$(git rev-parse --path-format=absolute --git-common-dir)/../.claude/cp.yml
+if [ $# -ge 2 ]; then
+  PAIRS=("$1 $2")
+else
+  # Every non-`cloud` peer vs `cloud`, then the two OA deployments vs each other.
+  PAIRS=()
+  for b in $(sed -n '/^branches:/,/^[a-z]/p' "$CFG" | grep -E '^  [a-z0-9-]+:' | sed 's/^  \([^:]*\):.*/\1/'); do
+    [ "$b" = cloud ] || PAIRS+=("$b cloud")
+  done
+  PAIRS+=("gcs cw-s3")
+fi
+if [ $# -ge 3 ]; then
+  SURFACES=("${@:3}")
+else
+  read -ra SURFACES <<<"$(sed -n 's/^surfaces: *\[\(.*\)\]/\1/p' "$CFG" | tr -d ',')"
+fi
+
+for pair in "${PAIRS[@]}"; do
+  set -- $pair
+  a=$1; b=$2
+  git rev-parse -q --verify "$a" >/dev/null || { echo "## $a ↔ $b: ref $a missing"; continue; }
+  git rev-parse -q --verify "$b" >/dev/null || { echo "## $a ↔ $b: ref $b missing"; continue; }
+  mb=$(git merge-base "$a" "$b")
+  echo "## $a ↔ $b  (merge-base ${mb:0:9}, $(git log -1 --format=%ad --date=short "$mb"))"
+  for s in "${SURFACES[@]}"; do
+    out=$(git-didi stat --pager never --color never "$mb..$a" "$mb..$b" "$s" 2>&1 || true)
+    if grep -q "No differences" <<<"$out"; then
+      printf '  %-22s parity\n' "$s"
+    else
+      n=$(grep -cE '^[-+][0-9-]+\s' <<<"$out" || true)
+      printf '  %-22s %s files differ  (git-didi stat %s..%s %s..%s %s)\n' "$s" "$n" "${mb:0:9}" "$a" "${mb:0:9}" "$b" "$s"
+    fi
+  done
+done

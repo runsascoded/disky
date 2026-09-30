@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Refresh the LOCAL (miniflare) D1 from a fresh export of the prod auth DB, so
+# `./dev` renders against real marks / owners / claims / access-log instead of
+# whatever the local copy last held. The export is read-only — prod is never
+# written — and any marks you make while testing stay in the local DB, so this
+# doubles as a throwaway staging mirror.
+#
+#   ./refresh-db              # export prod → reset & reload local D1
+#   ./refresh-db --from DUMP  # reload local D1 from an export already on disk
+#                             # (offline, or re-seeding after a wipe without
+#                             # pulling the multi-GB export again)
+#   ./dev --refresh           # refresh first, then boot the dev servers
+#
+# The dump lands in tmp/prod-auth.sql (gitignored) and holds real emails +
+# hashed IPs + agent-token hashes — keep it local, never commit it, and never
+# push the local DB back to prod.
+#
+# The load goes through `sqlite3`, straight into the miniflare D1's sqlite
+# file, not `wrangler d1 execute --local --file`: wrangler reads the whole file
+# into memory and refuses anything over 2 GiB, and a production export is
+# mostly `index_row_groups` (gcs's was 2.6 GB at cutover). sqlite3 streams it.
+# The export is a self-contained dump — `PRAGMA defer_foreign_keys`, then each
+# table's `CREATE TABLE` (possibly multi-line) followed by one `INSERT` per
+# row, then the indexes — and it carries prod's `d1_migrations` rows, so the
+# schema comes from the dump itself (the local D1 is wiped first, so nothing
+# collides) and `./dev` sees the migrations as already applied — exactly what
+# the wrangler import did, minus the size cap.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+FROM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from) [ $# -ge 2 ] || { echo "refresh-db: --from needs a path" >&2; exit 2; }; FROM=$2; shift 2 ;;
+    *) echo "unknown arg: $1 (expected --from DUMP)" >&2; exit 2 ;;
+  esac
+done
+command -v sqlite3 >/dev/null || { echo "refresh-db: sqlite3 not on PATH (macOS ships it; apt: sqlite3)" >&2; exit 1; }
+
+# This deployment's D1, from the same file wrangler binds it from.
+DB=$(sed -n 's/^database_name = "\(.*\)"$/\1/p' wrangler.toml | head -1)
+[ -n "$DB" ] || { echo "refresh-db: no database_name = ... in wrangler.toml" >&2; exit 1; }
+DB_ID=$(sed -n 's/^database_id = "\(.*\)"$/\1/p' wrangler.toml | head -1)
+[ -n "$DB_ID" ] || { echo "refresh-db: no database_id = ... in wrangler.toml" >&2; exit 1; }
+D1_DIR=.wrangler/state/v3/d1/miniflare-D1DatabaseObject
+mkdir -p tmp
+
+if [ -n "$FROM" ]; then
+  dump=$FROM
+  [ -f "$dump" ] || { echo "refresh-db: no such export: $dump" >&2; exit 1; }
+else
+  dump=tmp/prod-auth.sql
+  echo "→ exporting prod $DB (read-only)…" >&2
+  npx wrangler d1 export "$DB" --remote --output "$dump"
+fi
+bytes=$(wc -c <"$dump" | tr -d ' ')
+
+echo "→ resetting local D1 state…" >&2
+rm -rf .wrangler/state/v3/d1
+
+# Let wrangler create the (empty) local D1 the way `pages dev` will open it —
+# workerd's own file layout (WAL journal, `_cf_METADATA`) — then find it.
+# Miniflare names the file by the Durable Object id it derives from the
+# binding's `database_id`: sha256(namespace) keys an HMAC of the id, then an
+# HMAC of that, 16 bytes each (`durableObjectNamespaceIdFromName`). Computed
+# here so the target is deterministic, and checked against what wrangler
+# actually wrote (the dir was just wiped, so it holds exactly one database).
+npx wrangler d1 execute "$DB" --local --command 'select 1' >/dev/null
+sqlite=$D1_DIR/$(node -e '
+const { createHash, createHmac } = require("crypto")
+const key = createHash("sha256").update("miniflare-D1DatabaseObject").digest()
+const name = createHmac("sha256", key).update(process.argv[1]).digest().subarray(0, 16)
+const mac = createHmac("sha256", key).update(name).digest().subarray(0, 16)
+process.stdout.write(Buffer.concat([name, mac]).toString("hex"))
+' "$DB_ID").sqlite
+if [ ! -f "$sqlite" ]; then
+  found=$(find "$D1_DIR" -name '*.sqlite' ! -name metadata.sqlite)
+  case $(printf '%s\n' "$found" | grep -c .) in
+    1) echo "!! expected $sqlite; wrangler wrote $found — using it (miniflare's id derivation changed?)" >&2; sqlite=$found ;;
+    *) echo "refresh-db: can't find the local D1 file under $D1_DIR (expected $sqlite; found: ${found:-none})" >&2; exit 1 ;;
+  esac
+fi
+
+echo "→ loading $dump ($(numfmt --to=iec "$bytes" 2>/dev/null || echo "$bytes bytes"), $(wc -l <"$dump" | tr -d ' ') lines) into $sqlite…" >&2
+# One transaction (an autocommit per INSERT would fsync millions of times);
+# `synchronous=OFF` is per-connection, so workerd's WAL settings are untouched.
+# A statement that fails aborts the whole load (`-bail`), leaving the wiped
+# state rather than a half-loaded DB that `./dev` would take for a seeded one.
+{
+  echo 'PRAGMA synchronous=OFF;'
+  echo 'BEGIN;'
+  cat "$dump"
+  echo 'COMMIT;'
+  echo 'PRAGMA wal_checkpoint(TRUNCATE);'
+} | sqlite3 -bail "$sqlite" >/dev/null
+
+# What landed: every table the dump created, largest first (workerd's own
+# `_cf_*` tables aside).
+echo "✓ local D1 refreshed from $dump ($(numfmt --to=iec "$(wc -c <"$sqlite" | tr -d ' ')" 2>/dev/null || wc -c <"$sqlite" | tr -d ' ') on disk) — start it with ./dev" >&2
+sqlite3 "$sqlite" "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\_cf\_%' ESCAPE '\' AND name NOT LIKE 'sqlite\_%' ESCAPE '\'" \
+  | while read -r t; do printf '%s\t%s\n' "$(sqlite3 "$sqlite" "SELECT count(*) FROM \"$t\"")" "$t"; done \
+  | sort -rn | awk -F'\t' '{ printf "  %12s  %s\n", $1, $2 }' >&2

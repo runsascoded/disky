@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { contrastEdge, DEFAULT_PALETTE } from './colors'
+import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
 import type { FoldedNode, LayoutConfig } from './layout'
 import { edgeEmphFactor, isFolded, layoutCells } from './layout'
 import { foldSmall, foldThin, squarify, squarifyRemainder } from './squarify'
-import { TreemapCanvas, type CanvasHit } from './TreemapCanvas'
-import { resolveRing, type StyleOpts } from './cellStyle'
+import { TreemapCanvas, renderMapToCanvas, type CanvasHit } from './TreemapCanvas'
+import { OutlineOverlay } from './OutlineOverlay'
+import type { OutlineGroups } from './outlines'
+import { categoricalStyle, resolveRing, type StyleOpts } from './cellStyle'
+import { canvasToPngBlob, composeExport, copyPng, defaultExportFilename, downloadPng } from './exportImage'
+import type { ExportKind, ExportOptions } from './exportImage'
+import { CheckIcon, CopyIcon, DownloadIcon, FullscreenIcon } from './chromeIcons'
 import { useHoverPin } from './useHoverPin'
 
 /**
@@ -120,6 +125,17 @@ export interface TreemapProps<T> {
   renderCellExtra?: (n: T, path: T[], ctx: CellCtx) => ReactNode
   /** Tooltip body; return null to suppress the tooltip. */
   renderTooltip?: (n: T, path: T[]) => ReactNode
+  /**
+   * Tooltip placement. `'float'` (default) is a fixed tip that tracks the
+   * pointer; `'dock'` renders one panel below the footer that updates in place
+   * as the pointer moves through a lineage — no tip chasing the cursor or
+   * covering cells/controls, and a phone (no hover) taps to pin into it. The
+   * empty panel keeps a small footprint so the layout doesn't jump.
+   */
+  tipMode?: 'float' | 'dock'
+  /** Dock mode only: a resting card shown in the docked tip panel when no cell
+   *  is hovered (e.g. the current root's summary), instead of the empty hint. */
+  renderTipDefault?: (n: T, path: T[]) => ReactNode
   /** Extra row above the map (e.g. rollup / totals). */
   renderRollup?: (n: T, path: T[]) => ReactNode
   /** Right side of the breadcrumbs bar. */
@@ -189,6 +205,25 @@ export interface TreemapProps<T> {
   mergeSmall?: (small: T[]) => T
   /** Show the fullscreen toggle button. Default: true. */
   fullscreen?: boolean
+  /**
+   * Add copy-PNG / download-PNG buttons to the bar (and `⌘/Ctrl+Shift+C` to
+   * copy) that export the current view as an image. `true` ≡ `{}` (the bare
+   * map); `{ title: true }` composites the crumb text above it. Canvas
+   * renderer only — the export reads the map's `<canvas>` pixels directly (no
+   * DOM-to-image dependency); ignored under the DOM renderer.
+   */
+  exportable?: boolean | ExportOptions<T>
+  /** Fired after each export, with the PNG blob and how it left (for a
+   *  "copied ✓" toast / analytics; the copy/download itself is already done). */
+  onExport?: (blob: Blob, ctx: { kind: ExportKind }) => void
+  /**
+   * Wrap a control-bar button (export copy/download, fullscreen) with your own
+   * tooltip lib — MUI `<Tooltip>`, `@floating-ui/react`, Radix, … — instead of
+   * the browser-native `title`. Given the button's label and element, return
+   * the wrapped node. When set, the native `title` is suppressed so tips
+   * aren't doubled. Omitted → native `title` (the core stays dependency-free).
+   */
+  renderTip?: (label: string, button: ReactNode) => ReactNode
   /** Render the breadcrumbs/legend bar. Default: true. */
   chrome?: boolean
   /** Render in-cell labels. Default: true. (`false` + `chrome={false}` ≈ a redacted/og render.) */
@@ -200,6 +235,13 @@ export interface TreemapProps<T> {
    * it to the cell's far edge. Both renderers honor it identically.
    */
   sizeAlign?: 'left' | 'right'
+  /**
+   * Minimum cell width (CSS px) at which a branch title-bar or short leaf
+   * shows its size *inline* beside the name. Below it the name gets the whole
+   * line (the size stays in the tooltip, and on a tall leaf's 2nd line).
+   * Raise it when names matter more than sizes (long paths). Default: 90.
+   */
+  inlineSizeMinWidth?: number
   /** Extra className on the outer wrapper. */
   className?: string
   /** Style overrides on the map area. */
@@ -281,6 +323,15 @@ export interface TreemapProps<T> {
    */
   dustTexture?: boolean
   /**
+   * Hierarchical default coloring (no effect when `colorForCell` is set): each
+   * top-level dir keeps its categorical "macro" hue, its descendants get a
+   * per-L2-subtree "micro" variation of it (so sibling subtrees read as
+   * related-but-distinct), and container cells are tinted a recessed shade of
+   * their hue instead of a flat grey — so directory headers carry color. Off by
+   * default (the neutral-container look is unchanged); opt in per consumer.
+   */
+  nestedHues?: boolean
+  /**
    * Render a "detail" slider in the chrome bar that scales the fold thresholds
    * live (`minCellArea` and `minCellSide`), so a viewer can trade legibility
    * against completeness without a code change — drag toward *fine* to split
@@ -339,6 +390,14 @@ export interface TreemapProps<T> {
    * to mirror only the comfortably-clickable cells. Default: 0.
    */
   a11yMinSide?: number
+  /**
+   * Stroke, once, the outer perimeter of the union of rendered cells sharing a
+   * consumer-supplied group key — so a run of adjacent same-mark siblings reads
+   * as one bordered region instead of a lattice of doubled cell frames (spec
+   * `specs/treemap-mark-union-outlines.md`). An overlay above the fills, below
+   * tooltips, `pointer-events:none`; redrawn with layout. Off when unset.
+   */
+  outlineGroups?: OutlineGroups<T>
 }
 
 export type Tiling = 'gaps' | 'shared'
@@ -404,6 +463,11 @@ export interface CellCtx extends CellDims {
   /** Background opacity applied at this depth (the depth fade), so consumers
    * can compute what their color actually composites to on screen. */
   fade: number
+  /** With `collapseChains`, how many single-child levels this cell collapsed
+   * beyond its first (0 = not a chain): `path` ends at the deepest node, so
+   * the cell's own top node is `path[path.length - 1 - chain]`. Passed to
+   * `renderCellExtra` only. */
+  chain?: number
 }
 
 const DEFAULT_SLOTS = DEFAULT_PALETTE
@@ -464,6 +528,8 @@ export function Treemap<T>({
   lens,
   renderCellExtra,
   renderTooltip,
+  tipMode = 'float',
+  renderTipDefault,
   renderRollup,
   renderLegend,
   renderCrumbSuffix,
@@ -477,9 +543,13 @@ export function Treemap<T>({
   minCellSide = 7,
   mergeSmall,
   fullscreen = true,
+  exportable,
+  onExport,
+  renderTip,
   chrome = true,
   showLabels = true,
   sizeAlign = 'left',
+  inlineSizeMinWidth = 90,
   className,
   mapStyle,
   depthFade = 0.82,
@@ -490,12 +560,14 @@ export function Treemap<T>({
   edgeEmphasis = 0,
   edgeContrast = true,
   dustTexture = true,
+  nestedHues = false,
   foldControl = false,
   remainderTail = false,
   renderer = 'dom',
   a11yLinks = true,
   a11yMaxCells = 400,
   a11yMinSide = 0,
+  outlineGroups,
 }: TreemapProps<T>) {
   // Live fold-threshold multiplier driven by the optional "detail" slider:
   // >1 folds more (coarser), <1 folds less (finer). Scales area linearly and
@@ -511,6 +583,13 @@ export function Treemap<T>({
   const mapRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   const tipRef = useRef<HTMLDivElement>(null)
+  // The live map `<canvas>` (canvas renderer only), so image export can read
+  // its pixels directly (`exportable`).
+  const canvasElRef = useRef<HTMLCanvasElement | null>(null)
+  // Transient "copied ✓ / saved ✓" confirmation on the export buttons.
+  const [flash, setFlash] = useState<ExportKind | null>(null)
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => { if (flashTimer.current) clearTimeout(flashTimer.current) }, [])
   // Grace timer so the hover tip survives the cell→tip gap: leaving the map
   // schedules a clear, entering the tip cancels it. Lets you move into the tip
   // and use its controls/links without pinning (the tip is anchored, not
@@ -577,17 +656,21 @@ export function Treemap<T>({
     return () => ro.disconnect()
   }, [])
 
-  // Backspace/Escape pops the drill stack.
+  // Backspace/Escape pops the drill stack — unless another listener already
+  // consumed the key (a hotkey layer clearing a selection, closing a modal…).
+  // Listens on `window`, the end of the bubbling path, so a hotkey layer on
+  // `document` or `window` gets to `preventDefault` first. (mgu `gcs`.)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
       if ((e.key === 'Backspace' || e.key === 'Escape') && path.length > 1) {
         go(path.slice(0, -1))
       }
     }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [path, go])
 
   const idFor = useCallback(
@@ -657,7 +740,7 @@ export function Treemap<T>({
   // Categorical color slots by top-level index (used when no colorForCell is given).
   const topLevelSlot = useMemo(() => {
     const kids = childrenOf(root, [root]) ?? []
-    return new Map(kids.map((k, i) => [getLabel(k), DEFAULT_SLOTS[i % DEFAULT_SLOTS.length]]))
+    return new Map(kids.map((k, i) => [getLabel(k), slotColor(i, DEFAULT_SLOTS)]))
   }, [root, childrenOf, getLabel])
 
   // Build a folded stand-in from a set of small/thin items: consumer
@@ -752,13 +835,16 @@ export function Treemap<T>({
   // Canvas renderer: the placed-cell tree (geometry only) for the whole map,
   // laid once and reused for paint + hit-test. Only built in canvas mode.
   const placedCells = useMemo(() => {
-    if (renderer !== 'canvas') return []
+    // The canvas renderer paints from these; the DOM renderer doesn't, but the
+    // outline overlay needs the geometry either way — so build them whenever an
+    // `outlineGroups` overlay is present, not only for the canvas renderer.
+    if (renderer !== 'canvas' && !outlineGroups) return []
     const cfg: LayoutConfig<T> = {
       getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
     }
     return layoutCells(rects, path, rootMode, cfg)
   }, [
-    renderer, rects, path, rootMode, getSize, getLabel, childrenOf,
+    renderer, !!outlineGroups, rects, path, rootMode, getSize, getLabel, childrenOf,
     showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
   ])
 
@@ -767,8 +853,8 @@ export function Treemap<T>({
   // change none of these inputs (consumer props keep their identity across
   // internal state changes), so a hover never re-triggers a full repaint.
   const styleOpts = useMemo<StyleOpts<T>>(
-    () => ({ colorForCell, lens, getLabel, topLevelSlot, defaultSlots: DEFAULT_SLOTS, dustTexture, edgeContrast, fadeAt }),
-    [colorForCell, lens, getLabel, topLevelSlot, dustTexture, edgeContrast, fadeAt],
+    () => ({ colorForCell, lens, getLabel, topLevelSlot, defaultSlots: DEFAULT_SLOTS, dustTexture, edgeContrast, nestedHues, fadeAt }),
+    [colorForCell, lens, getLabel, topLevelSlot, dustTexture, edgeContrast, nestedHues, fadeAt],
   )
 
   // Hit → action, shared by both renderers: a DOM cell's event and a canvas
@@ -792,6 +878,25 @@ export function Treemap<T>({
       onCellHover?.(null, [])
     }
   }
+  // Stray-tip guard: a hover tip that outlived its cell (the pointer left via
+  // a path no mouseleave covered — a re-laid tip under the cursor, the window
+  // edge, a portal boundary) would otherwise sit there until the next cell
+  // hover. Any pointer movement outside a cell, the tip, or the map clears it;
+  // a pinned tip is the pin's business (outside click / Esc).
+  useEffect(() => {
+    if (!tip || pinnedTip) return
+    const onMove = (e: MouseEvent) => {
+      const t = e.target as Element | null
+      if (t?.closest?.('.dt-treemap-cell, .dt-treemap-tip, .dt-treemap-map, .dt-treemap-canvas')) return
+      cancelTipClear()
+      pin.hover(null)
+      clearHover()
+      setTip(null)
+    }
+    document.addEventListener('mousemove', onMove)
+    return () => document.removeEventListener('mousemove', onMove)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!tip, !!pinnedTip])
   const activatePin = (node: T, path: T[], key: string, x: number, y: number) => {
     // Reuse the hover tip's anchor for the same cell, so pinning doesn't jump
     // the tooltip from the cell to the click point.
@@ -804,7 +909,9 @@ export function Treemap<T>({
     node: T, path: T[], key: string, drillable: boolean, x: number, y: number, e: React.MouseEvent,
   ) => {
     if (onCellClick && onCellClick(node, path, e)) return
-    if (drillable) { pin.clearPin(); go(path) }
+    // A branch drills; ⌥-click pins it instead (its tip carries the per-cell
+    // controls), so a deep cell can be acted on without drilling. (mgu `gcs`.)
+    if (drillable && !e.altKey) { pin.clearPin(); go(path) }
     else activatePin(node, path, key, x, y)
   }
 
@@ -902,11 +1009,7 @@ export function Treemap<T>({
         ? { bg: 'var(--dt-treemap-folded-ground, rgba(120, 120, 135, 0.12))', ink: 'var(--dt-treemap-folded-ink, #d0d0d8)' }
         : { bg: 'var(--dt-treemap-folded, #4a4a52)', ink: 'var(--dt-treemap-folded-ink, #d0d0d8)' }
     } else {
-      const top = kidPath[1] // path[0] = root; [1] is the top-level bucket-of-the-current-drill
-      const slot = top ? topLevelSlot.get(getLabel(top)) : undefined
-      style = kids.length > 0
-        ? { bg: 'var(--dt-treemap-container-bg, #202024)', ink: 'var(--dt-treemap-ink, #d0d0d8)' }
-        : { bg: slot ?? DEFAULT_SLOTS[0], ink: '#fff' }
+      style = categoricalStyle(kidPath, kids.length > 0, getLabel, topLevelSlot, DEFAULT_SLOTS, nestedHues)
     }
     if (lens && !folded) {
       style = lens(kid as T, kidPath, depth, { w: r.w, h: r.h, fade: fadeAt(depth), hasKids: kids.length > 0 }, style) ?? style
@@ -1123,7 +1226,7 @@ export function Treemap<T>({
             {/* Inline size only for branch title-bars and short leaves; a tall
                 leaf drops it to a 2nd line (below) so the name gets the full
                 first line and isn't crowded by the size. */}
-            {(kids.length > 0 || r.h <= 34) && r.w > 90 && (
+            {(kids.length > 0 || r.h <= 34) && r.w > inlineSizeMinWidth && (
               <span className="sz" style={{ opacity: 0.75, whiteSpace: 'nowrap', flex: 'none', marginLeft: sizeAlign === 'right' ? 'auto' : undefined }}>
                 {formatSize(kidSize)}
                 {!folded && renderCellSubtitle && (
@@ -1156,7 +1259,7 @@ export function Treemap<T>({
             )}
           </div>
         )}
-        {!folded && renderCellExtra && renderCellExtra(kid as T, kidPath, { w: r.w, h: r.h, fade: fadeAt(depth), hasKids: kids.length > 0 })}
+        {!folded && renderCellExtra && renderCellExtra(kid as T, kidPath, { w: r.w, h: r.h, fade: fadeAt(depth), hasKids: kids.length > 0, chain: chainLabels ? chainLabels.length - 1 : 0 })}
         {kids.length > 0 && kidChildren && (
           <div
             className="dt-treemap-inner"
@@ -1181,6 +1284,72 @@ export function Treemap<T>({
     if (!el) return
     if (document.fullscreenElement) void document.exitFullscreen()
     else void el.requestFullscreen()
+  }
+
+  // Image export (`exportable`): read the live map canvas, optionally composite
+  // the crumb text as a title, then copy or download the PNG. Canvas renderer
+  // only (the buttons only render when a canvas is present).
+  const exportOpts: ExportOptions<T> | null =
+    exportable ? (exportable === true ? {} : exportable) : null
+  const doExport = useCallback(
+    async (kind: ExportKind) => {
+      if (!exportOpts || !mapRef.current) return
+      const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+      // Base image: the live canvas when the canvas renderer is up; otherwise
+      // (DOM renderer) render the same placed cells to an offscreen canvas with
+      // the identical paint machinery — so export is renderer-independent and
+      // costs nothing until a button is actually clicked.
+      let src = canvasElRef.current
+      if (!src) {
+        if (size.w <= 0 || size.h <= 0) return
+        const cfg: LayoutConfig<T> = {
+          getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+        }
+        const cells = layoutCells(rects, path, rootMode, cfg)
+        const off = document.createElement('canvas')
+        renderMapToCanvas(
+          off, cells, size.w, size.h,
+          { styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture },
+          mapRef.current,
+        )
+        src = off
+      }
+      const cs = getComputedStyle(mapRef.current)
+      const ink = cs.color || 'rgb(230, 230, 238)'
+      const transparent = (c: string | undefined) => !c || c === 'transparent' || c === 'rgba(0, 0, 0, 0)'
+      let bg: string | undefined = cs.backgroundColor
+      if (transparent(bg) && typeof document !== 'undefined') bg = getComputedStyle(document.body).backgroundColor
+      if (transparent(bg)) bg = `rgb(${CONTAINER_BG[0]}, ${CONTAINER_BG[1]}, ${CONTAINER_BG[2]})`
+      const title = exportOpts.title ? `${path.map(getLabel).join('/')} — ${formatSize(getSize(node))}` : null
+      const out = composeExport(src, { title, bg: bg!, ink, dpr })
+      const blob = await canvasToPngBlob(out)
+      const filename = exportOpts.filename?.({ node, path }) ?? defaultExportFilename(getLabel(node))
+      let outcome: ExportKind = kind
+      if (kind === 'copy') {
+        const copied = await copyPng(blob)
+        if (!copied) { downloadPng(blob, filename); outcome = 'download' } // Firefox/insecure → save.
+      } else {
+        downloadPng(blob, filename)
+      }
+      setFlash(outcome)
+      if (flashTimer.current) clearTimeout(flashTimer.current)
+      flashTimer.current = setTimeout(() => setFlash(null), 1600)
+      onExport?.(blob, { kind: outcome })
+    },
+    [
+      exportOpts, path, node, getLabel, getSize, formatSize, onExport, size, rects, rootMode,
+      styleOpts, sizeAlign, inlineSizeMinWidth, dustTexture,
+      childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+    ],
+  )
+  const showExport = !!exportOpts
+  // Wrap a bar button with the consumer's tooltip (if any); else identity, and
+  // the button keeps its native `title`.
+  const withTip = (label: string, button: ReactNode): ReactNode => (renderTip ? renderTip(label, button) : button)
+  const iconBtn: CSSProperties = {
+    background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    padding: 2, lineHeight: 0, fontSize: '1.05em',
   }
 
   const tipToShow = pinnedTip ?? tip
@@ -1208,6 +1377,13 @@ export function Treemap<T>({
     <div
       className={'dt-treemap' + (className ? ` ${className}` : '')}
       ref={wrapRef}
+      onKeyDown={showExport ? (e => {
+        // ⌘/Ctrl+Shift+C copies the current view (when focus is inside the map).
+        if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'c' || e.key === 'C')) {
+          e.preventDefault()
+          void doExport('copy')
+        }
+      }) : undefined}
       style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}
     >
       {chrome && <div
@@ -1260,16 +1436,48 @@ export function Treemap<T>({
             />
           </label>
         )}
-        {fullscreen && (
+        {showExport && (() => {
+          const okStyle = { ...iconBtn, color: 'var(--dt-treemap-ok, #3fb950)' }
+          const copyLabel = flash === 'copy' ? 'Copied ✓' : 'Copy PNG to clipboard (⌘/Ctrl+Shift+C)'
+          const dlLabel = flash === 'download' ? 'Saved ✓' : 'Download PNG'
+          return (
+            <>
+              {withTip(copyLabel, (
+                <button
+                  className="dt-treemap-export-copy"
+                  onClick={() => void doExport('copy')}
+                  title={renderTip ? undefined : copyLabel}
+                  aria-label="Copy image to clipboard"
+                  style={flash === 'copy' ? okStyle : iconBtn}
+                >
+                  {flash === 'copy' ? <CheckIcon /> : <CopyIcon />}
+                </button>
+              ))}
+              {withTip(dlLabel, (
+                <button
+                  className="dt-treemap-export-dl"
+                  onClick={() => void doExport('download')}
+                  title={renderTip ? undefined : dlLabel}
+                  aria-label="Download image"
+                  style={flash === 'download' ? okStyle : iconBtn}
+                >
+                  {flash === 'download' ? <CheckIcon /> : <DownloadIcon />}
+                </button>
+              ))}
+            </>
+          )
+        })()}
+        {fullscreen && withTip('Toggle fullscreen', (
           <button
             className="dt-treemap-fs"
             onClick={goFullscreen}
-            title="Toggle fullscreen"
-            style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1.1em' }}
+            title={renderTip ? undefined : 'Toggle fullscreen'}
+            aria-label="Toggle fullscreen"
+            style={iconBtn}
           >
-            ⛶
+            <FullscreenIcon />
           </button>
-        )}
+        ))}
       </div>}
       {(() => {
         const r = renderRollup?.(node, path)
@@ -1303,10 +1511,12 @@ export function Treemap<T>({
                 expandable={expandable}
                 dustTexture={dustTexture}
                 cellHref={cellHref}
+                inlineSizeMinWidth={inlineSizeMinWidth}
                 a11yLinks={a11yLinks}
                 a11yMaxCells={a11yMaxCells}
                 a11yMinSide={a11yMinSide}
                 pinnedKey={pinnedTip?.key ?? null}
+                canvasRef={exportable ? canvasElRef : undefined}
                 onHover={(hit: CanvasHit<T>, x, y) => activateHover(hit.node, hit.path, hit.key, x, y)}
                 onClick={(hit: CanvasHit<T>, e) =>
                   hit.foldChild
@@ -1319,6 +1529,9 @@ export function Treemap<T>({
               />
             ))
           : rects.filter(r => r.w >= 3 && r.h >= 3).map(r => cell(r.it, isFolded(r.it) ? path : [...path, r.it as T], r, 0, rootMode))}
+        {outlineGroups && size.w > 0 && size.h > 0 && (
+          <OutlineOverlay<T> cells={placedCells} width={size.w} height={size.h} groups={outlineGroups} />
+        )}
         {failed?.key === viewKey ? (
           <div className="dt-treemap-status error" style={STATUS_STYLE}>
             {renderLoadError
@@ -1340,7 +1553,43 @@ export function Treemap<T>({
         const f = renderFooter?.(node, path)
         return f ? <div className="dt-treemap-footer">{f}</div> : null
       })()}
-      {tipContent && tipToShow && (
+      {/* Docked tip: one panel below the footer that updates in place as the
+          pointer moves through a lineage — no tip chasing the cursor or
+          covering the cells and controls under it. Always rendered (a faint
+          hint while empty) so the layout doesn't jump. A phone, with no hover,
+          taps to pin into this same panel. */}
+      {tipMode === 'dock' ? (() => {
+        const defaultContent = renderTipDefault ? renderTipDefault(node, path) : null
+        const body = tipContent ?? defaultContent
+          ?? <span className="dt-treemap-tipdock-hint">Hover a cell for its details.</span>
+        // `resting` = a real default card (root summary); `empty` = nothing at all.
+        const cls = tipContent ? '' : defaultContent ? ' resting' : ' empty'
+        return (
+        <div
+          ref={tipRef}
+          className={'dt-treemap-tip dock' + (pinnedTip ? ' pinned' : '') + cls}
+          onMouseEnter={cancelTipClear}
+          onMouseLeave={() => { if (!pinnedTip) { pin.hover(null); clearHover(); setTip(null) } }}
+          style={{ position: 'relative', width: '100%', pointerEvents: 'auto' }}
+        >
+          {tipContent && pinnedTip && (
+            <button
+              onClick={() => pin.clearPin()}
+              title="Unpin (Esc)"
+              className="dt-treemap-tip-x"
+              style={{
+                position: 'absolute', top: 2, right: 4,
+                background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer',
+                fontSize: '1em', opacity: 0.6, pointerEvents: 'auto',
+              }}
+            >
+              ×
+            </button>
+          )}
+          {body}
+        </div>
+        )
+      })() : tipContent && tipToShow ? (
         <div
           ref={tipRef}
           className={'dt-treemap-tip' + (pinnedTip ? ' pinned' : '')}
@@ -1382,7 +1631,7 @@ export function Treemap<T>({
           )}
           {tipContent}
         </div>
-      )}
+      ) : null}
     </div>
   )
 }

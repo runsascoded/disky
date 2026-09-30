@@ -45,11 +45,17 @@ STATE_COLUMNS: tuple[str, ...] = ('bucket', 'path', 'last_ts', 'read_ops', 'read
 
 
 def live_bucket(con: "duckdb.DuckDBPyConnection", live: str) -> str:
-    """The bucket a dirs tier / layer-2 blob describes, from its root row's `uri`."""
-    rows = con.execute(f"SELECT uri FROM read_parquet('{live}') WHERE path = '.' LIMIT 1").fetchall()
-    if not rows:
-        raise ValueError(f"{live}: no root row (path = '.') — not a layer-2 blob or dirs tier")
-    uri = rows[0][0]
+    """The bucket a dirs tier / layer-2 blob describes: a v2 listing's scan root
+    (key-value metadata), else its root row's `uri`."""
+    from disk_tree.listing_format import format_of
+    fmt = format_of(live)
+    if fmt.version >= 2:
+        uri = fmt.scan_root
+    else:
+        rows = con.execute(f"SELECT uri FROM read_parquet('{live}') WHERE path = '.' LIMIT 1").fetchall()
+        if not rows:
+            raise ValueError(f"{live}: no root row (path = '.') — not a layer-2 blob or dirs tier")
+        uri = rows[0][0]
     if '://' not in uri:
         raise ValueError(f"{live}: root uri {uri!r} has no scheme — a bucket listing is expected")
     return uri.split('://', 1)[1].split('/', 1)[0]

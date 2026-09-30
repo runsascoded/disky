@@ -1,0 +1,50 @@
+# CF Pages config for the PUBLIC R2 deploy (r2.rbw.sh) — the union-of-roots Map
+# over public R2 buckets (ctbk, crashes, jc-taxes). Unlike gcs/cw this deploy is
+# anonymous (no CF Access, no app gate): `PUBLIC_READ` grants the base viewer
+# scope to everyone (reads open, mutations still closed — see _lib/auth.ts).
+#
+# Deploy:  wrangler pages deploy dist --project-name disk-tree-demo
+# (Build with the r2 store + public auth — these are BUILD-time Vite vars, not
+#  wrangler [vars]:  VITE_STORE=r2 VITE_AUTH_MODE=public pnpm build)
+# r2.rbw.sh IS the existing `disk-tree-demo` Pages project (was the ui/ static
+# demo) — this cuts it over to the site/ Map.
+name = "disk-tree-demo"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-06-01"
+
+# D1 holds only the index footer (index_schema + index_row_groups) for this
+# public deploy — no marks/auth/grants tables (marks:false, PUBLIC_READ).
+# Created with `wrangler d1 create disk-tree-demo-db`. Apply the migrations:
+#   wrangler d1 migrations apply disk-tree-demo-db --remote
+# (needs CLOUDFLARE_ACCOUNT_ID + a D1-scoped token). The index-footer migration
+# lives in the cw lineage today; the merged lineage is mgu's convergence work
+# (specs/disk-tree-as-base.md → convergence.md seam 3).
+[[d1_databases]]
+binding = "DB"
+database_name = "disk-tree-demo-db"
+database_id = "261d0c80-8f73-442e-979a-4e25725b2271"
+migrations_dir = "migrations/cw"
+remote = true
+
+[observability]
+enabled = true
+
+[vars]
+ROOT_LABEL = "public R2"
+BASE_SCOPE = "r2"
+PUBLIC_READ = "1"                # anonymous viewer scope; reads open (_lib/auth.ts)
+SNAPSHOTS_SUBDIR = "r2"          # this store's snapshots: snapshots/r2/ (_lib/shared.ts)
+INDEX_VARIANTS = "path"          # no ownership → no by-user tiers (index_footer.py mirror)
+# The index reader (makeStore, _lib/index.ts) points at R2. STORE_BUCKET is the
+# bucket the daily ingestion writes the tiers into (the existing demo bucket).
+STORE_BUCKET = "disk-tree-demo"
+STORE_REGION = "auto"
+
+# Set as Pages env vars/secrets at deploy — NOT committed (disk-tree is a public
+# repo; the account id in the R2 endpoint stays out of git):
+#   wrangler pages secret put STORE_ENDPOINT --project-name disk-tree-demo   (=$R2_ENDPOINT_URL)
+#   wrangler pages secret put STORE_ACCESS_KEY_ID --project-name disk-tree-demo      (=$R2_RO_ACCESS_KEY_ID)
+#   wrangler pages secret put STORE_SECRET_ACCESS_KEY --project-name disk-tree-demo  (=$R2_RO_SECRET_ACCESS_KEY)
+# The reader only GETs the index tiers, so it takes the RO keypair; the daily
+# ingestion uses the RW keypair to upload them. No GCS_HMAC_*/GCP_SA_KEY/ACCESS_*
+# — this deploy is public + GCS-free.

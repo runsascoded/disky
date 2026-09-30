@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Install this repo's git hooks for EVERY worktree of the clone: a local,
+# absolute `core.hooksPath` (a relative one resolves per worktree and misses
+# the linked ones) pointing at `<common-dir>/hooks`, where `pre-push` runs the
+# tracked guard (`scripts/hooks/pre-push`) and then what the machine's global
+# pnpm-dep-source hook would have run. The global pds hook chains into
+# `.git/hooks` without "$@" (the guard would see no remote/url) and loops if
+# the local hook chains back, so the local hooks inline `pds check` instead.
+# Idempotent; re-run after changing the guard.
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+common=$(cd "$root" && git rev-parse --path-format=absolute --git-common-dir)
+hooks=$common/hooks
+mkdir -p "$hooks"
+cp "$root/scripts/hooks/pre-push" "$hooks/pre-push.disky"
+cat >"$hooks/pre-push" <<'EOF'
+#!/usr/bin/env bash
+# This repo's push guard first (scripts/hooks/pre-push, copied here by
+# scripts/hooks/install), then the pnpm-dep-source check the global hook ran.
+input=$(cat)
+printf '%s\n' "$input" | "$(dirname "$0")/pre-push.disky" "$@" || exit $?
+command -v pds >/dev/null 2>&1 && { pds check --hook pre-push || exit 1; }
+exit 0
+EOF
+cat >"$hooks/pre-commit" <<'EOF'
+#!/usr/bin/env bash
+# What the global pnpm-dep-source hook runs (this repo uses a local core.hooksPath; see pre-push).
+command -v pds >/dev/null 2>&1 && { pds check --hook pre-commit || exit 1; }
+exit 0
+EOF
+chmod +x "$hooks/pre-push" "$hooks/pre-push.disky" "$hooks/pre-commit"
+git -C "$root" config core.hooksPath "$hooks"
+echo "hooks installed at $hooks (core.hooksPath set for the whole clone)"

@@ -24,6 +24,7 @@ from disk_tree.cli.base import cli
 @cli.command('bulk-list')
 @option('-a', '--adaptive', is_flag=True, help='Adaptive range-splitting: workers bisect their remaining key range whenever peers are idle — no weights or fanout discovery needed (spec: adaptive-listing.md)')
 @option('-E', '--endpoint-url', default=None, help='S3-compatible endpoint URL (required for r2://; also usable for MinIO / non-AWS S3)')
+@option('-f', '--profile', default=None, help='AWS credential profile to authenticate with (for a cross-account source/target); default: ambient credentials')
 @option('-o', '--out', 'out_dir', required=True, help='Output dir for listing shards (local path or fsspec URL such as `gs://...`)')
 @option('-p', '--prefix', default=None, help='Restrict listing to this bucket-relative prefix')
 @option('-P', '--procs', default=None, type=int, help='Worker processes (default: os.cpu_count()). LIST throughput is GIL-bound, not endpoint-bound: a single process saturates at ~8K keys/s no matter how many threads it runs, while processes scale ~linearly (measured on CoreWeave: 1/2/4/8/16 procs -> 8.3K/17.1K/34.5K/68.1K/89.8K keys/s). Scale this with cores, not -w.')
@@ -36,6 +37,7 @@ from disk_tree.cli.base import cli
 def bulk_list_cmd(
     adaptive: bool,
     endpoint_url: str | None,
+    profile: str | None,
     out_dir: str,
     prefix: str | None,
     procs: int | None,
@@ -57,7 +59,7 @@ def bulk_list_cmd(
             uri, out_dir=out_dir,
             prefix=prefix, procs=procs, threads=threads,
             exists=exists, warm_from=warm_from,
-            endpoint_url=endpoint_url, region=region,
+            endpoint_url=endpoint_url, region=region, profile=profile,
         )
     else:
         if warm_from:
@@ -66,7 +68,7 @@ def bulk_list_cmd(
             uri, out_dir=out_dir,
             prefix=prefix, procs=procs, threads=threads,
             exists=exists, weights_from=weights_from,
-            endpoint_url=endpoint_url, region=region,
+            endpoint_url=endpoint_url, region=region, profile=profile,
         )
     err(f"listed {total:,} objects to {out_dir}")
 
@@ -81,6 +83,7 @@ def bulk_list_adaptive_uri(
     warm_from: str | None = None,
     endpoint_url: str | None = None,
     region: str | None = None,
+    profile: str | None = None,
 ) -> int:
     """Scheme-dispatched adaptive listing (see `find/bulk_adaptive.py`)."""
     from disk_tree.backends.url import parse_url
@@ -96,7 +99,7 @@ def bulk_list_adaptive_uri(
         if parsed.scheme == 'r2' and not endpoint_url:
             raise ValueError("r2:// requires --endpoint-url (Cloudflare R2's S3-compatible endpoint)")
         from disk_tree.find.bulk_s3 import S3BulkLister
-        lister = S3BulkLister(scheme=parsed.scheme, endpoint_url=endpoint_url, region_name=region)
+        lister = S3BulkLister(scheme=parsed.scheme, endpoint_url=endpoint_url, region_name=region, profile=profile)
     else:
         raise ValueError(f"bulk-list requires a cloud URI (gcs://, s3://, r2://); got {uri!r}")
     return list_bucket_adaptive(
@@ -116,6 +119,7 @@ def bulk_list_uri(
     weights_from: str | None = None,
     endpoint_url: str | None = None,
     region: str | None = None,
+    profile: str | None = None,
 ) -> int:
     """Scheme-dispatched bulk listing; shared by `bulk-list` and `fetch`/`pull`/`sync`."""
     from disk_tree.backends.url import parse_url
@@ -144,5 +148,6 @@ def bulk_list_uri(
             endpoint_url=endpoint_url,
             region_name=region,
             scheme=parsed.scheme,
+            profile=profile,
         )
     raise ValueError(f"bulk-list requires a cloud URI (gcs://, s3://, r2://); got {uri!r}")

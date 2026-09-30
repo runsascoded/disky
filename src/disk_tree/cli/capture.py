@@ -51,7 +51,9 @@ def _frame(root: str, names: list[str], sizes: list[int], mtimes: list[int]):
         'bucket': root,
         'name': names,
         'size_bytes': pd.array(sizes, dtype='int64'),
-        'created': pd.to_datetime(mtimes, unit='s', utc=True),
+        # Pinned to ms: parquet has no seconds unit, so a `[s]` frame (pandas 3's
+        # result for `unit='s'`) would read back as `[ms]` — write what reads.
+        'created': pd.to_datetime(mtimes, unit='s', utc=True).astype('datetime64[ms, UTC]'),
         'storage_class_id': pd.array([0] * len(names), dtype='int64'),
     })
 
@@ -87,7 +89,9 @@ def capture_cmd(batch_rows: int, no_progress: bool, sudo: bool, to: str, path: s
     if blobfs.is_url(to):
         blobfs.fs_for(to)  # a bad scheme / missing endpoint fails before the walk, not after
     now = datetime.now(timezone.utc)
-    host = socket.gethostname()
+    # `DISK_TREE_HOST` pins the capture dir's host segment: the same machine
+    # reports `Mac` to a shell and `mac.lan` to a launchd job.
+    host = os.environ.get('DISK_TREE_HOST') or socket.gethostname()
     out = capture_dir(to, root, host, now.strftime('%Y-%m-%dT%H-%M-%SZ'))
     if not blobfs.is_url(out):
         os.makedirs(out, exist_ok=True)
@@ -217,6 +221,11 @@ def reduce_cmd(
         # reaches another one (`disk-tree scans register`).
         from disk_tree.scan_manifest import write_scan_manifest
         err(f'manifest → {write_scan_manifest(scan, blob)}')
+        # Footer sidecar for the serverless reader (see `find/groups.py`).
+        from disk_tree.find.groups import write_groups_sidecar
+        gs = write_groups_sidecar(blob)
+        if gs:
+            err(f'groups → {gs.path} ({gs.n_groups} groups)')
     if not no_diff:
         from disk_tree.cli.diff_index import build_previous
         build_previous(scan.id)

@@ -22,6 +22,18 @@ export const DEFAULT_PALETTE = [
 ]
 
 /**
+ * The categorical color for top-level slot `i`. The first
+ * {@link DEFAULT_PALETTE}`.length` are the fixed shared palette (so slot-3 is
+ * the same hue across widgets); past that, golden-angle-spaced hues keep many
+ * top-level dirs distinct instead of wrapping the 8 slots — a bucket root can
+ * have dozens of children (ctbk: 31).
+ */
+export function slotColor(i: number, palette: string[] = DEFAULT_PALETTE): string {
+  if (i < palette.length) return palette[i]
+  return `hsl(${Math.round((i * 137.508) % 360)} 60% 52%)`
+}
+
+/**
  * Diverging red-negative / green-positive scale for delta coloring
  * (`Δbytes`, `Δcount`). Returns an rgb-triple string, always at max
  * saturation to keep signs unambiguous; the *intensity* comes from
@@ -101,6 +113,50 @@ export function parseColor(c: string): [number, number, number, number] | null {
   if (out && out.some(n => Number.isNaN(n))) out = null
   parseCache.set(c, out)
   return out
+}
+
+/** Parse an `hsl()/hsla()` string to `[h(0-360), s(0-1), l(0-1)]`, else null. */
+function parseHsl(c: string): [number, number, number] | null {
+  const m = c.match(/^hsla?\(([^)]+)\)$/)
+  if (!m) return null
+  const [h, s, l] = m[1].replace(/\//g, ' ').split(/[\s,]+/).filter(Boolean)
+  const out: [number, number, number] = [parseFloat(h), parseFloat(s) / 100, parseFloat(l) / 100]
+  return out.some(n => Number.isNaN(n)) ? null : out
+}
+
+/** Deterministic [0, 1) from a string — a stable per-name jitter seed. */
+function hashUnit(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0
+  return (((h % 1000) + 1000) % 1000) / 1000
+}
+
+export interface HierColorOpts {
+  /** Max hue nudge (deg) between L2 sibling subtrees. Default 16. */
+  hueJitter?: number
+  /** Max lightness nudge between L2 sibling subtrees. Default 0.10. */
+  lightJitter?: number
+}
+
+/**
+ * Hierarchical cell fill: derive a cell's color from its top-level (L1) macro
+ * hue `base`, nudged per its L2 ancestor (`l2Key`, `null` for L1 cells) so
+ * sibling subtrees read as related-but-distinct "micro-hues". Containers
+ * (`hasKids`) get a darker, desaturated tint of that hue so a directory header
+ * carries its group color instead of a flat grey. `base` must be an `hsl()`
+ * string (the categorical slots are); anything else is returned unchanged.
+ */
+export function hierColor(base: string, l2Key: string | null, hasKids: boolean, opts?: HierColorOpts): string {
+  const p = parseHsl(base)
+  if (!p) return base
+  let [h, s, l] = p
+  if (l2Key) {
+    const j = 2 * hashUnit(l2Key) - 1 // [-1, 1)
+    h = (((h + j * (opts?.hueJitter ?? 16)) % 360) + 360) % 360
+    l = Math.max(0.22, Math.min(0.82, l + j * (opts?.lightJitter ?? 0.10)))
+  }
+  if (hasKids) { s *= 0.55; l *= 0.5 } // recessed, colored header
+  return `hsl(${Math.round(h)} ${Math.round(s * 100)}% ${Math.round(l * 100)}%)`
 }
 
 /**

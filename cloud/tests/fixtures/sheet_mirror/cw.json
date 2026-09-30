@@ -1,0 +1,25 @@
+{
+  "/data/cw/scans.json": ["2026-09-27"],
+  "/api/plans/staged": {
+    "plan": {"id": 2, "name": "Q3 cleanup", "note": null, "state": "open", "created_by": "dan@example.org", "created_ts": 1758000000, "closed_ts": null},
+    "items": [
+      {"prefix": "s3://marin-us-east-02a/tmp/", "note": null, "added_by": "dan@example.org", "added_ts": 1758000100, "batch_id": null}
+    ],
+    "batches": [],
+    "runs": [
+      {"run_id": "cw-sweep-dry-20260927-220000", "plan_id": 2, "manifest": "gs://oa-gcs-usage-dvx/sweep/cw/runs/cw-sweep-dry-20260927-220000", "scan": "2026-09-27", "head": 0, "exec_head": 0, "actor": "dan@example.org", "mode": "dry", "started_ts": 1759010400, "finished_ts": 1759012200, "deleted_bytes": 5000000000000, "deleted_objects": 90000, "skipped_gone": 0, "skipped_overwritten": 0, "undo_deadline": null, "undo_state": "none", "purge_state": "none", "log_dir": "gs://oa-gcs-usage-dvx/sweep/cw/runs/cw-sweep-dry-20260927-220000"}
+    ]
+  },
+  "/api/subtree?date=2026-09-27&path=marin-us-east-02a/tmp&w=128&h=128&depth=1": {
+    "date": "2026-09-27", "path": "marin-us-east-02a/tmp", "w": 128, "h": 128, "tier": "fine", "index": "d1", "nodes": 1, "truncated": false,
+    "tree": {"n": "tmp", "b": 2000000, "o": 40}
+  },
+  "/api/plan-sweep/jobs": {
+    "configured": true,
+    "region": "us-east4",
+    "jobs": [
+      {"job_id": "cw-sweep-real-20260928-040000", "mode": "real", "state": "QUEUED", "created": "2026-09-28T04:00:00Z", "updated": null, "run_secs": null, "date": "2026-09-27", "run": "gs://oa-gcs-usage-dvx/sweep/cw/runs/cw-sweep-real-20260928-040000", "last_event": null, "logs": "https://console.cloud.google.com/logs/query"},
+      {"job_id": "cw-sweep-dry-20260927-220000", "mode": "dry", "state": "SUCCEEDED", "created": "2026-09-27T22:00:00Z", "updated": "2026-09-27T22:30:00Z", "run_secs": 1800, "date": "2026-09-27", "run": "gs://oa-gcs-usage-dvx/sweep/cw/runs/cw-sweep-dry-20260927-220000", "last_event": "Job state is set from RUNNING to SUCCEEDED", "logs": "https://console.cloud.google.com/logs/query"}
+    ]
+  }
+}

@@ -44,6 +44,37 @@ v1 still shells out to GNU find. The bundle sets no PATH of its own, so install
 reachable, or the scan errors. v2 (Tauri + a native `getattrlistbulk` walker)
 removes this dependency.
 
+## Debugging
+
+The window is a **WKWebView** (WebKit), not Chrome — so WebKit-only errors (e.g.
+`The string did not match the expected pattern`, WebKit's wording for a bad
+`URL`/regex) surface here but *not* under the usual Chrome/dev-server check.
+There are three layers to look at:
+
+1. **The WKWebView Web Inspector** (JS console, network, sources) — the only way
+   to read a JS stack out of the native window. `disk_tree.desktop` enables it
+   via `webview.start(debug=…)`: **on by default from source**, and in the
+   **frozen bundle** with `DISK_TREE_APP_DEBUG=1`. Then right-click in the
+   window → *Inspect Element*. Fastest repro (no 332 MB rebuild):
+
+   ```bash
+   uv sync --extra app
+   disk-tree-app                 # debug on by default from source
+   # right-click → Inspect Element → Console, then reproduce
+   ```
+
+   For the installed bundle: `DISK_TREE_APP_DEBUG=1 open dist/disk-tree.app`.
+
+2. **Python / server logs** (Flask + waitress, the scan itself) go to **stderr**.
+   Launched via Finder/`open` they land in the unified log — read them with
+   `log stream --predicate 'process == "disk-tree"' --level debug`, or just
+   launch the bundle's executable from a terminal to see them inline:
+   `./dist/disk-tree.app/Contents/MacOS/disk-tree`.
+
+3. **Headless server smoke** (no window): `DISK_TREE_APP_SMOKE=1 disk-tree-app`
+   brings the embedded server up, hits `/api/scans`, prints a one-line result,
+   and exits — isolates "is the backend fine?" from "is the WebView fine?".
+
 ## Notes / known-fiddly
 
 - `disk_tree/static/` is a **build artifact** (copied from `ui/dist`); it's

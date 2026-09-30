@@ -11,6 +11,7 @@
 import {
   type AuditQuery,
   type AuditSink,
+  type Auth,
   type EmailPolicy,
   type Gate,
   type GrantStore,
@@ -82,6 +83,17 @@ export function gateFor(env: Env, req: Request): { gate: Gate; audit: AuditQuery
   })
   return { gate, audit: d1AuditQuery(env.DB) }
 }
+
+/** The authenticated identity behind a request (`null` if none) — for a
+ *  Function that needs to know *who* is acting, or check a scope beyond the
+ *  `view` the middleware already enforced. */
+export const authFor = (env: Env, req: Request): Promise<Auth | null> => gateFor(env, req).gate.authenticate(req)
+
+/** A stable, human label for an `Auth`, recorded as an action's actor. */
+export const actorLabel = (auth: Auth): string =>
+  auth.kind === 'sso'
+    ? auth.email
+    : auth.grant.name ?? auth.grant.email ?? auth.grant.subject?.email ?? `grant:${auth.grant.id}`
 
 const json = (data: unknown, status: number): Response =>
   new Response(JSON.stringify(data) + '\n', {

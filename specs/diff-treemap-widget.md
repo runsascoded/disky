@@ -117,14 +117,28 @@ poll). No diff geometry, color, sort, or paginate logic remains in the app.
 
 ## Phasing
 
-1. **Extract, no behavior change.** Move `CompareTreemap`/`CompareTable` + their
-   helpers into `packages/treemap/src/diff/`, parameterized by the accessor
-   API; re-point `CompareView` at them with a disk accessor adapter. Verify DT
-   `ui/` diff view is visually identical (CIC + screenshots). Typecheck both
-   packages (`tsc -b`) and the per-package tests.
-2. **Export + document.** Add to `treemap/src/index.ts`; a short story/example.
-3. **Publish `dist/treemap`**, bump mgu's pin, wire mgu's diff view.
-4. (Later) file-tree adoption.
+1. **Extract, no behavior change.** ✅ **Landed (2026-09-08).** `CompareTreemap`/
+   `CompareTable` + helpers moved into `packages/treemap/src/diff/` (`colors.ts`,
+   `types.ts`, `tree.ts`, `DiffTreemap.tsx`, `DiffTable.tsx`, `index.ts` — 1295
+   lines); `CompareView.tsx` rewritten as a thin disk adapter (**1857 → 842
+   lines**). Rather than a MUI/router/icons dependency in the core, the widgets
+   take **injected render-slots** (`renderContainer`/`renderOverlay`/`renderEmpty`
+   on the treemap; `renderIcon`/`renderPathLink`/`rowAction` on the table) — the
+   app passes the same `<Paper>`/`<Link>`/`<FaFolder>` it used before, so the
+   render is byte-identical. The sort caret (was a `react-icons` dep) is inlined
+   as the exact FA `sort-up`/`sort-down` SVG paths. `DiffNode` uses disk-neutral
+   field names (`oldSize`/`newSize`/`countDelta`); `DiffInput` is the flattened
+   compare payload the app's `toDiffInput`/`toRecRow` map onto; `DiffMetric[]`
+   drives the table columns (disk passes `[size, desc]`). Verified: `tsc -b`
+   clean, vitest ui 25 / treemap 130 / react 91, `pnpm build` green, and CIC of
+   the DT `/compare` view (all-unchanged + a real-churn pair) renders identically
+   — green grew / red shrank / grey unchanged, band labels, legend, Δ table.
+   **Follow-up:** no unit test for `buildDiffTree` yet — a golden test is a good
+   phase-2 add.
+2. **Export + document.** ✅ Exports added to `treemap/src/index.ts` (additive
+   only, flow through `@disk-tree/react`). A short story/example still worth adding.
+3. **Publish `dist/treemap`**, bump mgu's pin, wire mgu's diff view. *(open)*
+4. (Later) file-tree adoption. *(open)*
 
 ## Risks / notes
 

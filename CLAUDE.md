@@ -111,13 +111,58 @@ disk-tree diff-index A B | PATH… | -a   # Persisted full diff of a scan pair (
                           # path's previous scan automatically (`-D` to skip); `-f` rebuilds,
                           # `-g` GCs indexes whose scans are gone (`-n` previews)
 
-disk-tree migrate-row-groups  # Rewrite scan blobs to ≤64K-row parquet row groups (a directory listing
-                          # decodes every overlapping row group: ~4 ms vs ~40 ms at 1M rows)
+disk-tree migrate-row-groups [DIR|URL]  # Rewrite scan blobs to ≤64K-row parquet row groups, in place,
+                          # streaming (a directory listing decodes every overlapping row group: ~4 ms vs
+                          # ~40 ms at 1M rows; over R2 a `depth ≤ 2` view fetches ~2 MiB vs ~38 MiB).
+                          # Default: the write dir; `r2://bucket/prefix` rewrites remote blobs where they are
+
+disk-tree recompress PATH…  # Rewrite v1 layer-2 listings as v2 in place, lossless (spec `listing-slim.md`
+                          # phase 2): files, dirs (recursive `*.parquet`, sidecars skipped) or fsspec URLs
+                          # (`gs://`, `r2://`, `s3://`). Streams by row group (never a whole file in memory):
+                          # drops `uri` (scan root → metadata; refused unless `uri == <root>/<path>` on every
+                          # row) and the `sum_*` pivots equal to `size`, re-encodes under
+                          # `$DISK_TREE_PARQUET_CODEC` in ≤64K-row groups to a `.v2.tmp` sibling, verifies
+                          # (row count + order-insensitive digest of `(path,size,mtime,kind)`), then swaps
+                          # (atomic rename; copy + delete on a URL). v2 input is skipped; a failure leaves
+                          # the original untouched, exit 1. `-n` dry-run, `-k` keeps `<stem>.v1.parquet`,
+                          # `-j` JSON. Per-file old/new size + ratio, and totals
+disk-tree listing-format PATH…  # The audit: each parquet's listing format (v1 | v2 | not-a-listing), codec,
+                          # row groups, rows, size (+ root/implied for v2) from the footer only; `-j` JSON
+
+disk-tree tiers L2        # Cut the path store's sorts (spec `path-store.md` §1.2/§4.1) from a layer-2 — a
+                          # local path or an fsspec URL (copied once through `blobfs.open_read`): `path` =
+                          # every row (objects + dirs) sorted `(depth, path, …labels)`; `bysize` = the same
+                          # rows sorted `(⌊log2 size⌋ desc, path, …labels)`, size 0 last, the bucket computed
+                          # in SQL (never stored). 8K-row groups (`-r`), `tier`/`sort` (+ `bucket: log2`) in
+                          # the parquet metadata, the source's listing format inherited. `-t path,bysize`
+                          # (default both), `-s STEM` (may be a URL: cut locally, uploaded), `-g` writes the
+                          # `.groups.json` footer sidecar beside each (`find/groups.py`; carries `b_min` now),
+                          # `-v usr` extra sorted copies led by those columns, `-j` JSON; `-m` DuckDB memory limit (default 8GB — an
+                          # external sort, spills to `-T`, default `.duckdb-tmp` beside the stem; unbounded it took
+                          # 28 GB for 57M rows), `-p` threads. Prints rows, groups,
+                          # bytes, KV per tier. `import -i` does the same at import time (bare `-i` = both;
+                          # the `dirs`/`objects`/`coarse` tiers are retired). The cloud overlay's
+                          # `dt-cloud index-write` (cw) and `dt-cloud path-index -P` (gcs, the r2 demo)
+                          # cut the same two sorts from their bucket unions — objects as rows, L2 column
+                          # names — under `path-index[-bysize][-by-user].parquet` (spec §4.2–4.4)
+disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
+                          # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
+                          # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for
+                          # `bysize` it is `b_max ≥ thr_min ∧ p_max ≥ P/ ∧ p_min < P0`. Reports groups
+                          # selected, rows they hold, bytes (compressed chunks), and — from the parquet —
+                          # rows that actually pass, i.e. the decode waste. `P` = `.` for the root; `-a`
+                          # attenuation, `-d` max depth, `-t` tier (default: from the name), `-C` skips the
+                          # count, `-j` JSON. Measured on a 20K-child flat dir at 2048-row groups: `path`
+                          # decodes 10 groups / 20,015 rows for 1,250 answers, `bysize` 1 group / 2,048
 
 disk-tree filter URI QUERY  # Recursive filter, true re-aggregation: sizes of everything matching QUERY
                             # (`/…/` regex or substring); outermost matches only — never double-counts
                             # Slash-free queries match path segments (basenames); queries with `/` match
                             # full paths. Uses the vocab sidecar automatically when fresh (-B forces brute)
+
+disk-tree shallow URI     # Build the shallow sidecar (`<blob-stem>.shallow.parquet`: every chunk's depth-1
+  -s ID | -a              # rows beside a chunked scan's root) for scans saved before `index` wrote it —
+                          # `/api/scan` at the root then never opens a chunk blob (spec `scan-page-r2-latency.md`)
 
 disk-tree vocab URI       # Build the vocab sidecar (`<blob>.vocab.parquet`) for the scan covering URI:
                           # sorted segment names + name→row-group block index. Accelerates segment-local
@@ -165,6 +210,42 @@ disk-tree pull [BUCKET…]  # fetch + import as dated scans
 disk-tree sync            # pull all configured buckets (cron entrypoint); builds each bucket's
                           # diff index vs its previous scan (`-D` skips)
                           # Config: ~/.config/disk-tree/buckets.yml (see specs/personal-sync.md)
+
+disk-tree digest [BUCKET] # Post a bucket's usage digest to Slack/Discord: one thread per period,
+                          # an OP edited in place + one reply per scan (spec comms-notify.md).
+                          # Config: a `digest:` block in buckets.yml (profile/period/site_url/
+                          # icons_base + slack/discord channel + secret ENV VAR NAMES). Generic
+                          # engine (`disk_tree.notify`) + per-deployment profile; ships a `bytes`
+                          # reference profile. `-p slack|discord` (default discord), `-m YYYY-MM`
+                          # (default current month), `-n` dry-run (render + print OP, no post/secrets).
+                          # Needs the `notify` extra (`thrds`); the plot uses core plotly+kaleido
+
+disk-tree stage URI…      # Stage URIs for deletion into a shared open plan (spec staged-delete.md,
+                          # CP1). The opt-in "delete" model: nothing dies by inaction
+disk-tree staged          # List open plans (staged sets) + recent runs (-j for JSON)
+disk-tree unstage URI…    # Remove URIs from every open plan
+disk-tree undo RUN_ID     # Undo a deletion run: restore the objects it deleted where the store allows
+                          # it (S3/R2 versioning — remove the delete-markers; local/ssh have no undo).
+                          # Dry by default (report restorable scope); `-f`/`--for-real` restores. Records
+                          # the run's `undo_state` (spec staged-delete.md CP5)
+
+disk-tree dispatch [PLAN] # Execute a plan (id/name; default the open `Staged` plan): delete its
+                          # staged URIs via the backend, or (default) dry-run + report bytes/objects.
+                          # `-f`/`--for-real` deletes + closes the plan; records a run + per-URI bands.
+                          # `-s`/`--serve` instead runs the CP4 drainer: poll the edge's D1 (the
+                          # browser dispatched runs there; the edge can't reach user buckets) via the
+                          # `CLOUDFLARE_API_TOKEN` and execute each enqueued run here, deleting through
+                          # `backend_for` (`-i` base poll secs, `-o` once, Ctrl-C stops). Announces
+                          # per-run results to Slack/Discord per the `delete:` block in buckets.yml
+                          # (`chat`/`undo`/`database_id` + secret ENV VAR NAMES); needs `notify` for chat
+
+disk-tree iac r2-bindings # Generate deployment config from buckets.yml (spec staged-delete.md CP8):
+                          # `r2-bindings` emits the `[[r2_buckets]]` wrangler.toml blocks binding each
+disk-tree iac config      # configured R2 bucket for the edge CFN executor (CP7); `config` emits the
+disk-tree iac aws-batch   # `CfnDashboard` Pulumi component config (JSON); `aws-batch` emits the Terraform
+                          # tfvars for the AWS Batch delete executor (`iac/aws/`, the large-scope cell
+                          # the drainer submits oversized S3 runs to). One source of truth from
+                          # buckets.yml. IaC lives in `iac/` (applied where the SDK + creds live)
 
 disk-tree migrate         # Backfill SQLite stats from parquet files
 disk-tree migrate-depth   # Add depth column to existing parquets
@@ -223,8 +304,10 @@ auto-expand.
 ## Development
 
 ```bash
-# Python setup
-uv sync
+# Python setup — one uv workspace: the engine (root) + the cloud overlay
+# (`cloud/`, package `dt-cloud`) share ONE `uv.lock` and one `.venv`.
+uv sync                                                 # engine only
+uv sync --all-packages --all-extras --all-groups        # engine + dt-cloud, every extra, test groups
 disk-tree index .
 
 # Start API server
@@ -273,7 +356,9 @@ Default paths (override with `DISK_TREE_ROOT`):
 
 **Blob storage is a search path, not a single directory.** The DB stays on the boot disk (small, always mounted); blobs may live anywhere on `config.scan_read_dirs()`, since `Scan.blob` holds a basename. Creating `<volume>/disk-tree/scans` on an external volume opts it in — no config needed — and it becomes the *write* target while mounted; unplugging simply drops it out of the search path. `DISK_TREE_SCAN_DIRS` (colon-separated, priority order) overrides discovery, and an explicit `DISK_TREE_ROOT` disables it entirely so tests and alternate profiles stay self-contained. A candidate under an unmounted `/Volumes/<name>` is never written to — that would silently create the directory on the boot disk.
 
-A search-path entry may also be an **fsspec URL** (`r2://bucket/prefix`, `s3://…`, `gs://…`) — the remote-target story for a boot disk too full to hold scan output (spec `remote-scan-targets.md`). `index --to <url>` (or `DISK_TREE_REMOTE_SCAN_TARGET` + `-R`) writes a scan's blob there, and reads resolve it through the same search path — local dirs are checked first, so a local blob never costs a round-trip. `r2://` rides s3fs with the bucket's endpoint from `DISK_TREE_R2_ENDPOINT_URL` or its `buckets.yml` entry. Every parquet blob read/write goes through `blobfs.py` (the local-vs-URL seam); the vocab/reclaim sidecars, `--extents`, and `migrate*` are local-only and skip remote blobs.
+A search-path entry may also be an **fsspec URL** (`r2://bucket/prefix`, `s3://…`, `gs://…`) — the remote-target story for a boot disk too full to hold scan output (spec `remote-scan-targets.md`). `index --to <url>` (or `DISK_TREE_REMOTE_SCAN_TARGET` + `-R`) writes a scan's blob there, and reads resolve it through the same search path — local dirs are checked first, so a local blob never costs a round-trip. `r2://` rides s3fs with the bucket's endpoint from `DISK_TREE_R2_ENDPOINT_URL` or its `buckets.yml` entry. Every parquet blob read/write goes through `blobfs.py` (the local-vs-URL seam); the vocab/reclaim sidecars, `--extents`, and `migrate*` are local-only and skip remote blobs. The shallow sidecar (`<root-stem>.shallow.parquet`, each chunk's top level, written by every hybrid save) follows the blob anywhere, and scan blobs are written in 64K-row groups so a `depth`/`path` pushdown over R2 fetches kilobytes.
+
+**Cross-account credentials** — a `buckets.yml` entry (or `defaults`) may carry a `profile:` naming an AWS credential profile (`blobfs.bucket_profile`), so a source and a target in *different* accounts each authenticate with their own key inside one `index --to` run. It threads to every S3/R2 seam: the `s3fs` blob IO (`_s3fs(endpoint, profile)`), the `aws`-CLI lister (`S3Backend(profile=…)`), and the `boto3` bulk lister (`S3BulkLister(profile=…)`, `bulk-list -f`). No profile → ambient credentials (env / default profile), the single-account default. Cross-account needs per-bucket endpoints too, so leave `DISK_TREE_R2_ENDPOINT_URL` unset (it globally overrides all per-bucket endpoints).
 
 - `disk-tree scans dirs` — show the write target and every read dir, with blob counts (URL entries show reachability)
 - `disk-tree scans move [DEST]` — relocate blobs between local dirs (no DB rewrite). Keeps each path's newest scan **and its chunk closure** on the boot disk by default (`-L` to move those too), so browsing the latest scan doesn't depend on the volume being plugged in
@@ -286,10 +371,11 @@ Stream-engine tuning knobs (env, all with measured defaults — see the constant
 ## Tests
 
 ```bash
-pytest tests/
+pytest tests/                    # engine
+cd cloud && pytest               # dt-cloud (same venv; sync with --all-packages first)
 ```
 
-Test fixtures in `tests/data/` (mock gfind/s3 output → expected parquet).
+Test fixtures in `tests/data/` (mock gfind/s3 output → expected parquet). CI and the job images install `--frozen` from the workspace lock (`deploy/sheet-mirror/Dockerfile` is the reference recipe: `uv sync --frozen --no-dev --no-editable --package dt-cloud --extra …` into `UV_PROJECT_ENVIRONMENT=/usr/local`); a plain `pip install .` resolves fresh and ships pins the tests never ran.
 
 ## Current State (www branch)
 

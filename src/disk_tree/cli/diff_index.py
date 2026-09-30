@@ -35,14 +35,21 @@ def build_pair(scan_a: int, scan_b: int, force: bool = False) -> dict | None:
 
 
 def build_previous(scan_id: int, force: bool = False) -> dict | None:
-    """Index `scan_id` against the previous scan of the same path."""
+    """Index `scan_id` against the previous scan of the same path. Diffing is
+    best-effort prep: a failure here must never turn a persisted scan into a
+    nonzero exit (a scheduled run would read as failed), so errors are logged
+    and swallowed — see spec `r2-scan-target.md`."""
     from disk_tree.diff_index import previous_scan
     with _connect() as con:
         prev = previous_scan(con, scan_id)
     if prev is None:
-        err(f"scan {scan_id}: no earlier scan of this path, nothing to diff")
+        err(f"scan {scan_id}: no earlier scan with a reachable blob, nothing to diff")
         return None
-    return build_pair(prev['id'], scan_id, force=force)
+    try:
+        return build_pair(prev['id'], scan_id, force=force)
+    except Exception as e:
+        err(f"scan {scan_id}: diff vs scan {prev['id']} failed, skipping ({type(e).__name__}: {e})")
+        return None
 
 
 def build_latest(path: str, force: bool = False) -> dict | None:

@@ -124,6 +124,27 @@ class S3Backend(Backend):
         cmd = self._aws_cmd(['s3', 'rm', '--recursive', self._s3_url(url)])
         subprocess.run(cmd, check=True)
 
+    def restore(self, url: str) -> int:
+        """Undo a delete on a versioned bucket by removing the latest
+        delete-markers under `url`'s prefix (spec `staged-delete.md` CP5). Each
+        removal reveals the object's prior version. Returns the count restored;
+        0 if the bucket isn't versioned (no delete-markers to remove)."""
+        import json
+
+        p = urlparse(url)
+        bucket, prefix = p.netloc, p.path.lstrip('/')
+        listed = subprocess.run(
+            self._aws_cmd(['s3api', 'list-object-versions', '--bucket', bucket, '--prefix', prefix, '--output', 'json']),
+            check=True, stdout=PIPE, text=True,
+        )
+        markers = [m for m in (json.loads(listed.stdout or '{}').get('DeleteMarkers') or []) if m.get('IsLatest')]
+        for m in markers:
+            subprocess.run(
+                self._aws_cmd(['s3api', 'delete-object', '--bucket', bucket, '--key', m['Key'], '--version-id', m['VersionId']]),
+                check=True, stdout=PIPE,
+            )
+        return len(markers)
+
     def exists(self, url: str) -> bool:
         cmd = self._aws_cmd(['s3', 'ls', self._s3_url(url)])
         return subprocess.run(cmd, capture_output=True).returncode == 0

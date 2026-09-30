@@ -7,7 +7,7 @@
  * `edgeContrast` half-stroke — is identical to what `cell()` did inline; it
  * just reads its inputs off a `PlacedCell` now.
  */
-import { contrastEdge } from './colors'
+import { contrastEdge, hierColor } from './colors'
 import type { CellStyle } from './Treemap'
 import type { FoldedNode, PlacedCell } from './layout'
 
@@ -20,8 +20,37 @@ export interface StyleOpts<T> {
   defaultSlots: string[]
   dustTexture: boolean
   edgeContrast: boolean
+  /** Hierarchical L1-macro / L2-micro hues + tinted container headers. */
+  nestedHues?: boolean
   /** Background opacity at a nesting depth (the depth fade). */
   fadeAt: (d: number) => number
+}
+
+/**
+ * The default (no `colorForCell`) fill for a placed cell: its top-level macro
+ * hue, and — when `nested` — varied per L2 subtree with containers tinted so
+ * directory headers carry their group color. Shared by both renderers so they
+ * paint identically. The non-nested branch is byte-identical to the historical
+ * inline logic (leaf = slot, container = neutral var).
+ */
+export function categoricalStyle<T>(
+  path: T[],
+  hasKids: boolean,
+  getLabel: (n: T) => string,
+  topLevelSlot: Map<string, string>,
+  defaultSlots: string[],
+  nested: boolean,
+): CellStyle {
+  const top = path[1] as T | undefined
+  const base = (top ? topLevelSlot.get(getLabel(top)) : undefined) ?? defaultSlots[0]
+  if (!nested) {
+    return hasKids
+      ? { bg: 'var(--dt-treemap-container-bg, #202024)', ink: 'var(--dt-treemap-ink, #d0d0d8)' }
+      : { bg: base, ink: '#fff' }
+  }
+  const l2Key = path.length >= 3 ? getLabel(path[2]) : null
+  const bg = hierColor(base, l2Key, hasKids)
+  return hasKids ? { bg, ink: 'var(--dt-treemap-ink, #d0d0d8)' } : { bg, ink: '#fff' }
 }
 
 /** Resolved paint for one placed cell: its style plus the adaptive edge (if any). */
@@ -69,11 +98,7 @@ export function resolveCellStyle<T>(cell: PlacedCell<T>, o: StyleOpts<T>): Resol
       ? { bg: 'var(--dt-treemap-folded-ground, rgba(120, 120, 135, 0.12))', ink: 'var(--dt-treemap-folded-ink, #d0d0d8)' }
       : { bg: 'var(--dt-treemap-folded, #4a4a52)', ink: 'var(--dt-treemap-folded-ink, #d0d0d8)' }
   } else {
-    const top = path[1] // path[0] = root; [1] is the top-level bucket of this drill
-    const slot = top ? o.topLevelSlot.get(o.getLabel(top)) : undefined
-    style = hasKids
-      ? { bg: 'var(--dt-treemap-container-bg, #202024)', ink: 'var(--dt-treemap-ink, #d0d0d8)' }
-      : { bg: slot ?? o.defaultSlots[0], ink: '#fff' }
+    style = categoricalStyle(path, hasKids, o.getLabel, o.topLevelSlot, o.defaultSlots, o.nestedHues ?? false)
   }
   if (o.lens && !folded) {
     style = o.lens(node as T, path, depth, ctx, style) ?? style

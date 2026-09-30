@@ -12,11 +12,11 @@
     "selector": "table tbody tr"
   },
   "treemap": {
-    "query": "s3/ctbk?view=treemap",
-    "width": 1200,
-    "height": 800,
-    "selector": ".js-plotly-plot",
-    "preScreenshotSleep": 1000
+    "query": "r2/ctbk?view=treemap",
+    "width": 1560,
+    "height": 900,
+    "selector": ".dt-treemap-map .dt-treemap-cell",
+    "preScreenshotSleep": 1500
   },
   "s3-buckets": {
     "query": "s3",

@@ -1221,4 +1221,64 @@ class TestCapabilities:
             'static': False,
             'scan': True, 'delete': True, 'reveal': True, 'histogram': True, 'filter': True,
             'preview': True, 'compare': True, 'progress': True, 'library': True, 'backend': True, 's3': True,
+            'stageDelete': True, 'deleteApproval': 'sync',
         }
+
+
+class TestStagedApi:
+    """`/api/staged` sizes each item (and reports its `kind`); `/api/dispatch`
+    takes a `uris` subset (spec `staged-page-ux.md` §2–3)."""
+
+    def test_sizes_items_and_dispatches_a_subset(self, test_client, tmp_path):
+        from disk_tree.backends import canonical
+        client, _, _ = test_client
+        a, b = tmp_path / 'a.bin', tmp_path / 'b.bin'
+        a.write_bytes(b'\0' * 10)
+        b.write_bytes(b'\0' * 20)
+        ca, cb = canonical(str(a)), canonical(str(b))
+
+        r = client.post('/api/plans/stage', json={'uris': [str(a), str(b)]})
+        assert (r.status_code, r.get_json()['added']) == (200, [ca, cb])
+
+        # no scan covers tmp_path yet: items size as (0, 0)
+        plan = client.get('/api/staged').get_json()['plans'][0]
+        assert [(plan['state'], plan['items'])] == [('open', [
+            {'uri': ca, 'bytes': 0, 'objects': 0, 'kind': None},
+            {'uri': cb, 'bytes': 0, 'objects': 0, 'kind': None},
+        ])]
+
+        # a scan of the parent covers both: each item is sized from its row
+        _, db_path, scans_dir = test_client
+        blob = create_test_parquet(scans_dir, 'cover', [
+            {'path': '.', 'size': 30, 'mtime': 100, 'kind': 'dir', 'parent': '', 'uri': str(tmp_path), 'n_desc': 2, 'n_children': 2, 'depth': 0},
+            {'path': 'a.bin', 'size': 10, 'mtime': 100, 'kind': 'file', 'parent': '.', 'uri': str(a), 'n_desc': 0, 'n_children': 0, 'depth': 1},
+            {'path': 'b.bin', 'size': 20, 'mtime': 100, 'kind': 'file', 'parent': '.', 'uri': str(b), 'n_desc': 0, 'n_children': 0, 'depth': 1},
+        ])
+        conn = sqlite3.connect(db_path)
+        conn.execute('INSERT INTO scan (path, time, blob, size, n_desc, n_children) VALUES (?, ?, ?, ?, ?, ?)',
+                     (str(tmp_path), '2026-09-25T00:00:00', blob, 30, 2, 2))
+        conn.commit()
+        conn.close()
+        plan = client.get('/api/staged').get_json()['plans'][0]
+        assert plan['items'] == [
+            {'uri': ca, 'bytes': 10, 'objects': 1, 'kind': 'file'},
+            {'uri': cb, 'bytes': 20, 'objects': 1, 'kind': 'file'},
+        ]
+
+        bad = client.post('/api/dispatch', json={'uris': [str(tmp_path / 'nope')]})
+        assert (bad.status_code, bad.get_json()) == (400, {'error': f"not staged in plan {plan['id']}: {canonical(str(tmp_path / 'nope'))}"})
+        assert a.exists() and b.exists()
+
+        one = client.post('/api/dispatch', json={'uris': [str(a)]})
+        assert one.status_code == 200
+        j = one.get_json()
+        assert (j['plan_id'], j['mode'], j['items'], j['state'], j['bytes'], j['objects']) == (plan['id'], 'real', 1, 'done', 10, 1)
+        assert (a.exists(), b.exists()) == (False, True)
+
+        after = client.get('/api/staged').get_json()['plans']
+        assert [(p['id'], p['state'], [it['uri'] for it in p['items']]) for p in after] == [(plan['id'], 'open', [cb])]
+
+        rest = client.post('/api/dispatch', json={'uris': [str(b)]})
+        assert (rest.status_code, rest.get_json()['state']) == (200, 'done')
+        assert not b.exists()
+        assert client.get('/api/staged').get_json()['plans'] == []   # closed once empty

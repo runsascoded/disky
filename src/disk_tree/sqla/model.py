@@ -232,6 +232,14 @@ class Scan(Base):
         return df
 
     @classmethod
+    def load_reachable(cls, path: str) -> 'Scan | None':
+        """The freshest scan of `path` whose blob is reachable now — skips scans
+        whose parquet is on an unmounted volume (spec `r2-scan-target.md`)."""
+        from disk_tree.config import blob_reachable
+        scans = db.session.query(cls).filter_by(path=os.path.abspath(path).rstrip('/')).order_by(cls.time.desc()).all()
+        return next((s for s in scans if blob_reachable(s.blob)), None)
+
+    @classmethod
     def load_or_create(
         cls,
         path: str,
@@ -241,7 +249,19 @@ class Scan(Base):
         track_progress: bool = True,
         progress: bool = True,
     ) -> tuple['Scan', pd.DataFrame]:
+        from disk_tree.config import blob_reachable
         scan = cls.load(path)
+        if scan and not blob_reachable(scan.blob):
+            # Freshest cached scan's blob is unreachable (e.g. on an unmounted
+            # volume). Prefer an older reachable scan; if none, scan fresh rather
+            # than crashing on the missing blob (spec `r2-scan-target.md`).
+            older = cls.load_reachable(path)
+            if older:
+                err(f"{path}: freshest scan's blob {scan.blob} is unreachable, using scan {older.id} instead")
+                scan = older
+            else:
+                err(f"{path}: cached scan's blob {scan.blob} is unreachable (unmounted volume?), rescanning")
+                scan = None
         if not scan:
             return cls.create(path, gc=gc, sudo=sudo, mean_mtime=mean_mtime, track_progress=track_progress, progress=progress)
         df = scan.df()

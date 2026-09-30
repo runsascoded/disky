@@ -2,9 +2,12 @@
 
 :func:`prepare_listing` returns a parenthesized SQL fragment exposing the
 canonical layer-1 columns (``bucket, name, size_bytes, created,
-storage_class_id``) over one or more parquet globs, usable anywhere the
-pipeline previously interpolated ``read_parquet('<glob>')``. Sources may mix
-schemas:
+storage_class_id, updated``) over one or more parquet globs, usable anywhere
+the pipeline previously interpolated ``read_parquet('<glob>')``. ``updated``
+is the platform's second stamp where it has one (GCS ``updated`` beside
+``timeCreated``; S3/R2 have only ``LastModified``, which lands in ``created``)
+and NULL otherwise — the path store keeps both verbatim (spec
+``path-store.md`` §1.1). Sources may mix schemas:
 
 - raw object-listing parquet (e.g. `bucket_list.py` output, or marin's
   ``scan_gcs`` listings) passes through unchanged;
@@ -50,16 +53,17 @@ S3_CLASS_IDS = {
 
 def _normalized_select(con: "duckdb.DuckDBPyConnection", glob: str) -> str:
     cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{glob}') LIMIT 0").fetchall()}
+    updated = "updated" if "updated" in cols else "NULL::TIMESTAMPTZ AS updated"
     if "size_bytes" in cols:
         created = "created" if "created" in cols else "NULL::TIMESTAMPTZ AS created"
         cls = "storage_class_id" if "storage_class_id" in cols else "0 AS storage_class_id"
-        return f"SELECT bucket, name, size_bytes, {created}, {cls} FROM read_parquet('{glob}')"
+        return f"SELECT bucket, name, size_bytes, {created}, {cls}, {updated} FROM read_parquet('{glob}')"
     if {"size", "timeCreated", "storageClass"} <= cols:
         case = " ".join(f"WHEN '{k}' THEN {v}" for k, v in SII_CLASS_IDS.items())
         drop = " WHERE timeDeleted IS NULL" if "timeDeleted" in cols else ""
         return (
             "SELECT bucket, name, size::BIGINT AS size_bytes, timeCreated AS created,"
-            f" CASE storageClass {case} ELSE 0 END AS storage_class_id"
+            f" CASE storageClass {case} ELSE 0 END AS storage_class_id, {updated}"
             f" FROM read_parquet('{glob}'){drop}"
         )
     if {"Bucket", "Key", "Size"} <= cols:
@@ -79,7 +83,7 @@ def _normalized_select(con: "duckdb.DuckDBPyConnection", glob: str) -> str:
             filters.append("(IsLatest IS NULL OR IsLatest = TRUE)")
         where = f" WHERE {' AND '.join(filters)}" if filters else ""
         return (
-            f"SELECT Bucket AS bucket, Key AS name, Size::BIGINT AS size_bytes, {last_mod}, {cls}"
+            f"SELECT Bucket AS bucket, Key AS name, Size::BIGINT AS size_bytes, {last_mod}, {cls}, NULL::TIMESTAMPTZ AS updated"
             f" FROM read_parquet('{glob}'){where}"
         )
     raise ValueError(f"unrecognized listing schema for {glob}: {sorted(cols)}")

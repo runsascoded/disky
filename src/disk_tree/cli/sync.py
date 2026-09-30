@@ -24,10 +24,15 @@ Config: ``<DISK_TREE_ROOT>/buckets.yml``::
       - s3://my-bucket         # bare-string shorthand
       - uri: r2://my-r2-bucket
         endpoint_url: https://<acct>.r2.cloudflarestorage.com
+        profile: my-r2         # AWS credential profile (cross-account source/target)
       - uri: gcs://my-gcs-bucket
         prefix: some/subdir
         pivot_sums: [storage_class_id]
         mean_mtime: true
+
+`profile` (per-bucket, or under `defaults`) names an AWS credential profile — how
+a source and a target in *different* accounts each authenticate within one run.
+Omit it for the single-account case (ambient env / default profile).
 """
 
 from __future__ import annotations
@@ -54,11 +59,13 @@ class BucketCfg:
     prefix: str | None = None
     endpoint_url: str | None = None
     region: str | None = None
+    profile: str | None = None
     procs: int = 6
     threads: int = 8
     engine: str = 'stream'
     pivot_sums: tuple[str, ...] = ()
     mean_mtime: bool = False
+    digest: dict | None = None  # passthrough for `disk-tree digest` (see cli/digest.py); sync ignores it
 
     def __post_init__(self):
         from disk_tree.backends.url import parse_url
@@ -76,6 +83,7 @@ class BucketCfg:
 class SyncCfg:
     listings: str
     buckets: list[BucketCfg]
+    delete: dict | None = None  # deployment-wide staged-delete policy (CP4): chat/undo/database_id
 
 
 def load_config(path: str | None) -> SyncCfg:
@@ -88,7 +96,7 @@ def load_config(path: str | None) -> SyncCfg:
         )
     with open(cfg_path) as f:
         raw = yaml.safe_load(f) or {}
-    unknown = set(raw) - {'listings', 'defaults', 'buckets'}
+    unknown = set(raw) - {'listings', 'defaults', 'buckets', 'delete'}
     if unknown:
         raise ValueError(f"{cfg_path}: unknown top-level key(s) {sorted(unknown)}")
     defaults = raw.get('defaults') or {}
@@ -110,7 +118,7 @@ def load_config(path: str | None) -> SyncCfg:
             raise ValueError(f"{cfg_path}: bucket {e['uri']!r} has unknown key(s) {sorted(bad)}")
         buckets.append(BucketCfg(**{**defaults, **e}))
     listings = os.path.expanduser(raw.get('listings') or join(ROOT_DIR, 'listings'))
-    return SyncCfg(listings=listings, buckets=buckets)
+    return SyncCfg(listings=listings, buckets=buckets, delete=raw.get('delete'))
 
 
 def select_buckets(cfg: SyncCfg, names: tuple[str, ...]) -> list[BucketCfg]:
@@ -160,7 +168,7 @@ def fetch_bucket(cfg: SyncCfg, b: BucketCfg, date: str, force: bool) -> str:
         b.uri, out_dir=out_dir,
         prefix=b.prefix, procs=b.procs, threads=b.threads,
         exists='clear' if force else 'reuse',
-        endpoint_url=b.endpoint_url, region=b.region,
+        endpoint_url=b.endpoint_url, region=b.region, profile=b.profile,
     )
     err(f"{b.uri}: listed {total:,} objects")
     return out_dir

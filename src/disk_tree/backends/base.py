@@ -59,6 +59,13 @@ class Backend(ABC):
         """Delete a single path. Recursive for directories."""
         raise NotImplementedError(f"{type(self).__name__}.delete not implemented")
 
+    def restore(self, url: str) -> int:
+        """Undo a `delete` of `url` where the store makes that possible (spec
+        `specs/staged-delete.md` CP5) — e.g. remove the delete-markers a
+        versioned bucket added. Returns the number of objects restored. The
+        default has no undo (a plain delete is permanent)."""
+        raise NotImplementedError(f"{type(self).__name__}.restore not implemented (no undo for this store)")
+
     def exists(self, url: str) -> bool:
         """Cheap existence check (used for navigation fallbacks)."""
         raise NotImplementedError(f"{type(self).__name__}.exists not implemented")

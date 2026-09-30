@@ -2,6 +2,10 @@
 
 Disk and cloud storage analyzer with caching, CLI, and web UI.
 
+[![disk-tree treemap of an R2 bucket](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
+
+<p align="center"><b><a href="https://r2.rbw.sh/r2/ctbk">▶ Live demo</a></b> — interactive treemap of a 916&nbsp;GB R2 bucket (drill in, filter, compare), from <a href="https://ctbk.dev">ctbk.dev</a></p>
+
 <!-- toc -->
 - [Install](#install)
 - [Web UI](#web-ui)
@@ -40,9 +44,9 @@ Browse directories with size, modification time, children, and descendant counts
 
 ### Treemap Visualization
 
-Interactive treemaps for visualizing space usage:
+Interactive treemaps for visualizing space usage — drill into any directory, filter by name, toggle an age lens. Zero-dependency DIY-SVG/canvas ([`@rdub/treemap`](packages/treemap)), no chart lib. Try it on the [live `r2://ctbk` demo](https://r2.rbw.sh/r2/ctbk):
 
-![Treemap](screenshots/treemap.png)
+[![Treemap](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
 
 ### S3 Buckets
 

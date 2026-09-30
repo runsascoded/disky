@@ -1,0 +1,18 @@
+{
+  "name": "@disk-tree/iac",
+  "version": "0.1.0",
+  "description": "Pulumi CfnDashboard component: the disk-tree Vite+CFN reference deploy (spec specs/staged-delete.md CP8)",
+  "main": "index.ts",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pulumi/cloudflare": "^5",
+    "@pulumi/pulumi": "^3"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "@types/node": "^24"
+  }
+}

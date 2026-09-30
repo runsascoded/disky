@@ -30,6 +30,7 @@ from os.path import isabs, join
 from typing import Callable, Protocol
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.compute as pc
 
 from . import blobfs, config as _config
@@ -56,12 +57,16 @@ def _chunk_map(parquet_path: str) -> dict[str, str] | None:
 
 @lru_cache(maxsize=64)
 def _chunk_map_cached(parquet_path: str, mtime: float) -> dict[str, str] | None:
-    if 'child_scan_id' not in blobfs.read_schema(parquet_path).names:
+    schema = blobfs.read_schema(parquet_path)
+    # A chunk blob's `child_scan_id` is often Arrow type `null` (every value
+    # None): it holds no pointers, and it has no stats to prune on either
+    if 'child_scan_id' not in schema.names or pa.types.is_null(schema.field('child_scan_id').type):
         return None
-    # Filter Arrow-side: converting millions of path strings to pandas just
-    # to keep the few pointer rows cost ~0.4 s per blob (3× the read itself).
-    tbl = blobfs.read_table(parquet_path, columns=['path', 'child_scan_id'])
-    tbl = tbl.filter(pc.is_valid(tbl['child_scan_id']))
+    # Pushed down: row groups whose `child_scan_id` is all null (null_count ==
+    # num_rows) are pruned from the footer stats, so only the few groups holding
+    # pointer rows are fetched — reading the whole `path` column of a 3.6M-row
+    # chunk cost ~19 s per cold drill over R2.
+    tbl = blobfs.read_table(parquet_path, columns=['path', 'child_scan_id'], filters=pc.field('child_scan_id').is_valid())
     return dict(zip(tbl['path'].to_pylist(), tbl['child_scan_id'].to_pylist()))
 
 

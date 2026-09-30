@@ -86,6 +86,21 @@ def test_dt_walker_seam_matches_gfind(tmp_path, monkeypatch):
     assert via_walker.equals(via_gfind)
 
 
+def test_backend_for_threads_bucket_profile(monkeypatch, tmp_path):
+    """A per-bucket `profile` in buckets.yml reaches the lister backend, so a
+    cross-account source authenticates with its own key (`s3://` and `r2://`);
+    an unconfigured bucket gets no profile (ambient credentials)."""
+    from disk_tree import config
+    monkeypatch.setenv(R2_ENDPOINT_VAR, EP)
+    monkeypatch.setattr(config, 'ROOT_DIR', str(tmp_path))
+    (tmp_path / 'buckets.yml').write_text(
+        'buckets:\n  - uri: r2://ctbk\n    profile: hccs\n  - uri: s3://raw\n    profile: aws-src\n'
+    )
+    assert backend_for('r2://ctbk/p').profile == 'hccs'
+    assert backend_for('s3://raw/p').profile == 'aws-src'
+    assert backend_for('s3://unconfigured/p').profile is None
+
+
 def test_gcs_refuses_live_operations():
     gcs = backend_for('gcs://bk/p')
     msg = r"live scanning of gcs:// isn't implemented; import a listing instead \(`disk-tree pull`"

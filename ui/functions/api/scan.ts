@@ -1,24 +1,17 @@
 import type { Env } from '../../cfn/env'
 import { error, json, normUri } from '../../cfn/http'
-import { blobKey, findCovering, getScans } from '../../cfn/manifests'
+import { findCovering, getScans } from '../../cfn/manifests'
 import type { Scan } from '../../cfn/manifests'
-import { r2Buffer, readRows } from '../../cfn/parquet'
-import type { TreeRow } from '../../cfn/parquet'
+import { isSliceError, readScanSlice } from '../../cfn/scanRead'
+import type { ApiRow } from '../../cfn/scanRead'
 
 const DEFAULT_DEPTH = 2
 const DEFAULT_MAX_ROWS = 2000  // keep in sync with `server.DEFAULT_MAX_ROWS` / `ui/src/api.ts`
 
-/** A row as `/api/scan` returns it: paths relative to the requested uri. */
-type ApiRow = Omit<TreeRow, 'parent'> & { parent: string | null; uri: string; scanned?: boolean; scan_time?: string }
-
-const rowUri = (scan: Scan, path: string): string =>
-  path === '.' ? scan.path : scan.path === '/' ? `/${path}` : `${scan.path}/${path}`
-
 /** `GET /api/scan?uri=&depth=&max_rows=[&scan_id=]` — the Flask handler's
  *  scan-backed branch: the newest scan of `uri` or an ancestor, a depth- and
- *  prefix-pruned read of its blob, paths rebased to `uri`. No filesystem
- *  fallback (nothing here can list one), no chunk following yet (reduced
- *  blobs are single files), no single-child auto-expand. */
+ *  prefix-pruned read of its blob (hybrid chunks followed, see `scanRead.ts`),
+ *  paths rebased to `uri`. No filesystem fallback, no single-child auto-expand. */
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   const params = new URL(request.url).searchParams
   const uri = normUri(params.get('uri'))
@@ -38,31 +31,12 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   }
   if (!scan) return error('No scan found for path', 404, { uri })
 
-  const rel = scan.path === uri ? '.' : uri.slice(scan.path.replace(/\/$/, '').length + 1)
-  const viewedDepth = rel === '.' ? 0 : rel.split('/').length
-  const key = blobKey(env, scan)
-  const head = await env.SCANS.head(key)
-  if (!head) return error(`blob missing: ${scan.blob}`, 500)
-  const stored = await readRows(r2Buffer(env.SCANS, key, head.size), {
-    maxDepth: viewedDepth + depth,
-    prefix: rel === '.' ? null : rel,
-  })
-  const rootRow = stored.find(r => r.path === rel)
-  if (!rootRow) return error('URI not found in scan', 404, { uri, scan_path: scan.path })
-
-  // Rebase to the viewed dir: its row becomes `.`, descendants lose the prefix.
-  const cut = rel === '.' ? 0 : rel.length + 1
-  const toApi = (r: TreeRow): ApiRow => {
-    const { parent, ...rest } = r
-    const path = r.path === rel ? '.' : cut ? r.path.slice(cut) : r.path
-    const relParent = path === '.' ? null : parent == null ? null : parent === rel ? '.' : cut && parent.startsWith(rel + '/') ? parent.slice(cut) : parent
-    return { ...rest, path, parent: relParent, uri: rowUri(scan, r.path), depth: r.depth - viewedDepth }
-  }
-  const root = toApi(rootRow)
-  const all = stored.filter(r => r !== rootRow).map(toApi).filter(r => r.depth >= 1 && r.depth <= depth)
+  const slice = await readScanSlice(env, scan, uri, depth)
+  if (isSliceError(slice)) return error(slice.error, slice.status, slice.extra)
+  const { root, rows: all } = slice
   const children = all.filter(r => r.depth === 1).map(r => ({ ...r, scanned: true, scan_time: scan.time }))
 
-  let rows = all
+  let rows: ApiRow[] = all
   if (maxRows > 0 && all.length > maxRows) {
     // Top N by size, plus each kept row's ancestors so the treemap stays a tree.
     const byPath = new Map(all.map(r => [r.path, r]))

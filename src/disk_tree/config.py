@@ -162,6 +162,13 @@ def resolve_scan_blob(name: str, prefer: str | None = None) -> str:
     get a sensible path; a missing blob then fails at open time with the path
     it looked for.
     """
+    found = _find_blob(name, prefer)
+    return found if found is not None else blob_join(prefer or SCANS_DIR, name)
+
+
+def _find_blob(name: str, prefer: str | None = None) -> str | None:
+    """The read dir that actually holds blob `name` (local dirs first, then
+    remote), or `None` if no reachable dir has it — no write-dir fallback."""
     dirs = ([prefer] if prefer else []) + scan_read_dirs()
     for d in dirs:
         if not is_url(d) and exists(join(d, name)):
@@ -169,7 +176,15 @@ def resolve_scan_blob(name: str, prefer: str | None = None) -> str:
     for d in dirs:
         if is_url(d) and blob_exists(blob_join(d, name)):
             return blob_join(d, name)
-    return blob_join(prefer or SCANS_DIR, name)
+    return None
+
+
+def blob_reachable(name: str, prefer: str | None = None) -> bool:
+    """Whether blob `name` resolves to an existing file/object in some read dir.
+    False when its scan's blob lives only on an unmounted volume (or was never
+    written), so callers can fall back or raise a clear message instead of
+    hitting a raw `FileNotFoundError` on the write-dir fallback path."""
+    return _find_blob(name, prefer) is not None
 
 
 def on_write_target_change(cb: Callable[[], None]) -> None:

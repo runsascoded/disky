@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+from disk_tree.blobfs import read_parquet as read_listing
 import pytest
 
 from disk_tree.find.bulk_adaptive import (
@@ -109,8 +110,8 @@ def _run(keys, tmp_path: Path, out='listing', procs=1, threads=4, page_size=3, p
     total = list_bucket_adaptive(
         lister, bucket='b1', out_dir=out_dir, procs=procs, threads=threads, **kw,
     )
-    df = pd.read_parquet(f'{out_dir}/*.parquet') if False else pd.concat(
-        [pd.read_parquet(p) for p in sorted(Path(out_dir).glob('*.parquet'))],
+    df = read_listing(f'{out_dir}/*.parquet') if False else pd.concat(
+        [read_listing(p) for p in sorted(Path(out_dir).glob('*.parquet'))],
         ignore_index=True,
     )
     success = json.loads((Path(out_dir) / '_SUCCESS.json').read_text())
@@ -210,7 +211,7 @@ def test_stream_import_over_adaptive_shards(tmp_path: Path):
 
     out = str(tmp_path / 'l2.parquet')
     aggregate_stream((glob,), bucket='b1', scheme='s3', out_parquet=out)
-    got_stream = _normalize(pd.read_parquet(out))
+    got_stream = _normalize(read_listing(out))
     got_pandas = _normalize(import_listing((glob,), bucket='b1', scheme='s3').df)
     pd.testing.assert_frame_equal(got_pandas, got_stream)
 

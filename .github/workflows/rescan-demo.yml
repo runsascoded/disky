@@ -1,0 +1,129 @@
+# Periodic re-scan of the public demo buckets → a fresh dated scan per bucket in
+# `disk-tree-demo` (served at r2.rbw.sh), so scans accumulate over time and the
+# compare/diff view has something to diff.
+#
+# Cross-account (spec `specs/dynamic-ogi.md`, CLAUDE.md "Cross-account
+# credentials"): the source buckets and the write target live in *different*
+# Cloudflare accounts, so each authenticates with its own R2 token via an AWS
+# named profile (buckets.yml maps bucket → endpoint + profile):
+#   RAC  0dcad5654e9744de6616f74b8df4af63 — disk-tree-demo (write target)
+#   HCCS 2363642879f18d37d52dca114059937e — crashes, ctbk (public sources)
+#
+# Needs, in this repo's settings (secrets):
+#   R2_DEMO_RW_ACCESS_KEY_ID / R2_DEMO_RW_SECRET_ACCESS_KEY  (token "disky demo RW", RAC; CI-only)
+#   R2_HCCS_RO_ACCESS_KEY_ID / R2_HCCS_RO_SECRET_ACCESS_KEY  (token "hccs …RO", HCCS)
+# (jc-taxes, the one RAC *source*, is pending a working read token — see the
+#  scan loop below. It rejoins the loop via R2_DEMO_SRC_RO_*.)
+#
+# `index --to` drops a `<uuid>.parquet` blob + its `.scan.json` manifest under
+# `scans/`; the Pages Functions list newest-per-path and expose history, so each
+# run just adds a new dated point. Diff *indexes* are a separate step.
+#
+# NB: do NOT set DISK_TREE_R2_ENDPOINT_URL — it globally overrides every
+# per-bucket endpoint in buckets.yml and collapses the cross-account split.
+name: Rescan demo buckets
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Daily at 08:23 UTC — after nj-crashes' daily data refresh (adjust freely).
+    - cron: '23 8 * * *'
+
+# One run at a time; a slow scan shouldn't overlap the next day's.
+concurrency:
+  group: rescan-demo
+  cancel-in-progress: false
+
+env:
+  AWS_SHARED_CREDENTIALS_FILE: ${{ github.workspace }}/.aws-credentials
+  AWS_DEFAULT_REGION: auto
+  RAC_ENDPOINT: https://0dcad5654e9744de6616f74b8df4af63.r2.cloudflarestorage.com
+  HCCS_ENDPOINT: https://2363642879f18d37d52dca114059937e.r2.cloudflarestorage.com
+
+jobs:
+  rescan:
+    name: Re-scan demo buckets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Create empty ui/dist for editable install
+        run: mkdir -p ui/dist
+
+      - name: Install disk-tree (+ R2 driver)
+        run: uv sync --frozen --extra r2
+
+      - name: Configure R2 credential profiles + bucket registry
+        # Two named profiles (one per account) + a buckets.yml mapping each
+        # bucket to its endpoint + profile. Secrets are injected via env so they
+        # never appear literally in the workflow file; GH masks them in logs.
+        env:
+          RW_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          RW_SECRET: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+          HCCS_ID: ${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}
+          HCCS_SECRET: ${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null "$AWS_SHARED_CREDENTIALS_FILE"
+          {
+            printf '[rac-rw]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$RW_ID" "$RW_SECRET"
+            printf '[hccs-ro]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$HCCS_ID" "$HCCS_SECRET"
+          } > "$AWS_SHARED_CREDENTIALS_FILE"
+          mkdir -p ~/.config/disk-tree
+          cat > ~/.config/disk-tree/buckets.yml <<EOF
+          defaults:
+            endpoint_url: ${RAC_ENDPOINT}
+          buckets:
+            - uri: r2://crashes
+              endpoint_url: ${HCCS_ENDPOINT}
+              profile: hccs-ro
+            - uri: r2://ctbk
+              endpoint_url: ${HCCS_ENDPOINT}
+              profile: hccs-ro
+            - uri: r2://disk-tree-demo
+              profile: rac-rw
+          EOF
+
+      - name: Re-scan each demo bucket → disk-tree-demo
+        # `-C` forces a fresh listing (no cache read), `-q` keeps the log small,
+        # `-D` skips the local diff-index build (no prior scan in a stateless
+        # runner; diff indexes are published separately).
+        # jc-taxes is omitted until a working RAC read token (rac-ro) is wired.
+        run: |
+          set -euo pipefail
+          for b in crashes ctbk; do
+            echo "::group::index r2://$b"
+            uv run disk-tree index -C -q -D "r2://$b" --to r2://disk-tree-demo/scans/
+            echo "::endgroup::"
+          done
+
+      - name: Refresh OG cards (tier A)
+        # Capture each bucket's live treemap → R2 `og/r2/<bucket>.jpg`, which the
+        # `/og/<key>` Function serves ahead of the bundled seed cards. Best-effort:
+        # a capture flake must never fail the scan run (seeds + tier-B renders stay valid).
+        continue-on-error: true
+        working-directory: ui
+        env:
+          OG_BUCKETS: crashes,ctbk
+        run: |
+          set -euo pipefail
+          # Let the Pages Functions' 60s scan-list cache expire so the capture
+          # reflects the scan just uploaded.
+          sleep 70
+          npm i --no-save puppeteer@23
+          node scripts/og-capture.mjs
+          for b in crashes ctbk; do
+            aws --profile rac-rw --endpoint-url "$RAC_ENDPOINT" \
+              s3 cp "og-out/$b.jpg" "s3://disk-tree-demo/og/r2/$b.jpg" --content-type image/jpeg
+          done

@@ -15,7 +15,8 @@
     "cfn:migrate:local": "wrangler d1 migrations apply disk-tree-auth --local",
     "scrns": "scrns -c scrns.config.json -h 5001 -o ../screenshots",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "scrns:live": "scrns -c scrns.config.json -h r2.rbw.sh --https -o ../screenshots -i treemap"
   },
   "dependencies": {
     "@disk-tree/react": "workspace:*",
@@ -25,13 +26,15 @@
     "@open-athena/auth": "github:Open-Athena/auth#43bf9598898d820475b539c985f141e46067b54f",
     "@rdub/file-tree": "github:runsascoded/file-tree#49c02fab96dd4d7b98e695c1bc0c9ac4bb2764a1",
     "@rdub/treemap": "workspace:*",
+    "@resvg/resvg-wasm": "^2.6.2",
     "@tanstack/react-query": "^5.90.12",
+    "fzstd": "0.1.1",
     "hyparquet": "^1.30.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-icons": "^5.5.0",
     "react-router-dom": "^7.10.1",
-    "use-kbd": "https://github.com/runsascoded/use-kbd#34745efff8efdfd2c46e3e39d479a708aba704b2"
+    "use-kbd": "https://github.com/runsascoded/use-kbd#06ae0cfee696462fb35d761bb413b159eb66a1dd"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260906.1",

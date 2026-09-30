@@ -27,7 +27,7 @@ jobs:
         run: mkdir -p ui/dist
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --frozen --all-extras
 
       - name: Run tests
         run: uv run pytest tests/ -v
@@ -48,7 +48,7 @@ jobs:
         run: mkdir -p ui/dist
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --frozen --all-extras
 
       - name: Run mypy
         run: uv run mypy src/disk_tree --ignore-missing-imports
@@ -66,7 +66,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -91,7 +91,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -116,7 +116,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -149,7 +149,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -160,7 +160,7 @@ jobs:
         run: cd ui && pnpm build
 
       - name: Install Python dependencies
-        run: uv sync --all-extras
+        run: uv sync --frozen --all-extras
 
       - name: Install Playwright browsers
         run: cd ui && pnpm exec playwright install chromium --with-deps

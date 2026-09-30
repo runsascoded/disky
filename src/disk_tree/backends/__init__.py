@@ -43,11 +43,14 @@ def backend_for(url: str) -> Backend:
     """
     parsed = parse_url(url)
     if parsed.scheme == 's3':
-        return S3Backend()
+        from urllib.parse import urlparse
+        from disk_tree.blobfs import bucket_profile
+        return S3Backend(profile=bucket_profile(urlparse(url).netloc))
     if parsed.scheme == 'r2':
         from urllib.parse import urlparse
-        from disk_tree.blobfs import r2_endpoint
-        return S3Backend(endpoint_url=r2_endpoint(urlparse(url).netloc), scheme='r2')
+        from disk_tree.blobfs import bucket_profile, r2_endpoint
+        netloc = urlparse(url).netloc
+        return S3Backend(endpoint_url=r2_endpoint(netloc), profile=bucket_profile(netloc), scheme='r2')
     if parsed.scheme == 'gcs':
         return UnsupportedBackend('gcs')
     if parsed.scheme == 'ssh':

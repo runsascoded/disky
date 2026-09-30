@@ -16,8 +16,25 @@ from __future__ import annotations
 
 import os
 import socket
+import sys
 import threading
 import time
+
+
+def _debug_enabled() -> bool:
+    """Whether to open the WKWebView with the Web Inspector enabled.
+
+    With it on, right-click → *Inspect Element* opens Safari's Web Inspector
+    (console, network, sources) against the embedded UI — the only way to read
+    a JS stack out of the native window, since WebKit's errors (e.g. "The
+    string did not match the expected pattern") differ from Chrome's and don't
+    reproduce under the dev-server CIC. Default: on from source (dev), off in
+    the frozen bundle unless `DISK_TREE_APP_DEBUG` is set truthy.
+    """
+    env = os.environ.get('DISK_TREE_APP_DEBUG')
+    if env is not None:
+        return env.strip().lower() not in ('', '0', 'false', 'no')
+    return not getattr(sys, 'frozen', False)
 
 
 def _free_loopback_port() -> int:
@@ -79,7 +96,8 @@ def main() -> None:
         height=820,
         min_size=(720, 480),
     )
-    webview.start()
+    # `debug=True` enables the WKWebView Web Inspector (right-click → Inspect).
+    webview.start(debug=_debug_enabled())
 
 
 if __name__ == '__main__':

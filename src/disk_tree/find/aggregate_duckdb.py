@@ -905,6 +905,7 @@ def _write_ranged(
     out: str,
     run_dir: str,
     row_group_size: int,
+    copy_opts: str | None = None,
 ) -> int:
     """Write the output sorted `(depth, path, …)` without one global sort:
     sort each *path range* on its own, then concatenate the ranges depth by
@@ -962,7 +963,8 @@ def _write_ranged(
     con.execute("SET preserve_insertion_order = true")
     try:
         (n,) = con.execute(
-            f"COPY (SELECT * FROM read_parquet({lst})) TO '{out}' (FORMAT PARQUET, ROW_GROUP_SIZE {row_group_size})"
+            f"COPY (SELECT * FROM read_parquet({lst})) TO '{out}' "
+            + (copy_opts or f"(FORMAT PARQUET, ROW_GROUP_SIZE {row_group_size})")
         ).fetchone()
     finally:
         con.execute("SET preserve_insertion_order = false")
@@ -1120,16 +1122,30 @@ def _aggregate_listing_to_parquet(
     # file-level contributions, plus the exact HUGEINT Σ mtime·size partial.
     from .agg_ext import MT_WSUM, MTIME_MEAN, check_pivot_values, pivot_col
     sum_cols: list[str] = []
+    # Every pivot column in v1 order, and those left implied (spec
+    # `listing-slim.md`): a pivot whose column holds one value and no NULLs
+    # sums to exactly `size` on every row — file rows are their own size,
+    # folder placeholders likewise, synthesized dirs 0 = 0, and the cascade
+    # sums both alike — so it is not computed, and the metadata says so.
+    pivot_names: list[str] = []
+    implied: dict[str, str] = {}
     extra_file_cols = ''
     for col in pivot_sums:
-        vals = check_pivot_values(col, [
+        seen = [
             r[0] for r in con.execute(
                 f"SELECT DISTINCT {col} FROM {listing_sql} "
-                f"WHERE bucket = '{bucket}' AND {col} IS NOT NULL ORDER BY 1"
+                f"WHERE bucket = '{bucket}' ORDER BY 1 NULLS LAST"
             ).fetchall()
-        ])
+        ]
+        vals = check_pivot_values(col, [v for v in seen if v is not None])
+        if len(vals) == 1 and len(seen) == 1:
+            name = pivot_col(col, vals[0])
+            pivot_names.append(name)
+            implied[name] = 'size'
+            continue
         for v in vals:
             name = pivot_col(col, v)
+            pivot_names.append(name)
             extra_file_cols += (
                 f", CASE WHEN {col} = {_sql_lit(v)} THEN size_bytes ELSE 0 END::BIGINT AS {name}"
             )
@@ -1298,8 +1314,7 @@ def _aggregate_listing_to_parquet(
                 WHEN path = '' THEN ''
                 WHEN {parent_of_agg} = '' THEN '.'
                 ELSE {parent_of_agg}
-            END AS parent{extra_final},
-            CASE WHEN path = '' THEN '{scan_root}' ELSE '{scan_root}/' || path END AS uri
+            END AS parent{extra_final}
         FROM dirs_agg
     """)
     n_dirs = con.execute("SELECT COUNT(*) FROM dirs_final").fetchone()[0]
@@ -1309,8 +1324,9 @@ def _aggregate_listing_to_parquet(
 
     # COPY straight from the union query — materializing it as a table first
     # doubles the on-disk footprint (all 92.7M file rows a second time) and
-    # exhausted a ~95GiB spill budget at CW scale. `uri` is derived here rather
-    # than stored per input row for the same reason.
+    # exhausted a ~95GiB spill budget at CW scale. `uri` is not written at all
+    # (v2 listing, spec `listing-slim.md`): readers derive it from the scan
+    # root in the key-value metadata.
     # Bounded row groups (DuckDB's default is ~120K rows): the read side —
     # server and Pages Functions alike — decodes every group overlapping a
     # listing's (depth, path-prefix) range, and the measured optimum is 64K
@@ -1329,13 +1345,12 @@ def _aggregate_listing_to_parquet(
         """The output rows: aggregated dirs ∪ file rows, `depth` attached."""
         return f"""
             WITH unioned AS (
-                SELECT path{keys}, size, mtime, n_desc, n_files, n_children, kind, parent{extra_names}, uri
+                SELECT path{keys}, size, mtime, n_desc, n_files, n_children, kind, parent{extra_names}
                 FROM dirs_final{dirs_where}
                 UNION ALL
                 SELECT path{keys}, size, mtime,
                        1::BIGINT AS n_desc, 1::BIGINT AS n_files, 0::BIGINT AS n_children,
-                       kind, parent{file_extra},
-                       ('{scan_root}/' || path)::VARCHAR AS uri
+                       kind, parent{file_extra}
                 FROM {files_from}
                 WHERE kind = 'file'
             )
@@ -1346,6 +1361,14 @@ def _aggregate_listing_to_parquet(
             FROM unioned
         """
 
+    from disk_tree import listing_format as lf
+    fmt = lf.slim(scan_root, [
+        'path', *group_cols, 'size', 'mtime', 'n_desc', 'n_files', 'n_children', 'kind', 'parent',
+        *pivot_names, *([MTIME_MEAN] if mean_mtime else []),
+        *(['size_hist_n', 'size_hist_bytes'] if size_hist else []), *max_cols,
+        'uri', 'depth',
+    ], implied)
+    copy_opts = lf.duckdb_copy_options(fmt, BLOB_ROW_GROUP_SIZE)
     n_ranges = 0
     if len(batches) >= 2:
         # Each cascade's rows sort into their own range (see `_write_ranged`):
@@ -1367,12 +1390,13 @@ def _aggregate_listing_to_parquet(
         n_ranges = _write_ranged(
             con, range_select, [batch[0] + '/' for batch in batches], sort_keys,
             out=tmp_out, run_dir=os.path.join(spill_dir, 'runs'), row_group_size=BLOB_ROW_GROUP_SIZE,
+            copy_opts=copy_opts,
         )
     else:
-        con.execute(
-            f"COPY ({final_select('', 'files_src')} {order_by})"
-            f" TO '{tmp_out}' (FORMAT PARQUET, ROW_GROUP_SIZE {BLOB_ROW_GROUP_SIZE})"
-        )
+        con.execute(f"COPY ({final_select('', 'files_src')} {order_by}) TO '{tmp_out}' {copy_opts}")
+    got = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{tmp_out}')").fetchall()]
+    if got != lf.written_columns(fmt):
+        raise RuntimeError(f"layer-2 columns {got} != the v2 contract {lf.written_columns(fmt)}")
     _stage("COPY done")
     rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{tmp_out}')").fetchone()[0]
     os.replace(tmp_out, out_parquet)

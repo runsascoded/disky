@@ -1,0 +1,13 @@
+{
+  "format": "disk-tree-scan",
+  "version": 1,
+  "time": "2026-01-02T03:04:05",
+  "path": "/cmp",
+  "blob": "cmpA.parquet",
+  "size": 730,
+  "n_children": 4,
+  "n_desc": 8,
+  "mtime": 1700000000,
+  "error_count": null,
+  "error_paths": null
+}

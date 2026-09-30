@@ -10,6 +10,7 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -26,7 +27,7 @@ TS = dt.datetime(2026, 7, 28, tzinfo=dt.timezone.utc)
 
 def _wide_layer2(tmp_path: Path, n_files: int, labels: str | None = None) -> str:
     """`n_files` one-byte files `d<k>/f<i>` spread over 4 dirs — enough rows for
-    the objects tier to span several 2048-row groups."""
+    a tier to span several 2048-row groups."""
     names = [f'd{i % 4}/f{i:05d}' for i in range(n_files)]
     listing = tmp_path / 'wide.parquet'
     pd.DataFrame({
@@ -58,17 +59,17 @@ def _chunk_triples(path: str) -> list[list[list[int]]]:
 
 
 def test_groups_path():
-    assert groups_path('/x/gcs-b1.dirs.parquet') == '/x/gcs-b1.dirs.groups.json'
-    assert groups_path('r2://bk/p/gcs-b1.coarse-by-usr.parquet') == 'r2://bk/p/gcs-b1.coarse-by-usr.groups.json'
+    assert groups_path('/x/gcs-b1.path.parquet') == '/x/gcs-b1.path.groups.json'
+    assert groups_path('r2://bk/p/gcs-b1.bysize-by-usr.parquet') == 'r2://bk/p/gcs-b1.bysize-by-usr.groups.json'
     with pytest.raises(ValueError, match='not a parquet path'):
-        groups_path('/x/gcs-b1.dirs.groups.json')
+        groups_path('/x/gcs-b1.path.groups.json')
 
 
 def test_schema_json_is_hyparquet_shaped(tmp_path: Path):
     layer2 = _layer2(tmp_path)
     stem = str(tmp_path / 'gcs-b1')
-    write_tiers(layer2, stem, tiers=('coarse',), coarse_exp=3)
-    md = pq.read_metadata(f'{stem}.coarse.parquet')
+    write_tiers(layer2, stem, tiers=('path',))
+    md = pq.read_metadata(f'{stem}.path.parquet')
     schema = schema_json(md)
     names = md.schema.names
     # One leaf per column, in file order, physical types as parquet-thrift names.
@@ -78,62 +79,82 @@ def test_schema_json_is_hyparquet_shaped(tmp_path: Path):
     assert by_name['path'] == {'type': 'BYTE_ARRAY', 'repetition_type': 'OPTIONAL', 'name': 'path', 'converted_type': 'UTF8'}
     assert by_name['depth'] == {'type': 'INT64', 'repetition_type': 'OPTIONAL', 'name': 'depth', 'converted_type': 'INT_64'}
     assert by_name['size'] == {'type': 'INT64', 'repetition_type': 'OPTIONAL', 'name': 'size', 'converted_type': 'INT_64'}
-    # The coarse floor rides along from the parquet key-value metadata.
     assert schema['version'] == 1
-    assert schema['floor_bytes'] == int(md.metadata[b'floor_bytes'])
-    # A tier without a floor has none.
-    write_tiers(layer2, stem, tiers=('dirs',))
-    assert 'floor_bytes' not in schema_json(pq.read_metadata(f'{stem}.dirs.parquet'))
+    # The store's sorts have no floor (every byte floor is a prefix of `bysize`).
+    assert 'floor_bytes' not in schema
+    # A coarse tier's floor (mgu's `coarse_floor`, or `floor_bytes`) rides
+    # along from the parquet key-value metadata.
+    for key in ('floor_bytes', 'coarse_floor'):
+        t = pa.table({'path': ['.', 'a'], 'depth': [0, 1], 'size': [7, 3]})
+        pq.write_table(t.replace_schema_metadata({key: '512'}), tmp_path / f'{key}.parquet')
+        assert schema_json(pq.read_metadata(tmp_path / f'{key}.parquet'))['floor_bytes'] == 512
 
 
-def test_group_rows_span_the_sorted_objects_tier(tmp_path: Path):
+def test_group_rows_span_the_sorted_path_tier(tmp_path: Path):
     n = 5000
     layer2 = _wide_layer2(tmp_path, n)
     stem = str(tmp_path / 'gcs-b1')
-    write_tiers(layer2, stem, tiers=('objects',), row_group_rows=2048)
-    tier = f'{stem}.objects.parquet'
+    write_tiers(layer2, stem, tiers=('path',), row_group_rows=2048)
+    tier = f'{stem}.path.parquet'
     rows = group_rows(pq.read_metadata(tier))
-    # The objects tier is sorted by path: group boundaries are the sorted
-    # paths at 0 / 2047 / 2048 / … — exact, and every file is depth 2 (root
-    # `.` = 0, `d<k>` = 1), size 1.
+    # The path tier is sorted `(depth, path)`: the root (5000 bytes, depth 0)
+    # and the four 1250-byte dirs (depth 1) lead group 0, then the 1-byte
+    # files (depth 2) in path order; group boundaries are the sorted paths at
+    # 2043 / 2044 / 4091 / … — exact. Group 0's path stats span `.` to `d3`
+    # (the dir row sorts after every `d0/…`, `d1/…` file it holds), a reminder
+    # that a depth-spanning group's path range is not a prefix range.
+    # `b_min`/`b_max` bound each group's sizes: group 0 spans the root down to
+    # a file, the rest are all 1.
     paths = sorted(f'd{i % 4}/f{i:05d}' for i in range(n))
-    spans = [(0, 2048), (2048, 4096), (4096, 5000)]
     expected = [
         {
-            'rg': g, 'd_min': 2, 'd_max': 2,
-            'p_min': paths[a], 'p_max': paths[b - 1],
+            'rg': 0, 'd_min': 0, 'd_max': 2,
+            'p_min': '.', 'p_max': 'd3',
+            'b_max': 5000, 'u_min': None, 'u_max': None,
+            'row_start': 0, 'row_end': 2048, 'b_min': 1,
+        },
+        {
+            'rg': 1, 'd_min': 2, 'd_max': 2,
+            'p_min': paths[2043], 'p_max': paths[4090],
             'b_max': 1, 'u_min': None, 'u_max': None,
-            'row_start': a, 'row_end': b,
-        }
-        for g, (a, b) in enumerate(spans)
+            'row_start': 2048, 'row_end': 4096, 'b_min': 1,
+        },
+        {
+            'rg': 2, 'd_min': 2, 'd_max': 2,
+            'p_min': paths[4091], 'p_max': paths[4999],
+            'b_max': 1, 'u_min': None, 'u_max': None,
+            'row_start': 4096, 'row_end': 5005, 'b_min': 1,
+        },
     ]
     assert [{k: r[k] for k in GROUP_FIELDS if k != 'rg_json'} for r in rows] == expected
+    spans = [(0, 2048), (2048, 4096), (4096, 5005)]
     # `rg_json` = [num_rows, codec, per-column [data_page_offset, total_compressed_size, dictionary_page_offset|0]].
     triples = _chunk_triples(tier)
     assert [json.loads(r['rg_json']) for r in rows] == [
-        [b - a, 'SNAPPY', triples[g]] for g, (a, b) in enumerate(spans)
+        [b - a, 'ZSTD', triples[g]] for g, (a, b) in enumerate(spans)
     ]
     assert all(len(t) == pq.read_metadata(tier).num_columns for t in triples)
 
 
 def test_user_slice_bounds_and_size_column_fallback(tmp_path: Path):
-    # A `usr`-labeled layer-2: the dirs-by-usr tier sorts on usr first, so each
+    # A `usr`-labeled layer-2: the path-by-usr tier sorts on usr first, so each
     # group's u_min/u_max are that slice's bounds; the size column is `size`.
     labels = tmp_path / 'labels.parquet'
     pd.DataFrame({'prefix': ['d0', 'd1', 'd2'], 'usr': ['alice', 'bob', 'carol']}).to_parquet(labels)
     layer2 = _layer2(tmp_path, labels=str(labels))
     stem = str(tmp_path / 'gcs-b1')
-    write_tiers(layer2, stem, tiers=('dirs',), sort_variants=(('usr',),))
-    rows = group_rows(pq.read_metadata(f'{stem}.dirs-by-usr.parquet'))
-    # One group (7 dir rows × slices ≤ 8192): NULL-labeled rows sort first, so
+    write_tiers(layer2, stem, tiers=('path',), sort_variants=(('usr',),))
+    rows = group_rows(pq.read_metadata(f'{stem}.path-by-usr.parquet'))
+    # One group (37 rows × slices ≤ 8192): NULL-labeled rows sort first, so
     # the string stats span the labeled slices only.
     assert [(r['rg'], r['u_min'], r['u_max'], r['row_start']) for r in rows] == [(0, 'alice', 'carol', 0)]
-    assert rows[0]['b_max'] == int(pd.read_parquet(f'{stem}.dirs-by-usr.parquet')['size'].max())
+    sizes = pd.read_parquet(f'{stem}.path-by-usr.parquet')['size']
+    assert (rows[0]['b_min'], rows[0]['b_max']) == (int(sizes.min()), int(sizes.max()))
 
     # mgu's path index names its size column `b`: the same extraction applies.
     df = pd.DataFrame({'path': ['.', 'a'], 'depth': [0, 1], 'b': [7, 3]})
     df.to_parquet(tmp_path / 'mgu.parquet')
-    assert [(r['b_max'], r['u_min']) for r in group_rows(pq.read_metadata(tmp_path / 'mgu.parquet'))] == [(7, None)]
+    assert [(r['b_min'], r['b_max'], r['u_min']) for r in group_rows(pq.read_metadata(tmp_path / 'mgu.parquet'))] == [(3, 7, None)]
     # Without any size column the manifest is undefined, loudly.
     pd.DataFrame({'path': ['.'], 'depth': [0]}).to_parquet(tmp_path / 'nosize.parquet')
     with pytest.raises(ValueError, match=r'no size column \(size/b\)'):
@@ -143,10 +164,10 @@ def test_user_slice_bounds_and_size_column_fallback(tmp_path: Path):
 def test_write_tiers_groups_writes_the_manifest_beside_each_tier(tmp_path: Path):
     layer2 = _layer2(tmp_path)
     stem = str(tmp_path / 'gcs-b1')
-    written = write_tiers(layer2, stem, tiers=('dirs', 'coarse'), coarse_exp=3, groups=True)
+    written = write_tiers(layer2, stem, groups=True)
     assert sorted(p.name for p in tmp_path.glob('gcs-b1.*')) == [
-        'gcs-b1.coarse.groups.json', 'gcs-b1.coarse.parquet',
-        'gcs-b1.dirs.groups.json', 'gcs-b1.dirs.parquet',
+        'gcs-b1.bysize.groups.json', 'gcs-b1.bysize.parquet',
+        'gcs-b1.path.groups.json', 'gcs-b1.path.parquet',
     ]
     for tier_path, n_rows in written.items():
         doc = json.loads(Path(groups_path(tier_path)).read_text())
@@ -157,18 +178,18 @@ def test_write_tiers_groups_writes_the_manifest_beside_each_tier(tmp_path: Path)
         assert doc['v'] == GROUPS_VERSION
         assert doc['groups'] == [[r[k] for k in GROUP_FIELDS] for r in rows]
         assert doc['groups'][-1][9] == n_rows  # row_end of the last group = the tier's rows
-    assert json.loads(Path(f'{stem}.dirs.groups.json').read_text())['floor_bytes'] is None
-    assert json.loads(Path(f'{stem}.coarse.groups.json').read_text())['floor_bytes'] == int(
-        pq.read_metadata(f'{stem}.coarse.parquet').metadata[b'floor_bytes']
-    )
+        # `b_min` is the appended 12th field; the reader's positional
+        # destructure (`index.ts` `openBlob`) reads the first 11 and ignores it.
+        assert [len(g) for g in doc['groups']] == [12] * len(rows)
+        assert doc['floor_bytes'] is None
 
 
 def test_write_groups_over_a_url(tmp_path: Path):
     # The blob seam handles URLs; `file://` exercises the fsspec branch end to end.
     layer2 = _layer2(tmp_path)
     stem = str(tmp_path / 'gcs-b1')
-    write_tiers(layer2, stem, tiers=('dirs',))
-    st = write_groups(f'file://{stem}.dirs.parquet')
-    assert (st.path, st.n_groups) == (f'file://{stem}.dirs.groups.json', 1)
-    assert Path(f'{stem}.dirs.groups.json').read_text() == groups_json(*extract(f'{stem}.dirs.parquet'))
-    assert st.n_bytes == len(Path(f'{stem}.dirs.groups.json').read_bytes())
+    write_tiers(layer2, stem, tiers=('path',))
+    st = write_groups(f'file://{stem}.path.parquet')
+    assert (st.path, st.n_groups) == (f'file://{stem}.path.groups.json', 1)
+    assert Path(f'{stem}.path.groups.json').read_text() == groups_json(*extract(f'{stem}.path.parquet'))
+    assert st.n_bytes == len(Path(f'{stem}.path.groups.json').read_bytes())

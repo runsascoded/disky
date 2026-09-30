@@ -1,0 +1,46 @@
+# A deployment's sheet mirror: `deploy/sheet-mirror/deploy.sh <this file>`.
+# Copy it next to the deployment's site config (e.g. `sheet-mirror.yml`) and
+# fill in the placeholders; with no such file, nothing is built or scheduled.
+
+# The deployment's own site (its `/api/*` is what the exporters read).
+site: https://usage.example.org
+# Secret Manager secret holding a read-only grant token for `site`; the job
+# gets it as `$GCS_USAGE_TOKEN`.
+token_secret: usage-sheet-mirror-token
+# Cloud Scheduler cron (UTC): hourly at :05, off the top-of-hour contention.
+schedule: "5 * * * *"
+# The store's snapshot subdir under /data/ (`cw` on cw-s3; omit for the default store).
+# subdir: cw
+
+# Where the Cloud Run job + Scheduler trigger live, and the identity they run
+# as. The service account needs Editor on each sheet below; `deploy.sh` grants
+# it the token's secretAccessor and the job's run.invoker.
+gcp:
+  project: my-gcp-project
+  service_account: sheet-mirror@my-gcp-project.iam.gserviceaccount.com
+  job: usage-sheet-mirror
+  # region: us-central1            # default
+  # image: <registry>/<name>:<tag> # default: <region>-docker.pkg.dev/<project>/cloud-run-source-deploy/<job>:latest
+  # trigger: <scheduler job name>  # default: <job>-trigger
+
+mirrors:
+  # `/users` → one named tab: per-user owned bytes + storage-class split.
+  # `source` is a `dt-cloud export` source (`dt-cloud export --list`); `key`
+  # is the stable row identity `sheet-push -k` diffs by, so Version History
+  # shows one-row changes. `{site}` in `footer` expands to `site` above.
+  # `${NAME}` in any value comes from the deployer's environment at deploy
+  # time (strict: unset is an error), so a public repo can keep the sheet id
+  # in an untracked `.envrc`. `unit` rescales byte columns: `B` (default),
+  # `GiB`, `TiB` — rounded numbers, header `bytes (TiB)`.
+  - sheet: ${USAGE_SHEET_ID}
+    tab: Storage by user
+    source: owners
+    key: user
+    unit: TiB
+    footer: "⟳ Auto-synced hourly from {site}/users — edits are overwritten; add derived views in another tab"
+  # A `runs` mirror also names the site's executor (`Store.executor`):
+  # - sheet: YOUR_GOOGLE_SHEET_ID
+  #   tab: Deletion runs
+  #   source: runs
+  #   key: run
+  #   executor: sweep   # gcs; `plan-sweep` on cw-s3

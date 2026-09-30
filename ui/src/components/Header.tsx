@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { AppBar, Toolbar, Typography, Button, Box, Tooltip, Popover, List, ListItem, ListItemText, Chip, Alert, ToggleButton, ToggleButtonGroup } from '@mui/material'
-import { FaCloud, FaDatabase, FaFolder, FaHistory, FaCog } from 'react-icons/fa'
+import { FaCloud, FaDatabase, FaFolder, FaHistory, FaCog, FaTrash } from 'react-icons/fa'
 import { useQuery } from '@tanstack/react-query'
 import { fetchAvailableBackends } from '../api'
 import { useCapabilities } from '../hooks/useCapabilities'
+import { useDeleteMethod } from '../hooks/useDeleteMethod'
 import { useUnits } from '../utils/units'
 import { LibrarySwitcher } from './LibrarySwitcher'
 import { WhoamiChip } from '../auth'
@@ -16,6 +17,7 @@ export function Header() {
   const isLocalPage = path.startsWith('/file')
   const isS3Page = path.startsWith('/s3')
   const isRecentPage = path === '/recent'
+  const isStagedPage = path === '/staged'
   const [units, setUnits] = useUnits()
 
   // Backend popover state
@@ -29,6 +31,7 @@ export function Header() {
   const backendOpen = Boolean(anchorEl)
 
   const caps = useCapabilities()
+  const { method: deleteMethod, offered: methodOffered, setMethod: setDeleteMethod } = useDeleteMethod()
   // Fetch backend info (not on a static deployment — nothing to switch)
   const { data: backendData } = useQuery({
     queryKey: ['available-backends'],
@@ -53,24 +56,31 @@ export function Header() {
           >
             Scans
           </Button>
-          <Button
-            component={Link}
-            to="/file/"
-            startIcon={<FaFolder />}
-            variant={isLocalPage ? 'contained' : 'text'}
-            size="small"
-          >
-            Local
-          </Button>
-          <Button
-            component={Link}
-            to="/s3/"
-            startIcon={<FaCloud />}
-            variant={isS3Page ? 'contained' : 'text'}
-            size="small"
-          >
-            S3
-          </Button>
+          {/* Local + S3 lead to a live scanner / bucket lister the static
+              deployment doesn't run; hide them when the capability is off
+              (`undefined` while caps load → shown, matching the Flask default). */}
+          {caps?.filesystem !== false && (
+            <Button
+              component={Link}
+              to="/file/"
+              startIcon={<FaFolder />}
+              variant={isLocalPage ? 'contained' : 'text'}
+              size="small"
+            >
+              Local
+            </Button>
+          )}
+          {caps?.s3 !== false && (
+            <Button
+              component={Link}
+              to="/s3/"
+              startIcon={<FaCloud />}
+              variant={isS3Page ? 'contained' : 'text'}
+              size="small"
+            >
+              S3
+            </Button>
+          )}
           <Button
             component={Link}
             to="/recent"
@@ -80,9 +90,41 @@ export function Header() {
           >
             Recent
           </Button>
+          {/* Staged-delete queue: shown where staging is a possible method (an
+              always-sync deployment has no queue to show). */}
+          {caps?.stageDelete && caps?.deleteApproval !== 'sync' && (
+            <Button
+              component={Link}
+              to="/staged"
+              startIcon={<FaTrash />}
+              variant={isStagedPage ? 'contained' : 'text'}
+              size="small"
+            >
+              Staged
+            </Button>
+          )}
         </Box>
 
         {caps?.library && <LibrarySwitcher />}
+
+        {/* Delete method (spec `staged-delete.md` CP6): shown only where the
+            deployment leaves the choice to the user (`deleteApproval:
+            user-choice`); a locked deployment hides it entirely. */}
+        {methodOffered && (
+          <Tooltip title="Delete method — Sync: delete immediately · Staged: queue for an admin to dispatch">
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={deleteMethod}
+              onChange={(_e, v) => { if (v) setDeleteMethod(v) }}
+              sx={{ mr: 1, '& .MuiToggleButton-root': { py: 0, px: 1, fontSize: '0.7rem', textTransform: 'none' } }}
+            >
+              <ToggleButton value="sync">Sync</ToggleButton>
+              <ToggleButton value="staged">Staged</ToggleButton>
+            </ToggleButtonGroup>
+          </Tooltip>
+        )}
+
         <WhoamiChip />
 
         {/* Size units: SI (G = 10⁹) vs IEC (Gi = 2³⁰). Single tooltip on the

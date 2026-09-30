@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import { CONTAINER_BG, parseColor } from './colors'
+import { colorResolver } from './cssColor'
 import { drawDust } from './DustHatch'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
 import { flattenPlaced, hitTest, type FoldedNode, type PlacedCell } from './layout'
@@ -45,6 +46,8 @@ export interface TreemapCanvasProps<T> {
   formatSize: (n: number) => string
   /** Inline-size placement on a cell's first line (see `TreemapProps.sizeAlign`). */
   sizeAlign: 'left' | 'right'
+  /** Min cell width for the inline size (see `TreemapProps.inlineSizeMinWidth`). */
+  inlineSizeMinWidth: number
   idFor: (n: T, p: T[]) => string
   expandable: (n: T, p: T[]) => boolean
   dustTexture: boolean
@@ -58,6 +61,8 @@ export interface TreemapCanvasProps<T> {
   a11yMinSide: number
   /** Key of the currently pinned cell, ringed on the canvas so the pin reads. */
   pinnedKey: string | null
+  /** Mirror of the internal `<canvas>` element, for image export (`exportable`). */
+  canvasRef?: React.MutableRefObject<HTMLCanvasElement | null>
   onHover: (hit: CanvasHit<T>, clientX: number, clientY: number) => void
   onClick: (hit: CanvasHit<T>, e: React.MouseEvent) => void
   onLeave: () => void
@@ -69,19 +74,42 @@ const SYNC_BUDGET_MS = 8
 /** Each subsequent animation frame's paint budget, leaving headroom in 16ms. */
 const FRAME_BUDGET_MS = 10
 
-interface PaintOpts<T> {
+export interface PaintOpts<T> {
   styleOpts: StyleOpts<T>
   getSize: (n: T) => number
   getLabel: (n: T) => string
   formatSize: (n: number) => string
   sizeAlign: 'left' | 'right'
+  /** Min cell width for the inline size (see `TreemapProps.inlineSizeMinWidth`). */
+  inlineSizeMinWidth: number
   dustTexture: boolean
 }
 
+// The pass's `var()` resolver (see cssColor.ts): set by the paint effect
+// against the canvas element, so a consumer's `var(--other)` / `var(--ink)`
+// paint as the theme's color instead of `parseColor` giving up on them.
+let resolveVar: (c: string) => string = c => c
+// Label sizes, read from the same CSS custom properties the DOM renderer's
+// labels use (`--dt-treemap-lbl-fs`, `--dt-treemap-lbl-fs-sm`), so the two
+// renderers set type identically for a given consumer stylesheet.
+let lblFs = 13.5
+let lblFsSm = 11.5
+function readLabelSizes(el: Element): void {
+  const cs = getComputedStyle(el)
+  const px = (v: string, dflt: number) => {
+    const m = /^([\d.]+)(px|rem)?$/.exec(v.trim())
+    if (!m) return dflt
+    return m[2] === 'rem' ? parseFloat(m[1]) * parseFloat(getComputedStyle(document.documentElement).fontSize || '16') : parseFloat(m[1])
+  }
+  lblFs = px(cs.getPropertyValue('--dt-treemap-lbl-fs'), 13.5)
+  lblFsSm = px(cs.getPropertyValue('--dt-treemap-lbl-fs-sm'), 11.5)
+}
+
 /** A CSS color → `rgba()` at `alpha`, or null if it isn't a parseable solid
- * (a `var()`/gradient/`color-mix`) so the caller can skip or fall back. */
+ * (a gradient/`color-mix`) so the caller can skip or fall back. A `var()`
+ * reference is resolved against the canvas first (see `resolveVar`). */
 function rgbaAt(c: string | undefined, alpha: number): string | null {
-  const p = parseColor(c ?? '')
+  const p = parseColor(resolveVar(c ?? ''))
   if (!p) return null
   return `rgba(${p[0]}, ${p[1]}, ${p[2]}, ${p[3] * alpha})`
 }
@@ -95,6 +123,7 @@ export function TreemapCanvas<T>({
   getLabel,
   formatSize,
   sizeAlign,
+  inlineSizeMinWidth,
   idFor,
   expandable,
   dustTexture,
@@ -103,11 +132,18 @@ export function TreemapCanvas<T>({
   a11yMaxCells,
   a11yMinSide,
   pinnedKey,
+  canvasRef,
   onHover,
   onClick,
   onLeave,
 }: TreemapCanvasProps<T>) {
   const ref = useRef<HTMLCanvasElement>(null)
+  // Callback ref that keeps both the internal ref (used by the paint effect)
+  // and the consumer's export mirror pointed at the live element.
+  const setCanvas = (el: HTMLCanvasElement | null) => {
+    ref.current = el
+    if (canvasRef) canvasRef.current = el
+  }
   // Biggest-first paint order. A container's rect always contains its
   // descendants', so its area strictly exceeds theirs — area-descending is
   // therefore a valid ancestor-before-descendant order (children paint over
@@ -139,7 +175,11 @@ export function TreemapCanvas<T>({
     ctx.fillStyle = CONTAINER_RGB
     ctx.fillRect(0, 0, width, height)
 
-    const opts: PaintOpts<T> = { styleOpts, getSize, getLabel, formatSize, sizeAlign, dustTexture }
+    // Fresh per pass so a theme toggle repaints correctly (see cssColor.ts) and
+    // label sizes track the consumer's current stylesheet.
+    resolveVar = colorResolver(cv)
+    readLabelSizes(cv)
+    const opts: PaintOpts<T> = { styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture }
     let i = 0
     let raf = 0
     // Paint until `budgetMs` elapses (clock read every 256 cells to keep it
@@ -160,7 +200,7 @@ export function TreemapCanvas<T>({
     }
     if (i < flat.length) raf = requestAnimationFrame(step)
     return () => { if (raf) cancelAnimationFrame(raf) }
-  }, [flat, width, height, styleOpts, getSize, getLabel, formatSize, sizeAlign, dustTexture])
+  }, [flat, width, height, styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture])
 
   /** Squarify a folded tile's children over its box, to resolve a dust hover. */
   const dustChildAt = (
@@ -233,7 +273,7 @@ export function TreemapCanvas<T>({
   return (
     <>
       <canvas
-        ref={ref}
+        ref={setCanvas}
         width={Math.max(1, Math.round(width))}
         height={Math.max(1, Math.round(height))}
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', cursor: 'default' }}
@@ -328,12 +368,44 @@ export function TreemapCanvas<T>({
 }
 
 /**
+ * Paint the whole placed-cell tree to `canvas` in one synchronous pass (no
+ * progressive budget) — the export path, and any non-progressive render. Sizes
+ * the canvas to `width`×`height` at `devicePixelRatio`, and resolves theme CSS
+ * vars + label sizes against `resolveEl` (an in-DOM, themed element — an
+ * offscreen export canvas can't resolve a consumer's `var(--…)`). Lets the DOM
+ * renderer export an identical canvas rendering without mounting one.
+ */
+export function renderMapToCanvas<T>(
+  canvas: HTMLCanvasElement,
+  cells: PlacedCell<T>[],
+  width: number,
+  height: number,
+  opts: PaintOpts<T>,
+  resolveEl: Element,
+): void {
+  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+  canvas.width = Math.max(1, Math.round(width * dpr))
+  canvas.height = Math.max(1, Math.round(height * dpr))
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, width, height)
+  ctx.fillStyle = CONTAINER_RGB
+  ctx.fillRect(0, 0, width, height)
+  resolveVar = colorResolver(resolveEl)
+  readLabelSizes(resolveEl)
+  const flat = flattenPlaced(cells)
+  flat.sort((a, b) => b.w * b.h - a.w * a.h)
+  for (const c of flat) paintCell(ctx, c, opts)
+}
+
+/**
  * Paint one placed cell: opaque base, faded bg layer, shared edge stroke, dust
  * hatch, and label — the canvas equivalent of one DOM `.dt-treemap-cell`.
  * Standalone so the progressive loop can call it per cell across frames.
  */
 function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: PaintOpts<T>): void {
-  const { styleOpts, getSize, getLabel, formatSize, sizeAlign, dustTexture } = o
+  const { styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture } = o
   const { x, y, w, h, depth, mode, edge, dust, folded, showLbl, hasKids } = cell
   const shared = mode === 'shared'
   // Cell box: gaps leaves a 2px (1px dust) gutter to the container ground;
@@ -422,7 +494,7 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
   // width (the label itself already needs w > 36).
   if (showLbl) {
     const ink = rgbaAt(style.ink, 1) ?? 'rgba(230, 230, 238, 1)'
-    const fs = w < 64 ? 11.5 : 13.5
+    const fs = w < 64 ? lblFsSm : lblFs
     ctx.font = `${fs}px system-ui, -apple-system, sans-serif`
     ctx.textBaseline = 'top'
     ctx.fillStyle = ink
@@ -440,7 +512,9 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     ctx.clip()
     const pad = 4
     const kidSize = folded ? (cell.node as FoldedNode<T>).size : getSize(cell.node as T)
-    const inlineSize = (hasKids || h <= 34) && w > 90
+    // Same rule as the DOM label: inline size on branch bars / short leaves
+    // wider than the consumer's threshold.
+    const inlineSize = (hasKids || h <= 34) && w > inlineSizeMinWidth
     // Same 6px name↔size gap as the DOM label's flex `gap`.
     const gap = 6
     let nameMax = cw - 2 * pad
@@ -462,7 +536,7 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     // Second-line size for a tall leaf (name owns the first line).
     if (!hasKids && h > 34) {
       ctx.globalAlpha = 0.75
-      ctx.font = `11.5px system-ui, -apple-system, sans-serif`
+      ctx.font = `${lblFsSm}px system-ui, -apple-system, sans-serif`
       ctx.fillText(fit(ctx, formatSize(kidSize), cw - 2 * pad), x + pad, y + 2 + fs + 3)
       ctx.globalAlpha = 1
     }

@@ -1081,3 +1081,34 @@ describe('<Treemap> canvas pin ring', () => {
     }
   })
 })
+
+describe('renderCellExtra chain context', () => {
+  it('reports how many single-child levels a collapsed chain cell swallowed', () => {
+    const restore = withLayout()
+    try {
+      const chained: Node = {
+        n: 'root',
+        size: 300,
+        children: [
+          { n: 'run', size: 200, children: [{ n: 'checkpoints', size: 200, children: [{ n: 'step-1', size: 100 }, { n: 'step-2', size: 100 }] }] },
+          { n: 'bar', size: 100 },
+        ],
+      }
+      const seen: [string, number, number | undefined][] = []
+      render(
+        <Treemap
+          root={chained}
+          {...accessors}
+          collapseChains
+          minCellArea={null}
+          renderCellExtra={(n, path, ctx) => { seen.push([n.n, path.length, ctx.chain]); return null }}
+        />,
+      )
+      const top = seen.filter(([, len]) => len <= 3).sort()
+      // `run/checkpoints` is one cell: its node is `checkpoints` (path root→run→checkpoints), one level collapsed.
+      expect(top).toEqual([['bar', 2, 0], ['checkpoints', 3, 1]])
+    } finally {
+      restore()
+    }
+  })
+})

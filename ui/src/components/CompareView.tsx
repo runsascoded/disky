@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Box,
@@ -12,805 +12,102 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
-import { FaArrowRight, FaFolder, FaFile, FaSortUp, FaSortDown, FaSync, FaList } from 'react-icons/fa'
-import { Treemap as DTTreemap, CONTAINER_BG, contrastEdge, divergingColor, parseColor } from '@disk-tree/react'
+import { FaArrowRight, FaFolder, FaFile, FaSync, FaList } from 'react-icons/fa'
+import { DiffTable, DiffTreemap, deltaTextColor, mapMinFrac } from '@disk-tree/react'
+import type { DiffInput, DiffMetric, DiffRecRow, DiffSubtree, DiffTableRow } from '@disk-tree/react'
 import '@rdub/treemap/styles.css'
 import { compareScans, compareScansRecursive, fetchDiffIndexStatus, fetchScanHistory, startScan } from '../api'
-import type { CompareRecResult, CompareResult, CompareRow, ScanHistoryItem } from '../api'
+import type { CompareRecResult, CompareRecRow, CompareResult, ScanHistoryItem } from '../api'
 import { useScanProgress } from '../hooks/useScanProgress'
 import { useRecentPaths } from '../hooks/useRecentPaths'
 import { formatSize, formatCount, timeAgo } from '../utils/format'
 import { useTiling } from '../utils/tiling'
 import { comparePathToUri, isSchemeRoot, uriToPath, type RouteType } from '../schemes'
 
-type SortColumn = 'size_old' | 'size_new' | 'size_delta' | 'desc_old' | 'desc_new' | 'desc_delta'
-type SortDirection = 'asc' | 'desc'
-
 function formatDelta(bytes: number): string {
   const sign = bytes < 0 ? '−' : '+'  // U+2212: a hyphen reads as a dash at small sizes
   return sign + formatSize(Math.abs(bytes)).replace(' ', '')
 }
 
-/**
- * Diff polarity (git convention): green = added/grew, red = removed/shrank —
- * matching the added/removed row tints and the summary chips. This is a diff
- * view, not a cost alarm; a "growth = red" cost lens can be a toggle later.
- * `divergingColor` is red-positive, so negate on the way in.
- */
-const GREW_GREEN = '#3fb950'
-const SHRANK_RED = '#f85149'
-const NEUTRAL = '#8b949e'
-/** Unchanged-bytes fill: translucent dark grey (not `divergingColor(0)`'s mid
- * grey, which left the light ink low-contrast) — the colored bands pop and
- * labels read. */
-const UNCHANGED_GREY = 'rgba(110, 118, 129, 0.28)'
-/** touched (same bytes, mtime moved): the unchanged grey, hatched */
-const TOUCHED_HATCH = 'repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.11) 0 3px, transparent 3px 9px)'
-const deltaColor = (t: number) => divergingColor(-t)
-
-/** Legend swatch color: the translucent grey as it actually paints (over the
- * map's base), so it isn't invisible on the bar's own dark background. */
-const UNCHANGED_SWATCH = (() => {
-  const [r, g, b, a] = parseColor(UNCHANGED_GREY) ?? [110, 118, 129, 0.28]
-  const mix = (c: number, base: number) => Math.round(c * a + base * (1 - a))
-  return `rgb(${mix(r, CONTAINER_BG[0])}, ${mix(g, CONTAINER_BG[1])}, ${mix(b, CONTAINER_BG[2])})`
-})()
-const deltaTextColor = (d: number) => (d > 0 ? GREW_GREEN : d < 0 ? SHRANK_RED : NEUTRAL)
-
-/**
- * Δ-recolor treemap with two area modes:
- *
- * - `max` (default): one cell per row, sized by `max(old, new)` — deleted
- *   subtrees keep their old area, added ones their new area, and unchanged
- *   structure stays visible as neutral context. Color encodes Δ/max per cell:
- *   pure-add is fully red, pure-delete fully green, unchanged neutral.
- *   Caveat (labeled): cell areas sum to more than either side's true total.
- * - `Δ`: the churn view — only changed rows, sized by `|Δbytes|`, colored by
- *   Δ relative to the largest |Δ|.
- *
- * Clicking a directory drills into `/compare/<scheme>/<subpath>` so the
- * exploration matches the deep-link scheme.
- */
-type AreaMode = 'max' | 'delta'
-
-interface CompareTMNode {
-  key: string
-  label: string
-  /** what the widget sizes by — `max(old, new)` or `|size_delta|` per mode;
-   * parents take `max(own, Σ children)` so children can never overflow
-   * (delete-X-add-Y churn makes Σ children max exceed the parent's max). */
-  weight: number
-  /** signed delta for coloring */
-  delta: number
-  /** Σ of positive / negative deltas across descendants (frontier-leaf
-   * granularity): `grew ≥ 0`, `shrank ≤ 0`, `grew + shrank ≈ delta`. */
-  grew: number
-  shrank: number
-  /** same, for entry counts (`n_desc_delta`): `nGrew ≥ 0`, `nShrank ≤ 0` */
-  nGrew: number
-  nShrank: number
-  status: CompareRow['status'] | 'filler' | 'fold'
-  size_old: number
-  size_new: number
-  n_desc_delta: number
-  kind: CompareRow['kind'] | 'filler' | 'fold'
-  uri: string
-  /** fold cells: how many too-small-to-draw children were merged */
-  nFolded?: number
-  /** filler cells: the unenumerated unchanged children it stands for
-   * (direct-child count and their descendants), when the server told us */
-  nRest?: number
-  nDescRest?: number
-  /** Frontier dir with unexplored change below (budget/depth cut the walk). */
-  pruned?: boolean
-  children?: CompareTMNode[]
+function formatDeltaNumber(n: number): string {
+  const sign = n > 0 ? '+' : ''
+  return sign + formatCount(Math.abs(n))
 }
 
-/**
- * Recursive-diff frontier rows + the depth-1 unchanged rows (from the plain
- * compare, for labeled grey context at the top level) → a nested tree.
- *
- * Weights are bottom-up: a leaf is `max(old, new)` (or `|Δ|` in Δ mode); a
- * parent is `max(its own max, Σ children)` — churn (delete X + add Y) makes
- * children sum past either side's bytes, and the parent honestly grows to
- * hold them. Where children under-fill a parent (unchanged bytes the walk
- * never enumerated), a grey filler cell absorbs the gap, so areas stay
- * truthful without shipping every unchanged row. The server ships each
- * expanded dir's biggest unchanged children (`rec.unchanged.top`, named grey
- * cells) and an aggregate of the rest (`rec.unchanged.rest`) — the filler's
- * tooltip counts what it stands for.
- *
- * Children order is signed: biggest adds first, unchanged middle, biggest
- * shrinks last (sort by -Δ).
- */
-function buildCompareTree(
-  flat: CompareResult,
-  rec: CompareRecResult | undefined,
-  areaMode: AreaMode,
-  showUnchanged: boolean,
-): { cells: CompareTMNode[]; maxAbsDelta: number } {
-  const uriPrefix = flat.uri.replace(/\/$/, '') + '/'
-  const byPath = new Map<string, CompareTMNode>()
-  const pathOf = new Map<CompareTMNode, string>()
-  const roots: CompareTMNode[] = []
-  const attach = (node: CompareTMNode, path: string) => {
-    byPath.set(path, node)
-    pathOf.set(node, path)
-    const i = path.lastIndexOf('/')
-    if (i < 0) {
-      roots.push(node)
-      return
-    }
-    const parentPath = path.slice(0, i)
-    let parent = byPath.get(parentPath)
-    if (!parent) {
-      // Expanded-but-unchanged dir (e.g. a net-zero rename inside it): its
-      // children were emitted without it. Synthesize the intermediate.
-      parent = {
-        key: uriPrefix + parentPath,
-        label: parentPath.split('/').pop()!,
-        weight: 0,
-        delta: 0,
-        grew: 0,
-        shrank: 0,
-        nGrew: 0,
-        nShrank: 0,
-        status: 'unchanged',
-        size_old: 0,
-        size_new: 0,
-        n_desc_delta: 0,
-        kind: 'dir',
-        uri: uriPrefix + parentPath,
-        children: [],
-      }
-      attach(parent, parentPath)
-    }
-    ;(parent.children ??= []).push(node)
-  }
+/** The two disk metrics the diff table (and treemap area) are built on: bytes
+ *  and descendant count. `desc` is `dirOnly` (files render `-`). */
+const DIFF_METRICS: DiffMetric[] = [
+  { id: 'size', label: 'Size', fmt: formatSize, fmtDelta: formatDelta },
+  { id: 'desc', label: 'Descendants', dirOnly: true, fmt: formatCount, fmtDelta: formatDeltaNumber },
+]
 
-  const recRows = [
-    ...(rec?.rows ?? []),
-    ...(showUnchanged ? rec?.unchanged?.top ?? [] : []),
-  ].sort((a, b) => a.depth - b.depth || a.path.localeCompare(b.path))
-  const rest = rec?.unchanged?.rest ?? {}
-  for (const r of recRows) {
-    attach({
-      key: r.uri,
-      label: r.path.split('/').pop() || r.path,
-      weight: 0,
-      delta: r.size_delta,
-      grew: 0,
-      shrank: 0,
-      nGrew: 0,
-      nShrank: 0,
-      status: r.status,
-      size_old: r.size_a,
-      size_new: r.size_b,
-      n_desc_delta: r.n_desc_delta,
-      kind: r.kind,
-      uri: r.uri,
-      pruned: r.pruned,
-      children: undefined,
-    }, r.path)
-  }
-  // Labeled grey context at the top level (the recursive walk doesn't emit
-  // unchanged rows; the plain depth-1 compare does). Hidden entirely in
-  // hide-unchanged mode — only the changed frontier plots.
-  for (const r of showUnchanged ? flat.rows : []) {
-    if (r.status === 'unchanged' && !byPath.has(r.path)) {
-      attach({
-        key: r.uri,
-        label: r.path,
-        weight: 0,
-        delta: 0,
-        grew: 0,
-        shrank: 0,
-        nGrew: 0,
-        nShrank: 0,
-        status: 'unchanged',
-        size_old: r.size_old ?? r.size ?? 0,
-        size_new: r.size ?? 0,
-        n_desc_delta: 0,
-        kind: r.kind,
-        uri: r.uri,
-      }, r.path)
-    }
-  }
+// --- Adapters: the server's compare payload → the core widgets' shapes. -----
 
-  let maxAbs = 0
-  const finalize = (node: CompareTMNode): number => {
-    maxAbs = Math.max(maxAbs, Math.abs(node.delta))
-    const own = areaMode === 'max'
-      ? Math.max(node.size_old, node.size_new)
-      : Math.abs(node.delta)
-    if (!node.children?.length) {
-      node.grew = Math.max(node.delta, 0)
-      node.shrank = Math.min(node.delta, 0)
-      node.nGrew = Math.max(node.n_desc_delta, 0)
-      node.nShrank = Math.min(node.n_desc_delta, 0)
-      node.weight = own
-      return node.weight
-    }
-    let kidSum = 0
-    for (const k of node.children) {
-      kidSum += finalize(k)
-      node.grew += k.grew
-      node.shrank += k.shrank
-      node.nGrew += k.nGrew
-      node.nShrank += k.nShrank
-    }
-    // Hide-unchanged: a parent occupies only its changed children's bytes —
-    // no filler for the unenumerated remainder, so areas compare *changes*,
-    // not directory sizes. (Frontier leaves still carry their full
-    // max(old, new) — change granularity stops there.)
-    node.weight = showUnchanged ? Math.max(own, kidSum) : Math.max(kidSum, areaMode === 'max' ? 0 : own)
-    const gap = node.weight - kidSum
-    if (areaMode === 'max' && showUnchanged && gap > Math.max(1_000_000, node.weight * 0.002)) {
-      // No name: it aggregates children the walk never enumerated — the
-      // uniform grey (and the tooltip, with the server's count of what it
-      // stands for) do the talking.
-      const r = rest[pathOf.get(node) ?? '']
-      node.children.push({
-        key: `${node.key}/__unchanged__`,
-        label: '',
-        weight: gap,
-        delta: 0,
-        grew: 0,
-        shrank: 0,
-        nGrew: 0,
-        nShrank: 0,
-        status: 'filler',
-        size_old: gap,
-        size_new: gap,
-        n_desc_delta: 0,
-        kind: 'filler',
-        uri: node.uri,
-        nRest: r?.count,
-        nDescRest: r === undefined ? undefined : r.count + r.n_desc,
-      })
-    }
-    node.children.sort((a, b) => (b.delta - a.delta) || (b.weight - a.weight))
-    return node.weight
-  }
-  for (const r of roots) {
-    finalize(r)
-  }
+const toRecRow = (r: CompareRecRow): DiffRecRow => ({
+  path: r.path,
+  uri: r.uri,
+  depth: r.depth,
+  kind: r.kind,
+  status: r.status,
+  oldSize: r.size_a,
+  newSize: r.size_b,
+  delta: r.size_delta,
+  countDelta: r.n_desc_delta,
+  pruned: r.pruned,
+})
 
-  const cells = roots.filter(r => r.weight > 0)
-  cells.sort(areaMode === 'max'
-    ? (a, b) => (b.delta - a.delta) || (b.weight - a.weight)
-    : (a, b) => b.weight - a.weight)
-  return { cells, maxAbsDelta: maxAbs }
-}
+const toDiffInput = (result: CompareResult, rec: CompareRecResult | undefined): DiffInput => ({
+  uri: result.uri,
+  flatRows: result.rows.map(r => ({
+    path: r.path,
+    uri: r.uri,
+    kind: r.kind,
+    status: r.status,
+    oldSize: r.size_old ?? r.size ?? 0,
+    newSize: r.size ?? 0,
+  })),
+  recRows: (rec?.rows ?? []).map(toRecRow),
+  unchangedTop: (rec?.unchanged?.top ?? []).map(toRecRow),
+  unchangedRest: rec?.unchanged?.rest ?? {},
+  totalDelta: result.summary.total_delta,
+  oldRootSize: result.scan1.size ?? 0,
+  newRootSize: result.scan2.size ?? 0,
+  oldRootCount: result.scan1.n_desc ?? 0,
+  newRootCount: result.scan2.n_desc ?? 0,
+  index: rec?.index ? { status: rec.index.status, error: rec.index.error } : undefined,
+})
 
-/**
- * `▲ 32.4 ▼ 6.9 Δ +25.5` — churn among a node's descendants, for title
- * strips / crumbs / tooltips. Units are omitted when every value shares the
- * unit of the total it follows (`totalBytes`), and shown per value otherwise
- * (`▲ 100M ▼ 200K Δ +100M`) — never a mixed line the reader has to parse.
- * Both directions when there's churn both ways, else just the Δ.
- */
-function churn(
-  n: { grew: number; shrank: number; delta: number },
-  /** bytes: the total the line follows (drives unit elision); counts: `null` */
-  totalBytes: number | null,
-  /** omit the `Δ` part (the caller already shows the net elsewhere) */
-  net: boolean = true,
-): { text: string; node: ReactNode } | null {
-  const both = n.grew > 0 && n.shrank < 0
-  if (!both && n.delta === 0) return null
-  if (!both && !net) return null
-  let fmt: (v: number) => string
-  if (totalBytes === null) {
-    fmt = formatCount
-  } else {
-    const vals = both ? [n.grew, -n.shrank, Math.abs(n.delta)] : [Math.abs(n.delta)]
-    const unitOf = (b: number) => formatSize(b).split(' ')[1]
-    const shared = vals.every(v => v === 0 || unitOf(v) === unitOf(totalBytes))
-    fmt = b => shared ? formatSize(b).split(' ')[0] : formatSize(b).replace(' ', '')
-  }
-  const d = (n.delta > 0 ? '+' : n.delta < 0 ? '−' : '±') + fmt(Math.abs(n.delta))
-  const parts: [string, string, string][] = both
-    ? [['▲', fmt(n.grew), GREW_GREEN], ['▼', fmt(-n.shrank), SHRANK_RED]]
-    : []
-  // Counts carry their sign, so the bare number is the net; bytes keep the
-  // `Δ` glyph in title strips where it's the only cue the number is a delta.
-  if (net) parts.push([totalBytes === null ? '' : 'Δ', d, deltaTextColor(n.delta)])
-  return {
-    text: parts.map(([g, v]) => (g ? `${g} ${v}` : v)).join(' '),
-    node: parts.map(([g, v, color], i) => (
-      <span key={g || 'net'} style={{ color, marginLeft: i ? 6 : 0 }}>{g ? `${g} ${v}` : v}</span>
-    )),
-  }
-}
+const toTableRows = (result: CompareResult): DiffTableRow[] => result.rows.map(r => ({
+  key: r.path,
+  path: r.path,
+  uri: r.uri,
+  kind: r.kind,
+  status: r.status,
+  values: {
+    size: { old: r.size_old ?? r.size ?? null, new: r.size ?? null, delta: r.size_delta },
+    desc: { old: r.n_desc_old ?? r.n_desc ?? null, new: r.n_desc ?? null, delta: r.n_desc_delta ?? 0 },
+  },
+}))
 
-/** The smallest cell worth drawing, in px² — the widget's own fold floor. */
-const MIN_CELL_PX = 16
-
-/**
- * Has diff detail we could fetch for it: a dir whose children the response
- * trimmed but whose own row says something changed *inside* it. Everything
- * else has no slice to fetch — an unchanged dir has no index rows at all, and
- * an added/removed one is stored as a single row by design (its whole subtree
- * is the change). Those navigate to their own page rather than drilling into
- * a blank map.
- */
-const fetchable = (n: CompareTMNode): boolean =>
-  n.kind === 'dir'
-  && !n.children?.length
-  && (n.status === 'changed' || n.status === 'touched')
-  && (!!n.pruned || n.delta !== 0 || n.n_desc_delta !== 0)
-
-/**
- * The map's drawable floor as a byte fraction: a node's screen area is ≈ its
- * share of the compared subtree × the canvas, so anything under
- * `MIN_CELL_PX / canvas_px` can't be drawn and needn't be sent.
- *
- * The first request fires before the map mounts, so fall back to the size the
- * layout will give it (page `maxWidth` 1400 minus padding; the responsive
- * height below) — an estimate beats the server's fixed default.
- */
-function mapMinFrac(ref: React.RefObject<HTMLDivElement | null>): number {
-  const box = ref.current?.getBoundingClientRect()
-  if (box && box.width > 0) return MIN_CELL_PX / (box.width * box.height)
-  const vw = typeof window === 'undefined' ? 1200 : window.innerWidth
-  const vh = typeof window === 'undefined' ? 800 : window.innerHeight
-  const w = Math.max(320, Math.min(vw, 1400) - (vw < 600 ? 16 : 48))
-  const h = vw < 600 ? Math.min(0.75 * vh, 560) : 340
-  return MIN_CELL_PX / (w * h)
-}
-
-function CompareTreemap({
-  result,
-  rec,
-  recState,
-  onRecRetry,
-  onDrill,
-  scan1,
-  scan2,
-  mapRef,
-}: {
-  result: CompareResult
-  rec?: CompareRecResult
-  recState: 'loading' | 'error' | 'ready'
-  onRecRetry: () => void
-  onDrill: (uri: string) => void
-  scan1: number
-  scan2: number
-  /** The map box, measured for the drawable floor (see `mapMinFrac`). */
-  mapRef: React.RefObject<HTMLDivElement | null>
-}) {
-  const [areaMode, setAreaMode] = useState<AreaMode>('max')
-  const [tiling, setTiling] = useTiling()
-  const [showUnchanged, setShowUnchanged] = useState(true)
-
-  /**
-   * Drilling *inside* the widget shows a subtree whose deep cells the server
-   * trimmed relative to the whole compared tree — at the subtree's own scale
-   * they're big again. So fetch that subtree's slice on drill (one request
-   * per drill, cached by the widget), with the floor computed from the map's
-   * own pixels: a node's screen area is ≈ its byte share × the canvas.
-   */
-  const loadChildren = useCallback(
-    async (n: CompareTMNode) => {
-      const sub = await compareScansRecursive(n.uri, scan1, scan2, 200, mapMinFrac(mapRef))
-      const { cells } = buildCompareTree(
-        { uri: n.uri, rows: [] } as unknown as CompareResult, sub, areaMode, showUnchanged,
-      )
-      return cells
+const toParent = (result: CompareResult) => ({
+  uri: result.uri,
+  values: {
+    size: {
+      old: result.scan1.size ?? null,
+      new: result.scan2.size ?? null,
+      delta: (result.scan2.size ?? 0) - (result.scan1.size ?? 0),
     },
-    [scan1, scan2, areaMode, showUnchanged, mapRef],
-  )
-  const { root, maxAbsDelta } = useMemo(() => {
-    const { cells, maxAbsDelta: maxAbs } = buildCompareTree(result, rec, areaMode, showUnchanged)
-    const totalWeight = cells.reduce((s, c) => s + c.weight, 0)
-    // Root aggregates its cells so the widget's crumbs line reads correctly.
-    const root: CompareTMNode & { children: CompareTMNode[] } = {
-      key: result.uri,
-      label: result.uri,
-      weight: totalWeight,
-      delta: result.summary.total_delta,
-      grew: cells.reduce((s, c) => s + c.grew, 0),
-      shrank: cells.reduce((s, c) => s + c.shrank, 0),
-      nGrew: cells.reduce((s, c) => s + c.nGrew, 0),
-      nShrank: cells.reduce((s, c) => s + c.nShrank, 0),
-      status: 'changed',
-      size_old: result.scan1.size ?? 0,
-      size_new: result.scan2.size ?? 0,
-      n_desc_delta: (result.scan2.n_desc ?? 0) - (result.scan1.n_desc ?? 0),
-      kind: 'dir',
-      uri: result.uri,
-      children: cells,
-    }
-    return { root, maxAbsDelta: maxAbs }
-  }, [result, rec, areaMode, showUnchanged])
-
-  if (root.children.length === 0) {
-    return (
-      <Paper sx={{ p: 3, textAlign: 'center' }}>
-        <Typography color="text.secondary" variant="body2">
-          {areaMode === 'max' && showUnchanged
-            ? 'Nothing to plot — no row has any bytes on either side.'
-            : 'No size deltas to plot — every row is unchanged.'}
-        </Typography>
-        {!showUnchanged && (
-          <Button size="small" sx={{ mt: 1 }} onClick={() => setShowUnchanged(true)}>
-            show unchanged
-          </Button>
-        )}
-      </Paper>
-    )
-  }
-
-  return (
-    <Paper sx={{ p: 0, mb: 3, overflow: 'hidden' }}>
-      {/* Taller on phones: a 340px strip of a portrait screen is unreadable. */}
-      <Box ref={mapRef} sx={{ height: { xs: 'min(75vh, 560px)', sm: 340 }, position: 'relative' }}>
-        <DTTreemap<CompareTMNode & { children?: CompareTMNode[] }>
-          root={root}
-          getSize={n => n.weight}
-          getChildren={n => (n as { children?: CompareTMNode[] }).children}
-          // Only dirs with change *below* have a slice worth fetching.
-          hasChildren={fetchable}
-          loadChildren={loadChildren}
-          renderLoading={n => `Loading Δ for ${n.label || 'this subtree'}…`}
-          getLabel={n => n.label}
-          // First-class fold cells: aggregate the dust's Δ so a green parent
-          // whose change lives entirely in tiny children still shows where
-          // (band + tooltip), instead of an inert "(+N)" tile.
-          mergeSmall={small => ({
-            key: `${small[0].key}__fold${small.length}`,
-            label: `(+${small.length})`,
-            weight: small.reduce((s, c) => s + c.weight, 0),
-            delta: small.reduce((s, c) => s + c.delta, 0),
-            grew: small.reduce((s, c) => s + c.grew, 0),
-            shrank: small.reduce((s, c) => s + c.shrank, 0),
-            nGrew: small.reduce((s, c) => s + c.nGrew, 0),
-            nShrank: small.reduce((s, c) => s + c.nShrank, 0),
-            status: 'fold',
-            size_old: small.reduce((s, c) => s + c.size_old, 0),
-            size_new: small.reduce((s, c) => s + c.size_new, 0),
-            n_desc_delta: small.reduce((s, c) => s + c.n_desc_delta, 0),
-            kind: 'fold',
-            uri: small[0].uri,
-            nFolded: small.reduce((s, c) => s + (c.nFolded ?? 1), 0),
-          })}
-          // Brighter sibling separation: the compare palette's dark neutrals
-          // make the default (transparent) cell rings invisible.
-          // Tiling per the header toggle (shared: exact areas, the stroke is
-          // the boundary; gaps: classic gutters). The dark compare palette
-          // needs a light stroke/ring either way.
-          tiling={tiling}
-          // The stroke paints over each cell's opaque base (the container
-          // color), so it's one fixed color for the whole map: mid grey reads
-          // against both the bright full-Δ cells and the dark mostly-grey
-          // ones (a darker stroke disappeared into the latter).
-          mapStyle={{
-            '--dt-treemap-edge': 'rgba(255, 255, 255, 0.34)',
-            '--dt-treemap-cell-border': 'rgba(255, 255, 255, 0.14)',
-          } as CSSProperties}
-          // Displayed inline with the label — the raw |Δ| magnitude. Sign is
-          // encoded by the cell color; exact old/new/Δ lives in the tooltip.
-          formatSize={formatSize}
-          colorForCell={(n, _path, _depth, ctx) => {
-            // Stroke per cell, from the face it borders (see `contrastEdge`).
-            const withEdge = (s: { bg: string; ink: string; hatch?: string }, face: string) =>
-              ({ ...s, edge: contrastEdge(face, ctx.fade) ?? undefined })
-            // A branch either renders nested tiles now (`ctx.hasKids`) or
-            // holds children the layout was too small to draw — both take the
-            // container treatment, not the leaf band. (Lazily-loaded subtrees
-            // render kids without `n.children`, hence both halves.)
-            const hasKids = ctx.hasKids || !!n.children?.length
-            if (areaMode === 'max') {
-              if (hasKids) {
-                // Parent: children tile its interior, so only the title strip
-                // and gutters show — tint them by the net trend Δ/weight (a
-                // summary cue; magnitude lives in the leaf bands). Net-zero
-                // parents get the same grey as every other unchanged rect.
-                if (n.delta === 0) return withEdge({ bg: UNCHANGED_GREY, ink: '#fff', ...(n.status === 'touched' && { hatch: TOUCHED_HATCH }) }, UNCHANGED_GREY)
-                const t = n.weight === 0 ? 0 : n.delta / n.weight
-                return withEdge({ bg: deltaColor(t), ink: '#fff' }, deltaColor(t))
-              }
-              // Sub-rect encoding: a grey rect of min(old, new) bytes plus a
-              // full-strength colored band of |Δ| bytes, filling from the
-              // bottom — magnitude by *area*, not saturation.
-              const f = n.weight === 0 ? 0 : Math.min(1, Math.abs(n.delta) / n.weight)
-              if (f === 0) return withEdge({ bg: UNCHANGED_GREY, ink: '#fff', ...(n.status === 'touched' && { hatch: TOUCHED_HATCH }) }, UNCHANGED_GREY)
-              const pct = `${(f * 100).toFixed(2)}%`
-              const band = deltaColor(Math.sign(n.delta))
-              return withEdge({
-                bg: `linear-gradient(to top, ${band} ${pct}, ${UNCHANGED_GREY} ${pct})`,
-                ink: '#fff', // uniform with every other label
-              // The stroke follows whichever half dominates the face.
-              }, f > 0.5 ? band : UNCHANGED_GREY)
-            }
-            // Δ mode: full cell tinted by Δ relative to the largest |Δ|.
-            if (n.delta === 0) return withEdge({ bg: UNCHANGED_GREY, ink: '#fff' }, UNCHANGED_GREY)
-            const t = maxAbsDelta === 0 ? 0 : n.delta / maxAbsDelta
-            return withEdge({ bg: deltaColor(t), ink: '#fff' }, deltaColor(t))
-          }}
-          renderCellExtra={areaMode === 'max' ? (n, _path, { w, h, hasKids }) => {
-            const branch = hasKids || !!n.children?.length
-            // Per-sub-rect size labels: Δ centered in the colored band, the
-            // unchanged min(old, new) bytes centered in the grey rect above it.
-            // Leaves only (a parent's interior belongs to its children), and
-            // skip narrow slivers — a clipped "+128.0KB" is worse than none.
-            if (branch || w < 56) return null
-            const f = n.weight === 0 ? 0 : Math.min(1, Math.abs(n.delta) / n.weight)
-            if (f === 0) return null
-            const bandH = h * f
-            const greyH = h - bandH
-            // The title strip owns the top ~20px; a band label whose band
-            // reaches into it collides with the name in short cells.
-            if (greyH < 22 && h < 44) return null
-            const minBytes = Math.min(n.size_old, n.size_new)
-            const lbl = (top: string, height: number, text: string, style: CSSProperties) => (
-              <div style={{
-                position: 'absolute', top, left: 0, right: 0, height,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                pointerEvents: 'none', fontSize: '0.75rem', ...style,
-              }}>{text}</div>
-            )
-            return (
-              <>
-                {bandH >= 16 && lbl(`${(100 - f * 100).toFixed(2)}%`, bandH,
-                  formatDelta(n.delta), { color: '#fff', fontWeight: 600 })}
-                {f < 1 && greyH >= 44 && minBytes > 0 && lbl('0', greyH,
-                  formatSize(minBytes), { color: 'var(--dt-treemap-ink, #d0d0d8)', opacity: 0.65 })}
-              </>
-            )
-          } : undefined}
-          // Branch title strips have room to spare: inline the ▲/▼/Δ (or
-          // just the Δ) when it fits after the name and size — a rough
-          // char-width estimate against the cell box, since the size span
-          // never shrinks and would crush the name otherwise.
-          renderCellSubtitle={(n, _path, { w, hasKids }) => {
-            if (!hasKids && !n.children?.length) return null
-            // ▲/▼/Δ glyphs run wider than digits; err toward dropping the
-            // stats over ellipsizing the name.
-            const room = w - 8 - n.label.length * 7 - formatSize(n.weight).length * 6.5 - 12
-            const fits = (c: { text: string }) => c.text.length * 7.5 + 12 <= room
-            const full = churn(n, n.weight)
-            if (!full) return null
-            if (fits(full)) return full.node
-            const net = churn({ grew: 0, shrank: 0, delta: n.delta }, n.weight)
-            return net && fits(net) ? net.node : null
-          }}
-          // The crumbs row is the drilled node's own "title strip".
-          renderCrumbSuffix={n => (
-            <>— {formatSize(n.weight)}{(() => { const c = churn(n, n.weight); return c && <> {c.node}</> })()}</>
-          )}
-          renderTooltip={n => (
-            <>
-              <div style={{ fontWeight: 500 }}>
-                {n.status === 'fold'
-                  ? `${(n.nFolded ?? 0).toLocaleString()} smaller items`
-                  : n.status === 'filler'
-                  ? (n.nRest === undefined ? 'unchanged' : `${n.nRest.toLocaleString()} unchanged children`)
-                  : n.label || 'unchanged'}
-              </div>
-              <div style={{ color: 'rgba(255, 255, 255, 0.75)', fontSize: '0.85em' }}>
-                {n.delta === 0
-                  ? formatSize(n.size_new)
-                  : <>{formatSize(n.size_old)} → {formatSize(n.size_new)} (<span style={{ color: deltaTextColor(n.delta), fontWeight: 600, fontSize: '1.1em' }}>{formatDelta(n.delta)}</span>)</>}
-                {n.status === 'unchanged' && ' — unchanged'}
-                {n.status === 'touched' && ' — touched (same bytes & count, mtime moved)'}
-                {n.status === 'filler' && n.nDescRest !== undefined && n.nDescRest !== n.nRest && (
-                  <> · {formatCount(n.nDescRest)} entries below</>
-                )}
-              </div>
-              {/* Aggregates with churn in both directions: the net alone
-                  hides how much grew vs shrank among descendants. */}
-              {n.grew > 0 && n.shrank < 0 && (
-                <div style={{ fontSize: '0.8em' }}>{churn(n, n.size_new, false)?.node}</div>
-              )}
-              {/* Entry counts get the same ▲/▼/Δ treatment as bytes. */}
-              {(n.n_desc_delta !== 0 || n.nGrew > 0) && (
-                <div style={{ fontSize: '0.8em' }}>
-                  <span style={{ opacity: 0.6 }}>count </span>
-                  {churn({ grew: n.nGrew, shrank: n.nShrank, delta: n.n_desc_delta }, null)?.node}
-                </div>
-              )}
-              {/* Only what the size line doesn't already say. */}
-              {(n.status === 'filler' || n.status === 'fold' || n.status === 'added' || n.status === 'removed' || (n.pruned && rec?.index?.status !== 'done')) && (
-                <div style={{ opacity: 0.5, fontSize: '0.75em', marginTop: 2 }}>
-                  {n.status === 'filler' ? 'unchanged bytes the diff never needed to enumerate'
-                    : n.status === 'fold' ? 'children too small to draw, aggregated'
-                    : n.status === 'added' || n.status === 'removed' ? n.status
-                    : null}
-                  {n.pruned && rec?.index?.status !== 'done' && <>
-                    {(n.status === 'added' || n.status === 'removed') && ' · '}
-                    {n.delta === 0 && n.n_desc_delta === 0
-                      ? 'not descended (walk budget): something inside moved — click to compare here'
-                      : 'Δ not localized (walk budget) — click to compare here'}
-                  </>}
-                </div>
-              )}
-            </>
-          )}
-          renderLegend={() => (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', opacity: 0.85 }}>
-              {/* Δ share key: how much of a cell's max(old, new) the change
-                  is — the same ramp `deltaColor` walks, so a hue reads back
-                  as a rough percentage. */}
-              <span
-                title="Cell color = Δ as a share of max(old, new): full color when the change is the whole cell, grey when it's a sliver. Leaves paint that share as a band from the bottom; branches tint their title strip by the net share."
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-              >
-                <span style={{ opacity: 0.6 }}>−100%</span>
-                <span style={{
-                  display: 'inline-block', width: 84, height: 10, borderRadius: 2,
-                  background: `linear-gradient(to right, ${deltaColor(-1)}, ${deltaColor(-0.4)}, ${UNCHANGED_SWATCH}, ${deltaColor(0.4)}, ${deltaColor(1)})`,
-                }} />
-                <span style={{ opacity: 0.6 }}>+100%</span>
-              </span>
-              {areaMode === 'max' && (
-                // Legend-item toggle (plot-legend style): click to hide/show
-                // unchanged rows. Hidden = only changed entries plot (at
-                // max(old, new) size); parents shrink to their changed
-                // contents, fillers and grey context rows drop out.
-                <button
-                  onClick={e => { e.stopPropagation(); setShowUnchanged(s => !s) }}
-                  title={showUnchanged
-                    ? 'Hide unchanged rows: only changed entries plot; parents shrink to their changed contents'
-                    : 'Show unchanged rows: grey context cells and fillers restore true directory proportions'}
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
-                    background: 'none', border: 'none', padding: 0, margin: 0,
-                    font: 'inherit', color: 'inherit',
-                    opacity: showUnchanged ? 1 : 0.45,
-                    textDecoration: showUnchanged ? 'none' : 'line-through',
-                  }}
-                >
-                  {/* The map's grey is translucent; on the bar's own dark
-                      background it needs its composited color to be seen. */}
-                  <span style={{ display: 'inline-block', width: 12, height: 12, background: UNCHANGED_SWATCH, border: '1px solid rgba(255,255,255,0.25)', borderRadius: 2, boxSizing: 'border-box' }} />
-                  unchanged
-                </button>
-              )}
-              {areaMode === 'max' && (
-                <span title="same bytes & count, mtime moved (rename / net-zero churn / touch)" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ display: 'inline-block', width: 12, height: 12, background: UNCHANGED_SWATCH, backgroundImage: TOUCHED_HATCH, border: '1px solid rgba(255,255,255,0.25)', borderRadius: 2, boxSizing: 'border-box' }} />
-                  touched
-                </span>
-              )}
-              {rec?.index && rec.index.status !== 'done' && (
-                <span
-                  title={rec.index.status === 'failed'
-                    ? `full diff index failed: ${rec.index.error ?? 'unknown error'} — showing the budgeted walk`
-                    : 'showing a budgeted walk while the full diff index builds; the map completes itself when it lands'}
-                  style={{ opacity: 0.6, marginLeft: 6, fontStyle: 'italic' }}
-                >
-                  {rec.index.status === 'failed' ? 'index failed' : 'indexing…'}
-                </span>
-              )}
-              <span style={{ display: 'inline-flex', gap: 2, marginLeft: 6 }}>
-                {(['max', 'delta'] as const).map(m => (
-                  <button
-                    key={m}
-                    onClick={e => { e.stopPropagation(); setAreaMode(m) }}
-                    title={m === 'max'
-                      ? 'Area = max(old, new), with |Δ| painted as a band: deleted subtrees keep their old area; stable structure stays visible'
-                      : 'Area = |Δbytes|: churn only, unchanged rows dropped'}
-                    style={{
-                      cursor: 'pointer', fontSize: '0.75rem', padding: '1px 7px', borderRadius: 3,
-                      border: '1px solid var(--dt-border, #444)',
-                      background: areaMode === m ? 'var(--dt-accent-bg, #30363d)' : 'transparent',
-                      color: 'inherit', fontWeight: areaMode === m ? 600 : 400,
-                    }}
-                  >
-                    {m === 'max' ? 'max' : 'Δ'}
-                  </button>
-                ))}
-              </span>
-              {/* Tiling sits with the other view controls, not in the app
-                  header — it's the same kind of knob as max/Δ. */}
-              <span style={{ display: 'inline-flex', gap: 2, marginLeft: 4 }}>
-                {(['gaps', 'shared'] as const).map(t => (
-                  <button
-                    key={t}
-                    onClick={e => { e.stopPropagation(); setTiling(t) }}
-                    title={t === 'gaps'
-                      ? '2px gutters and rounded corners; dense leaf fields under-paint by ~perimeter/area'
-                      : 'Cells abut, one stroke per boundary — areas exact (a 6×6px cell with 2px gutters paints only 4×4)'}
-                    style={{
-                      cursor: 'pointer', fontSize: '0.75rem', padding: '1px 7px', borderRadius: 3,
-                      border: '1px solid var(--dt-border, #444)',
-                      background: tiling === t ? 'var(--dt-accent-bg, #30363d)' : 'transparent',
-                      color: 'inherit', fontWeight: tiling === t ? 600 : 400,
-                    }}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </span>
-            </span>
-          )}
-          onCellClick={(n) => {
-            // Option A (matches the scan treemap): a dir click re-roots the
-            // whole /compare page — URL + breadcrumb + table + map — preserving
-            // scan1/scan2, rather than drilling the map in place and diverging
-            // from the table. Synthetic filler/fold cells (no real uri) and
-            // files keep the widget default (pin tooltip).
-            if (n.kind !== 'dir' || n.status === 'filler' || n.status === 'fold') return false
-            onDrill(n.uri)
-            return true
-          }}
-          cellHref={n =>
-            n.kind === 'dir' && n.status !== 'filler' && n.status !== 'fold' && n.uri
-              ? `/compare${uriToPath(n.uri)}?scan1=${scan1}&scan2=${scan2}`
-              : undefined
-          }
-        />
-        {/* The colored Δ cells come from the recursive frontier; until it
-            lands, the flat grey context alone reads as a broken all-grey
-            map — put the state front and center, not in the legend. */}
-        {recState !== 'ready' && (
-          <Box
-            sx={{
-              position: 'absolute', inset: 0, zIndex: 2,
-              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-              gap: 1.5, bgcolor: 'rgba(8, 10, 12, 0.55)',
-              pointerEvents: recState === 'error' ? 'auto' : 'none',
-            }}
-          >
-            {recState === 'loading' ? (
-              <>
-                <CircularProgress size={40} />
-                <Typography variant="body2" sx={{ opacity: 0.9 }}>computing Δ detail…</Typography>
-              </>
-            ) : (
-              <Button size="small" color="error" variant="outlined" onClick={onRecRetry}>
-                Δ detail failed — retry
-              </Button>
-            )}
-          </Box>
-        )}
-      </Box>
-    </Paper>
-  )
-}
+    desc: {
+      old: result.scan1.n_desc ?? null,
+      new: result.scan2.n_desc ?? null,
+      delta: (result.scan2.n_desc ?? 0) - (result.scan1.n_desc ?? 0),
+    },
+  },
+})
 
 function formatDateTime(dateStr: string): string {
   const date = new Date(dateStr)
   return date.toLocaleString()
-}
-
-const statusColors = {
-  added: { bg: 'rgba(46, 160, 67, 0.15)' },
-  removed: { bg: 'rgba(248, 81, 73, 0.15)' },
-  changed: { bg: 'transparent' },
-  touched: { bg: 'transparent' },
-  unchanged: { bg: 'transparent' },
-}
-
-// Delta bar component - visual representation of size change
-function DeltaBar({ delta, maxDelta }: { delta: number; maxDelta: number }) {
-  if (maxDelta === 0) return <div style={{ width: '50px' }} />
-  const pct = Math.min(Math.abs(delta) / maxDelta * 100, 100)
-  const color = delta === 0 ? 'transparent' : deltaTextColor(delta)
-  return (
-    <div style={{
-      width: '50px',
-      height: '8px',
-      backgroundColor: 'rgba(255,255,255,0.1)',
-      borderRadius: '4px',
-      overflow: 'hidden',
-      flexShrink: 0,
-    }}>
-      <div style={{
-        width: `${pct}%`,
-        height: '100%',
-        backgroundColor: color,
-        borderRadius: '4px',
-      }} />
-    </div>
-  )
-}
-
-function formatDeltaNumber(n: number): string {
-  const sign = n > 0 ? '+' : ''
-  return sign + formatCount(Math.abs(n))
 }
 
 // Check if a path is covered by a scan (path is at or below scan_path)
@@ -841,7 +138,7 @@ function CompareBreadcrumbs({
   // Split path into segments
   const isFile = routeType === 'file'
   const scheme = routeType // 's3' | 'gcs' | 'r2' | 'ssh' (file handled by isFile)
-  let segments: { name: string; path: string }[] = []
+  const segments: { name: string; path: string }[] = []
 
   if (isFile) {
     // /Users/ryan/Library/...
@@ -914,389 +211,6 @@ function CompareBreadcrumbs({
         )
       })}
     </Typography>
-  )
-}
-
-// Sortable column header component
-function SortHeader({
-  label,
-  column,
-  sortColumn,
-  sortDirection,
-  onSort,
-  style,
-}: {
-  label: string
-  column: SortColumn
-  sortColumn: SortColumn | null
-  sortDirection: SortDirection
-  onSort: (col: SortColumn) => void
-  style?: React.CSSProperties
-}) {
-  const isActive = sortColumn === column
-  return (
-    <th
-      onClick={() => onSort(column)}
-      style={{
-        ...style,
-        cursor: 'pointer',
-        userSelect: 'none',
-        fontWeight: 'normal',
-        color: isActive ? '#e6edf3' : '#8b949e',
-      }}
-    >
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
-        {label}
-        {isActive && (sortDirection === 'desc' ? <FaSortDown size={10} /> : <FaSortUp size={10} />)}
-      </span>
-    </th>
-  )
-}
-
-// Parent directory summary row - shows totals for the directory being compared
-function ParentSummaryRow({
-  result,
-  maxSizeDelta,
-  maxDescDelta,
-  onScan,
-  isScanning,
-}: {
-  result: CompareResult
-  maxSizeDelta: number
-  maxDescDelta: number
-  onScan: (path: string) => void
-  isScanning: (path: string) => boolean
-}) {
-  const { scan1, scan2, uri } = result
-  const sizeDelta = (scan2.size ?? 0) - (scan1.size ?? 0)
-  const descDelta = (scan2.n_desc ?? 0) - (scan1.n_desc ?? 0)
-
-  const sizeDeltaColor = deltaTextColor(sizeDelta)
-  const descDeltaColor = deltaTextColor(descDelta)
-
-  const td: React.CSSProperties = { padding: '8px 6px', textAlign: 'right', fontFamily: 'monospace', fontSize: '0.85em', whiteSpace: 'nowrap' }
-  const dim: React.CSSProperties = { color: '#8b949e' }
-
-  // Get the directory name for display
-  const dirName = uri === '/' ? '/' : uri.split('/').pop() || uri
-
-  return (
-    <tr style={{ backgroundColor: 'rgba(88, 166, 255, 0.1)', borderBottom: '2px solid rgba(255,255,255,0.2)' }}>
-      {/* Path */}
-      <td style={{ padding: '8px', fontWeight: 'bold' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <FaFolder size={14} color="#54aeff" style={{ flexShrink: 0 }} />
-          <span style={{ fontFamily: 'monospace', fontSize: '0.9em' }}>. ({dirName})</span>
-        </div>
-      </td>
-      {/* Size: before */}
-      <td style={{ ...td, ...dim, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '12px' }}>{formatSize(scan1.size)}</td>
-      {/* Size: after */}
-      <td style={td}>{formatSize(scan2.size)}</td>
-      {/* Size: delta */}
-      <td style={{ ...td, color: sizeDeltaColor, fontWeight: sizeDelta !== 0 ? 'bold' : undefined }}>
-        {formatDelta(sizeDelta)}
-      </td>
-      {/* Size: bar */}
-      <td style={{ padding: '8px 12px 8px 4px' }}>
-        <DeltaBar delta={sizeDelta} maxDelta={Math.max(maxSizeDelta, Math.abs(sizeDelta))} />
-      </td>
-      {/* Desc: before */}
-      <td style={{ ...td, ...dim, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '12px' }}>{formatCount(scan1.n_desc)}</td>
-      {/* Desc: after */}
-      <td style={td}>{formatCount(scan2.n_desc)}</td>
-      {/* Desc: delta */}
-      <td style={{ ...td, color: descDeltaColor, fontWeight: descDelta !== 0 ? 'bold' : undefined }}>
-        {formatDeltaNumber(descDelta)}
-      </td>
-      {/* Desc: bar */}
-      <td style={{ padding: '8px 4px' }}>
-        <DeltaBar delta={descDelta} maxDelta={Math.max(maxDescDelta, Math.abs(descDelta))} />
-      </td>
-      {/* Scan button */}
-      <td style={{ padding: '4px 8px', textAlign: 'center', borderLeft: '1px solid rgba(255,255,255,0.1)' }}>
-        <Tooltip title={`Scan ${uri}`}>
-          <span>
-            <Button
-              size="small"
-              onClick={() => onScan(uri)}
-              disabled={isScanning(uri)}
-              sx={{ minWidth: 'auto', padding: '2px 6px' }}
-            >
-              {isScanning(uri) ? <CircularProgress size={12} /> : <FaSync size={10} />}
-            </Button>
-          </span>
-        </Tooltip>
-      </td>
-    </tr>
-  )
-}
-
-function CompareTable({
-  result,
-  onScan,
-  isScanning,
-  getProgress,
-  scan1,
-  scan2,
-}: {
-  result: CompareResult
-  onScan: (path: string) => void
-  isScanning: (path: string) => boolean
-  getProgress: (path: string) => { items_found?: number } | undefined
-  scan1: number | ''
-  scan2: number | ''
-}) {
-  const [sortColumn, setSortColumn] = useState<SortColumn | null>('size_delta')
-  const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
-  const PAGE = 50
-  const [page, setPage] = useState(0)
-
-  useEffect(() => { setPage(0) }, [result, sortColumn, sortDirection])
-
-  const handleSort = (col: SortColumn) => {
-    if (sortColumn === col) {
-      setSortDirection(d => d === 'asc' ? 'desc' : 'asc')
-    } else {
-      setSortColumn(col)
-      setSortDirection('desc')
-    }
-  }
-
-  // Filter out unchanged rows for cleaner view
-  const changedRows = result.rows.filter(r => r.status !== 'unchanged')
-
-  // Sort rows
-  const sortedRows = useMemo(() => {
-    if (!sortColumn) return changedRows
-    return [...changedRows].sort((a, b) => {
-      let aVal: number, bVal: number
-      switch (sortColumn) {
-        case 'size_old': aVal = a.size_old ?? a.size ?? 0; bVal = b.size_old ?? b.size ?? 0; break
-        case 'size_new': aVal = a.size ?? 0; bVal = b.size ?? 0; break
-        case 'size_delta': aVal = Math.abs(a.size_delta); bVal = Math.abs(b.size_delta); break
-        case 'desc_old': aVal = a.n_desc_old ?? a.n_desc ?? 0; bVal = b.n_desc_old ?? b.n_desc ?? 0; break
-        case 'desc_new': aVal = a.n_desc ?? 0; bVal = b.n_desc ?? 0; break
-        case 'desc_delta': aVal = Math.abs(a.n_desc_delta ?? 0); bVal = Math.abs(b.n_desc_delta ?? 0); break
-      }
-      return sortDirection === 'desc' ? bVal - aVal : aVal - bVal
-    })
-  }, [changedRows, sortColumn, sortDirection])
-
-  // Find max deltas for scaling bars
-  const maxSizeDelta = Math.max(...changedRows.map(r => Math.abs(r.size_delta)), 1)
-  const maxDescDelta = Math.max(...changedRows.map(r => Math.abs(r.n_desc_delta ?? 0)), 1)
-
-  const subTh: React.CSSProperties = { padding: '4px 6px', textAlign: 'right', fontSize: '0.75em', whiteSpace: 'nowrap' }
-
-  return (
-    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-      {/* Header rows stick to the top of the viewport while the page scrolls
-          past a long table (`#0d1117` so rows don't show through). */}
-      <thead style={{ position: 'sticky', top: 0, zIndex: 2, background: '#0d1117' }}>
-        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-          <th style={{ textAlign: 'left', padding: '8px', width: '100%' }}>Path</th>
-          <th colSpan={4} style={{ textAlign: 'center', padding: '8px 12px', borderLeft: '1px solid rgba(255,255,255,0.1)', whiteSpace: 'nowrap' }}>Size</th>
-          <th colSpan={4} style={{ textAlign: 'center', padding: '8px 12px', borderLeft: '1px solid rgba(255,255,255,0.1)', whiteSpace: 'nowrap' }}>Descendants</th>
-          <th style={{ padding: '8px', borderLeft: '1px solid rgba(255,255,255,0.1)', whiteSpace: 'nowrap' }}></th>
-        </tr>
-        <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-          <th style={{ width: '100%' }}></th>
-          <SortHeader label="old" column="size_old" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} style={{ ...subTh, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '12px' }} />
-          <SortHeader label="new" column="size_new" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} style={subTh} />
-          <SortHeader label="Δ" column="size_delta" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} style={subTh} />
-          <th style={subTh}></th>
-          <SortHeader label="old" column="desc_old" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} style={{ ...subTh, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '12px' }} />
-          <SortHeader label="new" column="desc_new" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} style={subTh} />
-          <SortHeader label="Δ" column="desc_delta" sortColumn={sortColumn} sortDirection={sortDirection} onSort={handleSort} style={subTh} />
-          <th style={subTh}></th>
-          <th style={{ whiteSpace: 'nowrap' }}></th>
-        </tr>
-      </thead>
-      <tbody>
-        {/* Parent directory summary row */}
-        <ParentSummaryRow
-          result={result}
-          maxSizeDelta={maxSizeDelta}
-          maxDescDelta={maxDescDelta}
-          onScan={onScan}
-          isScanning={isScanning}
-        />
-        {sortedRows.slice(page * PAGE, (page + 1) * PAGE).map((row) => (
-          <CompareRowComponent
-            key={row.path}
-            row={row}
-            maxSizeDelta={maxSizeDelta}
-            maxDescDelta={maxDescDelta}
-            parentUri={result.uri}
-            onScan={onScan}
-            isScanning={isScanning}
-            getProgress={getProgress}
-            scan1={scan1}
-            scan2={scan2}
-          />
-        ))}
-        {sortedRows.length === 0 && (
-          <tr>
-            <td colSpan={10} style={{ padding: '24px', textAlign: 'center', color: '#8b949e' }}>
-              No changes detected between scans
-            </td>
-          </tr>
-        )}
-        {/* The treemap draws unchanged children as grey context; the table
-            lists changes only — say what it's leaving out so they agree. */}
-        {(sortedRows.length > PAGE || result.summary.unchanged > 0) && (
-          <tr>
-            <td colSpan={10} style={{ padding: '6px 8px', color: '#8b949e', fontSize: '0.8em' }}>
-              {sortedRows.length > PAGE && (
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginRight: 16 }}>
-                  {page * PAGE + 1}–{Math.min((page + 1) * PAGE, sortedRows.length)} of {sortedRows.length.toLocaleString()}
-                  {(['«', '‹', '›', '»'] as const).map((g, i) => {
-                    const last = Math.ceil(sortedRows.length / PAGE) - 1
-                    const to = [0, page - 1, page + 1, last][i]
-                    const off = to < 0 || to > last || to === page
-                    return (
-                      <button
-                        key={g}
-                        disabled={off}
-                        onClick={() => setPage(to)}
-                        style={{ background: 'none', border: 'none', color: off ? '#555' : '#54aeff', cursor: off ? 'default' : 'pointer', fontSize: '1em', padding: '0 2px' }}
-                      >
-                        {g}
-                      </button>
-                    )
-                  })}
-                </span>
-              )}
-              {result.summary.unchanged > 0 && (
-                <>{result.summary.unchanged.toLocaleString()} unchanged {result.summary.unchanged === 1 ? 'entry' : 'entries'} not listed</>
-              )}
-            </td>
-          </tr>
-        )}
-      </tbody>
-    </table>
-  )
-}
-
-function CompareRowComponent({
-  row,
-  maxSizeDelta,
-  maxDescDelta,
-  onScan,
-  isScanning,
-  getProgress: _getProgress,
-  scan1,
-  scan2,
-}: {
-  row: CompareRow
-  maxSizeDelta: number
-  maxDescDelta: number
-  parentUri: string
-  onScan: (path: string) => void
-  isScanning: (path: string) => boolean
-  getProgress: (path: string) => { items_found?: number } | undefined
-  scan1: number | ''
-  scan2: number | ''
-}) {
-  const { bg } = statusColors[row.status]
-  const Icon = row.kind === 'dir' ? FaFolder : FaFile
-  const iconColor = row.kind === 'dir' ? '#54aeff' : '#8b949e'
-
-  const sizeDeltaColor = deltaTextColor(row.size_delta)
-  const descDelta = row.n_desc_delta ?? 0
-  const descDeltaColor = deltaTextColor(descDelta)
-
-  // Build link URL for drilling into subdirectory (preserving scan params)
-  const childUri = row.uri
-  const basePath = `/compare${uriToPath(childUri)}`
-  const params = new URLSearchParams()
-  if (scan1 !== '') params.set('scan1', String(scan1))
-  if (scan2 !== '') params.set('scan2', String(scan2))
-  const compareUrl = params.toString() ? `${basePath}?${params}` : basePath
-
-  const td: React.CSSProperties = { padding: '8px 6px', textAlign: 'right', fontFamily: 'monospace', fontSize: '0.85em', whiteSpace: 'nowrap' }
-
-  // Size values
-  const sizeBefore = row.status === 'added' ? '-' : formatSize(row.size_old ?? row.size)
-  const sizeAfter = row.status === 'removed' ? '-' : formatSize(row.size)
-  const sizeBeforeColor = row.status === 'removed' ? '#f85149' : '#8b949e'
-  const sizeAfterColor = row.status === 'added' ? '#3fb950' : undefined
-
-  // Desc values
-  const descBefore = row.status === 'added' ? '-' : formatCount(row.n_desc_old ?? row.n_desc)
-  const descAfter = row.status === 'removed' ? '-' : formatCount(row.n_desc)
-  const descBeforeColor = row.status === 'removed' ? '#f85149' : '#8b949e'
-  const descAfterColor = row.status === 'added' ? '#3fb950' : undefined
-
-  return (
-    <tr style={{ backgroundColor: bg, borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-      {/* Path */}
-      <td style={{ padding: '8px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Icon size={14} color={iconColor} style={{ flexShrink: 0 }} />
-          {row.kind === 'dir' ? (
-            <Link to={compareUrl} style={{ fontFamily: 'monospace', fontSize: '0.9em', color: 'inherit', textDecoration: 'none' }}>
-              {row.path}
-            </Link>
-          ) : (
-            <span style={{ fontFamily: 'monospace', fontSize: '0.9em' }}>{row.path}</span>
-          )}
-          {row.status === 'touched' && (
-            <span
-              title="same bytes & count, mtime moved (rename / net-zero churn / touch)"
-              style={{
-                fontSize: '0.7em', color: '#8b949e', padding: '0 6px', borderRadius: 3,
-                background: UNCHANGED_GREY, backgroundImage: TOUCHED_HATCH,
-              }}
-            >
-              touched
-            </span>
-          )}
-        </div>
-      </td>
-      {/* Size: before */}
-      <td style={{ ...td, color: sizeBeforeColor, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '12px' }}>{sizeBefore}</td>
-      {/* Size: after */}
-      <td style={{ ...td, color: sizeAfterColor }}>{sizeAfter}</td>
-      {/* Size: delta */}
-      <td style={{ ...td, color: sizeDeltaColor, fontWeight: row.size_delta !== 0 ? 'bold' : undefined }}>
-        {formatDelta(row.size_delta)}
-      </td>
-      {/* Size: bar */}
-      <td style={{ padding: '8px 12px 8px 4px' }}>
-        <DeltaBar delta={row.size_delta} maxDelta={maxSizeDelta} />
-      </td>
-      {/* Desc: before */}
-      <td style={{ ...td, color: descBeforeColor, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '12px' }}>{row.kind === 'dir' ? descBefore : '-'}</td>
-      {/* Desc: after */}
-      <td style={{ ...td, color: descAfterColor }}>{row.kind === 'dir' ? descAfter : '-'}</td>
-      {/* Desc: delta */}
-      <td style={{ ...td, color: descDeltaColor, fontWeight: descDelta !== 0 ? 'bold' : undefined }}>
-        {row.kind === 'dir' ? formatDeltaNumber(descDelta) : '-'}
-      </td>
-      {/* Desc: bar */}
-      <td style={{ padding: '8px 4px' }}>
-        {row.kind === 'dir' ? <DeltaBar delta={descDelta} maxDelta={maxDescDelta} /> : null}
-      </td>
-      {/* Scan button */}
-      <td style={{ padding: '4px 8px', textAlign: 'center', borderLeft: '1px solid rgba(255,255,255,0.1)' }}>
-        {row.kind === 'dir' && (
-          <Tooltip title={`Scan ${row.path}`}>
-            <span>
-              <Button
-                size="small"
-                onClick={() => onScan(row.uri)}
-                disabled={isScanning(row.uri)}
-                sx={{ minWidth: 'auto', padding: '2px 6px' }}
-              >
-                {isScanning(row.uri) ? <CircularProgress size={12} /> : <FaSync size={10} />}
-              </Button>
-            </span>
-          </Tooltip>
-        )}
-      </td>
-    </tr>
   )
 }
 
@@ -1433,6 +347,7 @@ export function CompareView() {
   const mapRef = useRef<HTMLDivElement>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [tiling, setTiling] = useTiling()
 
   // Record visit to recent paths
   const { recordVisit } = useRecentPaths()
@@ -1600,6 +515,15 @@ export function CompareView() {
       })
     }
   }, [scanProgress, scanningPath, uri, scan1, scan2])
+
+  // Preserve scan1/scan2 query params on a link/drill so the sub-view shows
+  // the same snapshot pair.
+  const scanQuery = () => {
+    const q = new URLSearchParams()
+    if (scan1 !== '') q.set('scan1', String(scan1))
+    if (scan2 !== '') q.set('scan2', String(scan2))
+    return q.toString() ? `?${q}` : ''
+  }
 
   return (
     <Box sx={{ p: { xs: 1, sm: 3 }, maxWidth: 1400, margin: '0 auto' }}>
@@ -1820,32 +744,93 @@ export function CompareView() {
           {result && !loading && (
             <>
               <Summary result={result} />
-              <CompareTreemap
-                result={result}
-                rec={recResult ?? undefined}
+              <DiffTreemap
+                input={toDiffInput(result, recResult ?? undefined)}
                 recState={recState}
-                scan1={scan1 as number}
-                scan2={scan2 as number}
-                mapRef={mapRef}
                 onRecRetry={() => setRecAttempt(a => a + 1)}
-                onDrill={childUri => {
-                  // Preserve scan1/scan2 query params on drill so the sub-view
-                  // shows the same snapshot pair.
-                  const q = new URLSearchParams()
-                  if (scan1 !== '') q.set('scan1', String(scan1))
-                  if (scan2 !== '') q.set('scan2', String(scan2))
-                  const suffix = q.toString() ? `?${q}` : ''
-                  navigate(`/compare${uriToPath(childUri)}${suffix}`)
+                onDrill={childUri => navigate(`/compare${uriToPath(childUri)}${scanQuery()}`)}
+                cellHref={childUri => `/compare${uriToPath(childUri)}?scan1=${scan1}&scan2=${scan2}`}
+                fetchSubtree={async (n): Promise<DiffSubtree> => {
+                  const sub = await compareScansRecursive(n.uri, scan1 as number, scan2 as number, 200, mapMinFrac(mapRef))
+                  return {
+                    recRows: sub.rows.map(toRecRow),
+                    unchangedTop: (sub.unchanged?.top ?? []).map(toRecRow),
+                    unchangedRest: sub.unchanged?.rest ?? {},
+                  }
                 }}
+                formatSize={formatSize}
+                formatCount={formatCount}
+                tiling={tiling}
+                setTiling={setTiling}
+                mapRef={mapRef}
+                renderContainer={children => <Paper sx={{ p: 0, mb: 3, overflow: 'hidden' }}>{children}</Paper>}
+                renderOverlay={(rs, onRetry) => (
+                  <Box
+                    sx={{
+                      position: 'absolute', inset: 0, zIndex: 2,
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                      gap: 1.5, bgcolor: 'rgba(8, 10, 12, 0.55)',
+                      pointerEvents: rs === 'error' ? 'auto' : 'none',
+                    }}
+                  >
+                    {rs === 'loading' ? (
+                      <>
+                        <CircularProgress size={40} />
+                        <Typography variant="body2" sx={{ opacity: 0.9 }}>computing Δ detail…</Typography>
+                      </>
+                    ) : (
+                      <Button size="small" color="error" variant="outlined" onClick={onRetry}>
+                        Δ detail failed — retry
+                      </Button>
+                    )}
+                  </Box>
+                )}
+                renderEmpty={({ areaMode, showUnchanged, onShowUnchanged }) => (
+                  <Paper sx={{ p: 3, textAlign: 'center' }}>
+                    <Typography color="text.secondary" variant="body2">
+                      {areaMode === 'max' && showUnchanged
+                        ? 'Nothing to plot — no row has any bytes on either side.'
+                        : 'No size deltas to plot — every row is unchanged.'}
+                    </Typography>
+                    {!showUnchanged && (
+                      <Button size="small" sx={{ mt: 1 }} onClick={onShowUnchanged}>
+                        show unchanged
+                      </Button>
+                    )}
+                  </Paper>
+                )}
               />
               <Paper sx={{ overflowX: 'auto' }}>
-                <CompareTable
-                  result={result}
-                  onScan={handleStartScan}
-                  isScanning={isScanning}
-                  getProgress={getProgress}
-                  scan1={scan1}
-                  scan2={scan2}
+                <DiffTable
+                  rows={toTableRows(result)}
+                  parent={toParent(result)}
+                  metrics={DIFF_METRICS}
+                  unchangedCount={result.summary.unchanged}
+                  renderIcon={({ kind }) => kind === 'dir'
+                    ? <FaFolder size={14} color="#54aeff" style={{ flexShrink: 0 }} />
+                    : <FaFile size={14} color="#8b949e" style={{ flexShrink: 0 }} />}
+                  renderPathLink={(row, children) => (
+                    <Link
+                      to={`/compare${uriToPath(row.uri)}${scanQuery()}`}
+                      style={{ fontFamily: 'monospace', fontSize: '0.9em', color: 'inherit', textDecoration: 'none' }}
+                    >
+                      {children}
+                    </Link>
+                  )}
+                  rowAction={({ uri: rowUri, kind, path }) => kind === 'dir' ? (
+                    <Tooltip title={`Scan ${path}`}>
+                      <span>
+                        <Button
+                          size="small"
+                          onClick={() => handleStartScan(rowUri)}
+                          disabled={isScanning(rowUri)}
+                          sx={{ minWidth: 'auto', padding: '2px 6px' }}
+                        >
+                          {isScanning(rowUri) ? <CircularProgress size={12} /> : <FaSync size={10} />}
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  ) : null}
                 />
               </Paper>
             </>

@@ -71,6 +71,43 @@ export function comparePathToUri(pathAfterCompare: string): { uri: string; route
   return { uri: decodeURIComponent(pathAfterCompare || '/'), routeType: 'file' }
 }
 
+/**
+ * Per-scheme UI descriptor — the single registry `Breadcrumbs` / `Header` /
+ * the bucket-list page read from, so no view component special-cases a scheme
+ * (spec `union-of-roots.md`). Adding a scheme stays a one-line edit here.
+ */
+export interface SchemeDesc {
+  /** Breadcrumb / nav label, e.g. `r2://` or `/`. */
+  label: string
+  /**
+   * Where this scheme's top breadcrumb crumb (and any Header nav link) points:
+   * a *dedicated* bucket-list page (`/s3`) if it has one, else the `/` union
+   * landing, else `null` (render the scheme as plain text, no up-link).
+   */
+  landing: string | null
+}
+
+export const SCHEMES: Record<RouteType, SchemeDesc> = {
+  file: { label: '/', landing: '/file' },
+  // Cloud schemes get a dedicated per-scheme landing (`/r2` = the R2 buckets,
+  // etc.) so a multi-cloud deployment can disambiguate. A *single*-cloud
+  // deployment (mgu gcs/cw-s3) that needs no disambiguator would set its one
+  // scheme's landing to `/`. `ssh` has hosts, not buckets — no landing page.
+  s3: { label: 's3://', landing: '/s3' },
+  gcs: { label: 'gcs://', landing: '/gcs' },
+  // This deployment is effectively single-cloud (R2 only — no GCS to demo), and
+  // the host is already `r2.rbw.sh`, so `r2` needs no `/r2` disambiguator: its
+  // landing IS `/` (the union root). A multi-cloud deployment would set this to
+  // `/r2` and register a sibling `/gcs`, etc. (spec `union-of-roots.md`).
+  r2: { label: 'r2://', landing: '/' },
+  ssh: { label: 'ssh://', landing: '/' },
+}
+
+/** The path a scheme's top breadcrumb crumb links up to (`SCHEMES[rt].landing`). */
+export function schemeLanding(rt: RouteType): string | null {
+  return SCHEMES[rt].landing
+}
+
 /** `true` for `'/'` or `<scheme>://` (empty-scan-root placeholder URIs). */
 export function isSchemeRoot(uri: string): boolean {
   if (uri === '/') return true
@@ -78,10 +115,12 @@ export function isSchemeRoot(uri: string): boolean {
 }
 
 /**
- * Whether the delete UI should render for a route type. Historical: the S3
- * button is hidden even though the S3 backend supports it — mirror that for
- * gcs/r2 which don't yet have DT backends.
+ * Whether a route's scheme has a delete-capable backend at all (`backend_for`
+ * can remove it): local `gfind`/`rm`, `ssh`, `S3Backend.delete` (`aws s3 rm`,
+ * R2 via endpoint). `gcs` has no DT delete backend yet. *How* a delete runs —
+ * inline (`sync`) or via the staged queue — is the deployment's `deleteApproval`
+ * policy (`useDeleteMethod`), not the scheme.
  */
 export function supportsDelete(routeType: RouteType): boolean {
-  return routeType === 'file' || routeType === 'ssh'
+  return routeType === 'file' || routeType === 'ssh' || routeType === 's3' || routeType === 'r2'
 }

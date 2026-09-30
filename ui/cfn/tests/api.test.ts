@@ -98,7 +98,7 @@ describe('capabilities + fallback', () => {
   it('declares the static deployment and refuses everything else', async () => {
     const caps = await call(capabilities, '/api/capabilities')
     expect(caps.status).toBe(200)
-    expect(Object.entries(caps.body).filter(([, v]) => v)).toEqual([['static', true], ['auth', true]])
+    expect(Object.entries(caps.body).filter(([, v]) => v)).toEqual([['static', true], ['compare', true], ['stageDelete', true], ['deleteApproval', 'staged'], ['auth', true]])
     expect(await call(fallback, '/api/histogram?uri=/x')).toEqual({
       status: 501, body: { error: 'not available in the static (cloud) deployment', path: '/api/histogram' },
     })
@@ -112,7 +112,7 @@ describe('open demo (PUBLIC_OPEN)', () => {
 
   it('reports auth: false so the UI shows no wall', async () => {
     const res = await capabilities({ request: new Request('http://x/api/capabilities'), env: openEnv, params: {} } as never)
-    expect(Object.entries(await res.json()).filter(([, v]) => v)).toEqual([['static', true]])
+    expect(Object.entries(await res.json()).filter(([, v]) => v)).toEqual([['static', true], ['compare', true], ['deleteApproval', 'staged']])
   })
 
   it('serves every /api/* route without a session (no gate, no DB)', async () => {

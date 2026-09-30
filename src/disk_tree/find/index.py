@@ -8,6 +8,7 @@ import pandas as pd
 
 from disk_tree import time
 from ..backends import backend_for, ErrorCollector
+from ..listing_format import uri_of
 
 
 # Type for progress callback: (items_found, items_per_sec, error_count) -> None
@@ -119,7 +120,10 @@ def aggregate(
             dirs['parent'] = dirs.path.apply(dirname)
             dirs.loc[dirs.parent == '', 'parent'] = '.'
             dirs.loc[dirs.path == '', ['path', 'parent']] = ['.', '']
-            dirs['uri'] = dirs.path.apply(lambda p: scan_root if p == '.' else f'{scan_root}/{p}')
+            # The same join the backends use for file rows (`/` root → `/foo`,
+            # not `//foo`), so `uri` is `uri_of(root, path)` on every row and
+            # the v2 writer can leave it implied (spec `listing-slim.md`).
+            dirs['uri'] = dirs.path.apply(lambda p: uri_of(scan_root, p))
         out = pd.concat([dirs, files], ignore_index=True)
         # Add depth column for efficient parquet filtering
         # '.' = 0, 'foo' = 1, 'foo/bar' = 2, etc.

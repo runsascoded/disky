@@ -1,0 +1,93 @@
+# Daily r2.rbw.sh ingestion, moved off the laptop LaunchAgent to GHA (reliable
+# scheduling; the LaunchAgent never fired). Mirrors scripts/r2-ingest.sh: list
+# the three public buckets → the union's path store (`path` + `bysize` sorts,
+# objects included; specs/path-store.md §4.4) + snapshot → upload to
+# disk-tree-demo → publish footers to the D1 the Map reads. Idempotent per date
+# (a fresh generation flips the pointer). Run it by hand anytime via "Run
+# workflow" (workflow_dispatch).
+#
+# Creds (repo secrets/vars): R2_HCCS_RO_* + R2_HCCS_ENDPOINT_URL (ctbk/crashes,
+# HCCS account); R2_DEMO_SRC_RO_* (token "disky demo bkts RO": read, RAC
+# source buckets — jc-taxes) and R2_DEMO_RW_* (token "disky demo RW":
+# read/write, disk-tree-demo only), both RAC via vars.R2_ENDPOINT_URL;
+# CLOUDFLARE_API_TOKEN (D1). The demo's own tokens (the root worktree's `.envrc`
+# holds the same ones as R2_RAC_RO_* / R2_RW_*); no other deployment or laptop
+# key is shared. The site reads with "disky demo RO" (a Pages secret).
+name: daily-ingest
+
+on:
+  schedule:
+    - cron: "15 7 * * *"   # 07:15 UTC daily
+  workflow_dispatch:
+
+concurrency:
+  group: daily-ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BUCKET: disk-tree-demo
+      RAC_ENDPOINT: ${{ vars.R2_ENDPOINT_URL }}
+      HCCS_ENDPOINT: ${{ secrets.R2_HCCS_ENDPOINT_URL }}
+      AWS_DEFAULT_REGION: auto
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: mkdir -p ui/dist   # editable install expects it
+      - name: Install (disk-tree bulk lister + dt_cloud)
+        run: |
+          uv sync --frozen --all-packages --all-extras
+      - name: Stamp date + generation
+        id: d
+        run: |
+          echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+          echo "gen=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+      - name: List the three buckets → canonical shards
+        run: |
+          set -euo pipefail
+          mkdir -p work/listing work/index work/snap
+          list() { AWS_ACCESS_KEY_ID="$1" AWS_SECRET_ACCESS_KEY="$2" \
+            uv run disk-tree bulk-list "r2://$3" -E "$4" -o "work/listing/$3" -P 4; }
+          list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" ctbk     "$HCCS_ENDPOINT"
+          list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" crashes  "$HCCS_ENDPOINT"
+          list "${{ secrets.R2_DEMO_SRC_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_DEMO_SRC_RO_SECRET_ACCESS_KEY }}" jc-taxes "$RAC_ENDPOINT"
+      - name: Union → path store (path + bysize sorts) + snapshot
+        run: |
+          cd cloud && uv run dt-cloud path-index -d "${{ steps.d.outputs.date }}" \
+            -l "$GITHUB_WORKSPACE/work/listing/*/*.parquet" \
+            -P "$GITHUB_WORKSPACE/work/index/path-index.parquet" \
+            -o "$GITHUB_WORKSPACE/work/snap"
+      - name: Upload tiers + snapshot to the index bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          aws s3 cp work/index/ "s3://$BUCKET/listing/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}/" \
+            --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
+          aws s3 cp work/snap/  "s3://$BUCKET/snapshots/r2/${{ steps.d.outputs.date }}/" \
+            --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
+      - name: Publish footers → D1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DB_ID: 261d0c80-8f73-442e-979a-4e25725b2271
+          D1_DB_NAME: disk-tree-demo-db
+          INDEX_VARIANTS: path
+        run: |
+          cd cloud && uv run dt-cloud index-sync "${{ steps.d.outputs.date }}" \
+            -g "${{ steps.d.outputs.gen }}" -b "$BUCKET" \
+            -k "listing/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
+            -d "$GITHUB_WORKSPACE/work/index" -v path -v bysize
+      - name: Smoke — the new generation serves
+        run: |
+          set -euo pipefail
+          sleep 5
+          code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+            "https://r2.rbw.sh/api/subtree?date=${{ steps.d.outputs.date }}&w=1280&h=800")
+          echo "GET /api/subtree?date=${{ steps.d.outputs.date }} → $code"
+          test "$code" = "200"

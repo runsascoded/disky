@@ -34,6 +34,22 @@ NODES = [
 ]
 
 
+def write_v2(df: pd.DataFrame, out: str) -> None:
+    """The same rows as a v2 listing (spec `listing-slim.md`): no `uri`, zstd,
+    the scan root + v1 column order in the key-value metadata — what the
+    duckdb/stream engines now write. `parquet.test.ts` reads both alike."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    tbl = pa.Table.from_pandas(df.drop(columns=['uri']), preserve_index=False)
+    kv = {
+        'disk_tree.listing_format': '2',
+        'disk_tree.scan_root': ROOT,
+        'disk_tree.columns': json.dumps(list(df.columns), separators=(',', ':')),
+    }
+    tbl = tbl.replace_schema_metadata({**(tbl.schema.metadata or {}), **kv})
+    pq.write_table(tbl, out, row_group_size=4, compression='zstd', compression_level=3)
+
+
 def main() -> None:
     here = dirname(__file__)
     rows = []
@@ -47,6 +63,7 @@ def main() -> None:
         })
     df = pd.DataFrame(rows).sort_values(['depth', 'path']).reset_index(drop=True)
     df.to_parquet(join(here, 'fixture.parquet'), index=False, row_group_size=4)
+    write_v2(df, join(here, 'fixture-v2.parquet'))
     manifest = {
         'format': 'disk-tree-scan', 'version': 1, 'time': '2026-01-02T03:04:05',
         'path': ROOT, 'blob': 'fixture.parquet', 'size': 3600, 'n_children': 4, 'n_desc': 11,
@@ -56,6 +73,20 @@ def main() -> None:
         json.dump(manifest, f, indent=2)
         f.write('\n')
     print(df.to_string())
+
+    # The `.groups.json` footer sidecar the serverless reader consumes instead
+    # of parsing the thrift footer (`disk_tree.find.groups`; spec
+    # `serverless-tier-reads.md`). Best-effort: this uv-script's shebang isolates
+    # deps, so `disk_tree` imports only when run in the project venv — where a
+    # full regen belongs. `groups.test.ts` asserts it reads identically to the
+    # footer, so a stale sidecar fails loudly.
+    try:
+        from disk_tree.find.groups import write_groups
+    except ImportError:
+        print('disk_tree not importable — skipped fixture.groups.json (run in the project venv)')
+    else:
+        gs = write_groups(join(here, 'fixture.parquet'))
+        print(f'groups → {gs.path} ({gs.n_groups} groups)')
 
 
 if __name__ == '__main__':

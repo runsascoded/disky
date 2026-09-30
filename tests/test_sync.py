@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from disk_tree.blobfs import read_parquet as read_listing
 import pytest
 
 from disk_tree.cli.sync import BucketCfg, load_config, select_buckets, SyncCfg
@@ -195,8 +196,8 @@ buckets:
     blobs = dict(conn.execute("SELECT path, blob FROM scan").fetchall())
     conn.close()
     ext_cols = {'sum_storage_class_id_1', 'mtime_mean'}
-    b2_cols = set(pd.read_parquet(root / 'scans' / blobs['r2://b2']).columns)
-    b1_cols = set(pd.read_parquet(root / 'scans' / blobs['s3://b1']).columns)
+    b2_cols = set(read_listing(root / 'scans' / blobs['r2://b2']).columns)
+    b1_cols = set(read_listing(root / 'scans' / blobs['s3://b1']).columns)
     assert ext_cols <= b2_cols
     assert ext_cols & b1_cols == set()
 

@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Full local app = vite (UI, :$PORT) + `wrangler pages dev` (the /data +
+# /v1/files + /api Pages Functions, :$WPORT, reading the store creds from
+# .dev.vars). vite proxies the API paths to wrangler (see vite.config.ts), so
+# the treemap, the scan browser, and the auth/marks API all work locally.
+#
+#   ./dev              # UI + functions against the REAL prod D1 (remote binding, RW)
+#   ./dev --local-db   # against a LOCAL (miniflare) D1 — prod is never touched
+#   ./dev --refresh    # seed the local D1 from a prod export first, then --local-db
+#   ./dev --staging    # alias for --refresh
+#
+# Default (remote) hits the live ledger as `DEV_EMAIL` (.dev.vars), so a mark /
+# stage / grant gesture writes REAL prod rows. Prefer `--local-db` for anything
+# that WRITES (auth grants, marks, staging, sweeps): it reads/writes a throwaway
+# local copy, so prod stays untouched — the way to test stack-spanning changes
+# (auth + D1) off-prod. First `--local-db` with no prior seed applies this
+# deployment's migrations (`migrations_dir` in wrangler.toml) into an empty
+# local D1; `--refresh` mirrors the real prod ledger in (see ./refresh-db —
+# needs a live `wrangler login` + `sqlite3`; it loads the export straight into
+# the miniflare sqlite file, so a multi-GB prod export is fine). (`pnpm dev`
+# alone runs only vite → blank treemap, since /api + /data aren't served.)
+#
+# .dev.vars keys: DEV_EMAIL (the localhost identity — use a staff address to get
+# the admin console), the store creds (GCS_HMAC_KEY_ID/GCS_HMAC_SECRET, or
+# STORE_* for an S3/R2 store), and SESSION_SECRET (any value — the auth gate
+# needs it, and the /admin console's package routes authenticate by a session
+# cookie the localhost stub can't fake, so functions/api/auth/[[path]].ts
+# auto-signs-in DEV_EMAIL on localhost).
+set -euo pipefail
+cd "$(dirname "$0")"
+
+LOCALDB=0
+REFRESH=0
+for arg in "$@"; do
+  case "$arg" in
+    --local-db) LOCALDB=1 ;;
+    --refresh|--staging) LOCALDB=1; REFRESH=1 ;;
+    *) echo "unknown arg: $arg (expected --local-db | --refresh | --staging)" >&2; exit 2 ;;
+  esac
+done
+
+# Ports: `devPort` in package.json (vite) and the next one (wrangler). `PORT=…`
+# overrides (a second stack, or when another worktree already holds the port).
+PORT=${PORT:-$(node -p "require('./package.json').devPort")}
+export PORT
+WPORT=$((PORT + 1))
+
+# This deployment's D1, from the same file wrangler binds it from.
+DB=$(sed -n 's/^database_name = "\(.*\)"$/\1/p' wrangler.toml | head -1)
+[ -n "$DB" ] || { echo "dev: no database_name = ... in wrangler.toml" >&2; exit 1; }
+
+# Local-DB mode: wrangler must bind a LOCAL (miniflare) D1, not the prod one.
+# The binding is `remote = true` in wrangler.toml (RW against prod), and
+# `pages dev` has no flag to override a declared binding's remoteness — so run
+# against a copy of the config with that one line stripped (without it wrangler
+# uses the local D1 under .wrangler/state). Restored on exit — but only if the
+# file is still the stripped copy we wrote: an edit made while the stack ran
+# is kept (with a loud reminder to re-add the line), not clobbered by the
+# backup. A hard kill (kill -9, power loss) can leave the strip in place —
+# `git checkout wrangler.toml` recovers it.
+CFG_BAK=""
+CFG_STRIPPED=""
+restore_config() {
+  [ -n "$CFG_BAK" ] && [ -f "$CFG_BAK" ] || return 0
+  if [ -f "$CFG_STRIPPED" ] && cmp -s wrangler.toml "$CFG_STRIPPED"; then
+    mv "$CFG_BAK" wrangler.toml
+  else
+    echo "!! wrangler.toml changed while --local-db ran: kept your edits; re-add 'remote = true' to the D1 binding (backup: $CFG_BAK)" >&2
+  fi
+  rm -f "$CFG_STRIPPED"
+  CFG_BAK=""
+}
+if [ "$LOCALDB" = 1 ]; then
+  mkdir -p tmp
+  CFG_BAK=tmp/wrangler.toml.remote
+  CFG_STRIPPED=tmp/wrangler.toml.stripped
+  cp wrangler.toml "$CFG_BAK"
+  grep -v '^remote = true$' "$CFG_BAK" > "$CFG_STRIPPED"
+  cp "$CFG_STRIPPED" wrangler.toml
+  echo "→ local-db mode: wrangler bound to the LOCAL D1 (prod untouched)" >&2
+fi
+
+if [ "$REFRESH" = 1 ]; then
+  ./refresh-db
+elif [ "$LOCALDB" = 1 ] && [ ! -d .wrangler/state/v3/d1 ]; then
+  # No local D1 yet and not refreshing: apply the migrations so the auth gate
+  # has its schema (empty ledger). `--refresh` instead mirrors prod's rows in.
+  echo "→ no local D1 yet — applying migrations (empty ledger; use --refresh to seed from prod)" >&2
+  npx wrangler d1 migrations apply "$DB" --local
+fi
+
+# Boot wrangler in the background. Local mode has no tunnel and needs no auth, so
+# one process suffices. Remote mode rides a long-lived tunnel to the prod D1 —
+# the session needs Workers scopes the direnv CLOUDFLARE_API_TOKEN lacks (mask
+# it so wrangler falls back to the OAuth login, and pin the OA account), and a
+# network blip ("Network connection lost") turns every D1 call into "internal
+# error" until wrangler exits — so relaunch it until this script is stopped.
+run_wrangler() {
+  if [ "$LOCALDB" = 1 ]; then
+    npx wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01
+  else
+    while :; do
+      env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID=74981a43be0de7712369306c7b19133d \
+        npx wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01 || true
+      echo "wrangler exited; restarting in 3s (ctrl-c to stop)" >&2
+      sleep 3
+    done
+  fi
+}
+run_wrangler &
+wpid=$!
+trap 'kill "$wpid" 2>/dev/null || true; pkill -P "$wpid" 2>/dev/null || true; restore_config' EXIT INT TERM
+pnpm dev

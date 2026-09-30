@@ -61,7 +61,16 @@ def test_reduce_to_url_writes_a_manifest_that_register_imports(tree: Path, tmp_p
     r = _ok(_run(['reduce', '-D', '-e', 'pandas', '-t', blobs, cap], a))
     (scan_a,) = _scans(a)
     manifest = tmp_path / 'blobs' / f'{scan_a["blob"]}{SUFFIX}'
-    assert r.stderr.rstrip('\n').split('\n')[-1] == f'manifest → {blobs}/{scan_a["blob"]}{SUFFIX}'
+    # `reduce --to` writes the manifest, then the `.groups.json` footer sidecar
+    # (`find/groups.py`) — the last two stderr lines (group count normalized).
+    import re as _re
+
+    from disk_tree.find.groups import groups_path
+    blob_url = f'{blobs}/{scan_a["blob"]}'
+    assert [_re.sub(r' \(\d+ groups\)$', '', l) for l in r.stderr.rstrip('\n').split('\n')[-2:]] == [
+        f'manifest → {blob_url}{SUFFIX}',
+        f'groups → {groups_path(blob_url)}',
+    ]
     # `time` is the capture's instant, at full precision: the row stores it as
     # naive local wall clock (like `index`), the manifest carries the offset so
     # another zone can register it. `scans list` renders rows at second

@@ -72,6 +72,39 @@ def test_to_writes_the_blob_to_the_url_target_and_reads_it_back(src: Path, tmp_p
     ]
 
 
+def test_to_writes_a_groups_json_footer_sidecar(src: Path, tmp_path: Path):
+    """`index --to <url>` precomputes the `.groups.json` footer beside the blob,
+    so the serverless reader (`ui/cfn`) plans range reads without a cold
+    thrift-footer parse (`find/groups.py`). Absent-safe: a reader without it
+    falls back to the blob's own footer."""
+    import json
+
+    import pyarrow.parquet as pq
+
+    from disk_tree.find.groups import GROUP_FIELDS, groups_path
+
+    root, remote = tmp_path / 'root', tmp_path / 'remote'
+    target = f'file://{remote}'
+    r = _run(['index', '-C', '-D', '-t', target, str(src)], root)
+    assert r.returncode == 0, r.stderr
+
+    blob = next(remote.glob('*.parquet'))
+    sidecar = Path(groups_path(str(blob)))
+    assert sidecar.exists()
+    doc = json.loads(sidecar.read_text())
+
+    md = pq.read_metadata(str(blob))
+    # One `groups` entry per row group, each an array in GROUP_FIELDS order; a
+    # main blob carries no coarse floor; schema leaves are the blob's columns.
+    assert [len(g) for g in doc['groups']] == [len(GROUP_FIELDS)] * md.num_row_groups
+    assert (doc['v'], doc['floor_bytes']) == (1, None)
+    assert [leaf['name'] for leaf in doc['schema'][1:]] == md.schema.names
+    # The publish announced it on stdout (the URL path, matching the `--to` target).
+    assert [l.split(' (')[0] for l in r.stdout.split('\n') if l.startswith('Scan groups: ')] == [
+        f'Scan groups: {groups_path(f"{target}/{blob.name}")}',
+    ]
+
+
 def test_low_space_warns_and_suggests(src: Path, tmp_path: Path):
     root = tmp_path / 'root'
     r = _run(['index', '-C', '-D', str(src)], root, **{LOW_SPACE_VAR: LOW})

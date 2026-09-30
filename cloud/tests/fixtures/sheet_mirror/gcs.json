@@ -1,0 +1,47 @@
+{
+  "/data/scans.json": ["2026-09-27", "2026-09-26"],
+  "/api/owners?date=2026-09-27": {
+    "scan": "2026-09-27",
+    "head": 4182,
+    "bytes": 8000000000000,
+    "objects": 123456789,
+    "users": {
+      "dave": {"b": 0, "mix": {}},
+      "carol": {"b": 1500000000000, "mix": {"1": 500000000000, "4": 1000000000000}},
+      "alice": {"b": 5000000000000, "mix": {"1": 4000000000000, "2": 999999999999.6, "3": 0.4}},
+      "bob": {"b": 1500000000000, "mix": {"1": 1500000000000}}
+    },
+    "computed": {"at": 1759000000, "ms": 2412, "groups": 12, "prefixes": 340, "index": "d1"}
+  },
+  "/api/plans/staged": {
+    "plan": {"id": 7, "name": "Staged", "note": null, "state": "open", "created_by": "alice@example.org", "created_ts": 1758800000, "closed_ts": null},
+    "items": [
+      {"prefix": "gs://marin-us-east1/checkpoints/old-run/", "note": "superseded", "added_by": "bob@example.org", "added_ts": 1758990000, "batch_id": 3},
+      {"prefix": "gs://marin-us-central2/scratch/tmp/", "note": null, "added_by": "alice@example.org", "added_ts": 1758900000, "batch_id": 2},
+      {"prefix": "gs://marin-us-central2/scratch/gone/", "note": null, "added_by": "alice@example.org", "added_ts": 1758900000, "batch_id": 2}
+    ],
+    "batches": [
+      {"id": 3, "plan_id": 7, "note": "superseded", "created_by": "bob@example.org", "created_ts": 1758990000},
+      {"id": 2, "plan_id": 7, "note": null, "created_by": "alice@example.org", "created_ts": 1758900000}
+    ],
+    "runs": [
+      {"run_id": "2026-09-27-p7/20260928T010203Z", "plan": "gs://oa-gcs-usage-dvx/sweep/runs/gcs-sweep-dry-20260928-010000", "scan": "2026-09-27", "head": 0, "exec_head": 0, "actor": "alice@example.org", "mode": "dry", "started_ts": 1759021323, "finished_ts": 1759024923, "deleted_bytes": 2100000000, "deleted_objects": 420, "skipped_gone": 0, "undo_deadline": null, "undo_state": "none", "log_dir": "gs://oa-gcs-usage-dvx/sweep/runs/gcs-sweep-dry-20260928-010000", "plan_id": 7}
+    ]
+  },
+  "/api/subtree?date=2026-09-27&path=marin-us-east1/checkpoints/old-run&w=128&h=128&depth=1": {
+    "date": "2026-09-27", "path": "marin-us-east1/checkpoints/old-run", "w": 128, "h": 128, "tier": "fine", "index": "d1", "nodes": 3, "truncated": false,
+    "tree": {"n": "old-run", "b": 734003200, "o": 12}
+  },
+  "/api/subtree?date=2026-09-27&path=marin-us-central2/scratch/tmp&w=128&h=128&depth=1": {
+    "date": "2026-09-27", "path": "marin-us-central2/scratch/tmp", "w": 128, "h": 128, "tier": "fine", "index": "d1", "nodes": 1, "truncated": false,
+    "tree": {"n": "tmp", "b": 1048576, "o": 3}
+  },
+  "/api/subtree?date=2026-09-27&path=marin-us-central2/scratch/gone&w=128&h=128&depth=1": 404,
+  "/api/sweep/jobs": {
+    "configured": true,
+    "jobs": [
+      {"job_id": "gcs-sweep-real-20260928-030000", "mode": "real", "state": "RUNNING", "created": "2026-09-28T03:00:05.123456789Z", "updated": "2026-09-28T03:10:00Z", "run_secs": 595.2, "by": "carol@example.org", "date": "2026-09-27", "buckets": ["marin-us-east1"], "region": "us-east1", "bucket_region": "us-east1", "plan": "gs://oa-gcs-usage-dvx/sweep/runs/gcs-sweep-real-20260928-030000", "last_event": "Job state is set from SCHEDULED to RUNNING", "logs": "https://console.cloud.google.com/logs/query"},
+      {"job_id": "gcs-sweep-dry-20260928-010000", "mode": "dry", "state": "SUCCEEDED", "created": "2026-09-28T01:00:00Z", "updated": "2026-09-28T02:02:03Z", "run_secs": 3600, "by": null, "date": "2026-09-27", "buckets": [], "region": "us-central1", "bucket_region": null, "plan": "gs://oa-gcs-usage-dvx/sweep/runs/gcs-sweep-dry-20260928-010000", "last_event": "Job state is set from RUNNING to SUCCEEDED", "logs": "https://console.cloud.google.com/logs/query"}
+    ]
+  }
+}

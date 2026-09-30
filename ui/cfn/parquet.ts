@@ -9,6 +9,7 @@
  *  as `<scan root>/<path>` by the caller, as the engines derive it. */
 import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet'
 import type { AsyncBuffer, FileMetaData } from 'hyparquet'
+import { compressors } from './zstd.js'
 
 /** A scan row as stored (`storage/base.py` columns, minus `uri`). */
 export interface TreeRow {
@@ -21,6 +22,10 @@ export interface TreeRow {
   n_desc: number | null
   n_children: number | null
   depth: number
+  /** Hybrid chunk pointer (`storage/hybrid.py`): a `<uuid>.parquet` basename
+   *  whose blob holds this dir's subtree, when it was chunked out (≥100K desc).
+   *  Present only on chunked blobs; `null`/absent otherwise. */
+  child_scan_id?: string | null
 }
 
 const BASE_COLS = ['path', 'size', 'mtime', 'kind', 'parent', 'n_desc', 'n_children', 'depth']
@@ -96,16 +101,22 @@ export function selectRuns(meta: FileMetaData, q: Query): Run[] {
 }
 
 const num = (v: unknown): number | null => (v == null ? null : Number(v))
+const decoder2 = new TextDecoder()
+/** A parquet string cell → JS string (hyparquet hands back `Uint8Array` for
+ *  BYTE_ARRAY columns), or null. */
+const str = (v: unknown): string | null =>
+  v == null ? null : v instanceof Uint8Array ? decoder2.decode(v) : String(v)
 
 /** The rows matching `q`, in file order (`(depth, path)`). */
 export async function readRows(file: AsyncBuffer, q: Query, metadata?: FileMetaData): Promise<TreeRow[]> {
   const meta = metadata ?? await parquetMetadataAsync(file)
   const meanMtime = hasColumn(meta, 'mtime_mean')
-  const columns = meanMtime ? [...BASE_COLS, 'mtime_mean'] : BASE_COLS
+  const chunked = hasColumn(meta, 'child_scan_id')
+  const columns = [...BASE_COLS, ...(meanMtime ? ['mtime_mean'] : []), ...(chunked ? ['child_scan_id'] : [])]
   const [lo, hi] = q.prefix ? prefixBounds(q.prefix) : [null, null]
   const out: TreeRow[] = []
   for (const { rowStart, rowEnd } of selectRuns(meta, q)) {
-    const rows = await parquetReadObjects({ file, metadata: meta, columns, rowStart, rowEnd })
+    const rows = await parquetReadObjects({ file, metadata: meta, columns, rowStart, rowEnd, compressors })
     for (const r of rows) {
       const depth = Number(r.depth)
       if (depth > q.maxDepth) continue
@@ -122,7 +133,29 @@ export async function readRows(file: AsyncBuffer, q: Query, metadata?: FileMetaD
         depth,
       }
       if (meanMtime) row.mtime_mean = num(r.mtime_mean)
+      if (chunked) row.child_scan_id = str(r.child_scan_id) || null
       out.push(row)
+    }
+  }
+  return out
+}
+
+/**
+ * `path → child_scan_id` for a hybrid blob's chunk-pointer rows (empty when the
+ * blob has no `child_scan_id` column — flat `reduce` output, or non-chunked).
+ * A chunk is a depth-1 dir of its blob (`storage/hybrid.py` splits depth-1 dirs
+ * with ≥100K descendants), so only depth-1 rows are scanned — cheap even on a
+ * multi-million-row blob (`diff._chunk_map`, read-side). */
+export async function readChunkPointers(file: AsyncBuffer, metadata?: FileMetaData): Promise<Map<string, string>> {
+  const meta = metadata ?? await parquetMetadataAsync(file)
+  const out = new Map<string, string>()
+  if (!hasColumn(meta, 'child_scan_id')) return out
+  for (const { rowStart, rowEnd } of selectRuns(meta, { maxDepth: 1 })) {
+    const rows = await parquetReadObjects({ file, metadata: meta, columns: ['path', 'child_scan_id', 'depth'], rowStart, rowEnd, compressors })
+    for (const r of rows) {
+      if (Number(r.depth) !== 1) continue
+      const ref = str(r.child_scan_id)
+      if (ref) out.set(String(r.path), ref)
     }
   }
   return out

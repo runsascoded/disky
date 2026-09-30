@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { ThemeProvider, CssBaseline, Tooltip } from '@mui/material'
 import { HotkeysProvider, ShortcutsModal, Omnibar, SequenceModal, LookupModal } from 'use-kbd'
 import 'use-kbd/styles.css'
@@ -11,6 +11,7 @@ import { RecentList } from './components/RecentList'
 import { CompareView } from './components/CompareView'
 import { BrowsePage } from './components/BrowsePage'
 import { AccessPage } from './components/AccessPage'
+import { StagedPage } from './components/StagedPage'
 import { Gate } from './auth'
 import './App.scss'
 import type { ReactNode } from 'react'
@@ -42,11 +43,19 @@ function App() {
                 (specs/done/pages-auth.md); elsewhere `Gate` is a pass-through. */}
             <Gate>
             <Routes>
+              {/* Home is the scheme-agnostic union of every scan (a laptop's
+                  local paths, buckets, …); `/r2`, `/gcs` scope it to one cloud. */}
               <Route path="/" element={<ScanList />} />
+              <Route path="/scans" element={<Navigate to="/" replace />} />
+              <Route path="/r2" element={<ScanList scheme="r2" />} />
               <Route path="/access" element={<AccessPage />} />
+              <Route path="/staged" element={<StagedPage />} />
               <Route path="/file/*" element={<ScanDetails />} />
               <Route path="/s3" element={<S3BucketList />} />
               <Route path="/s3/*" element={<ScanDetails />} />
+              {/* Per-scheme landing for any other cloud (scans-derived union
+                  treemap; s3 keeps its live bucket lister above). */}
+              <Route path="/gcs" element={<ScanList scheme="gcs" />} />
               <Route path="/gcs/*" element={<ScanDetails />} />
               <Route path="/r2/*" element={<ScanDetails />} />
               <Route path="/ssh/*" element={<ScanDetails />} />

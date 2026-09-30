@@ -27,7 +27,6 @@ from disk_tree.find.aggregate_duckdb import DEFAULT_PARTITION_FILES
 
 
 @cli.command('import')
-@option('-E', '--coarse-exp', default=24, help='Tiers: the `coarse` floor exponent — F = 2^(round(log2 total_size) − E) (default 24: 256 MiB at 3 PiB)')
 @option('-e', '--engine', type=Choice(['pandas', 'duckdb', 'stream']), default='pandas', help='Aggregation engine: `pandas` (in-memory; small), `duckdb` (out-of-core; big), or `stream` (O(depth) over sorted listings; biggest)')
 @option('-l', '--listing', 'listings', required=True, multiple=True, help='Listing parquet glob(s) — raw / SII / S3-Inventory; repeatable, earlier sources win per bucket')
 @option('-A', '--max-col', 'max_cols', multiple=True, help='DuckDB engine only: a `--side` column folded through the cascade as a subtree MAX (e.g. `last_ts`); repeatable')
@@ -36,11 +35,10 @@ from disk_tree.find.aggregate_duckdb import DEFAULT_PARTITION_FILES
 @option('-d', '--db', 'db_path', default=None, help='DuckDB engine only: run the cascade in a file-backed database (a `.duckdb` path, kept; or a directory to create a temporary one in). Inert: every cascade table is TEMP and spills to `--temp-dir` under `--memory-limit` from an in-memory database too. Default: in-memory.')
 @option('-G', '--groups', is_flag=True, help='Tiers: also write each tier\'s group manifest `<tier>.groups.json` beside it — the footer precomputed as compact JSON (schema + per-row-group stats/offsets) for a serverless range reader (spec mgu-engine-audit-2026-09-07.md §4)')
 @option('-H', '--size-hist', is_flag=True, help='DuckDB engine only: emit `size_hist_n` / `size_hist_bytes` — per path, a log2 histogram (41 bins) of descendant files by size, counts and bytes per bin')
-@option('-i', '--tiers', default=None, help='Also write layer-2 as index tiers (`dirs,objects,coarse`, any subset) under `--tiers-dir` as `<scheme>-<bucket>.<tier>.parquet`: sorted, small row groups, floor in the parquet metadata (spec mgu-scale-unification.md C). duckdb/stream engines only.')
+@option('-i', '--tiers', is_flag=False, flag_value='path,bysize', default=None, help='Also cut the path store\'s sorts from the layer-2 (spec path-store.md §4.1) under `--tiers-dir` as `<scheme>-<bucket>.<tier>.parquet`: `path` (every row, `(depth, path)`) and `bysize` (every row, `(⌊log2 size⌋ desc, path)`), 8K-row groups, `tier`/`sort` in the parquet metadata. Bare `-i` = both; `-i path` / `-i bysize` for one. duckdb/stream engines only.')
 @option('-j', '--jobs', default=1, help='Stream engine only: partition the keyspace into N ranges streamed by parallel worker processes (0 = all cores). Output is byte-identical for any value.')
 @option('-L', '--label', default=None, help='DuckDB engine only: attribution label parquet (`prefix` + label columns). Every row is labeled by its deepest matching prefix and the labels become extra group keys — one output row per (path, labels); rows under no prefix get NULLs. Default: none (one row per path).')
 @option('-c', '--label-cols', default=None, help='Comma-separated label columns to carry from `--label` (default: every column but `prefix`)')
-@option('-F', '--coarse-floor', 'coarse_floor', default=None, type=int, help='Tiers: pin the `coarse` floor to this many bytes instead of deriving it from this import\'s total (a fleet imports per bucket but plans tiers with one fleet-wide floor: pass `2^(round(log2 fleet_total) − E)`). Recorded as `floor_source = explicit`')
 @option('-k', '--partition-depth', default=0, help='DuckDB engine only: cascade each distinct depth-K *directory* prefix separately (peak memory ∝ the largest cascade, not the listing); rows at depth ≤ K go to the top cascade; 0 = one cascade. Output is byte-identical for any value.')
 @option('-P', '--partition-files', default=None, type=int, help=f'DuckDB engine only, with `-k`: pack partitions (in key order) into cascades of up to N files — the memory knob (~4.4 KB/file with every extension on); a key over N is split into its sub-directories, recursively, until it fits or is a flat dir of N+ files; 0 = one cascade per key, no splitting. Default {DEFAULT_PARTITION_FILES:,}')
 @option('-n', '--threads', default=8, help='DuckDB engine only: DuckDB `threads` (default 8: fewer → fewer concurrent per-operator buffers; on a big node, more → a faster final sort + parquet write, the largest statement at scale)')
@@ -50,7 +48,7 @@ from disk_tree.find.aggregate_duckdb import DEFAULT_PARTITION_FILES
 @option('-O', '--tiers-dir', default=None, help='Where `--tiers` go (default: `--out-dir`)')
 @option('-p', '--pivot-sum', 'pivot_sums', multiple=True, help='Emit per-value byte-sum columns `sum_<col>_<v>` for this layer-1 column (e.g. storage_class_id); repeatable')
 @option('-r', '--row-group-rows', default=8192, help='Tiers: max rows per parquet row group (the HTTP range-read unit)')
-@option('-S', '--sort-variant', 'sort_variants', multiple=True, help='Tiers: extra sorted copies of the dirs/coarse tiers led by these comma-separated columns (e.g. `usr` → `(usr, depth, path)`, file `…dirs-by-usr.parquet`); repeatable')
+@option('-S', '--sort-variant', 'sort_variants', multiple=True, help='Tiers: extra sorted copies of each tier led by these comma-separated columns (e.g. `usr` → `(usr, depth, path)`, file `…path-by-usr.parquet`); repeatable')
 @option('-s', '--scheme', default='gcs', help='URI scheme for the scan root (gcs / s3 / r2)')
 @option('-T', '--temp-dir', default=None, help='DuckDB spill directory (duckdb engine only; the stream engine is sort-free). Default: fresh per-invocation temp dir (safe under concurrent imports).')
 @option('-t', '--time', 'time_str', default=None, help='Snapshot time (ISO 8601) recorded on each Scan; default: now')
@@ -59,8 +57,6 @@ from disk_tree.find.aggregate_duckdb import DEFAULT_PARTITION_FILES
 def import_cmd(
     max_cols: tuple[str, ...],
     side: str | None,
-    coarse_exp: int,
-    coarse_floor: int | None,
     engine: str,
     listings: tuple[str, ...],
     buckets: tuple[str, ...],
@@ -114,8 +110,7 @@ def import_cmd(
         if not (tiers_dir or out_dir):
             raise ValueError("--tiers needs --tiers-dir (or --out-dir)")
         tier_opts = TierOpts(
-            tiers=parse_tiers(tiers), out_dir=tiers_dir or out_dir, coarse_exp=coarse_exp,
-            coarse_floor=coarse_floor, row_group_rows=row_group_rows,
+            tiers=parse_tiers(tiers), out_dir=tiers_dir or out_dir, row_group_rows=row_group_rows,
             sort_variants=tuple(tuple(c for c in v.split(',') if c) for v in sort_variants),
             groups=groups,
         )
@@ -143,9 +138,6 @@ class TierOpts:
     """`--tiers` and friends, resolved (see `find/tiers.py`)."""
     tiers: tuple[str, ...]
     out_dir: str
-    coarse_exp: int = 24
-    #: Absolute coarse floor (bytes); None derives it from the import's total.
-    coarse_floor: int | None = None
     row_group_rows: int = 8192
     sort_variants: tuple[tuple[str, ...], ...] = ()
     #: Write `<tier>.groups.json` beside each tier (`find/groups.py`).
@@ -259,8 +251,7 @@ def import_bucket(
                 os.makedirs(tier_opts.out_dir, exist_ok=True)
                 written = write_tiers(
                     out_parquet, stem=os.path.join(tier_opts.out_dir, f'{scheme}-{bucket}'),
-                    tiers=tier_opts.tiers, coarse_exp=tier_opts.coarse_exp, coarse_floor_bytes=tier_opts.coarse_floor,
-                    row_group_rows=tier_opts.row_group_rows, sort_variants=tier_opts.sort_variants,
+                    tiers=tier_opts.tiers, row_group_rows=tier_opts.row_group_rows, sort_variants=tier_opts.sort_variants,
                     con=con, groups=tier_opts.groups,
                 )
                 for path, n in written.items():

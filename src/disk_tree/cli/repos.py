@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
 
 from click import argument, option
@@ -51,12 +52,16 @@ class RepoState:
         return self.recoverable and self.untracked == 0
 
 
+def _du_argv(root: str) -> list[str]:
+    """The `du` subprocess: this interpreter's `python -m disk_tree`, so it works
+    wherever the package is importable (a bare `disk-tree` needs the venv's bin
+    on `PATH`, which a LaunchAgent or another project's shell may not have)."""
+    return [sys.executable, '-m', 'disk_tree', 'du', root, '-d', '3', '-n', '0', '-j']
+
+
 def _repo_sizes(root: str) -> dict[str, int]:
     """path (abs) → size, for every dir under `root` in the freshest scan."""
-    out = subprocess.run(
-        ['disk-tree', 'du', root, '-d', '3', '-n', '0', '-j'],
-        capture_output=True, text=True,
-    )
+    out = subprocess.run(_du_argv(root), capture_output=True, text=True)
     if out.returncode != 0:
         raise SystemExit(out.stderr.strip() or 'no scan covers that root')
     sizes: dict[str, int] = {}

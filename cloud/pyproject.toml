@@ -1,0 +1,65 @@
+[project]
+name = "dt-cloud"
+version = "0.1.0"
+description = "Per-user attribution and reporting for Marin GCS storage"
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.1",
+    "duckdb>=1.0",
+    "fsspec>=2024.0.0",
+    "gcsfs>=2024.0.0",
+    "google-cloud-storage>=2.14",
+    "pandas>=2.0",
+    "pyarrow>=16.0",
+    "pyyaml>=6.0",
+    # `dt-cloud digest` drives Slack via thrds; pinned to the `py` branch (has
+    # editable image blocks + per-message sender) at the SHA gcs runs in prod.
+    # GitHub tarball (not git+…) so `pip install ./marin` works in the git-less
+    # python:slim image. Bump the SHA to update.
+    "thrds @ https://github.com/runsascoded/thrds/archive/70548988ac6827a81a770b938b36057f67ae0e3d.tar.gz",
+    # The shared engine: `dt_cloud` builds on `disk_tree` (listing normalization,
+    # aggregation, backends). Workspace member of the parent repo (one lockfile;
+    # specs/union-of-roots.md). The `gcs` + `s3` extras are what the overlay's
+    # jobs read and write through (`gs://` via gcsfs, `r2://`/CAIOS via s3fs +
+    # boto3), so an image built from this package alone has them.
+    "disk-tree[gcs,s3]",
+]
+
+[project.optional-dependencies]
+# The over-time index producer (`dt_cloud.overtime`) consolidates via pyrmts'
+# generic multiscan kernel. Optional — kept out of the base deps so the daily
+# scan image (git-less python:slim, tarball deps) is unaffected; installed only
+# where the over-time build runs (`pip install ./cloud[overtime]`). Bump the SHA
+# to update. `pyrmts.overtime` imports are lazy (inside the CLI command), so the
+# base CLI works without this extra.
+overtime = [
+    "pyrmts @ git+https://github.com/runsascoded/pyrmts@71cbfd5#subdirectory=python/pyrmts",
+    "pyrmts-engine[duckdb] @ git+https://github.com/runsascoded/pyrmts@71cbfd5#subdirectory=python/pyrmts_engine",
+]
+wandb = ["wandb>=0.19"]
+s3 = ["boto3>=1.34"]  # CoreWeave S3 (CAIOS) mark & sweep executor; `publish-r2` (R2 S3 API)
+sheets = ["gspread>=6.0"]  # `sheet-push` → Google Sheets (ADC auth)
+plot = ["matplotlib>=3.8"]  # `dt-cloud digest` OP mosaic (digest_plot)
+
+[project.scripts]
+dt-cloud = "dt_cloud.cli:main"
+
+[dependency-groups]
+test = ["pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+disk-tree = { workspace = true }
+
+[tool.hatch.metadata]
+# the direct-URL `thrds` pin above
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dt_cloud"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

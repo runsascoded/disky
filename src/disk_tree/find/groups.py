@@ -11,19 +11,23 @@ parquet, holding exactly what a read needs and nothing else:
   leaf per column (physical type, repetition, converted type, name);
 - ``groups``: one compact array per row group, in this order::
 
-    [rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json]
+    [rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json, b_min]
 
   — the pruning stats (``depth`` / ``path`` / size / user column min-max, the
-  group's absolute row span) and ``rg_json``, the stripped ``RowGroup`` the
-  reader revives into a subset ``FileMetaData``::
+  group's absolute row span), ``rg_json``, the stripped ``RowGroup`` the
+  reader revives into a subset ``FileMetaData``, and ``b_min`` (appended:
+  with ``b_max`` it is a ``bysize`` tier's bucket range per group, spec
+  ``path-store.md`` §1.3; D1's ``index_row_groups`` has no column for it, so
+  it is sidecar-only, and the positional readers ignore the tail)::
 
     rg_json = [num_rows, codec, [[data_page_offset, total_compressed_size, dictionary_page_offset|0], …]]
 
   one triple per leaf column in schema order (hyparquet reads nothing else
   from a column chunk);
 - ``floor_bytes``: a coarse tier's floor, from the parquet key-value metadata
-  (``floor_bytes``, as :func:`disk_tree.find.tiers.write_tiers` writes it, or
-  mgu's ``coarse_floor``), so a planner can pick tiers without touching a file.
+  (``floor_bytes``, or mgu's ``coarse_floor``), so a planner can pick tiers
+  without touching a file; ``null`` for the path store's sorts, which have
+  no floor (every byte floor is a prefix of ``bysize``).
 
 This is the wire format of mgu's ``index_footer.py`` (``groups_blob``), owned
 here so the two Cloudflare readers — mgu's ``_lib/index.ts`` ``openBlob`` and
@@ -48,8 +52,9 @@ if TYPE_CHECKING:
 
 GROUPS_SUFFIX = '.groups.json'
 GROUPS_VERSION = 1
-#: Field order of each ``groups`` array entry — mgu's ``index_row_groups`` column order.
-GROUP_FIELDS = ('rg', 'd_min', 'd_max', 'p_min', 'p_max', 'b_max', 'u_min', 'u_max', 'row_start', 'row_end', 'rg_json')
+#: Field order of each ``groups`` array entry — mgu's ``index_row_groups`` column
+#: order, then the appended ``b_min``.
+GROUP_FIELDS = ('rg', 'd_min', 'd_max', 'p_min', 'p_max', 'b_max', 'u_min', 'u_max', 'row_start', 'row_end', 'rg_json', 'b_min')
 #: Size column candidates, first present wins: DT layer-2 / tiers, then mgu's path index.
 SIZE_COLS = ('size', 'b')
 #: The user-slice column (item B's ``--label`` default), when the tier has one.
@@ -147,7 +152,7 @@ def group_rows(md: "pq.FileMetaData") -> list[dict]:
         cols = [[cc.data_page_offset, cc.total_compressed_size, cc.dictionary_page_offset or 0] for cc in chunks]
         d_min, d_max = _minmax(chunks[di].statistics)
         p_min, p_max = _minmax(chunks[pi].statistics)
-        _, b_max = _minmax(chunks[bi].statistics)
+        b_min, b_max = _minmax(chunks[bi].statistics)
         u_min, u_max = _minmax(chunks[ui].statistics) if ui is not None else (None, None)
         rows.append({
             'rg': g,
@@ -157,6 +162,7 @@ def group_rows(md: "pq.FileMetaData") -> list[dict]:
             'u_min': u_min, 'u_max': u_max,
             'row_start': row_start, 'row_end': row_start + n,
             'rg_json': json.dumps([n, codecs.pop(), cols], separators=(',', ':')),
+            'b_min': int(b_min),
         })
         row_start += n
     return rows
@@ -190,3 +196,18 @@ def write_groups(parquet_path: str) -> GroupsStats:
     out = groups_path(parquet_path)
     blobfs.write_text(out, text)
     return GroupsStats(path=out, n_groups=len(rows), n_bytes=len(text.encode()))
+
+
+def write_groups_sidecar(parquet_path: str) -> GroupsStats | None:
+    """Emit the ``.groups.json`` footer beside a freshly-published blob, so the
+    serverless reader (``ui/cfn``) plans range reads without a cold thrift-footer
+    parse. It is a pure *optimization*: the blob still reads through its own
+    footer if the sidecar is absent, so a failure here (a blob without row-group
+    stats, a transient write error) is non-fatal — warn and return ``None``
+    rather than abort a publish whose scan blob + manifest are already valid."""
+    try:
+        return write_groups(parquet_path)
+    except Exception as e:
+        from utz import err
+        err(f"groups.json sidecar skipped for {parquet_path}: {type(e).__name__}: {e}")
+        return None

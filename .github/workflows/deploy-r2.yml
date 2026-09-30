@@ -1,0 +1,118 @@
+# r2.rbw.sh CI + deploy (the `cloud` branch's own pipeline; the repo's `ci.yml`
+# covers `main` / the legacy `ui/` app). On every push to `cloud`: run the
+# hermetic test suites, and only on green deploy the public union-of-roots Map
+# to the `disk-tree-demo` Pages project (r2.rbw.sh), then smoke it.
+#
+# Repo secrets this needs (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN   — a token with Pages:Edit on the RAC account
+#   CLOUDFLARE_ACCOUNT_ID  — the RAC account id
+# The store-read creds (STORE_ACCESS_KEY_ID/SECRET/ENDPOINT) are already
+# Pages *project* secrets on the production env, so the deploy itself needs
+# only the two above.
+name: r2.rbw.sh
+
+on:
+  push:
+    branches: [cloud, dev]
+    paths-ignore: ['specs/**']   # spec-only commits don't need a test run + redeploy
+  pull_request:
+    branches: [cloud]
+
+concurrency:
+  group: r2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: site (typecheck + unit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      # `tsc -b` builds the referenced packages (@rdub/treemap, @disk-tree/react)
+      # too, so this typechecks the whole site + widget graph in one pass.
+      - name: Typecheck (site + packages)
+        run: pnpm -C site exec tsc -b --noEmit
+      - name: Unit tests (Functions + client)
+        run: pnpm -C site test
+
+  py:
+    name: engine + dt_cloud (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      # The root wheel force-includes ui/dist; the editable install wants it present.
+      - run: mkdir -p ui/dist
+      # One workspace env (engine + `cloud/` overlay, one lockfile): every
+      # package, extra and group, so both suites run against the same pins.
+      - run: uv sync --frozen --all-packages --all-extras --all-groups
+      - name: disk_tree engine tests (incl. e2e backends)
+        run: uv run pytest tests/ -q
+      - name: dt_cloud tests
+        run: cd cloud && uv run pytest tests/ -q
+
+  deploy:
+    # `cloud` → disk-tree-demo (r2.rbw.sh); `dev` → disk-tree-demo-dev (dev.r2.rbw.sh).
+    # Both read the same public index; dev is the pre-prod staging mirror.
+    name: deploy
+    needs: [web, py]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/cloud' || github.ref == 'refs/heads/dev')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Select target (prod vs dev)
+        id: t
+        run: |
+          if [ "${{ github.ref_name }}" = "cloud" ]; then
+            echo "project=disk-tree-demo"      >> "$GITHUB_OUTPUT"
+            echo "config=wrangler.r2.toml"     >> "$GITHUB_OUTPUT"
+            echo "branch=main"                 >> "$GITHUB_OUTPUT"
+            echo "host=r2.rbw.sh"              >> "$GITHUB_OUTPUT"
+          else
+            echo "project=disk-tree-demo-dev"  >> "$GITHUB_OUTPUT"
+            echo "config=wrangler.dev.toml"    >> "$GITHUB_OUTPUT"
+            echo "branch=dev"                  >> "$GITHUB_OUTPUT"
+            echo "host=dev.r2.rbw.sh"          >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build (r2 / public)
+        run: cd site && VITE_STORE=r2 VITE_AUTH_MODE=public pnpm build
+      - name: Deploy to Cloudflare Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd site
+          # Pages rejects a custom config path (-c); swap the target config in as wrangler.toml.
+          cp "${{ steps.t.outputs.config }}" wrangler.toml
+          npx wrangler pages deploy dist --project-name "${{ steps.t.outputs.project }}" --branch "${{ steps.t.outputs.branch }}" --commit-dirty=true
+      - name: Smoke test (served + index reads)
+        run: |
+          set -euo pipefail
+          host="${{ steps.t.outputs.host }}"
+          root=$(curl -fsS -o /dev/null -w '%{http_code}' "https://$host/")
+          echo "GET https://$host/ → $root"
+          test "$root" = "200"
+          # The map's first paint is a subtree read of the newest scan; assert it
+          # resolves for today (the daily ingestion lands ~07:15 UTC) or yesterday.
+          for d in "$(date -u +%F)" "$(date -u -d yesterday +%F 2>/dev/null || date -u -v-1d +%F)"; do
+            code=$(curl -fsS -o /dev/null -w '%{http_code}' "https://$host/api/subtree?date=$d&w=1280&h=800" || true)
+            echo "GET /api/subtree?date=$d → $code"
+            [ "$code" = "200" ] && exit 0
+          done
+          echo "no subtree served for today or yesterday" >&2
+          exit 1

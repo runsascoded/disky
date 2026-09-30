@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { DEFAULT_PALETTE } from '@rdub/treemap'
 import { pow10 } from './stats'
@@ -24,21 +24,52 @@ export interface Series<T> {
   label?: string
   color?: string
   points: T[]
+  /** Per-series area fill; overrides the chart-wide `area`. */
+  area?: boolean
+  /** The part of the line at x < this is dashed — e.g. a total drawn before
+   *  every component existed (specs/root-geneses.md). */
+  dashBeforeX?: number
+  /** Draw per-point dots (default true). */
+  dots?: boolean
+  /** Line stroke width (default 1.75). */
+  strokeWidth?: number
+  /** With `yFrom: 'data'`, only series marked `fit` set the y-range (when any
+   *  is) — e.g. a stack's total, so "fit" zooms to the stack's top edge and the
+   *  bands below are clipped rather than the whole stack shrunk to fit. */
+  fit?: boolean
+  /** `false`: listed in the tooltip but not drawn — a total beside per-part
+   *  lines it would dwarf. */
+  plot?: boolean
 }
 
 export interface Annotation {
   x: number
   y: number
+  /** A band callout: the label sits centred between `y0` and `y` (inside the
+   *  band) instead of beside the point, and is skipped when the band is too
+   *  thin on screen to hold it. */
+  y0?: number
   label: string
   below?: boolean
 }
+
+/** A band callout needs this many px of band to sit inside. */
+const MIN_BAND_PX = 13
 
 export interface TimeSeriesProps<T> {
   series: Series<T>[]
   getX: (p: T) => number
   getY: (p: T) => number
+  /** A point's baseline: with it, a series is a BAND from `getY0` up to
+   *  `getY` (stacked areas: each series' y0 = the running sum below it), the
+   *  tooltip shows the band's height, and the y-range still spans `getY`. */
+  getY0?: (p: T) => number
   /** Format an X tick (default: `new Date(x).toLocaleDateString()`). */
   formatX?: (x: number) => string
+  /** Format the X value in the hover tooltip; defaults to `formatX`. Lets the
+   *  tooltip show finer granularity (e.g. an intra-day scan's time) than the
+   *  axis ticks, which stay coarse. */
+  formatTipX?: (x: number) => string
   /** Format a Y tick / tooltip value. */
   formatY?: (y: number) => string
   /** `linear` (default) or `log`. */
@@ -107,7 +138,9 @@ export function TimeSeries<T>({
   series,
   getX,
   getY,
+  getY0,
   formatX = x => new Date(x).toLocaleDateString(),
+  formatTipX,
   formatY = y => y.toLocaleString('en-US'),
   yScale = 'linear',
   yFrom = 'zero',
@@ -125,6 +158,9 @@ export function TimeSeries<T>({
   height,
 }: TimeSeriesProps<T>) {
   const wrapRef = useRef<HTMLDivElement>(null)
+  // Per-instance clip id (several charts share a page); `useId`'s delimiters
+  // aren't valid in a `url(#…)` reference.
+  const clipId = 'dt-ts-clip-' + useId().replace(/\W/g, '')
   const [dims, setDims] = useState({ w: 0, h: 0 })
 
   // Measure synchronously first — a ResizeObserver's initial delivery can be
@@ -144,20 +180,23 @@ export function TimeSeries<T>({
   const { xMin, xMax, yMin, yMax } = useMemo(() => {
     const xs: number[] = []
     const ys: number[] = []
-    for (const s of series) for (const p of s.points) {
-      xs.push(getX(p))
-      ys.push(getY(p))
-    }
+    const fit = yScale === 'linear' && yFrom === 'data'
+    // Fitting: the `fit`-marked series set the y-range when any is marked.
+    const fitTo = fit && series.some(s => s.fit) ? series.filter(s => s.fit) : series
+    for (const s of series) for (const p of s.points) xs.push(getX(p))
+    for (const s of fitTo) for (const p of s.points) ys.push(getY(p))
     if (xs.length === 0) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
     const yMinRaw = Math.min(...ys)
     const yMaxRaw = Math.max(...ys)
-    const fit = yScale === 'linear' && yFrom === 'data'
     const pad = fit ? Math.max(yMaxRaw - yMinRaw, Math.abs(yMaxRaw) * 0.01) * 0.05 : 0
+    // Zero-anchored: the axis still spans below 0 when a series goes negative
+    // (a Δ trace), padded like the top.
+    const below = yMinRaw < 0 ? yMinRaw * 1.05 : 0
     return {
       xMin: Math.min(...xs),
       xMax: Math.max(...xs),
-      yMin: yScale === 'log' ? Math.max(1, yMinRaw) : fit ? yMinRaw - pad : 0,
-      yMax: fit ? yMaxRaw + pad : yMaxRaw > 0 ? yMaxRaw * 1.05 : 1,
+      yMin: yScale === 'log' ? Math.max(1, yMinRaw) : fit ? yMinRaw - pad : below,
+      yMax: fit ? yMaxRaw + pad : yMaxRaw > 0 ? yMaxRaw * 1.05 : yMaxRaw < 0 ? 0 : 1,
     }
   }, [series, getX, getY, yScale, yFrom])
 
@@ -206,6 +245,18 @@ export function TimeSeries<T>({
   const dragRef = useRef<{ x0: number; x1: number } | null>(null)
   const [drag, setDragState] = useState<{ x0: number; x1: number } | null>(null)
   const setDrag = (d: { x0: number; x1: number } | null) => { dragRef.current = d; setDragState(d) }
+  // A drag that starts inside the shown window SLIDES it (same width in points,
+  // clamped to the data) instead of brushing a new one; a drag that starts
+  // outside brushes as before. Held in point indices so the window keeps its
+  // point count while the x spacing varies. (Upstreamed from mgu `gcs`.)
+  const slideRef = useRef<{ i0: number; span: number; start: number } | null>(null)
+  const xsSorted = useMemo(() => [...allXs].sort((a, b) => a - b), [allXs])
+  const idxOf = (x: number): number => {
+    let best = 0
+    for (let i = 1; i < xsSorted.length; i++) if (Math.abs(xsSorted[i] - x) < Math.abs(xsSorted[best] - x)) best = i
+    return best
+  }
+  const inWindow = (x: number | null): boolean => x != null && !!xWindow && x >= xWindow[0] && x <= xWindow[1]
   const svgRef = useRef<SVGSVGElement>(null)
   const xAt = (clientX: number): number | null => {
     const el = svgRef.current
@@ -215,13 +266,39 @@ export function TimeSeries<T>({
     const x = xAt(e.clientX)
     setHoverX(x)
     const d = dragRef.current
-    if (d && x != null && x !== d.x1) setDrag({ x0: d.x0, x1: x })
+    if (!d || x == null) return
+    const s = slideRef.current
+    if (s) {
+      // Sliding: shift the fixed-span window by the pointer's index delta.
+      const i0 = Math.max(0, Math.min(xsSorted.length - 1 - s.span, s.i0 + (idxOf(x) - s.start)))
+      const x0 = xsSorted[i0]
+      if (x0 !== d.x0) setDrag({ x0, x1: xsSorted[i0 + s.span] })
+    } else if (x !== d.x1) setDrag({ x0: d.x0, x1: x })
   }
   const onDown = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!onBrush || e.button !== 0) return
     e.preventDefault() // no text selection while dragging
     const x = xAt(e.clientX)
     if (x == null) return
+    // A press inside the current window slides it (keeps its point span); a
+    // press outside brushes a fresh window.
+    if (inWindow(x) && xWindow && xsSorted.length > 1) {
+      const i0 = idxOf(xWindow[0])
+      const span = Math.max(1, idxOf(xWindow[1]) - i0)
+      slideRef.current = { i0, span, start: idxOf(x) }
+      setDrag({ x0: xsSorted[i0], x1: xsSorted[i0 + span] })
+      window.addEventListener('mouseup', (up: MouseEvent) => {
+        const s = slideRef.current
+        const d = dragRef.current
+        slideRef.current = null
+        setDrag(null)
+        if (!s || !d) return
+        const xi = idxOf(xAt(up.clientX) ?? x)
+        if (xi === s.start) onPickX?.(x) // a click inside the window is still a pick
+        else onBrush(d.x0, d.x1)
+      }, { once: true })
+      return
+    }
     setDrag({ x0: x, x1: x })
     // Commit on the release wherever it lands (a drag often ends past the
     // plot's edge), from the pointer's own x rather than the last move.
@@ -243,7 +320,7 @@ export function TimeSeries<T>({
       return {
         color: s.color ?? DEFAULT_COLORS[i % DEFAULT_COLORS.length],
         label: s.label ?? s.key,
-        y: pt ? getY(pt) : null,
+        y: pt ? getY(pt) - (getY0 ? getY0(pt) : 0) : null,
       }
     })
 
@@ -264,7 +341,7 @@ export function TimeSeries<T>({
           // With a brush, clicks resolve in mouseup (a zero-width drag) — a
           // separate click handler would fire the pick twice.
           onClick={onPickX && !onBrush ? () => { if (hoverX != null) onPickX(hoverX) } : undefined}
-          style={{ display: 'block', cursor: drag ? 'col-resize' : onBrush ? 'crosshair' : onPickX ? 'pointer' : undefined, userSelect: 'none' }}
+          style={{ display: 'block', cursor: drag ? (slideRef.current ? 'grabbing' : 'col-resize') : onBrush ? (inWindow(hoverX) ? 'grab' : 'crosshair') : onPickX ? 'pointer' : undefined, userSelect: 'none' }}
         >
           {/* Window band (the highlighted x-range, or the drag in progress) */}
           {band && band[1] > band[0] && (
@@ -289,6 +366,14 @@ export function TimeSeries<T>({
               ))}
             </g>
           )}
+          {/* Series + callouts stay inside the plot: a fitted y-range clips
+              whatever falls below it (a stack's lower bands) instead of
+              painting over the axis. */}
+          <defs>
+            <clipPath id={clipId}>
+              <rect x={PAD.left} y={PAD.top} width={plotW} height={plotH} />
+            </clipPath>
+          </defs>
           {/* Y grid + ticks */}
           {yTickVals.map((y, i) => (
             <g key={`y${i}`}>
@@ -297,7 +382,7 @@ export function TimeSeries<T>({
                 x2={PAD.left + plotW}
                 y1={yToPx(y)}
                 y2={yToPx(y)}
-                stroke="var(--dt-ts-grid, rgba(255,255,255,0.08))"
+                stroke={y === 0 && yMin < 0 ? 'var(--dt-ts-axis, rgba(255,255,255,0.2))' : 'var(--dt-ts-grid, rgba(255,255,255,0.08))'}
               />
               <text
                 x={PAD.left - 6}
@@ -360,21 +445,30 @@ export function TimeSeries<T>({
             </text>
           )}
           {/* Series */}
+          <g clipPath={`url(#${clipId})`}>
           {series.map((s, si) => {
-            if (s.points.length === 0) return null
+            if (s.points.length === 0 || s.plot === false) return null
             const color = s.color ?? DEFAULT_COLORS[si % DEFAULT_COLORS.length]
             const sortedPts = [...s.points].sort((a, b) => getX(a) - getX(b))
-            const linePath = sortedPts
-              .map((p, i) => `${i === 0 ? 'M' : 'L'} ${xToPx(getX(p))} ${yToPx(getY(p))}`)
-              .join(' ')
-            const areaPath = area
-              ? `${linePath} L ${xToPx(getX(sortedPts[sortedPts.length - 1]))} ${PAD.top + plotH} L ${xToPx(getX(sortedPts[0]))} ${PAD.top + plotH} Z`
-              : null
+            const seg = (pts: T[]) => pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xToPx(getX(p))} ${yToPx(getY(p))}`).join(' ')
+            const linePath = seg(sortedPts)
+            // A band's lower edge is its baseline, walked back; a plain area
+            // drops to the axis.
+            const base = getY0
+              ? [...sortedPts].reverse().map(p => `L ${xToPx(getX(p))} ${yToPx(getY0(p))}`).join(' ')
+              : `L ${xToPx(getX(sortedPts[sortedPts.length - 1]))} ${PAD.top + plotH} L ${xToPx(getX(sortedPts[0]))} ${PAD.top + plotH}`
+            const areaPath = (s.area ?? area) ? `${linePath} ${base} Z` : null
+            // `dashBeforeX`: the line up to (and joining) the first point at or
+            // past it is dashed; the rest solid.
+            const cut = s.dashBeforeX != null ? sortedPts.findIndex(p => getX(p) >= s.dashBeforeX!) : -1
+            const dashed = cut > 0 ? seg(sortedPts.slice(0, cut + 1)) : null
+            const solid = cut > 0 ? seg(sortedPts.slice(cut)) : linePath
             return (
               <g key={s.key}>
-                {areaPath && <path d={areaPath} fill={color} fillOpacity={0.15} />}
-                <path d={linePath} fill="none" stroke={color} strokeWidth={1.75} />
-                {sortedPts.map((p, i) => (
+                {areaPath && <path d={areaPath} fill={color} fillOpacity={getY0 ? 0.35 : 0.15} />}
+                {dashed && <path d={dashed} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} strokeDasharray="4 4" />}
+                <path d={solid} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} />
+                {(s.dots ?? true) && sortedPts.map((p, i) => (
                   <circle
                     key={i}
                     cx={xToPx(getX(p))}
@@ -386,20 +480,29 @@ export function TimeSeries<T>({
               </g>
             )
           })}
+          </g>
           {/* Annotations: a haloed label beside the point, leaning away from
-              the nearest side edge */}
+              the nearest side edge; a band callout (`y0`) sits inside the
+              band, centred, and only where the band is tall enough */}
           {annotations?.map((a, i) => {
             const px = xToPx(a.x)
-            const py = yToPx(a.y)
             const anchor = px < PAD.left + plotW * 0.15 ? 'start' : px > PAD.left + plotW * 0.85 ? 'end' : 'middle'
             const dx = anchor === 'start' ? 5 : anchor === 'end' ? -5 : 0
-            const dy = a.below ? 14 : -7
+            let py: number
+            if (a.y0 != null) {
+              const top = Math.max(PAD.top, Math.min(yToPx(a.y), yToPx(a.y0)))
+              const bot = Math.min(PAD.top + plotH, Math.max(yToPx(a.y), yToPx(a.y0)))
+              if (bot - top < MIN_BAND_PX) return null
+              py = (top + bot) / 2
+            } else py = yToPx(a.y) + (a.below ? 14 : -7)
             return (
               <text
                 key={`a${i}`}
                 x={px + dx}
-                y={py + dy}
+                y={py}
                 textAnchor={anchor}
+                dominantBaseline={a.y0 != null ? 'middle' : undefined}
+                clipPath={a.y0 != null ? `url(#${clipId})` : undefined}
                 fontSize={10.5}
                 fontWeight={600}
                 fill="var(--dt-ts-anno-ink, #e6e6ea)"
@@ -443,7 +546,7 @@ export function TimeSeries<T>({
             whiteSpace: 'nowrap',
           }}
         >
-          <div style={{ opacity: 0.7, marginBottom: 2 }}>{formatX(hoverX)}</div>
+          <div style={{ opacity: 0.7, marginBottom: 2 }}>{(formatTipX ?? formatX)(hoverX)}</div>
           {hoverPoints.map((p, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ display: 'inline-block', width: 8, height: 8, background: p.color, borderRadius: 2 }} />

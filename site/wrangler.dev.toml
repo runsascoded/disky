@@ -1,0 +1,36 @@
+# CF Pages config for the DEV mirror (dev.r2.rbw.sh) — a staging copy of the
+# public r2.rbw.sh Map. Same D1 + index bucket (reads the *same* public data),
+# so it's a code/UI preview of what a `cloud`-branch push will ship to prod.
+# Its production branch is `dev`; deploy the `dev` branch here, `cloud` to the
+# `disk-tree-demo` project. Only `name` + `ROOT_LABEL` differ from wrangler.r2.toml.
+#
+# Deploy:  swap this in as wrangler.toml (Pages rejects -c), then
+#   VITE_STORE=r2 VITE_AUTH_MODE=public pnpm build
+#   wrangler pages deploy dist --project-name disk-tree-demo-dev --branch dev
+name = "disk-tree-demo-dev"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-06-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "disk-tree-demo-db"
+database_id = "261d0c80-8f73-442e-979a-4e25725b2271"
+migrations_dir = "migrations/cw"
+remote = true
+
+[observability]
+enabled = true
+
+[vars]
+ROOT_LABEL = "public R2 (dev)"   # distinguishes dev.r2.rbw.sh from prod at a glance
+BASE_SCOPE = "r2"
+PUBLIC_READ = "1"
+SNAPSHOTS_SUBDIR = "r2"
+INDEX_VARIANTS = "path"
+STORE_BUCKET = "disk-tree-demo"
+STORE_REGION = "auto"
+
+# Store-read secrets (STORE_ENDPOINT, STORE_ACCESS_KEY_ID, STORE_SECRET_ACCESS_KEY)
+# are set on the dev project's production env (it serves the `dev` branch), the
+# same values as prod — see `wrangler pages secret put ... --project-name
+# disk-tree-demo-dev`, kept out of this public repo.

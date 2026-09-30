@@ -4,6 +4,7 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 
 from .base import Base
+from .migrate import add_missing_columns
 from .. import config
 
 app = None
@@ -27,6 +28,7 @@ def init(sqlite_path: str = None) -> SQLAlchemy:
     db = SQLAlchemy(app)
     app.app_context().push()
     Base.metadata.create_all(db.engine)
+    add_missing_columns(db.engine)
     return db
 
 

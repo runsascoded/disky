@@ -119,3 +119,16 @@ def test_peer_remote_is_not_treated_as_hosted(tmp_path):
 ])
 def test_parse_size(text, expected):
     assert R._parse_size(text) == expected
+
+
+def test_du_argv_uses_this_interpreter_not_a_path_lookup():
+    """`_repo_sizes` shells out; a bare `disk-tree` breaks outside the venv's
+    `PATH`, so it runs `python -m disk_tree` with the current interpreter."""
+    import sys
+    assert R._du_argv('/x/y') == [sys.executable, '-m', 'disk_tree', 'du', '/x/y', '-d', '3', '-n', '0', '-j']
+
+
+def test_python_m_disk_tree_is_the_cli():
+    import sys
+    out = subprocess.run([sys.executable, '-m', 'disk_tree', '--help'], capture_output=True, text=True)
+    assert (out.returncode, out.stdout.split('\n')[0]) == (0, 'Usage: disk-tree [OPTIONS] COMMAND [ARGS]...')

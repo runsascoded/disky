@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# The push guard for the one-clone layout (specs/done/one-clone-layout.md):
+# OA deployment branches (gcs*, cw-s3*, *-prod, *-dev) may only go to `o`
+# (Open-Athena/marin-gcs-usage); base branches and the personal `m3` deployment
+# only to `r` (runsascoded/disky). Belt to the per-branch `pushRemote`'s
+# suspenders. Installed by `scripts/hooks/install`; `git push --dry-run` runs
+# it, so dry-runs are the test.
+remote=$1; url=$2
+case "$url" in
+  *runsascoded/disk*)              kind=base ;;
+  *Open-Athena/marin-gcs-usage*)   kind=deploy ;;
+  *)                               exit 0 ;;   # ec2 nodes etc.: unconstrained
+esac
+while read -r local_ref local_sha remote_ref remote_sha; do
+  name=${remote_ref#refs/heads/}; name=${name#refs/tags/}
+  case "$name" in
+    gcs*|cw-s3*|*-prod|*-dev|pre-public-original) [ "$kind" = deploy ] || { echo "pre-push: refusing deployment ref $name → $remote ($url)" >&2; exit 1; } ;;
+    cloud|flask|www|dev|mgu-scale|tauri-native-app|app|m3*) [ "$kind" = base ] || { echo "pre-push: refusing base ref $name → $remote ($url)" >&2; exit 1; } ;;
+  esac
+done
+exit 0

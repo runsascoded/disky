@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from disk_tree.blobfs import read_parquet as read_listing
 import pytest
 from pandas.testing import assert_frame_equal
 
@@ -63,7 +64,7 @@ def _expected_listing(tree: Path) -> pd.DataFrame:
         'bucket': str(tree),
         'name': [n for n, _ in rows],
         'size_bytes': pd.array([_blocks(p) for _, p in rows], dtype='int64'),
-        'created': pd.to_datetime([int(os.stat(p).st_mtime) for _, p in rows], unit='s', utc=True),
+        'created': pd.to_datetime([int(os.stat(p).st_mtime) for _, p in rows], unit='s', utc=True).astype('datetime64[ms, UTC]'),
         'storage_class_id': pd.array([0, 0, 0], dtype='int64'),
     })
 
@@ -76,7 +77,7 @@ def _only_capture(to: Path) -> Path:
 
 def _listing(cap: Path) -> pd.DataFrame:
     shards = sorted(cap.glob('shard-*.parquet'))
-    return pd.concat([pd.read_parquet(s) for s in shards]).sort_values('name').reset_index(drop=True)
+    return pd.concat([read_listing(s) for s in shards]).sort_values('name').reset_index(drop=True)
 
 
 def _scans(root: Path) -> list[dict]:
@@ -85,7 +86,7 @@ def _scans(root: Path) -> list[dict]:
 
 
 def _layer2(root: Path, blob: str) -> pd.DataFrame:
-    return pd.read_parquet(root / 'scans' / blob).sort_values('path').reset_index(drop=True)
+    return read_listing(root / 'scans' / blob).sort_values('path').reset_index(drop=True)
 
 
 def test_capture_writes_files_only_shards_and_a_manifest(tree: Path, tmp_path: Path):

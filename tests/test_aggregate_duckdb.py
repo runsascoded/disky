@@ -15,6 +15,7 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+from disk_tree.blobfs import read_parquet as read_listing
 import pytest
 
 from disk_tree.find import aggregate as aggregate_pandas
@@ -149,7 +150,7 @@ def test_cross_engine_identity_on_real_edge_cases(tmp_path: Path):
         prepare_listing(con, (str(listing),)),
         bucket='b1', scheme='gcs', out_parquet=out, con=con,
     )
-    got_duckdb = _normalize(pd.read_parquet(out))
+    got_duckdb = _normalize(read_listing(out))
 
     pd.testing.assert_frame_equal(got_pandas, got_duckdb)
 
@@ -189,7 +190,7 @@ def test_out_of_core_matches_import_listing(listing_parquet, tmp_path: Path):
         prepare_listing(con, (listing_parquet,)),
         bucket='b1', scheme='gcs', out_parquet=out, con=con,
     )
-    got_ooc = _normalize(pd.read_parquet(out))
+    got_ooc = _normalize(read_listing(out))
     got_ref = _normalize(import_listing((listing_parquet,), bucket='b1', scheme='gcs').df)
     pd.testing.assert_frame_equal(got_ooc, got_ref)
     # Root stats returned by aggregate_listing_to_parquet match the frame's root row
@@ -230,7 +231,7 @@ def test_out_of_core_collapses_double_slashes(tmp_path: Path):
         bucket='b1', scheme='gcs',
         out_parquet=str(tmp_path / 'out.parquet'), con=con,
     )
-    df = pd.read_parquet(tmp_path / 'out.parquet')
+    df = read_listing(tmp_path / 'out.parquet')
 
     # Bytes conserved.
     assert stats['root_size'] == 154
@@ -287,7 +288,7 @@ def test_out_of_core_scale(tmp_path: Path):
     )
     assert stats['files'] == len(names)
     # root n_desc = 1 (self) + all files + all synthesized dir rows
-    df = pd.read_parquet(tmp_path / 'out.parquet')
+    df = read_listing(tmp_path / 'out.parquet')
     n_dirs = int((df['kind'] == 'dir').sum())
     assert stats['root_n_desc'] == n_dirs + stats['files']  # includes self via n_dirs count
 
@@ -343,7 +344,7 @@ def _run_ooc(listing: str, out: Path, **kw) -> tuple[pd.DataFrame, dict]:
         prepare_listing(con, (listing,)),
         bucket='b1', scheme='gcs', out_parquet=str(out), con=con, **kw,
     )
-    return _normalize(pd.read_parquet(out)), stats
+    return _normalize(read_listing(out)), stats
 
 
 _IDENTITY_STATS = {

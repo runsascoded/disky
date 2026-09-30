@@ -15,6 +15,7 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+from disk_tree.blobfs import read_parquet as read_listing
 import pytest
 
 from disk_tree.find.aggregate_duckdb import aggregate_listing_to_parquet
@@ -51,7 +52,7 @@ def _write_listing(
 def _stream(listings: tuple[str, ...], tmp_path: Path, bucket: str = 'b1'):
     out = str(tmp_path / 'stream-out.parquet')
     stats = aggregate_stream(listings, bucket=bucket, scheme='gcs', out_parquet=out)
-    return _normalize(pd.read_parquet(out)), stats
+    return _normalize(read_listing(out)), stats
 
 
 # ---------- Cross-engine identity: all 3 engines, same edge-case fixture ----------
@@ -67,7 +68,7 @@ def test_three_engine_identity(tmp_path: Path):
         prepare_listing(con, (listing,)),
         bucket='b1', scheme='gcs', out_parquet=ooc, con=con,
     )
-    got_duckdb = _normalize(pd.read_parquet(ooc))
+    got_duckdb = _normalize(read_listing(ooc))
 
     got_stream, stats = _stream((listing,), tmp_path)
 
@@ -78,8 +79,8 @@ def test_three_engine_identity(tmp_path: Path):
     # like EXCEPT) — `_normalize` reindexes to COLS, hiding order skew, so
     # lock the raw parquet column lists explicitly. Caught on the CW 92.7M
     # acceptance: stream emitted (path,size,mtime,kind,parent,uri,n_*,depth).
-    assert list(pd.read_parquet(str(tmp_path / 'stream-out.parquet')).columns) == \
-        list(pd.read_parquet(ooc).columns) == [
+    assert list(read_listing(str(tmp_path / 'stream-out.parquet')).columns) == \
+        list(read_listing(ooc).columns) == [
         'path', 'size', 'mtime', 'n_desc', 'n_files', 'n_children', 'kind', 'parent', 'uri', 'depth',
     ]
 
@@ -127,7 +128,7 @@ def test_multi_shard_merge(tmp_path: Path):
     got_multi, stats_multi = _stream((str(shard_dir / '*.parquet'),), tmp_path)
     out2 = str(tmp_path / 'single-out.parquet')
     aggregate_stream((single,), bucket='b1', scheme='gcs', out_parquet=out2)
-    got_single = _normalize(pd.read_parquet(out2))
+    got_single = _normalize(read_listing(out2))
 
     pd.testing.assert_frame_equal(got_multi, got_single)
     assert stats_multi['files'] == len(rows)
@@ -173,7 +174,7 @@ def test_fractional_second_timestamps(tmp_path: Path):
         prepare_listing(con, (str(listing),)),
         bucket='b1', scheme='gcs', out_parquet=ooc, con=con,
     )
-    got_duckdb = _normalize(pd.read_parquet(ooc))
+    got_duckdb = _normalize(read_listing(ooc))
 
     got_stream, _ = _stream((str(listing),), tmp_path)
 
@@ -197,7 +198,7 @@ def test_piecewise_sorted_shard(tmp_path: Path):
         prepare_listing(con, (listing,)),
         bucket='b1', scheme='gcs', out_parquet=ooc, con=con,
     )
-    got_duckdb = _normalize(pd.read_parquet(ooc))
+    got_duckdb = _normalize(read_listing(ooc))
 
     pd.testing.assert_frame_equal(got_stream, got_duckdb)
     assert stats['files'] == 5
@@ -239,7 +240,7 @@ def test_interleaved_buckets_multi_run_row_groups(tmp_path: Path):
             prepare_listing(con, (listing,)),
             bucket=bucket, scheme='gcs', out_parquet=ooc, con=con,
         )
-        got_duckdb = _normalize(pd.read_parquet(ooc))
+        got_duckdb = _normalize(read_listing(ooc))
         pd.testing.assert_frame_equal(got_stream, got_duckdb)
         assert stats['files'] == n_files
 
@@ -265,7 +266,7 @@ def test_lazy_merge_bounds_open_sources(tmp_path: Path):
         prepare_listing(con, (f'{tmp_path}/[ab].parquet',)),
         bucket='b1', scheme='gcs', out_parquet=ooc, con=con,
     )
-    pd.testing.assert_frame_equal(got_stream, _normalize(pd.read_parquet(ooc)))
+    pd.testing.assert_frame_equal(got_stream, _normalize(read_listing(ooc)))
 
 
 def test_finalize_failure_preserves_parts_and_resumes(tmp_path: Path, capsys, monkeypatch):
@@ -292,7 +293,7 @@ def test_finalize_failure_preserves_parts_and_resumes(tmp_path: Path, capsys, mo
     stats = aggregate_stream((listing,), bucket='b1', scheme='gcs', out_parquet=str(out))
     assert 'stream pass skipped' in capsys.readouterr().err
     assert not parts_dir.exists()
-    got = _normalize(pd.read_parquet(out))
+    got = _normalize(read_listing(out))
     expected = _normalize(import_listing((listing,), bucket='b1', scheme='gcs').df)
     pd.testing.assert_frame_equal(got, expected)
     assert stats['rows'] == 5
@@ -427,7 +428,7 @@ def test_shard_read_is_batch_size_independent(tmp_path: Path, monkeypatch, batch
     monkeypatch.setattr(ags, '_SHARD_BATCH_ROWS', batch_rows)
     out = str(tmp_path / f'out-{batch_rows}.parquet')
     aggregate_stream((listing,), bucket='b1', scheme='gcs', out_parquet=out)
-    got = _normalize(pd.read_parquet(out))
+    got = _normalize(read_listing(out))
     expected = _normalize(import_listing((listing,), bucket='b1', scheme='gcs').df)
     pd.testing.assert_frame_equal(got, expected)
 
@@ -590,7 +591,7 @@ def test_same_path_file_and_dir_tiny_batches(tmp_path: Path, monkeypatch):
     listing = _write_listing(tmp_path / 'l.parquet', rows)
     out = str(tmp_path / 'out.parquet')
     mod.aggregate_stream((listing,), bucket='b1', scheme='gcs', out_parquet=out)
-    got = pd.read_parquet(out)
+    got = read_listing(out)
     expected = import_listing((listing,), bucket='b1', scheme='gcs').df
     # Raw (un-normalized) comparison: row order and column order must match
     # the pandas engine byte-for-byte, including the dir-before-file tiebreak.
@@ -720,7 +721,7 @@ def _assert_jobs_identical(tmp_path: Path, listing: str, jobs: int, monkeypatch=
     sn = aggregate_stream((listing,), bucket='b1', scheme='gcs', out_parquet=outn, jobs=jobs, **kw)
     assert _md5(out1) == _md5(outn)
     assert {k: s1[k] for k in _ROOT_STATS} == {k: sn[k] for k in _ROOT_STATS}
-    got = _normalize(pd.read_parquet(outn))
+    got = _normalize(read_listing(outn))
     expected = _normalize(
         import_listing((listing,), bucket='b1', scheme='gcs',
                        pivot_sums=kw.get('pivot_sums', ()), mean_mtime=kw.get('mean_mtime', False)).df
@@ -992,7 +993,7 @@ def test_within_depth_units_are_byte_identical(tmp_path: Path, monkeypatch, caps
     )
     assert _md5(out1) == _md5(outn)
 
-    got = _normalize(pd.read_parquet(outn))
+    got = _normalize(read_listing(outn))
     expected = _normalize(import_listing((listing,), bucket='b1', scheme='gcs').df[got.columns])
     pd.testing.assert_frame_equal(got, expected)
     assert stats['rows'] == len(got)

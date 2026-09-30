@@ -107,12 +107,15 @@ def _rebase(child: pa.Table, prefix: str) -> pa.Table:
     """Chunk coordinates → parent coordinates: `.` is the pointer row (drop),
     `x` → `prefix/x`, parent `.` → `prefix`."""
     child = child.filter(pc.not_equal(child['path'], '.'))
-    pfx = pa.scalar(prefix)
-    path = pc.binary_join_element_wise(pfx, child['path'], '/')
+    # Scalars typed like the column: a pandas-3-written blob holds `large_string`
+    # paths, and the join kernel has no mixed `(large_string, string)` form.
+    t = child['path'].type
+    pfx, sep = pa.scalar(prefix, type=t), pa.scalar('/', type=t)
+    path = pc.binary_join_element_wise(pfx, child['path'], sep)
     parent = pc.if_else(
         pc.equal(child['parent'], '.'),
         pfx,
-        pc.binary_join_element_wise(pfx, child['parent'], '/'),
+        pc.binary_join_element_wise(pfx, pc.cast(child['parent'], t), sep),
     )
     depth = pc.add(child['depth'], pa.scalar(prefix.count('/') + 1, pa.int32()))
     return child.set_column(0, 'path', path).set_column(1, 'parent', parent).set_column(2, 'depth', pc.cast(depth, pa.int32()))
@@ -495,12 +498,16 @@ def build_and_record(scan_a: int, blob_a: str, scan_b: int, blob_b: str) -> dict
 
 
 def previous_scan(con: sqlite3.Connection, scan_id: int) -> sqlite3.Row | None:
-    """The most recent earlier scan of the same path (the pair `sync`/`index`
-    build by default)."""
+    """The most recent earlier scan of the same path whose blob is *reachable*
+    (the pair `sync`/`index` build by default). Skipping unreachable blobs (a
+    prior scan whose parquet is on an unmounted volume) keeps the post-scan diff
+    step from crashing on a blob it can't read — see spec `r2-scan-target.md`."""
+    from disk_tree.config import blob_reachable
     s = con.execute('SELECT * FROM scan WHERE id = ?', (scan_id,)).fetchone()
     if s is None:
         return None
-    return con.execute(
-        'SELECT * FROM scan WHERE path = ? AND time < ? ORDER BY time DESC LIMIT 1',
+    rows = con.execute(
+        'SELECT * FROM scan WHERE path = ? AND time < ? ORDER BY time DESC',
         (s['path'], s['time']),
-    ).fetchone()
+    ).fetchall()
+    return next((r for r in rows if blob_reachable(r['blob'])), None)

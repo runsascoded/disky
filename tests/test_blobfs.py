@@ -59,6 +59,45 @@ def test_r2_endpoint_none_without_config(monkeypatch, tmp_path: Path):
     assert blobfs.r2_endpoint('ctbk') is None
 
 
+def test_bucket_profile_per_bucket_then_defaults(monkeypatch, tmp_path: Path):
+    """A bucket's own `profile` wins; a bucket without one inherits `defaults`;
+    a bucket absent from the config resolves to `defaults` too."""
+    monkeypatch.setattr(config, 'ROOT_DIR', str(tmp_path))
+    (tmp_path / 'buckets.yml').write_text(
+        'defaults:\n  profile: rac\n'
+        'buckets:\n'
+        '  - uri: r2://ctbk\n    profile: hccs\n'
+        '  - uri: r2://disk-tree-demo\n'
+    )
+    assert blobfs.bucket_profile('ctbk') == 'hccs'          # per-bucket wins
+    assert blobfs.bucket_profile('disk-tree-demo') == 'rac'  # falls to defaults
+    assert blobfs.bucket_profile('never-configured') == 'rac'
+
+
+def test_bucket_profile_none_without_config(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(config, 'ROOT_DIR', str(tmp_path))
+    assert blobfs.bucket_profile('ctbk') is None
+
+
+def test_s3fs_threads_profile_when_set(monkeypatch):
+    """A per-bucket profile reaches `s3fs` as `profile=`; without one the kwarg
+    is absent (ambient credential resolution)."""
+    import s3fs
+    captured: dict = {}
+
+    class Fake:
+        def __init__(self, **kw):
+            captured.clear()
+            captured.update(kw)
+
+    monkeypatch.setattr(s3fs, 'S3FileSystem', Fake)
+    ep = f'https://ep-{uuid4()}.example'  # fresh endpoint dodges the lru_cache
+    blobfs._s3fs(ep, 'hccs')
+    assert captured == {'client_kwargs': {'endpoint_url': ep}, 'fixed_upload_size': True, 'profile': 'hccs'}
+    blobfs._s3fs(f'https://ep-{uuid4()}.example')  # no profile → no `profile` kwarg
+    assert 'profile' not in captured
+
+
 def test_fs_for_r2_without_endpoint_is_a_pointed_error(monkeypatch, tmp_path: Path):
     monkeypatch.delenv(blobfs.R2_ENDPOINT_VAR, raising=False)
     monkeypatch.setattr(config, 'ROOT_DIR', str(tmp_path))
@@ -67,6 +106,22 @@ def test_fs_for_r2_without_endpoint_is_a_pointed_error(monkeypatch, tmp_path: Pa
     assert str(e.value) == (
         'r2://ctbk: no endpoint — set DISK_TREE_R2_ENDPOINT_URL, or give the bucket an `endpoint_url` in buckets.yml'
     )
+
+
+def test_s3fs_sets_fixed_upload_size_for_r2(monkeypatch):
+    """R2 rejects varying-length multipart parts; s3fs only guarantees fixed
+    lengths under `fixed_upload_size=True` (spec `r2-scan-target.md`)."""
+    import s3fs
+    captured: dict = {}
+
+    class Fake:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setattr(s3fs, 'S3FileSystem', Fake)
+    ep = f'https://ep-{uuid4()}.example'  # fresh endpoint dodges the lru_cache
+    blobfs._s3fs(ep)
+    assert captured == {'client_kwargs': {'endpoint_url': ep}, 'fixed_upload_size': True}
 
 
 def test_remote_write_read_list_put_remove(tmp_path: Path):

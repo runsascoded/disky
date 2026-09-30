@@ -49,3 +49,22 @@ describe('readRows', () => {
     expect(paths(await readRows(file, { maxDepth: 3, prefix: 't2' }))).toEqual(['t2'])
   })
 })
+
+// The same rows as a v2 listing (spec `listing-slim.md`): zstd, no `uri`, the
+// scan root in the key-value metadata — what the duckdb/stream engines write.
+const FIXTURE_V2 = join(__dirname, 'fixtures', 'fixture-v2.parquet')
+
+describe('v2 (zstd, uri-less) blobs', () => {
+  it('are zstd-coded', async () => {
+    const meta = await parquetMetadataAsync(await asyncBufferFromFile(FIXTURE_V2))
+    expect(meta.row_groups.map(rg => rg.columns[0].meta_data?.codec)).toEqual(['ZSTD', 'ZSTD', 'ZSTD'])
+  })
+
+  it('read exactly as the v1 blob does', async () => {
+    const v1 = await asyncBufferFromFile(FIXTURE)
+    const v2 = await asyncBufferFromFile(FIXTURE_V2)
+    for (const opts of [{ maxDepth: 0 }, { maxDepth: 1 }, { maxDepth: 3 }, { maxDepth: 3, prefix: 'a' }, { maxDepth: 3, prefix: 't2' }]) {
+      expect(await readRows(v2, opts)).toEqual(await readRows(v1, opts))
+    }
+  })
+})

@@ -3,22 +3,35 @@ from os import makedirs, rename, replace
 from os.path import basename, isabs, isfile, join
 
 import pandas as pd
-from click import command, option
+from click import argument, command, option
 from utz import err
 
+from disk_tree.blobfs import read_parquet  # v2 listings come back in the v1 shape (spec `listing-slim.md`)
 from disk_tree.cli.base import cli
 from disk_tree.config import SCANS_DIR, SQLITE_PATH as DB_PATH
+from disk_tree.listing_format import write_listing  # …and every rewrite goes back out as v2
 from disk_tree.storage.base import BLOB_ROW_GROUP_SIZE
 
 
 @cli.command('migrate')
 def migrate():
-    """Run database migrations (add columns, backfill stats)."""
+    """Run database migrations: add every column the models have that the DB
+    lacks (any table), then backfill `scan` stats from the parquet blobs."""
     import sqlite3
+    from sqlalchemy import create_engine
+    from disk_tree.sqla.migrate import add_missing_columns
 
     if not isfile(DB_PATH):
         err(f"Database not found: {DB_PATH}")
         return
+
+    # Generic schema catch-up (also runs on every server/CLI DB init): the
+    # explicit `scan` list below predates it and stays for the backfill.
+    added = add_missing_columns(create_engine(f"sqlite:///{DB_PATH}"))
+    for table, col in added:
+        err(f"Added column: {table}.{col}")
+    if not added:
+        err("Schema up to date (no missing columns)")
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -68,7 +81,7 @@ def migrate():
             continue
 
         try:
-            df = pd.read_parquet(blob_path)
+            df = read_parquet(blob_path)
             # Try 'parent == ""' first (local scans), fallback to 'path == "."' (S3 scans)
             root_rows = df[df['parent'] == '']
             if root_rows.empty:
@@ -131,7 +144,7 @@ def migrate_depth():
             schema = pq.read_schema(blob_path)
             has_depth = 'depth' in schema.names
 
-            df = pd.read_parquet(blob_path)
+            df = read_parquet(blob_path)
 
             # Add depth column if missing
             if not has_depth:
@@ -139,7 +152,7 @@ def migrate_depth():
 
             # Always re-sort by depth for efficient parquet filtering (breadth-first order)
             df = df.sort_values(['depth', 'path']).reset_index(drop=True)
-            df.to_parquet(blob_path)
+            write_listing(df, blob_path, BLOB_ROW_GROUP_SIZE)
             updated += 1
         except Exception as e:
             err(f"  Error processing {blob_path}: {e}")
@@ -195,7 +208,7 @@ def migrate_hybrid(dry_run: bool):
             continue
 
         try:
-            df = pd.read_parquet(old_blob)
+            df = read_parquet(old_blob)
             n_rows = len(df)
 
             # Check if already has child_scan_id (already hybrid)
@@ -312,7 +325,7 @@ def _normalize_parquet_chunks(blob_path: str, dry_run: bool, counts: dict) -> No
         counts['errors'] += 1
         return
     try:
-        df = pd.read_parquet(blob_path)
+        df = read_parquet(blob_path)
     except Exception as e:
         err(f"  Error reading {blob_path}: {e}")
         counts['errors'] += 1
@@ -333,7 +346,7 @@ def _normalize_parquet_chunks(blob_path: str, dry_run: bool, counts: dict) -> No
             df['child_scan_id'] = df['child_scan_id'].apply(
                 lambda v: basename(v) if isinstance(v, str) and isabs(v) else v
             )
-            df.to_parquet(blob_path, index=False)
+            write_listing(df, blob_path, BLOB_ROW_GROUP_SIZE)
         counts['updated'] += 1
 
     # Recurse into chunk parquets (resolve via basename in case still abs-on-disk)
@@ -345,31 +358,37 @@ def _normalize_parquet_chunks(blob_path: str, dry_run: bool, counts: dict) -> No
 @cli.command('migrate-row-groups')
 @option('-n', '--dry-run', is_flag=True, help='Only report blobs that would be rewritten')
 @option('-r', '--rows', default=BLOB_ROW_GROUP_SIZE, help=f'Target rows per row group (default {BLOB_ROW_GROUP_SIZE})')
-def migrate_row_groups(dry_run: bool, rows: int):
-    """Rewrite scan blobs whose parquet row groups exceed ROWS rows.
+@argument('scans_dir', required=False)
+def migrate_row_groups(dry_run: bool, rows: int, scans_dir: str | None):
+    """Rewrite the blobs in SCANS_DIR (a dir or URL; default the write dir)
+    whose parquet row groups exceed ROWS rows.
 
     A directory listing (`load(min_depth=max_depth=d, path_prefix=…)`) decodes
     every row group whose stats overlap, so row-group size is the unit of work
-    per browse / diff expansion: ~4 ms at 64K rows vs ~40 ms at 1M. Older blobs
-    were written with 262K–1M-row groups. Rewrites are atomic (tmp + replace);
-    vocab sidecars index by row group and are skipped — rebuild them with
-    `disk-tree vocab` (they detect the changed blob and refuse stale reads).
+    per browse / diff expansion: ~4 ms at 64K rows vs ~40 ms at 1M — and over
+    R2 it is the unit of *fetch*: a `depth ≤ 2` view of a 1M-row group pulls
+    ~38 MiB, of a 64K-row group ~2 MiB (spec `scan-page-r2-latency.md`). Older
+    blobs were written with 262K–1M-row groups. Rewrites stream and are atomic
+    (tmp + move); sidecars are skipped — a vocab sidecar indexes by row group,
+    so rebuild it with `disk-tree vocab` (it refuses stale reads).
     """
-    from glob import glob
-    import pyarrow.parquet as pq
+    from disk_tree import blobfs
+    from disk_tree.find.groups import groups_path, write_groups_sidecar
+    d = scans_dir or SCANS_DIR
     n = 0
-    for path in sorted(glob(join(SCANS_DIR, '*.parquet'))):
-        if path.endswith('.vocab.parquet'):
-            continue
-        md = pq.ParquetFile(path).metadata
-        biggest = max((md.row_group(i).num_rows for i in range(md.num_row_groups)), default=0)
+    for name in blobfs.list_parquets(d):
+        path = blobfs.join(d, name)
+        sizes = blobfs.row_group_sizes(path)
+        biggest = max(sizes, default=0)
         if biggest <= rows:
             continue
         n += 1
-        err(f"{basename(path)}: {md.num_rows:,} rows in {md.num_row_groups} group(s), max {biggest:,}")
+        err(f"{name}: {sum(sizes):,} rows in {len(sizes)} group(s), max {biggest:,}")
         if dry_run:
             continue
-        tmp = path + '.rg.tmp'
-        pq.write_table(pq.read_table(path), tmp, row_group_size=rows)
-        replace(tmp, path)
+        blobfs.rewrite_row_groups(path, rows)
+        # a `.groups.json` (the edge reader's precomputed footer) describes the
+        # old groups — regenerate it beside the rewritten blob
+        if blobfs.exists(groups_path(path)):
+            write_groups_sidecar(path)
     err(f"{n} blob(s) {'would be ' if dry_run else ''}rewritten to ≤{rows:,}-row groups")

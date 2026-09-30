@@ -153,6 +153,89 @@ export async function deletePath(path: string): Promise<DeleteResult> {
   return res.json()
 }
 
+// ---- staged delete (spec `specs/staged-delete.md`) ------------------------
+
+/** One staged URI. `bytes`/`objects` come from the freshest covering scan on
+ *  the Flask peer (what a dispatch reports); the edge has no index to size
+ *  against and sends `null`. */
+/** A staged URI, sized from its freshest covering scan (`null`s on the edge,
+ *  which has no scans to size from — and no `kind`). */
+export type StagedItem = { uri: string; bytes: number | null; objects: number | null; kind: 'file' | 'dir' | null }
+
+/** A staged set (open plan) with its URIs, as `GET /api/staged` returns it. */
+export type StagedPlan = {
+  id: number
+  name: string
+  state: 'open' | 'closed'
+  created_by: string
+  created_ts: number
+  items: StagedItem[]
+}
+
+/** A recorded run. `finished_ts == null` = enqueued, awaiting the executor. */
+export type StagedRun = {
+  run_id: string
+  plan_id: number
+  mode: string
+  actor: string
+  started_ts: number
+  finished_ts: number | null
+  deleted_bytes: number
+  deleted_objects: number
+}
+
+export type StagedState = { plans: StagedPlan[]; runs: StagedRun[] }
+
+async function postJson<T>(path: string, body: unknown, fallback: string): Promise<T> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || fallback)
+  }
+  return res.json()
+}
+
+export async function fetchStaged(): Promise<StagedState> {
+  const res = await fetch('/api/staged')
+  if (!res.ok) throw new Error('Failed to fetch staged set')
+  return res.json()
+}
+
+/** Stage URIs into the shared open plan (spec `specs/staged-delete.md`). */
+export const stageUris = (uris: string[], note?: string): Promise<{ plan_id: number; added: string[] }> =>
+  postJson('/api/plans/stage', note ? { uris, note } : { uris }, 'Failed to stage')
+
+export const unstageUris = (uris: string[]): Promise<{ removed: number }> =>
+  postJson('/api/plans/unstage', { uris }, 'Failed to unstage')
+
+export type DispatchResult = {
+  run_id: string
+  plan_id: number
+  mode: string
+  items: number
+  /** Scope of the run (dry or real), from its bands — the Flask peer only. */
+  bytes?: number
+  objects?: number
+  deleted_bytes?: number
+  deleted_objects?: number
+  state: 'done' | 'dry' | 'enqueued'
+}
+
+/** Dispatch a plan (default the open `Staged`): admin only. The edge enqueues +
+ *  closes it; the Flask peer deletes inline. `uris` dispatches just those staged
+ *  items (they leave the plan, which stays open while anything remains);
+ *  `forReal: false` is a dry run (report only) — both Flask-only. */
+export const dispatchPlan = (opts: { plan?: string; uris?: string[]; forReal?: boolean } = {}): Promise<DispatchResult> =>
+  postJson('/api/dispatch', {
+    ...(opts.plan ? { plan: opts.plan } : {}),
+    ...(opts.uris ? { uris: opts.uris } : {}),
+    ...(opts.forReal === false ? { for_real: false } : {}),
+  }, 'Failed to dispatch')
+
 export async function revealPath(path: string): Promise<void> {
   const res = await fetch('/api/reveal', {
     method: 'POST',
@@ -508,6 +591,18 @@ export type Capabilities = {
   library: boolean
   backend: boolean
   s3: boolean
+  /** Stage paths for deletion into a plan an admin dispatches (spec
+   *  `specs/staged-delete.md`), rather than deleting immediately (`delete`).
+   *  On where the deployment is gated (needs an identity to attribute to). */
+  stageDelete: boolean
+  /** The deployment's delete-approval policy (spec `specs/staged-delete.md` CP6):
+   *  `sync` deletes inline, `staged` always queues, `user-choice` lets each user
+   *  pick (sticky) — the deployment default + lock. A credentialless deployment
+   *  (edge) is `staged`; a credentialed one (laptop) defaults `sync`. */
+  deleteApproval: 'sync' | 'staged' | 'user-choice'
+  /** Browse the host's local filesystem (`/file/*`). Off on a static deployment,
+   *  which has no live scanner — the Local nav item hides. */
+  filesystem: boolean
   /** `/api/*` needs a session (`/api/auth/whoami`); the UI shows a sign-in wall otherwise. */
   auth: boolean
 }
@@ -515,7 +610,7 @@ export type Capabilities = {
 export const ALL_CAPABILITIES: Capabilities = {
   static: false, scan: true, delete: true, reveal: true, histogram: true, filter: true,
   preview: true, compare: true, progress: true, library: true, backend: true, s3: true,
-  auth: false,
+  stageDelete: true, deleteApproval: 'sync', filesystem: true, auth: false,
 }
 
 /** A server without the endpoint (an older Flask) can do everything. */

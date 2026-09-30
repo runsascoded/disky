@@ -7,6 +7,7 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./squarify": "./src/squarify.ts",
     "./styles.css": "./src/styles.css",
     "./voronoi": "./src/voronoi/index.ts"
   },

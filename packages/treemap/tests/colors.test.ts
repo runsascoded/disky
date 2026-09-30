@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { contrastEdge, parseColor } from '../src/colors'
+import { contrastEdge, hierColor, parseColor, slotColor } from '../src/colors'
+import { categoricalStyle } from '../src/cellStyle'
 
 describe('parseColor', () => {
   it('parses #rgb / #rrggbb / #rrggbbaa', () => {
@@ -48,5 +49,55 @@ describe('contrastEdge', () => {
   it('returns null for an unparseable face so the caller keeps its fallback', () => {
     expect(contrastEdge('var(--dt-treemap-container-bg, #202024)')).toBeNull()
     expect(contrastEdge(undefined)).toBeNull()
+  })
+})
+
+describe('slotColor', () => {
+  it('returns the fixed palette for the first slots (cross-widget hue identity)', () => {
+    expect(slotColor(0)).toBe('hsl(210 70% 55%)')
+    expect(slotColor(7)).toBe('hsl(120 45% 50%)')
+  })
+  it('generates golden-angle hues past the palette so many top-level dirs stay distinct', () => {
+    expect(slotColor(8)).toBe('hsl(20 60% 52%)')
+    expect(slotColor(9)).toBe('hsl(158 60% 52%)')
+  })
+})
+
+describe('hierColor', () => {
+  it('is identity for an L1 cell (no L2 key, leaf)', () => {
+    expect(hierColor('hsl(210 70% 55%)', null, false)).toBe('hsl(210 70% 55%)')
+  })
+  it('tints a container a darker, desaturated shade of its hue', () => {
+    expect(hierColor('hsl(210 70% 55%)', null, true)).toBe('hsl(210 39% 28%)')
+  })
+  it('nudges hue + lightness per L2 key so sibling subtrees read as related-but-distinct', () => {
+    expect(hierColor('hsl(210 70% 55%)', 'md5', false)).toBe('hsl(223 70% 63%)')
+    expect(hierColor('hsl(210 70% 55%)', 'md5', true)).toBe('hsl(223 39% 32%)')
+    // A different key lands on a different variant, deterministically.
+    expect(hierColor('hsl(210 70% 55%)', 'b', false)).toBe('hsl(197 70% 47%)')
+  })
+  it('passes a non-hsl base through unchanged (var / hex)', () => {
+    expect(hierColor('var(--x)', 'k', false)).toBe('var(--x)')
+    expect(hierColor('#abcdef', null, false)).toBe('#abcdef')
+  })
+})
+
+describe('categoricalStyle', () => {
+  const label = (n: string) => n
+  const slots = ['hsl(210 70% 55%)']
+  const top = new Map([['a', 'hsl(210 70% 55%)']])
+
+  it('non-nested: leaf gets the slot hue, container the neutral var (unchanged behavior)', () => {
+    expect(categoricalStyle(['root', 'a'], false, label, top, slots, false)).toEqual({ bg: 'hsl(210 70% 55%)', ink: '#fff' })
+    expect(categoricalStyle(['root', 'a'], true, label, top, slots, false)).toEqual({ bg: 'var(--dt-treemap-container-bg, #202024)', ink: 'var(--dt-treemap-ink, #d0d0d8)' })
+  })
+
+  it('nested: an L1 leaf keeps the macro hue, an L2 leaf gets its micro-variant', () => {
+    expect(categoricalStyle(['root', 'a'], false, label, top, slots, true)).toEqual({ bg: 'hsl(210 70% 55%)', ink: '#fff' })
+    expect(categoricalStyle(['root', 'a', 'md5'], false, label, top, slots, true)).toEqual({ bg: 'hsl(223 70% 63%)', ink: '#fff' })
+  })
+
+  it('nested: a container carries a tinted shade of its group hue instead of grey', () => {
+    expect(categoricalStyle(['root', 'a'], true, label, top, slots, true)).toEqual({ bg: 'hsl(210 39% 28%)', ink: 'var(--dt-treemap-ink, #d0d0d8)' })
   })
 })

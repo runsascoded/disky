@@ -50,6 +50,7 @@ class S3BulkLister:
     scheme: str = "s3"
     endpoint_url: Optional[str] = None
     region_name: Optional[str] = None
+    profile: Optional[str] = None
 
     def _client(self):
         # Cache one client per thread — boto3 clients aren't thread-safe for
@@ -93,7 +94,10 @@ class S3BulkLister:
             if style:
                 cfg = cfg.merge(Config(s3={"addressing_style": style}))
             kw["config"] = cfg
-            client = local.client = boto3.client("s3", **kw)
+            # A per-bucket `profile` selects a named credential set (cross-account
+            # source/target); no profile → boto's ambient resolution (env / default).
+            session = boto3.Session(profile_name=self.profile) if self.profile else boto3
+            client = local.client = session.client("s3", **kw)
         return client
 
     def stream_prefix(
@@ -211,20 +215,24 @@ def list_s3_bucket_to_parquet(
     endpoint_url: Optional[str] = None,
     region_name: Optional[str] = None,
     scheme: str = "s3",
+    profile: Optional[str] = None,
 ) -> int:
     """Bulk-list an S3-compatible bucket to sharded canonical listing parquet.
 
     Pass ``endpoint_url`` (and typically ``scheme='r2'``) to target Cloudflare
-    R2 or another S3-compatible service.
+    R2 or another S3-compatible service. ``profile`` names a credential set (for
+    a cross-account source/target); ``None`` uses boto's ambient resolution.
     """
     import s3fs
 
     from disk_tree.find.bulk import list_bucket_to_parquet
 
-    lister = S3BulkLister(scheme=scheme, endpoint_url=endpoint_url, region_name=region_name)
+    lister = S3BulkLister(scheme=scheme, endpoint_url=endpoint_url, region_name=region_name, profile=profile)
     kw: dict = {}
     if endpoint_url:
         kw["client_kwargs"] = {"endpoint_url": endpoint_url}
+    if profile:
+        kw["profile"] = profile
     fs = s3fs.S3FileSystem(**kw)
     return list_bucket_to_parquet(
         lister=lister,

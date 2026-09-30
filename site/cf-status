@@ -1,0 +1,76 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Report whether the local HEAD is deployed to this checkout's CF Pages project (`name` in wrangler.toml).
+
+Reads `CLOUDFLARE_API_TOKEN` from the environment (the repo `.envrc` token has
+Pages read). Compares the newest successful deployment's commit to `HEAD` and
+lists any undeployed commits touching `site/`. Invoked directly or via
+`site/deploy --status`.
+"""
+import json
+import re
+from pathlib import Path
+import os
+import subprocess
+import sys
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+ACCT = "74981a43be0de7712369306c7b19133d"
+PROJECT = re.search(r'^name = "(.*)"$', Path(__file__).with_name("wrangler.toml").read_text(), re.M).group(1)  # the Pages project this checkout deploys
+
+err = lambda *a: print(*a, file=sys.stderr)
+
+
+def git(*args: str) -> str:
+    root = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()
+    return subprocess.check_output(["git", *args], cwd=root, text=True).strip()
+
+
+def latest_deploy() -> dict:
+    tok = os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not tok:
+        err("CLOUDFLARE_API_TOKEN not set (needs Pages read on the OA account)")
+        sys.exit(2)
+    url = f"https://api.cloudflare.com/client/v4/accounts/{ACCT}/pages/projects/{PROJECT}/deployments?per_page=10"
+    req = Request(url, headers={"Authorization": f"Bearer {tok}"})
+    try:
+        r = json.load(urlopen(req, timeout=20))
+    except HTTPError as e:
+        err(f"CF API HTTP {e.code}: {e.read().decode()[:300]}")
+        sys.exit(1)
+    if not r.get("success"):
+        err("CF API error:", json.dumps(r.get("errors"))[:300])
+        sys.exit(1)
+    dep = next((d for d in r["result"] if d.get("latest_stage", {}).get("status") == "success"), None)
+    if not dep:
+        err("no successful deployment found")
+        sys.exit(1)
+    return dep
+
+
+def main() -> None:
+    dep = latest_deploy()
+    sha = (dep.get("deployment_trigger", {}).get("metadata", {}) or {}).get("commit_hash", "")
+    head = git("rev-parse", "HEAD")
+    print(f"deployed: {sha[:9] or '(unknown)'}  ({dep.get('created_on', '')})  [{dep.get('short_id')}]")
+    print(f"HEAD:     {head[:9]}")
+    if sha and sha[:12] == head[:12]:
+        print("✓ HEAD is deployed")
+        return
+    if not sha:
+        print("? deployed commit unknown (no commit_hash in deployment metadata)")
+        sys.exit(1)
+    log = git("log", "--oneline", f"{sha}..HEAD", "--", "site/")
+    commits = [l for l in log.splitlines() if l]
+    print(f"✗ {len(commits)} undeployed commit(s) touching site/:")
+    if log:
+        print(log)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

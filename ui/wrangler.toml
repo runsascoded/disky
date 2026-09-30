@@ -20,6 +20,18 @@ bucket_name = "disk-tree"
 
 [vars]
 SCANS_PREFIX = "scans/"
+# Max objects the edge R2 CFN deletes inline before deferring to the drainer
+# (spec `specs/staged-delete.md` CP7).
+DELETE_THRESHOLD = "1000"
+
+# R2 CFN executor (CP7): bind each demo R2 bucket the edge may delete from as
+# `R2_<bucket>` (bucket name sanitized to an identifier). A staged `r2://ctbk/…`
+# then deletes inline via `env.R2_ctbk` instead of enqueueing for the drainer;
+# unbound buckets fall back to the drainer automatically. Uncomment + add yours,
+# then redeploy. Example:
+# [[r2_buckets]]
+# binding = "R2_ctbk"
+# bucket_name = "ctbk"
 
 # The gate (spec `specs/pages-auth.md`): grants + access log. Created with
 # `wrangler d1 create disk-tree-auth` (fill `database_id` from its output),

@@ -7,6 +7,7 @@ import pandas as pd
 
 from .base import BLOB_ROW_GROUP_SIZE, StorageBackend, PathStats, path_prefix_bounds
 from .. import blobfs, config as _config
+from ..listing_format import write_listing
 
 
 # LRU cache for parquet DataFrames
@@ -47,7 +48,7 @@ class ParquetBackend(StorageBackend):
         blob_path = blobfs.join(self.scans_dir, blob_ref)
         if blobfs.exists(blob_path):
             raise RuntimeError(f"Blob path already exists: {blob_path}")
-        blobfs.write_parquet(df, blob_path, BLOB_ROW_GROUP_SIZE)
+        write_listing(df, blob_path, BLOB_ROW_GROUP_SIZE)
         return blob_ref
 
     def load(

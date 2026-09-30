@@ -1,0 +1,3 @@
+# SPA fallback: deep client routes (e.g. /files/listing/…) serve the app shell.
+# CF Pages Functions (/v1/files/*) and real static assets take precedence.
+/*  /index.html  200

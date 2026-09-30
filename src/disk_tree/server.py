@@ -23,6 +23,7 @@ from disk_tree import blobfs
 from disk_tree.diff import ScanSource, recursive_diff, resolve_blob, resolve_chunk_for_path
 from disk_tree.diff_index import DIFF_TABLE_SQL, build_and_record, get_index, load_index_slice, serve_slice
 from disk_tree.filter import DEFAULT_DISPLAY_DEPTH, filter_scan, rebase_frame
+from disk_tree.listing_format import write_listing
 from disk_tree.registry import freshest_scan_covering
 from disk_tree.storage import get_backend
 from disk_tree.storage.base import BLOB_ROW_GROUP_SIZE
@@ -98,11 +99,10 @@ _static_candidates = [
 # under sys._MEIPASS. We add-data the UI as `disk_tree/static` (see the spec).
 if getattr(_sys, 'frozen', False) and hasattr(_sys, '_MEIPASS'):
     _static_candidates.insert(0, join(_sys._MEIPASS, 'disk_tree', 'static'))
-STATIC_DIR = None
-for candidate in _static_candidates:
-    if exists(join(candidate, 'index.html')):
-        STATIC_DIR = abspath(candidate)
-        break
+# Several may exist in a dev checkout (a stale packaged `static/` from the last
+# wheel build beside a fresh `ui/dist`): serve whichever `index.html` is newest.
+_static_found = [c for c in _static_candidates if exists(join(c, 'index.html'))]
+STATIC_DIR = abspath(max(_static_found, key=lambda c: os.path.getmtime(join(c, 'index.html')))) if _static_found else None
 
 # Track in-progress scans: {job_id: {path, status, started, output, error}}
 running_scans: dict[str, dict] = {}
@@ -810,30 +810,34 @@ def get_scan():
 
     children = [row_to_dict(row) for _, row in direct_children_df.iterrows()]
 
-    # Load items from child scans for treemap completeness
-    # For directories with child_scan_id, load their direct children (depth-1 items)
-    # This ensures we show the top-level breakdown of each chunked directory
+    # Each chunked direct child's own direct children (its chunk's depth-1
+    # rows, depth 2 here) so the treemap shows every chunk's top level. From
+    # the root blob's shallow sidecar when it has one, else a filtered +
+    # projected read of the chunk, cached per process — never the whole chunk
+    # blob (spec `scan-page-r2-latency.md`).
     if 'child_scan_id' in df.columns:
+        from disk_tree.shallow import chunk_top_rows
+        root_blob_path = resolve_blob(effective_blob)
+        top_cols = [c for c in df.columns if c not in ('rel_path', 'rel_parent')]
         child_scan_dfs = []
         for _, row in direct_children_df.iterrows():
             child_scan = row.get('child_scan_id')
-            if pd.notna(child_scan) and blobfs.exists(resolve_blob(child_scan)):
-                try:
-                    child_df = blobfs.read_parquet(resolve_blob(child_scan))
-                    # Only load direct children (depth=1) from child scans
-                    # These become depth=2 in the parent context
-                    child_df = child_df[child_df['depth'] == 1]
-                    if len(child_df) > 0:
-                        # Prefix paths with parent directory name
-                        parent_path = row['path'] if not use_rel_path else row.get('rel_path', row['path'])
-                        child_df = child_df.copy()
-                        child_df['path'] = parent_path + '/' + child_df['path']
-                        child_df['parent'] = parent_path  # All become children of this dir
-                        # Adjust depth: depth-1 in child becomes depth-2 in parent
-                        child_df['depth'] = 2
-                        child_scan_dfs.append(child_df)
-                except Exception as e:
-                    print(f"Error loading child scan {child_scan}: {e}")
+            if pd.isna(child_scan):
+                continue
+            try:
+                child_df = chunk_top_rows(root_blob_path, child_scan, resolve_blob, top_cols)
+            except Exception as e:
+                print(f"Error loading child scan {child_scan}: {e}")
+                continue
+            if child_df is None or len(child_df) == 0:
+                continue
+            # Prefix paths with the parent directory name; all become its children
+            parent_path = row['path'] if not use_rel_path else row.get('rel_path', row['path'])
+            child_df = child_df.copy()
+            child_df['path'] = parent_path + '/' + child_df['path']
+            child_df['parent'] = parent_path
+            child_df['depth'] = 2
+            child_scan_dfs.append(child_df)
         if child_scan_dfs:
             children_df = pd.concat([children_df] + child_scan_dfs, ignore_index=True)
 
@@ -2222,7 +2226,7 @@ def delete_path():
                                 df.loc[mask, 'n_children'] = df.loc[mask, 'n_children'] - 1
 
                     # Rewrite parquet (this is the expensive part)
-                    blobfs.write_parquet(df, resolve_blob(blob_ref), BLOB_ROW_GROUP_SIZE)
+                    write_listing(df, resolve_blob(blob_ref), BLOB_ROW_GROUP_SIZE)
 
                     # Update denormalized stats in SQLite scan metadata
                     root_row = df[df['path'] == '.']
@@ -2255,6 +2259,145 @@ def delete_path():
     })
 
 
+# ---- staged delete (spec `specs/staged-delete.md`) ------------------------
+# The HTTP surface behind the `/staged` UI, over the CP1 engine. The Cloudflare
+# edge (`ui/cfn/stagedRoutes.ts`) implements the same shapes but *enqueues* a run
+# (it can't reach arbitrary buckets); the Flask peer deletes inline (local-confirm).
+
+def _staged_who() -> str:
+    """Actor for a staged action on the local (ungated) server."""
+    return os.environ.get('USER') or 'local'
+
+
+def _staged_epoch(dt) -> int | None:
+    """A model `datetime` as epoch seconds, matching the edge's D1 shape."""
+    return int(dt.timestamp()) if dt is not None else None
+
+
+def _staged_uris(data):
+    uris = data.get('uris')
+    if not isinstance(uris, list) or not uris or not all(isinstance(u, str) for u in uris):
+        return None
+    return uris
+
+
+@app.route('/api/staged')
+def api_staged():
+    """Open plans (staged sets) with their URIs — each sized from its freshest
+    covering scan (`bytes`/`objects`, what a dispatch would report, plus its
+    `kind`) — plus the recent runs feed."""
+    from sqlalchemy import select
+    from disk_tree.sqla import DeletionRun, Plan
+    from disk_tree.staged import items
+    from disk_tree.staged_backend import describe, session
+
+    def item(uri: str) -> dict:
+        return {'uri': uri, **describe(uri)}
+
+    s = session()
+    plans = list(s.scalars(select(Plan).where(Plan.state == 'open').order_by(Plan.id)))
+    runs = list(s.scalars(select(DeletionRun).order_by(DeletionRun.started_ts.desc()).limit(20)))
+    return jsonify({
+        'plans': [
+            {
+                'id': p.id, 'name': p.name, 'state': p.state, 'created_by': p.created_by,
+                'created_ts': _staged_epoch(p.created_ts), 'items': [item(it.uri) for it in items(s, p)],
+            }
+            for p in plans
+        ],
+        'runs': [
+            {
+                'run_id': r.run_id, 'plan_id': r.plan_id, 'mode': r.mode, 'actor': r.actor,
+                'started_ts': _staged_epoch(r.started_ts), 'finished_ts': _staged_epoch(r.finished_ts),
+                'deleted_bytes': r.deleted_bytes, 'deleted_objects': r.deleted_objects,
+            }
+            for r in runs
+        ],
+    })
+
+
+@app.route('/api/plans/stage', methods=['POST'])
+def api_stage():
+    """Stage URIs into the shared open plan."""
+    from disk_tree.staged import stage
+    from disk_tree.staged_backend import session
+
+    uris = _staged_uris(request.get_json() or {})
+    if uris is None:
+        return jsonify({'error': '`uris` must be a non-empty array of strings'}), 400
+    note = (request.get_json() or {}).get('note')
+    s = session()
+    plan, added = stage(s, uris, _staged_who(), note)
+    s.commit()
+    return jsonify({'plan_id': plan.id, 'added': added})
+
+
+@app.route('/api/plans/unstage', methods=['POST'])
+def api_unstage():
+    """Remove URIs from every open plan."""
+    from disk_tree.staged import unstage
+    from disk_tree.staged_backend import session
+
+    uris = _staged_uris(request.get_json() or {})
+    if uris is None:
+        return jsonify({'error': '`uris` must be a non-empty array of strings'}), 400
+    s = session()
+    removed = unstage(s, uris)
+    s.commit()
+    return jsonify({'removed': removed})
+
+
+@app.route('/api/dispatch', methods=['POST'])
+def api_dispatch():
+    """Dispatch a plan. The local server deletes inline (`for_real`, default
+    true); pass `for_real=false` for a dry report. `uris` (optional) dispatches
+    just those staged items — they leave the plan, which stays open while
+    anything remains staged (spec `staged-page-ux.md` §2)."""
+    from sqlalchemy import select
+    from disk_tree.staged import dispatch, items, plan_by_ref
+    from disk_tree.staged_backend import delete_fn, session, size_fn
+
+    data = request.get_json(silent=True) or {}
+    ref = data.get('plan')
+    for_real = bool(data.get('for_real', True))
+    uris = None
+    if 'uris' in data:
+        uris = _staged_uris(data)
+        if uris is None:
+            return jsonify({'error': '`uris` must be a non-empty array of strings'}), 400
+    s = session()
+    plan = plan_by_ref(s, ref)
+    if plan is None:
+        return jsonify({'error': f'no plan {ref or "(open Staged)"}'}), 404
+    if plan.state != 'open':
+        return jsonify({'error': f'plan {plan.id} is already {plan.state}'}), 409
+    its = items(s, plan)
+    if not its:
+        return jsonify({'error': f'plan {plan.id} has no staged items'}), 400
+    try:
+        run = dispatch(s, plan, _staged_who(), for_real=for_real, delete_fn=delete_fn, size_fn=size_fn, uris=uris)
+    except KeyError as e:
+        return jsonify({'error': str(e.args[0])}), 400
+    s.commit()
+    if for_real:
+        # Deleted objects — drop cached scan slices so the next read is fresh.
+        _cache.clear()
+    # A dry run deletes nothing, so its scope lives on the bands: `bytes`/`objects`
+    # are what the run covered (dry or real); `deleted_*` what it actually removed.
+    from sqlalchemy import func
+    from disk_tree.sqla import DeletionBand
+    tot_bytes, tot_objs = s.execute(
+        select(func.coalesce(func.sum(DeletionBand.bytes), 0), func.coalesce(func.sum(DeletionBand.objects), 0))
+        .where(DeletionBand.run_id == run.run_id)
+    ).one()
+    return jsonify({
+        'run_id': run.run_id, 'plan_id': plan.id, 'mode': run.mode, 'items': len(uris) if uris else len(its),
+        'bytes': tot_bytes, 'objects': tot_objs,
+        'deleted_bytes': run.deleted_bytes, 'deleted_objects': run.deleted_objects,
+        'state': 'done' if for_real else 'dry',
+    })
+
+
 #: What this server can do — the live Flask peer can do everything. The static
 #: Cloudflare Pages deployment (`ui/functions/api/capabilities.ts`) answers the
 #: same shape with most of these off, and the UI hides those affordances. Keep
@@ -2272,12 +2415,36 @@ CAPABILITIES = {
     'library': True,
     'backend': True,
     's3': True,
+    'stageDelete': True,
+    'deleteApproval': 'sync',
 }
+
+
+def _delete_approval() -> str:
+    """The deployment's delete-approval policy (spec `staged-delete.md` CP6):
+    `DISK_TREE_DELETE_APPROVAL`, else buckets.yml `delete.approval`, else `sync`
+    (a credentialed local server just deletes)."""
+    v = os.environ.get('DISK_TREE_DELETE_APPROVAL')
+    if v in ('sync', 'staged', 'user-choice'):
+        return v
+    try:
+        import yaml
+        from disk_tree.config import ROOT_DIR
+        p = os.path.join(ROOT_DIR, 'buckets.yml')
+        if os.path.exists(p):
+            with open(p) as f:
+                raw = yaml.safe_load(f) or {}
+            a = (raw.get('delete') or {}).get('approval')
+            if a in ('sync', 'staged', 'user-choice'):
+                return a
+    except Exception:
+        pass
+    return 'sync'
 
 
 @app.route('/api/capabilities')
 def get_capabilities():
-    return jsonify(CAPABILITIES)
+    return jsonify({**CAPABILITIES, 'deleteApproval': _delete_approval()})
 
 
 @app.route('/api/backend', methods=['GET'])

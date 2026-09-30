@@ -53,3 +53,14 @@
 .dt-treemap-tip.pinned {
   border-color: var(--dt-treemap-pin, rgba(120, 170, 255, 0.95)) !important;
 }
+
+/* Diff treemap map box: taller on phones (a 340px strip of a portrait screen
+   is unreadable), 340px at ≥600px. Replaces the MUI `sm` breakpoint sx the
+   widget used before it moved into the core. */
+.dt-diff-map {
+  position: relative;
+  height: min(75vh, 560px);
+}
+@media (min-width: 600px) {
+  .dt-diff-map { height: 340px; }
+}

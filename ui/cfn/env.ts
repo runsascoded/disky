@@ -19,6 +19,13 @@ export interface Env {
    *  data only — never point an open deployment at a private (e.g. laptop)
    *  scan. Needs no `DB`/`SESSION_SECRET`. */
   PUBLIC_OPEN?: string
+  /** Max objects the edge R2 CFN deletes inline before deferring the run to the
+   *  drainer (spec `staged-delete.md` CP7). Default 1000. */
+  DELETE_THRESHOLD?: string
+  /** Per-bucket R2 bindings for the CFN executor: `R2_<bucket>` (bucket name
+   *  sanitized to an identifier), e.g. `R2_ctbk` -> the `ctbk` bucket. Bound in
+   *  `wrangler.toml`; absent buckets fall back to the drainer. */
+  [binding: `R2_${string}`]: R2Bucket | undefined
 }
 
 export const scansPrefix = (env: Env): string => env.SCANS_PREFIX ?? ''

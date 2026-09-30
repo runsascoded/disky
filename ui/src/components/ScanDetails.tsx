@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Alert, Box, Button, Checkbox, CircularProgress, Collapse, TextField, Tooltip } from '@mui/material'
 import { FaChevronDown, FaChevronRight, FaExclamationTriangle, FaExchangeAlt, FaFileAlt, FaFolder, FaFolderOpen, FaSync, FaSortUp, FaSortDown, FaTrash, FaSearch, FaRegCopy, FaCheck } from 'react-icons/fa'
-import { useAction } from 'use-kbd'
+import { useRowSelection, useRowSelectionKeys } from '../hooks/useRowSelection'
+import type { RowSelection } from '../hooks/useRowSelection'
 import { AgeHistograms, age01, ageDomain, ageFade, BytesOverTime, dimUnmatched, parseQuery, StalenessScatter, Treemap as DTTreemap } from '@disk-tree/react'
 import '@rdub/treemap/styles.css'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchScanDetails, fetchScanHistory, fetchHistogram, fetchFilter, startScan, fetchScanStatus, deletePath, revealPath, fetchFilePreview, DEFAULT_MAX_ROWS } from '../api'
+import { fetchScanDetails, fetchScanHistory, fetchHistogram, fetchFilter, startScan, fetchScanStatus, deletePath, stageUris, revealPath, fetchFilePreview, DEFAULT_MAX_ROWS } from '../api'
 import type { FilterResult, HistogramChild, Row, ScanJob, ScanProgress, CollapsedRow } from '../api'
 import { VoronoiTreemap } from '@rdub/treemap/voronoi'
 import { VizBoundary } from './VizBoundary'
 import { useCapabilities } from '../hooks/useCapabilities'
+import { useNarrow } from '../hooks/useNarrow'
+import { elideMiddle } from '../staged'
+import { useDeleteMethod } from '../hooks/useDeleteMethod'
 import { useScanProgress } from '../hooks/useScanProgress'
 import { useRecentPaths } from '../hooks/useRecentPaths'
 import { formatSize, formatCount, timeAgo, elapsed } from '../utils/format'
@@ -20,6 +25,8 @@ import {
   childLinkPrefix,
   detectRouteType,
   isSchemeRoot,
+  SCHEMES,
+  schemeLanding,
   segmentsToUri,
   supportsDelete,
   uriToPath,
@@ -94,13 +101,14 @@ function Breadcrumbs({ uri, routeType }: { uri: string; routeType: RouteType }) 
 
   return (
     <div className="breadcrumbs">
-      {!isFile && (
-        // Only s3 has a bucket-list landing page (/s3); other schemes
-        // just show the scheme prefix as text.
-        routeType === 's3'
-          ? <Link to="/s3">s3://</Link>
-          : <span>{routeType}://</span>
-      )}
+      {!isFile && (() => {
+        // The top crumb links up to the scheme's landing (a dedicated
+        // bucket-list page like /s3, else the `/` union root) — driven by the
+        // SCHEMES registry, so no scheme is special-cased here.
+        const up = schemeLanding(routeType)
+        const { label } = SCHEMES[routeType]
+        return up ? <Link to={up}>{label}</Link> : <span>{label}</span>
+      })()}
       {isFile && <Link to="/file/" className="breadcrumb-sep">/</Link>}
       {paths.map((path, idx) => (
         <span key={idx}>
@@ -266,8 +274,22 @@ function ChildScanStatus({ row, scanStatus, parentScanTime }: { row: Row; scanSt
   return <span style={{ opacity: 0.4 }}>-</span>
 }
 
-function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPaths, scanStatus, scanTime, onRescan, isScanning, sorts, onSort, onDelete, deletingPaths, selectedPaths, hoveredIndex, mouseHoverIndex, onRowClick, onRowHover, collapsedRows, tableRef }: {
+/** A row's name; at phone width middle-elided (the extension survives) with
+ *  the full name on hover / long-press. */
+function PathName({ name, narrow }: { name: string; narrow: boolean }) {
+  const shown = narrow ? elideMiddle(name, 26, 9) : name
+  if (shown === name) return <code>{name}</code>
+  return (
+    <Tooltip title={name} placement="top" arrow enterTouchDelay={0} leaveTouchDelay={3000}>
+      <code>{shown}</code>
+    </Tooltip>
+  )
+}
+
+function DetailsTable({ root, rootLabel, children, uri, routeType, onScanChild, scanningPaths, scanStatus, scanTime, onRescan, isScanning, sorts, onSort, onDelete, deletingPaths, sel, collapsedRows, tableRef }: {
   root: Row
+  /** The root row's Path cell — the location's basename (`gbfs`), not `.`. */
+  rootLabel: string
   children: Row[]
   uri: string
   routeType: RouteType
@@ -281,47 +303,35 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
   onSort: (key: SortKey) => void
   onDelete: (path: string) => void
   deletingPaths: Set<string>
-  selectedPaths: Set<string>
-  hoveredIndex: number | null
-  mouseHoverIndex: number | null
-  onRowClick: (uri: string, index: number, event: React.MouseEvent | React.KeyboardEvent) => void
-  onRowHover: (index: number | null) => void
+  sel: RowSelection<Row>
   collapsedRows?: CollapsedRow[] | null
   tableRef?: React.RefObject<HTMLTableElement | null>
 }) {
   const caps = useCapabilities()
-  const canDelete = supportsDelete(routeType) && caps?.delete === true
+  // The trash gesture syncs or stages per the deployment's `deleteApproval`
+  // policy (spec `staged-delete.md` CP6), not the scheme.
+  const { method } = useDeleteMethod()
+  const deletable = supportsDelete(routeType)
+  const canSync = deletable && caps?.delete === true && method === 'sync'
+  const staging = deletable && caps?.stageDelete === true && method === 'staged'
+  const canAct = canSync || staging
+  const actionVerb = staging ? 'Stage' : 'Delete'
+  const actionColor = staging ? '#ed6c02' : '#d32f2f'
   // Track whether the collapsed (auto-expanded) rows are shown expanded
   const [collapsedExpanded, setCollapsedExpanded] = useState(true)
 
   // Build prefix for child links, avoiding double slashes
   // For root (/), prefix should be /file not /file/
   const prefix = childLinkPrefix(uri)
-  const allSelected = children.length > 0 && children.every(r => selectedPaths.has(r.uri))
-  const someSelected = children.some(r => selectedPaths.has(r.uri))
-
-  const handleSelectAll = () => {
-    // Toggle all - if all selected, deselect all; otherwise select all
-    const syntheticEvent = { shiftKey: false, metaKey: false, ctrlKey: false } as React.MouseEvent
-    if (allSelected) {
-      // Deselect all by clicking each selected one with meta key (toggle off)
-      children.forEach((r, idx) => {
-        if (selectedPaths.has(r.uri)) {
-          onRowClick(r.uri, idx, { ...syntheticEvent, metaKey: true } as React.MouseEvent)
-        }
-      })
-    } else {
-      // Select all not yet selected
-      children.forEach((r, idx) => {
-        if (!selectedPaths.has(r.uri)) {
-          onRowClick(r.uri, idx, { ...syntheticEvent, metaKey: true } as React.MouseEvent)
-        }
-      })
-    }
-  }
+  const allSelected = children.length > 0 && children.every(r => sel.isSelected(r))
+  const someSelected = children.some(r => sel.isSelected(r))
+  // Phone width: the name is what matters — Modified/Children/Desc/Scanned
+  // hide (`.col-wide`) and names middle-elide with the full name in a tooltip.
+  const ownRef = useRef<HTMLTableElement | null>(null)
+  const narrow = useNarrow(tableRef ?? ownRef)
 
   return (
-    <table className="scan-details-table" ref={tableRef}>
+    <table className={`scan-details-table${narrow ? ' narrow' : ''}`} ref={tableRef ?? ownRef}>
       <thead>
         <tr>
           <th className="col-checkbox">
@@ -329,31 +339,41 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
               size="small"
               checked={allSelected}
               indeterminate={someSelected && !allSelected}
-              onChange={handleSelectAll}
+              onChange={sel.togglePage}
               sx={{ padding: 0 }}
             />
           </th>
           <SortableHeader className="col-icon" label="" sortKey="kind" sorts={sorts} onSort={onSort} tooltip="Sort by type (file/folder)" />
           <SortableHeader className="col-path" label="Path" sortKey="path" sorts={sorts} onSort={onSort} />
           <SortableHeader className="col-numeric" label="Size" sortKey="size" sorts={sorts} onSort={onSort} tooltip="Total size including all nested files and directories" />
-          <SortableHeader className="col-numeric" label="Modified" sortKey="mtime" sorts={sorts} onSort={onSort} tooltip="Most recent modification time of any file in this directory tree" />
-          <SortableHeader className="col-numeric" label="Children" sortKey="n_children" sorts={sorts} onSort={onSort} tooltip="Number of direct children (files and subdirectories)" />
-          <SortableHeader className="col-numeric" label="Desc." sortKey="n_desc" sorts={sorts} onSort={onSort} tooltip="Total number of descendants (all nested files and directories)" />
-          <SortableHeader className="col-numeric" label="Scanned" sortKey="scanned" sorts={sorts} onSort={onSort} tooltip="When this directory was last scanned" />
+          <SortableHeader className="col-numeric col-wide" label="Modified" sortKey="mtime" sorts={sorts} onSort={onSort} tooltip="Most recent modification time of any file in this directory tree" />
+          <SortableHeader className="col-numeric col-wide" label="Children" sortKey="n_children" sorts={sorts} onSort={onSort} tooltip="Number of direct children (files and subdirectories)" />
+          <SortableHeader className="col-numeric col-wide" label="Desc." sortKey="n_desc" sorts={sorts} onSort={onSort} tooltip="Total number of descendants (all nested files and directories)" />
+          <SortableHeader className="col-numeric col-wide" label="Scanned" sortKey="scanned" sorts={sorts} onSort={onSort} tooltip="When this directory was last scanned" />
           <th className="col-action"></th>
-          {canDelete && <th className="col-action"></th>}
+          {canAct && <th className="col-action"></th>}
         </tr>
       </thead>
       <tbody>
         <tr className="root">
-          <td className="col-checkbox"></td>
+          <td className="col-checkbox">
+            {caps?.compare && (
+              <Tooltip title="Compare scans">
+                <Link to={`/compare${uriToPath(uri)}`}>
+                  <Button size="small" sx={{ minWidth: 0, padding: '2px 4px' }}>
+                    <FaExchangeAlt size={12} />
+                  </Button>
+                </Link>
+              </Tooltip>
+            )}
+          </td>
           <td className="col-icon">{root.kind === 'file' ? <FaFileAlt /> : <FaFolder />}</td>
-          <td className="col-path"><code>.</code></td>
+          <td className="col-path"><code>{rootLabel}</code></td>
           <td className="col-numeric">{formatSize(root.size)}</td>
-          <td className="col-numeric">{timeAgo(root.mtime)}</td>
-          <td className="col-numeric">{root.n_children?.toLocaleString()}</td>
-          <td className="col-numeric">{root.n_desc && root.n_desc > 1 ? root.n_desc.toLocaleString() : null}</td>
-          <td className="col-numeric">
+          <td className="col-numeric col-wide">{timeAgo(root.mtime)}</td>
+          <td className="col-numeric col-wide">{root.n_children?.toLocaleString()}</td>
+          <td className="col-numeric col-wide">{root.n_desc && root.n_desc > 1 ? root.n_desc.toLocaleString() : null}</td>
+          <td className="col-numeric col-wide">
             {scanStatus === 'full' && scanTime ? (
               <span>{scanTimeAgo(scanTime)}</span>
             ) : scanStatus === 'partial' ? (
@@ -381,17 +401,23 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
                 </span>
               </Tooltip>
             )}
-            {caps?.compare && (
-              <Tooltip title="Compare scans">
-                <Link to={`/compare${uriToPath(uri)}`}>
-                  <Button size="small" sx={{ minWidth: 0, padding: '2px 4px' }}>
-                    <FaExchangeAlt size={12} />
-                  </Button>
-                </Link>
-              </Tooltip>
-            )}
           </td>
-          {canDelete && <td className="col-action"></td>}
+          {canAct && (
+            <td className="col-action">
+              <Tooltip title={`${actionVerb} this ${root.kind === 'file' ? 'file' : 'directory'}`}>
+                <span>
+                  <Button
+                    size="small"
+                    onClick={() => onDelete(uri)}
+                    disabled={deletingPaths.has(uri)}
+                    sx={{ minWidth: 0, padding: '2px 4px', color: actionColor }}
+                  >
+                    {deletingPaths.has(uri) ? <CircularProgress size={14} /> : <FaTrash size={12} />}
+                  </Button>
+                </span>
+              </Tooltip>
+            </td>
+          )}
         </tr>
         {/* Render collapsed/expanded parent rows (auto-expanded single-child dirs) */}
         {collapsedRows && collapsedRows.map((collapsedRow, depth) => {
@@ -428,10 +454,10 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
                 </Link>
               </td>
               <td className="col-numeric">{formatSize(collapsedRow.size)}</td>
-              <td className="col-numeric">{timeAgo(collapsedRow.mtime)}</td>
-              <td className="col-numeric">{collapsedRow.n_children?.toLocaleString()}</td>
-              <td className="col-numeric">{collapsedRow.n_desc && collapsedRow.n_desc > 1 ? collapsedRow.n_desc.toLocaleString() : null}</td>
-              <td className="col-numeric">{scanStatus === 'full' && scanTime ? scanTimeAgo(scanTime) : null}</td>
+              <td className="col-numeric col-wide">{timeAgo(collapsedRow.mtime)}</td>
+              <td className="col-numeric col-wide">{collapsedRow.n_children?.toLocaleString()}</td>
+              <td className="col-numeric col-wide">{collapsedRow.n_desc && collapsedRow.n_desc > 1 ? collapsedRow.n_desc.toLocaleString() : null}</td>
+              <td className="col-numeric col-wide">{scanStatus === 'full' && scanTime ? scanTimeAgo(scanTime) : null}</td>
               <td className="col-action">
                 {caps?.scan && (
                   <Tooltip title="Rescan this directory">
@@ -448,15 +474,15 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
                   </Tooltip>
                 )}
               </td>
-              {canDelete && (
+              {canAct && (
                 <td className="col-action">
-                  <Tooltip title="Delete directory">
+                  <Tooltip title={`${actionVerb} directory`}>
                     <span>
                       <Button
                         size="small"
                         onClick={() => onDelete(collapsedUri)}
                         disabled={isDeleting}
-                        sx={{ minWidth: 0, padding: '2px 4px', color: '#d32f2f' }}
+                        sx={{ minWidth: 0, padding: '2px 4px', color: actionColor }}
                       >
                         {isDeleting ? <CircularProgress size={14} /> : <FaTrash size={12} />}
                       </Button>
@@ -471,9 +497,7 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
         {(!collapsedRows || collapsedExpanded) && children.map((row, idx) => {
           const childUri = row.uri
           const isChildScanning = scanningPaths.has(childUri)
-          const isSelected = selectedPaths.has(childUri)
-          const isCursor = hoveredIndex === idx  // Keyboard cursor position
-          const isMouseHover = mouseHoverIndex === idx  // Mouse hover (for visual feedback)
+          const isSelected = sel.isSelected(row)
           // Indent children under collapsed rows when expanded
           const indentPx = collapsedRows && collapsedExpanded ? collapsedRows.length * 20 : 0
           // Build the collapsed path prefix from the last collapsed row's original_path
@@ -483,30 +507,15 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
           return (
             <tr
               key={row.path}
-              style={{
-                opacity: row.scanned || scanStatus === 'full' ? 1 : 0.6,
-                background: isSelected
-                  ? 'var(--selected-bg, rgba(25, 118, 210, 0.12))'
-                  : isCursor
-                    ? 'var(--cursor-bg, rgba(25, 118, 210, 0.08))'
-                    : isMouseHover
-                      ? 'var(--hover-bg, #f5f5f5)'
-                      : undefined,
-                // Show cursor indicator with left border
-                boxShadow: isCursor ? 'inset 3px 0 0 var(--cursor-border, #1976d2)' : undefined,
-              }}
-              onClick={e => onRowClick(childUri, idx, e)}
-              onMouseEnter={() => onRowHover(idx)}
-              onMouseLeave={() => onRowHover(null)}
+              ref={sel.rowRef(idx)}
+              {...sel.rowProps(idx)}
+              style={{ opacity: row.scanned || scanStatus === 'full' ? 1 : 0.6 }}
             >
               <td className="col-checkbox" onClick={e => e.stopPropagation()}>
                 <Checkbox
                   size="small"
                   checked={isSelected}
-                  onChange={() => {
-                    // Checkbox always toggles (unlike row click which replaces selection)
-                    onRowClick(childUri, idx, { metaKey: true, ctrlKey: true, shiftKey: false } as React.MouseEvent)
-                  }}
+                  onChange={() => sel.toggle(idx)}
                   sx={{ padding: 0 }}
                 />
               </td>
@@ -525,7 +534,7 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
               </td>
               <td className="col-path">
                 <Link to={`${prefix}/${collapsedPrefix ? collapsedPrefix + '/' : ''}${row.path}`} onClick={e => e.stopPropagation()}>
-                  <code>{row.path}</code>
+                  <PathName name={row.path} narrow={narrow} />
                 </Link>
                 {row.expand_preview && row.expand_preview.split('/').map((segment, idx, arr) => {
                   const pathToSegment = `${row.path}/${arr.slice(0, idx + 1).join('/')}`
@@ -540,10 +549,10 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
                 })}
               </td>
               <td className="col-numeric">{formatSize(row.size)}</td>
-              <td className="col-numeric">{timeAgo(row.mtime)}</td>
-              <td className="col-numeric">{row.n_children ? row.n_children.toLocaleString() : null}</td>
-              <td className="col-numeric">{row.n_desc && row.n_desc > 1 ? row.n_desc.toLocaleString() : null}</td>
-              <td className="col-numeric">
+              <td className="col-numeric col-wide">{timeAgo(row.mtime)}</td>
+              <td className="col-numeric col-wide">{row.n_children ? row.n_children.toLocaleString() : null}</td>
+              <td className="col-numeric col-wide">{row.n_desc && row.n_desc > 1 ? row.n_desc.toLocaleString() : null}</td>
+              <td className="col-numeric col-wide">
                 <ChildScanStatus row={row} scanStatus={scanStatus} parentScanTime={scanTime} />
               </td>
               <td className="col-action" onClick={e => e.stopPropagation()}>
@@ -562,15 +571,15 @@ function DetailsTable({ root, children, uri, routeType, onScanChild, scanningPat
                   </Tooltip>
                 )}
               </td>
-              {canDelete && (
+              {canAct && (
                 <td className="col-action" onClick={e => e.stopPropagation()}>
-                  <Tooltip title={`Delete ${row.kind === 'dir' ? 'directory' : 'file'}`}>
+                  <Tooltip title={`${actionVerb} ${row.kind === 'dir' ? 'directory' : 'file'}`}>
                     <span>
                       <Button
                         size="small"
                         onClick={() => onDelete(childUri)}
                         disabled={deletingPaths.has(childUri)}
-                        sx={{ minWidth: 0, padding: '2px 4px', color: '#d32f2f' }}
+                        sx={{ minWidth: 0, padding: '2px 4px', color: actionColor }}
                       >
                         {deletingPaths.has(childUri) ? <CircularProgress size={14} /> : <FaTrash size={12} />}
                       </Button>
@@ -721,6 +730,7 @@ function buildFilterTree(result: FilterResult, rootLabel: string, rootUri?: stri
 
 function Treemap({
   root,
+  rootLabel,
   rows,
   ageLens,
   query,
@@ -728,6 +738,8 @@ function Treemap({
   filterResult,
 }: {
   root: Row
+  /** The root cell's label — the location's basename (`gbfs`), not `.`. */
+  rootLabel: string
   rows: Row[]
   ageLens: boolean
   query: string
@@ -741,12 +753,12 @@ function Treemap({
   const tree = useMemo(
     () => ({
       path: '.',
-      label: root.path.split('/').pop() || '.',
+      label: rootLabel,
       size: root.size ?? 0,
       uri: root.uri,
       children: buildDTNodes(rows, '.', root.size ?? null),
     } satisfies DTNode),
-    [root, rows],
+    [root, rootLabel, rows],
   )
 
   // Drilling past the depth the response carried fetches that subtree, so the
@@ -775,8 +787,8 @@ function Treemap({
   const matches = useMemo(() => parseQuery(query), [query])
 
   const filterTree = useMemo(
-    () => (filterResult ? buildFilterTree(filterResult, root.path.split('/').pop() || '.', root.uri) : null),
-    [filterResult, root],
+    () => (filterResult ? buildFilterTree(filterResult, rootLabel, root.uri) : null),
+    [filterResult, root, rootLabel],
   )
 
   return (
@@ -785,27 +797,28 @@ function Treemap({
         root={filterTree ?? tree}
         tiling={tiling}
         renderer={renderer}
+        exportable={{ title: true }}
+        renderTip={(label, btn) => <Tooltip title={label}>{btn as ReactElement}</Tooltip>}
+        nestedHues
         renderLegend={() => (
           <span style={{ display: 'inline-flex', gap: 8, fontSize: '0.8rem' }}>
-            <span style={{ display: 'inline-flex', gap: 2 }}>
-              {(['gaps', 'shared'] as const).map(t => (
-                <button
-                  key={t}
-                  onClick={e => { e.stopPropagation(); setTiling(t) }}
-                  title={t === 'gaps'
-                    ? '2px gutters and rounded corners; dense leaf fields under-paint by ~perimeter/area'
-                    : 'Cells abut, one stroke per boundary — areas exact (a 6×6px cell with 2px gutters paints only 4×4)'}
-                  style={{
-                    cursor: 'pointer', fontSize: '0.75rem', padding: '1px 7px', borderRadius: 3,
-                    border: '1px solid var(--dt-border, #444)',
-                    background: tiling === t ? 'var(--dt-accent-bg, #30363d)' : 'transparent',
-                    color: 'inherit', fontWeight: tiling === t ? 600 : 400,
-                  }}
-                >
-                  {t}
-                </button>
-              ))}
-            </span>
+            {/* One control, not a gaps|shared pair: cells abut and share one
+                stroke by default (areas exact); check `gaps` for the 2px-gutter
+                look (which under-paints dense leaf fields by ~perimeter/area). */}
+            <Tooltip title="Off (default): cells abut, one stroke per boundary — areas exact. On: 2px gutters and rounded corners, but a dense leaf field under-paints by ~perimeter/area (a 6×6px cell with 2px gutters paints only 4×4).">
+              <label
+                onClick={e => e.stopPropagation()}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 3, cursor: 'pointer', fontSize: '0.75rem' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={tiling === 'gaps'}
+                  onChange={e => setTiling(e.target.checked ? 'gaps' : 'shared')}
+                  style={{ margin: 0, verticalAlign: 'middle' }}
+                />
+                gaps
+              </label>
+            </Tooltip>
             <span style={{ display: 'inline-flex', gap: 2 }}>
               {(['dom', 'canvas'] as const).map(r => (
                 <button
@@ -836,8 +849,11 @@ function Treemap({
         // staleness/voronoi views already do — rather than drilling the map
         // in place and diverging from the table above. `uri` is the absolute
         // URI, so this is correct through chunk/collapse boundaries; `true`
-        // suppresses the widget's built-in in-place drill.
-        onCellClick={n => {
+        // suppresses the widget's built-in in-place drill. ⌥-click falls
+        // through (returns nothing) so the widget pins the branch instead —
+        // inspect/act on a deep cell's tip without re-rooting the page.
+        onCellClick={(n, _path, e) => {
+          if (e.altKey) return
           if (!n.uri || n.isPlaceholder) return
           navigate(uriToPath(n.uri))
           return true
@@ -1161,6 +1177,15 @@ export function ScanDetails() {
   const pathname = window.location.pathname
   const routeType: RouteType = detectRouteType(pathname)
   const uri = segmentsToUri(routeType, pathSegments)
+  const navigate = useNavigate()
+
+  // The current location's own name, for the treemap's root cell and the table's
+  // root row (the full navigable path already sits in the breadcrumb above, so
+  // `.` there was redundant *and* uninformative). Basename of the uri: `gbfs`
+  // for `r2://ctbk/gbfs`; the bare scheme/`/` root falls back to its label.
+  const rootLabel = isSchemeRoot(uri)
+    ? (routeType === 'file' ? '/' : `${routeType}://`)
+    : (uri.replace(/\/+$/, '').split('/').pop() || uri)
 
   // Selected scan ID for time-travel (undefined = latest)
   const [selectedScanId, setSelectedScanId] = useState<number | undefined>(undefined)
@@ -1175,12 +1200,19 @@ export function ScanDetails() {
   const [treemapMaxRows, setTreemapMaxRows] = useState(DEFAULT_MAX_ROWS)
   const [ageLens, setAgeLens] = useState(false)
   const [viz, setViz] = useState<Viz>('treemap')
+  const caps = useCapabilities()
+  // A static deployment has no live scanner, so `/file/` (uri `/`) can never
+  // resolve — don't fire the request (it would 404 and retry, spinning on
+  // "Loading…"); render a friendly note instead.
+  const localBrowseUnavailable = routeType === 'file' && isSchemeRoot(uri) && caps?.filesystem === false
   const { data: details, isLoading, error: queryError, refetch } = useQuery({
     queryKey: ['scan-details', uri, selectedScanId, treemapMaxRows],
     queryFn: () => fetchScanDetails(uri, selectedScanId, 2, treemapMaxRows),
     staleTime: 60 * 1000, // 1 minute - scan details don't change frequently
+    enabled: !localBrowseUnavailable,
   })
   const [mutationError, setMutationError] = useState<string | null>(null)
+  const [stageNotice, setStageNotice] = useState<string | null>(null)
   const error = queryError?.message || mutationError
   const [scanning, setScanning] = useState(false)
   const [scanJob, setScanJob] = useState<ScanJob | null>(null)
@@ -1202,21 +1234,18 @@ export function ScanDetails() {
     placeholderData: prev => prev, // keep the last slice on screen while typing
     staleTime: 60 * 1000,
   })
-  // Selection model (Superhuman-style):
-  // - hoveredIndex: keyboard cursor position (moving end of range)
-  // - rangeAnchor: fixed end of range selection
-  // - pinnedUris: items selected via meta-click that persist across range changes
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
-  const [rangeAnchor, setRangeAnchor] = useState<number | null>(null)
-  const [pinnedUris, setPinnedUris] = useState<Set<string>>(new Set())
-  const [mouseHoverIndex, setMouseHoverIndex] = useState<number | null>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const tableRef = useRef<HTMLTableElement>(null)
 
   // Live scan progress from SSE
   const scanProgress = useScanProgress()
-  const caps = useCapabilities()
-  const canDelete = supportsDelete(routeType) && caps?.delete === true
+  // Sync vs stage is the deployment's `deleteApproval` policy (CP6), not the scheme.
+  const { method: deleteMethod } = useDeleteMethod()
+  const deletable = supportsDelete(routeType)
+  const canDelete = deletable && caps?.delete === true && deleteMethod === 'sync'
+  const staging = deletable && caps?.stageDelete === true && deleteMethod === 'staged'
+  const canAct = canDelete || staging
+  const actionColor = staging ? '#ed6c02' : '#d32f2f'
 
   // Auto-refetch when a scan relevant to this view finishes. A completed scan
   // is *deleted* from `scan_progress` (see ScanProgress.finish), so completion
@@ -1323,212 +1352,35 @@ export function ScanDetails() {
     return sortedChildren.slice(start, start + pageSize)
   }, [sortedChildren, page, pageSize])
 
-  // Compute selectedPaths from pinnedUris + range(rangeAnchor, hoveredIndex)
-  const selectedPaths = useMemo(() => {
-    const result = new Set(pinnedUris)
-    if (hoveredIndex !== null && rangeAnchor !== null) {
-      const start = Math.min(hoveredIndex, rangeAnchor)
-      const end = Math.max(hoveredIndex, rangeAnchor)
-      for (let i = start; i <= end; i++) {
-        if (paginatedChildren[i]) {
-          result.add(paginatedChildren[i].uri)
-        }
-      }
-    }
-    return result
-  }, [pinnedUris, hoveredIndex, rangeAnchor, paginatedChildren])
+  // Multi-row selection (shift-range, ⌘-click, j/k) — use-kbd's `useRowSelection`
+  // via the shared wrapper, keyed by `uri` so it survives paging and sort.
+  const sel = useRowSelection(paginatedChildren, r => r.uri)
+  useRowSelectionKeys(sel)
 
   // Reset page when sort/filter changes or data reloads
   useEffect(() => {
     setPage(0)
   }, [sorts, filter, details])
 
-  // Clear selection when data changes
-  useEffect(() => {
-    setHoveredIndex(null)
-    setRangeAnchor(null)
-    setPinnedUris(new Set())
-  }, [details])
+  // Clear selection on a new listing (scan reload); a page/sort/filter change
+  // keeps it — use-kbd freezes the active range into pins by key.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { sel.clear(); setStageNotice(null) }, [details])
 
-  // Handle row click with shift/meta modifiers
-  const handleRowClick = useCallback((uri: string, index: number, event: React.MouseEvent | React.KeyboardEvent) => {
-    const shiftKey = event.shiftKey
-    const metaKey = 'metaKey' in event ? event.metaKey || event.ctrlKey : false
-
-    if (metaKey) {
-      // Meta-click: pin current selection, then toggle this item and set new anchor
-      setPinnedUris(prev => {
-        const next = new Set(prev)
-        // Add current range to pinned
-        if (hoveredIndex !== null && rangeAnchor !== null) {
-          const start = Math.min(hoveredIndex, rangeAnchor)
-          const end = Math.max(hoveredIndex, rangeAnchor)
-          for (let i = start; i <= end; i++) {
-            if (paginatedChildren[i]) {
-              next.add(paginatedChildren[i].uri)
-            }
-          }
-        }
-        // Toggle clicked item
-        if (next.has(uri)) {
-          next.delete(uri)
-        } else {
-          next.add(uri)
-        }
-        return next
-      })
-      setHoveredIndex(index)
-      setRangeAnchor(index)
-    } else if (shiftKey && rangeAnchor !== null) {
-      // Shift-click: extend range from anchor to clicked (pinnedUris stay)
-      setHoveredIndex(index)
-    } else {
-      // Regular click: toggle if only this row selected, otherwise select just this row
-      const isOnlySelected = selectedPaths.size === 1 && selectedPaths.has(uri)
-      if (isOnlySelected) {
-        // Clicking the only selected row deselects it
-        setHoveredIndex(null)
-        setRangeAnchor(null)
-        setPinnedUris(new Set())
-      } else {
-        // Select just this row
-        setHoveredIndex(index)
-        setRangeAnchor(index)
-        setPinnedUris(new Set())
-      }
-    }
-  }, [hoveredIndex, rangeAnchor, paginatedChildren, selectedPaths])
-
-  // Click outside table to deselect
+  // Click outside the wrapper (table + toolbar) deselects.
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      // Clear selection when clicking outside the wrapper (table + toolbar)
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
-        setHoveredIndex(null)
-        setRangeAnchor(null)
-        setPinnedUris(new Set())
-      }
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) sel.clear()
     }
-
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Get initial cursor position (from mouse hover or start/end)
-  const getInitialIndex = useCallback((direction: 'up' | 'down') => {
-    if (mouseHoverIndex !== null && mouseHoverIndex >= 0 && mouseHoverIndex < paginatedChildren.length) {
-      return mouseHoverIndex
-    }
-    return direction === 'up' ? paginatedChildren.length - 1 : 0
-  }, [mouseHoverIndex, paginatedChildren.length])
-
-  // Move cursor up (clears selection, sets single-row selection)
-  useAction('table:up', {
-    label: 'Row up',
-    group: 'Table: Navigation',
-    defaultBindings: ['k', 'arrowup'],
-    handler: useCallback(() => {
-      if (paginatedChildren.length === 0) return
-      const newIndex = hoveredIndex === null
-        ? getInitialIndex('up')
-        : Math.max(0, hoveredIndex - 1)
-      setHoveredIndex(newIndex)
-      setRangeAnchor(newIndex)
-      setPinnedUris(new Set())
-    }, [hoveredIndex, paginatedChildren.length, getInitialIndex]),
-  })
-
-  // Move cursor down
-  useAction('table:down', {
-    label: 'Row down',
-    group: 'Table: Navigation',
-    defaultBindings: ['j', 'arrowdown'],
-    handler: useCallback(() => {
-      if (paginatedChildren.length === 0) return
-      const newIndex = hoveredIndex === null
-        ? getInitialIndex('down')
-        : Math.min(paginatedChildren.length - 1, hoveredIndex + 1)
-      setHoveredIndex(newIndex)
-      setRangeAnchor(newIndex)
-      setPinnedUris(new Set())
-    }, [hoveredIndex, paginatedChildren.length, getInitialIndex]),
-  })
-
-  // Extend selection up (keeps anchor fixed, moves cursor)
-  useAction('table:extend-up', {
-    label: 'Extend selection up',
-    group: 'Table: Selection',
-    defaultBindings: ['shift+k', 'shift+arrowup'],
-    handler: useCallback(() => {
-      if (paginatedChildren.length === 0) return
-      if (rangeAnchor === null) {
-        // First shift+arrow: set anchor and move cursor
-        const startIndex = hoveredIndex ?? getInitialIndex('up')
-        setRangeAnchor(startIndex)
-        setHoveredIndex(Math.max(0, startIndex - 1))
-      } else {
-        // Move cursor up (anchor stays fixed)
-        setHoveredIndex(prev => Math.max(0, (prev ?? rangeAnchor) - 1))
-      }
-    }, [hoveredIndex, rangeAnchor, paginatedChildren.length, getInitialIndex]),
-  })
-
-  // Extend selection down
-  useAction('table:extend-down', {
-    label: 'Extend selection down',
-    group: 'Table: Selection',
-    defaultBindings: ['shift+j', 'shift+arrowdown'],
-    handler: useCallback(() => {
-      if (paginatedChildren.length === 0) return
-      if (rangeAnchor === null) {
-        // First shift+arrow: set anchor and move cursor
-        const startIndex = hoveredIndex ?? getInitialIndex('down')
-        setRangeAnchor(startIndex)
-        setHoveredIndex(Math.min(paginatedChildren.length - 1, startIndex + 1))
-      } else {
-        // Move cursor down (anchor stays fixed)
-        setHoveredIndex(prev => Math.min(paginatedChildren.length - 1, (prev ?? rangeAnchor) + 1))
-      }
-    }, [hoveredIndex, rangeAnchor, paginatedChildren.length, getInitialIndex]),
-  })
-
-  // Clear selection
-  useAction('table:clear', {
-    label: 'Clear selection',
-    group: 'Table: Selection',
-    defaultBindings: ['escape'],
-    handler: useCallback(() => {
-      setHoveredIndex(null)
-      setRangeAnchor(null)
-      setPinnedUris(new Set())
-    }, []),
-  })
-
-  // Select all
-  useAction('table:select-all', {
-    label: 'Select all',
-    group: 'Table: Selection',
-    defaultBindings: ['meta+a'],
-    handler: useCallback(() => {
-      if (paginatedChildren.length === 0) return
-      setPinnedUris(new Set(paginatedChildren.map(r => r.uri)))
-      setHoveredIndex(paginatedChildren.length - 1)
-      setRangeAnchor(0)
-    }, [paginatedChildren]),
-  })
-
-  // Compute selection summary
-  const selectedRows = useMemo(() => {
-    return paginatedChildren.filter(r => selectedPaths.has(r.uri))
-  }, [paginatedChildren, selectedPaths])
-
-  const selectedSize = useMemo(() => {
-    return selectedRows.reduce((sum, r) => sum + (r.size ?? 0), 0)
-  }, [selectedRows])
-
-  const selectedDirs = useMemo(() => {
-    return selectedRows.filter(r => r.kind === 'dir')
-  }, [selectedRows])
+  // Selection summary (over the current page's selected rows).
+  const selectedRows = sel.selectedRows()
+  const selectedSize = selectedRows.reduce((sum, r) => sum + (r.size ?? 0), 0)
+  const selectedDirs = selectedRows.filter(r => r.kind === 'dir')
 
   // Bulk actions
   const handleBulkScan = async () => {
@@ -1544,6 +1396,22 @@ export function ScanDetails() {
 
   const handleBulkDelete = async () => {
     if (selectedRows.length === 0) return
+
+    // Cloud buckets stage into a plan (reversible, no deadline) rather than
+    // deleting immediately; an admin dispatches from `/staged`.
+    if (staging) {
+      const uris = selectedRows.map(r => r.uri)
+      try {
+        const { added } = await stageUris(uris)
+        const dup = uris.length - added.length
+        setStageNotice(`Staged ${added.length} for deletion${dup ? ` (${dup} already staged)` : ''} — review in Staged.`)
+        setMutationError(null)
+      } catch (e) {
+        setMutationError(e instanceof Error ? e.message : 'Failed to stage')
+      }
+      sel.clear()
+      return
+    }
 
     const msg = selectedRows.length === 1
       ? `Delete "${selectedRows[0].path}"?`
@@ -1574,9 +1442,7 @@ export function ScanDetails() {
       return next
     })
 
-    setHoveredIndex(null)
-    setRangeAnchor(null)
-    setPinnedUris(new Set())
+    sel.clear()
     refetch()
   }
 
@@ -1648,6 +1514,18 @@ export function ScanDetails() {
   }
 
   const handleDelete = async (path: string) => {
+    // Cloud buckets stage into a plan; an admin dispatches from `/staged`.
+    if (staging) {
+      try {
+        const { added } = await stageUris([path])
+        setStageNotice(added.length ? 'Staged for deletion — review in Staged.' : 'Already staged.')
+        setMutationError(null)
+      } catch (e) {
+        setMutationError(e instanceof Error ? e.message : 'Failed to stage')
+      }
+      return
+    }
+
     const name = path.split('/').pop() || path
     if (!confirm(`Delete "${name}"? This cannot be undone.`)) {
       return
@@ -1656,6 +1534,11 @@ export function ScanDetails() {
     setDeletingPaths(prev => new Set(prev).add(path))
     try {
       await deletePath(path)
+      if (path === uri) {
+        // The folder on screen is gone: show its parent instead
+        navigate(uriToPath(path.replace(/\/[^/]+\/?$/, '')))
+        return
+      }
       refetch()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : 'Failed to delete')
@@ -1674,6 +1557,16 @@ export function ScanDetails() {
       .map(([path]) => path)
   )
 
+  if (localBrowseUnavailable) {
+    return (
+      <div style={{ padding: '1.5rem 0' }}>
+        <p>Local filesystem browsing isn't available in this deployment.</p>
+        <p style={{ opacity: 0.75 }}>
+          Head to <Link to="/">Scans</Link> to browse the published scans.
+        </p>
+      </div>
+    )
+  }
   if (isLoading) return <div>Loading...</div>
   if (error && !details) {
     return (
@@ -1717,6 +1610,90 @@ export function ScanDetails() {
     if (diffDays < 7) return `${diffDays}d ago ${timeFormatted}`
     return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ` ${timeFormatted}`
   }
+
+  // The viz panel (treemap / scatter / histograms / voronoi) + its controls,
+  // rendered *above* the table so the map is visible without scrolling past a
+  // long directory listing (a bucket root can be dozens of rows).
+  const vizPanel = rows.length > 0 ? (
+    <Box sx={{ mt: 2, mb: 2 }}>
+      <VizBoundary label={VIZ_LABELS[viz]}>
+        {viz === 'treemap' ? (
+          <Treemap
+            root={root}
+            rootLabel={rootLabel}
+            rows={rows}
+            ageLens={ageLens}
+            query={filter}
+            scanId={selectedScanId}
+            filterResult={filterActive ? filterResult : undefined}
+          />
+        ) : viz === 'scatter' ? (
+          <StalenessPanel nodes={filteredChildren} uri={uri} collapsedRows={collapsed_rows} />
+        ) : viz === 'histograms' ? (
+          <HistogramPanel uri={uri} scanId={selectedScanId} query={filter} />
+        ) : (
+          <VoronoiPanel nodes={filteredChildren} uri={uri} collapsedRows={collapsed_rows} />
+        )}
+      </VizBoundary>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 1, fontSize: '0.85rem', opacity: 0.7 }}>
+        <span>{viz === 'treemap' ? `${rows.length} items` : `${filteredChildren.length} children`}</span>
+        {filter.trim() && caps?.filter && (
+          <Tooltip
+            title={reagg
+              ? 'Recursive server-side filter: sizes count matched bytes only, and a match inside a matched dir never double-counts. Click to switch back to display-only dimming.'
+              : "The filter highlights and re-lays-out what's shown at this level; directory sizes still include children the filter hides. Click to re-aggregate: sizes count only what matches, recursively."}
+          >
+            <span
+              onClick={() => setReagg(r => !r)}
+              style={{ fontStyle: 'italic', cursor: 'pointer', textDecoration: 'underline dotted' }}
+            >
+              {reagg
+                ? filterResult
+                  ? `filtered (re-aggregated): ${formatSize(filterResult.total_size)} in ${filterResult.n_matches.toLocaleString()} match${filterResult.n_matches === 1 ? '' : 'es'}${filterFetching ? ' …' : ''}`
+                  : 'filtered (re-aggregating…)'
+                : 'filtered (display only)'}
+            </span>
+          </Tooltip>
+        )}
+        <label>
+          View:
+          <select value={viz} onChange={e => setViz(e.target.value as Viz)} style={{ marginLeft: 4 }}>
+            <option value="treemap">Treemap</option>
+            <option value="scatter">Staleness</option>
+            {caps?.histogram && <option value="histograms">Age histograms</option>}
+            <option value="voronoi">Voronoi</option>
+          </select>
+        </label>
+        {viz === 'treemap' && (
+          <Tooltip title="Fade cells by age (size-weighted mean mtime when the scan has it, else newest descendant) — older fades toward the background">
+            <label style={{ cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={ageLens}
+                onChange={e => setAgeLens(e.target.checked)}
+                style={{ marginRight: 4, verticalAlign: 'middle' }}
+              />
+              Age lens
+            </label>
+          </Tooltip>
+        )}
+        <label>
+          Max:
+          <select
+            value={treemapMaxRows}
+            onChange={e => setTreemapMaxRows(Number(e.target.value))}
+            style={{ marginLeft: 4 }}
+          >
+            <option value={500}>500</option>
+            <option value={1000}>1,000</option>
+            <option value={2000}>2,000</option>
+            <option value={5000}>5,000</option>
+            <option value={0}>All</option>
+          </select>
+        </label>
+      </Box>
+    </Box>
+  ) : null
 
   return (
     <div ref={wrapperRef} tabIndex={0} style={{ outline: 'none' }}>
@@ -1770,6 +1747,11 @@ export function ScanDetails() {
       </Box>
       <ScanProgressBanner progress={scanProgress} currentUri={uri} />
       {error && <p style={{ color: 'red' }}>{error}</p>}
+      {stageNotice && (
+        <Alert severity="success" onClose={() => setStageNotice(null)} sx={{ mb: 1 }}>
+          {stageNotice} <Link to="/staged">Staged →</Link>
+        </Alert>
+      )}
       {error_count && error_count > 0 && (
         <PermissionErrorWarning
           errorCount={error_count}
@@ -1803,25 +1785,21 @@ export function ScanDetails() {
                 </Button>
               </Tooltip>
             )}
-            {canDelete && (
-              <Tooltip title={`Delete ${selectedRows.length} item${selectedRows.length === 1 ? '' : 's'}`}>
+            {canAct && (
+              <Tooltip title={`${staging ? 'Stage' : 'Delete'} ${selectedRows.length} item${selectedRows.length === 1 ? '' : 's'}${staging ? ' for deletion' : ''}`}>
                 <Button
                   size="small"
                   onClick={handleBulkDelete}
                   startIcon={<FaTrash size={12} />}
-                  sx={{ minWidth: 0, color: '#d32f2f' }}
+                  sx={{ minWidth: 0, color: actionColor }}
                 >
-                  Delete
+                  {staging ? 'Stage' : 'Delete'}
                 </Button>
               </Tooltip>
             )}
             <Button
               size="small"
-              onClick={() => {
-                setHoveredIndex(null)
-                setRangeAnchor(null)
-                setPinnedUris(new Set())
-              }}
+              onClick={() => sel.clear()}
               sx={{ minWidth: 0, opacity: 0.7 }}
             >
               Clear
@@ -1829,11 +1807,13 @@ export function ScanDetails() {
           </Box>
         )}
       </Box>
+      {vizPanel}
       {/* The table x-scrolls inside its own box on narrow screens; the page
           itself never scrolls sideways. */}
       <div style={{ overflowX: 'auto' }}>
       <DetailsTable
         root={root}
+        rootLabel={rootLabel}
         children={paginatedChildren}
         uri={uri}
         routeType={routeType}
@@ -1847,11 +1827,7 @@ export function ScanDetails() {
         onSort={handleSort}
         onDelete={handleDelete}
         deletingPaths={deletingPaths}
-        selectedPaths={selectedPaths}
-        hoveredIndex={hoveredIndex}
-        mouseHoverIndex={mouseHoverIndex}
-        onRowClick={handleRowClick}
-        onRowHover={setMouseHoverIndex}
+        sel={sel}
         collapsedRows={collapsed_rows}
         tableRef={tableRef}
       />
@@ -1897,85 +1873,6 @@ export function ScanDetails() {
               points={scanHistory.map(h => ({ time: h.time, bytes: h.size ?? null }))}
               formatBytes={formatSize}
             />
-          </Box>
-        </Box>
-      )}
-      {rows.length > 0 && (
-        <Box sx={{ mt: 2 }}>
-          <VizBoundary label={VIZ_LABELS[viz]}>
-            {viz === 'treemap' ? (
-              <Treemap
-                root={root}
-                rows={rows}
-                ageLens={ageLens}
-                query={filter}
-                scanId={selectedScanId}
-                filterResult={filterActive ? filterResult : undefined}
-              />
-            ) : viz === 'scatter' ? (
-              <StalenessPanel nodes={filteredChildren} uri={uri} collapsedRows={collapsed_rows} />
-            ) : viz === 'histograms' ? (
-              <HistogramPanel uri={uri} scanId={selectedScanId} query={filter} />
-            ) : (
-              <VoronoiPanel nodes={filteredChildren} uri={uri} collapsedRows={collapsed_rows} />
-            )}
-          </VizBoundary>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 1, fontSize: '0.85rem', opacity: 0.7 }}>
-            <span>{viz === 'treemap' ? `${rows.length} items` : `${filteredChildren.length} children`}</span>
-            {filter.trim() && caps?.filter && (
-              <Tooltip
-                title={reagg
-                  ? 'Recursive server-side filter: sizes count matched bytes only, and a match inside a matched dir never double-counts. Click to switch back to display-only dimming.'
-                  : "The filter highlights and re-lays-out what's shown at this level; directory sizes still include children the filter hides. Click to re-aggregate: sizes count only what matches, recursively."}
-              >
-                <span
-                  onClick={() => setReagg(r => !r)}
-                  style={{ fontStyle: 'italic', cursor: 'pointer', textDecoration: 'underline dotted' }}
-                >
-                  {reagg
-                    ? filterResult
-                      ? `filtered (re-aggregated): ${formatSize(filterResult.total_size)} in ${filterResult.n_matches.toLocaleString()} match${filterResult.n_matches === 1 ? '' : 'es'}${filterFetching ? ' …' : ''}`
-                      : 'filtered (re-aggregating…)'
-                    : 'filtered (display only)'}
-                </span>
-              </Tooltip>
-            )}
-            <label>
-              View:
-              <select value={viz} onChange={e => setViz(e.target.value as Viz)} style={{ marginLeft: 4 }}>
-                <option value="treemap">Treemap</option>
-                <option value="scatter">Staleness</option>
-                {caps?.histogram && <option value="histograms">Age histograms</option>}
-                <option value="voronoi">Voronoi</option>
-              </select>
-            </label>
-            {viz === 'treemap' && (
-              <Tooltip title="Fade cells by age (size-weighted mean mtime when the scan has it, else newest descendant) — older fades toward the background">
-                <label style={{ cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={ageLens}
-                    onChange={e => setAgeLens(e.target.checked)}
-                    style={{ marginRight: 4, verticalAlign: 'middle' }}
-                  />
-                  Age lens
-                </label>
-              </Tooltip>
-            )}
-            <label>
-              Max:
-              <select
-                value={treemapMaxRows}
-                onChange={e => setTreemapMaxRows(Number(e.target.value))}
-                style={{ marginLeft: 4 }}
-              >
-                <option value={500}>500</option>
-                <option value={1000}>1,000</option>
-                <option value={2000}>2,000</option>
-                <option value={5000}>5,000</option>
-                <option value={0}>All</option>
-              </select>
-            </label>
           </Box>
         </Box>
       )}
