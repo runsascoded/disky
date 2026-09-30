@@ -69,6 +69,9 @@ disk-tree index [URL]     # Scan a directory, an s3:// bucket, or an r2:// bucke
   -g, --gc                # Garbage collect old scans
   -m, --mean-mtime        # Emit `mtime_mean` (size-weighted mean mtime; feeds the UI age lens)
   -M, --measure-memory    # Track peak memory
+  -o, --one-fs            # Don't descend into filesystems mounted below URL. `index -o /` on macOS = the
+                          # System volume + the Data volume via its firmlinks, once (the whole machine:
+                          # 8.74M entries / 457 GiB vs `~`'s 7.49M / 398 GiB, 2026-09-30). `capture -o` too
   -q, --no-progress       # Suppress the tqdm progress bar (scheduled/redirected runs — keeps logs small)
   -R, --auto-remote       # If the local write dir is low on space (< $DISK_TREE_LOW_SPACE_BYTES, 5 GiB)
                           # and $DISK_TREE_REMOTE_SCAN_TARGET is set, write the blob there instead
@@ -204,6 +207,10 @@ disk-tree overcount URI   # How much URI's apparent size overstates physical byt
                           # (ATTR_CMNEXT_PRIVATESIZE — bytes only this subtree holds, i.e. what a
                           # delete frees) vs `shared`. No open() per file; ~32K files/s. macOS-only.
                           # Measured 2026-08-29: `oa/marin` 18.7 GiB apparent → 3.92 GiB exclusive
+
+disk-tree volumes [PATH]  # The APFS container PATH (default `/`) lives on: each volume's used bytes, mount
+                          # point and snapshots, plus free space — what no walk shows (Preboot, VM/swap,
+                          # Recovery, the sealed System volume, OS-update snapshots). `-j` JSON. macOS-only
 
 disk-tree fetch [BUCKET…] # Bulk-list configured buckets → dated raw-listing shards
 disk-tree pull [BUCKET…]  # fetch + import as dated scans
