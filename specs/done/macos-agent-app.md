@@ -1,6 +1,6 @@
 # The laptop agents as a macOS app (TCC identity)
 
-**Status:** proposed (2026-09-29). Follow-up to `m3-site.md` Phase 3.
+**Status:** superseded (2026-09-30) by `tauri-native-app.md` Phase 5: the Tauri `disk-tree.app` is the agents' identity (`disk-tree-app agent -- CMD…`), not a second bundle. One correction carried over: the wrapper must *spawn* the interpreter, not `execv` it (an exec makes the job's responsible code `python3.x` again). Follow-up to `m3-site.md` Phase 3.
 
 ## Problem
 

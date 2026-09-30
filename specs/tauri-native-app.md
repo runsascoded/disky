@@ -1,8 +1,13 @@
 # Spec: disk-tree Tauri v2 native macOS app
 
-Status: **in progress** (2026-09-08) — greenfield Option C from `specs/macos-app.md`. This
-is the reviewable plan; it's kept in sync with the code and moves to `specs/done/` only when
-v2 is real (signed `.app`, native walker feeding scans end-to-end).
+Status: **in progress** (2026-09-08; roadmap extended 2026-09-30) — greenfield Option C from
+`specs/macos-app.md`. This is the reviewable plan; it's kept in sync with the code and moves to
+`specs/done/` only when v2 is real (signed `.app`, native walker feeding scans end-to-end, the
+laptop's scheduled scans running under the app's identity).
+
+**2026-09-30:** the app is now also the laptop's *agent identity* (Phase 5, absorbing `m3`'s
+`macos-agent-app.md`, now in `specs/done/` as superseded) and the home of *whole-machine
+coverage* (Phase 6). Branch `tauri-native-app` merged `cloud` at `e1967dd`.
 
 ## Why v2 (recap of `macos-app.md` Option C)
 
@@ -179,23 +184,119 @@ the walk carries the app's identity with no child-process caveat — the core v2
        It should read them with no per-file prompts and a low `error_count` — the same bar the
        interpreter-FDA scan cleared, but now keyed to the stable app identity.
 
+- **Phase 5** — scheduled scans under the app's TCC identity. ✅ code, ⏳ Ryan's FDA grant + routing.
+  See "Scheduled scans" below.
+- **Phase 6** — whole-machine coverage (not just `~`). ⏳ walker half done. See "Whole-machine coverage".
+- **Phase 7** — menu-bar presence + `SMAppService`-registered agents. Proposed. See "Menu bar".
+
+## Scheduled scans (Phase 5)
+
+The laptop's two LaunchAgents (`com.runsascoded.disk-tree.index` → `m3`'s `aws/laptop-scan`,
+`com.runsascoded.disk-tree.drain` → `aws/laptop-drain`) read TCC-protected trees (`~/.Trash`,
+`~/Library/{Mail,Messages,Safari,Containers,…}`). TCC charges a launchd job's reads to the job's
+*root executable*, so today Full Disk Access is granted to the venv's resolved `python3.x`: a uv
+Python upgrade silently drops it (3.13 → 3.14 on 2026-09-29 cost a scan 69 GiB), and the FDA row
+reads "python3.14".
+
+`m3`'s `macos-agent-app.md` proposed a separate tiny `disk-tree agent.app` with a C launcher. This
+bundle already is one: same signed identity, no second app. So:
+
+- **`disk-tree-app agent [--] CMD…`** (`src-tauri/src/agent.rs`), dispatched on argv *before*
+  Tauri/AppKit start (no window, no Dock icon). It **spawns** CMD as a child and exits with its
+  status, forwarding TERM/INT/HUP. Correction to `macos-agent-app.md`, which said the launcher
+  `execv`s python: an `exec` replaces the signed image with the interpreter's, and the job's
+  responsible code is `python3.x` again.
+- **`disk-tree-app probe`** reads the protected dirs in-process and prints `ok`/`denied`/`absent`
+  per dir; exit 0 iff none denied.
+- **`apps/tauri/scripts/agentctl`**: `install` (bundle → `~/Applications/disk-tree.app`, a stable
+  path), `check` (runs `probe` and `agent -- /bin/ls ~/Library/Mail` *as launchd jobs*, so TCC sees
+  the app rather than the terminal), `route LABEL…` / `unroute LABEL…` (prefix or strip the
+  plist's `ProgramArguments` with the wrapper, back it up, reload), `status`.
+- **Verified 2026-09-30:** with no grant to the app, both launchd probes are denied (the in-process
+  read and the `/bin/ls` child), while the same probe from a terminal with FDA reads everything.
+  So TCC charges the job, children included, to `disk-tree.app`. Signature:
+  `designated => identifier "com.runsascoded.disk-tree" and certificate leaf = H"e055a22e…"`
+  (the `disk-tree-selfsigned` cert), so the grant survives rebuilds.
+
+**Cut-over (Ryan + `m3`):**
+1. System Settings → Privacy & Security → Full Disk Access → **+** → `~/Applications/disk-tree.app`.
+2. `apps/tauri/scripts/agentctl check` → `FDA: granted`.
+3. `agentctl route index drain`, then `launchctl kickstart gui/$UID/com.runsascoded.disk-tree.index`;
+   its total must match a shell run (Σalloc over `~` was 398 GiB on 2026-09-30).
+4. Remove the python3.x FDA row. Future uv/Python changes no longer matter.
+
+**Build note:** macOS 27's dyld rejects Cargo-stripped proc-macro dylibs ("mis-aligned LINKEDIT
+string pool" → E0463 "can't find crate for `phf_macros`"); `[profile.release.build-override]
+strip = false` in `apps/tauri/Cargo.toml` fixes it (Rust 1.93, ld-27037). 1.98 may not need it.
+
+## Whole-machine coverage (Phase 6)
+
+Scans cover `/Users/ryan` only, so the map can't explain the rest of the disk. Measured 2026-09-30
+(460 GiB container, 23 GiB free):
+
+| where | GiB | how it's reachable |
+|---|---|---|
+| `~` (walk, apparent) | 398.3 | today's scan; clone-overcounted (Σprivate 288) |
+| rest of Data + System (walk) | 58.8 | `dt-walker --one-fs /`: `/System/Library` 16.7, `/Applications` 15.1, `/opt` 13.0, `/private/var` 8.6, `/Library` 3.4, … |
+| Preboot volume | 20.2 | not walkable usefully; `diskutil apfs list -plist` → `CapacityInUse` |
+| VM volume (swap) | 12.0 | same |
+| Recovery ×2, Update | 6.4 | same |
+| OS-update snapshots | ? | `diskutil apfs listSnapshots /`: 3, not purgeable, incl. `MSUPrepareUpdate` |
+
+**Walk:** `dt-walker --one-fs /` walks the sealed System volume plus the Data volume through its
+firmlinks (`/usr/share/firmlinks`; they aren't mount points, so `--one-fs` follows them while
+skipping `/System/Volumes/*`, `/Volumes/*`, `/dev`, nullfs). 8.74M entries in 144 s, **285
+unreadable dirs** (root-only: `/private/var/{folders,db,spool}`, `/System/Library/Templates`).
+Paths keep their usual spelling (`/Users/ryan/…`), so a `/` scan and a `~` scan are the same tree.
+`gfind -xdev` can't do this: firmlinked dirs report the Data volume's `st_dev`, so it would prune
+`/Users`.
+
+**Plan:**
+1. `local.py`: a `one_fs` option (walker `--one-fs`; gfind has no equivalent from `/`, so a `/`
+   scan requires the walker). `laptop-scan` then captures `/` instead of `~` (≈+17% entries).
+2. **Volume rows:** the scan records the APFS container (`diskutil apfs list -plist` +
+   `listSnapshots`) as a sidecar; the UI shows the non-Data volumes and free space as synthetic
+   top-level cells, so the map's root is the *container*, and the numbers add up to the disk.
+3. **Residual:** `Data CapacityInUse − Σprivate(walked Data files)` bounds what the walk couldn't
+   see (root-only dirs, snapshots' private blocks). Needs `--private` in the capture (+55% walk
+   time), or accept the apparent-size version with the clone caveat.
+4. **Root-only dirs** (the 285): a privileged helper (`SMAppService.daemon`, a bundled
+   LaunchDaemon) could walk them. Open: whether `SMAppService` accepts a self-signed (no Team ID)
+   bundle for daemons; if not, `sudo` scans (which lose the TCC identity) are the fallback, and
+   the residual is honest enough.
+
+## Menu bar (Phase 7, proposed)
+
+A tray item beats a window for a background tool: last scan age and total, next scheduled run,
+FDA status (the `probe`), "Scan now", "Open disk.rbw.sh". With it, the agents move into the bundle
+(`Contents/Library/LaunchAgents/*.plist`, `BundleProgram`) and register via `SMAppService.agent`,
+so they show in Login Items as "disk-tree" and hand-written plists go away.
+
+Open: what the window shows. Today it wraps `ui/` + a local Flask server; the laptop's live UI is
+`site/` on disk.rbw.sh (R2 + D1 + Batch ingest). Options: (a) the window loads disk.rbw.sh (the
+app is scheduling + permissions + walker, the UI stays in the cloud); (b) keep a local `ui/` for
+offline/external-drive use. (a) is the cheaper default.
+
 ## Remaining work (v2 not yet "real")
 
 1. **PyInstaller sidecar** — bundle the Python backend into the app (`externalBin` +
    `--waitress`, reusing `packaging/macos/disk-tree.spec`) so it's self-contained; today the
-   host spawns `disk-tree-server` from PATH. Sign the sidecar with inheritance.
+   host spawns `disk-tree-server` from PATH. Sign the sidecar with inheritance. (Lower priority
+   if the window loads disk.rbw.sh.)
 2. **Ship `dt-walker` as a bundle resource** and confirm `locate_walker()` resolves it, so the
-   packaged backend scans via the native walker.
+   packaged backend (and routed agents, via `DISK_TREE_WALKER`) scan via the native walker.
 3. **In-process walk → aggregation** — stream `native_walk_stats`'s records straight into the
-   Python aggregation (or a Rust port) instead of the subprocess seam, so the walk is fully
-   in-app (the strongest TCC form).
+   Python aggregation (or a Rust port) instead of the subprocess seam.
 4. Real app icon (current is a placeholder).
-5. Ryan's GUI FDA grant + protected-folder check (steps above).
+5. Phase 5 cut-over (above), Phase 6 plan, Phase 7.
+6. **Private size in the record stream** (`m3`'s `apfs-sharing.md`): `--private` currently only
+   sums; emitting it needs a record-format extension + the Python parser, and costs +55% walk time.
 
 ## Open questions / risks
 
 - `%b` bulk-vs-`st_blocks` fidelity (see above) — resolved empirically in Phase 1.
 - Whether to eventually retire the sidecar and port aggregation to Rust (out of scope for v2;
   the stream seam keeps that door open).
-- Scheduled scans: does the LaunchAgent invoke the app (app identity on cron) or keep the CLI?
-  Inherited from `macos-app.md`; not decided here.
+- Scheduled scans: resolved — the LaunchAgents run *through* the app (`agent` mode, Phase 5).
+- Branch naming: Ryan is floating `app` → "macos" (packaging, scheduling, permissions) and `m3` →
+  "local" (FS semantics). Undecided.

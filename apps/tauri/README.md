@@ -53,6 +53,19 @@ grant survives rebuilds and TCC shows "disk-tree" — same identity and bundle i
   instead of `gfind` (the host sets this automatically when it finds the bundled
   walker next to its executable).
 
+## Headless modes (LaunchAgents)
+
+The app binary doubles as the laptop agents' TCC identity (spec Phase 5):
+
+```bash
+disk-tree-app agent -- CMD ARGS…   # spawn CMD as a child; FDA granted to the app covers it
+disk-tree-app probe                # read TCC-protected dirs in-process; exit 3 if any denied
+scripts/agentctl install           # target/…/disk-tree.app → ~/Applications (stable grant path)
+scripts/agentctl check             # run the probe as launchd jobs: is FDA granted to the app?
+scripts/agentctl route index drain # route com.runsascoded.disk-tree.{index,drain} through the app
+scripts/agentctl status
+```
+
 ## Status / what's left
 
 - **Done**: native walker at gfind parity (Phase 1); host compiles, opens a window
