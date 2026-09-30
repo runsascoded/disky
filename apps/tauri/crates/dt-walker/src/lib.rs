@@ -177,7 +177,15 @@ impl<'a> Walker<'a> {
             }
             self.private_bytes += private;
             self.mounts_skipped += skipped;
-            for (path, kind, blocks, mtime, descend) in children {
+            for (path, kind, blocks, mut mtime, descend) in children {
+                // A mount point's bulk attributes describe the *covered* dir
+                // (e.g. the sealed system's build date); `lstat` sees the
+                // mounted root, as gfind does. Rare, so the extra call is free.
+                if kind == b'd' && !descend {
+                    if let Some((_, _, m, _)) = lstat_record(&path) {
+                        mtime = m;
+                    }
+                }
                 self.alloc_bytes += if kind == b'f' { blocks * 512 } else { 0 };
                 self.emit(Record { kind, blocks, mtime, path: &path }, out)?;
                 if descend && !self.is_excluded(&path) {
