@@ -70,11 +70,19 @@ def read_marker(capture: str) -> dict:
 
 @cli.command('capture')
 @option('-n', '--batch-rows', default=200_000, help='Rows per shard — bounds memory: one batch is buffered at a time')
+@option('-o', '--one-fs', is_flag=True, help="Don't descend into filesystems mounted below PATH. With PATH `/` on macOS: the System volume + the Data volume (via its firmlinks), once — the whole machine")
 @option('-q', '--no-progress', is_flag=True, help='Suppress the tqdm progress bar')
 @option('-s', '--sudo', is_flag=True, help='Run `find` as sudo')
 @option('-t', '--to', required=True, help='Where the capture goes: a local dir or an fsspec URL (`r2://bucket/prefix`)')
 @argument('path', required=False)
-def capture_cmd(batch_rows: int, no_progress: bool, sudo: bool, to: str, path: str | None):
+def capture_cmd(
+    batch_rows: int,
+    one_fs: bool,
+    no_progress: bool,
+    sudo: bool,
+    to: str,
+    path: str | None,
+):
     """Stream PATH's listing to --to as layer-1 shards, using no local disk.
 
     Prints the capture dir (`<to>/<host>/<root>/<stamp>`), which `reduce` takes.
@@ -116,7 +124,7 @@ def capture_cmd(batch_rows: int, no_progress: bool, sudo: bool, to: str, path: s
         n_shards += 1
         names, sizes, mtimes = [], [], []
 
-    for e in backend.list(root, errors=errors, sudo=sudo, progress=not no_progress):
+    for e in backend.list(root, errors=errors, sudo=sudo, one_fs=one_fs, progress=not no_progress):
         if e['kind'] == 'dir' or e['path'] == '':
             continue
         names.append(e['path'])

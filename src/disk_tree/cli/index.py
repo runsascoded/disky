@@ -52,6 +52,7 @@ def _check_local_space(auto_remote: bool) -> None:
 @option('-g', '--gc', is_flag=True)
 @option('-m', '--mean-mtime', is_flag=True, help='Emit `mtime_mean` (size-weighted mean mtime over descendants) per path')
 @option('-M', '--measure-memory', is_flag=True)
+@option('-o', '--one-fs', is_flag=True, help="Don't descend into filesystems mounted below URL. With URL `/` on macOS: the System volume + the Data volume (via its firmlinks), once — the whole machine")
 @option('-q', '--no-progress', is_flag=True, help='Suppress the tqdm scan progress bar (for scheduled/redirected runs — keeps logs small)')
 @option('-R', '--auto-remote', is_flag=True, help=f'If the local write target is low on space (< ${LOW_SPACE_VAR}, default 5 GiB) and ${REMOTE_TARGET_VAR} is set, write the blob there instead (default: warn and suggest `--to`)')
 @option('-s', '--sudo', is_flag=True, help='Run `find` as sudo')
@@ -65,6 +66,7 @@ def index(
     gc: bool,
     mean_mtime: bool,
     measure_memory: bool,
+    one_fs: bool,
     no_progress: bool,
     auto_remote: bool,
     sudo: bool,
@@ -114,9 +116,9 @@ def index(
 
     with ctx, time("scan"):
         if no_cache_read:
-            scan, df = Scan.create(url, gc=gc, sudo=sudo, mean_mtime=mean_mtime, progress=not no_progress)
+            scan, df = Scan.create(url, gc=gc, sudo=sudo, mean_mtime=mean_mtime, progress=not no_progress, one_fs=one_fs)
         else:
-            scan, df = Scan.load_or_create(url, gc=gc, sudo=sudo, mean_mtime=mean_mtime, progress=not no_progress)
+            scan, df = Scan.load_or_create(url, gc=gc, sudo=sudo, mean_mtime=mean_mtime, progress=not no_progress, one_fs=one_fs)
 
     elapsed = time['scan']
     if not no_diff and not gc:
