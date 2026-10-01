@@ -75,6 +75,15 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
         .user_agent(&applink::user_agent())
         .inner_size(1280.0, 860.0)
         .min_inner_size(480.0, 400.0)
+        // WKWebView drops `window.open` / `target=_blank` without a handler:
+        // send them to the default browser (the site's "sign in with your
+        // browser" link, external links), never a second in-app window.
+        .on_new_window(|url, _| {
+            if matches!(url.scheme(), "http" | "https") {
+                open(url.as_str());
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
         .build();
 }
 
@@ -92,14 +101,38 @@ fn show_settings(app: &AppHandle) {
         .build();
 }
 
-/// A `disky://` URL from LaunchServices (the browser's "Open in disky").
+/// A `disky://` URL from LaunchServices (the browser's "Open in disky"). A
+/// link from the other known site (prod ↔ dev) switches the app to that site.
 fn open_deep_link(app: &AppHandle, deep: &tauri::Url) {
-    let site = match tauri::Url::parse(&site_url()) {
-        Ok(s) => s,
+    let current = settings::load().site;
+    let mut sites = vec![];
+    match tauri::Url::parse(&site_url()) {
+        Ok(u) => sites.push((current.as_str(), u)),
         Err(e) => return jobs::note(&format!("disky: bad site URL: {e}")),
-    };
-    match applink::link_to_load(deep, &site) {
-        Ok(link) => show_window(app, Some(link)),
+    }
+    // An explicit `DISKY_URL` pins the site; otherwise the known ones qualify.
+    if std::env::var_os("DISKY_URL").is_none() {
+        for (name, url) in [("prod", settings::PROD_URL), ("dev", settings::DEV_URL)] {
+            if name != current {
+                sites.push((name, url.parse().expect("known site URL")));
+            }
+        }
+    }
+    match applink::resolve(deep, &sites) {
+        Ok((name, link)) => {
+            if name != current {
+                let mut s = settings::load();
+                s.site = name.to_string();
+                if let Err(e) = settings::save(&s) {
+                    jobs::note(&format!("disky: can't save settings: {e}"));
+                }
+                jobs::note(&format!("disky: switched site {current} → {name} for a sign-in link"));
+                if let Some(t) = app.try_state::<Tray>() {
+                    t.refresh();
+                }
+            }
+            show_window(app, Some(link))
+        }
         // Never log the URL itself: a valid-looking one carries a token.
         Err(e) => jobs::note(&format!("disky: refused a disky:// link: {e}")),
     }

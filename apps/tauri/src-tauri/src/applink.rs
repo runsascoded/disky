@@ -33,6 +33,22 @@ pub fn link_to_load(deep: &Url, site: &Url) -> Result<Url, String> {
     Ok(link)
 }
 
+/// `deep`'s link checked against each `(name, site)` in turn (the configured
+/// site first, then the other known ones): the first site it belongs to, and
+/// the URL to load. A link minted on the other known site (prod vs dev) is as
+/// trustworthy as one from the configured site — the app switches to it rather
+/// than silently refusing. All refused → the configured site's reason.
+pub fn resolve<'a>(deep: &Url, sites: &[(&'a str, Url)]) -> Result<(&'a str, Url), String> {
+    let mut first = None;
+    for (name, site) in sites {
+        match link_to_load(deep, site) {
+            Ok(link) => return Ok((name, link)),
+            Err(e) => { first.get_or_insert(e); }
+        }
+    }
+    Err(first.unwrap_or_else(|| "no sites configured".into()))
+}
+
 /// The webview's user agent: WKWebView's default shape plus `disky/<version>`,
 /// which the site reads to hide its "Open in disky" button inside the app.
 pub fn user_agent() -> String {
@@ -49,6 +65,24 @@ mod tests {
     fn check(deep: &str) -> Result<String, String> {
         let site = Url::parse("https://disk.rbw.sh").unwrap();
         link_to_load(&Url::parse(deep).unwrap(), &site).map(|u| u.to_string())
+    }
+
+    #[test]
+    fn resolve_switches_to_the_known_site_a_link_came_from() {
+        let sites = [("prod", Url::parse("https://disk.rbw.sh").unwrap()), ("dev", Url::parse("https://dev.disk.rbw.sh").unwrap())];
+        let r = |deep: &str| resolve(&Url::parse(deep).unwrap(), &sites).map(|(n, u)| (n, u.to_string()));
+        assert_eq!(
+            r("disky://open?link=https%3A%2F%2Fdev.disk.rbw.sh%2Fauth%2Fapp-link%3Ftoken%3Dabc"),
+            Ok(("dev", "https://dev.disk.rbw.sh/auth/app-link?token=abc".to_string())),
+        );
+        assert_eq!(
+            r("disky://open?link=https%3A%2F%2Fdisk.rbw.sh%2Fauth%2Fapp-link%3Ftoken%3Dabc"),
+            Ok(("prod", "https://disk.rbw.sh/auth/app-link?token=abc".to_string())),
+        );
+        assert_eq!(
+            r("disky://open?link=https%3A%2F%2Fevil.example%2Fauth%2Fapp-link%3Ftoken%3Dabc"),
+            Err("link origin https://evil.example isn't the site's (https://disk.rbw.sh)".to_string()),
+        );
     }
 
     #[test]
