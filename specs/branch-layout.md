@@ -6,6 +6,14 @@ Ryan: *"each with exactly the code (and migrations) they need, and nothing they 
 
 Today `cloud` is the union of everything: every `[base]` pick from gcs, cw-s3, m3 and the app landed there, whoever used it. This spec classifies what's on `cloud` by who runs it (a read-only audit of all five branches' job scripts, wrangler configs, LaunchAgents and imports, 2026-10-01), proposes a branch tree, and lists the decisions needed before the moves.
 
+## Progress (2026-10-01)
+
+- **Done on `cloud`:** dead code + Flask/`ui/` + interactive CLI deleted (939e7eb); laptop-only code (75674f2), local-filesystem scanning (ed2bf71) and `index` + its lister + `rescan-demo.yml` (4a06f4a) moved to `local`; the scans DB and hybrid storage stay (cw-s3's job reads `disk-tree import`'s blob). The r2 demo has its own page head + OG card (424656d); cw's stale `site/wrangler.toml`/`wrangler.dev.toml` and gcs's pre-squash `migrations/gcs` left `cloud` (1cfded5, 2c7bd9e); the shared `cf/cfn_dashboard.py` + ignore files live on `cloud` once (d4d592c); CI runs on every branch but `dist/**`, with dt-cloud tests and the site's build + vitest.
+- **`local`** (on `r` since 2026-10-01; the 2021 branch is tag `archive/local-2021`): `cloud` + the laptop code; m3 and `tauri-native-app` merge it, never `cloud`.
+- **All four deployments merged** the restructured base (gcs, cw-s3, m3, app), as local commits pending their pushes/deploys.
+- **Conventions learned:** a removal commit holds only removals (children take it with `merge -s ours`; a bundled fix is silently lost); merge a rename-adding commit separately from a removal, or git reads the pair as a rename; tag picks `[cloud]` / `[local]`.
+- **Open (Ryan):** `CLAUDE.md` as a regular file + `@AGENTS.md` import on every branch (the gcs/cw symlink conflicts on every `cloud` merge touching it); the gcs/cw unification sequence (digests → sweep executors → `path-index`/`index-write` → identities into D1 → sheet mirror); the ops cron program's per-cron checkout paths.
+
 ## 1. Who runs what
 
 | deployment | branch | what actually runs |
