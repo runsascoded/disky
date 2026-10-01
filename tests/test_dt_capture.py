@@ -36,10 +36,14 @@ def tree(tmp_path: Path) -> Path:
     return t
 
 
-def _capture(cmd: list[str], to: Path) -> Path:
+def _capture(cmd: list[str], to: str) -> Path:
+    """Run a capture into `to` (a dir or a `file://` URL); the capture dir. A URL
+    target prints the capture as a URL under `to`, as the Python CLI does."""
     env = {**os.environ, 'DISK_TREE_HOST': 'h'}
-    r = subprocess.run(cmd, capture_output=True, text=True, env=env, check=True)
-    return Path(r.stdout.strip().split('\n')[-1])
+    r = subprocess.run([*cmd, '-t', to], capture_output=True, text=True, env=env, check=True)
+    out = r.stdout.strip().split('\n')[-1]
+    assert out.startswith(f'{to}/h/')
+    return Path(out.removeprefix('file://'))
 
 
 def _rows(cap: Path) -> pd.DataFrame:
@@ -47,9 +51,16 @@ def _rows(cap: Path) -> pd.DataFrame:
     return pd.concat([pd.read_parquet(s) for s in shards]).sort_values('name').reset_index(drop=True)
 
 
-def test_dt_capture_matches_python_capture(tree: Path, tmp_path: Path):
-    py = _capture([join(dirname(sys.executable), 'disk-tree'), 'capture', '-q', '-n', '2', '-t', str(tmp_path / 'py'), str(tree)], tmp_path)
-    rs = _capture([DT_CAPTURE, '-n', '2', '-t', str(tmp_path / 'rs'), str(tree)], tmp_path)
+DISK_TREE = join(dirname(sys.executable), 'disk-tree')
+
+
+@pytest.mark.parametrize('url', [False, True], ids=['dir', 'file-url'])
+def test_dt_capture_matches_python_capture(tree: Path, tmp_path: Path, url: bool):
+    """A local dir, and a `file://` URL: the object-store path (`r2://` / `s3://`
+    differ only in the store's endpoint and credentials)."""
+    to = lambda name: f'file://{tmp_path / name}' if url else str(tmp_path / name)
+    py = _capture([DISK_TREE, 'capture', '-q', '-n', '2', str(tree)], to('py'))
+    rs = _capture([DT_CAPTURE, '-n', '2', str(tree)], to('rs'))
     # Same layout: <to>/<host>/<root slug>/<stamp>, same shard files.
     assert (rs.parent.parent.name, rs.parent.name) == (py.parent.parent.name, py.parent.name) == ('h', str(tree).strip('/').replace('/', '__'))
     assert sorted(p.name for p in rs.iterdir()) == sorted(p.name for p in py.iterdir()) == [MARKER, 'shard-00000.parquet', 'shard-00001.parquet', 'shard-00002.parquet']
@@ -70,3 +81,15 @@ def test_dt_capture_matches_python_capture(tree: Path, tmp_path: Path):
     if cp:
         assert sorted(cr) == sorted(cp)
         assert [(v['device'], v['name'], v['roles'], v['mount']) for v in cr['volumes']] == [(v['device'], v['name'], v['roles'], v['mount']) for v in cp['volumes']]
+
+
+def test_r2_without_an_endpoint_fails_before_the_walk(tree: Path, tmp_path: Path):
+    """No `DISK_TREE_R2_ENDPOINT_URL` and no `buckets.yml`: both refuse up front,
+    with the same reason, and write nothing."""
+    env = {k: v for k, v in os.environ.items() if k != 'DISK_TREE_R2_ENDPOINT_URL'}
+    env['DISK_TREE_ROOT'] = str(tmp_path / 'root')
+    run = lambda cmd: subprocess.run([*cmd, '-t', 'r2://bk/caps', str(tree)], capture_output=True, text=True, env=env)
+    py, rs = run([DISK_TREE, 'capture', '-q']), run([DT_CAPTURE])
+    why = 'r2://bk: no endpoint — set DISK_TREE_R2_ENDPOINT_URL, or give the bucket an `endpoint_url` in buckets.yml'
+    assert (py.returncode, py.stderr.rstrip('\n').split('\n')[-1]) == (1, f'RuntimeError: {why}')
+    assert (rs.returncode, rs.stdout, rs.stderr) == (1, '', f'dt-capture: {why}\n')

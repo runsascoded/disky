@@ -188,7 +188,7 @@ the walk carries the app's identity with no child-process caveat — the core v2
   See "Scheduled scans" below.
 - **Phase 6** — whole-machine coverage (not just `~`). ⏳ walker half done. See "Whole-machine coverage".
 - **Phase 7** — menu-bar presence ✅, `SMAppService`-registered agents ✅, login item ✅,
-  template icon ✅; in-app sign-in ✅ (verified on dev). The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
+  template icon ✅; in-app sign-in ✅ (verified on dev, and on prod 2026-10-01 via "Open in disky"). The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
 
 ## Scheduled scans (Phase 5)
 

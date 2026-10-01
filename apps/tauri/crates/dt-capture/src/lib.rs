@@ -11,13 +11,14 @@
 //! - `_SUCCESS.json`: `{format, version, scheme, root, host, time, n_rows,
 //!   n_shards, error_count, error_paths[, container]}`.
 //!
-//! Local output only for now; an `r2://`/`s3://` target is the next step.
+//! `--to` is a local dir or an object-store URL (`target.rs`): `r2://` with the
+//! bucket's endpoint and profile, `s3://`, or `file://`.
 
 pub mod apfs;
+pub mod creds;
+pub mod target;
 
-use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, Int64Array, LargeStringArray, RecordBatch, TimestampMillisecondArray};
@@ -25,7 +26,7 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use serde_json::{json, Value};
+use serde_json::json;
 
 pub const FORMAT: &str = "disk-tree-capture";
 pub const VERSION: u32 = 1;
@@ -34,7 +35,7 @@ pub const ROW_GROUP_ROWS: usize = 1 << 16;
 
 pub struct Opts {
     pub root: String,
-    pub to: PathBuf,
+    pub to: target::Target,
     pub host: String,
     pub batch_rows: usize,
     pub one_fs: bool,
@@ -43,7 +44,8 @@ pub struct Opts {
 }
 
 pub struct Summary {
-    pub dir: PathBuf,
+    /// The capture dir: a path, or a URL under `--to`'s.
+    pub dir: String,
     pub n_rows: u64,
     pub n_shards: u64,
     pub error_count: u64,
@@ -92,7 +94,7 @@ pub fn stamps(secs: i64, micros: u32) -> (String, String) {
 }
 
 struct Shards {
-    dir: PathBuf,
+    dir: target::Target,
     root: String,
     names: Vec<String>,
     sizes: Vec<i64>,
@@ -115,14 +117,15 @@ impl Shards {
             Arc::new(Int64Array::from(vec![0i64; n])),
         ];
         let batch = RecordBatch::try_new(schema(), cols).map_err(io::Error::other)?;
-        let path = self.dir.join(format!("shard-{:05}.parquet", self.n_shards));
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
             .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
             .build();
-        let mut w = ArrowWriter::try_new(File::create(&path)?, schema(), Some(props)).map_err(io::Error::other)?;
+        let mut buf = Vec::new();
+        let mut w = ArrowWriter::try_new(&mut buf, schema(), Some(props)).map_err(io::Error::other)?;
         w.write(&batch).map_err(io::Error::other)?;
         w.close().map_err(io::Error::other)?;
+        self.dir.put(&format!("shard-{:05}.parquet", self.n_shards), buf)?;
         self.n_rows += n as u64;
         self.n_shards += 1;
         Ok(())
@@ -134,12 +137,12 @@ pub fn capture(opts: &Opts) -> io::Result<Summary> {
     let root = normalize_root(&opts.root);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     let (stamp, iso) = stamps(now.as_secs() as i64, now.subsec_micros());
-    let dir = opts.to.join(&opts.host).join(slug(&root)).join(stamp);
-    std::fs::create_dir_all(&dir)?;
+    let dir = opts.to.join(&format!("{}/{}/{stamp}", opts.host, slug(&root)));
+    dir.create()?;
 
     let excludes = dt_walker::default_excludes();
     let mut walker = dt_walker::Walker::new(&excludes).one_fs(opts.one_fs);
-    let mut shards = Shards { dir: dir.clone(), root: root.clone(), names: vec![], sizes: vec![], mtimes: vec![], n_rows: 0, n_shards: 0 };
+    let mut shards = Shards { dir, root: root.clone(), names: vec![], sizes: vec![], mtimes: vec![], n_rows: 0, n_shards: 0 };
     let prefix: Vec<u8> = if root == "/" { b"/".to_vec() } else { format!("{root}/").into_bytes() };
     let batch_rows = opts.batch_rows.max(1);
     let mut errbuf: Vec<u8> = Vec::new();
@@ -183,12 +186,8 @@ pub fn capture(opts: &Opts) -> io::Result<Summary> {
             Err(e) => eprintln!("{root}: no APFS container recorded: {e}"),
         }
     }
-    write_manifest(&dir, &manifest)?;
-    Ok(Summary { dir, n_rows: shards.n_rows, n_shards: shards.n_shards, error_count: walker.errors.count })
-}
-
-fn write_manifest(dir: &Path, m: &Value) -> io::Result<()> {
-    std::fs::write(dir.join(MARKER), serde_json::to_string_pretty(m)? + "\n")
+    shards.dir.put(MARKER, (serde_json::to_string_pretty(&manifest)? + "\n").into_bytes())?;
+    Ok(Summary { dir: shards.dir.display(), n_rows: shards.n_rows, n_shards: shards.n_shards, error_count: walker.errors.count })
 }
 
 /// `DISK_TREE_HOST`, else the hostname (what `capture.py` uses).

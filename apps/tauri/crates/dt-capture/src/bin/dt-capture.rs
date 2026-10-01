@@ -1,12 +1,11 @@
-//! `dt-capture [-o] [-n ROWS] [-C] -t DIR ROOT` — the Rust `disk-tree capture`
-//! (local target). Prints the capture dir on stdout, a summary on stderr, as
+//! `dt-capture [-o] [-n ROWS] [-C] -t DIR|URL ROOT` — the Rust `disk-tree capture`
+//! (a local dir, or `r2://` / `s3://` / `file://`). Prints the capture dir on stdout, a summary on stderr, as
 //! the Python CLI does.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn usage(msg: &str) -> ExitCode {
-    eprintln!("dt-capture: {msg}\nusage: dt-capture [-o|--one-fs] [-n|--batch-rows N] [-C|--no-container] -t|--to DIR ROOT");
+    eprintln!("dt-capture: {msg}\nusage: dt-capture [-o|--one-fs] [-n|--batch-rows N] [-C|--no-container] -t|--to DIR|URL ROOT");
     ExitCode::from(2)
 }
 
@@ -41,12 +40,16 @@ fn main() -> ExitCode {
         }
     }
     let (Some(to), Some(root)) = (to, root) else { return usage("need -t DIR and ROOT") };
-    if to.contains("://") {
-        return usage("only a local --to for now (r2:// / s3:// is next)");
-    }
+    let to = match dt_capture::target::Target::parse(&to) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("dt-capture: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let opts = dt_capture::Opts {
         root,
-        to: PathBuf::from(to),
+        to,
         host: dt_capture::host(),
         batch_rows,
         one_fs,
@@ -55,8 +58,8 @@ fn main() -> ExitCode {
     match dt_capture::capture(&opts) {
         Ok(s) => {
             let tail = if s.error_count > 0 { format!(", {} permission errors", s.error_count) } else { String::new() };
-            eprintln!("{}: {} files in {} shard(s) → {}{tail}", dt_capture::normalize_root(&opts.root), thousands(s.n_rows), s.n_shards, s.dir.display());
-            println!("{}", s.dir.display());
+            eprintln!("{}: {} files in {} shard(s) → {}{tail}", dt_capture::normalize_root(&opts.root), thousands(s.n_rows), s.n_shards, s.dir);
+            println!("{}", s.dir);
             ExitCode::SUCCESS
         }
         Err(e) => {
