@@ -1,4 +1,4 @@
-"""Scan-registry queries shared by the server and the CLI (no Flask import)."""
+"""Scan-registry queries (the scan DB, read with plain `sqlite3`)."""
 
 from __future__ import annotations
 

@@ -209,7 +209,14 @@ function RunRow({ r, job, admin, planFirst, busy, fmtBytes, act }: {
         {r.undo_state === 'full' && <span className="tag">undone</span>}
         {r.purge_state === 'done' && <span className="tag">purged</span>}
       </td>
-      <td>{fmtBytes(r.deleted_bytes)} <span className="dim">/ {fmtN(r.deleted_objects)}</span></td>
+      <td>
+        {fmtBytes(r.deleted_bytes)} <span className="dim">/ {fmtN(r.deleted_objects)}</span>
+        {r.freed_bytes != null && (
+          <Tooltip content={<>What deleting this set would <b>actually</b> free, measured on the laptop: bytes it shares with a clone or hardlink outside the set (e.g. a <code>.venv</code>’s files cloned from <code>~/.cache/uv</code>) stay on disk. The size before it counts every path in full.</>}>
+            <span className="frees"> · frees <b>{fmtBytes(r.freed_bytes)}</b></span>
+          </Tooltip>
+        )}
+      </td>
       <td>{fmtN(r.skipped_gone)}</td>
       <td><Tooltip content={iso(r.started_ts)}><span>{ago(r.started_ts)} ago</span></Tooltip></td>
       <td className="actions">

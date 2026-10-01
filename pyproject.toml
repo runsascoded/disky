@@ -11,12 +11,9 @@ dependencies = [
     "click",
     "duckdb",
     "flask",
-    "flask-cors",
     "flask-sqlalchemy",
     "humanize",
-    "kaleido",
     "pandas",
-    "plotly",
     "pyarrow",
     "python-dateutil",
     "pyyaml>=6.0.3",
@@ -26,12 +23,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Native macOS window (pywebview → pyobjc WebKit/Cocoa) + a real WSGI server
-# (Flask's dev server doesn't bind under PyInstaller). See specs/macos-app.md.
-app = [
-    "pywebview",
-    "waitress",
-]
 dev = [
     "mypy",
     "pytest",
@@ -39,9 +30,7 @@ dev = [
 mem = [
     "memray",
 ]
-# Post monthly digests to Slack/Discord (`disk-tree digest`). Core stays lean —
-# only a deployment that posts pulls `thrds`; `discord_api` needs only stdlib.
-# The OP plot uses plotly + kaleido, already core deps.
+# Announce staged-delete runs to Slack/Discord (`dispatch --serve`'s `delete.chat`).
 notify = [
     "thrds",
 ]
@@ -72,8 +61,6 @@ bulk = [
 
 [project.scripts]
 disk-tree = "disk_tree.cli.main:cli"
-disk-tree-server = "disk_tree.server:main"
-disk-tree-app = "disk_tree.desktop:main"
 
 [dependency-groups]
 dev = [
@@ -103,16 +90,11 @@ exclude = [
     ".claude/",
     ".idea/",
     ".venv/",
+    "node_modules/",
     "screenshots/",
     "tmp/",
-    "ui/node_modules/",
     "*.iml",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/disk_tree"]
-
-# Include built UI assets in the wheel (if they exist)
-# Run `cd ui && pnpm build` before building the wheel
-[tool.hatch.build.targets.wheel.force-include]
-"ui/dist" = "disk_tree/static"

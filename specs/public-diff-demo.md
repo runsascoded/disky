@@ -1,5 +1,7 @@
 # Public diff demo (r2.rbw.sh): periodic re-scans + a served compare view
 
+**Status:** retired 2026-10-01 — the `ui/` Cloudflare edge was removed; its served successor is `site/` (see specs/path-store.md).
+
 Grow the public open demo (`disk-tree-demo`, r2.rbw.sh) toward the mgu/cw-s3
 shape: accumulate dated scans of the public buckets so the **diff treemap +
 diff table** (`@rdub/treemap`'s `DiffTreemap`/`DiffTable`, already used by

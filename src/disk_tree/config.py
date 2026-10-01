@@ -15,14 +15,6 @@ DEFAULT_ROOT_DIR = join(CONFIG_DIR, 'disk-tree')
 #: Volumes are probed here for an opted-in `disk-tree/scans` directory.
 VOLUMES = join(sep, 'Volumes')
 
-#: True when the active root was chosen deliberately (env var or `set_root`),
-#: which disables volume discovery so new blobs stay inside the chosen library.
-_explicit_root = DISK_TREE_ROOT_VAR in env
-
-#: Callbacks fired after `set_root` rebinds the active root (engine rebind,
-#: backend reset, cache clear). Registered by long-running consumers.
-_root_change_hooks: list[Callable[[], None]] = []
-
 #: Callbacks fired after `set_write_target` repoints the blob write dir (the
 #: backend singleton must be rebuilt against it).
 _write_target_hooks: list[Callable[[], None]] = []
@@ -61,42 +53,13 @@ def _ensure_dir(path: str) -> None:
 
 
 def _apply_root(path: str) -> None:
-    """(Re)bind the root-derived globals to `path`, ensuring the dir exists."""
+    """Bind the root-derived globals to `path`, ensuring the dir exists."""
     global ROOT_DIR, DEFAULT_SCANS_DIR, SQLITE_PATH, SCANS_DIR
     ROOT_DIR = expanduser(path)
     _ensure_dir(ROOT_DIR)
     DEFAULT_SCANS_DIR = join(ROOT_DIR, 'scans')
     SQLITE_PATH = join(ROOT_DIR, 'disk-tree.db')
     SCANS_DIR = scan_write_dir()
-
-
-def current_root() -> str:
-    """The active library root."""
-    return ROOT_DIR
-
-
-def on_root_change(cb: Callable[[], None]) -> None:
-    """Register a callback to run after `set_root` rebinds the active root."""
-    _root_change_hooks.append(cb)
-
-
-def set_root(path: str) -> str:
-    """Switch the active library to `path` at runtime, firing rebind hooks.
-
-    Marks the root explicit (disables volume discovery, so new blobs land inside
-    the opened library), rebinds the derived globals, then notifies listeners
-    (the SQLAlchemy engine, the backend singleton, server caches). Idempotent
-    for a path already open as the explicit root.
-    """
-    global _explicit_root
-    path = expanduser(path)
-    if path == ROOT_DIR and _explicit_root:
-        return ROOT_DIR
-    _explicit_root = True
-    _apply_root(path)
-    for cb in list(_root_change_hooks):
-        cb()
-    return ROOT_DIR
 
 
 def discovered_scan_dirs() -> list[str]:
@@ -123,9 +86,9 @@ def configured_scan_dirs() -> list[str]:
     raw = env.get(DISK_TREE_SCAN_DIRS_VAR)
     if raw:
         return [p if is_url(p) else expanduser(p) for p in split_dirs(raw)]
-    if _explicit_root or DISK_TREE_ROOT_VAR in env:
-        # An explicit root — an env var, or a library opened via `set_root` — is a
-        # deliberate choice; discovery must not silently redirect writes out of it.
+    if DISK_TREE_ROOT_VAR in env:
+        # An explicit root is a deliberate choice; discovery must not silently
+        # redirect writes out of it.
         return [DEFAULT_SCANS_DIR]
     return [*discovered_scan_dirs(), DEFAULT_SCANS_DIR]
 
@@ -216,7 +179,7 @@ def set_write_target(target: str) -> str:
 
 
 #: Bind the root-derived globals (`ROOT_DIR`, `DEFAULT_SCANS_DIR`, `SQLITE_PATH`,
-#: `SCANS_DIR`) from the env at import. `set_root` rebinds them at runtime.
+#: `SCANS_DIR`) from the env at import.
 #: `SCANS_DIR` is the write target, resolved once here; re-plugging a volume
 #: mid-run won't be noticed, but a new blob never lands somewhere unreadable.
 _apply_root(env.get(DISK_TREE_ROOT_VAR, DEFAULT_ROOT_DIR))

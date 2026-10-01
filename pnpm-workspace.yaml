@@ -1,4 +1,3 @@
 packages:
-  - "ui"
   - "site"
   - "packages/*"

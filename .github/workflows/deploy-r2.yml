@@ -1,5 +1,5 @@
 # r2.rbw.sh CI + deploy (the `cloud` branch's own pipeline; the repo's `ci.yml`
-# covers `main` / the legacy `ui/` app). On every push to `cloud`: run the
+# covers `main`). On every push to `cloud`: run the
 # hermetic test suites, and only on green deploy the public union-of-roots Map
 # to the `disk-tree-demo` Pages project (r2.rbw.sh), then smoke it.
 #
@@ -49,12 +49,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv python install 3.12
-      # The root wheel force-includes ui/dist; the editable install wants it present.
-      - run: mkdir -p ui/dist
       # One workspace env (engine + `cloud/` overlay, one lockfile): every
       # package, extra and group, so both suites run against the same pins.
       - run: uv sync --frozen --all-packages --all-extras --all-groups
-      - name: disk_tree engine tests (incl. e2e backends)
+      - name: disk_tree engine tests
         run: uv run pytest tests/ -q
       - name: dt_cloud tests
         run: cd cloud && uv run pytest tests/ -q
@@ -64,7 +62,7 @@ jobs:
     # Both read the same public index; dev is the pre-prod staging mirror.
     name: deploy
     needs: [web, py]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/cloud' || github.ref == 'refs/heads/dev')
+    if: github.repository == 'runsascoded/disky' && github.event_name == 'push' && (github.ref == 'refs/heads/cloud' || github.ref == 'refs/heads/dev')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

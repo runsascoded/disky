@@ -13,10 +13,4 @@ def parser_for(store: str):
     if store == 'gcs':
         from . import gcs
         return gcs.parse
-    if store == 's3':
-        from . import s3
-        return s3.parse
-    if store == 'r2':
-        from . import r2
-        return r2.parse
     raise ValueError(f"no access-log parser registered for store={store!r}")

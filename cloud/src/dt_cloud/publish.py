@@ -30,17 +30,14 @@ from __future__ import annotations
 
 import base64
 import re
-import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import timezone
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from datetime import datetime
 
     from mypy_boto3_s3.client import S3Client
 
@@ -121,7 +118,7 @@ def is_listing(key: str, layer2_dir: str) -> bool:
     tiers under `index/<gen>/`. The base's layout (`listing/<scan>/index/`) has
     none. Nothing served reads these (the site reads the tiers; only the
     `/files` viewer opened them), so a deployment may keep them out of R2
-    (`publish -L`) and drop the copies already there (`prune_listings`)."""
+    (`publish -L`)."""
     if not key.startswith(layer2_dir):
         return False
     rest = key[len(layer2_dir):]
@@ -132,15 +129,6 @@ def is_listing(key: str, layer2_dir: str) -> bool:
 # even at a layer-2 dir's top level (the base's pre-generation layout put the
 # tiers straight in `listing/<scan>/index/`).
 TIER_STEM = re.compile(r"^(path-index|age-index|age-pyramid|over-time)(\.|-)")
-
-
-def should_prune(src: Obj | None, dst: Dest) -> bool:
-    """Delete an R2 listing copy only when GCS still holds the same bytes: same
-    size, and the same md5 when both sides know one. A rewritten (recompressed)
-    GCS listing no longer matches, so prune BEFORE recompressing."""
-    if src is None or src.size != dst.size:
-        return False
-    return src.md5 is None or dst.md5 is None or src.md5 == dst.md5
 
 
 @dataclass
@@ -267,107 +255,3 @@ def publish(
             report.bytes += obj.size
     err(report.summary(scan, dry_run=False))
     return report
-
-
-def prune_listings(
-    scan: str,
-    *,
-    src_bucket: str = DATA_BUCKET,
-    layer2: str = LAYER2_PREFIX,
-    dry_run: bool = False,
-    workers: int = 8,
-) -> Report:
-    """Delete the scan's canonical listings from R2 (the mirror of what
-    `publish(listings=False)` no longer copies), each only when GCS holds the
-    identical object (`should_prune`). Dry-run prints the keys it would delete.
-    The `Report` reuses `copied` for the deleted keys and `skipped` for the
-    kept ones."""
-    l2 = layer2.format(scan=scan)
-    s3, bucket = r2_client(), r2_bucket()
-    keys: list[str] = []
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=l2, Delimiter="/"):
-        keys.extend(o["Key"] for o in page.get("Contents", []) if is_listing(o["Key"], l2))
-    from google.cloud import storage
-
-    gcs = storage.Client().bucket(src_bucket)
-    report = Report()
-
-    def decide(key: str) -> tuple[str, int, bool]:
-        blob = gcs.get_blob(key)
-        src = Obj(key=key, size=int(blob.size or 0), md5=md5_hex(blob.md5_hash)) if blob else None
-        dst = head_dest(s3, bucket, key)
-        return key, (dst.size if dst else 0), bool(dst) and should_prune(src, dst)
-
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        decisions = list(ex.map(decide, sorted(keys)))
-    report.skipped = [k for k, _, do in decisions if not do]
-    for k in report.skipped:
-        err(f"  keep {k} (GCS copy missing or different)")
-    todo = [(k, n) for k, n, do in decisions if do]
-    for k, n in todo:
-        if dry_run:
-            print(k)
-        else:
-            s3.delete_object(Bucket=bucket, Key=k)
-            err(f"  ✗ {k} ({n:,} B)")
-        report.copied.append(k)
-        report.bytes += n
-    verb = "would delete" if dry_run else "deleted"
-    err(f"prune-r2-listings {scan}: {verb} {len(report.copied)} ({report.bytes:,} B), kept {len(report.skipped)}")
-    return report
-
-
-# ---------------------------------------------------------------------------
-# `published` as data (specs/r2-serving-migration.md step 6)
-# ---------------------------------------------------------------------------
-# The site used to splice the store object's mtime into meta.json as
-# `published`. Once the served copy lives in R2 that mtime is the *copy* time,
-# so the job now writes `published` into meta.json itself, and the scans from
-# before that get it back-stamped here from their GCS object's `updated` — the
-# original publish time — before they are (re-)published.
-
-PUBLISHED_KEY = "published"
-
-
-def iso_z(t: "datetime") -> str:
-    """The site's timestamp shape: UTC, milliseconds, `Z`."""
-    return t.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def stamp_published(meta: dict[str, Any], updated: "datetime") -> dict[str, Any] | None:
-    """`meta` with `published` set from `updated`, or None when it already has
-    one (the job wrote it, or an earlier pass did) — the idempotent core."""
-    if isinstance(meta.get(PUBLISHED_KEY), str):
-        return None
-    out = dict(meta)
-    out[PUBLISHED_KEY] = iso_z(updated)
-    return out
-
-
-def stamp_metas(src_bucket: str, prefix: str, *, dry_run: bool = False) -> list[str]:
-    """Back-stamp every `<prefix><scan>/meta.json` under `src_bucket` that lacks
-    `published`, from the object's `updated` time, rewriting it in place (same
-    compact JSON shape the producers write). Returns the keys stamped (or, on
-    a dry run, those that would be)."""
-    from google.cloud import storage
-
-    client = storage.Client()
-    bucket = client.bucket(src_bucket)
-    done: list[str] = []
-    for blob in client.list_blobs(src_bucket, prefix=prefix):
-        if not blob.name.endswith("/meta.json"):
-            continue
-        meta = json.loads(blob.download_as_bytes())
-        stamped = stamp_published(meta, blob.updated)
-        if stamped is None:
-            continue
-        done.append(blob.name)
-        if dry_run:
-            err(f"  would stamp {blob.name} published={stamped[PUBLISHED_KEY]}")
-            continue
-        bucket.blob(blob.name).upload_from_string(
-            json.dumps(stamped, separators=(",", ":")), content_type="application/json",
-        )
-        err(f"  stamped {blob.name} published={stamped[PUBLISHED_KEY]}")
-    err(f"stamp-published {src_bucket}/{prefix}: {'would stamp' if dry_run else 'stamped'} {len(done)}")
-    return done

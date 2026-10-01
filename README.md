@@ -1,6 +1,6 @@
 # disk-tree
 
-Disk and cloud storage analyzer with caching, CLI, and web UI.
+Disk and cloud storage analyzer: a scanning/indexing CLI, and a Cloudflare-hosted treemap site (`site/`) over its indexes.
 
 [![disk-tree treemap of an R2 bucket](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
 
@@ -8,7 +8,7 @@ Disk and cloud storage analyzer with caching, CLI, and web UI.
 
 <!-- toc -->
 - [Install](#install)
-- [Web UI](#web-ui)
+- [Site](#site)
 - [CLI](#cli)
   - [Examples](#examples)
 - [Notes](#notes)
@@ -18,41 +18,16 @@ Disk and cloud storage analyzer with caching, CLI, and web UI.
 
 ## Install
 
-```bash
-pip install disk-tree
-```
-
-## Web UI
-
-Start the server and open http://localhost:5001:
+From a clone (one uv workspace: the engine plus the `dt-cloud` overlay in `cloud/`):
 
 ```bash
-disk-tree-server
+uv sync                                     # engine (`disk-tree` CLI)
+uv sync --all-packages --all-extras         # + dt-cloud, every extra
 ```
 
-### Scan List
+## Site
 
-View all cached scans, start new scans for local paths or S3 buckets:
-
-![Scan list](screenshots/scan-list.png)
-
-### Directory Browsing
-
-Browse directories with size, modification time, children, and descendant counts. Multi-select with keyboard navigation, bulk delete:
-
-![Directory listing](screenshots/directory-listing.png)
-
-### Treemap Visualization
-
-Interactive treemaps for visualizing space usage — drill into any directory, filter by name, toggle an age lens. Zero-dependency DIY-SVG/canvas ([`@rdub/treemap`](packages/treemap)), no chart lib. Try it on the [live `r2://ctbk` demo](https://r2.rbw.sh/r2/ctbk):
-
-[![Treemap](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
-
-### S3 Buckets
-
-Browse and scan S3 buckets:
-
-![S3 buckets](screenshots/s3-buckets.png)
+`site/` is a Vite + React app with Cloudflare Pages Functions over a path index of each scan (in R2 / GCS, with D1 for the index footers): treemaps you can drill into, filter, diff between scans, and an age lens. Zero-dependency DIY-SVG/canvas ([`@rdub/treemap`](packages/treemap)), no chart lib. Try it on the [live `r2://ctbk` demo](https://r2.rbw.sh/r2/ctbk).
 
 ## CLI
 
@@ -68,7 +43,6 @@ disk-tree index --help
 #   --help                 Show this message and exit.
 
 disk-tree scans           # List cached scans (JSON)
-disk-tree-server          # Start the web UI server
 ```
 
 ### Examples
@@ -113,7 +87,6 @@ disk-tree index /Users/ryan/c/disk-tree
 
 - **Local filesystems**: Uses `gfind -printf` for fast stat collection (handles sparse files correctly with 512-byte block sizes)
 - **S3**: Caches `aws s3 ls --recursive` output
-- **Fresher child patching**: When viewing a parent directory, newer child scans automatically patch in updated stats
 - **Depth-based predicate pushdown**: Parquet queries filter by depth for fast loading
 
 ## Development
@@ -121,14 +94,10 @@ disk-tree index /Users/ryan/c/disk-tree
 ```bash
 # Python
 uv sync
-disk-tree-server
+pytest tests/
 
-# Web UI
-cd ui
+# Site
 pnpm install
-pnpm dev  # http://localhost:5180 (proxies API to :5001)
-
-# Screenshots
-cd ui
-pnpm screenshots
+cd site
+pnpm dev
 ```

@@ -4,7 +4,7 @@ Same bottom-up group-by cascade as :func:`disk_tree.find.index.aggregate`
 (the pandas version), but expressed in SQL so DuckDB can spill to disk
 under a memory cap. Callers pick the engine (pandas for small local scans,
 DuckDB for large / imported / bulk-listing scans); output shape is
-identical so `/api/compare`, treemap, etc. don't know or care.
+identical so readers don't know or care.
 
 Two entry points:
 

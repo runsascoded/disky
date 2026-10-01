@@ -1,5 +1,7 @@
 # Serverless tier reads: `.groups.json` footer + coarse tiers (CP from mgu, no D1)
 
+**Status:** retired 2026-10-01 — the `ui/` Cloudflare edge was removed; its served successor is `site/` (see specs/path-store.md). Phase 1 (engine-side `.groups.json` emission) stays live; the `ui/cfn` read side (Phase 2+) is retired.
+
 Port mgu's serverless read-layer advances into dt so the demo's Pages Functions
 read fewer row groups and **avoid parsing the ~5 MB thrift parquet footer on a
 cold Worker isolate**. Two separable wins, both from mgu (`serverless-reference.md`

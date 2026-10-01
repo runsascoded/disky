@@ -146,7 +146,9 @@ def exists(parquet_path: str) -> bool:
         import gcsfs
 
         return gcsfs.GCSFileSystem().exists(parquet_path)
-    return os.path.exists(parquet_path)
+    from disk_tree import blobfs
+
+    return blobfs.exists(parquet_path)
 
 
 def extract(parquet_path: str) -> tuple[dict, list[dict]]:
@@ -194,20 +196,68 @@ def groups_blob(schema: dict, rows: list[dict]) -> str:
     return json.dumps(body, separators=(",", ":"))
 
 
+def _write(out: str, data: bytes) -> None:
+    """Bytes to a local/mounted path, a bucket-relative `oa-…` / `gs://` path
+    (gcsfs), or another fsspec URL (`blobfs`: `r2://`, `s3://`)."""
+    if _remote(out):
+        import gcsfs
+
+        with gcsfs.GCSFileSystem().open(out, "wb") as f:
+            f.write(data)
+    else:
+        from disk_tree import blobfs
+
+        blobfs.write_bytes(out, data)
+
+
 def write_groups_blob(parquet_path: str, schema: dict, rows: list[dict]) -> tuple[str, int]:
     """Write the group-manifest blob beside ``parquet_path`` (local, mounted,
     or `gs://`); returns (path, bytes)."""
     out = groups_blob_path(parquet_path)
     text = groups_blob(schema, rows)
-    if out.startswith(("gs://", "oa-")):
+    _write(out, text.encode())
+    return out, len(text)
+
+
+# The cold footer tier (specs/path-store.md §1.6): the same rows as one small
+# parquet beside the tier, `FOOTER_ROW_GROUP_ROWS` rows per group with stats on
+# the pruning columns — what the site range-reads (`_lib/index.ts` `pq` mode)
+# once retention retires a scan's rows from D1. The engine owns the format.
+def groups_parquet_path(parquet_path: str) -> str:
+    """`…/path-index-bysize.parquet` → `…/path-index-bysize.groups.parquet`."""
+    from disk_tree.find.groups import groups_parquet_path as gpp
+
+    return gpp(parquet_path)
+
+
+def write_groups_parquet(parquet_path: str, schema: dict, rows: list[dict], row_group_rows: int | None = None) -> tuple[str, int]:
+    """Write the cold footer tier beside ``parquet_path`` (local, mounted,
+    `gs://`, or an fsspec URL); returns (path, bytes)."""
+    from disk_tree.find.groups import FOOTER_ROW_GROUP_ROWS, groups_parquet_bytes
+
+    out = groups_parquet_path(parquet_path)
+    data = groups_parquet_bytes(schema, rows, row_group_rows or FOOTER_ROW_GROUP_ROWS)
+    _write(out, data)
+    return out, len(data)
+
+
+def read_groups_blob(parquet_path: str) -> tuple[dict, list[dict]]:
+    """``(schema, rows)`` from the `.groups.json` beside ``parquet_path`` —
+    `extract`'s result without reading the tier's own footer (the backfill's
+    cheap source: `index-blob -J`)."""
+    from disk_tree.find.groups import groups_from_json
+
+    path = groups_blob_path(parquet_path)
+    if _remote(path):
         import gcsfs
 
-        with gcsfs.GCSFileSystem().open(out, "w") as f:
-            f.write(text)
+        with gcsfs.GCSFileSystem().open(path, "r") as f:
+            text = f.read()
     else:
-        with open(out, "w") as f:
-            f.write(text)
-    return out, len(text)
+        from disk_tree import blobfs
+
+        text = blobfs.read_text(path)
+    return groups_from_json(text)
 
 
 def _sql_escape(s: str) -> str:
@@ -216,10 +266,11 @@ def _sql_escape(s: str) -> str:
 
 # The D1 database `/query` runs one SQL string; we send multi-row INSERTs.
 # Deployment config (specs/denovo-factor.md): the site's D1, as `site/wrangler.toml`
-# binds it — `D1_DB_ID` / `D1_DB_NAME` in the job's environment (`job/cw-run.sh`
-# exports the CoreWeave pair); the defaults are the GCS deployment's.
-D1_DB_ID = os.environ.get("D1_DB_ID", "e52398b7-5538-4bc4-83db-3355a1b5ef9a")  # oa-gcs-usage-auth
-D1_DB_NAME = os.environ.get("D1_DB_NAME", "oa-gcs-usage-auth")
+# binds it — `D1_DB_ID` / `D1_DB_NAME` in the job's environment. No default:
+# every deployment names its own D1 (a default once pointed at gcs's production
+# D1, so a run that forgot it wrote there).
+D1_DB_ID = os.environ.get("D1_DB_ID", "")
+D1_DB_NAME = os.environ.get("D1_DB_NAME", "")
 
 
 def _creds() -> tuple[str, str]:
@@ -264,7 +315,9 @@ INSERT_BYTES = 64_000
 def _d1_query(sql: str, acct: str, tok: str, db_id: str = D1_DB_ID) -> list[dict]:
     """Run one SQL string against D1 over the HTTP API (no Node/wrangler).
     Returns the statement's result rows (`[]` for writes); `meta` per row batch
-    is dropped."""
+    is dropped. Refuses without a database id (`$D1_DB_ID`)."""
+    if not db_id:
+        raise RuntimeError("no D1 database: set $D1_DB_ID (and $D1_DB_NAME) to this deployment's D1")
     import time
     import urllib.error
     import urllib.request
@@ -352,9 +405,11 @@ def sync_d1(
     the pointer untouched (still serving the previous generation) and orphan
     rows the next sync/gc sweeps. Nothing is deleted before the flip.
 
-    The same rows also land as the group-manifest blob beside the parquet
-    (``write_groups_blob``) first — the durable copy the site opens once
-    retention retires this tier's rows from D1.
+    The same rows also land beside the parquet first, twice: the cold footer
+    tier (``write_groups_parquet``, `.groups.parquet`) — the durable copy the
+    site range-reads once retention retires this tier's rows from D1 — and
+    the `.groups.json` blob, the fallback for a reader or a generation
+    without the parquet.
 
     ``store`` (default the primary, whose SQL is unchanged) files the rows
     under a secondary store: variant ``<store>:<variant>`` and the ``store``
@@ -366,6 +421,7 @@ def sync_d1(
     sv = f"'{_sql_escape(store)}', " if sec else ""  # its value
     schema, rows = extract(parquet_path)
     if blob:
+        write_groups_parquet(parquet_path, schema, rows)
         write_groups_blob(parquet_path, schema, rows)
     floor = schema.get("floor_bytes")
     # Leftovers from earlier flips (any gen that is neither the current pointer's
@@ -463,8 +519,8 @@ USER_SORTS: dict[str, str] = {"user": "path-index-by-user.parquet", "bysize-user
 _ENV_VARIANTS = tuple(v for v in os.environ.get("INDEX_VARIANTS", "path,user").split(",") if v)
 HAS_USER_SORTS = "user" in _ENV_VARIANTS
 # The store sorts this deployment syncs — what `index-gc -r` retires for scans
-# past the retention window (their pointers stay; the reader opens the
-# `.groups.json` blob beside the parquet instead).
+# past the retention window (their pointers stay; the reader range-reads the
+# `.groups.parquet` cold tier beside the parquet instead).
 SORT_VARIANTS = tuple(STORE_SORTS) + (tuple(USER_SORTS) if HAS_USER_SORTS else ())
 
 # Index variants the site reads (functions/_lib/index.ts `indexKey` mirrors
@@ -484,27 +540,67 @@ for _b in ("1h", "3h", "6h", "12h", "1d", "2d", "4d", "8d"):
 INDEX_VARIANTS["over-time"] = "over-time.parquet"
 
 
-def retire_d1(retain: int, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> list[tuple[str, str, int]]:
-    """Retention (specs/view-serving.md follow-ups): drop the store sorts'
-    row groups (`SORT_VARIANTS`) for every synced scan older than the newest
-    ``retain`` — they are 95 % of D1's index bytes (thousands of groups per
-    sort per scan) and a deep drill into an old scan is rare. The pointer
-    stays, so the reader opens the `.groups.json` blob beside the parquet
-    instead; the age pyramid and over-time tiers are kept for every scan.
-    Returns (date, variant, rows deleted) per retired variant."""
+def cold_path(base: str, gdir: str, variant: str) -> str:
+    """Where (date, variant)'s cold footer tier lives: the pointer's dir
+    ``gdir`` under ``base`` (a bucket name — `oa-…` → gcsfs —, a mounted dir, or an
+    fsspec URL like `r2://bucket`)."""
+    return groups_parquet_path(f"{base.rstrip('/')}/{gdir}/{INDEX_VARIANTS[variant]}")
+
+
+def retire_d1(
+    retain: int,
+    db_id: str = D1_DB_ID,
+    store: str = PRIMARY_STORE,
+    base: str = "oa-gcs-usage-dvx",
+    has_cold=exists,
+) -> tuple[list[tuple[str, str, int]], list[tuple[str, str, str]]]:
+    """Retention (specs/path-store.md §1.6): drop the store sorts' row groups
+    (`SORT_VARIANTS`) for every synced scan older than the newest ``retain``
+    — they are 95 % of D1's index bytes (thousands of groups per sort per
+    scan) and a deep drill into an old scan is rare. The pointer stays, and
+    the reader range-reads the tier's cold footer (`.groups.parquet`) beside
+    the parquet instead; the age pyramid and over-time tiers are kept for
+    every scan.
+
+    A (date, variant) whose `.groups.parquet` is absent (``has_cold`` of
+    `cold_path(base, <pointer dir>, variant)` is false) keeps its rows — the
+    only other way back would be the whole `.groups.json`, which a Worker
+    can't hold for a large sort; backfill it (`index-blob`) and re-run.
+
+    Returns ``(retired, skipped)``: (date, variant, rows deleted) per retired
+    variant, (date, variant, missing path) per variant kept for want of its
+    cold footer."""
     tok, acct = _creds()
     dates = sorted({d for d, _ in synced_variants(db_id, store)})
+    old = set(dates[:-retain] if retain > 0 else dates)
     sw = "" if store == PRIMARY_STORE else f"store = '{_sql_escape(store)}' AND "
-    out: list[tuple[str, str, int]] = []
-    for d in dates[:-retain] if retain > 0 else dates:
-        for v in SORT_VARIANTS:
-            rows = _d1_query(
-                f"DELETE FROM index_row_groups WHERE {sw}date = '{_sql_escape(d)}' AND variant = '{_sql_escape(d1_variant(v, store))}' RETURNING 1 AS n;",
-                acct, tok, db_id,
-            )
-            if rows:
-                out.append((d, v, len(rows)))
-    return out
+    names = {d1_variant(v, store): v for v in SORT_VARIANTS}
+    vin = ", ".join(f"'{_sql_escape(n)}'" for n in names)
+    # What is still in D1 (an already-retired variant costs no existence
+    # check), and where each pointer's files live.
+    held = _d1_query(f"SELECT DISTINCT date, variant FROM index_row_groups WHERE {sw}variant IN ({vin});", acct, tok, db_id)
+    dirs = {
+        (r["date"], r["variant"]): r["dir"]
+        for r in _d1_query(f"SELECT date, variant, dir FROM index_schema WHERE {sw}variant IN ({vin});", acct, tok, db_id)
+    }
+    order = {v: i for i, v in enumerate(SORT_VARIANTS)}
+    todo = sorted(((r["date"], names[r["variant"]]) for r in held if r["date"] in old), key=lambda dv: (dv[0], order[dv[1]]))
+    retired: list[tuple[str, str, int]] = []
+    skipped: list[tuple[str, str, str]] = []
+    for d, v in todo:
+        d1v = d1_variant(v, store)
+        gdir = dirs.get((d, d1v))
+        cold = cold_path(base, gdir, v) if gdir else None
+        if cold is None or not has_cold(cold):
+            skipped.append((d, v, cold or f"(no pointer for {d} [{v}])"))
+            continue
+        rows = _d1_query(
+            f"DELETE FROM index_row_groups WHERE {sw}date = '{_sql_escape(d)}' AND variant = '{_sql_escape(d1v)}' RETURNING 1 AS n;",
+            acct, tok, db_id,
+        )
+        if rows:
+            retired.append((d, v, len(rows)))
+    return retired, skipped
 
 
 def index_dir(date: str, variant: str = "path", db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> str | None:
@@ -537,22 +633,6 @@ def _pack(head: str, values: list[str], limit: int) -> list[str]:
     return out
 
 
-# In-place rewrite of rows still holding the verbose (pre-2026-09-06) thrift-shaped
-# `rg_json` object into the compact array form, with SQLite's JSON1 — no parquet
-# read, one statement per (date, variant). Old rows start with `{`.
-COMPACT_SQL = (
-    "UPDATE index_row_groups SET rg_json = json_array("
-    "CAST(json_extract(rg_json, '$.num_rows') AS INTEGER), "
-    "json_extract(rg_json, '$.columns[0].meta_data.codec'), "
-    "(SELECT json_group_array(json_array("
-    "CAST(json_extract(value, '$.meta_data.data_page_offset') AS INTEGER), "
-    "CAST(json_extract(value, '$.meta_data.total_compressed_size') AS INTEGER), "
-    "CAST(coalesce(json_extract(value, '$.meta_data.dictionary_page_offset'), '0') AS INTEGER))) "
-    "FROM json_each(index_row_groups.rg_json, '$.columns'))"
-    ") WHERE date = '{date}' AND variant = '{variant}' AND rg_json LIKE '{{%';"
-)
-
-
 def synced_variants(db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> list[tuple[str, str]]:
     """Every (date, variant) of ``store`` with a schema row in D1 (= a complete
     sync); variants as the store names them (a secondary store's prefix off).
@@ -568,16 +648,3 @@ def synced_variants(db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> list[t
     )
     pre = f"{store}:"
     return [(r["date"], r["variant"][len(pre):]) for r in rows if r["variant"].startswith(pre)]
-
-
-def compact_d1(date: str, variant: str, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> int:
-    """Compact one (date, variant)'s verbose `rg_json` rows in place; returns the
-    number of rows left in the old form afterwards (0 = done)."""
-    tok, acct = _creds()
-    variant = d1_variant(variant, store)
-    _d1_query(COMPACT_SQL.format(date=date, variant=variant), acct, tok, db_id)
-    rows = _d1_query(
-        f"SELECT count(*) AS n FROM index_row_groups WHERE date = '{date}' AND variant = '{variant}' AND rg_json LIKE '{{%';",
-        acct, tok, db_id,
-    )
-    return int(rows[0]["n"])

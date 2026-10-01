@@ -170,12 +170,9 @@ def import_bucket(
     side: str | None = None,
     max_cols: tuple[str, ...] = (),
     size_hist: bool = False,
-    replace=None,
 ):
     """Aggregate one bucket's listing → blob + Scan row.
 
-    `replace`: an existing Scan row to update in place (same path+time)
-    instead of inserting a new one — used by `disk-tree pull --force`.
     `out_dir`: aggregate into a deterministic `<out_dir>/<scheme>-<bucket>.parquet`
     rather than a fresh temp name, so the stream engine's `<out>.parts` resume
     token is findable on a rerun (a per-invocation temp name never is).
@@ -270,26 +267,18 @@ def import_bucket(
             if os.path.exists(out_parquet):
                 os.remove(out_parquet)
 
-    if replace is not None:
-        scan = replace
-        scan.blob = blob_ref
-        scan.size = root_size
-        scan.n_children = root_n_children
-        scan.n_desc = root_n_desc
-        scan.mtime = root_mtime
-    else:
-        scan = Scan(
-            path=scan_path,
-            time=snap_time,
-            blob=blob_ref,
-            error_count=None,
-            error_paths=None,
-            size=root_size,
-            n_children=root_n_children,
-            n_desc=root_n_desc,
-            mtime=root_mtime,
-        )
-        db.session.add(scan)
+    scan = Scan(
+        path=scan_path,
+        time=snap_time,
+        blob=blob_ref,
+        error_count=None,
+        error_paths=None,
+        size=root_size,
+        n_children=root_n_children,
+        n_desc=root_n_desc,
+        mtime=root_mtime,
+    )
+    db.session.add(scan)
     db.session.commit()
     err(f"  {scan_path}: {n_rows:,} rows @ {snap_time.isoformat()} → {blob_ref}")
     return scan

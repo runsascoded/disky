@@ -42,6 +42,9 @@ env:
 
 jobs:
   rescan:
+    # The r2.rbw.sh demo's own job: deployment branches carry this file
+    # through `cloud` merges, but their repos have none of its secrets.
+    if: github.repository == 'runsascoded/disky'
     name: Re-scan demo buckets
     runs-on: ubuntu-latest
     steps:
@@ -57,9 +60,6 @@ jobs:
 
       - name: Set up Python
         run: uv python install 3.12
-
-      - name: Create empty ui/dist for editable install
-        run: mkdir -p ui/dist
 
       - name: Install disk-tree (+ R2 driver)
         run: uv sync --frozen --extra r2
@@ -96,34 +96,12 @@ jobs:
           EOF
 
       - name: Re-scan each demo bucket → disk-tree-demo
-        # `-C` forces a fresh listing (no cache read), `-q` keeps the log small,
-        # `-D` skips the local diff-index build (no prior scan in a stateless
-        # runner; diff indexes are published separately).
+        # `-C` forces a fresh listing (no cache read), `-q` keeps the log small.
         # jc-taxes is omitted until a working RAC read token (rac-ro) is wired.
         run: |
           set -euo pipefail
           for b in crashes ctbk; do
             echo "::group::index r2://$b"
-            uv run disk-tree index -C -q -D "r2://$b" --to r2://disk-tree-demo/scans/
+            uv run disk-tree index -C -q "r2://$b" --to r2://disk-tree-demo/scans/
             echo "::endgroup::"
-          done
-
-      - name: Refresh OG cards (tier A)
-        # Capture each bucket's live treemap → R2 `og/r2/<bucket>.jpg`, which the
-        # `/og/<key>` Function serves ahead of the bundled seed cards. Best-effort:
-        # a capture flake must never fail the scan run (seeds + tier-B renders stay valid).
-        continue-on-error: true
-        working-directory: ui
-        env:
-          OG_BUCKETS: crashes,ctbk
-        run: |
-          set -euo pipefail
-          # Let the Pages Functions' 60s scan-list cache expire so the capture
-          # reflects the scan just uploaded.
-          sleep 70
-          npm i --no-save puppeteer@23
-          node scripts/og-capture.mjs
-          for b in crashes ctbk; do
-            aws --profile rac-rw --endpoint-url "$RAC_ENDPOINT" \
-              s3 cp "og-out/$b.jpg" "s3://disk-tree-demo/og/r2/$b.jpg" --content-type image/jpeg
           done

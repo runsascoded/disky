@@ -20,7 +20,7 @@
   "dependencies": {
     "@disk-tree/react": "workspace:*",
     "@floating-ui/react": "^0.27.20",
-    "@open-athena/auth": "github:Open-Athena/auth#7442ab0d54d65c850689074e5ca40a0d91ce87ba",
+    "@open-athena/auth": "github:Open-Athena/auth#fa93d1467dcb0072218ce2f951ea3b3d861e11b3",
     "@rdub/file-tree": "https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b",
     "@rdub/treemap": "workspace:*",
     "@tanstack/react-query": "^5.101.4",

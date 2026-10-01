@@ -50,7 +50,7 @@ def src(tmp_path: Path) -> Path:
 def test_to_writes_the_blob_to_the_url_target_and_reads_it_back(src: Path, tmp_path: Path):
     root, remote = tmp_path / 'root', tmp_path / 'remote'
     target = f'file://{remote}'
-    r = _run(['index', '-C', '-D', '-t', target, str(src)], root)
+    r = _run(['index', '-C', '-t', target, str(src)], root)
     assert r.returncode == 0, r.stderr
     assert _stderr_lines(r)[0] == f'--to: writing blobs to {target}'
 
@@ -74,9 +74,9 @@ def test_to_writes_the_blob_to_the_url_target_and_reads_it_back(src: Path, tmp_p
 
 def test_to_writes_a_groups_json_footer_sidecar(src: Path, tmp_path: Path):
     """`index --to <url>` precomputes the `.groups.json` footer beside the blob,
-    so the serverless reader (`ui/cfn`) plans range reads without a cold
-    thrift-footer parse (`find/groups.py`). Absent-safe: a reader without it
-    falls back to the blob's own footer."""
+    so the serverless reader (`site/functions/_lib/index.ts`) plans range
+    reads without a cold thrift-footer parse (`find/groups.py`). Absent-safe:
+    a reader without it falls back to the blob's own footer."""
     import json
 
     import pyarrow.parquet as pq
@@ -85,7 +85,7 @@ def test_to_writes_a_groups_json_footer_sidecar(src: Path, tmp_path: Path):
 
     root, remote = tmp_path / 'root', tmp_path / 'remote'
     target = f'file://{remote}'
-    r = _run(['index', '-C', '-D', '-t', target, str(src)], root)
+    r = _run(['index', '-C', '-t', target, str(src)], root)
     assert r.returncode == 0, r.stderr
 
     blob = next(remote.glob('*.parquet'))
@@ -107,7 +107,7 @@ def test_to_writes_a_groups_json_footer_sidecar(src: Path, tmp_path: Path):
 
 def test_low_space_warns_and_suggests(src: Path, tmp_path: Path):
     root = tmp_path / 'root'
-    r = _run(['index', '-C', '-D', str(src)], root, **{LOW_SPACE_VAR: LOW})
+    r = _run(['index', '-C', str(src)], root, **{LOW_SPACE_VAR: LOW})
     assert r.returncode == 0, r.stderr
     first = re.sub(r'only .+? free', 'only <free> free', _stderr_lines(r)[0])
     assert first == (
@@ -119,7 +119,7 @@ def test_low_space_warns_and_suggests(src: Path, tmp_path: Path):
 
 def test_low_space_names_the_configured_remote(src: Path, tmp_path: Path):
     root, remote = tmp_path / 'root', f'file://{tmp_path / "remote"}'
-    r = _run(['index', '-C', '-D', str(src)], root, **{LOW_SPACE_VAR: LOW, REMOTE_TARGET_VAR: remote})
+    r = _run(['index', '-C', str(src)], root, **{LOW_SPACE_VAR: LOW, REMOTE_TARGET_VAR: remote})
     assert r.returncode == 0, r.stderr
     first = re.sub(r'only .+? free', 'only <free> free', _stderr_lines(r)[0])
     assert first == (
@@ -132,7 +132,7 @@ def test_low_space_names_the_configured_remote(src: Path, tmp_path: Path):
 def test_auto_remote_redirects_when_low(src: Path, tmp_path: Path):
     root, remote_dir = tmp_path / 'root', tmp_path / 'remote'
     remote = f'file://{remote_dir}'
-    r = _run(['index', '-C', '-D', '-R', str(src)], root, **{LOW_SPACE_VAR: LOW, REMOTE_TARGET_VAR: remote})
+    r = _run(['index', '-C', '-R', str(src)], root, **{LOW_SPACE_VAR: LOW, REMOTE_TARGET_VAR: remote})
     assert r.returncode == 0, r.stderr
     first = re.sub(r'low space: .+? free', 'low space: <free> free', _stderr_lines(r)[0])
     assert first == (
@@ -140,11 +140,3 @@ def test_auto_remote_redirects_when_low(src: Path, tmp_path: Path):
     )
     assert len(list(remote_dir.glob('*.parquet'))) == 1
     assert list((root / 'scans').glob('*.parquet')) == []
-
-
-def test_diff_index_builds_over_remote_blobs(src: Path, tmp_path: Path):
-    root, remote = tmp_path / 'root', f'file://{tmp_path / "remote"}'
-    for _ in range(2):
-        r = _run(['index', '-C', '-t', remote, str(src)], root)
-        assert r.returncode == 0, r.stderr
-    assert sorted(p.name for p in (root / 'diffs').glob('*.parquet')) == ['1-2.parquet']

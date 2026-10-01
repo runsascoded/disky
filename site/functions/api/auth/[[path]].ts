@@ -6,6 +6,7 @@
 import { authRoutes } from '@open-athena/auth'
 import { d1AuditQuery } from '@open-athena/auth/d1'
 import { ADMIN_SCOPE, type Ctx, gateFor } from '../../_lib/auth.js'
+import { siteAllowlist } from '../../_lib/allowlist.js'
 
 /**
  * Local-dev auto sign-in. The package's admin routes authenticate by a signed
@@ -43,6 +44,9 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   const handle = authRoutes(gate, {
     adminScope: ADMIN_SCOPE,
     audit: ctx.env.DB ? d1AuditQuery(ctx.env.DB) : undefined,
+    // A share link minted with `allowlist: true` also lets its recipient sign
+    // in (Google / emailed code): the `allowed_emails` row, via this adapter.
+    allowlist: siteAllowlist(ctx.env),
   })
 
   let req = ctx.request

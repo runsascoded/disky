@@ -388,7 +388,7 @@ def reclaimable_by_dir(root: str) -> tuple[dict[str, int], int]:
 #   path         str    directory, in the scan's relative scheme ('.' = root)
 #   reclaimable  int64  bytes `rm -rf path` frees (extent-LCA rollup)
 # Written only by `index -x` (needs the live filesystem). Stale if older than
-# its blob, which `/api/delete` rewrites in place.
+# its blob, which a hybrid in-place delete rewrites.
 
 RECLAIM_SUFFIX = '.reclaim.parquet'
 

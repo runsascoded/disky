@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from sys import stdout
+from sys import platform, stdout
 
 from click import argument, option
 from humanize import naturalsize
@@ -219,25 +219,6 @@ def _delete_cfg(config_path: str | None) -> dict:
         return {}
 
 
-def _batch_submitter(batch_cfg: dict | None):
-    """Build a `(submit_fn, threshold)` for the drainer from a `delete.batch`
-    block (`provider: aws`, `job_queue`, `job_definition`, `region?`,
-    `threshold?`), or `(None, None)` when Batch isn't configured."""
-    if not batch_cfg:
-        return None, None
-    import boto3
-
-    from disk_tree.batch import submit_delete_job
-
-    client = boto3.client("batch", region_name=batch_cfg.get("region"))
-    jq, jd = batch_cfg["job_queue"], batch_cfg["job_definition"]
-
-    def submit(run_id: str, uris: list[str]) -> str:
-        return submit_delete_job(client, run_id=run_id, uris=uris, job_queue=jq, job_definition=jd)
-
-    return submit, int(batch_cfg.get("threshold", 10000))
-
-
 def _serve(
     config_path: str | None,
     interval: int,
@@ -251,8 +232,7 @@ def _serve(
 ) -> None:
     """The CP4 drainer: execute edge-enqueued runs from D1, here where the
     backend creds live. Exp-backoff polling (base `interval`, up to 5x while
-    idle); Ctrl-C stops cleanly. Several `--d1`s are drained in turn each poll
-    (the laptop serves `site/`'s and `ui/`'s until the cut-over)."""
+    idle); Ctrl-C stops cleanly. Several `--d1`s are drained in turn each poll."""
     import subprocess
     import time
 
@@ -269,7 +249,6 @@ def _serve(
         raise SystemExit(f"dispatch --serve: {e}")
     undo_state = delete_cfg.get("undo", "none")
     announce = make_announcer(delete_cfg)
-    submit_fn, batch_threshold = _batch_submitter(delete_cfg.get("batch"))
     ttl_s = parse_duration(ttl) if ttl else None
     if ttl_s is not None and not trash_on:
         raise SystemExit("dispatch --serve: --ttl needs --trash")
@@ -288,6 +267,14 @@ def _serve(
         return nbytes, nobjs
 
     delete_fn = lambda uri: _delete_fn(local(uri))  # noqa: E731
+
+    # A dry run's true reclaim for the staged set as a whole (specs/apfs-sharing.md):
+    # extents the set shares with the uv / pnpm caches (clones, hardlinks) stay
+    # live, so they don't count; sharing inside the set does. macOS only.
+    def reclaim_fn(uris: list[str]) -> int:
+        from disk_tree.extents import measure
+        paths = [local(u).rstrip('/') for u in uris if u.startswith('file://')]
+        return measure([p for p in paths if os.path.lexists(p)]).unique
     trash_fn = (lambda uri, run_id: trash_mod.trash(local(uri), run_id)) if trash_on else None
 
     def run_after(summary: dict) -> None:
@@ -300,7 +287,7 @@ def _serve(
 
     schemas = {c.database_id: Schema.detect(c) for c in clients}
     err(f"dispatch --serve: draining D1 {', '.join(c.database_id for c in clients)} (undo={undo_state}, "
-        f"chat={delete_cfg.get('chat', 'none')}, batch={'on' if submit_fn else 'off'}, "
+        f"chat={delete_cfg.get('chat', 'none')}, "
         f"{'trash' if trash_on else 'rm'}{f', ttl {ttl}' if ttl else ''})")
 
     def sweep_ttl() -> None:
@@ -319,14 +306,13 @@ def _serve(
                 summaries += drain_once(
                     c, size_fn=size_fn, delete_fn=delete_fn, schema=schemas[c.database_id], trash_fn=trash_fn,
                     undo_state=undo_state, hold_s=ttl_s, announce=announce, after=run_after,
-                    submit_fn=submit_fn, batch_threshold=batch_threshold, host=host,
+                    host=host,
+                    reclaim_fn=reclaim_fn if platform == 'darwin' else None,
                 )
             for s in summaries:
-                if s.get("submitted"):
-                    err(f"  submitted {s['run_id']} to Batch job {s['batch_job']} ({s['items']} path(s), over threshold)")
-                    continue
                 verb = "would delete" if s["mode"] == "dry" else ("trashed" if s["trashed"] else "deleted")
-                err(f"  ran {s['run_id']}: {verb} {naturalsize(s['deleted_bytes'], binary=True)}"
+                freed = f", frees {naturalsize(s['freed_bytes'], binary=True)}" if s.get("freed_bytes") is not None else ""
+                err(f"  ran {s['run_id']}: {verb} {naturalsize(s['deleted_bytes'], binary=True)}{freed}"
                     f" across {s['deleted_objects']} object(s), {s['items']} path(s)"
                     + (f", {len(s['errors'])} failed" if s['errors'] else ""))
                 for uri, why in s["errors"]:

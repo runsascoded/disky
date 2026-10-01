@@ -110,6 +110,7 @@ def test_sync_d1_retires_coarse_tiers_after_a_store_flip(monkeypatch, version, v
     sent: list[str] = []
     monkeypatch.setattr(F, "extract", lambda p: ({"version": version, "schema": [], "floor_bytes": None}, []))
     monkeypatch.setattr(F, "write_groups_blob", lambda *a: ("", 0))
+    monkeypatch.setattr(F, "write_groups_parquet", lambda *a: ("", 0))
     monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
     monkeypatch.setattr(F, "_d1_query", lambda sql, acct, tok, db_id: sent.append(sql) or [])
     F.sync_d1("2026-09-30", "x.parquet", variant=variant, gen="g2", key="k", store=store)

@@ -82,7 +82,7 @@ def test_dry_run_sizes_without_deleting_and_reports_would_delete(db):
     assert deleted == []
     assert out == [{
         "run_id": "laptop-dry-1", "plan_id": 1, "actor": "ryan", "mode": "dry", "items": 2, "deleted_paths": 0,
-        "deleted_bytes": 200, "deleted_objects": 4, "errors": [], "submitted": False, "finished_ts": 200, "trashed": False,
+        "deleted_bytes": 200, "deleted_objects": 4, "errors": [], "finished_ts": 200, "trashed": False,
     }]
     assert db.query("SELECT finished_ts, deleted_bytes, deleted_objects, undo_state, undo_deadline, purge_state FROM deletion_runs") == [
         {"finished_ts": 200, "deleted_bytes": 200, "deleted_objects": 4, "undo_state": "none", "undo_deadline": None, "purge_state": "none"},
@@ -147,3 +147,44 @@ def test_a_failed_path_is_recorded_not_fatal(db):
     out = drain.drain_once(db, size_fn=lambda u: (50, 1), delete_fn=lambda u: None, trash_fn=trash_fn, now=lambda: 600)
     assert (out[0]["deleted_objects"], out[0]["deleted_bytes"], out[0]["errors"]) == (1, 50, [(B, "not on the trash root's volume")])
     assert db.query("SELECT prefix FROM deletion_bands ORDER BY prefix") == [{"prefix": B}, {"prefix": A}]
+
+
+FREED_SCHEMA = SITE_SCHEMA + "ALTER TABLE deletion_runs ADD COLUMN freed_bytes INTEGER;\n"
+
+
+def test_dry_run_records_what_the_set_actually_frees():
+    """A dry run on a schema with `freed_bytes` measures the staged set as a
+    whole (`reclaim_fn`, the extent intersection: clone/hardlink-shared bytes
+    don't count) beside the per-path would-delete sizes."""
+    db = FakeD1(FREED_SCHEMA)
+    assert Schema.detect(db).freed
+    _enqueue(db, "laptop-dry-2", 1, [A, B], mode="dry")
+    measured = []
+    out = drain.drain_once(db, size_fn=lambda u: (100, 2), delete_fn=lambda u: None, reclaim_fn=lambda us: measured.append(us) or 30, now=lambda: 200)
+    assert measured == [[B, A]]
+    assert (out[0]["deleted_bytes"], out[0]["freed_bytes"]) == (200, 30)
+    assert db.query("SELECT deleted_bytes, freed_bytes FROM deletion_runs") == [{"deleted_bytes": 200, "freed_bytes": 30}]
+
+
+def test_freed_bytes_only_for_dry_runs_on_a_schema_that_has_it(db):
+    """No column → no measurement; a real run is never re-measured (its trash
+    rename frees nothing until emptied)."""
+    _enqueue(db, "laptop-dry-3", 1, [A], mode="dry")
+    calls = []
+    out = drain.drain_once(db, size_fn=lambda u: (100, 2), delete_fn=lambda u: None, reclaim_fn=lambda us: calls.append(us) or 1, now=lambda: 200)
+    assert (calls, "freed_bytes" in out[0]) == ([], False)
+    db2 = FakeD1(FREED_SCHEMA)
+    _enqueue(db2, "laptop-real-3", 1, [A])
+    drain.drain_once(db2, size_fn=lambda u: (100, 2), delete_fn=lambda u: None, trash_fn=lambda u, r: None, reclaim_fn=lambda us: calls.append(us) or 1, now=lambda: 200)
+    assert (calls, db2.query("SELECT freed_bytes FROM deletion_runs")) == ([], [{"freed_bytes": None}])
+
+
+def test_a_failed_measurement_leaves_freed_bytes_unset():
+    db = FakeD1(FREED_SCHEMA)
+    _enqueue(db, "laptop-dry-4", 1, [A], mode="dry")
+
+    def boom(us):
+        raise OSError("F_LOG2PHYS_EXT unsupported")
+
+    out = drain.drain_once(db, size_fn=lambda u: (100, 2), delete_fn=lambda u: None, reclaim_fn=boom, now=lambda: 200)
+    assert ("freed_bytes" in out[0], db.query("SELECT finished_ts, freed_bytes FROM deletion_runs")) == (False, [{"finished_ts": 200, "freed_bytes": None}])

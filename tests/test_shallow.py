@@ -1,10 +1,9 @@
 """Spec `scan-page-r2-latency.md`: scan blobs are written in bounded row groups
-(ask 2); `/api/scan` gets each chunk's depth-1 rows from the root blob's
+(ask 2); each chunk's depth-1 rows are served from the root blob's
 `.shallow.parquet` sidecar written at save time (ask 3), falling back to a
-filtered, projected, per-process-cached read of the chunk (ask 1) — so a page
-load never pulls a whole chunk blob, local or R2."""
+filtered, projected, per-process-cached read of the chunk (ask 1) — so a
+top-level read never pulls a whole chunk blob, local or R2."""
 import os
-import sqlite3
 from uuid import uuid4
 
 import pandas as pd
@@ -13,7 +12,6 @@ import pytest
 from pandas.testing import assert_frame_equal
 
 from disk_tree import blobfs, shallow
-from disk_tree.storage import reset_backend
 from disk_tree.storage.base import BLOB_ROW_GROUP_SIZE
 from disk_tree.storage.hybrid import HybridBackend
 
@@ -160,75 +158,13 @@ def test_remote_scans_dir_gets_the_sidecar_too():
     assert_frame_equal(_sorted(shallow.chunk_top_rows(root, chunk_ref, b._resolve)), _sorted(direct))
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    """A Flask test client over a hybrid backend rooted in `tmp_path`."""
-    from disk_tree.server import app, clear_cache, init_db
-    scans_dir = str(tmp_path / 'scans')
-    os.makedirs(scans_dir)
-    db_path = str(tmp_path / 'disk-tree.db')
-    monkeypatch.setenv('DISK_TREE_BACKEND', 'hybrid')
-    monkeypatch.setattr('disk_tree.server.DB_PATH', db_path)
-    monkeypatch.setattr('disk_tree.config.SQLITE_PATH', db_path)
-    monkeypatch.setattr('disk_tree.config.ROOT_DIR', str(tmp_path))
-    monkeypatch.setattr('disk_tree.config.SCANS_DIR', scans_dir)
-    monkeypatch.setattr('disk_tree.server.AUTO_INDEX', False)
-    reset_backend()
-    init_db()
-    clear_cache()
-    shallow.clear_cache()
-    app.config['TESTING'] = True
-    with app.test_client() as c:
-        yield c, db_path, scans_dir
-    reset_backend()
-
-
-def _scan_rows(client, uri: str) -> list[dict]:
-    r = client.get(f'/api/scan?uri={uri}&depth=2&expand_single=false')
-    assert r.status_code == 200, r.get_json()
-    return sorted(r.get_json()['rows'], key=lambda x: x['path'])
-
-
-def test_api_scan_serves_chunk_tops_from_the_sidecar(client, monkeypatch):
-    from disk_tree.server import clear_cache
-    c, db_path, scans_dir = client
-    b, ref, root, chunk_ref = _chunked(scans_dir)
-    con = sqlite3.connect(db_path)
-    con.execute('INSERT INTO scan (path, time, blob, size, n_desc, n_children) VALUES (?, ?, ?, ?, ?, ?)',
-                ('/test', '2026-09-26T00:00:00', ref, 100 + 99 * N_LARGE, 3 + N_LARGE, 2))
-    con.commit()
-    con.close()
-    chunk_path = blobfs.join(scans_dir, chunk_ref)
-    calls = _record_reads(monkeypatch)
-
-    rows = _scan_rows(c, '/test')
-    assert [r['path'] for r in rows] == sorted(['large', *[f'large/f{i:03d}.txt' for i in range(N_LARGE)], 'small', 'small/a.txt'])
-    assert {(r['parent'], r['depth']) for r in rows if r['path'].startswith('large/')} == {('large', 2)}
-    assert [c for c in calls if c[0] == chunk_path] == []  # the chunk blob was never opened
-
-    # No sidecar (a scan written before this landed): one filtered, projected
-    # read of the chunk, then the per-process cache answers.
-    os.remove(shallow.shallow_path(root))
-    clear_cache()
-    calls.clear()
-    assert _scan_rows(c, '/test') == rows
-    chunk_reads = [c for c in calls if c[0] == chunk_path]
-    assert len(chunk_reads) == 1
-    assert chunk_reads[0][1] == [('depth', '==', 1)]
-    assert sorted(chunk_reads[0][2]) == sorted([*chunked_df().columns, 'child_scan_id'])
-    clear_cache()
-    calls.clear()
-    assert _scan_rows(c, '/test') == rows
-    assert [c for c in calls if c[0] == chunk_path] == []
-
-
 def test_chunk_map_reads_only_pointer_row_groups(tmp_path, monkeypatch):
     """`_chunk_map` pushes `child_scan_id IS NOT NULL` down: an all-null row
     group is pruned from its footer stats, and a chunk whose column is Arrow
     type `null` (no stats at all) is answered from the schema alone — reading
     a 1.4M-row chunk's `path` column to find zero pointers cost ~16 s over R2."""
     import pyarrow as pa
-    from disk_tree import diff
+    from disk_tree import resolve
     n = 3 * BLOB_ROW_GROUP_SIZE
     ids = [None] * n
     ids[1] = 'c.parquet'
@@ -239,7 +175,7 @@ def test_chunk_map_reads_only_pointer_row_groups(tmp_path, monkeypatch):
     reads: list[int] = []
     real = blobfs.read_table
     monkeypatch.setattr(blobfs, 'read_table', lambda *a, **kw: reads.append(real(*a, **kw).num_rows) or real(*a, **kw))
-    diff._chunk_map_cached.cache_clear()
-    assert diff._chunk_map(root) == {'p000001': 'c.parquet'}
-    assert diff._chunk_map(chunk) is None
+    resolve._chunk_map_cached.cache_clear()
+    assert resolve._chunk_map(root) == {'p000001': 'c.parquet'}
+    assert resolve._chunk_map(chunk) is None
     assert reads == [1]

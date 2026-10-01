@@ -230,7 +230,7 @@ async function tryOpen(env: Env, date: string, variant: string): Promise<IndexHa
   // `path` sort is a store generation, any such pointer left for that date is
   // an earlier generation's (index-sync now retires them; older D1s still hold
   // some) and must not answer.
-  if (variant.startsWith('coarse') || variant === 'user') {
+  if (variant.startsWith('coarse')) {
     const path = await tryOpen(env, date, 'path')
     if (path && isStore(path)) {
       missing.set(ck, Date.now())
@@ -238,7 +238,18 @@ async function tryOpen(env: Env, date: string, variant: string): Promise<IndexHa
     }
   }
   try {
-    return await openIndex(env, date, variant)
+    const h = await openIndex(env, date, variant)
+    // A user-first sort left by an earlier v1 generation of a store date
+    // (index-sync now retires it) must not answer a lens; a store
+    // generation's own (`path-index -u bysize`) does.
+    if ((variant === 'user' || variant === 'bysize-user') && !isStore(h)) {
+      const path = await tryOpen(env, date, 'path')
+      if (path && isStore(path)) {
+        missing.set(ck, Date.now())
+        return null
+      }
+    }
+    return h
   } catch (e) {
     if (String((e as Error).message).includes('not synced')) {
       missing.set(ck, Date.now())
@@ -272,7 +283,9 @@ async function readSubtree(
   // more (gcs at 32K-row groups: small drills over the 700K-row cap).
   // `smallRows`: below it the `path` read is taken without planning `bysize`.
   if (isStore(pathIdx) && (nDesc == null || nDesc > smallRows)) {
-    const sized = await tryOpen(env, date, sizeVariant(pathIdx.variant))
+    // A lens prefers the user-first size sort where the scan has one (gcs
+    // writes only `bysize-user`): a user's root reads their own groups.
+    const sized = (lens ? await tryOpen(env, date, 'bysize-user') : null) ?? await tryOpen(env, date, sizeVariant(pathIdx.variant))
     if (sized) {
       const sh = withTrace(sized, tr)
       const [pp, sp] = await Promise.all([planRects(pathIdx, rects, thrAt, lens), planSizeRects(sh, rects, thrAt, lens)])
@@ -1157,13 +1170,15 @@ export async function buildDiff(env: Env, o: DiffOpts): Promise<Diff> {
   }
 }
 
-/** The sort a lens view reads on `date`: a store generation serves the lens
- * from its own `path` sort (and `bysize` beside it), filtered per row — it
- * writes no `user` sort on gcs (`path-index -U`), and one left by an earlier
- * v1 generation of the date must not answer; a version-1 scan reads `user`. */
+/** The by-path sort a lens view reads on `date`: a version-1 scan's `user`;
+ * a store generation's own `user` copy where it wrote one, else its `path`
+ * filtered per row (a v1 `user` left on a store date never answers —
+ * `tryOpen`). Subtree reads also try the user-first `bysize-user`
+ * (`readSubtree`), which is what keeps a user's root view narrow. */
 export async function lensSort(env: Env, date: string): Promise<string> {
   const p = await tryOpen(env, date, 'path')
-  return p && isStore(p) ? 'path' : 'user'
+  if (!(p && isStore(p))) return 'user'
+  return (await tryOpen(env, date, 'user')) ? 'user' : 'path'
 }
 
 async function openFine(env: Env, date: string, sort: string, lens?: Lens): Promise<IndexHandle> {

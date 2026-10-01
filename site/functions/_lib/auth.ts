@@ -128,21 +128,38 @@ async function adminRow(env: Env, email: string): Promise<boolean> {
 /**
  * Email → scopes: the in-app policy that the Access policy used to be. Staff
  * get everything; a viewer domain (`VIEWER_DOMAINS`) or a D1 `allowed_emails`
- * row (the app-owned allowlist — see /admin/db) gets the base scope, plus
+ * row (the app-owned allowlist — see /admin/db) gets the base scope (a
+ * `read_only` row: the read-only tier), plus
  * `admin` for an `admin_emails` row. Email sessions re-derive scopes here on
  * every request, so removing a row de-authorizes existing sessions on their
  * next request. If the DB isn't bound (local dev), non-staff fall back to
  * allowed — local dev has no gate to enforce.
  */
+/** `email`'s `allowed_emails` row as `{ read_only }`, or null. A D1 that
+ * hasn't applied (or dropped) the `read_only` migration still admits its
+ * rows, as full viewers — sign-in must not break on a schema a branch
+ * chose not to carry. */
+export async function allowedRow(db: D1Database, email: string): Promise<{ read_only: number } | null> {
+  try {
+    return await db.prepare('SELECT read_only FROM allowed_emails WHERE email = ?').bind(email).first<{ read_only: number }>()
+  } catch (e) {
+    if (!/no such column: read_only/.test(String((e as Error).message))) throw e
+    const row = await db.prepare('SELECT email FROM allowed_emails WHERE email = ?').bind(email).first()
+    return row ? { read_only: 0 } : null
+  }
+}
+
 export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | null> => {
   const email = raw.toLowerCase()
   const base = baseScope(env)
   if (email.endsWith(`@${staffDomain(env)}`)) return allScopes(env)
   if (!env.DB) return [base]
-  const admitted = viewerDomains(env).some(d => email.endsWith(`@${d}`))
-    || !!(await env.DB.prepare('SELECT email FROM allowed_emails WHERE email = ?').bind(email).first())
-  if (!admitted) return null
-  return (await adminRow(env, email)) ? [base, ADMIN_SCOPE] : [base]
+  const byDomain = viewerDomains(env).some(d => email.endsWith(`@${d}`))
+  const row = byDomain ? null : await allowedRow(env.DB, email)
+  if (!byDomain && !row) return null
+  if (await adminRow(env, email)) return [base, ADMIN_SCOPE]
+  // A `read_only` row is the read-only viewer tier (what a read-only share link carries).
+  return row?.read_only ? [baseReadScope(env)] : [base]
 }
 
 export function gateFor(env: Env): Gate | null {
@@ -151,7 +168,7 @@ export function gateFor(env: Env): Gate | null {
     store: d1GrantStore(env.DB),
     requests: d1RequestStore(env.DB),
     audit: d1AuditSink(env.DB),
-    // The name + face Google verified at sign-in (`seedProfile`, `_lib/oidc.ts`),
+    // The name + face Google verified at sign-in (seeded by default),
     // or a self-set one: what `whoami.subject` carries to the header chip.
     profiles: d1ProfileStore(env.DB),
     secret: env.SESSION_SECRET,

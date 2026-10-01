@@ -29,9 +29,25 @@ parquet, holding exactly what a read needs and nothing else:
   without touching a file; ``null`` for the path store's sorts, which have
   no floor (every byte floor is a prefix of ``bysize``).
 
+Beside it, the **cold footer tier** ``<tier>.groups.parquet`` holds the same
+rows as a small parquet (spec ``path-store.md`` §1.6): one row per tier row
+group, columns :data:`FOOTER_COLS` typed (ints; strings; ``u_min`` /
+``u_max`` nullable), in ``rg`` order — the tier's own key order, so each
+footer group bounds a contiguous key range — in
+:data:`FOOTER_ROW_GROUP_ROWS`-row groups, zstd, with column statistics on
+the pruning columns (:data:`FOOTER_STAT_COLS`). A reader range-reads its
+footer, prunes the footer's own row groups by those stats with the predicates
+it sends D1, and decodes only the groups that can hold a match: how a
+deployment serves a scan once retention retires its rows from D1
+(``site/functions/_lib/index.ts`` ``pq`` mode), without parsing the whole
+``.groups.json`` (86 MB on gcs) in a Worker. The key-value metadata carries
+what ``index_schema`` holds for the tier (``groups_v``, ``version``,
+``schema``, ``floor_bytes``), so the file is self-describing
+(:func:`read_groups_parquet`).
+
 This is the wire format of mgu's ``index_footer.py`` (``groups_blob``), owned
-here so the two Cloudflare readers — mgu's ``_lib/index.ts`` ``openBlob`` and
-``ui/cfn/parquet.ts`` — converge on one artifact (spec
+here so the serverless reader (``site/functions/_lib/index.ts`` ``openBlob``)
+and the engine converge on one artifact (spec
 ``mgu-engine-audit-2026-09-07.md`` §4). Column *names* differ between the two
 producers (DT tiers carry ``size``, mgu's path index ``b``; the user slice is
 ``usr`` in both when present), so the size and user columns are resolved by
@@ -48,10 +64,21 @@ from typing import TYPE_CHECKING
 from disk_tree import blobfs
 
 if TYPE_CHECKING:
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
 GROUPS_SUFFIX = '.groups.json'
 GROUPS_VERSION = 1
+GROUPS_PARQUET_SUFFIX = '.groups.parquet'
+GROUPS_PARQUET_VERSION = 1
+#: Rows per row group of a `.groups.parquet` — the reader's decode unit: 512
+#: footer rows ≈ 4M (8K-row tier groups) to 16M (32K) tier rows of key range
+#: per decode; a 95K-group gcs sort has ~186 footer groups.
+FOOTER_ROW_GROUP_ROWS = 512
+#: The `.groups.parquet` columns, in file order (readers name columns).
+FOOTER_COLS = ('rg', 'd_min', 'd_max', 'p_min', 'p_max', 'b_min', 'b_max', 'u_min', 'u_max', 'row_start', 'row_end', 'rg_json')
+#: The columns with statistics — what a reader prunes footer groups by.
+FOOTER_STAT_COLS = ('d_min', 'd_max', 'p_min', 'p_max', 'b_min', 'b_max', 'u_min', 'u_max')
 #: Field order of each ``groups`` array entry — mgu's ``index_row_groups`` column
 #: order, then the appended ``b_min``.
 GROUP_FIELDS = ('rg', 'd_min', 'd_max', 'p_min', 'p_max', 'b_max', 'u_min', 'u_max', 'row_start', 'row_end', 'rg_json', 'b_min')
@@ -188,20 +215,127 @@ def groups_json(schema: dict, rows: list[dict]) -> str:
     return json.dumps(body, separators=(',', ':'))
 
 
-def write_groups(parquet_path: str) -> GroupsStats:
+def write_groups(parquet_path: str, footer_parquet: bool = False) -> GroupsStats:
     """Extract ``parquet_path``'s footer and write the manifest beside it
-    (local or URL, via :mod:`disk_tree.blobfs`)."""
+    (local or URL, via :mod:`disk_tree.blobfs`); with ``footer_parquet``, the
+    cold footer tier (`.groups.parquet`) too, from the same rows."""
     schema, rows = extract(parquet_path)
     text = groups_json(schema, rows)
     out = groups_path(parquet_path)
     blobfs.write_text(out, text)
+    if footer_parquet:
+        write_groups_parquet(parquet_path, schema, rows)
     return GroupsStats(path=out, n_groups=len(rows), n_bytes=len(text.encode()))
+
+
+def groups_parquet_path(parquet_path: str) -> str:
+    """``…/path-index.parquet`` → ``…/path-index.groups.parquet`` (local or URL)."""
+    if not parquet_path.endswith('.parquet') or parquet_path.endswith(GROUPS_PARQUET_SUFFIX):
+        raise ValueError(f"not a tier parquet path: {parquet_path}")
+    return parquet_path[: -len('.parquet')] + GROUPS_PARQUET_SUFFIX
+
+
+def _footer_schema() -> "pa.Schema":
+    import pyarrow as pa
+    return pa.schema([
+        pa.field('rg', pa.int32(), nullable=False),
+        pa.field('d_min', pa.int32(), nullable=False),
+        pa.field('d_max', pa.int32(), nullable=False),
+        pa.field('p_min', pa.string(), nullable=False),
+        pa.field('p_max', pa.string(), nullable=False),
+        pa.field('b_min', pa.int64()),  # null in a pre-`b_min` .groups.json
+        pa.field('b_max', pa.int64(), nullable=False),
+        pa.field('u_min', pa.string()),
+        pa.field('u_max', pa.string()),
+        pa.field('row_start', pa.int64(), nullable=False),
+        pa.field('row_end', pa.int64(), nullable=False),
+        pa.field('rg_json', pa.string(), nullable=False),
+    ])
+
+
+def groups_parquet_table(schema: dict, rows: list[dict]) -> "pa.Table":
+    """The footer rows as a typed table in ``rg`` order (they must be
+    ``0..n-1``, each once), the tier's ``index_schema`` fields in the
+    key-value metadata."""
+    import pyarrow as pa
+    rows = sorted(rows, key=lambda r: r['rg'])
+    if [r['rg'] for r in rows] != list(range(len(rows))):
+        raise ValueError("footer rows must be rg 0..n-1, each once")
+    t = pa.table({c: [r[c] for r in rows] for c in FOOTER_COLS}, schema=_footer_schema())
+    kv = {
+        'groups_v': str(GROUPS_PARQUET_VERSION),
+        'version': str(schema['version']),
+        'schema': json.dumps(schema['schema'], separators=(',', ':')),
+    }
+    if schema.get('floor_bytes') is not None:
+        kv['floor_bytes'] = str(int(schema['floor_bytes']))
+    return t.replace_schema_metadata(kv)
+
+
+def groups_parquet_bytes(schema: dict, rows: list[dict], row_group_rows: int = FOOTER_ROW_GROUP_ROWS) -> bytes:
+    """The `.groups.parquet` file: zstd, ``row_group_rows`` rows per group,
+    statistics on :data:`FOOTER_STAT_COLS` only (stats on ``rg_json`` would
+    only bloat the footer a reader parses), no Arrow schema blob."""
+    import io
+
+    import pyarrow.parquet as pq
+    t = groups_parquet_table(schema, rows)
+    buf = io.BytesIO()
+    # `store_schema=False` drops the schema's key-value metadata with the
+    # Arrow blob; it goes back in as plain parquet key-values.
+    with pq.ParquetWriter(buf, t.schema, compression='zstd', write_statistics=list(FOOTER_STAT_COLS), store_schema=False) as w:
+        w.write_table(t, row_group_size=row_group_rows)
+        w.add_key_value_metadata({k.decode(): v.decode() for k, v in t.schema.metadata.items()})
+    return buf.getvalue()
+
+
+def write_groups_parquet(parquet_path: str, schema: dict, rows: list[dict], row_group_rows: int = FOOTER_ROW_GROUP_ROWS) -> GroupsStats:
+    """Write the cold footer tier beside ``parquet_path`` (local or URL)."""
+    out = groups_parquet_path(parquet_path)
+    data = groups_parquet_bytes(schema, rows, row_group_rows)
+    blobfs.write_bytes(out, data)
+    return GroupsStats(path=out, n_groups=len(rows), n_bytes=len(data))
+
+
+def read_groups_parquet(path: str) -> tuple[dict, list[dict]]:
+    """``(schema_json, group_rows)`` back from a `.groups.parquet` — the
+    inverse of :func:`groups_parquet_table`."""
+    import pyarrow.parquet as pq
+    def read(f) -> tuple:
+        pf = pq.ParquetFile(f)
+        return pf.read(), pf.metadata.metadata or {}
+
+    if blobfs.is_url(path):
+        fs, p = blobfs.fs_for(path)
+        with fs.open(p, 'rb') as f:
+            t, raw = read(f)
+    else:
+        t, raw = read(path)
+    kv = {k.decode(): v.decode() for k, v in raw.items()}
+    if kv.get('groups_v') != str(GROUPS_PARQUET_VERSION):
+        raise ValueError(f"{path}: not a v{GROUPS_PARQUET_VERSION} groups parquet (groups_v={kv.get('groups_v')!r})")
+    schema: dict = {'version': int(kv['version']), 'schema': json.loads(kv['schema'])}
+    if 'floor_bytes' in kv:
+        schema['floor_bytes'] = int(kv['floor_bytes'])
+    return schema, t.to_pylist()
+
+
+def groups_from_json(text: str) -> tuple[dict, list[dict]]:
+    """``(schema_json, group_rows)`` back from a `.groups.json` document — what
+    a backfill builds a `.groups.parquet` from without the tier's footer."""
+    body = json.loads(text)
+    if body.get('v') != GROUPS_VERSION:
+        raise ValueError(f"unknown groups.json version {body.get('v')!r}")
+    schema: dict = {'version': body['version'], 'schema': body['schema']}
+    if body.get('floor_bytes') is not None:
+        schema['floor_bytes'] = int(body['floor_bytes'])
+    return schema, [{'b_min': None, **dict(zip(GROUP_FIELDS, g))} for g in body['groups']]
 
 
 def write_groups_sidecar(parquet_path: str) -> GroupsStats | None:
     """Emit the ``.groups.json`` footer beside a freshly-published blob, so the
-    serverless reader (``ui/cfn``) plans range reads without a cold thrift-footer
-    parse. It is a pure *optimization*: the blob still reads through its own
+    serverless reader (``site/functions/_lib/index.ts``) plans range reads
+    without a cold thrift-footer parse. It is a pure *optimization*: the blob still reads through its own
     footer if the sidecar is absent, so a failure here (a blob without row-group
     stats, a transient write error) is non-fatal — warn and return ``None``
     rather than abort a publish whose scan blob + manifest are already valid."""

@@ -1,21 +1,18 @@
-"""`disk-tree capture` / `disk-tree reduce` — the scan pipeline split in two
-(spec `cloud-reduce.md`), so a laptop whose disk is ~full can still be scanned:
-
-    capture PATH --to URL    gfind → canonical layer-1 listing shards, streamed
-                             straight to URL. Bounded memory, zero local disk.
-    reduce  CAPTURE [--to]   shards → layer-2 scan blob + Scan row, on any
-                             machine that has disk (a CI runner, a VM, the
-                             laptop once its SSD is back).
+"""`disk-tree capture` — the walk half of the split scan pipeline (spec
+`cloud-reduce.md`), so a laptop whose disk is ~full can still be scanned:
+`capture PATH --to URL` streams gfind → canonical layer-1 listing shards
+straight to URL (bounded memory, zero local disk); the aggregation runs where
+there is disk (m3's AWS Batch ingest: `dt-cloud path-index` over the shards).
 
 `capture` writes exactly what the bucket listers write (`bucket, name,
 size_bytes, created, storage_class_id`; `bucket` = the scan root, `name` = the
-path relative to it), so `reduce` is `disk-tree import` pointed at the shards,
-with the root and time taken from the capture's `_SUCCESS.json`. Files only:
+path relative to it), with the root and time in the capture's
+`_SUCCESS.json`. Files only:
 the engines derive directories from name prefixes, so directory rows would
 read as phantom files — empty directories are therefore not captured, and no
 bytes are lost (APFS directories hold 0 blocks). Symlinks are captured as
 files (their own block size), as `index` does. Shards are unsorted (walk
-order); the DuckDB engine handles that, on the reduce side, where the disk is.
+order); the DuckDB engine handles that, on the aggregation side.
 """
 from __future__ import annotations
 
@@ -26,7 +23,7 @@ import sys
 from datetime import datetime, timezone
 from os import getcwd
 
-from click import Choice, argument, option
+from click import argument, option
 from utz import err
 
 from disk_tree.cli.base import cli
@@ -34,7 +31,7 @@ from disk_tree.cli.base import cli
 FORMAT = 'disk-tree-capture'
 VERSION = 1
 MARKER = '_SUCCESS.json'
-_CLOUD = ('s3://', 'gcs://', 'r2://', 'ssh://')
+_CLOUD = ('s3://', 'gcs://', 'r2://')
 
 
 def capture_dir(to: str, root: str, host: str, stamp: str) -> str:
@@ -59,16 +56,6 @@ def _frame(root: str, names: list[str], sizes: list[int], mtimes: list[int]):
     })
 
 
-def read_marker(capture: str) -> dict:
-    """The capture's manifest (`_SUCCESS.json`), local or remote."""
-    from disk_tree import blobfs
-    path = blobfs.join(capture, MARKER)
-    m = json.loads(blobfs.read_text(path))
-    if m.get('format') != FORMAT:
-        raise SystemExit(f'{path}: not a disk-tree capture (format={m.get("format")!r})')
-    return m
-
-
 @cli.command('capture')
 @option('-n', '--batch-rows', default=200_000, help='Rows per shard — bounds memory: one batch is buffered at a time')
 @option('-o', '--one-fs', is_flag=True, help="Don't descend into filesystems mounted below PATH. With PATH `/` on macOS: the System volume + the Data volume (via its firmlinks), once — the whole machine")
@@ -86,7 +73,7 @@ def capture_cmd(
 ):
     """Stream PATH's listing to --to as layer-1 shards, using no local disk.
 
-    Prints the capture dir (`<to>/<host>/<root>/<stamp>`), which `reduce` takes.
+    Prints the capture dir (`<to>/<host>/<root>/<stamp>`).
     """
     from disk_tree import blobfs
     from disk_tree.backends import backend_for, ErrorCollector
@@ -163,91 +150,3 @@ def capture_cmd(
     tail = f', {errors.count} permission errors' if errors.count else ''
     err(f'{root}: {n_rows:,} files in {n_shards} shard(s) → {out}{tail}')
     print(out)
-
-
-@cli.command('reduce')
-@option('-D', '--no-diff', is_flag=True, help="Skip building the diff index against the path's previous scan")
-@option('-e', '--engine', type=Choice(['pandas', 'duckdb', 'stream']), default='duckdb', help='Aggregation engine; `duckdb` (out-of-core) handles the unsorted shards `capture` writes')
-@option('-j', '--jobs', default=1, help='Stream engine only: parallel keyspace partitions (0 = all cores)')
-@option('-m', '--mean-mtime', is_flag=True, help='Emit `mtime_mean` (size-weighted mean mtime) per path')
-@option('-M', '--memory-limit', default='8GB', help='DuckDB memory cap; excess spills to the work dir')
-@option('-T', '--temp-dir', default=None, help='Work dir for downloaded shards + spill (default: a fresh temp dir, removed after)')
-@option('-t', '--to', default=None, help='Write the scan blob to a dir or fsspec URL (same as `index --to`)')
-@argument('capture')
-def reduce_cmd(
-    no_diff: bool,
-    engine: str,
-    jobs: int,
-    mean_mtime: bool,
-    memory_limit: str,
-    temp_dir: str | None,
-    to: str | None,
-    capture: str,
-):
-    """Aggregate a capture (dir or URL holding shards + `_SUCCESS.json`) into a scan."""
-    import shutil
-    import tempfile
-
-    import duckdb
-
-    from disk_tree import blobfs, config as _config
-    from disk_tree.cli.import_listing import import_bucket
-    from disk_tree.diff import resolve_blob
-    from disk_tree.sqla.db import init
-    from disk_tree.storage import get_backend
-
-    capture = capture.rstrip('/')
-    m = read_marker(capture)
-    if to:
-        target = _config.set_write_target(to)
-        err(f'--to: writing blobs to {target}')
-    db = init()
-    db.create_all()
-    work = temp_dir or tempfile.mkdtemp(prefix='disk-tree-reduce-')
-    try:
-        if blobfs.is_url(capture):
-            # The engines glob local paths (DuckDB could read some URLs, but
-            # only with per-scheme httpfs credentials), and this machine has
-            # disk — that's why the reduce runs here. Pull the shards down.
-            fs, p = blobfs.fs_for(capture)
-            shards = sorted(fs.glob(f'{p}/shard-*.parquet'))
-            local = os.path.join(work, 'shards')
-            os.makedirs(local, exist_ok=True)
-            for s in shards:
-                fs.get(s, os.path.join(local, s.rsplit('/', 1)[-1]))
-            err(f'{capture}: fetched {len(shards)} shard(s) → {local}')
-            listing = os.path.join(local, 'shard-*.parquet')
-        else:
-            listing = os.path.join(capture, 'shard-*.parquet')
-        spill = os.path.join(work, 'spill')
-        os.makedirs(spill, exist_ok=True)
-        scan = import_bucket(
-            db=db, storage=get_backend(), con=duckdb.connect(),
-            engine=engine, listings=(listing,),
-            bucket=m['root'], scheme=m['scheme'],
-            # Local wall clock, like `index` rows (SQLite drops the offset).
-            snap_time=datetime.fromisoformat(m['time']).astimezone(),
-            memory_limit=memory_limit, temp_dir=spill, jobs=jobs, mean_mtime=mean_mtime,
-        )
-        if m.get('error_count'):
-            scan.error_count = m['error_count']
-            scan.error_paths = json.dumps(m['error_paths'])
-            db.session.commit()
-    finally:
-        if not temp_dir:
-            shutil.rmtree(work, ignore_errors=True)
-    blob = resolve_blob(scan.blob)
-    if blobfs.is_url(blob):
-        # This DB may be a runner's throwaway; the manifest is how the scan
-        # reaches another one (`disk-tree scans register`).
-        from disk_tree.scan_manifest import write_scan_manifest
-        err(f'manifest → {write_scan_manifest(scan, blob)}')
-        # Footer sidecar for the serverless reader (see `find/groups.py`).
-        from disk_tree.find.groups import write_groups_sidecar
-        gs = write_groups_sidecar(blob)
-        if gs:
-            err(f'groups → {gs.path} ({gs.n_groups} groups)')
-    if not no_diff:
-        from disk_tree.cli.diff_index import build_previous
-        build_previous(scan.id)
-    print(f'scan {scan.id}: {scan.path} → {blob}')

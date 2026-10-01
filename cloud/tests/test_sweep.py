@@ -13,7 +13,6 @@ import pytest
 from dt_cloud.sweep import (
     Plan,
     SweepError,
-    build_expiry_manifest,
     build_manifest,
     eligible,
     execute_plan,
@@ -367,81 +366,3 @@ def test_execute_for_real_without_versioning_guard(tmp_path: Path, capsys) -> No
     s2 = execute_plan(str(run2), for_real=True, client=_FakeStore(_LIVE, versioning="Enabled"))
     assert (s2["versioning_guard"], capsys.readouterr().err) == (True, "")
     assert execute_plan(str(run2), for_real=False, client=_FakeStore(_LIVE, versioning=None))["versioning_guard"] is True
-
-
-# --- TTL expiry manifest ----------------------------------------------------
-
-NOW = 1_000_000_000
-DAY = 86_400
-# (path, size, mtime, kind) — ages at NOW: old 3d, fresh 0.5d, a/x 15d, b 13d, c 10d, marin 100d
-_TTL_L2 = [
-    ("tmp/ttl=1d/old.bin", 10, NOW - 3 * DAY, "file"),
-    ("tmp/ttl=1d/fresh.bin", 11, NOW - DAY // 2, "file"),
-    ("tmp/ttl=14d/a/x.bin", 20, NOW - 15 * DAY, "file"),
-    ("tmp/ttl=14d/b.bin", 21, NOW - 13 * DAY, "file"),
-    ("tmp/ttl=30d/c.bin", 30, NOW - 10 * DAY, "file"),
-    ("marin/x.bin", 40, NOW - 100 * DAY, "file"),
-    ("tmp/ttl=14d/a", 0, NOW - 15 * DAY, "dir"),
-]
-
-
-def test_build_expiry_manifest(tmp_path: Path) -> None:
-    l2 = tmp_path / "l2.parquet"
-    _write_l2(l2, _TTL_L2)
-    out = tmp_path / "run0"
-    s = build_expiry_manifest(str(l2), str(out), bucket=BUCKET, now_ts=NOW)
-    # early_days=0: only objects at/past their TTL (1d: old 3d; 14d: a/x 15d — b at 13d is not)
-    assert _read_manifest(out / "manifest" / f"{BUCKET}.parquet") == [
-        ("tmp/ttl=14d/a/x.bin", 20, NOW - 15 * DAY, "tmp/ttl=14d/a/"),
-        ("tmp/ttl=1d/old.bin", 10, NOW - 3 * DAY, "tmp/ttl=1d/"),
-    ]
-    assert s == {
-        "bucket": BUCKET,
-        "sweep": ["tmp/ttl=1d/", "tmp/ttl=14d/"],
-        "objects": 2,
-        "bytes": 30,
-        "manifest": str(out / "manifest" / f"{BUCKET}.parquet"),
-        "expiry": {"early_days": 0.0, "now_ts": NOW, "by_ttl": {1: {"objects": 1, "bytes": 10}, 14: {"objects": 1, "bytes": 20}}},
-    }
-    assert json.loads((out / "plan-summary.json").read_text())["expiry"]["by_ttl"] == {"1": {"objects": 1, "bytes": 10}, "14": {"objects": 1, "bytes": 20}}
-
-    # early_days=2: also fresh (0.5d >= 1-2) and b (13d >= 12); c (10d < 28) still not; never marin/ or the dir row
-    out2 = tmp_path / "run2"
-    s2 = build_expiry_manifest(str(l2), str(out2), bucket=BUCKET, now_ts=NOW, early_days=2)
-    assert _read_manifest(out2 / "manifest" / f"{BUCKET}.parquet") == [
-        ("tmp/ttl=14d/a/x.bin", 20, NOW - 15 * DAY, "tmp/ttl=14d/a/"),
-        ("tmp/ttl=14d/b.bin", 21, NOW - 13 * DAY, "tmp/ttl=14d/"),
-        ("tmp/ttl=1d/fresh.bin", 11, NOW - DAY // 2, "tmp/ttl=1d/"),
-        ("tmp/ttl=1d/old.bin", 10, NOW - 3 * DAY, "tmp/ttl=1d/"),
-    ]
-    assert (s2["sweep"], s2["objects"], s2["bytes"], s2["expiry"]) == (
-        ["tmp/ttl=1d/", "tmp/ttl=14d/"], 4, 62,
-        {"early_days": 2, "now_ts": NOW, "by_ttl": {1: {"objects": 2, "bytes": 21}, 14: {"objects": 2, "bytes": 41}}},
-    )
-    # nothing expired → empty manifest, no roots
-    s3 = build_expiry_manifest(str(l2), str(tmp_path / "run3"), bucket=BUCKET, now_ts=NOW - 20 * DAY)
-    assert (s3["sweep"], s3["objects"], s3["bytes"], s3["expiry"]["by_ttl"]) == ([], 0, 0, {})
-
-
-def test_execute_dry_run_on_expiry_manifest(tmp_path: Path) -> None:
-    # the aged objects are decided for deletion; a fresh key under a swept root
-    # is not in the manifest → drift (untouched) — only aged objects go
-    l2 = tmp_path / "l2.parquet"
-    _write_l2(l2, _TTL_L2)
-    run = tmp_path / "run"
-    build_expiry_manifest(str(l2), str(run), bucket=BUCKET, now_ts=NOW)
-    store = _FakeStore({
-        "tmp/ttl=14d/a/x.bin": (20, NOW - 15 * DAY),
-        "tmp/ttl=1d/old.bin": (10, NOW - 3 * DAY),
-        "tmp/ttl=1d/fresh.bin": (11, NOW - DAY // 2),
-        "marin/x.bin": (40, NOW - 100 * DAY),
-    }, versioning=None)
-    s = execute_plan(str(run), for_real=False, client=store)
-    assert {k: s[k] for k in _COUNTS} == {"deleted_objects": 2, "deleted_bytes": 30, "skipped_gone": 0,
-                                          "skipped_overwritten": 0, "drift_new": 1, "delete_failed": 0}
-    assert (s["mode"], s["versioning_guard"], store.delete_calls) == ("dry", True, 0)
-    assert s["bands"] == [
-        {"prefix": "tmp/ttl=14d/", "bytes": 20, "objects": 1, "gone": 0, "overwritten": 0, "drift_new": 0},
-        {"prefix": "tmp/ttl=1d/", "bytes": 10, "objects": 1, "gone": 0, "overwritten": 0, "drift_new": 1},
-    ]
-

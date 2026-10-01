@@ -5,7 +5,7 @@ from .url import ParsedUrl, canonical, parse_url, url_parent
 
 
 class UnsupportedBackend(Backend):
-    """A cloud scheme disk-tree can *hold scans for* (imported via `pull` /
+    """A scheme disk-tree can *hold scans for* (imported via `bulk-list` +
     `import`) but cannot list live. Exists so `backend_for` never falls through
     to the local filesystem for a `gcs://` URL — which used to "succeed" with an
     empty scan — and so callers that only ask `is_local` keep working."""
@@ -20,7 +20,7 @@ class UnsupportedBackend(Backend):
     def _refuse(self, verb: str) -> NotImplementedError:
         return NotImplementedError(
             f"{verb} of {self._scheme}:// isn't implemented; import a listing instead "
-            "(`disk-tree pull` with the bucket in buckets.yml, or `disk-tree import -l <listing>`)"
+            "(`disk-tree bulk-list` + `disk-tree import -l <listing>`)"
         )
 
     def list(self, url: str, **kwargs):
@@ -39,7 +39,7 @@ def backend_for(url: str) -> Backend:
     `r2://` is S3-compatible: it lists through the bucket's Cloudflare endpoint
     (`DISK_TREE_R2_ENDPOINT_URL`, else the bucket's `endpoint_url` in
     buckets.yml — resolved here, missing reported at list time). `gcs://` has
-    no live lister (see `UnsupportedBackend`).
+    and any other non-`file` scheme have no live lister (see `UnsupportedBackend`).
     """
     parsed = parse_url(url)
     if parsed.scheme == 's3':
@@ -51,12 +51,9 @@ def backend_for(url: str) -> Backend:
         from disk_tree.blobfs import bucket_profile, r2_endpoint
         netloc = urlparse(url).netloc
         return S3Backend(endpoint_url=r2_endpoint(netloc), profile=bucket_profile(netloc), scheme='r2')
-    if parsed.scheme == 'gcs':
-        return UnsupportedBackend('gcs')
-    if parsed.scheme == 'ssh':
-        from .ssh import SshBackend
-        return SshBackend()
-    return LocalBackend()
+    if parsed.scheme == 'file':
+        return LocalBackend()
+    return UnsupportedBackend(parsed.scheme)
 
 
 __all__ = [

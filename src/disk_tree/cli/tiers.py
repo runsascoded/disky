@@ -37,7 +37,7 @@ def _hr(n: int) -> str:
 
 
 @tiers_group.command('cut')
-@option('-g', '--groups', is_flag=True, help='Also write each tier\'s `.groups.json` footer sidecar beside it (`find/groups.py`)')
+@option('-g', '--groups', is_flag=True, help='Also write each tier\'s footer sidecars beside it: `.groups.json` and the cold-tier `.groups.parquet` (`find/groups.py`)')
 @option('-j', '--json', 'as_json', is_flag=True, help='One JSON document on stdout')
 @option('-m', '--mem', default=DEFAULT_MEM, help=f'DuckDB memory limit for the sort (default {DEFAULT_MEM}); it spills past this, so it bounds peak RSS, not the input')
 @option('-p', '--threads', default=None, type=int, help='DuckDB threads (default: DuckDB\'s)')
@@ -79,7 +79,7 @@ def cut_cmd(
         return
     for r in reports:
         kv = ' '.join(f'{k}={v}' for k, v in r.kv.items() if not k.startswith('disk_tree.'))
-        echo(f"{r.path}: {r.rows:,} rows, {r.groups:,} group(s), {_hr(r.bytes)}{' (+ groups.json)' if groups else ''}  [{kv}]")
+        echo(f"{r.path}: {r.rows:,} rows, {r.groups:,} group(s), {_hr(r.bytes)}{' (+ groups.json, groups.parquet)' if groups else ''}  [{kv}]")
 
 
 @tiers_group.command('plan')

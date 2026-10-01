@@ -18,11 +18,6 @@ def format_run(summary: dict) -> str:
     from humanize import naturalsize
 
     who = f" by {summary['actor']}" if summary.get("actor") else ""
-    if summary.get("submitted"):
-        return (
-            f":truck: run `{summary['run_id']}`{who}: {summary['items']} path(s) too large for inline — "
-            f"submitted to Batch job `{summary['batch_job']}`"
-        )
     lines = [
         f":wastebasket: run `{summary['run_id']}`{who}: deleted "
         f"{naturalsize(summary['deleted_bytes'])} ({summary['deleted_objects']} object(s)) "

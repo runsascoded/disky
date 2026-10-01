@@ -64,7 +64,7 @@ def test_drain_executes_enqueued_run_records_bands_and_finishes(db):
     assert deleted == ["r2://b/a", "r2://b/c"]
     assert out == [{
         "run_id": "1-x", "plan_id": 1, "actor": "ryan", "mode": "real", "items": 2, "deleted_paths": 2,
-        "deleted_bytes": 200, "deleted_objects": 4, "errors": [], "submitted": False, "finished_ts": 200, "trashed": False,
+        "deleted_bytes": 200, "deleted_objects": 4, "errors": [], "finished_ts": 200, "trashed": False,
     }]
     assert announced == out
     run = db.query("SELECT finished_ts, deleted_bytes, deleted_objects, undo_state FROM deletion_runs WHERE run_id = '1-x'")
@@ -102,58 +102,6 @@ def test_drain_skips_already_finished_runs(db):
     # second pass: the run is finished, so nothing is pending
     again = drain.drain_once(db, size_fn=lambda u: (1, 1), delete_fn=lambda u: None, now=lambda: 600)
     assert again == []
-
-
-def test_drain_submits_an_oversized_run_to_batch_instead_of_deleting(db):
-    _enqueue(db, "5-b", 5, ["r2://b/huge"])
-    deleted: list[str] = []
-    submitted: list[tuple[str, list[str]]] = []
-
-    def submit(run_id, uris):
-        submitted.append((run_id, uris))
-        return "job-abc"
-
-    out = drain.drain_once(
-        db, size_fn=lambda u: (0, 100), delete_fn=lambda u: deleted.append(u),
-        submit_fn=submit, batch_threshold=50, now=lambda: 700,
-    )
-    assert deleted == []                                   # nothing deleted inline
-    assert submitted == [("5-b", ["r2://b/huge"])]
-    assert (out[0]["submitted"], out[0]["batch_job"]) == (True, "job-abc")
-    row = db.query("SELECT batch_job, finished_ts FROM deletion_runs WHERE run_id = '5-b'")
-    assert row == [{"batch_job": "job-abc", "finished_ts": None}]   # unfinished; Batch completes it
-    assert db.query("SELECT * FROM deletion_bands WHERE run_id = '5-b'") == []
-
-
-def test_drain_skips_a_run_already_handed_to_batch(db):
-    _enqueue(db, "6-c", 6, ["r2://b/huge"])
-    drain.drain_once(db, size_fn=lambda u: (0, 100), delete_fn=lambda u: None,
-                     submit_fn=lambda r, u: "job-1", batch_threshold=50, now=lambda: 800)
-    # second pass: the run has a batch_job, so it's no longer pending
-    again = drain.drain_once(db, size_fn=lambda u: (0, 100), delete_fn=lambda u: None,
-                             submit_fn=lambda r, u: "job-2", batch_threshold=50, now=lambda: 900)
-    assert again == []
-
-
-def test_batch_submit_builds_the_job_payload():
-    from disk_tree.batch import submit_delete_job
-
-    seen = {}
-
-    class FakeBatch:
-        def submit_job(self, **kw):
-            seen.update(kw)
-            return {"jobId": "job-xyz"}
-
-    job = submit_delete_job(FakeBatch(), run_id="7-d", uris=["r2://b/a", "r2://b/c"],
-                            job_queue="dt-q", job_definition="dt-def")
-    assert job == "job-xyz"
-    assert seen["jobName"] == "disk-tree-delete-7-d"
-    assert (seen["jobQueue"], seen["jobDefinition"]) == ("dt-q", "dt-def")
-    assert seen["containerOverrides"] == {"environment": [
-        {"name": "RUN_ID", "value": "7-d"},
-        {"name": "URIS", "value": "r2://b/a\nr2://b/c"},
-    ]}
 
 
 # ---- D1 client -------------------------------------------------------------

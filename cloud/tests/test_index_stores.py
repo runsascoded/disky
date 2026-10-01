@@ -37,6 +37,7 @@ def _db(monkeypatch, *, migrated: bool) -> sqlite3.Connection:
     monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
     monkeypatch.setattr(index_footer, "extract", lambda _p: ({"version": 1, "schema": []}, ROWS))
     monkeypatch.setattr(index_footer, "write_groups_blob", lambda path, schema, rs: (path, 0))
+    monkeypatch.setattr(index_footer, "write_groups_parquet", lambda path, schema, rs: (path, 0))
     return con
 
 
@@ -77,8 +78,8 @@ def test_secondary_store_is_namespaced_beside_the_primary(monkeypatch):
     assert synced_variants(store="meta") == [("2026-08-01", "path"), ("2026-09-01", "path")]
     # gc / retention never touch the other store's live rows.
     assert [gc_d1("2026-09-01"), gc_d1("2026-09-01", store="meta")] == [0, 0]
-    assert retire_d1(1, store="meta") == [("2026-08-01", "path", 2)]
-    assert retire_d1(0) == [("2026-09-01", "path", 2)]
+    assert retire_d1(1, store="meta", has_cold=lambda _p: True) == ([("2026-08-01", "path", 2)], [])
+    assert retire_d1(0, has_cold=lambda _p: True) == ([("2026-09-01", "path", 2)], [])
     assert con.execute("SELECT store, date, count(*) FROM index_row_groups GROUP BY 1, 2 ORDER BY 1, 2").fetchall() == [
         ("meta", "2026-09-01", 2),
     ]

@@ -1,7 +1,7 @@
 {
   "name": "@disk-tree/react",
   "version": "0.1.0",
-  "description": "disk-tree's React widgets (StalenessScatter, AgeHistograms, TimeSeries) — bytes/mtime/age-domain views built on the @rdub/treemap core, which it also re-exports. Accessor-based, chart-lib-free.",
+  "description": "disk-tree's React widgets (TimeSeries / BytesOverTime) built on the @rdub/treemap core, which it also re-exports. Accessor-based, chart-lib-free.",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

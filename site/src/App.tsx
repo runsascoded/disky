@@ -1202,7 +1202,7 @@ function AppContent() {
 
       {/* Bytes per scan under the drilled prefix, scoped like the map (a user
           or an owner pool) — one index row per scan via /api/series. The age
-          chart still hides under any scope until /api/age lands. */}
+          chart still hides under any scope. */}
       <SizeOverTime
         scopeLabel={store.rootLabel}
         paths={matchedRoots}

@@ -10,7 +10,7 @@ from disk_tree.sqla.db import init
 from humanize import naturalsize
 from utz import err, iec
 
-_CLOUD = ('s3://', 'gcs://', 'r2://', 'ssh://')
+_CLOUD = ('s3://', 'gcs://', 'r2://')
 LOW_SPACE_VAR = 'DISK_TREE_LOW_SPACE_BYTES'
 REMOTE_TARGET_VAR = 'DISK_TREE_REMOTE_SCAN_TARGET'
 DEFAULT_LOW_SPACE_BYTES = 5 * 2**30
@@ -19,8 +19,8 @@ DEFAULT_LOW_SPACE_BYTES = 5 * 2**30
 def _check_local_space(auto_remote: bool) -> None:
     """Warn — or, with `--auto-remote`, redirect — when the local write target is
     low on space: the crisis a remote target exists for (spec
-    `remote-scan-targets.md`). A URL target is never checked; the reduce still
-    needs *transient* local scratch either way, only the persistent blob moves.
+    `remote-scan-targets.md`). A URL target is never checked; only the
+    persistent blob moves.
     """
     from shutil import disk_usage
     from disk_tree import blobfs, config as _config
@@ -47,7 +47,6 @@ def _check_local_space(auto_remote: bool) -> None:
 
 @cli.command
 @option('-C', '--no-cache-read', is_flag=True)
-@option('-D', '--no-diff', is_flag=True, help="Skip building the diff index against the path's previous scan")
 @option('-e', '--require-external', is_flag=True, help='Skip (exit 0) if the resolved write target is the boot-disk default — i.e. no opted-in external volume is mounted. For scheduled scans that must land on external media.')
 @option('-g', '--gc', is_flag=True)
 @option('-m', '--mean-mtime', is_flag=True, help='Emit `mtime_mean` (size-weighted mean mtime over descendants) per path')
@@ -61,7 +60,6 @@ def _check_local_space(auto_remote: bool) -> None:
 @argument('url', required=False)
 def index(
     no_cache_read: bool,
-    no_diff: bool,
     require_external: bool,
     gc: bool,
     mean_mtime: bool,
@@ -89,7 +87,7 @@ def index(
     # Scheduled scans that must land on external media: bail before doing any
     # work when the write target fell back to the boot disk (no opted-in volume
     # mounted). Exit 0 so a launchd/cron wrapper logs a skip, not a failure.
-    if require_external and not url.startswith(('s3://', 'gcs://', 'r2://', 'ssh://')):
+    if require_external and not url.startswith(_CLOUD):
         from disk_tree import config as _config
         wd = _config.scan_write_dir()
         if wd == _config.DEFAULT_SCANS_DIR:
@@ -121,12 +119,6 @@ def index(
             scan, df = Scan.load_or_create(url, gc=gc, sudo=sudo, mean_mtime=mean_mtime, progress=not no_progress, one_fs=one_fs)
 
     elapsed = time['scan']
-    if not no_diff and not gc:
-        # Overnight prep: the "what changed since last time" view is a slice,
-        # not a walk, by the time anyone asks. (`--gc` deleted the previous
-        # scan, so there's nothing to diff against.)
-        from disk_tree.cli.diff_index import build_previous
-        build_previous(scan.id)
     # Find root row: try 'path == "."', fallback to 'parent == ""'
     root_rows = df[df['path'] == '.']
     if root_rows.empty:
@@ -151,7 +143,7 @@ def index(
     # search path — not a naive join with the *write* dir, which stats a path
     # that need not exist (e.g. blob on the boot disk, write target on X6).
     from disk_tree import blobfs
-    from disk_tree.diff import resolve_blob
+    from disk_tree.resolve import resolve_blob
     blob_path = resolve_blob(scan.blob)
     if blobfs.exists(blob_path):
         print(f"Scan cached path: {blob_path} ({iec(blobfs.size(blob_path))})")
@@ -162,7 +154,7 @@ def index(
         from disk_tree.scan_manifest import write_scan_manifest
         print(f"Scan manifest: {write_scan_manifest(scan, blob_path)}")
         # Precompute the footer as a `.groups.json` sidecar so the serverless
-        # reader (`ui/cfn`) plans range reads without a cold thrift-footer parse.
+        # reader (`site/functions/_lib/index.ts`) plans range reads without a cold thrift-footer parse.
         from disk_tree.find.groups import write_groups_sidecar
         gs = write_groups_sidecar(blob_path)
         if gs:
@@ -201,7 +193,7 @@ def _build_reclaim_sidecar(url: str, blob_path: str):
     if not SUPPORTED:
         err(f"--extents is macOS-only (got {sys.platform}); skipping")
         return
-    if url.startswith(('s3://', 'gcs://', 'r2://', 'ssh://')) or not isdir(url):
+    if url.startswith(_CLOUD) or not isdir(url):
         err(f"--extents needs a local directory that still exists; skipping ({url})")
         return
     with time("extents"):

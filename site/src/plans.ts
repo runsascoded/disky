@@ -47,6 +47,9 @@ export interface DeletionRun {
   finished_ts: number | null
   deleted_bytes: number
   deleted_objects: number
+  /** A dry run's measured reclaim — what the set as a whole would actually
+   *  free (clone/hardlink-shared bytes don't count); null = not measured. */
+  freed_bytes?: number | null
   skipped_gone: number
   skipped_overwritten?: number
   undo_deadline: number | null

@@ -17,6 +17,16 @@ import type { Sqlite } from './testD1.js'
 
 /** Store key → local file. */
 export const FILES = new Map<string, string>()
+/** Every `get` the store served, in order — what a test asserts a read's I/O by. */
+export const GETS: { key: string; offset?: number; length?: number }[] = []
+
+/** What the real store throws for an absent key (`@rdub/file-tree`'s `NotFoundError`). */
+class NotFoundError extends Error {
+  constructor(key: string) {
+    super(`no such key: ${key}`)
+    this.name = 'NotFoundError'
+  }
+}
 
 interface NodeFs {
   readFileSync(path: string): Uint8Array
@@ -29,7 +39,8 @@ export function S3Store(_opts: unknown): { get(key: string, range?: { offset: nu
   return {
     async get(key, range) {
       const path = FILES.get(key)
-      if (!path) throw new Error(`no such key: ${key}`)
+      if (!path) throw new NotFoundError(key)
+      GETS.push({ key, ...range })
       const fs = await load<NodeFs>('node:fs')
       const all = fs.readFileSync(path)
       const totalSize = all.byteLength
@@ -41,6 +52,12 @@ export function S3Store(_opts: unknown): { get(key: string, range?: { offset: nu
 
 /** A fixture path, relative to this directory. */
 export const fixture = (rel: string): string => new URL(`./fixtures/${rel}`, (import.meta as ImportMeta & { url: string }).url).pathname
+
+/** A fixture file's size in bytes. */
+export async function fixtureSize(rel: string): Promise<number> {
+  const fs = await load<NodeFs>('node:fs')
+  return fs.statSync(fixture(rel)).size
+}
 
 /** Parse a JSON fixture. */
 export async function readJson<T>(rel: string): Promise<T> {
@@ -58,18 +75,21 @@ export interface D1Variant {
 const q = (v: unknown): string => (v == null ? 'NULL' : `'${String(v).replace(/'/g, "''")}'`)
 
 /** Publish a generation into a test D1 the way `index-sync` does: every
- * variant's group rows (unless `groupsOnly` excludes it — a retired tier
- * keeps its pointer and serves from the blob) and the pointer row, as the
- * primary store (no `store` column named) or a secondary one (scoped rows,
- * namespaced variant). Registers each variant's parquet and `.groups.json`
- * under `dir` in `FILES`. */
+ * variant's group rows (unless `retired` names it — a retired tier
+ * keeps its pointer and serves from its `.groups.parquet`, else the blob)
+ * and the pointer row, as the primary store (no `store` column named) or a
+ * secondary one (scoped rows, namespaced variant). Registers each variant's
+ * parquet, `.groups.json` and (when given) `.groups.parquet` under `dir` in
+ * `FILES`. */
 export function seedGeneration(raw: Sqlite, o: {
   date: string
   gen: string
   dir: string
   variants: Record<string, D1Variant>
-  /** Local fixture files per variant: `{ parquet, groups }` (relative to `fixtures/`). */
-  files: Record<string, { parquet: string; groups: string }>
+  /** Local fixture files per variant: `{ parquet, groups, footer? }` (relative
+   * to `fixtures/`); `footer`, the `.groups.parquet`, is registered only when
+   * given, so a retired variant without it is served from the blob. */
+  files: Record<string, { parquet: string; groups: string; footer?: string }>
   store?: string
   /** Variants whose row groups are NOT written (blob-served). */
   retired?: string[]
@@ -86,8 +106,14 @@ export function seedGeneration(raw: Sqlite, o: {
     }
     raw.exec(`INSERT INTO index_schema (${storeCol}date, variant, version, schema_json, floor_bytes, gen, dir) VALUES (${storeVal}${q(o.date)}, ${q(d1v)}, ${v.schema.version}, ${q(JSON.stringify(v.schema.schema))}, ${v.schema.floor_bytes == null ? 'NULL' : v.schema.floor_bytes}, ${q(o.gen)}, ${q(o.dir)})`)
     const f = o.files[variant]
-    const base = variant === 'path' ? 'path-index' : `path-index-${variant}`
-    FILES.set(`${o.dir}/${base}.parquet`, fixture(f.parquet))
-    FILES.set(`${o.dir}/${base}.groups.json`, fixture(f.groups))
+    // Where the reader looks for it — `index.ts` `indexKey`'s names, spelled
+    // out: importing `./index` here would cycle through the mocked S3 module
+    // (whose factory imports this file) and hang the test file at load.
+    const tier = variant.endsWith('-user') ? variant.slice(0, -'-user'.length) : variant
+    const sort = variant === 'user' || variant.endsWith('-user') ? '-by-user' : ''
+    const key = `${o.dir}/path-index${tier === 'path' || tier === 'user' ? '' : `-${tier}`}${sort}.parquet`
+    FILES.set(key, fixture(f.parquet))
+    FILES.set(key.replace(/\.parquet$/, '.groups.json'), fixture(f.groups))
+    if (f.footer) FILES.set(key.replace(/\.parquet$/, '.groups.parquet'), fixture(f.footer))
   }
 }

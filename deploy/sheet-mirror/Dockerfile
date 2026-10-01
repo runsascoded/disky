@@ -17,9 +17,8 @@ COPY pyproject.toml README.md uv.lock ./
 COPY src ./src
 COPY cloud/pyproject.toml ./cloud/
 COPY cloud/src ./cloud/src
-# The engine's wheel force-includes the built UI (ui/dist) — none is needed
-# here, so an empty dir stands in. `--no-editable`: the members are copied in,
-# not linked. `--package dt-cloud --extra sheets`: the overlay + what it needs.
-RUN mkdir -p ui/dist && uv sync --no-dev --no-editable --package dt-cloud --extra sheets
+# `--no-editable`: the members are copied in, not linked. `--package dt-cloud
+# --extra sheets`: the overlay + what it needs.
+RUN uv sync --no-dev --no-editable --package dt-cloud --extra sheets
 COPY deploy/sheet-mirror/sync.sh ./sync.sh
 ENTRYPOINT ["bash", "sync.sh"]

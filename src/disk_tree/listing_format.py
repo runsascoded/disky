@@ -28,7 +28,7 @@ column-for-column the frame a v1 writer would have produced.
 Writers: the duckdb engine COPYs with :func:`duckdb_copy_options`, the stream
 engine's finalize stamps :func:`with_kv` on its schema, and every in-memory
 writer (local `index`, `import -e pandas`, the hybrid backend's chunk and
-delete rewrites, the server's delete rewrite, `migrate*`) goes through
+delete rewrites) goes through
 :func:`write_listing`, which slims a v1 frame (:func:`slim_table`) and
 writes it with the switch codec.
 """

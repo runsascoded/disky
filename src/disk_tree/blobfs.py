@@ -337,9 +337,17 @@ def write_text(path: str, text: str) -> None:
         with open(path, 'w') as f:
             f.write(text)
         return
+    write_bytes(path, text.encode())
+
+
+def write_bytes(path: str, data: bytes) -> None:
+    if not is_url(path):
+        with open(path, 'wb') as f:
+            f.write(data)
+        return
     fs, p = fs_for(path)
     _ensure_parent(fs, p)
-    fs.pipe(p, text.encode())
+    fs.pipe(p, data)
     _known.add(path)
 
 

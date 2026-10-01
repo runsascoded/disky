@@ -28,17 +28,28 @@ def _fmt(size: int, human: bool) -> str:
 @option('-H', '--no-human', is_flag=True, help='Print raw bytes instead of human-readable sizes')
 @option('-j', '--json', 'as_json', is_flag=True, help='Emit JSON')
 @option('-n', '--top', default=15, help='Max children shown per level (0 = all)')
+@option('-p', '--path-index', 'path_index', envvar='DISK_TREE_PATH_INDEX', default=None, help="Read the site's path index instead of a scan blob: a `path-index.parquet`, or a root whose newest `<date>/index/<gen>/` is used (e.g. `r2://disk-tree/listing/laptop`; $DISK_TREE_PATH_INDEX)")
 @option('-s', '--scan-id', default=None, help='Use a specific scan id (default: freshest covering URI)')
 @argument('uri')
-def du_cmd(all_kinds: bool, depth: int, no_human: bool, as_json: bool, top: int, scan_id: str | None, uri: str):
-    """Biggest children of URI, per level, from the freshest covering scan."""
-    from disk_tree.diff import resolve_blob, resolve_chunk_for_path
+def du_cmd(all_kinds: bool, depth: int, no_human: bool, as_json: bool, top: int, path_index: str | None, scan_id: str | None, uri: str):
+    """Biggest children of URI, per level, from the freshest covering scan (or the site's path index, `-p`)."""
+    uri = uri.rstrip('/') or '/'
+    if path_index and not scan_id:
+        from disk_tree.path_index import latest_path_index, read_subtree, source_label
+        src = latest_path_index(path_index)
+        df, root_size = read_subtree(src, uri, depth)
+        if not all_kinds:
+            df = df[df['kind'] == 'dir']
+        meta = {'source': source_label(src)}
+        header = f"path index {source_label(src)}"
+        _print_tree(df, root_size, uri, top, no_human, as_json, meta, header, recl_map=None, recl=lambda _: None)
+        return
+
     from disk_tree.extents import read_reclaim_sidecar
-    from disk_tree.filter import rebase_frame
     from disk_tree.registry import freshest_scan_covering
+    from disk_tree.resolve import rebase_frame, resolve_blob, resolve_chunk_for_path
     from disk_tree.storage import get_backend
 
-    uri = uri.rstrip('/') or '/'
     con = sqlite3.connect(SQLITE_PATH)
     con.row_factory = sqlite3.Row
     scan = freshest_scan_covering(con, uri, scan_id)
@@ -63,7 +74,14 @@ def du_cmd(all_kinds: bool, depth: int, no_human: bool, as_json: bool, top: int,
     df = df[(df['depth'] >= 1) & (df['depth'] <= depth)]
     if not all_kinds:
         df = df[df['kind'] == 'dir']
+    meta = {'scan_id': scan['id'], 'time': scan['time']}
+    header = f"scan {scan['id']} of {scan['path']}, {str(scan['time'])[:19]}"
+    _print_tree(df, root_size, uri, top, no_human, as_json, meta, header, recl_map=recl_map, recl=_recl)
 
+
+def _print_tree(df, root_size: int, uri: str, top: int, no_human: bool, as_json: bool, meta: dict, header: str, *, recl_map, recl) -> None:
+    """The per-level top-N tree of `df` (paths relative to `uri`), as JSON or text."""
+    _recl = recl
     kids: dict[str, list[dict]] = {}
     for row in df.sort_values('size', ascending=False).itertuples():
         parent = row.path.rsplit('/', 1)[0] if '/' in row.path else ''
@@ -100,11 +118,11 @@ def du_cmd(all_kinds: bool, depth: int, no_human: bool, as_json: bool, top: int,
     tree = walk('')
     root_recl = _recl('.')
     if as_json:
-        print(json.dumps({'uri': uri, 'scan_id': scan['id'], 'time': scan['time'], 'size': root_size, 'reclaimable': root_recl, 'rows': tree}, indent=2))
+        print(json.dumps({'uri': uri, **meta, 'size': root_size, 'reclaimable': root_recl, 'rows': tree}, indent=2, default=str))
         return
 
     human = not no_human
-    print(f"{uri} — {_fmt(root_size, human)} (scan {scan['id']} of {scan['path']}, {str(scan['time'])[:19]})")
+    print(f"{uri} — {_fmt(root_size, human)} ({header})")
 
     show_recl = recl_map is not None
 

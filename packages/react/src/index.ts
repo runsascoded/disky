@@ -3,22 +3,7 @@
 // unchanged; new/non-disk consumers should depend on `@rdub/treemap` directly.
 export * from '@rdub/treemap'
 
-// disk-flavored widgets (bytes / mtime / age-year domain) built on the core.
-export { StalenessScatter } from './StalenessScatter'
-export type { StalenessScatterProps } from './StalenessScatter'
-export { AgeHistograms } from './AgeHistograms'
-export type { AgeHistogramsProps } from './AgeHistograms'
-export { bytesOlderThan, peakBin, timeTicks, totalBytes } from './histogram'
-export { formatTbYears, pow10, SEC_PER_YEAR, sumTbYears, TB } from './stats'
-export {
-  decadesBetween,
-  isoScoreDecades,
-  isoScoreSegment,
-  isoScoresForData,
-  logDomain,
-  logPos,
-  logTicks,
-  radiusFor,
-} from './scatter'
+// disk-flavored widgets built on the core.
+export { pow10 } from './stats'
 export { BytesOverTime, TimeSeries } from './TimeSeries'
 export type { Annotation, Series, TimeSeriesProps } from './TimeSeries'

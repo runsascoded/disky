@@ -3,22 +3,12 @@
 Supported inputs:
 - Bare path: `/Users/ryan`  → `file` scheme, absolute path
 - `file://` URL
-- `s3://bucket/prefix`
-- `ssh://[user@]host[:port]/abs-path` (canonical)
-- scp-shorthand `[user@]host:/abs-path` (normalized to `ssh://`)
+- `s3://bucket/prefix` (and `r2://`, `gcs://`, `az://`)
 """
 
-import re
 from dataclasses import dataclass
 from os.path import abspath, expanduser
 from urllib.parse import urlparse
-
-
-# scp shorthand: `[user@]host:/abs-path`. Require colon-slash to disambiguate
-# from local paths that happen to contain `:` (e.g. `foo:bar`).
-SCP_RE = re.compile(
-    r'^(?:(?P<user>[^@/:]+)@)?(?P<host>[A-Za-z0-9][A-Za-z0-9._-]*):(?P<path>/.*)$'
-)
 
 
 @dataclass(frozen=True)
@@ -34,15 +24,6 @@ class ParsedUrl:
 
 def parse_url(url: str) -> ParsedUrl:
     if '://' not in url:
-        m = SCP_RE.match(url)
-        if m:
-            return ParsedUrl(
-                scheme='ssh',
-                user=m.group('user'),
-                host=m.group('host'),
-                path=m.group('path'),
-                raw=url,
-            )
         # Bare local path
         return ParsedUrl(
             scheme='file',
@@ -86,9 +67,7 @@ def url_parent(url: str) -> str | None:
     host_part = f'{userpart}{p.host}{portpart}'
     if parent_path == '/':
         # Strip the trailing slash so the bucket root matches what `canonical()`
-        # stores (e.g. `s3://bucket`, not `s3://bucket/`). For `ssh://` and
-        # `file://` the canonical form keeps a leading `/` on the path, so the
-        # parent of the host root collapses to plain `<scheme>://<host>`.
+        # stores (e.g. `s3://bucket`, not `s3://bucket/`).
         return f'{p.scheme}://{host_part}'
     return f'{p.scheme}://{host_part}{parent_path}'
 
@@ -98,10 +77,6 @@ def canonical(url: str) -> str:
     p = parse_url(url)
     if p.scheme == 'file':
         return p.path.rstrip('/') or '/'
-    if p.scheme == 'ssh':
-        userpart = f'{p.user}@' if p.user else ''
-        portpart = f':{p.port}' if p.port else ''
-        return f'ssh://{userpart}{p.host}{portpart}{p.path}'.rstrip('/') or f'ssh://{p.host}/'
     if p.scheme in ('s3', 'r2', 'gcs', 'az'):
         return f'{p.scheme}://{p.host}{p.path}'.rstrip('/')
     return url

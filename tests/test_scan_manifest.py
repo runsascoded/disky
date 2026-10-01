@@ -1,6 +1,6 @@
-"""`<blob>.scan.json` + `disk-tree scans register`: a scan reduced (or indexed
-with `--to`) under one DB reaches another — the cross-machine / cloud-runner
-hand-off of spec `cloud-reduce.md`. Two isolated roots stand in for two machines.
+"""`<blob>.scan.json` + `disk-tree scans register`: a scan indexed with `--to`
+under one DB reaches another — the cross-machine hand-off of spec
+`cloud-reduce.md`. Two isolated roots stand in for two machines.
 """
 
 from __future__ import annotations
@@ -14,14 +14,12 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-import yaml
 
 from disk_tree import config
 from disk_tree.scan_manifest import SUFFIX
 
 pytest.importorskip('fsspec')
 
-REPO = Path(__file__).resolve().parent.parent
 SCAN_KEYS = ['path', 'time', 'blob', 'size', 'n_children', 'n_desc', 'mtime', 'error_count', 'error_paths']
 
 
@@ -54,35 +52,23 @@ def tree(tmp_path: Path) -> Path:
     return d
 
 
-def test_reduce_to_url_writes_a_manifest_that_register_imports(tree: Path, tmp_path: Path):
+def test_index_to_url_writes_a_manifest_that_register_imports(tree: Path, tmp_path: Path):
     a, b = tmp_path / 'a', tmp_path / 'b'  # two "machines"
     blobs = f'file://{tmp_path / "blobs"}'
-    cap = _ok(_run(['capture', '-q', '-t', str(tmp_path / 'cap'), str(tree)], a)).stdout.rstrip('\n')
-    r = _ok(_run(['reduce', '-D', '-e', 'pandas', '-t', blobs, cap], a))
+    _ok(_run(['index', '-C', '-q', '-t', blobs, str(tree)], a))
     (scan_a,) = _scans(a)
     manifest = tmp_path / 'blobs' / f'{scan_a["blob"]}{SUFFIX}'
-    # `reduce --to` writes the manifest, then the `.groups.json` footer sidecar
-    # (`find/groups.py`) — the last two stderr lines (group count normalized).
-    import re as _re
-
-    from disk_tree.find.groups import groups_path
-    blob_url = f'{blobs}/{scan_a["blob"]}'
-    assert [_re.sub(r' \(\d+ groups\)$', '', l) for l in r.stderr.rstrip('\n').split('\n')[-2:]] == [
-        f'manifest → {blob_url}{SUFFIX}',
-        f'groups → {groups_path(blob_url)}',
-    ]
-    # `time` is the capture's instant, at full precision: the row stores it as
-    # naive local wall clock (like `index`), the manifest carries the offset so
-    # another zone can register it. `scans list` renders rows at second
-    # precision, hence the source here.
-    captured_at = datetime.fromisoformat(json.loads((Path(cap) / '_SUCCESS.json').read_text())['time'])
-    full_time = captured_at.astimezone().replace(tzinfo=None)
-    assert json.loads(manifest.read_text()) == {
+    m = json.loads(manifest.read_text())
+    # The row stores `time` as naive local wall clock; the manifest carries the
+    # offset so another zone can register it. `scans list` renders rows at
+    # second precision, hence the manifest as the full-precision source.
+    full_time = datetime.fromisoformat(m['time']).astimezone().replace(tzinfo=None)
+    assert m == {
         'format': 'disk-tree-scan', 'version': 1,
-        'time': captured_at.astimezone().isoformat(),
+        'time': m['time'],
         'path': str(tree), 'blob': scan_a['blob'],
         'size': scan_a['size'], 'n_children': scan_a['n_children'], 'n_desc': scan_a['n_desc'],
-        'mtime': scan_a['mtime'], 'error_count': None, 'error_paths': None,
+        'mtime': scan_a['mtime'], 'error_count': scan_a['error_count'], 'error_paths': scan_a['error_paths'],
     }
 
     # Machine b: no scans yet; register from the blobs dir (not on its search path → note).
@@ -110,7 +96,7 @@ def test_reduce_to_url_writes_a_manifest_that_register_imports(tree: Path, tmp_p
 def test_register_a_single_manifest_file(tree: Path, tmp_path: Path):
     a, b = tmp_path / 'a', tmp_path / 'b'
     blobs = f'file://{tmp_path / "blobs"}'
-    _ok(_run(['index', '-C', '-D', '-q', '-t', blobs, str(tree)], a))
+    _ok(_run(['index', '-C', '-q', '-t', blobs, str(tree)], a))
     (scan_a,) = _scans(a)
     r = _ok(_run(['scans', 'register', f'{blobs}/{scan_a["blob"]}{SUFFIX}'], b, **{config.DISK_TREE_SCAN_DIRS_VAR: blobs}))
     assert r.stdout.rstrip('\n') == '1 registered, 0 skipped'
@@ -120,7 +106,7 @@ def test_register_a_single_manifest_file(tree: Path, tmp_path: Path):
 
 def test_index_to_url_writes_a_manifest(tree: Path, tmp_path: Path):
     root, blobs = tmp_path / 'root', f'file://{tmp_path / "blobs"}'
-    r = _ok(_run(['index', '-C', '-D', '-q', '-t', blobs, str(tree)], root))
+    r = _ok(_run(['index', '-C', '-q', '-t', blobs, str(tree)], root))
     (scan,) = _scans(root)
     manifest = f'{blobs}/{scan["blob"]}{SUFFIX}'
     assert [l for l in r.stdout.split('\n') if l.startswith('Scan manifest: ')] == [f'Scan manifest: {manifest}']
@@ -130,18 +116,5 @@ def test_index_to_url_writes_a_manifest(tree: Path, tmp_path: Path):
 
 def test_index_to_local_dir_writes_no_manifest(tree: Path, tmp_path: Path):
     root, blobs = tmp_path / 'root', tmp_path / 'blobs'
-    _ok(_run(['index', '-C', '-D', '-q', '-t', str(blobs), str(tree)], root))
+    _ok(_run(['index', '-C', '-q', '-t', str(blobs), str(tree)], root))
     assert sorted(p.suffix for p in blobs.iterdir()) == ['.parquet']
-
-
-def test_reduce_workflow_dispatches_disk_tree_reduce():
-    wf = yaml.safe_load((REPO / '.github' / 'workflows' / 'reduce.yml').read_text())
-    inputs = wf[True]['workflow_dispatch']['inputs']  # YAML reads the `on:` key as True
-    assert list(inputs) == ['capture', 'to', 'engine', 'memory_limit']
-    assert inputs['engine']['options'] == ['duckdb', 'stream', 'pandas']
-    (job,) = wf['jobs'].values()
-    assert sorted(job['env']) == ['AWS_ACCESS_KEY_ID', 'AWS_DEFAULT_REGION', 'AWS_SECRET_ACCESS_KEY', 'DISK_TREE_R2_ENDPOINT_URL']
-    assert ' '.join(job['steps'][-1]['run'].split()) == (
-        'uv run disk-tree reduce -D -e "${{ inputs.engine }}" -M "${{ inputs.memory_limit }}" '
-        '-t "${{ inputs.to }}" "${{ inputs.capture }}"'
-    )

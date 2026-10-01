@@ -1360,14 +1360,6 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       align-items: center;
       input { flex: 1; min-width: 0; }
     }
-    .avatar-preview {
-      flex: none;
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      object-fit: cover;
-      border: 1px solid var(--ink-3, #888);
-    }
     label { font-weight: 600; }
     input {
       padding: 6px 8px;

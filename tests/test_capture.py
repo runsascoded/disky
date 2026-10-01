@@ -1,4 +1,4 @@
-"""`disk-tree capture` → `disk-tree reduce`: the split scan pipeline (spec
+"""`disk-tree capture`: the walk half of the split scan pipeline (spec
 `cloud-reduce.md`). End to end through the CLI, offline (`file://` stands in
 for the object store), each process under an isolated `DISK_TREE_ROOT`.
 """
@@ -11,7 +11,6 @@ import re
 import socket
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -80,15 +79,6 @@ def _listing(cap: Path) -> pd.DataFrame:
     return pd.concat([read_listing(s) for s in shards]).sort_values('name').reset_index(drop=True)
 
 
-def _scans(root: Path) -> list[dict]:
-    r = _ok(_run(['scans', 'list'], root))
-    return [json.loads(l) for l in r.stdout.split('\n') if l]
-
-
-def _layer2(root: Path, blob: str) -> pd.DataFrame:
-    return read_listing(root / 'scans' / blob).sort_values('path').reset_index(drop=True)
-
-
 def test_capture_writes_files_only_shards_and_a_manifest(tree: Path, tmp_path: Path):
     root, to = tmp_path / 'root', tmp_path / 'cap'
     r = _ok(_run(['capture', '-q', '-t', str(to), str(tree)], root))
@@ -136,65 +126,3 @@ def test_capture_to_a_url_target(tree: Path, tmp_path: Path):
     assert cap.startswith(f'{to}/{HOST}/')
     assert blobfs.list_parquets(cap) == ['shard-00000.parquet']
     assert blobfs.exists(blobfs.join(cap, MARKER)) is True
-
-
-@pytest.mark.parametrize('engine', ['pandas', 'duckdb'])
-def test_reduce_reproduces_index(tree: Path, tmp_path: Path, engine: str):
-    """capture → reduce yields the same scan `index` does, minus the empty dir."""
-    idx_root, red_root, to = tmp_path / 'idx', tmp_path / 'red', tmp_path / 'cap'
-    _ok(_run(['index', '-C', '-D', '-q', str(tree)], idx_root))
-    cap = _ok(_run(['capture', '-q', '-t', str(to), str(tree)], red_root)).stdout.rstrip('\n')
-    r = _ok(_run(['reduce', '-D', '-e', engine, cap], red_root))
-    (idx,), (red,) = _scans(idx_root), _scans(red_root)
-    assert r.stdout.rstrip('\n') == f'scan 1: {tree} → {red_root / "scans" / red["blob"]}'
-    assert red['path'] == idx['path'] == str(tree)
-    # `Scan.time` is the capture's instant as local wall-clock time (naive, the
-    # convention `index` rows follow); `scans list` renders it at second precision.
-    m = json.loads((Path(cap) / MARKER).read_text())
-    assert datetime.fromisoformat(red['time']) == datetime.fromisoformat(m['time']).astimezone().replace(tzinfo=None, microsecond=0)
-    # The empty dir is invisible to a listing: it is gone, and its parent (the
-    # root) has one child / one descendant fewer. A listing has no directory
-    # rows either, so a directory's *own* blocks (0 on APFS, 4 KiB on ext4)
-    # are absent from it and every ancestor. Everything else is identical.
-    own = _dir_own_bytes(tree)
-    assert (red['size'], red['n_children'], red['n_desc']) == (idx['size'] - sum(own.values()), idx['n_children'] - 1, idx['n_desc'] - 1)
-
-    a, b = _layer2(idx_root, idx['blob']), _layer2(red_root, red['blob'])
-    cols = ['path', 'kind', 'parent', 'uri', 'size', 'n_desc', 'n_children', 'depth']
-    expected = a[a['path'] != 'empty'][cols].reset_index(drop=True)
-    root = expected['path'] == '.'
-    expected.loc[root, ['n_children', 'n_desc']] -= 1
-    for i, row in expected[expected['kind'] == 'dir'].iterrows():
-        p = row['path']
-        expected.loc[i, 'size'] -= sum(v for d, v in own.items() if p == '.' or d == p or d.startswith(p + '/'))
-    assert_frame_equal(b[cols], expected)
-
-
-def _dir_own_bytes(tree: Path) -> dict[str, int]:
-    """Blocks allocated to each directory *itself* under `tree`, keyed by
-    layer-2 path (`.` for the root)."""
-    return {
-        ('.' if d == tree else str(d.relative_to(tree))): _blocks(d)
-        for d in [tree, *tree.rglob('*')] if d.is_dir()
-    }
-
-
-def test_reduce_from_a_url_capture_writes_a_remote_blob(tree: Path, tmp_path: Path):
-    root = tmp_path / 'root'
-    to, blobs = f'file://{tmp_path / "cap"}', f'file://{tmp_path / "blobs"}'
-    cap = _ok(_run(['capture', '-q', '-t', to, str(tree)], root)).stdout.rstrip('\n')
-    r = _ok(_run(['reduce', '-D', '-e', 'pandas', '-t', blobs, cap], root))
-    lines = r.stderr.rstrip('\n').split('\n')
-    assert lines[0] == f'--to: writing blobs to {blobs}'
-    assert lines[1] == f'{cap}: fetched 1 shard(s) → ' + lines[1].rsplit(' → ', 1)[1]
-    (scan,) = _scans(root)
-    assert sorted(p.name for p in (tmp_path / 'blobs').glob('*.parquet')) == [scan['blob']]
-    assert not (root / 'scans').exists()
-
-
-def test_reduce_builds_the_diff_index_against_the_previous_scan(tree: Path, tmp_path: Path):
-    root, to = tmp_path / 'root', tmp_path / 'cap'
-    for _ in range(2):
-        cap = _ok(_run(['capture', '-q', '-t', str(to), str(tree)], root)).stdout.rstrip('\n')
-        _ok(_run(['reduce', '-e', 'pandas', cap], root))
-    assert sorted(p.name for p in (root / 'diffs').glob('*.parquet')) == ['1-2.parquet']

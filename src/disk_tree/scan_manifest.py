@@ -1,10 +1,10 @@
 """A scan's metadata as a small JSON beside a *remote* blob — the portable
-"DB row" that lets a cloud reduce runner (whose own SQLite is thrown away) or
-another machine hand a cloud-stored scan to this laptop's DB:
+"DB row" that lets another machine (or a runner whose own SQLite is thrown
+away) hand a cloud-stored scan to this laptop's DB:
 `disk-tree scans register URL`. The manifest route of
 `done/remote-scan-targets.md`, made concrete for `cloud-reduce.md`.
 
-Written by `reduce --to <url>` and `index --to <url>`. A local blob needs none:
+Written by `index --to <url>`. A local blob needs none:
 the local DB already has the row.
 """
 from __future__ import annotations

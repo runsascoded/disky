@@ -123,6 +123,7 @@ def _write_store(
     maxseg: int,
     user_sorts: bool = True,
     row_group_rows: int | None = None,
+    user_sort_tiers: tuple[str, ...] | None = None,
     asof_day: int = 0,
     age_cols: tuple[str, ...] = (),
 ) -> dict[str, dict]:
@@ -213,7 +214,7 @@ def _write_store(
     _rss("store-l2")
     try:
         kw = {"row_group_rows": row_group_rows} if row_group_rows else {}
-        return write_sorts(con, str(store), path_index.parent, sort_variants=((("usr",),) if attr and user_sorts else ()), **kw)
+        return write_sorts(con, str(store), path_index.parent, sort_variants=((("usr",),) if attr and user_sorts else ()), variant_tiers=user_sort_tiers, **kw)
     finally:
         store.unlink()
 
@@ -244,14 +245,16 @@ def write_path_index(
     user_sorts: bool = True,
     row_group_rows: int | None = None,
     age_strata: bool = False,
+    user_sort_tiers: tuple[str, ...] | None = None,
 ) -> dict:
     """Write age.json / meta.json under ``out_dir`` (+ the path store's sorts
     beside ``path_index``); returns meta.
 
-    ``user_sorts=False`` skips the ``-by-user`` copies: the reader prunes a
-    lens by the footer's ``u_min``/``u_max`` on the two sorts, so the copies
-    are an optimization — and on gcs (777M rows) they doubled bytes and D1
-    footer rows. ``row_group_rows`` overrides the 8K default (gcs: 32K).
+    ``user_sorts=False`` skips the ``-by-user`` copies; ``user_sort_tiers``
+    keeps the copy for some sorts only. A lens view reads a user-first sort
+    when one exists — on the mixed-user sorts a user's root view decodes the
+    fleet's top rows (gcs 9/30: 413) — so gcs keeps ``("bysize",)``: one
+    copy instead of two. ``row_group_rows`` overrides the 8K default.
 
     ``path_index`` (``<dir>/path-index.parquet``) writes the store
     (specs/path-store.md §4.3): every dir row — every ancestor path ×
@@ -433,6 +436,16 @@ def write_path_index(
     con.execute("CREATE TEMP TABLE access_agg (bucket VARCHAR, dir VARCHAR, aday INTEGER, ro BIGINT, rb BIGINT)")
     if access:
         globs = "[" + ", ".join(f"'{g}'" for g in access) + "]"
+        # The aggregates' time grain moved from `day` to `hour` (engine
+        # `aggregate_access`); a glob spans both shapes until the day-grain
+        # parts age out, so read them by name and take the day from whichever
+        # column a part has.
+        acc = f"read_parquet({globs}, union_by_name = true)"
+        have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {acc}").fetchall()}
+        day_of = [f"CAST({c} AS DATE)" for c in ("day", "hour") if c in have]
+        if not day_of:
+            raise ValueError(f"access aggregates have neither `day` nor `hour`: {sorted(have)}")
+        day = day_of[0] if len(day_of) == 1 else f"COALESCE({', '.join(day_of)})"
         con.execute(
             f"""
             INSERT INTO access_agg
@@ -440,15 +453,15 @@ def write_path_index(
               CAST(floor(epoch(MAX(last_ts)) / 86400) AS INTEGER) AS aday,
               COALESCE(SUM(n_ops) FILTER (WHERE op IN ('GET', 'HEAD')), 0) AS ro,
               COALESCE(SUM(bytes_out) FILTER (WHERE op IN ('GET', 'HEAD')), 0) AS rb
-            FROM read_parquet({globs})
-            WHERE op IN ('GET', 'HEAD', 'LIST') AND day < DATE '{asof}'
+            FROM {acc}
+            WHERE op IN ('GET', 'HEAD', 'LIST') AND {day} < DATE '{asof}'
             GROUP BY 1, 2
             """
         )
         lo, hi = con.execute(
             f"SELECT CAST(floor(epoch(MIN(last_ts)) / 86400) AS INTEGER), "
-            f"CAST(floor(epoch(MAX(last_ts)) / 86400) AS INTEGER) FROM read_parquet({globs}) "
-            f"WHERE day < DATE '{asof}'"
+            f"CAST(floor(epoch(MAX(last_ts)) / 86400) AS INTEGER) FROM {acc} "
+            f"WHERE {day} < DATE '{asof}'"
         ).fetchone()
         if lo is not None:
             access_window = (int(lo), int(hi))
@@ -523,7 +536,7 @@ def write_path_index(
     _rss("ptu")
     sorts: dict[str, dict] = {}
     if path_index is not None:
-        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows, asof_day=asof_day, age_cols=age_cols)
+        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows, user_sort_tiers=user_sort_tiers, asof_day=asof_day, age_cols=age_cols)
         _rss("store")
         # Provenance sidecar: the attributing prefixes' user/source/evidence.
         from .extras import write_extras

@@ -1,5 +1,7 @@
 # Serverless reference: converge dt's demo with the mgu fleet + codify IaC
 
+**Status:** retired 2026-10-01 — the `ui/` Cloudflare edge was removed; its served successor is `site/` (see specs/path-store.md).
+
 The public demo (r2.rbw.sh) is a serverless (SL) Cloudflare Pages + Pages
 Functions deployment over an R2 bucket of reduced scans — the same family as the
 `marin-gcs-usage` (**mgu**) deployments (`gcs`, `cw-s3`). This spec is about

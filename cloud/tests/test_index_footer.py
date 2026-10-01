@@ -40,9 +40,9 @@ def test_d1_query_retries_transient_401(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    _d1_query("SELECT 1", acct="acct", tok="tok")
+    _d1_query("SELECT 1", acct="acct", tok="tok", db_id="db")
     assert calls == [
-        "https://api.cloudflare.com/client/v4/accounts/acct/d1/database/" + index_footer.D1_DB_ID + "/query",
+        "https://api.cloudflare.com/client/v4/accounts/acct/d1/database/db/query",
     ] * 3
 
 
@@ -56,7 +56,7 @@ def test_d1_query_persistent_401_raises_after_all_retries(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(RuntimeError) as ei:
-        _d1_query("SELECT 1", acct="acct", tok="tok")
+        _d1_query("SELECT 1", acct="acct", tok="tok", db_id="db")
     assert str(ei.value) == (
         'D1 query failed (401): {"success":false,"errors":'
         '[{"code":10000,"message":"Authentication error"}]}'
@@ -75,19 +75,18 @@ def test_d1_query_non_retryable_status_fails_fast(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(RuntimeError):
-        _d1_query("SELECT 1", acct="acct", tok="tok")
+        _d1_query("SELECT 1", acct="acct", tok="tok", db_id="db")
     assert calls == [1]
 
 
 # --- compact `rg_json` (2026-09-06) ------------------------------------------
 
 import json
-import sqlite3
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from dt_cloud.index_footer import COMPACT_SQL, _group_rows, _schema_json
+from dt_cloud.index_footer import _group_rows, _schema_json
 
 
 def _write_index(path) -> "pq.FileMetaData":
@@ -146,44 +145,6 @@ def test_store_sort_is_version_2_and_sizes_resolve_to_size(tmp_path):
     assert [(g["b_min"], g["b_max"], g["u_min"], g["u_max"]) for g in groups] == [(10, 30, None, None)]
 
 
-def _verbose_rg_json(md: "pq.FileMetaData", g: int) -> str:
-    """The pre-2026-09-06 thrift-shaped row (what older D1 rows hold)."""
-    rg = md.row_group(g)
-    cols = []
-    for c in range(rg.num_columns):
-        cc = rg.column(c)
-        m = {
-            "type": cc.physical_type, "encodings": list(cc.encodings), "path_in_schema": cc.path_in_schema.split("."),
-            "codec": cc.compression, "num_values": str(cc.num_values),
-            "total_uncompressed_size": str(cc.total_uncompressed_size), "total_compressed_size": str(cc.total_compressed_size),
-            "data_page_offset": str(cc.data_page_offset),
-        }
-        if cc.dictionary_page_offset is not None:
-            m["dictionary_page_offset"] = str(cc.dictionary_page_offset)
-        cols.append({"file_offset": str(cc.file_offset), "meta_data": m})
-    return json.dumps({"columns": cols, "total_byte_size": str(rg.total_byte_size), "num_rows": str(rg.num_rows)}, separators=(",", ":"))
-
-
-def test_compact_sql_rewrites_verbose_rows_to_the_synced_form(tmp_path):
-    md = _write_index(tmp_path / "i.parquet")
-    con = sqlite3.connect(":memory:")
-    con.execute("CREATE TABLE index_row_groups (date TEXT, variant TEXT, rg INTEGER, rg_json TEXT)")
-    for g in range(md.num_row_groups):
-        con.execute("INSERT INTO index_row_groups VALUES ('2026-09-01', 'path', ?, ?)", (g, _verbose_rg_json(md, g)))
-    con.execute("INSERT INTO index_row_groups VALUES ('2026-09-02', 'path', 0, ?)", (_verbose_rg_json(md, 0),))
-    con.execute(COMPACT_SQL.format(date="2026-09-01", variant="path"))
-    got = con.execute("SELECT date, rg, rg_json FROM index_row_groups ORDER BY date, rg").fetchall()
-    fresh = {r["rg"]: r["rg_json"] for r in _group_rows(md)}
-    assert got == [
-        ("2026-09-01", 0, fresh[0]),
-        ("2026-09-01", 1, fresh[1]),
-        ("2026-09-02", 0, _verbose_rg_json(md, 0)),  # other scans untouched
-    ]
-    # Idempotent: compact rows don't match the verbose-form predicate.
-    con.execute(COMPACT_SQL.format(date="2026-09-01", variant="path"))
-    assert con.execute("SELECT rg_json FROM index_row_groups WHERE date='2026-09-01' ORDER BY rg").fetchall() == [(fresh[0],), (fresh[1],)]
-
-
 def test_sync_d1_packs_inserts_greedily_under_the_byte_limit(tmp_path, monkeypatch):
     from dt_cloud.index_footer import sync_d1
 
@@ -194,14 +155,15 @@ def test_sync_d1_packs_inserts_greedily_under_the_byte_limit(tmp_path, monkeypat
     monkeypatch.setattr(index_footer, "extract", lambda _p: ({"version": 1, "schema": []}, rows))
     monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
     blobs: list[tuple] = []
-    monkeypatch.setattr(index_footer, "write_groups_blob", lambda path, schema, rs: blobs.append((path, schema, rs)) or (path, 0))
+    monkeypatch.setattr(index_footer, "write_groups_blob", lambda path, schema, rs: blobs.append(("json", path, schema, rs)) or (path, 0))
+    monkeypatch.setattr(index_footer, "write_groups_parquet", lambda path, schema, rs: blobs.append(("parquet", path, schema, rs)) or (path, 0))
     sent: list[str] = []
     monkeypatch.setattr(index_footer, "_d1_query", lambda sql, acct, tok, db_id: sent.append(sql) or [])
     limit = 1000
     n = sync_d1("2026-09-01", "x.parquet", variant="path", gen="20260901T070000Z", key="listing/2026-09-01/index/20260901T070000Z", insert_bytes=limit)
     assert n == 12
-    # The blob beside the parquet is written before any D1 row: the durable copy.
-    assert blobs == [("x.parquet", {"version": 1, "schema": []}, rows)]
+    # The cold footer + blob beside the parquet are written before any D1 row: the durable copies.
+    assert blobs == [("parquet", "x.parquet", {"version": 1, "schema": []}, rows), ("json", "x.parquet", {"version": 1, "schema": []}, rows)]
     # Generation protocol: sweep unreachable gens, land every group under this
     # gen, then flip the pointer — nothing is deleted before the flip.
     assert sent[0] == (
@@ -301,15 +263,64 @@ def test_retire_d1_drops_sort_groups_of_scans_past_the_retention_window(monkeypa
 
     monkeypatch.setattr(index_footer, "_d1_query", fake_query)
     monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
-    assert retire_d1(2) == [("2026-09-01", "path", 2), ("2026-09-01", "user", 2)]
+    checked: list[str] = []
+    every = lambda p: checked.append(p) or True  # noqa: E731 — every cold footer exists
+    assert retire_d1(2, has_cold=every) == ([("2026-09-01", "path", 2), ("2026-09-01", "user", 2)], [])
+    assert checked == [
+        "oa-gcs-usage-dvx/listing/2026-09-01/path-index.groups.parquet",
+        "oa-gcs-usage-dvx/listing/2026-09-01/path-index-by-user.groups.parquet",
+    ]
     assert con.execute("SELECT date, variant, count(*) FROM index_row_groups GROUP BY 1, 2 ORDER BY 1, 2").fetchall() == [
         ("2026-09-01", "age-pyramid-1d", 2),
         ("2026-09-02", "age-pyramid-1d", 2), ("2026-09-02", "bysize", 2), ("2026-09-02", "path", 2), ("2026-09-02", "user", 2),
         ("2026-09-03", "age-pyramid-1d", 2), ("2026-09-03", "bysize", 2), ("2026-09-03", "path", 2), ("2026-09-03", "user", 2),
     ]
     assert con.execute("SELECT count(*) FROM index_schema").fetchone() == (11,)
-    assert retire_d1(2) == []  # idempotent
-    assert retire_d1(1) == [("2026-09-02", "path", 2), ("2026-09-02", "bysize", 2), ("2026-09-02", "user", 2)]
+    checked.clear()
+    assert retire_d1(2, has_cold=every) == ([], [])  # idempotent
+    assert checked == []  # nothing left in D1 to check
+    # No cold footer for the `bysize` sort: it stays in D1, the rest go.
+    cold = lambda p: "bysize" not in p  # noqa: E731
+    assert retire_d1(1, base="r2://bk", has_cold=cold) == (
+        [("2026-09-02", "path", 2), ("2026-09-02", "user", 2)],
+        [("2026-09-02", "bysize", "r2://bk/listing/2026-09-02/path-index-bysize.groups.parquet")],
+    )
+    assert con.execute("SELECT variant, count(*) FROM index_row_groups WHERE date = '2026-09-02' GROUP BY 1 ORDER BY 1").fetchall() == [
+        ("age-pyramid-1d", 2), ("bysize", 2),
+    ]
+
+
+def test_retire_d1_refuses_without_a_cold_footer_on_disk(tmp_path, monkeypatch):
+    """The default check looks for the real file under `base`: none → kept
+    (and reported), written → retired."""
+    import sqlite3
+
+    from dt_cloud.index_footer import retire_d1, write_groups_parquet
+
+    con = sqlite3.connect(":memory:")
+    con.executescript("""
+      CREATE TABLE index_schema (date TEXT, variant TEXT, version INTEGER, schema_json TEXT, floor_bytes INTEGER, gen TEXT, dir TEXT, PRIMARY KEY (date, variant));
+      CREATE TABLE index_row_groups (date TEXT, variant TEXT, gen TEXT, rg INTEGER, PRIMARY KEY (date, variant, gen, rg));
+    """)
+    for d in ("2026-09-01", "2026-09-02"):
+        con.execute("INSERT INTO index_schema VALUES (?, 'path', 2, '[]', NULL, 'g', ?)", (d, f"listing/{d}/index/g"))
+        con.executemany("INSERT INTO index_row_groups VALUES (?, 'path', 'g', ?)", [(d, i) for i in range(3)])
+
+    def fake_query(sql, acct, tok, db_id):
+        cur = con.execute(sql)
+        return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()] if cur.description else []
+
+    monkeypatch.setattr(index_footer, "_d1_query", fake_query)
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    gdir = tmp_path / "listing/2026-09-01/index/g"
+    want = str(gdir / "path-index.groups.parquet")
+    assert retire_d1(1, base=str(tmp_path)) == ([], [("2026-09-01", "path", want)])
+    assert con.execute("SELECT count(*) FROM index_row_groups").fetchone() == (6,)
+    gdir.mkdir(parents=True)
+    md = _write_index(tmp_path / "i.parquet")
+    write_groups_parquet(str(gdir / "path-index.parquet"), _schema_json(md), _group_rows(md))
+    assert retire_d1(1, base=str(tmp_path)) == ([("2026-09-01", "path", 3)], [])
+    assert con.execute("SELECT date, count(*) FROM index_row_groups GROUP BY 1").fetchall() == [("2026-09-02", 3)]
 
 
 def test_groups_blob_is_the_synced_rows_as_one_document(tmp_path):
@@ -333,3 +344,97 @@ def test_groups_blob_is_the_synced_rows_as_one_document(tmp_path):
         ],
     }
     assert [(g[0], g[11]) for g in json.loads(text)["groups"]] == [(0, 10), (1, 50)]  # `b_min` appended 12th
+
+
+def test_groups_parquet_is_the_synced_rows_typed_in_small_stat_groups(tmp_path):
+    """The cold footer tier holds exactly the rows `sync_d1` sends D1 (and the
+    blob holds, `b_min` included), in rg order, in `row_group_rows`-row
+    groups with min/max stats on every pruning column — none on `rg_json`."""
+    from disk_tree.find.groups import FOOTER_COLS, FOOTER_STAT_COLS, read_groups_parquet
+
+    from dt_cloud.index_footer import groups_parquet_path, write_groups_parquet
+
+    t = pa.table({
+        "path": pa.array([f"b/d{i:02d}" for i in range(10)]),
+        "depth": pa.array([2] * 10, pa.int64()),
+        "usr": pa.array(["u1"] * 4 + [None] * 2 + ["u2"] * 4),
+        "size": pa.array(range(100, 110), pa.int64()),
+    })
+    pq.write_table(t.replace_schema_metadata({b"tier": b"path"}), tmp_path / "path-index.parquet", row_group_size=2, compression="zstd")
+    schema, rows = index_footer.extract(str(tmp_path / "path-index.parquet"))
+    out, n = write_groups_parquet(str(tmp_path / "path-index.parquet"), schema, rows, row_group_rows=2)
+    assert out == groups_parquet_path(str(tmp_path / "path-index.parquet")) == str(tmp_path / "path-index.groups.parquet")
+    assert n == (tmp_path / "path-index.groups.parquet").stat().st_size
+    back_schema, back = read_groups_parquet(out)
+    assert back_schema == schema
+    assert back == [{c: r[c] for c in FOOTER_COLS} for r in rows]
+    assert [(r["rg"], r["u_min"], r["u_max"], r["b_min"], r["b_max"], r["row_start"], r["row_end"]) for r in back] == [
+        (0, "u1", "u1", 100, 101, 0, 2), (1, "u1", "u1", 102, 103, 2, 4), (2, None, None, 104, 105, 4, 6),
+        (3, "u2", "u2", 106, 107, 6, 8), (4, "u2", "u2", 108, 109, 8, 10),
+    ]
+    md = pq.read_metadata(out)
+    assert [md.row_group(g).num_rows for g in range(md.num_row_groups)] == [2, 2, 1]
+    assert md.schema.names == list(FOOTER_COLS)
+    assert (md.metadata[b"groups_v"], md.metadata[b"version"], b"ARROW:schema" in md.metadata) == (b"1", b"2", False)
+
+    def stats(g: int) -> dict:
+        rg = md.row_group(g)
+        got = {}
+        for c in range(rg.num_columns):
+            cc = rg.column(c)
+            assert cc.compression == "ZSTD"
+            s = cc.statistics
+            got[cc.path_in_schema] = (s.min, s.max) if s is not None and s.has_min_max else None
+        return got
+
+    # Footer group 1 = tier groups 2 (usr all NULL) and 3 (u2): the NULLs drop out of the u stats.
+    assert stats(1) == {
+        "rg": None, "d_min": (2, 2), "d_max": (2, 2), "p_min": ("b/d04", "b/d06"), "p_max": ("b/d05", "b/d07"),
+        "b_min": (104, 106), "b_max": (105, 107), "u_min": ("u2", "u2"), "u_max": ("u2", "u2"),
+        "row_start": None, "row_end": None, "rg_json": None,
+    }
+    assert {c for c, v in stats(0).items() if v is not None} == set(FOOTER_STAT_COLS)
+
+
+def test_index_blob_backfills_the_cold_footer_from_json(tmp_path, monkeypatch):
+    """`index-blob -J`: the `.groups.parquet` from the `.groups.json` already
+    beside a tier, never reading the tier's footer — byte-identical to the
+    one written from the footer."""
+    from click.testing import CliRunner
+    from disk_tree.find.groups import read_groups_parquet
+
+    from dt_cloud import cli as C
+    from dt_cloud.cli import main
+    from dt_cloud.index_footer import write_groups_blob, write_groups_parquet
+
+    logged: list[str] = []  # `err` binds stderr at import: record it instead
+    monkeypatch.setattr(C, "err", lambda *a: logged.append(" ".join(map(str, a))))
+
+    d = tmp_path / "g"
+    d.mkdir()
+    md = _write_index(d / "path-index.parquet")
+    schema, rows = _schema_json(md), _group_rows(md)
+    write_groups_blob(str(d / "path-index.parquet"), schema, rows)
+    ref, _ = write_groups_parquet(str(tmp_path / "ref.parquet"), schema, rows)
+    # The tier's own footer must not be read: make it unreadable.
+    (d / "path-index.parquet").write_bytes(b"not a parquet")
+    res = CliRunner().invoke(main, ["index-blob", "-J", "-v", "path", "-v", "bysize", "-d", str(d), "2026-09-01"])
+    assert res.exit_code == 0, res.output
+    size = (d / "path-index.groups.parquet").stat().st_size
+    assert logged == [
+        f"index-blob: 2026-09-01 [path] 2 groups → {d}/path-index.groups.parquet ({size:,} B)",
+        f"index-blob: 2026-09-01 [bysize] no tier at {d}/path-index-bysize.parquet; skipped",
+    ]
+    assert (d / "path-index.groups.parquet").read_bytes() == (tmp_path / "ref.groups.parquet").read_bytes()
+    assert ref == str(tmp_path / "ref.groups.parquet")
+    assert read_groups_parquet(str(d / "path-index.groups.parquet")) == (schema, rows)
+
+
+def test_d1_query_refuses_without_a_database(monkeypatch):
+    """No default D1: a deployment that forgot `$D1_DB_ID` fails instead of
+    writing into another deployment's database (it once defaulted to gcs prod)."""
+    calls: list[object] = []
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: calls.append(a) or None)
+    with pytest.raises(RuntimeError, match=r"^no D1 database: set \$D1_DB_ID"):
+        _d1_query("SELECT 1", acct="acct", tok="tok", db_id="")
+    assert calls == []

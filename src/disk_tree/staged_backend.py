@@ -3,12 +3,11 @@ real backends/DB (spec ``specs/staged-delete.md``).
 
 The engine takes ``size_fn``/``delete_fn`` injected so it stays backend- and
 DB-free; this is the one place that binds them to the actual scan DB and
-``backend_for``. Shared by the CLI (``cli/staged.py``) and the Flask server.
+``backend_for``, for the CLI (``cli/staged.py``).
 
 The session comes from a standalone SQLAlchemy engine over
 ``config.SQLITE_PATH`` — *not* flask-sqlalchemy's ``init()``, which pushes its
-own app context and so corrupts the server's request context when called inside
-a request handler.
+own app context.
 """
 from __future__ import annotations
 
@@ -71,7 +70,7 @@ def describe(uri: str) -> dict:
         return none
     if scan["path"] == uri:
         return {"bytes": scan["size"] or 0, "objects": (scan["n_desc"] or 0) + 1, "kind": "dir"}
-    from disk_tree.diff import resolve_chunk_for_path
+    from disk_tree.resolve import resolve_chunk_for_path
     from disk_tree.storage import get_backend
 
     rel = uri[len(scan["path"].rstrip("/") + "/"):]

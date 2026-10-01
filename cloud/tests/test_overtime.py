@@ -176,30 +176,6 @@ def test_write_over_time_groups(tmp_path: Path):
     ]
 
 
-def test_cli_over_time_write_explicit(tmp_path: Path):
-    """`over-time-write <date>=<parquet> …` bypasses D1 and builds the index."""
-    args = []
-    for sid, rows in SCANS.items():
-        pi = tmp_path / f"{sid}.parquet"
-        _write_path_index(pi, rows)
-        args.append(f"{sid}={pi}")
-    out = tmp_path / "ot"
-    r = CliRunner().invoke(main, ["over-time-write", "-o", str(out), *args])
-    assert r.exit_code == 0, r.output
-    summary = json.loads(r.output.strip().splitlines()[-1])
-    assert summary["rows"] == 6
-    assert summary["paths"] == 4
-    assert summary["scans"] == ["s0", "s1", "s2", "s3"]
-    assert _intervals(out / "over-time.parquet") == [
-        (0, "", 100, 10, 0, 1),
-        (0, "", 200, 20, 2, 3),
-        (1, B, 100, 10, 0, 1),
-        (1, B, 200, 20, 2, 3),
-        (2, f"{B}/a", 50, 5, 0, 3),
-        (2, f"{B}/b", 7, 1, 1, 2),
-    ]
-
-
 def test_sealed_groups_are_fixed_k_runs_from_the_oldest_scan():
     dates = [f"2026-09-{d:02d}T{h}" for d in range(1, 11) for h in ("0001", "1201")]  # 20 scans
     assert OT.sealed_groups(dates, 8) == [dates[0:8], dates[8:16]]      # the 4-scan tail is not a group

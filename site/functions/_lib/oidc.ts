@@ -13,9 +13,6 @@ export interface OidcCfg {
   clientId: string
   clientSecret: string
   redirectUri: string
-  /** First sign-in seeds the profile (name + Google `picture`, inlined) so the
-   *  chip shows a face by default, not an initial. Never overrides a self-set one. */
-  seedProfile: true
 }
 
 /** The adapter config, or null if the deployment isn't OIDC-configured
@@ -28,6 +25,5 @@ export function oidcConfig(env: Env, request: Request): OidcCfg | null {
     clientId: env.GOOGLE_CLIENT_ID,
     clientSecret: env.GOOGLE_CLIENT_SECRET,
     redirectUri: `${new URL(request.url).origin}/auth/google/callback`,
-    seedProfile: true,
   }
 }

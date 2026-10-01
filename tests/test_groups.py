@@ -16,7 +16,8 @@ import pytest
 
 from disk_tree.find.aggregate_duckdb import aggregate_listing_to_parquet
 from disk_tree.find.groups import (
-    GROUP_FIELDS, GROUPS_VERSION, extract, group_rows, groups_json, groups_path, schema_json, write_groups,
+    FOOTER_COLS, GROUP_FIELDS, GROUPS_VERSION, extract, group_rows, groups_from_json, groups_json, groups_parquet_bytes,
+    groups_parquet_path, groups_path, read_groups_parquet, schema_json, write_groups, write_groups_parquet,
 )
 from disk_tree.find.tiers import write_tiers
 from disk_tree.listing import prepare_listing
@@ -166,12 +167,14 @@ def test_write_tiers_groups_writes_the_manifest_beside_each_tier(tmp_path: Path)
     stem = str(tmp_path / 'gcs-b1')
     written = write_tiers(layer2, stem, groups=True)
     assert sorted(p.name for p in tmp_path.glob('gcs-b1.*')) == [
-        'gcs-b1.bysize.groups.json', 'gcs-b1.bysize.parquet',
-        'gcs-b1.path.groups.json', 'gcs-b1.path.parquet',
+        'gcs-b1.bysize.groups.json', 'gcs-b1.bysize.groups.parquet', 'gcs-b1.bysize.parquet',
+        'gcs-b1.path.groups.json', 'gcs-b1.path.groups.parquet', 'gcs-b1.path.parquet',
     ]
     for tier_path, n_rows in written.items():
         doc = json.loads(Path(groups_path(tier_path)).read_text())
         schema, rows = extract(tier_path)
+        # The cold footer tier: the same rows, typed, and the same schema.
+        assert read_groups_parquet(groups_parquet_path(tier_path)) == (schema, rows)
         # The document is exactly `groups_json(extract(tier))`: envelope + arrays in GROUP_FIELDS order.
         assert doc == json.loads(groups_json(schema, rows))
         assert list(doc) == ['v', 'version', 'schema', 'floor_bytes', 'groups']
@@ -193,3 +196,51 @@ def test_write_groups_over_a_url(tmp_path: Path):
     assert (st.path, st.n_groups) == (f'file://{stem}.path.groups.json', 1)
     assert Path(f'{stem}.path.groups.json').read_text() == groups_json(*extract(f'{stem}.path.parquet'))
     assert st.n_bytes == len(Path(f'{stem}.path.groups.json').read_bytes())
+    # The cold footer tier over the same seam.
+    schema, rows = extract(f'{stem}.path.parquet')
+    pst = write_groups_parquet(f'file://{stem}.path.parquet', schema, rows)
+    assert (pst.path, pst.n_groups) == (f'file://{stem}.path.groups.parquet', 1)
+    assert pst.n_bytes == len(Path(f'{stem}.path.groups.parquet').read_bytes())
+    assert read_groups_parquet(pst.path) == (schema, rows)
+
+
+def test_groups_parquet_spans_many_footer_groups_and_round_trips_json(tmp_path: Path):
+    """A 5000-row `path` tier at 2048-row groups has 3 tier groups; at 2 footer
+    rows per footer group, the `.groups.parquet` has 2 footer groups whose
+    stats bound their rows' stats. A `.groups.json` (incl. one written before
+    `b_min`) rebuilds it."""
+    layer2 = _wide_layer2(tmp_path, 5000)
+    stem = str(tmp_path / 'gcs-b1')
+    write_tiers(layer2, stem, tiers=('path',), row_group_rows=2048)
+    tier = f'{stem}.path.parquet'
+    schema, rows = extract(tier)
+    assert len(rows) == 3
+    data = groups_parquet_bytes(schema, rows, row_group_rows=2)
+    Path(groups_parquet_path(tier)).write_bytes(data)
+    md = pq.read_metadata(groups_parquet_path(tier))
+    assert [md.row_group(g).num_rows for g in range(md.num_row_groups)] == [2, 1]
+    names = md.schema.names
+    assert names == list(FOOTER_COLS)
+
+    def mm(g: int, col: str) -> tuple:
+        s = md.row_group(g).column(names.index(col)).statistics
+        return (s.min, s.max) if s.has_min_max else None
+
+    assert [(mm(g, 'd_min'), mm(g, 'd_max'), mm(g, 'b_max'), mm(g, 'p_min'), mm(g, 'p_max'), mm(g, 'u_min')) for g in range(2)] == [
+        ((rows[0]['d_min'], rows[1]['d_min']), (rows[0]['d_max'], rows[1]['d_max']), (rows[1]['b_max'], rows[0]['b_max']),
+         (rows[0]['p_min'], rows[1]['p_min']), (rows[0]['p_max'], rows[1]['p_max']), None),
+        ((rows[2]['d_min'],) * 2, (rows[2]['d_max'],) * 2, (rows[2]['b_max'],) * 2, (rows[2]['p_min'],) * 2, (rows[2]['p_max'],) * 2, None),
+    ]
+    assert md.row_group(0).column(names.index('rg_json')).statistics is None
+    # From the JSON: the same file, byte for byte.
+    assert groups_from_json(groups_json(schema, rows)) == (schema, rows)
+    assert groups_parquet_bytes(*groups_from_json(groups_json(schema, rows)), row_group_rows=2) == data
+    # A pre-`b_min` document (11 fields) loads with `b_min` null.
+    old = json.loads(groups_json(schema, rows))
+    old['groups'] = [g[:11] for g in old['groups']]
+    assert groups_from_json(json.dumps(old)) == (schema, [{**r, 'b_min': None} for r in rows])
+    assert groups_parquet_path('/x/a.parquet') == '/x/a.groups.parquet'
+    with pytest.raises(ValueError, match='not a tier parquet path'):
+        groups_parquet_path('/x/a.groups.parquet')
+    with pytest.raises(ValueError, match='rg 0..n-1'):
+        groups_parquet_bytes(schema, rows[1:])

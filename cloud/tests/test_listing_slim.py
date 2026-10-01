@@ -20,11 +20,10 @@ from disk_tree.blobfs import read_parquet
 from disk_tree.find.aggregate_duckdb import aggregate_listing_to_parquet
 from disk_tree.listing import prepare_listing
 from dt_cloud import cascade_a2a, index as X
-from dt_cloud.sweep import Plan, build_expiry_manifest, build_manifest
+from dt_cloud.sweep import Plan, build_manifest
 
 BUCKET = "bk"
 T0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
-NOW = int((T0 + timedelta(days=30)).timestamp())
 #: (name, size, age in hours before T0) — nested dirs, a TTL tree, a root file,
 #: a `//` key and a folder placeholder, all in one storage class (2).
 OBJECTS = [
@@ -106,7 +105,10 @@ def test_indexes_are_byte_identical(layer2, codec, tmp_path: Path):
     files = sorted(p.name for p in (tmp_path / "i1").glob("*.parquet")) + sorted(p.name for p in (tmp_path / "i1").glob("*.json"))
     assert files == sorted(p.name for p in (tmp_path / "i2").glob("*.parquet")) + sorted(p.name for p in (tmp_path / "i2").glob("*.json"))
     assert files == [
-        *sorted(["path-index.parquet", "path-index-bysize.parquet", *(f"age-pyramid-{b}.parquet" for b in X.AGE_PYRAMID_BINS)]),
+        *sorted([
+            "path-index.parquet", "path-index-bysize.parquet", "path-index.groups.parquet", "path-index-bysize.groups.parquet",
+            *(f"age-pyramid-{b}.parquet" for b in X.AGE_PYRAMID_BINS),
+        ]),
         "path-index-bysize.groups.json", "path-index.groups.json",
     ]
     assert {f: (tmp_path / "i1" / f).read_bytes() == (tmp_path / "i2" / f).read_bytes() for f in files} == {f: True for f in files}
@@ -131,19 +133,15 @@ def test_sweep_manifests_are_byte_identical(layer2, tmp_path: Path):
     plan = Plan(name="p", bucket=BUCKET, sweep=["marin/ckpt/"], plan_id=1)
     out = {}
     for tag, src in (("v1", v1), ("v2", v2)):
-        s = build_manifest(src, plan, str(tmp_path / f"plan-{tag}"))
-        e = build_expiry_manifest(src, str(tmp_path / f"exp-{tag}"), bucket=BUCKET, now_ts=NOW)
-        out[tag] = (s, e)
-    for kind in ("plan", "exp"):
-        m1 = tmp_path / f"{kind}-v1" / "manifest" / f"{BUCKET}.parquet"
-        m2 = tmp_path / f"{kind}-v2" / "manifest" / f"{BUCKET}.parquet"
-        assert m1.read_bytes() == m2.read_bytes()
-    (s1, e1), (s2, e2) = out["v1"], out["v2"]
+        out[tag] = build_manifest(src, plan, str(tmp_path / f"plan-{tag}"))
+    m1 = tmp_path / "plan-v1" / "manifest" / f"{BUCKET}.parquet"
+    m2 = tmp_path / "plan-v2" / "manifest" / f"{BUCKET}.parquet"
+    assert m1.read_bytes() == m2.read_bytes()
+    s1, s2 = out["v1"], out["v2"]
     assert {**s1, "manifest": None} == {**s2, "manifest": None} == {
         "plan_id": 1, "name": "p", "bucket": BUCKET, "sweep": ["marin/ckpt/"],
         "objects": 3, "bytes": 6000, "manifest": None,
     }
-    assert {**e1, "manifest": None} == {**e2, "manifest": None}
 
 
 def _mgu_index(v1: str, out: Path) -> str:

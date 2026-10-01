@@ -13,7 +13,8 @@ widths common laptops and phones produce. The cache keys include the pixel
 budget: the client sends `w = ceil(innerWidth / 128) * 128`, `h = round(0.6 w)`,
 so warming a width only helps viewers whose window quantizes to it.
 
-Pure planning (`nearest_prior`, `plan`) is unit-tested; `warm` does the HTTP."""
+Pure planning (`nearest_prior`, `plan`) is unit-tested; `scan_dates` lists the
+published scans, `warm` does the HTTP."""
 from __future__ import annotations
 
 import datetime as dt
@@ -30,6 +31,20 @@ SPANS = (1, 3, 7, 14, 30)
 # Deployment config: `WARM_PATHS` (comma-separated; `""` = the root) — the
 # CoreWeave job passes its bucket + top-level dirs. Default: the GCS fleet.
 PATHS = tuple(os.environ["WARM_PATHS"].split(",")) if os.environ.get("WARM_PATHS") else ("", "marin-us-central2", "marin-us-east5", "marin-us-central1", "marin-eu-west4", "marin-us-west4", "marin-us-east1")
+
+
+def scan_dates(root: str) -> list[str]:
+    """Published scan dates under ``root`` (``gs://<bucket>/snapshots``), ascending."""
+    import re
+
+    import fsspec
+
+    fs, _, _ = fsspec.get_fs_token_paths(root)
+    return sorted(
+        m.group(1)
+        for p in fs.glob(f"{root.split('://', 1)[-1]}/*/meta.json")
+        if (m := re.search(r"/(\d{4}-\d{2}-\d{2}(?:T\d{4})?)/meta\.json$", p))  # date-only or sub-daily ids
+    )
 
 
 def _ts(date: str) -> int:

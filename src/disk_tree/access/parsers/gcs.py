@@ -22,8 +22,9 @@ Header row is present. Fields we care about (per
 - ``s_request_id`` — Google's request id (used for dedupe: Google documents
   rare duplicate log lines; deduping on this field is idempotent).
 
-The parser returns a DuckDB relation exposing the canonical
-:data:`~disk_tree.access.schema.ACCESS_COLUMNS`. Callers can materialize
+The parser returns a DuckDB relation exposing the canonical access columns
+(`ts, store, bucket, path, op, op_raw, status, bytes_out, bytes_in,
+requester, user_agent, request_id`). Callers can materialize
 to parquet with ``rel.write_parquet(path)`` or feed it directly to
 :mod:`disk_tree.access.aggregate`.
 """
@@ -88,7 +89,7 @@ def parse(input_glob: str, store: str = 'gcs', con: "duckdb.DuckDBPyConnection |
 
     # Canonical projection + normalization. Path derived from cs_object
     # (already the object key); bucket from cs_bucket. `cs_operation` beats
-    # `cs_method` for the normalized op (matches schema.normalize_op).
+    # `cs_method` for the normalized op (`_normalize_op_sql`).
     #
     # Dedupe on the WHOLE canonical record, not on s_request_id. Google's
     # wording is "Occasionally, a single *record* may appear twice... you can
@@ -163,9 +164,7 @@ def parse_storage_daily(input_glob: str, con: "duckdb.DuckDBPyConnection | None"
 
 
 # SQL fragment: fold GCS's cs_operation/cs_method into the canonical op
-# vocabulary. Matches disk_tree.access.schema.normalize_op semantics exactly
-# so parser output === Python-normalized output. Any drift here would violate
-# the cross-parser identity contract.
+# vocabulary (GET | PUT | DELETE | HEAD | LIST | OTHER).
 #
 # LIST detection is the subtle one — GCS spells "list the objects in a bucket"
 # three ways depending on API surface, none of them literally "LIST":

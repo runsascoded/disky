@@ -1,5 +1,7 @@
 # `/api/scan` takes 17–23 s when the scan's blobs live only in R2
 
+**Status:** partly retired 2026-10-01 — the `ui/` Cloudflare edge was removed, so the "views of R2-hosted scans come from the edge API" path (`ui/cfn/scanRead.ts`, FE-direct) is retired; its served successor is `site/` (see specs/path-store.md). The engine-side fixes (64K row groups, shallow sidecar) stand.
+
 From the `~/.disk` cleanup session, 2026-09-26. User: "even that long on 1st load is unacceptable".
 
 ## Repro

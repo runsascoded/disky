@@ -41,10 +41,11 @@ export const TABLES: TableSpec[] = [
   {
     name: 'allowed_emails',
     pk: 'email',
-    desc: 'Sign-in allowlist: non-OA emails that may view the dashboard (Google or email-PIN). Removal takes effect on the next request.',
+    desc: 'Sign-in allowlist: non-OA emails that may view the dashboard (Google or email-PIN); `read_only` = 1 admits them view-only (no staging). Changes take effect on the next request.',
     columns: [
       { name: 'email', type: 'text', required: true },
       { name: 'note', type: 'text', editable: true },
+      { name: 'read_only', type: 'int', editable: true },
       { name: 'who', type: 'text', server: 'who' },
       { name: 'ts', type: 'int', server: 'now' },
     ],

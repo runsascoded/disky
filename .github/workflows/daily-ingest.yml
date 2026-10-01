@@ -1,7 +1,7 @@
 # Daily r2.rbw.sh ingestion, moved off the laptop LaunchAgent to GHA (reliable
-# scheduling; the LaunchAgent never fired). Mirrors scripts/r2-ingest.sh: list
-# the three public buckets → the union's path store (`path` + `bysize` sorts,
-# objects included; specs/path-store.md §4.4) + snapshot → upload to
+# scheduling; the LaunchAgent never fired): list the three public buckets →
+# the union's path store (`path` + `bysize` sorts, objects included;
+# specs/path-store.md §4.4) + snapshot → upload to
 # disk-tree-demo → publish footers to the D1 the Map reads. Idempotent per date
 # (a fresh generation flips the pointer). Run it by hand anytime via "Run
 # workflow" (workflow_dispatch).
@@ -26,6 +26,9 @@ concurrency:
 
 jobs:
   ingest:
+    # The r2.rbw.sh demo's own job: deployment branches carry this file
+    # through `cloud` merges, but their repos have none of its secrets.
+    if: github.repository == 'runsascoded/disky'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -37,7 +40,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv python install 3.12
-      - run: mkdir -p ui/dist   # editable install expects it
       - name: Install (disk-tree bulk lister + dt_cloud)
         run: |
           uv sync --frozen --all-packages --all-extras

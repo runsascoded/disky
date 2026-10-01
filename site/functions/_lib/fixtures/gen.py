@@ -14,7 +14,10 @@
   dir, an empty object. Row groups are 2048 rows so the fixture has several.
 - `<stem>.d1.json` beside each: `{variant: {schema, rows}}` as `index-sync`
   puts them in `index_schema` / `index_row_groups` (`index_footer.extract`),
-  plus the served `.groups.json` blobs (`index_footer.groups_blob`).
+  plus the served `.groups.json` blobs (`index_footer.groups_blob`) and, for
+  the v2 sorts, the cold footer tier `.groups.parquet`
+  (`index_footer.write_groups_parquet`) at `FOOTER_ROWS` rows per footer
+  group, so a retired generation's footer reads prune between groups.
 - `v2/plans.json`: `disk-tree tiers plan -j -C` over each v2 sidecar for a
   set of reads — the engine planner's group selection, which the reader's
   span queries must reproduce exactly (`pathStore.test.ts`).
@@ -35,11 +38,14 @@ import pandas as pd
 import dt_cloud.index as ix
 from disk_tree.find.aggregate_duckdb import aggregate_listing_to_parquet
 from disk_tree.listing import prepare_listing
-from dt_cloud.index_footer import extract, groups_blob
+from dt_cloud.index_footer import extract, groups_blob, write_groups_parquet
 
 TS = datetime(2026, 9, 1, tzinfo=timezone.utc)
 N_FLAT = 8000
 MiB = 1 << 20
+#: Rows per footer group of the fixtures' `.groups.parquet`: one, so the v2
+#: sorts' 4 row groups are 4 footer groups the reader must prune between.
+FOOTER_ROWS = 1
 SORTS = {'path': 'path-index', 'bysize': 'path-index-bysize'}
 #: The reads cross-checked against the reader (path, thr, atten, max_depth).
 PLANS = [
@@ -92,8 +98,7 @@ def write_v2(here: str) -> None:
         con = duckdb.connect()
         l2 = join(tmp, 'l2.parquet')
         aggregate_listing_to_parquet(prepare_listing(con, (listing,)), bucket='bk', scheme='s3', out_parquet=l2, con=con, mean_mtime=True)
-        ix.ROW_GROUP_SIZE = 2048
-        summary = ix.write_index([('bk', l2)], join(tmp, 'out'), mem='1GB', threads=1)
+        summary = ix.write_index([('bk', l2)], join(tmp, 'out'), mem='1GB', threads=1, row_group_rows=2048)
         print(json.dumps({'rows': summary['rows'], 'columns': summary['columns'], 'sorts': summary['sorts']}, indent=2), file=sys.stderr)
         shutil.os.makedirs(out_dir)
         files = {}
@@ -104,6 +109,7 @@ def write_v2(here: str) -> None:
     d1 = d1_json(files)
     for variant, stem in SORTS.items():
         write_text(join(out_dir, f'{stem}.groups.json'), groups_blob(d1[variant]['schema'], d1[variant]['rows']))
+        write_groups_parquet(files[variant], d1[variant]['schema'], d1[variant]['rows'], row_group_rows=FOOTER_ROWS)
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
     plans = []
     for path, thr, atten, max_depth in PLANS:
@@ -120,7 +126,9 @@ def write_v2_lens(here: str) -> None:
     """`v2-lens/`: the v2 generation with an owner label (`usr`) — `nest`'s
     subtree is `alice`'s, `flat`'s `bob`'s, the rest unclaimed — so a lens view
     on a store generation (which writes no `user` sort; `path-index -U`) has
-    rows to filter. `path` + `bysize` only, as gcs writes them."""
+    rows to filter. `path` + `bysize` + the one user-first copy, `bysize-user`,
+    as gcs writes them (`path-index -u bysize`), each one group at the
+    writer's default row-group size."""
     out_dir = join(here, 'v2-lens')
     shutil.rmtree(out_dir, ignore_errors=True)
     with tempfile.TemporaryDirectory() as tmp:
@@ -146,17 +154,17 @@ def write_v2_lens(here: str) -> None:
               FROM read_parquet('{bare}')
             ) TO '{l2}' (FORMAT parquet)
         """)
-        ix.ROW_GROUP_SIZE = 2048
-        ix.write_index([('bk', l2)], join(tmp, 'out'), mem='1GB', threads=1)
+        ix.write_index([('bk', l2)], join(tmp, 'out'), mem='1GB', threads=1, sort_variants=(('usr',),), variant_tiers=('bysize',))
         shutil.os.makedirs(out_dir)
         files = {}
-        for variant, stem in SORTS.items():
+        for variant, stem in {**SORTS, 'bysize-user': 'path-index-bysize-by-user'}.items():
             dst = join(out_dir, f'{stem}.parquet')
             shutil.copy(join(tmp, 'out', f'{stem}.parquet'), dst)
             files[variant] = dst
     d1 = d1_json(files)
-    for variant, stem in SORTS.items():
+    for variant, stem in {**SORTS, 'bysize-user': 'path-index-bysize-by-user'}.items():
         write_text(join(out_dir, f'{stem}.groups.json'), groups_blob(d1[variant]['schema'], d1[variant]['rows']))
+        write_groups_parquet(files[variant], d1[variant]['schema'], d1[variant]['rows'], row_group_rows=FOOTER_ROWS)
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
 
 

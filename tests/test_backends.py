@@ -3,6 +3,7 @@ with the bucket's endpoint, and a loud refusal for `gcs://` (which used to
 fall through to the *local* backend and "succeed" with an empty scan).
 """
 
+import re
 import sys
 from io import StringIO
 from os.path import dirname, exists, join
@@ -111,8 +112,8 @@ def test_backend_for_threads_bucket_profile(monkeypatch, tmp_path):
 
 def test_gcs_refuses_live_operations():
     gcs = backend_for('gcs://bk/p')
-    msg = r"live scanning of gcs:// isn't implemented; import a listing instead \(`disk-tree pull`"
-    with pytest.raises(NotImplementedError, match=msg):
+    msg = "live scanning of gcs:// isn't implemented; import a listing instead (`disk-tree bulk-list` + `disk-tree import -l <listing>`)"
+    with pytest.raises(NotImplementedError, match=re.escape(msg)):
         list(gcs.list('gcs://bk/p'))
     with pytest.raises(NotImplementedError, match=r'delete of gcs://'):
         gcs.delete('gcs://bk/p')

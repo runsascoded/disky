@@ -69,7 +69,7 @@ def scans_move(src_dir: str | None, no_keep_latest: bool, dry_run: bool, dest: s
         # A hybrid scan's root blob only points at its chunks, so keeping the
         # root alone would still leave the latest scan unbrowsable with the
         # volume out. Keep the whole closure.
-        from disk_tree.diff import _chunk_map, resolve_blob
+        from disk_tree.resolve import _chunk_map, resolve_blob
         keep, queue = set(), [basename(s.blob) for s in latest.values()]
         while queue:
             ref = queue.pop()
@@ -118,8 +118,8 @@ def scans_move(src_dir: str | None, no_keep_latest: bool, dry_run: bool, dest: s
 def scans_register(src: str):
     """Add scans described by `*.scan.json` manifests to this DB.
 
-    SRC is one manifest, or a dir / URL holding them. A cloud reduce (or another
-    machine's `index --to`) records its Scan row in *its* DB; the manifest beside
+    SRC is one manifest, or a dir / URL holding them. Another machine's
+    `index --to` records its Scan row in *its* DB; the manifest beside
     the remote blob is how the scan reaches this one. Blobs resolve through the
     search path, so put their dir on `DISK_TREE_SCAN_DIRS`. Idempotent.
     """
@@ -231,7 +231,7 @@ def scans_info(path: str):
     if isfile(scan.blob):
         # Show parquet file size (the blob may sit on any read dir, or a URL)
         from disk_tree import blobfs
-        from disk_tree.diff import resolve_blob
+        from disk_tree.resolve import resolve_blob
         blob_path = resolve_blob(scan.blob)
         print(f"Blob size:    {blobfs.size(blob_path):,} bytes")
 

@@ -30,23 +30,3 @@ def init(sqlite_path: str = None) -> SQLAlchemy:
     Base.metadata.create_all(db.engine)
     add_missing_columns(db.engine)
     return db
-
-
-def reinit() -> None:
-    """Rebind the DB to the current `config.SQLITE_PATH` after a root change.
-
-    A no-op until the DB has actually been initialized — the next `init()` then
-    picks up the new path on its own. Registered as a `config.on_root_change`
-    hook so opening a library re-points the engine.
-    """
-    global db, app, cache_url
-    if db is None:
-        return
-    db.engine.dispose()
-    db = None
-    app = None
-    cache_url = None
-    init()
-
-
-config.on_root_change(reinit)

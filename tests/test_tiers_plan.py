@@ -260,11 +260,12 @@ def test_cli_cut_over_a_url_and_a_url_stem(tiers: Path, tmp_path: Path):
     ]
     assert [x['kv']['sort'] for x in reports] == ['depth,path', 'size_bucket desc,path']
     assert sorted(p.name for p in out.iterdir()) == [
-        'cut.bysize.groups.json', 'cut.bysize.parquet', 'cut.path.groups.json', 'cut.path.parquet',
+        'cut.bysize.groups.json', 'cut.bysize.groups.parquet', 'cut.bysize.parquet', 'cut.path.groups.json', 'cut.path.groups.parquet', 'cut.path.parquet',
     ]
     assert [x['bytes'] for x in reports] == [(out / 'cut.path.parquet').stat().st_size, (out / 'cut.bysize.parquet').stat().st_size]
     # The uploaded tiers are the local cut, byte for byte identical in content.
     assert (out / 'cut.bysize.groups.json').read_text() == (tiers / 'l2.bysize.groups.json').read_text()
+    assert (out / 'cut.bysize.groups.parquet').read_bytes() == (tiers / 'l2.bysize.groups.parquet').read_bytes()
     # A local layer-2 with no stem lands beside it; one tier by name.
     local = tmp_path / 'local'
     local.mkdir()

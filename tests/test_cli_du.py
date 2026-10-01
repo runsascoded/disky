@@ -140,7 +140,7 @@ def resolve_blob_env(env, blob):
     """Resolve a blob basename to its path under the test's DISK_TREE_ROOT."""
     import subprocess, sys
     code = (
-        "from disk_tree.diff import resolve_blob;"
+        "from disk_tree.resolve import resolve_blob;"
         f"print(resolve_blob({blob!r}))"
     )
     return subprocess.run([sys.executable, '-c', code], env=env,

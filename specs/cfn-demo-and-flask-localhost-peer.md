@@ -1,5 +1,7 @@
 # CFN public demo (fleet over R2) + Flask as the localhost peer
 
+**Status:** partly retired 2026-10-01 — the `ui/` Cloudflare edge was removed, so the CFW-demo half (`apps/cfn/`, the open-gate `ui/` demo) is retired; its served successor is `site/` (see specs/path-store.md). The Flask-as-localhost-peer half stands.
+
 Supersedes `two-reference-deploys.md` (2026-08-28). Revised through discussion
 2026-09-04/05. The original "two archs, compare the branch diff" framing is
 dropped — Ryan has no story for deploying Flask publicly, and the prod apps he

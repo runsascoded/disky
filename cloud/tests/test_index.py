@@ -92,8 +92,8 @@ def test_write_index(tmp_path: Path):
     }
     # Only the served files remain: the union itself is gone, no coarse tiers.
     assert sorted(p.name for p in out.iterdir() if p.name != ".duckdb-tmp") == sorted([
-        "path-index.parquet", "path-index.groups.json",
-        "path-index-bysize.parquet", "path-index-bysize.groups.json",
+        "path-index.parquet", "path-index.groups.json", "path-index.groups.parquet",
+        "path-index-bysize.parquet", "path-index-bysize.groups.json", "path-index-bysize.groups.parquet",
         *(f"age-pyramid-{b}.parquet" for b in BINS),
     ])
 

@@ -10,7 +10,7 @@ def get_backend(backend_type: str | None = None) -> StorageBackend:
     """Get or create the storage backend singleton.
 
     Args:
-        backend_type: 'parquet', 'duckdb', 'sqlite', or 'hybrid'. If None, uses DISK_TREE_BACKEND
+        backend_type: 'parquet' or 'hybrid'. If None, uses DISK_TREE_BACKEND
                       env var or defaults to 'hybrid'.
     """
     global _backend_instance
@@ -24,12 +24,6 @@ def get_backend(backend_type: str | None = None) -> StorageBackend:
     if backend_type == 'parquet':
         from .parquet import ParquetBackend
         _backend_instance = ParquetBackend()
-    elif backend_type == 'duckdb':
-        from .duckdb import DuckDBBackend
-        _backend_instance = DuckDBBackend()
-    elif backend_type == 'sqlite':
-        from .sqlite import SQLiteBackend
-        _backend_instance = SQLiteBackend()
     elif backend_type == 'hybrid':
         from .hybrid import HybridBackend
         _backend_instance = HybridBackend()
@@ -45,7 +39,6 @@ def reset_backend():
     _backend_instance = None
 
 
-# Opening a library must drop the backend built against the previous root.
+# `index --to` repoints the write dir; the backend must be rebuilt against it.
 from .. import config as _config  # noqa: E402
-_config.on_root_change(reset_backend)
 _config.on_write_target_change(reset_backend)

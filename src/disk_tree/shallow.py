@@ -4,12 +4,12 @@ the child's name, `parent == '.'`, `depth == 1`) plus a ``chunk_ref`` column
 naming the chunk blob. Written by `HybridBackend.save`, refreshed after an
 in-place delete, removed with the scan (spec `scan-page-r2-latency.md`).
 
-`/api/scan` at a chunked root shows each chunk's top level — ~100 rows per
+A chunked root's top-level view is each chunk's top level — ~100 rows per
 chunk. Reading them from the chunk blobs pulled the whole blob (3.6M rows,
 131 MiB from R2) per chunk per request. With the sidecar, a page load reads
 one small file; without one (scans saved before this landed), `chunk_top_rows`
-falls back to a `depth == 1` read of the chunk, projected to the columns the
-page emits and cached per process. Blobs are immutable except for the in-place
+falls back to a `depth == 1` read of the chunk, projected to the requested
+columns and cached per process. Blobs are immutable except for the in-place
 rewrite a delete does, so the caches key on `(path, mtime, size)`.
 """
 from __future__ import annotations

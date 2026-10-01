@@ -11,7 +11,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from disk_tree import listing_format as lf
-from disk_tree.access.state import live_bucket
 from disk_tree.blobfs import read_parquet
 from disk_tree.find.aggregate_duckdb import aggregate_listing_to_parquet
 from disk_tree.find.aggregate_stream import aggregate_stream
@@ -111,7 +110,7 @@ def test_restored_v2_is_the_v1_frame(tmp_path: Path, codec, classes):
 def test_tiers_from_either_format(tmp_path: Path, codec):
     """Tiers cut from a v1 layer-2 and from the v2 layer-2 of the same input read
     back row-for-row identical (bytes differ: the v2 tiers carry no `uri` column
-    and the v2 format keys), and both name the same bucket."""
+    and the v2 format keys)."""
     v2 = _duckdb(_listing(tmp_path / 'l.parquet', [1, 1, 1, 1, 1]), tmp_path / 'v2.parquet')
     v1 = str(tmp_path / 'v1.parquet')
     v1_df = read_parquet(v2)
@@ -124,6 +123,3 @@ def test_tiers_from_either_format(tmp_path: Path, codec):
         pd.testing.assert_frame_equal(read_parquet(a), read_parquet(b))
         assert _codecs(a) == _codecs(b) == {codec}
         assert lf.format_of(b) == lf.format_of(v2)
-    con = duckdb.connect()
-    path1, path2 = str(tmp_path / 't1.path.parquet'), str(tmp_path / 't2.path.parquet')
-    assert [live_bucket(con, p) for p in (v1, v2, path1, path2)] == ['b1'] * 4

@@ -19,12 +19,18 @@
  * never overwrites a file the pointer names: it lands a new generation and
  * flips the pointer last (specs/view-serving.md, "Index rewrite vs D1
  * footer"). A pointer whose row groups retention retired (`index-gc -r`)
- * opens the tier's group-manifest blob beside the parquet instead — the same
- * rows as one ~10 MB document, cached at the edge and per isolate — since
- * parsing the parquet footer itself exceeds the Worker's memory.
+ * opens the tier's **cold footer** instead (`pq` mode): the same rows as a
+ * small parquet beside the tier (`<tier>.groups.parquet`, 512 rows per
+ * group, stats on the pruning columns), whose own footer is range-read and
+ * cached; a query prunes its groups by those stats with the predicates it
+ * would send D1 and decodes only the survivors (specs/path-store.md §1.6).
+ * Only a generation without one opens the `.groups.json` blob (`blob` mode:
+ * the whole document, fine for small deployments — 86 MB on gcs is not).
+ * Parsing the tier parquet's own footer is never an option: a floor-free
+ * tier's ~27k-group footer exceeds the Worker's memory.
  */
 import { S3Store } from '@rdub/file-tree/stores/s3'
-import { parquetMetadataAsync, parquetReadObjects } from 'hyparquet'
+import { type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetReadObjects, type RowGroup } from 'hyparquet'
 import type { Env } from './auth.js'
 import { shared } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
@@ -150,7 +156,35 @@ interface BlobGroup extends Span {
   uMax: string | null
   rgJson: string
 }
-export type IndexHandle = D1Handle | BlobHandle
+/** Cold-footer-backed: the tier's footer rows as `<tier>.groups.parquet`
+ * (written beside it by `index-sync` / `index-blob`), opened when the D1
+ * pointer has no row groups for its generation. The handle holds that
+ * file's own (small) footer — one entry per footer group, with the group's
+ * byte range and its stats folded into the same bounds a tier group has —
+ * and a query decodes only the footer groups whose bounds pass its span
+ * predicate (`pqGroups`). */
+interface PqHandle extends Omit<D1Handle, 'mode'> {
+  mode: 'pq'
+  footer: FooterIndex
+}
+/** One row group of a `.groups.parquet`: its rows (= tier groups
+ * `[rgStart, rgEnd)`), byte range, hyparquet metadata, and the bounds its
+ * column stats give (null where a stat is missing: always a candidate). */
+interface FooterGroup {
+  n: number
+  rgStart: number
+  rgEnd: number
+  byteStart: number
+  byteEnd: number
+  meta: RowGroup
+  bounds: { dMin: number; dMax: number; pMin: string; pMax: string; bMax: number; uMin: string | null; uMax: string | null } | null
+}
+interface FooterIndex {
+  key: string
+  metadata: FileMetaData
+  groups: FooterGroup[]
+}
+export type IndexHandle = D1Handle | BlobHandle | PqHandle
 
 export const num = (v: unknown): number => (typeof v === 'bigint' ? Number(v) : (v as number) ?? 0)
 export const str = (v: unknown): string =>
@@ -324,13 +358,20 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
     const s = await schemaRow<{ version: number; schema_json: string; floor_bytes: number | null; gen: string | null; dir: string | null }>(env, 'version, schema_json, floor_bytes, gen, dir', date, variant)
     if (!s || !s.gen || !s.dir) throw new Error(`index variant '${variant}' not synced for ${date}`)
     // A pointer whose row groups were retired (`index-gc -r`) still names
-    // the generation dir: open the tier's group-manifest blob there instead.
-    // (Parsing the parquet footer itself is not an option — a floor-free
-    // tier's ~27k-group footer exceeds the Worker's memory.)
+    // the generation dir: open the tier's cold footer there, else (a
+    // generation from before it was written) the group-manifest blob.
     const any = await env.DB.prepare('SELECT 1 AS x FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1').bind(date, d1Variant(env, variant), s.gen).first<{ x: number }>()
-    if (!any) return openBlob(env, date, variant, s.gen, s.dir)
     const schema = JSON.parse(s.schema_json) as SchemaElement[]
-    return { mode: 'd1', file: fileFor(env, s.dir, variant), env, date, variant, gen: s.gen, schema, version: s.version, columns: rowColumns(s.version, schema), floor: s.floor_bytes == null ? null : num(s.floor_bytes) }
+    const base = { file: fileFor(env, s.dir, variant), env, date, variant, gen: s.gen, schema, version: s.version, columns: rowColumns(s.version, schema), floor: s.floor_bytes == null ? null : num(s.floor_bytes) }
+    if (any) return { mode: 'd1', ...base }
+    let footer: FooterIndex
+    try {
+      footer = await openFooter(env, footerKey(s.dir, variant))
+    } catch (e) {
+      if ((e as Error).name !== 'NotFoundError') throw e
+      return openBlob(env, date, variant, s.gen, s.dir)
+    }
+    return { mode: 'pq', ...base, footer }
   }, 30_000) // a blob open is a ~15 MB fetch + parse
 }
 
@@ -400,6 +441,135 @@ async function openBlob(env: Env, date: string, variant: string, gen: string, di
   if (blob.v !== 1) throw new Error(`${key}: unknown blob version ${blob.v}`)
   const groups: BlobGroup[] = blob.groups.map(([rg, dMin, dMax, pMin, pMax, bMax, uMin, uMax, rowStart, rowEnd, rgJson]) => ({ rg, dMin, dMax, pMin, pMax, bMax, uMin, uMax, rowStart, rowEnd, rgJson }))
   return { mode: 'blob', file: fileFor(env, dir, variant), env, date, variant, gen, schema: blob.schema, version: blob.version, columns: rowColumns(blob.version, blob.schema), floor: blob.floor_bytes == null ? null : num(blob.floor_bytes), groups }
+}
+
+// --- the cold footer tier: `<tier>.groups.parquet` (`pq` mode) ---------------
+
+/** The cold footer beside a tier (`disk_tree.find.groups.groups_parquet_path`). */
+export const footerKey = (dir: string, variant: string): string => indexKey(dir, variant).replace(/\.parquet$/, '.groups.parquet')
+
+/** The columns a footer row decodes (the writer's `FOOTER_COLS`, minus `b_min`:
+ * no span predicate reads it yet). */
+const FOOTER_COLS = ['rg', 'd_min', 'd_max', 'p_min', 'p_max', 'b_max', 'u_min', 'u_max', 'row_start', 'row_end', 'rg_json']
+
+/** The first tail read of a `.groups.parquet`: its whole footer in one
+ * request up to ~170 footer groups (~1.5 KB of thrift each, measured on cw's
+ * `bysize`: 14 groups → 20.8 KB) — a gcs sort at 32K-row tier groups has
+ * ~47; a larger footer costs one more request. */
+const FOOTER_TAIL = 1 << 18
+
+const colo = (): Cache => (caches as unknown as { default: Cache }).default
+/** A colo-cache key for part of a store object — a secondary store's under its own segment. */
+const coloKey = (env: Env, key: string, part: string): Request => {
+  const st = storeKey(env)
+  return new Request(`https://index-footer.cache/${st === PRIMARY_STORE ? '' : `@${st}/`}${key}?${part}`)
+}
+const toBuffer = (b: Uint8Array): ArrayBuffer => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer
+
+/** Bytes `[start, end)` of a store object through the colo cache (a
+ * generation dir is immutable, so a range is too). */
+async function cachedRange(env: Env, key: string, start: number, end: number): Promise<ArrayBuffer> {
+  const ck = coloKey(env, key, `r=${start}-${end}`)
+  const hit = await colo().match(ck)
+  if (hit) return hit.arrayBuffer()
+  const buf = toBuffer((await makeStore(env).get(key, { offset: start, length: end - start })).bytes)
+  await colo().put(ck, new Response(buf, { headers: { 'cache-control': `max-age=${BLOB_CACHE_TTL}` } }))
+  return buf
+}
+
+/** A `.groups.parquet`'s footer — its metadata bytes + the 8-byte trailer,
+ * colo-cached — parsed into one `FooterGroup` per row group. Throws the
+ * store's `NotFoundError` when the file is absent (the caller falls back to
+ * the `.groups.json` blob). */
+async function openFooter(env: Env, key: string): Promise<FooterIndex> {
+  const ck = coloKey(env, key, 'footer')
+  let buf: ArrayBuffer
+  const hit = await colo().match(ck)
+  if (hit) buf = await hit.arrayBuffer()
+  else {
+    const store = makeStore(env)
+    const size = (await store.get(key, { offset: 0, length: 1 })).totalSize
+    if (size == null || !(size >= 12)) throw new Error(`${key}: size unknown or too small (${size})`)
+    const at = Math.max(0, size - FOOTER_TAIL)
+    let tail = new Uint8Array(toBuffer((await store.get(key, { offset: at, length: size - at })).bytes))
+    const need = new DataView(tail.buffer).getUint32(tail.byteLength - 8, true) + 8
+    if (need > size) throw new Error(`${key}: footer length ${need} exceeds the file (${size})`)
+    if (need > tail.byteLength) {
+      const head = (await store.get(key, { offset: size - need, length: need - tail.byteLength })).bytes
+      const all = new Uint8Array(need)
+      all.set(head, 0)
+      all.set(tail, head.byteLength)
+      tail = all
+    }
+    buf = toBuffer(tail.subarray(tail.byteLength - need))
+    await colo().put(ck, new Response(buf, { headers: { 'cache-control': `max-age=${BLOB_CACHE_TTL}` } }))
+  }
+  const metadata = parquetMetadata(buf)
+  const kv = new Map((metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
+  if (kv.get('groups_v') !== '1') throw new Error(`${key}: not a v1 groups parquet (groups_v=${kv.get('groups_v')})`)
+  let rg = 0
+  const groups = metadata.row_groups.map((meta, n): FooterGroup => {
+    const cols = new Map(meta.columns.map(c => [c.meta_data!.path_in_schema[0], c.meta_data!]))
+    let byteStart = Infinity
+    let byteEnd = 0
+    for (const c of cols.values()) {
+      const data = Number(c.data_page_offset)
+      const dict = c.dictionary_page_offset == null ? data : Number(c.dictionary_page_offset)
+      const start = dict > 0 ? Math.min(dict, data) : data
+      byteStart = Math.min(byteStart, start)
+      byteEnd = Math.max(byteEnd, start + Number(c.total_compressed_size))
+    }
+    const stat = (col: string) => cols.get(col)?.statistics
+    const lo = (col: string) => { const s = stat(col); return s?.min_value ?? s?.min }
+    const hi = (col: string) => { const s = stat(col); return s?.max_value ?? s?.max }
+    const req = [lo('d_min'), hi('d_max'), lo('p_min'), hi('p_max'), hi('b_max')]
+    // `u_*` are nullable: a group with stats but no min/max is all-NULL (no
+    // lens matches it); a group without stats at all is unknown — as is one
+    // missing any other bound — and always a candidate.
+    const uKnown = stat('u_min') != null && stat('u_max') != null
+    const bounds = req.some(v => v == null) || !uKnown
+      ? null
+      : { dMin: num(req[0]), dMax: num(req[1]), pMin: str(req[2]), pMax: str(req[3]), bMax: num(req[4]), uMin: lo('u_min') == null ? null : str(lo('u_min')), uMax: hi('u_max') == null ? null : str(hi('u_max')) }
+    const rows = Number(meta.num_rows)
+    const g = { n, rgStart: rg, rgEnd: rg + rows, byteStart, byteEnd, meta, bounds }
+    rg += rows
+    return g
+  })
+  return { key, metadata, groups }
+}
+
+/** Decode one footer group into the blob handle's group shape — cached per
+ * isolate beside the tier groups, `(store, date, variant, gen, fg:<n>)`. */
+async function readFooterGroup(h: PqHandle, fg: FooterGroup): Promise<BlobGroup[]> {
+  const k = `${storeKey(h.env)}|${h.date}|${h.variant}|${h.gen}|fg:${fg.n}`
+  const hit = cacheGet<BlobGroup>(k)
+  if (hit) return hit
+  const t0 = now()
+  const buf = await cachedRange(h.env, h.footer.key, fg.byteStart, fg.byteEnd)
+  const file: FileSlice = { byteLength: fg.byteEnd, slice: async (s, e) => buf.slice(s - fg.byteStart, (e ?? fg.byteEnd) - fg.byteStart) }
+  const metadata = { ...h.footer.metadata, row_groups: [fg.meta], num_rows: fg.meta.num_rows }
+  const rows = (await parquetReadObjects({ file, metadata, columns: FOOTER_COLS, compressors })) as Record<string, unknown>[]
+  const out = rows.map((r): BlobGroup => ({
+    rg: num(r.rg), dMin: num(r.d_min), dMax: num(r.d_max), pMin: str(r.p_min), pMax: str(r.p_max), bMax: num(r.b_max),
+    uMin: r.u_min == null ? null : str(r.u_min), uMax: r.u_max == null ? null : str(r.u_max),
+    rowStart: num(r.row_start), rowEnd: num(r.row_end), rgJson: str(r.rg_json),
+  }))
+  h.trace?.('footer', now() - t0, h.variant)
+  cachePut(k, out, out.reduce((n, g) => n + 96 + 2 * (g.pMin.length + g.pMax.length + g.rgJson.length), 0))
+  return out
+}
+
+/** The tier groups of a `pq` handle that `pass` (the span predicate)
+ * accepts: footer groups whose bounds fail it are never fetched or decoded.
+ * Sound because each predicate is monotone in the bounds — a footer group's
+ * bounds contain every row's — and `groupMatches` / `groupMatchesSize`
+ * applied to the bounds is exactly that relaxation (a depth-spanning range
+ * skips the path test, a mixed-user one the keyed rect). */
+async function pqGroups(h: PqHandle, pass: (g: NonNullable<FooterGroup['bounds']>) => boolean): Promise<BlobGroup[]> {
+  const sel = h.footer.groups.filter(fg => !fg.bounds || pass(fg.bounds))
+  h.trace?.('fgroups', sel.length)
+  const all = (await mapLimit(sel, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
+  return all.filter(pass)
 }
 
 // --- shared row shaping ------------------------------------------------------
@@ -516,29 +686,44 @@ export interface Span extends GroupSpan { rg: number }
  * keeps well inside the isolate's 128 MB with concurrent requests. */
 const GROUP_CACHE_CAP = 24 << 20
 const ROW_BYTES = 160 // a shaped Row with a ~60-char path, roughly
-const groupCache = new Map<string, Row[]>()
+/** Tier groups (`…|<rg>` → `Row[]`) and a cold footer's decoded groups
+ * (`…|fg:<n>` → `BlobGroup[]`), one LRU, each entry with its estimated bytes. */
+const groupCache = new Map<string, { v: unknown[]; bytes: number }>()
 let groupCacheBytes = 0
+
+function cacheGet<T>(k: string): T[] | undefined {
+  const hit = groupCache.get(k)
+  if (!hit) return undefined
+  groupCache.delete(k)
+  groupCache.set(k, hit) // LRU: most recent last
+  return hit.v as T[]
+}
+
+function cachePut(k: string, v: unknown[], bytes: number): void {
+  if (bytes > GROUP_CACHE_CAP) return
+  const old = groupCache.get(k)
+  if (old) {
+    groupCache.delete(k)
+    groupCacheBytes -= old.bytes
+  }
+  while (groupCacheBytes + bytes > GROUP_CACHE_CAP && groupCache.size) {
+    const [k0, e0] = groupCache.entries().next().value as [string, { bytes: number }]
+    groupCache.delete(k0)
+    groupCacheBytes -= e0.bytes
+  }
+  groupCache.set(k, { v, bytes })
+  groupCacheBytes += bytes
+}
 
 async function readGroupCached(h: IndexHandle, rg: number, rgJson: string): Promise<Row[]> {
   const k = `${storeKey(h.env)}|${h.date}|${h.variant}|${h.gen}|${rg}`
-  const hit = groupCache.get(k)
+  const hit = cacheGet<Row>(k)
   if (hit) {
-    groupCache.delete(k)
-    groupCache.set(k, hit) // LRU: most recent last
     h.trace?.('gcache', 1)
     return hit
   }
   const rows = await readGroup(h, rgJson)
-  const bytes = rows.length * ROW_BYTES
-  if (bytes <= GROUP_CACHE_CAP) {
-    while (groupCacheBytes + bytes > GROUP_CACHE_CAP && groupCache.size) {
-      const [k0, v0] = groupCache.entries().next().value as [string, Row[]]
-      groupCache.delete(k0)
-      groupCacheBytes -= v0.length * ROW_BYTES
-    }
-    groupCache.set(k, rows)
-    groupCacheBytes += bytes
-  }
+  cachePut(k, rows, rows.length * ROW_BYTES)
   return rows
 }
 
@@ -582,8 +767,9 @@ export function groupMatches(g: { dMin: number; dMax: number; pMin: string; pMax
  * finer per-ask test. A group spanning a depth boundary resets path order, so
  * the path test only applies within a single depth (`d_min = d_max`). */
 async function selectSpans(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0, lens?: Lens): Promise<Span[]> {
-  if (h.mode === 'blob') {
-    const out = h.groups.filter(g => groupMatches(g, rects, bMin, lens, lensSorted(h.variant)))
+  if (h.mode !== 'd1') {
+    const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant))
+    const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
     if (out.length > cap) throw new Error(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
   }
@@ -627,6 +813,15 @@ async function fetchGroupJson(h: IndexHandle, rgs: number[]): Promise<Map<number
   if (h.mode === 'blob') {
     const want = new Set(rgs)
     for (const g of h.groups) if (want.has(g.rg)) out.set(g.rg, g.rgJson)
+    return out
+  }
+  if (h.mode === 'pq') {
+    // A tier group's footer row is row `rg` of the footer parquet: read the
+    // footer groups holding the asked rgs (the span query just decoded them,
+    // so these are cache hits).
+    const want = new Set(rgs)
+    const fgs = h.footer.groups.filter(fg => rgs.some(rg => rg >= fg.rgStart && rg < fg.rgEnd))
+    for (const g of (await mapLimit(fgs, GROUP_READS, fg => readFooterGroup(h, fg))).flat()) if (want.has(g.rg)) out.set(g.rg, g.rgJson)
     return out
   }
   for (let i = 0; i < rgs.length; i += 80) {
@@ -741,8 +936,9 @@ export function groupMatchesSize(g: { pMin: string; pMax: string; bMax: number; 
  * one byte floor — one SQL pass per batch of ranges, no depth rect (the
  * depth test is per row, §1.3 "attenuation"). */
 async function selectSizeSpans(h: IndexHandle, ranges: { pLo: string; pHi: string }[], thrMin: number, cap = 4000, lens?: Lens): Promise<Span[]> {
-  if (h.mode === 'blob') {
-    const out = h.groups.filter(g => groupMatchesSize(g, ranges, thrMin, lens))
+  if (h.mode !== 'd1') {
+    const pass = (g: Parameters<typeof groupMatchesSize>[0]) => groupMatchesSize(g, ranges, thrMin, lens)
+    const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
     if (out.length > cap) throw new Error(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
   }
@@ -764,6 +960,14 @@ async function selectSizeSpans(h: IndexHandle, ranges: { pLo: string; pHi: strin
 const maxDepths = new Map<string, Promise<number>>()
 async function tierMaxDepth(h: IndexHandle): Promise<number> {
   if (h.mode === 'blob') return h.groups.reduce((m, g) => Math.max(m, g.dMax), 0)
+  if (h.mode === 'pq') {
+    // The footer groups' `d_max` stats bound it; decode only where a group has none.
+    let m = 0
+    for (const fg of h.footer.groups) {
+      m = Math.max(m, fg.bounds ? fg.bounds.dMax : (await readFooterGroup(h, fg)).reduce((x, g) => Math.max(x, g.dMax), 0))
+    }
+    return m
+  }
   const k = `${storeKey(h.env)}|${h.date}|${h.variant}|${h.gen}`
   return shared(maxDepths, k, async () => {
     const r = await h.env.DB!.prepare('SELECT MAX(d_max) AS d FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ?').bind(h.date, d1Variant(h.env, h.variant), h.gen).first<{ d: number | null }>()

@@ -7,8 +7,6 @@ import pytest
 
 from disk_tree.storage.base import PathStats
 from disk_tree.storage.parquet import ParquetBackend
-from disk_tree.storage.duckdb import DuckDBBackend
-from disk_tree.storage.sqlite import SQLiteBackend
 from disk_tree.storage.hybrid import HybridBackend
 
 
@@ -66,116 +64,6 @@ class TestParquetBackend:
             blob_ref = backend.save(sample_df, '/test')
             result = backend.delete_path(blob_ref, 'foo/a.txt')
             assert result is None  # Not supported
-
-
-class TestDuckDBBackend:
-    def test_save_and_load(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = DuckDBBackend(db_path=os.path.join(tmpdir, 'test.duckdb'))
-            blob_ref = backend.save(sample_df, '/test')
-
-            loaded = backend.load(blob_ref)
-            assert len(loaded) == 6
-            assert set(loaded['path'].tolist()) == {'.', 'foo', 'bar', 'foo/a.txt', 'foo/b.txt', 'bar/c.txt'}
-
-    def test_depth_filtering(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = DuckDBBackend(db_path=os.path.join(tmpdir, 'test.duckdb'))
-            blob_ref = backend.save(sample_df, '/test')
-
-            loaded = backend.load(blob_ref, max_depth=1, min_depth=1)
-            assert len(loaded) == 2
-            assert set(loaded['path'].tolist()) == {'foo', 'bar'}
-
-    def test_get_path_stats(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = DuckDBBackend(db_path=os.path.join(tmpdir, 'test.duckdb'))
-            blob_ref = backend.save(sample_df, '/test')
-
-            stats = backend.get_path_stats(blob_ref, 'foo')
-            assert stats is not None
-            assert stats.size == 400
-            assert stats.n_desc == 2
-
-    def test_delete_path_updates_ancestors(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = DuckDBBackend(db_path=os.path.join(tmpdir, 'test.duckdb'))
-            assert backend.supports_updates is True
-            blob_ref = backend.save(sample_df, '/test')
-
-            # Delete foo/a.txt (size=100, n_desc=1)
-            stats = backend.delete_path(blob_ref, 'foo/a.txt')
-            assert stats is not None
-            assert stats.size == 100
-
-            # Verify it's deleted
-            assert backend.get_path_stats(blob_ref, 'foo/a.txt') is None
-
-            # Verify parent 'foo' was updated
-            foo_stats = backend.get_path_stats(blob_ref, 'foo')
-            assert foo_stats.size == 300  # 400 - 100
-            assert foo_stats.n_desc == 1  # 2 - 1
-            assert foo_stats.n_children == 1  # 2 - 1
-
-            # Verify root '.' was updated
-            root_stats = backend.get_path_stats(blob_ref, '.')
-            assert root_stats.size == 900  # 1000 - 100
-            assert root_stats.n_desc == 4  # 5 - 1
-
-
-class TestSQLiteBackend:
-    def test_save_and_load(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = SQLiteBackend(db_path=os.path.join(tmpdir, 'test.sqlite'))
-            blob_ref = backend.save(sample_df, '/test')
-
-            loaded = backend.load(blob_ref)
-            assert len(loaded) == 6
-            assert set(loaded['path'].tolist()) == {'.', 'foo', 'bar', 'foo/a.txt', 'foo/b.txt', 'bar/c.txt'}
-
-    def test_depth_filtering(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = SQLiteBackend(db_path=os.path.join(tmpdir, 'test.sqlite'))
-            blob_ref = backend.save(sample_df, '/test')
-
-            loaded = backend.load(blob_ref, max_depth=1, min_depth=1)
-            assert len(loaded) == 2
-            assert set(loaded['path'].tolist()) == {'foo', 'bar'}
-
-    def test_get_path_stats(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = SQLiteBackend(db_path=os.path.join(tmpdir, 'test.sqlite'))
-            blob_ref = backend.save(sample_df, '/test')
-
-            stats = backend.get_path_stats(blob_ref, 'foo')
-            assert stats is not None
-            assert stats.size == 400
-            assert stats.n_desc == 2
-
-    def test_delete_path_updates_ancestors(self, sample_df):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            backend = SQLiteBackend(db_path=os.path.join(tmpdir, 'test.sqlite'))
-            assert backend.supports_updates is True
-            blob_ref = backend.save(sample_df, '/test')
-
-            # Delete foo/a.txt (size=100, n_desc=1)
-            stats = backend.delete_path(blob_ref, 'foo/a.txt')
-            assert stats is not None
-            assert stats.size == 100
-
-            # Verify it's deleted
-            assert backend.get_path_stats(blob_ref, 'foo/a.txt') is None
-
-            # Verify parent 'foo' was updated
-            foo_stats = backend.get_path_stats(blob_ref, 'foo')
-            assert foo_stats.size == 300  # 400 - 100
-            assert foo_stats.n_desc == 1  # 2 - 1
-            assert foo_stats.n_children == 1  # 2 - 1
-
-            # Verify root '.' was updated
-            root_stats = backend.get_path_stats(blob_ref, '.')
-            assert root_stats.size == 900  # 1000 - 100
-            assert root_stats.n_desc == 4  # 5 - 1
 
 
 class TestHybridBackend:
@@ -301,10 +189,6 @@ class TestHybridBackend:
 def _mk_backend(kind: str, tmpdir: str):
     if kind == 'parquet':
         return ParquetBackend(scans_dir=tmpdir)
-    if kind == 'duckdb':
-        return DuckDBBackend(db_path=os.path.join(tmpdir, 'test.duckdb'))
-    if kind == 'sqlite':
-        return SQLiteBackend(db_path=os.path.join(tmpdir, 'test.sqlite'))
     if kind == 'hybrid':
         return HybridBackend(scans_dir=tmpdir)
     raise ValueError(kind)
@@ -330,7 +214,7 @@ def prefix_adversarial_df():
     ])
 
 
-BACKENDS = ['parquet', 'duckdb', 'sqlite', 'hybrid']
+BACKENDS = ['parquet', 'hybrid']
 
 
 @pytest.mark.parametrize('kind', BACKENDS)
