@@ -188,7 +188,7 @@ the walk carries the app's identity with no child-process caveat — the core v2
   See "Scheduled scans" below.
 - **Phase 6** — whole-machine coverage (not just `~`). ⏳ walker half done. See "Whole-machine coverage".
 - **Phase 7** — menu-bar presence ✅, `SMAppService`-registered agents ✅, login item ✅,
-  template icon ✅; in-app sign-in open (base is building the auth hand-off). The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
+  template icon ✅; in-app sign-in ✅ app side (redemption untested until disk.rbw.sh has the endpoint). The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
 
 ## Scheduled scans (Phase 5)
 
@@ -343,23 +343,29 @@ Still to do: a scope setting (whole machine / home) once `laptop-scan`'s `/` cap
 (`m3`); a schedule setting (bundled plists fix 06:00/18:00; changing it means a rebuild, or a
 second bundled variant).
 
-### Sign-in inside the window (open)
+### Sign-in inside the window ✅ app side (2026-09-30)
 
-disk.rbw.sh is private; its sign-in is Google OAuth (plus access links). Google refuses OAuth in
-embedded webviews (`disallowed_useragent`; WKWebView's UA has no `Safari/` token). Observed
-2026-09-30: clicking "Sign in" in the window left an empty page (no screen-capture permission
-from the session, so not seen directly). Spoofing Safari's UA is against Google's policy. The
-sanctioned shape is **sign in in the system browser, hand a one-time credential to the app**:
+disk.rbw.sh is private and its sign-in is Google OAuth, which Google refuses in embedded webviews
+(`disallowed_useragent`). So the person signs in in the system browser and hands the app a
+one-time credential. Site half: `specs/app-link.md` on `cloud` (87ac278): `POST /api/app-link`
+mints a 60 s single-use link for the caller's own email and scopes; `GET /auth/app-link?token=`
+redeems it into an ordinary session cookie; the user menu's **Open in disky** navigates to
+`disky://open?link=<url>`.
 
-1. Register a `disky://` URL scheme (`tauri-plugin-deep-link`).
-2. The site (signed in, in the browser) offers "Open in disky": it mints a short-lived,
-   single-use access link for the *current user* (the existing `@open-athena/auth` grant
-   mechanism: "an access link signs this browser in automatically") and navigates to
-   `disky://open?link=<url>`.
-3. disky loads that link in its window; the grant sets the session cookie in the app's webview.
+App half (`applink.rs`):
+- `Info.plist` registers the `disky` URL scheme (`CFBundleURLTypes`; Tauri merges
+  `src-tauri/Info.plist`); `RunEvent::Opened` delivers the URL, cold launch included.
+- **Only** `https://<site origin>/auth/app-link?…` is loaded (stricter than the contract's "same
+  origin": the redeem path only), into the main window (created or navigated). Anything else is
+  refused with a `disky.log` line that never echoes the URL (it may carry a token). Unit-tested:
+  http, other hosts, look-alike hosts, other ports, other paths, `javascript:`, missing `link`.
+- The webview's user agent ends in ` disky/<version>`, so the site hides the button in the app.
 
-(2) is a site/`$oa/auth` change (self-mint, scoped to the caller's own email and scopes, a TTL
-of minutes, logged). Until then: "Open in browser".
+Verified 2026-09-30: the UA (a local server logged `…(KHTML, like Gecko) disky/0.1.0`); a
+wrong-origin link refused and logged; `open 'disky://open?link=https://disk.rbw.sh/auth/app-link?token=…'`
+with the app quit cold-launched it into one window on that URL. Not yet verified: an actual
+redemption, since disk.rbw.sh serves `/auth/app-link` only after `m3`'s next `cloud` merge.
+Open: a download URL for the site's "install the app" hint (none until disky is distributed).
 
 ## Remaining work (v2 not yet "real")
 

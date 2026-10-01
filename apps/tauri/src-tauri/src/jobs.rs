@@ -67,7 +67,7 @@ pub fn log_paths(name: &str, job: Option<&Job>) -> (PathBuf, PathBuf) {
     (d.join(format!("{stem}.out.log")), d.join(format!("{stem}.err.log")))
 }
 
-fn note(msg: &str) {
+pub fn note(msg: &str) {
     let _ = std::fs::create_dir_all(logs_dir());
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(logs_dir().join("disky.log")) {
         let _ = writeln!(f, "{msg}");

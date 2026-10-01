@@ -9,6 +9,7 @@
 //! See `specs/tauri-native-app.md` (Phases 5–7).
 
 mod agent;
+mod applink;
 mod jobs;
 mod services;
 mod status;
@@ -53,22 +54,45 @@ fn open(target: &str) {
     let _ = Command::new("/usr/bin/open").arg(target).spawn();
 }
 
-fn show_window(app: &AppHandle) {
+/// Show the window, creating it on the site if needed; with `url`, navigate there.
+fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
     if let Some(w) = app.get_webview_window("main") {
+        if let Some(u) = url {
+            let _ = w.navigate(u);
+        }
         let _ = w.show();
         let _ = w.set_focus();
         return;
     }
-    let url = site_url();
-    let Ok(parsed) = url.parse() else {
-        eprintln!("disky: bad DISKY_URL {url:?}");
-        return;
+    let target = match url {
+        Some(u) => u,
+        None => match site_url().parse() {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("disky: bad DISKY_URL {:?}", site_url());
+                return;
+            }
+        },
     };
-    let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
+    let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target))
         .title("disky")
+        .user_agent(&applink::user_agent())
         .inner_size(1280.0, 860.0)
         .min_inner_size(480.0, 400.0)
         .build();
+}
+
+/// A `disky://` URL from LaunchServices (the browser's "Open in disky").
+fn open_deep_link(app: &AppHandle, deep: &tauri::Url) {
+    let site = match tauri::Url::parse(&site_url()) {
+        Ok(s) => s,
+        Err(e) => return jobs::note(&format!("disky: bad DISKY_URL: {e}")),
+    };
+    match applink::link_to_load(deep, &site) {
+        Ok(link) => show_window(app, Some(link)),
+        // Never log the URL itself: a valid-looking one carries a token.
+        Err(e) => jobs::note(&format!("disky: refused a disky:// link: {e}")),
+    }
 }
 
 fn fda_line(granted: bool) -> &'static str {
@@ -150,7 +174,7 @@ pub fn run() {
                         }
                         let _ = login_c.set_checked(services::status(s) == "enabled");
                     }
-                    "window" => show_window(app),
+                    "window" => show_window(app, None),
                     "browser" => open(&site_url()),
                     "logs" => {
                         let home = std::env::var("HOME").unwrap_or_default();
@@ -176,12 +200,15 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error building disky")
-        .run(|_app, event| {
+        .run(|app, event| match event {
             // Closing the window leaves the menu-bar item running.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                if code.is_none() {
-                    api.prevent_exit();
+            tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                for u in &urls {
+                    open_deep_link(app, u);
                 }
             }
+            _ => {}
         });
 }
