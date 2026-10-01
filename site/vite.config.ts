@@ -40,14 +40,27 @@ const devSeriesIndex = {
 // `CLOUDFLARE_ENV=<name>` is set — the same variable wrangler itself reads —
 // so a preview build carries the preview's mode, not production's.
 // `VITE_STORE` / `VITE_AUTH_MODE` in the environment still override (a CI
-// build of another store, e.g. deploy-r2.yml). Neither set → the registry's
-// first store, `app`.
+// build of another store). Neither set → the registry's first store, `app`.
+//
+// Which file: `$WRANGLER_CONFIG` if set (e.g. `wrangler.r2-dev.toml`), else
+// the deployment branch's own `wrangler.toml`, else `wrangler.r2.toml` — the
+// r2 demo's config, which is all `cloud` carries (it has no `wrangler.toml`;
+// each child branch owns its own as a whole file).
+function wranglerConfig(): string | undefined {
+  const explicit = process.env.WRANGLER_CONFIG
+  if (explicit) {
+    if (!existsSync(explicit)) throw new Error(`WRANGLER_CONFIG=${explicit}: no such file`)
+    return explicit
+  }
+  return ['wrangler.toml', 'wrangler.r2.toml'].find(f => existsSync(f))
+}
 function wranglerVars(env = process.env.CLOUDFLARE_ENV): Record<string, string> {
-  if (!existsSync('wrangler.toml')) return {}
+  const file = wranglerConfig()
+  if (!file) return {}
   const vars: Record<string, string> = {}
   const sections = new Set(['[vars]', ...(env ? [`[env.${env}.vars]`] : [])])
   let inVars = false
-  for (const raw of readFileSync('wrangler.toml', 'utf8').split('\n')) {
+  for (const raw of readFileSync(file, 'utf8').split('\n')) {
     const line = raw.replace(/#.*$/, '').trim()
     if (line.startsWith('[')) { inVars = sections.has(line); continue }
     const m = inVars ? /^([A-Z_][A-Z0-9_]*)\s*=\s*"([^"]*)"$/.exec(line) : null

@@ -39,7 +39,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 
 TIB = 1024**4
-# The scan covers every CoreWeave bucket (specs/cw-multi-bucket.md); the
+# The scan covers every CoreWeave bucket (specs/done/cw-multi-bucket.md); the
 # digest's headline, deltas and quota line are the PRIMARY's (the 1 PB
 # bucket), read from `meta.buckets[<primary>]` when the scan has it and from
 # the flat totals (which were the primary's) before that. The other buckets

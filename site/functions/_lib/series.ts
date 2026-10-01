@@ -1,4 +1,4 @@
-// The pure parts of `/api/series?split=roots` (specs/root-geneses.md §1):
+// The pure parts of `/api/series?split=roots` (specs/done/root-geneses.md §1):
 // per-root traces from the depth-1 rows of each indexed scan, plus what a
 // tier-less scan's meta.json can still say about its roots.
 

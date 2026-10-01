@@ -246,7 +246,7 @@ export function makeStore(env: Env) {
  * `INDEX_VARIANTS` in the dt-cloud CLI (specs/view-serving.md §1). */
 export function indexKey(dir: string, variant: string): string {
   // The age index is a standalone index (per-path created-day strata), not a
-  // path-index tier, so it keeps its own base name (specs/age-index.md).
+  // path-index tier, so it keeps its own base name (specs/done/age-index.md).
   if (variant === 'age') return `${dir}/age-index.parquet`
   // Phase B: one path-major pyramid tier per bin (`age-pyramid-<bin>`).
   const pm = /^age-pyramid-(\d+(?:min|h|d|mo|y))$/.exec(variant)

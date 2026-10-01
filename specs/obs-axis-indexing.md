@@ -81,7 +81,18 @@ archival compaction). Refinements:
 ## Phasing (proposed)
 
 1. **Over-time-per-path index** (aggregate half). ✅ **Implemented** (cw-s3;
-   verified on dev with a 15-scan real build). Not a throwaway densify — the
+   verified on dev with a 15-scan real build). **LIVE in production 2026-09-28**:
+   the capped-K groups had no producer stage until then (`pyramid_multiscans`
+   was empty, so `/api/series` walked one point per scan — 5–20 s cold, and
+   never cached either: `[base]` `be72545`). `dt-cloud over-time-groups`
+   (`27c55aa`) + `job/cw-overtime.sh` (cw-run.sh stage 4d; one-off
+   `cw-overtime-submit.sh`) seal fixed K=16 groups from the oldest scan;
+   the first backfill (`cw-overtime-20260928-145440`, ~30 min on
+   n2-standard-8) sealed 5 groups over 80 of 95 scans — ≈11.1–11.2 M
+   intervals / 11.1–11.2 M paths each, 142–259 MB parquet, 1360–1374 row
+   groups — published to R2 under each group's last scan's layer-2 dir with
+   `index_schema` (`over-time`) + manifest rows verified in D1. The ≤15-scan
+   tip stays per-scan until the next seal (every 16 scans ≈ 8 days). Not a throwaway densify — the
    durable SCD-2 interval substrate (Phase 2 reuses it), since the churn is so
    low (measured 1.0016 intervals/path over 15 real scans) that intervals cost
    ≈ one tier for the whole history. Shipped shape:

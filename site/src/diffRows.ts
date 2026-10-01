@@ -36,7 +36,7 @@ export interface DiffTableRow {
 export const deltaPct = (a: number, b: number): number | null => (a > 0 ? (b - a) / a : null)
 
 /** A row's status: the diff's own, except that a first-scanned root (entered
- *  the scan this interval — specs/root-geneses.md §3) reads as `first`, not
+ *  the scan this interval — specs/done/root-geneses.md §3) reads as `first`, not
  *  `added`, and the filler cell is `unchanged`. */
 export const statusOf = (n: DiffNode): DiffStatus =>
   n.first ? 'first' : n.status === 'filler' || n.status === 'root' ? 'unchanged' : n.status

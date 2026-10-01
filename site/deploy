@@ -3,10 +3,11 @@
 # (`oa-gcs-usage` → gcs.oa.dev, `oa-cw-s3-usage` → cw-s3.oa.dev; Open Athena
 # account). CF Access (Zero Trust) gates every hostname, production and preview.
 set -euo pipefail
+cd "$(dirname "$0")"
 # The Pages project this checkout deploys: `name = "…"` in wrangler.toml.
+[ -f wrangler.toml ] || { echo "deploy: no site/wrangler.toml: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)" >&2; exit 1; }
 PROJECT=$(sed -n 's/^name = "\(.*\)"$/\1/p' wrangler.toml)
 [ -n "$PROJECT" ] || { echo "deploy: no name = ... in wrangler.toml" >&2; exit 1; }
-cd "$(dirname "$0")"
 
 # `--status`: report whether HEAD is deployed (no build/deploy). Delegates to the
 # standalone `cf-status` (queries the CF Pages deployments API, compares to HEAD).

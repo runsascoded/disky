@@ -1,4 +1,4 @@
-// Pure helpers for the store root's size-over-time (specs/root-geneses.md
+// Pure helpers for the store root's size-over-time (specs/done/root-geneses.md
 // §2): per-root traces stacked into bands, and each root's genesis — the
 // first scan its trace has a point for.
 

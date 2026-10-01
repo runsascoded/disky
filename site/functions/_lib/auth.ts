@@ -24,7 +24,7 @@ export interface Env {
   DB?: D1Database
   SESSION_SECRET?: string
   /** OIDC (our own Google client) — the ZT-free sign-in path. Set as Pages
-   *  secrets; see specs/oidc-cutover-cw.md. Absent → `/auth/google` 503s. */
+   *  secrets; see specs/done/oidc-cutover-cw.md. Absent → `/auth/google` 503s. */
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
   /** Email-code fallback (ZT One-Time-PIN replacement) — Resend sender + `from`

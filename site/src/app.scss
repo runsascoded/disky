@@ -670,7 +670,7 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   // box-shadow here would lose to): depth-based widths via the `borderWidth`
   // prop and per-cell adaptive `edge` colors via `colorForCell`, both in
   // site/src/Treemap.tsx. The old class-level inset rules were dead — dropped
-  // (same cleanup cw-s3 did in `1e5ee40`; see specs/branch-parity-discipline.md).
+  // (same cleanup cw-s3 did in `1e5ee40`; see specs/done/branch-parity-discipline.md).
   .hint { color: var(--ink-3); font-size: 12px; }
 }
 
@@ -1953,7 +1953,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // Legend rows align their avatar with the swatch + text.
 .ri .user-avatar { margin: 0 1px; vertical-align: middle; }
 
-// Bulk assignment over filter matches (BulkBar; specs/selection-actions.md),
+// Bulk assignment over filter matches (BulkBar; `gcs:specs/done/selection-actions.md`),
 // inline next to the match chip.
 .bulkbar {
   display: inline-flex;
@@ -2153,7 +2153,7 @@ select.assign-sel {
 // Storage-class swatches in the class-mix table (same palette as the CLASS bar).
 .classmix td .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 
-// Size-over-time roots legend (specs/root-geneses.md §2): one swatch per
+// Size-over-time roots legend (specs/done/root-geneses.md §2): one swatch per
 // bucket; a root that entered the scan late says since when.
 #over-time .roots-legend {
   display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px;

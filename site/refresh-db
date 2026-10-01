@@ -38,6 +38,7 @@ done
 command -v sqlite3 >/dev/null || { echo "refresh-db: sqlite3 not on PATH (macOS ships it; apt: sqlite3)" >&2; exit 1; }
 
 # This deployment's D1, from the same file wrangler binds it from.
+[ -f wrangler.toml ] || { echo "refresh-db: no site/wrangler.toml: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)" >&2; exit 1; }
 DB=$(sed -n 's/^database_name = "\(.*\)"$/\1/p' wrangler.toml | head -1)
 [ -n "$DB" ] || { echo "refresh-db: no database_name = ... in wrangler.toml" >&2; exit 1; }
 DB_ID=$(sed -n 's/^database_id = "\(.*\)"$/\1/p' wrangler.toml | head -1)

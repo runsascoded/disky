@@ -1,5 +1,5 @@
 """The per-path created-day age index (`dt_cloud.index.write_age_index`) and its
-footer extraction (`index_footer` with no `usr` column) — specs/age-index.md.
+footer extraction (`index_footer` with no `usr` column) — specs/done/age-index.md.
 Both read the store's union (`write_store`), not the per-bucket layer-2s."""
 from pathlib import Path
 

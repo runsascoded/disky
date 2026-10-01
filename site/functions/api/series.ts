@@ -91,7 +91,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   }
   const owner = parseOwner(url.searchParams.get('o'))
   const classes = parseClasses(url.searchParams.get('cl'))
-  // `split=roots` (specs/root-geneses.md §1): the unscoped store root only —
+  // `split=roots` (specs/done/root-geneses.md §1): the unscoped store root only —
   // one trace per depth-1 row (bucket) beside the total.
   const split = url.searchParams.get('split')
   if (split && split !== 'roots') return json({ error: 'bad split (want roots)' }, 400)

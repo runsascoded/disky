@@ -599,7 +599,7 @@ def write_path_index(
         "generated": dt.date.today().isoformat(),
         # When this scan was published, as data (the site used to splice the
         # store object's mtime in, which stops being the publish time once the
-        # served copy lives in R2 — specs/r2-serving-migration.md step 6).
+        # served copy lives in R2 — specs/done/r2-serving-migration.md step 6).
         "published": dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "total_bytes": total_b,
         "total_objects": total_o,

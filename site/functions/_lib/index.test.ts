@@ -39,7 +39,7 @@ describe('blobKey', () => {
 })
 
 // The store seam: unset `STORE_*` is byte-for-byte the GCS deploy; setting it
-// points every proxy at an S3-compatible store (R2) — specs/r2-serving-migration.md.
+// points every proxy at an S3-compatible store (R2) — specs/done/r2-serving-migration.md.
 describe('store seam', () => {
   const gcs = { GCS_HMAC_KEY_ID: 'gk', GCS_HMAC_SECRET: 'gs' } as never
   const r2 = { ...(gcs as object), STORE_ENDPOINT: 'https://acct.r2.cloudflarestorage.com', STORE_BUCKET: 'idx', STORE_REGION: 'auto', STORE_ACCESS_KEY_ID: 'rk', STORE_SECRET_ACCESS_KEY: 'rs' } as never

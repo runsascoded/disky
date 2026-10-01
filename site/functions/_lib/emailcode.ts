@@ -4,7 +4,7 @@
  * D1 policy / session as every other identity path; the only new pieces are
  * the `pending_auth` store (migrations/cw 0015–0016) and a Resend sender.
  * Dormant until RESEND_API_KEY + MAIL_FROM are set. See
- * specs/oidc-cutover-cw.md.
+ * specs/done/oidc-cutover-cw.md.
  */
 import { emailCodeAuth } from '@open-athena/auth'
 import { d1PendingAuthStore } from '@open-athena/auth/d1'

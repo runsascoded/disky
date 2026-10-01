@@ -1,5 +1,5 @@
 /** Multi-scale per-path created-time strata — the pyrmts pyramid backend for
- * `AgeChart` (specs/age-index.md, Phase B): a bin the planner picks for the
+ * `AgeChart` (specs/done/age-index.md, Phase B): a bin the planner picks for the
  * requested window + budget.
  *
  *   GET /api/age-pyramid?date=<scan>&path=<prefix>&from=<iso>&to=<iso>&bin_budget=<n>

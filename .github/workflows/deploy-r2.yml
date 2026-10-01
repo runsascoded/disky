@@ -83,12 +83,12 @@ jobs:
             echo "host=r2.rbw.sh"              >> "$GITHUB_OUTPUT"
           else
             echo "project=disk-tree-demo-dev"  >> "$GITHUB_OUTPUT"
-            echo "config=wrangler.dev.toml"    >> "$GITHUB_OUTPUT"
+            echo "config=wrangler.r2-dev.toml" >> "$GITHUB_OUTPUT"
             echo "branch=dev"                  >> "$GITHUB_OUTPUT"
             echo "host=dev.r2.rbw.sh"          >> "$GITHUB_OUTPUT"
           fi
       - name: Build (r2 / public)
-        run: cd site && VITE_STORE=r2 VITE_AUTH_MODE=public pnpm build
+        run: cd site && WRANGLER_CONFIG="${{ steps.t.outputs.config }}" pnpm build  # STORE/AUTH_MODE from its [vars]
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

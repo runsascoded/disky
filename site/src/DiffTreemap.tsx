@@ -16,7 +16,7 @@ const { abs, max, min, sign } = Math
 // `divergingColor` is red-positive, so negate on the way in.
 const UNCHANGED_GREY = 'rgba(110, 118, 129, 0.28)'
 const deltaColor = (t: number) => divergingColor(-t)
-// A root the older scan never covered (specs/root-geneses.md §3): neither
+// A root the older scan never covered (specs/done/root-geneses.md §3): neither
 // grew nor shrank, so neither green nor red — the site's blue. A first-scanned
 // bucket AND everything under it read blue: its bytes entered the scan, they
 // aren't the interval's writes, so painting its interior green (as "added")

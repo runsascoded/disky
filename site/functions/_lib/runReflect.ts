@@ -26,7 +26,7 @@ export interface BatchJob {
 
 interface RunSummary {
   mode: string
-  bucket?: string // the run's bucket (specs/cw-multi-bucket.md §4); older summaries: the primary
+  bucket?: string // the run's bucket (specs/done/cw-multi-bucket.md §4); older summaries: the primary
   deleted_objects: number
   deleted_bytes: number
   skipped_gone: number

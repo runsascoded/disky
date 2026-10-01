@@ -504,7 +504,7 @@ function AppContent() {
   }, [urlPath, canonUrlPath]) // eslint-disable-line react-hooks/exhaustive-deps
   // Per-path created-time strata for `AgeChart`, keyed on the drilled prefix so
   // it follows the drill exactly instead of showing the whole fleet at every
-  // depth (specs/age-index.md). Root (`drillPath === ''`, depth 0) is the fleet
+  // depth (specs/done/age-index.md). Root (`drillPath === ''`, depth 0) is the fleet
   // total; a prefix below the index floor returns no rows. Served by the pyrmts
   // pyramid (`/api/age-pyramid`, Phase B): the server picks the bin for the
   // budget and returns `{dt (epoch-ms), b, o}`; the chart still buckets to
@@ -589,7 +589,7 @@ function AppContent() {
   // Only axes the rows actually carry a per-stratum value for are offered (no
   // dead buttons): `read` needs `a`, `user` needs `u`, `tree` needs `d1`. The
   // Phase-A per-path index carries only `(d, b, o)`, so `date` is the axis;
-  // richer strata return with Phase B (specs/age-index.md).
+  // richer strata return with Phase B (specs/done/age-index.md).
   const ageModes = AGE_MODES.filter(m =>
     m === 'date'
     || (m === 'read' && !!ageReadRange)
@@ -684,7 +684,7 @@ function AppContent() {
   // Two flavours of "still aligning": (1) refining — the map already shows
   // THIS pair's depth-1 diff (`diffL1`) while the full walk lands, so it's
   // correct as far as it goes; keep it bright and mark it with a small corner
-  // pill (specs/treemap-first-class-everywhere.md §2 — no map-wide veil once
+  // pill (specs/done/treemap-first-class-everywhere.md §2 — no map-wide veil once
   // depth 1 has rendered). (2) genuinely stale — the map is still showing a
   // DIFFERENT pair's diff (the placeholder fell back to `prev`); that one is
   // misleading, so it dims under the centered marker until this pair lands.

@@ -24,7 +24,7 @@ import { pathText } from './pathCrumbs'
 // Sortable, paged listing of the treemap's current node's children — the
 // tabular twin of the map above it: every named row is a link, a directory
 // drilling like its cell, an object opening in the leaf viewer.
-// Row selection + bulk staging / assignment: specs/children-table-selection.md.
+// Row selection + bulk staging / assignment: `gcs:specs/done/children-table-selection.md`.
 
 type SortKey = 'n' | 'b' | 'o' | 'd' | 'a'
 

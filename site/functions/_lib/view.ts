@@ -318,7 +318,7 @@ const floorOf = (h: IndexHandle): number | null => h.floor
  * (`/api/series`): the root read of a view, from the coarsest tier that has
  * P, without folding anything under it. */
 /** The store root's depth-1 rows (one per bucket) in a scan — `/api/series
- * ?split=roots` (specs/root-geneses.md §1); null = the scan has no tier. The
+ * ?split=roots` (specs/done/root-geneses.md §1); null = the scan has no tier. The
  * same one range read `readRootAgg` sums for the unscoped root. */
 export async function readRootRows(env: Env, date: string): Promise<{ path: string; b: number; o: number }[] | null> {
   const top = await tryOpen(env, date, `coarse${COARSE_EXPS[0]}`)

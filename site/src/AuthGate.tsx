@@ -48,7 +48,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 // domain, no `allowed_emails` row), not the wall itself — and unfold on a
 // `?denied=<email>` bounce (the redirect flow's, or one the in-page button
 // sets), which also pre-fills the form with the provider-verified address. All
-// paths converge on the same app session. See specs/oidc-cutover-cw.md.
+// paths converge on the same app session. See specs/done/oidc-cutover-cw.md.
 //
 // Inside <Gate> the wall stands in for the page, so signing in just refetches
 // whoami (`onSignedIn={forget}`) and Google returns to the current URL. On the

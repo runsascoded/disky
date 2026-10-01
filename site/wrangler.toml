@@ -48,7 +48,7 @@ ACCESS_AUD = "1de65a9ffe270d860911b786720fefe00123e79e71ca038c311479e468dc8378"
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
 # The in-app viewer policy that replaces the Access policy's email-domain
-# include once the host is off Zero Trust (specs/oidc-cutover-cw.md): these
+# include once the host is off Zero Trust (specs/done/oidc-cutover-cw.md): these
 # domains get the `cw` scope with no `allowed_emails` row. Inert behind the
 # edge (edge identities are already authorized).
 VIEWER_DOMAINS = "coreweave.com"
@@ -73,7 +73,7 @@ VIEWER_DOMAINS = "coreweave.com"
 
 # Secrets (set with `wrangler pages secret put <NAME> --project-name oa-cw-s3-usage`):
 #   SESSION_SECRET   — HMAC key for session cookies + IP hashing (the app
-#     session model, specs/oidc-cutover-cw.md; absent = no gate, edge only)
+#     session model, specs/done/oidc-cutover-cw.md; absent = no gate, edge only)
 #   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET — the "cw-s3.oa.dev" OAuth Web client
 #   RESEND_API_KEY / MAIL_FROM — emailed-code sign-in (noreply@oa.dev)
 #   GCS_HMAC_KEY_ID / GCS_HMAC_SECRET — read-only GCS proxy creds (data + /files)

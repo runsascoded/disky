@@ -8,7 +8,7 @@
  *   GET  /auth/email/poll    -> original tab polls for the link being clicked
  * All converge on the same `gate.signIn` as Google — same D1 policy, sessions,
  * scopes. Dormant (503) until RESEND_API_KEY + MAIL_FROM are set.
- * See specs/oidc-cutover-cw.md.
+ * See specs/done/oidc-cutover-cw.md.
  */
 import { type Ctx } from '../../_lib/auth.js'
 import { markDevSession } from '../../_lib/devsession.js'

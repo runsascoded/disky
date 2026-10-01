@@ -6,7 +6,7 @@ The site's read path (`/data/*`, `/api/subtree|diff|series|path-index`, the
 so they can live wherever serving is cheapest: colocated with the CF Worker in
 R2 (no cross-provider round trips, no egress on reads). An ingest that keeps
 building against GCS (cw's GCP Batch job) runs this as its final "publish to
-the serving cloud" stage (cw-s3 specs/r2-serving-migration.md §3); a deploy
+the serving cloud" stage (cw-s3 specs/done/r2-serving-migration.md §3); a deploy
 whose ingest already writes to R2 (r2.rbw.sh) never needs it.
 
 The served subset's layout is a deployment parameter: snapshots live under

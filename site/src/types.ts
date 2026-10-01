@@ -51,7 +51,7 @@ export const unclaimedBytes = (n: Pick<TreeNode, 'b' | 'us'>): number => Math.ma
 
 export interface AgeRow {
   d: number   // created day, epoch days (site aggregates to day/week/month)
-  d1?: string // top-level dir (whole-fleet age.json only; the per-path `age` index omits it — specs/age-index.md)
+  d1?: string // top-level dir (whole-fleet age.json only; the per-path `age` index omits it — specs/done/age-index.md)
   u?: string  // owning user
   a?: number  // last-read epoch day of the row's dir (access logs; subtree MAX, like TreeNode.a); absent = no read observed
   b: number

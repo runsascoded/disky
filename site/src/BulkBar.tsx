@@ -1,4 +1,4 @@
-// Bulk assignment over the filter's matched prefixes (specs/selection-actions.md
+// Bulk assignment over the filter's matched prefixes (`gcs:specs/done/selection-actions.md`
 // step 1). The filter already computes the outermost matched roots; this bar
 // assigns one owner to all of them — client-side expansion into exact-prefix
 // ledger actions (server-side pattern rows are the v2 follow-up).

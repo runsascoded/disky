@@ -21,7 +21,7 @@ rule's identity is its content: `diff_gcs` reports added / removed only, and
 the site synthesizes a display name from the content. A `gs://` bucket URI
 picks the GCS backend (`*_any`); a bare name is S3 (the CoreWeave deployment's
 default). A deployment with several buckets snapshots a map `{bucket: rules}`
-(`pull_many` + `dump_map`, specs/cw-multi-bucket.md §2) — the site reads this
+(`pull_many` + `dump_map`, specs/done/cw-multi-bucket.md §2) — the site reads this
 and the bare list alike, normalizing each bucket's rules through the store's
 adapter (`site/src/lifecycle.ts`).
 
@@ -260,7 +260,7 @@ def dump(rules: list[dict], bucket: str = "") -> str:
 
 
 def dump_map(by_bucket: dict[str, list[dict]]) -> str:
-    """The multi-bucket snapshot the scan job writes (specs/cw-multi-bucket.md
+    """The multi-bucket snapshot the scan job writes (specs/done/cw-multi-bucket.md
     §2): `{<bucket>: rules}` in the given (deployment) order — the primary
     first — each bucket's rules normalized for its cloud (a `gs://` key) and
     keyed by the bare name, which is how the site's `Store.buckets` name them."""

@@ -73,7 +73,7 @@ def age_bucket_sql(created: str, asof_day: str) -> str:
     return f"CASE {arms} ELSE {len(AGE_EDGES_DAYS)} END"
 PIVOT_PREFIX = "sum_storage_class_id_"
 
-# The per-path created-day strata behind a path-aware `AgeChart` (specs/age-index.md).
+# The per-path created-day strata behind a path-aware `AgeChart` (specs/done/age-index.md).
 # A distinct index (not a path-index tier): rows `(path, depth, day, b, o)` sorted
 # `(depth, path, day)`, floored, served by prefix as a point lookup. Registered as
 # variant `age` in `index_footer.INDEX_VARIANTS` too (what `index-sync` publishes).
@@ -322,7 +322,7 @@ def write_age_index(
     return {"rows": int(n_rows), "floor": floor, "paths": int(kept), "file": str(out_path)}
 
 
-# --- Phase B: multi-scale time pyramid (specs/age-index.md) ------------------
+# --- Phase B: multi-scale time pyramid (specs/done/age-index.md) ------------------
 # Path-major tiers (one parquet per bin), reusing pyrmts's planner + our
 # D1-footer reader at serve time (DIY sum-combine, so the producer stays our own
 # DuckDB — no pyrmts Python dep). Bins finest→coarsest; the base (first) is
@@ -415,7 +415,7 @@ def write_index(
     """Write the store's sorts (`path-index.parquet`, `path-index-bysize.parquet`,
     + `sort_variants` copies) and the age pyramid under ``out_dir`` from
     ``sources`` — one ``(bucket, layer-2 parquet)`` per bucket of the scan
-    (specs/cw-multi-bucket.md §2): the rows are the UNION of each bucket's
+    (specs/done/cw-multi-bucket.md §2): the rows are the UNION of each bucket's
     rows, so depth 1 holds every bucket. Returns a summary (rows, buckets,
     columns, per-sort rows/groups, pyramid, files).
 

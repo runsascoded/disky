@@ -1,4 +1,4 @@
-/** The age pyramid's tier set + planner glue (specs/age-index.md, Phase B).
+/** The age pyramid's tier set + planner glue (specs/done/age-index.md, Phase B).
  *
  * Unlike a stock pyrmts pyramid (finer tiers cover only the live tail via a
  * shard ladder, stitched with coarser ones), our tiers are **complete**: one

@@ -189,7 +189,7 @@ export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, w
   const setFloorPct = (p: number) => setExpP(p === DEFAULT_FLOOR_PCT ? undefined : String(p))
   const [gearOpen, setGearOpen] = useState(false)
 
-  // The store root, unscoped: one trace per root (specs/root-geneses.md §2).
+  // The store root, unscoped: one trace per root (specs/done/root-geneses.md §2).
   const split = !prefix && !user && !pool && !paths?.length && !filterLabel
   const scope = (user ? `&lens=user:${encodeURIComponent(user)}` : pool ? `&o=${pool}` : '') + (paths?.length ? `&paths=${encodeURIComponent(paths.join(','))}` : '') + (split ? '&split=roots' : '')
   // The subtree's store: its key in the query key (two mounted stores may

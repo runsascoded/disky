@@ -29,7 +29,7 @@ export function prefixShape(env: { STORE_SCHEME?: string; STORE_BUCKETS?: string
 /** The bucket a raw prefix names — `<scheme><b>/…` or `<b>/…` for a scanned
  * bucket — else the primary. The treemap's paths start with the bucket, so
  * a plan item under `hero-checkpoints/…` must not canonicalize under
- * the primary (specs/cw-multi-bucket.md §4). */
+ * the primary (specs/done/cw-multi-bucket.md §4). */
 export function bucketOf(raw: string, buckets: readonly string[] = CW_BUCKETS): string {
   const s = raw.trim().replace(SCHEME_RE, "").replace(/^\/+/, "")
   // `*` (`STORE_BUCKETS = "*"`): every top-level segment is a root — a

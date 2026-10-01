@@ -126,7 +126,7 @@ export const displayId = (r: LifecycleRule): string => {
 }
 
 /** Rules per bucket. The job writes `{<bucket>: rules[]}` for a multi-bucket
- * scan (specs/cw-multi-bucket.md §2); a bare `rules[]` is the primary
+ * scan (specs/done/cw-multi-bucket.md §2); a bare `rules[]` is the primary
  * bucket's (cw scans from before the multi-bucket job; a one-bucket store). */
 export type LifecycleSnapshot = Record<string, LifecycleRule[]>
 

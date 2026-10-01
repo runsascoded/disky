@@ -4,7 +4,7 @@
  * (`google/callback.ts`) mints the app session, so the gate, D1 policy, scopes,
  * and share links are all the same as every other identity path. Reads `?next`
  * for where to land after. Dormant until the Google client secrets are set —
- * see specs/oidc-cutover-cw.md.
+ * see specs/done/oidc-cutover-cw.md.
  */
 import { oidcStart } from '@open-athena/auth/oidc'
 import { type Ctx } from '../_lib/auth.js'

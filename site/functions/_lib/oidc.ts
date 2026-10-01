@@ -4,7 +4,7 @@
  * callback handlers must be given the *same* `redirectUri`, so it's derived
  * once here from the request origin — which makes prod (cw-s3.oa.dev), the
  * dev stack (the Pages preview), and localhost all work, provided each origin's
- * callback is registered on the Google client. See specs/oidc-cutover-cw.md.
+ * callback is registered on the Google client. See specs/done/oidc-cutover-cw.md.
  */
 import { type Env, gateFor } from './auth.js'
 

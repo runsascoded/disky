@@ -20,7 +20,10 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 ACCT = "74981a43be0de7712369306c7b19133d"
-PROJECT = re.search(r'^name = "(.*)"$', Path(__file__).with_name("wrangler.toml").read_text(), re.M).group(1)  # the Pages project this checkout deploys
+WRANGLER_TOML = Path(__file__).with_name("wrangler.toml")
+if not WRANGLER_TOML.exists():
+    sys.exit("cf-status: no site/wrangler.toml: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)")
+PROJECT = re.search(r'^name = "(.*)"$', WRANGLER_TOML.read_text(), re.M).group(1)  # the Pages project this checkout deploys
 
 err = lambda *a: print(*a, file=sys.stderr)
 

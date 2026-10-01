@@ -64,7 +64,7 @@ export interface DiffNode {
   n_removed: number
   lookup?: 1 | 2
   /** A root (bucket) the older scan didn't cover at all: it entered the scan,
-   *  its bytes aren't the interval's writes (specs/root-geneses.md §3). The
+   *  its bytes aren't the interval's writes (specs/done/root-geneses.md §3). The
    *  crumb accounts for it apart from the interval's growth, and its label
    *  says so — only the bucket carries this (see `fs` for the colour). */
   first?: boolean

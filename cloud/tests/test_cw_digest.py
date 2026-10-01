@@ -65,7 +65,7 @@ def test_formatters_and_links():
 
 
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
-    """A multi-bucket scan's meta.json (specs/cw-multi-bucket.md §2)."""
+    """A multi-bucket scan's meta.json (specs/done/cw-multi-bucket.md §2)."""
     return {
         "total_bytes": round((primary_tib + hero_tib) * TIB), "total_objects": objs + 400_000, "class_bytes": {},
         "buckets": {

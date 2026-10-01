@@ -3,11 +3,11 @@
 // In the app tier the host is public shell + app-gated data — identity is the
 // app session (`/api/auth/whoami`), minted by our own Google OIDC client
 // (`/auth/google`), an emailed code (`/auth/email/*`), or by redeeming a
-// `?key=` share link (specs/oidc-cutover-cw.md).
+// `?key=` share link (specs/done/oidc-cutover-cw.md).
 import { displayName, useForgetWhoami, useWhoami, type Whoami, type WhoamiSource } from '@open-athena/auth/react'
 import { DEFAULT_STORE } from './stores'
 
-// Deployment seam (specs/denovo-factor.md): a build-time flag from
+// Deployment seam (specs/done/denovo-factor.md): a build-time flag from
 // `wrangler.toml` `[vars]` `AUTH_MODE` (vite.config.ts). `app` = the app
 // session (`/api/auth/whoami`, minted at `/signin`); `public` = no gate
 // (r2.rbw.sh, per-project embeds): the app renders for an anonymous viewer,

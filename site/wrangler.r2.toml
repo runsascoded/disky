@@ -3,9 +3,12 @@
 # anonymous (no CF Access, no app gate): `PUBLIC_READ` grants the base viewer
 # scope to everyone (reads open, mutations still closed — see _lib/auth.ts).
 #
-# Deploy:  wrangler pages deploy dist --project-name disk-tree-demo
-# (Build with the r2 store + public auth — these are BUILD-time Vite vars, not
-#  wrangler [vars]:  VITE_STORE=r2 VITE_AUTH_MODE=public pnpm build)
+# Deploy (deploy-r2.yml does this on a push to `cloud`):
+#   WRANGLER_CONFIG=wrangler.r2.toml pnpm build   (the r2 store + public auth:
+#   vite.config.ts reads `STORE` / `AUTH_MODE` below; on `cloud`, which has no
+#   wrangler.toml, a bare `pnpm build` falls back to this file)
+#   swap this in as wrangler.toml (Pages rejects -c), then
+#   wrangler pages deploy dist --project-name disk-tree-demo
 # r2.rbw.sh IS the existing `disk-tree-demo` Pages project (was the ui/ static
 # demo) — this cuts it over to the site/ Map.
 name = "disk-tree-demo"
@@ -30,6 +33,8 @@ remote = true
 enabled = true
 
 [vars]
+STORE = "r2"                     # build-time: the `src/stores.ts` registry key (vite.config.ts)
+AUTH_MODE = "public"             # build-time: no sign-in wall (src/auth.ts)
 ROOT_LABEL = "public R2"
 BASE_SCOPE = "r2"
 PUBLIC_READ = "1"                # anonymous viewer scope; reads open (_lib/auth.ts)

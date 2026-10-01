@@ -27,7 +27,7 @@ export interface Series<T> {
   /** Per-series area fill; overrides the chart-wide `area`. */
   area?: boolean
   /** The part of the line at x < this is dashed — e.g. a total drawn before
-   *  every component existed (specs/root-geneses.md). */
+   *  every component existed (specs/done/root-geneses.md). */
   dashBeforeX?: number
   /** Draw per-point dots (default true). */
   dots?: boolean
