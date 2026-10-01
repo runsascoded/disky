@@ -188,7 +188,7 @@ the walk carries the app's identity with no child-process caveat — the core v2
   See "Scheduled scans" below.
 - **Phase 6** — whole-machine coverage (not just `~`). ⏳ walker half done. See "Whole-machine coverage".
 - **Phase 7** — menu-bar presence ✅, `SMAppService`-registered agents ✅, login item ✅,
-  template icon ✅; in-app sign-in ✅ app side (redemption untested until disk.rbw.sh has the endpoint). The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
+  template icon ✅; in-app sign-in ✅ (verified on dev). The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
 
 ## Scheduled scans (Phase 5)
 
@@ -368,8 +368,12 @@ App half (`applink.rs`):
 
 Verified 2026-09-30: the UA (a local server logged `…(KHTML, like Gecko) disky/0.1.0`); a
 wrong-origin link refused and logged; `open 'disky://open?link=https://disk.rbw.sh/auth/app-link?token=…'`
-with the app quit cold-launched it into one window on that URL. Not yet verified: an actual
-redemption, since disk.rbw.sh serves `/auth/app-link` only after `m3`'s next `cloud` merge.
+with the app quit cold-launched it into one window on that URL. **Redemption verified
+2026-10-01 on dev.disk.rbw.sh** (`DISKY_URL=https://dev.disk.rbw.sh`): D1 `access_log` shows
+`mint` (Chrome UA) → `redeem` → `revoke` → `signin` (`disky/0.1.0` UA) in the same second, and the
+window rendered the signed-in map. A first attempt redeemed a link Chrome had held behind its
+"Open disky?" prompt for 34 min: `deny`/`expired`, as designed. prod disk.rbw.sh gets the route at
+`m3`'s Phase 4 cut-over (it still serves `ui/`).
 Open: a download URL for the site's "install the app" hint (none until disky is distributed).
 
 ## Remaining work (v2 not yet "real")
