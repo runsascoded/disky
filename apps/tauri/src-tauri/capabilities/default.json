@@ -1,7 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core permissions for the disk-tree main window.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "The local Settings window only. The main window loads a remote site and gets no capability, so it has no IPC to the app's commands.",
+  "windows": [
+    "settings"
+  ],
+  "permissions": [
+    "core:default"
+  ]
 }

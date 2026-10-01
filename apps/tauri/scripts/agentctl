@@ -100,9 +100,9 @@ def install():
     if not BUILT.exists():
         raise SystemExit(f'no bundle at {BUILT}; build it with `cargo tauri build --bundles app`')
     run('codesign', '--verify', '--deep', '--strict', str(BUILT))
-    # SMAppService pins the registered build: launchd then refuses a rebuilt
-    # binary ("Launch Constraint Violation", SIGKILL at spawn, seen 2026-09-30),
-    # so registered agents are unregistered around the swap and re-registered.
+    # Re-register around the swap so the installed plists are re-rendered from
+    # the new bundle's templates (plain LaunchAgents; see services.rs for why
+    # not SMAppService, whose agents a rebuilt self-signed binary can't launch).
     registered = EXE.exists() and 'enabled' in disky('agents', 'status')
     if registered:
         err(disky('agents', 'unregister'))

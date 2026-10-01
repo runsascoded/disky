@@ -44,10 +44,11 @@ pub fn dispatch(args: &[OsString]) -> Option<i32> {
     match args.get(1).and_then(|a| a.to_str()) {
         Some("agent") => Some(agent(&args[2..])),
         Some("probe") => Some(probe()),
-        Some("job") => Some(match args.get(2).and_then(|a| a.to_str()) {
-            Some(name) => crate::jobs::run(name),
-            None => {
-                eprintln!("usage: disky job NAME");
+        Some("job") => Some(match (args.get(2).and_then(|a| a.to_str()), args.get(3).and_then(|a| a.to_str())) {
+            (Some("scan"), Some("--scheduled")) => crate::jobs::run_scheduled_scan(),
+            (Some(name), None) => crate::jobs::run(name),
+            _ => {
+                eprintln!("usage: disky job NAME | disky job scan --scheduled");
                 2
             }
         }),

@@ -1,9 +1,19 @@
-//! `SMAppService` registration: the bundled LaunchAgents and the login item.
+//! The scheduled agents and the login item.
 //!
-//! Registering an agent tells launchd to load
-//! `Contents/Library/LaunchAgents/<plist>` from this bundle; it shows in
-//! System Settings → General → Login Items as "disky", and the user can turn
-//! it off there. Agents need no approval step (daemons would).
+//! **Agents are plain per-user LaunchAgents**, written to
+//! `~/Library/LaunchAgents/<label>.plist` from the bundled templates
+//! (`Contents/Library/LaunchAgents/`, with `BundleProgram` resolved to this
+//! executable's absolute path) and loaded with `launchctl bootstrap`. Login
+//! Items still lists them as "disky" (BTM attributes them by executable path).
+//!
+//! Not `SMAppService.agent`: for a bundle with no Team ID (self-signed), launchd
+//! pins a registered agent to the build that registered it; after a rebuild
+//! it SIGKILLs the agent at spawn ("Launch Constraint Violation"), and
+//! re-registering didn't reliably clear it (2026-09-30: the drainer
+//! crash-looped). Revisit once disky is signed with a Developer ID.
+//!
+//! The login item stays `SMAppService.mainApp` (LaunchServices opens the app;
+//! no launchd launch constraint).
 
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
@@ -30,6 +40,9 @@ fn service(s: Service) -> objc2::rc::Retained<SMAppService> {
 
 #[cfg(target_os = "macos")]
 pub fn status(s: Service) -> &'static str {
+    if let Service::Agent(p) = s {
+        return agent_status(p);
+    }
     let st = unsafe { service(s).status() };
     match st {
         SMAppServiceStatus::NotRegistered => "not registered",
@@ -42,11 +55,17 @@ pub fn status(s: Service) -> &'static str {
 
 #[cfg(target_os = "macos")]
 pub fn register(s: Service) -> Result<(), String> {
+    if let Service::Agent(p) = s {
+        return agent_register(p);
+    }
     unsafe { service(s).registerAndReturnError() }.map_err(|e| e.localizedDescription().to_string())
 }
 
 #[cfg(target_os = "macos")]
 pub fn unregister(s: Service) -> Result<(), String> {
+    if let Service::Agent(p) = s {
+        return agent_unregister(p);
+    }
     unsafe { service(s).unregisterAndReturnError() }.map_err(|e| e.localizedDescription().to_string())
 }
 
@@ -57,6 +76,84 @@ pub fn open_login_items_settings() {
 
 pub fn agents_enabled() -> bool {
     AGENT_PLISTS.iter().all(|p| status(Service::Agent(p)) == "enabled")
+}
+
+fn label(plist: &str) -> &str {
+    plist.trim_end_matches(".plist")
+}
+
+fn installed_plist(plist: &str) -> std::path::PathBuf {
+    crate::status::agents_dir().join(plist)
+}
+
+fn domain_target(plist: &str) -> String {
+    format!("gui/{}/{}", crate::status::uid(), label(plist))
+}
+
+/// The bundled template with `BundleProgram` resolved to this executable.
+fn render_agent(plist: &str) -> Result<plist::Dictionary, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let tpl = exe
+        .parent()
+        .ok_or("no exe dir")?
+        .join(format!("../Library/LaunchAgents/{plist}"));
+    let mut d = plist::Value::from_file(&tpl)
+        .map_err(|e| format!("{}: {e}", tpl.display()))?
+        .into_dictionary()
+        .ok_or("template isn't a dict")?;
+    d.remove("BundleProgram");
+    d.remove("AssociatedBundleIdentifiers");
+    let args = d.get_mut("ProgramArguments").and_then(|v| v.as_array_mut()).ok_or("no ProgramArguments")?;
+    args[0] = plist::Value::String(exe.to_string_lossy().into_owned());
+    Ok(d)
+}
+
+fn launchctl(args: &[&str]) -> bool {
+    std::process::Command::new("launchctl").args(args).output().is_ok_and(|o| o.status.success())
+}
+
+fn agent_status(plist: &str) -> &'static str {
+    if !installed_plist(plist).exists() {
+        "not registered"
+    } else if launchctl(&["print", &domain_target(plist)]) {
+        "enabled"
+    } else {
+        "installed, not loaded"
+    }
+}
+
+fn agent_register(plist: &str) -> Result<(), String> {
+    let d = render_agent(plist)?;
+    let path = installed_plist(plist);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    plist::Value::Dictionary(d).to_file_xml(&path).map_err(|e| e.to_string())?;
+    agent_bootout(plist);
+    let p = path.to_string_lossy();
+    if !launchctl(&["bootstrap", &format!("gui/{}", crate::status::uid()), &p]) {
+        return Err(format!("launchctl bootstrap {p} failed"));
+    }
+    Ok(())
+}
+
+/// bootout, then wait until launchd has dropped the label (a KeepAlive job
+/// takes a moment; bootstrapping before that fails with exit 5).
+fn agent_bootout(plist: &str) {
+    let target = domain_target(plist);
+    launchctl(&["bootout", &target]);
+    for _ in 0..240 {
+        if !launchctl(&["print", &target]) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+fn agent_unregister(plist: &str) -> Result<(), String> {
+    agent_bootout(plist);
+    match std::fs::remove_file(installed_plist(plist)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
 }
 
 /// `disky agents register|unregister|status [NAME]` (NAME: `scan`, `drain`;

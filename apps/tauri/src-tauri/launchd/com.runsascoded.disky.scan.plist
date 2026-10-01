@@ -5,13 +5,13 @@
   <key>Label</key><string>com.runsascoded.disky.scan</string>
   <key>BundleProgram</key><string>Contents/MacOS/disky</string>
   <key>ProgramArguments</key>
-  <array><string>disky</string><string>job</string><string>scan</string></array>
+  <array><string>disky</string><string>job</string><string>scan</string><string>--scheduled</string></array>
   <key>AssociatedBundleIdentifiers</key><string>com.runsascoded.disk-tree</string>
-  <key>StartCalendarInterval</key>
-  <array>
-    <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>0</integer></dict>
-    <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
-  </array>
+  <!-- Wake every 15 min; `--scheduled` runs the scan only when a time in
+       disky.json's settings.schedule has passed since the last start (so the
+       schedule is a setting, not baked into this signed plist), or after
+       "Scan now". A wake missed during sleep catches up on the next one. -->
+  <key>StartInterval</key><integer>900</integer>
   <key>ProcessType</key><string>Background</string>
   <key>Nice</key><integer>10</integer>
   <key>LowPriorityIO</key><true/>

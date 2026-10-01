@@ -1,6 +1,6 @@
 [package]
 name = "disk-tree-app"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "disk-tree — native macOS app (Tauri v2 host)"
 license = "MIT"

@@ -317,36 +317,45 @@ window leaves it running. The menu (verified via System Events: items and enable
   `native_walk_stats` command are gone (routed agents already walk as the app, via the bundled
   `dt-walker`); `ui/` + Flask stay available outside the app.
 
-**Bundled agents + login item ✅ 2026-09-30.** The agents moved into the bundle:
-`Contents/Library/LaunchAgents/com.runsascoded.disky.{scan,drain}.plist` (`BundleProgram
-Contents/MacOS/disky`, args `job scan|drain`; scan at 06:00/18:00 with low-priority I/O, drain
-`RunAtLoad` + `KeepAlive {SuccessfulExit: false}`), registered via `SMAppService.agent`
-(`services.rs`; `objc2-service-management`). A bundled plist is signed and static, so per-user
-command/env/log-name live in `~/.config/disk-tree/disky.json`, and `disky job NAME` redirects the
-child's output to `~/Library/Logs/disk-tree/<log>.{out,err}.log` itself (launchd can't expand `~`).
-An unconfigured job logs to `disky.log` and exits 0.
+**Agents + login item (2026-09-30, revised 2026-10-01).** The agent definitions live in the bundle
+(`Contents/Library/LaunchAgents/com.runsascoded.disky.{scan,drain}.plist`), but `disky agents
+register` installs them as **plain per-user LaunchAgents**: it renders each template into
+`~/Library/LaunchAgents/` (`BundleProgram` → this executable's absolute path) and `launchctl
+bootstrap`s it. Login Items still lists them as "disky", because BTM attributes them by
+executable path.
 
-- **Self-signed works:** `SMAppService` registered both agents for the `disk-tree-selfsigned`
-  bundle (no Team ID); they show as "disky" in Login Items. A job launched by the registered agent
-  read `~/Library/Mail` (the app's FDA grant applies).
-- `agentctl adopt` migrated this Mac: the routed hand-written plists' commands/env/log names went
-  into `disky.json`, the plists were booted out and renamed `*.plist.adopted-<stamp>`, the bundled
-  agents registered; the drainer came back as `disky job drain`, same logs. `agentctl unadopt`
-  reverts.
-- **Reinstall gotcha (2026-09-30):** `SMAppService` pins the registered build. After replacing the
-  bundle, launchd SIGKILLs the agent at spawn ("Code Signature Invalid", Launch Constraint
-  Violation, EX_CONFIG): the drainer crash-looped until re-registered. `agentctl install` now
-  unregisters registered agents around the swap and re-registers them (verified: the drainer
-  comes back).
-- Tray: **Scheduled scans** (registers/unregisters both agents; verified both ways) and **Open at
-  login** (`SMAppService.mainApp`; on). The scan status line reads the bundled agent (schedule
-  from the bundled plist, log from `disky.json`), falling back to the legacy label.
-- **Template tray icon:** a 36 px treemap glyph (`icons/tray-template@2x.png`, black on
-  transparent), `icon_as_template(true)`, so macOS tints it for light/dark menu bars.
+- **Why not `SMAppService.agent`** (the first cut): for a bundle with no Team ID (self-signed),
+  launchd pins a registered agent to the build that registered it. After a rebuild it SIGKILLs the
+  agent at spawn ("Code Signature Invalid", Launch Constraint Violation, exit 78). Re-registering
+  cleared it once, but not after the next rebuild, and the drainer crash-looped until
+  `agentctl unadopt` restored the hand-written plists. Plain plists exec by path and survived
+  every rebuild: verified with a real new build (0.1.0 → 0.1.1, new CDHash), with both agents
+  spawning and no crash reports. Revisit `SMAppService` once disky has a Developer ID (Team ID).
+- The login item stays `SMAppService.mainApp` (LaunchServices opens the app; no launchd
+  constraint).
+- Per-user command, env and log name: `~/.config/disk-tree/disky.json` `jobs`. `disky job NAME`
+  redirects the job's output to `~/Library/Logs/disk-tree/<log>.{out,err}.log`.
+- `agentctl adopt` moved this Mac's hand-written plists into `disky.json` and the app's agents;
+  `unadopt` reverts. `agentctl install` re-renders the installed plists from the new bundle.
 
-Still to do: a scope setting (whole machine / home) once `laptop-scan`'s `/` capture lands
-(`m3`); a schedule setting (bundled plists fix 06:00/18:00; changing it means a rebuild, or a
-second bundled variant).
+## Settings (2026-10-01)
+
+`disky.json` `settings`: `site` (`prod` | `dev` | a URL; `DISKY_URL` overrides), `scope`
+(`machine` → `DISKY_SCAN_ROOT=/`, `home` → `$HOME`; m3's `laptop-scan` reads it and passes `-o`
+for `/`), `schedule` (local `HH:MM` list).
+
+- **Schedule as a setting:** the scan agent wakes every 15 min (`StartInterval 900`) and runs
+  `disky job scan --scheduled`, which starts the scan only if a slot passed since the last start
+  (run state in `disky-state.json`: last start/end/exit, a force flag). One catch-up run after
+  sleep. The first wake after install records a baseline (no surprise scan). "Scan now" sets the
+  force flag and kickstarts. Unit-tested (`settings.rs`).
+- **Settings window** (local `apps/tauri/settings/index.html`, `frontendDist`): FDA status (polls
+  every 3 s) with a link to the pane, scope, schedule presets or custom times, scheduled
+  scans on/off, open at login, site. It opens on first run, or whenever FDA is missing.
+  Only the `settings` window has a capability; the remote site window gets no IPC.
+- **Tray:** a "Site" submenu (disk.rbw.sh / dev.disk.rbw.sh; switching re-points an open window),
+  plus "Settings…". The status line reads the run state ("Scanned 3h ago · next 18:00",
+  "Scanning…", "Last scan failed (exit N) …", "… · scheduled scans off").
 
 ### Sign-in inside the window ✅ app side (2026-09-30)
 

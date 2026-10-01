@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>disky settings</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f6f7; --card: #fff; --fg: #1d1d1f; --mute: #6e6e73; --line: #d9d9de; --ok: #1f8f4e; --bad: #c4321f; --acc: #2a6fdb; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1c1c1e; --card: #2c2c2e; --fg: #f2f2f7; --mute: #a1a1a6; --line: #3a3a3c; --ok: #4cc97a; --bad: #ff6b5a; --acc: #5b9bff; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 22px 28px; background: var(--bg); color: var(--fg); font: 13px/1.45 -apple-system, BlinkMacSystemFont, sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: var(--mute); margin: 0 0 16px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--mute); margin: 0 0 8px; }
+  label { display: flex; gap: 8px; align-items: baseline; margin: 4px 0; }
+  .hint { color: var(--mute); font-size: 12px; margin: 2px 0 0 24px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .status { font-weight: 600; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  button { font: inherit; padding: 4px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
+  input[type=text] { font: inherit; padding: 3px 6px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 14em; }
+  #msg { color: var(--mute); min-height: 1.2em; margin-top: 6px; }
+  .banner { border-color: var(--acc); }
+</style>
+</head>
+<body>
+<h1>disky</h1>
+<p class="sub">Scans this Mac's disk on a schedule and shows it on <span id="site-host">disk.rbw.sh</span>.</p>
+
+<section id="fda-card">
+  <h2>Full Disk Access</h2>
+  <div class="row"><span id="fda" class="status">…</span><button id="fda-open">Open System Settings…</button></div>
+  <p class="hint" style="margin-left:0">Without it, scans skip macOS-protected folders (Mail, Messages, Safari, app containers, the Trash) and count them as unreadable. In System Settings → Privacy &amp; Security → Full Disk Access, turn on <b>disky</b> (or add it with +). This page updates by itself.</p>
+</section>
+
+<section>
+  <h2>What to scan</h2>
+  <label><input type="radio" name="scope" value="machine"> The whole Mac (<code>/</code>)</label>
+  <div class="hint">Your files, apps, Homebrew, system folders. Folders only root can read are counted, not listed.</div>
+  <label><input type="radio" name="scope" value="home"> Only my home folder</label>
+</section>
+
+<section>
+  <h2>Schedule</h2>
+  <label><input type="checkbox" id="agents"> Scan on a schedule</label>
+  <div class="row" style="margin:6px 0 0 24px">
+    <select id="preset">
+      <option value="06:00,18:00">Twice a day (06:00, 18:00)</option>
+      <option value="00:00,06:00,12:00,18:00">Every 6 hours</option>
+      <option value="03:00">Daily at 03:00</option>
+      <option value="custom">Custom…</option>
+    </select>
+    <input type="text" id="times" placeholder="HH:MM, HH:MM">
+  </div>
+  <div class="hint">A scan missed while the Mac sleeps runs when it wakes.</div>
+  <label style="margin-top:8px"><input type="checkbox" id="login"> Open disky at login</label>
+</section>
+
+<section>
+  <h2>Site</h2>
+  <label><input type="radio" name="site" value="prod"> disk.rbw.sh</label>
+  <label><input type="radio" name="site" value="dev"> dev.disk.rbw.sh</label>
+</section>
+
+<div class="row"><button class="primary" id="save">Save</button><button id="scan">Scan now</button></div>
+<div id="msg"></div>
+
+<script>
+const { invoke } = window.__TAURI__.core;
+const $ = id => document.getElementById(id);
+const msg = t => { $('msg').textContent = t; };
+let state;
+
+function render(s) {
+  state = s;
+  $('fda').textContent = s.fda ? 'Granted ✓' : 'Not granted';
+  $('fda').className = 'status ' + (s.fda ? 'ok' : 'bad');
+  $('fda-card').classList.toggle('banner', !s.fda);
+  $('fda-open').hidden = s.fda;
+  $('site-host').textContent = new URL(s.site_url).host;
+}
+
+function fill(s) {
+  document.querySelector(`input[name=scope][value=${s.settings.scope}]`)?.click();
+  const site = document.querySelector(`input[name=site][value="${s.settings.site}"]`);
+  if (site) site.checked = true;
+  const times = s.settings.schedule.join(',');
+  const opt = [...$('preset').options].find(o => o.value === times);
+  $('preset').value = opt ? times : 'custom';
+  $('times').value = s.settings.schedule.join(', ');
+  $('times').hidden = $('preset').value !== 'custom';
+  $('agents').checked = s.agents;
+  $('login').checked = s.login;
+}
+
+$('preset').onchange = () => {
+  const v = $('preset').value;
+  $('times').hidden = v !== 'custom';
+  if (v !== 'custom') $('times').value = v.split(',').join(', ');
+};
+$('fda-open').onclick = () => invoke('open_fda_settings');
+$('scan').onclick = async () => { try { await invoke('scan_now'); msg('Scan started.'); } catch (e) { msg(String(e)); } };
+$('save').onclick = async () => {
+  const schedule = $('times').value.split(',').map(t => t.trim()).filter(Boolean);
+  const settings = {
+    scope: document.querySelector('input[name=scope]:checked')?.value ?? 'machine',
+    site: document.querySelector('input[name=site]:checked')?.value ?? 'prod',
+    schedule,
+  };
+  try {
+    const s = await invoke('save_settings', { settings, agents: $('agents').checked, login: $('login').checked });
+    render(s); fill(s); msg('Saved.');
+  } catch (e) { msg(String(e)); }
+};
+
+(async () => {
+  const s = await invoke('get_state');
+  render(s); fill(s);
+  setInterval(async () => render(await invoke('get_state')), 3000);
+})();
+</script>
+</body>
+</html>

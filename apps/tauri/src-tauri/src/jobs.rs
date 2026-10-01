@@ -75,6 +75,28 @@ pub fn note(msg: &str) {
     eprintln!("{msg}");
 }
 
+/// `disky job scan --scheduled`: the scan agent's 15-minute wake. Runs the scan
+/// only if a schedule slot passed since the last start, or "Scan now" set the
+/// force flag; otherwise exits 0 silently. The first wake after install just
+/// records a baseline.
+pub fn run_scheduled_scan() -> i32 {
+    use crate::settings;
+    let s = settings::load();
+    let mut st = settings::load_state();
+    let now = settings::now();
+    if !st.force {
+        if st.last_start.is_none() {
+            st.last_start = Some(now);
+            let _ = settings::save_state(&st);
+            return 0;
+        }
+        if !settings::due(&s.times(), st.last_start, now) {
+            return 0;
+        }
+    }
+    run("scan")
+}
+
 pub fn run(name: &str) -> i32 {
     let cfg = match load() {
         Ok(c) => c,
@@ -100,7 +122,21 @@ pub fn run(name: &str) -> i32 {
     };
     let mut cmd = Command::new(program);
     cmd.args(args).envs(&job.env).stdout(out_f).stderr(err_f);
-    crate::agent::run_child(cmd)
+    if name != "scan" {
+        return crate::agent::run_child(cmd);
+    }
+    use crate::settings;
+    cmd.env("DISKY_SCAN_ROOT", settings::load().scan_root());
+    let mut st = settings::load_state();
+    st.last_start = Some(settings::now());
+    st.force = false;
+    let _ = settings::save_state(&st);
+    let code = crate::agent::run_child(cmd);
+    let mut st = settings::load_state();
+    st.last_end = Some(settings::now());
+    st.last_exit = Some(code);
+    let _ = settings::save_state(&st);
+    code
 }
 
 #[cfg(test)]

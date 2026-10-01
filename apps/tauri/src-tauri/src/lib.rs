@@ -1,51 +1,53 @@
 //! disky — the disk-tree macOS app (Tauri v2 host).
 //!
 //! A menu-bar item (no Dock icon) that reports the scheduled scan and Full
-//! Disk Access, kicks a scan, and opens a window on the web UI (disk.rbw.sh by
-//! default; `DISKY_URL` overrides). The app binary is also the LaunchAgents'
-//! TCC identity: `disky agent -- CMD…` (see `agent.rs`), so the scans it
-//! schedules read what the app was granted.
+//! Disk Access, kicks a scan, switches between the prod and dev sites, and
+//! opens a window on the site plus a local Settings window (scope, schedule,
+//! FDA onboarding). The app binary is also the LaunchAgents' TCC identity
+//! (`disky job …`, `disky agent -- …`; see `agent.rs`, `jobs.rs`).
 //!
-//! See `specs/tauri-native-app.md` (Phases 5–7).
+//! See `specs/tauri-native-app.md` (Phases 5–7 and "Settings").
 
 mod agent;
 mod applink;
 mod jobs;
 mod services;
+mod settings;
 mod status;
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::image::Image;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Wry, WebviewUrl, WebviewWindowBuilder};
 
-const DEFAULT_URL: &str = "https://disk.rbw.sh";
+use settings::Settings;
+
 /// System Settings → Privacy & Security → Full Disk Access.
 const FDA_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
 fn site_url() -> String {
-    std::env::var("DISKY_URL").unwrap_or_else(|_| DEFAULT_URL.to_string())
+    settings::load().site_url()
 }
 
 /// The bundled `dt-walker` (`Contents/Resources/dt-walker`), unless
-/// `DISK_TREE_WALKER` is already set. `agent` hands it to its child.
+/// `DISK_TREE_WALKER` is already set. `agent`/`job` hand it to their child.
 pub(crate) fn locate_walker() -> Option<PathBuf> {
     if std::env::var_os("DISK_TREE_WALKER").is_some() {
         return None;
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    [dir.join("dt-walker"), dir.join("../Resources/dt-walker")]
-        .into_iter()
-        .find(|c| c.is_file())
+    [dir.join("dt-walker"), dir.join("../Resources/dt-walker")].into_iter().find(|c| c.is_file())
 }
 
-/// A headless mode (`agent`, `probe`) when `args` selects one: its exit code.
-/// Checked before `run()`, so launchd jobs never touch Tauri/AppKit.
+/// A headless mode (`agent`, `job`, `probe`, `agents`, `login-item`) when
+/// `args` selects one: its exit code. Checked before `run()`, so launchd jobs
+/// never touch Tauri/AppKit.
 pub fn headless(args: &[std::ffi::OsString]) -> Option<i32> {
     agent::dispatch(args)
 }
@@ -54,7 +56,7 @@ fn open(target: &str) {
     let _ = Command::new("/usr/bin/open").arg(target).spawn();
 }
 
-/// Show the window, creating it on the site if needed; with `url`, navigate there.
+/// Show the site window, creating it if needed; with `url`, navigate there.
 fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
     if let Some(w) = app.get_webview_window("main") {
         if let Some(u) = url {
@@ -64,15 +66,9 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
         let _ = w.set_focus();
         return;
     }
-    let target = match url {
+    let target = match url.or_else(|| site_url().parse().ok()) {
         Some(u) => u,
-        None => match site_url().parse() {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!("disky: bad DISKY_URL {:?}", site_url());
-                return;
-            }
-        },
+        None => return jobs::note(&format!("disky: bad site URL {:?}", site_url())),
     };
     let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target))
         .title("disky")
@@ -82,11 +78,25 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
         .build();
 }
 
+/// The local Settings window (`settings/index.html`, the only window with IPC).
+fn show_settings(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+        .title("disky settings")
+        .inner_size(520.0, 720.0)
+        .resizable(true)
+        .build();
+}
+
 /// A `disky://` URL from LaunchServices (the browser's "Open in disky").
 fn open_deep_link(app: &AppHandle, deep: &tauri::Url) {
     let site = match tauri::Url::parse(&site_url()) {
         Ok(s) => s,
-        Err(e) => return jobs::note(&format!("disky: bad DISKY_URL: {e}")),
+        Err(e) => return jobs::note(&format!("disky: bad site URL: {e}")),
     };
     match applink::link_to_load(deep, &site) {
         Ok(link) => show_window(app, Some(link)),
@@ -96,47 +106,170 @@ fn open_deep_link(app: &AppHandle, deep: &tauri::Url) {
 }
 
 fn fda_line(granted: bool) -> &'static str {
-    if granted {
-        "Full Disk Access ✓"
-    } else {
-        "Grant Full Disk Access…"
+    if granted { "Full Disk Access ✓" } else { "Grant Full Disk Access…" }
+}
+
+fn login_enabled() -> bool {
+    services::status(services::Service::LoginItem) == "enabled"
+}
+
+fn set_agents(on: bool) -> Result<(), String> {
+    for p in services::AGENT_PLISTS {
+        let s = services::Service::Agent(p);
+        if on { services::register(s)? } else { services::unregister(s)? }
+    }
+    Ok(())
+}
+
+fn set_login(on: bool) -> Result<(), String> {
+    let s = services::Service::LoginItem;
+    if on { services::register(s) } else { services::unregister(s) }
+}
+
+// --- Settings window commands ---------------------------------------------
+
+#[derive(Serialize)]
+struct UiState {
+    settings: Settings,
+    site_url: String,
+    fda: bool,
+    agents: bool,
+    login: bool,
+    scan: String,
+}
+
+fn ui_state() -> UiState {
+    let s = settings::load();
+    UiState {
+        site_url: s.site_url(),
+        settings: s,
+        fda: agent::has_full_disk_access(),
+        agents: services::agents_enabled(),
+        login: login_enabled(),
+        scan: status::scan_line(),
+    }
+}
+
+#[tauri::command]
+fn get_state() -> UiState {
+    ui_state()
+}
+
+#[tauri::command]
+fn save_settings(app: AppHandle, settings: Settings, agents: bool, login: bool) -> Result<UiState, String> {
+    for t in &settings.schedule {
+        settings::parse_hm(t).ok_or_else(|| format!("bad time {t:?} (want HH:MM)"))?;
+    }
+    if !["machine", "home"].contains(&settings.scope.as_str()) {
+        return Err(format!("bad scope {:?}", settings.scope));
+    }
+    let old = settings::load();
+    settings::save(&settings)?;
+    if agents != services::agents_enabled() {
+        set_agents(agents)?;
+    }
+    if login != login_enabled() {
+        set_login(login)?;
+    }
+    if settings.site != old.site {
+        site_changed(&app);
+    }
+    Ok(ui_state())
+}
+
+#[tauri::command]
+fn open_fda_settings() {
+    open(FDA_PANE);
+}
+
+#[tauri::command]
+fn scan_now() -> Result<(), String> {
+    status::scan_now()
+}
+
+// --- tray -------------------------------------------------------------------
+
+struct Tray {
+    scan: MenuItem<Wry>,
+    fda: MenuItem<Wry>,
+    prod: CheckMenuItem<Wry>,
+    dev: CheckMenuItem<Wry>,
+    scheduled: CheckMenuItem<Wry>,
+    login: CheckMenuItem<Wry>,
+}
+
+impl Tray {
+    fn refresh(&self) {
+        let _ = self.scan.set_text(status::scan_line());
+        let granted = agent::has_full_disk_access();
+        let _ = self.fda.set_text(fda_line(granted));
+        let _ = self.fda.set_enabled(!granted);
+        let site = settings::load().site;
+        let _ = self.prod.set_checked(site == "prod");
+        let _ = self.dev.set_checked(site == "dev");
+        let _ = self.scheduled.set_checked(services::agents_enabled());
+        let _ = self.login.set_checked(login_enabled());
+    }
+}
+
+/// The site setting changed: re-point an open site window, re-check the menu.
+fn site_changed(app: &AppHandle) {
+    if let (Some(w), Ok(u)) = (app.get_webview_window("main"), site_url().parse()) {
+        let _ = w.navigate(u);
+    }
+    if let Some(t) = app.try_state::<Tray>() {
+        t.refresh();
+    }
+}
+
+fn set_site(app: &AppHandle, site: &str) {
+    let mut s = settings::load();
+    s.site = site.to_string();
+    match settings::save(&s) {
+        Ok(()) => site_changed(app),
+        Err(e) => jobs::note(&format!("disky: can't save settings: {e}")),
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![get_state, save_settings, open_fda_settings, scan_now])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let scan = MenuItem::with_id(app, "scan_status", status::scan_line(), false, None::<&str>)?;
-            let granted = agent::has_full_disk_access();
-            let fda = MenuItem::with_id(app, "fda", fda_line(granted), !granted, None::<&str>)?;
-            let scheduled = CheckMenuItem::with_id(app, "scheduled", "Scheduled scans", true, services::agents_enabled(), None::<&str>)?;
-            let login = CheckMenuItem::with_id(
-                app, "login", "Open at login", true,
-                services::status(services::Service::LoginItem) == "enabled", None::<&str>,
-            )?;
+            let site = settings::load().site;
+            let tray = Tray {
+                scan: MenuItem::with_id(app, "scan_status", status::scan_line(), false, None::<&str>)?,
+                fda: MenuItem::with_id(app, "fda", fda_line(true), false, None::<&str>)?,
+                prod: CheckMenuItem::with_id(app, "site_prod", "disk.rbw.sh", true, site == "prod", None::<&str>)?,
+                dev: CheckMenuItem::with_id(app, "site_dev", "dev.disk.rbw.sh", true, site == "dev", None::<&str>)?,
+                scheduled: CheckMenuItem::with_id(app, "scheduled", "Scheduled scans", true, false, None::<&str>)?,
+                login: CheckMenuItem::with_id(app, "login", "Open at login", true, false, None::<&str>)?,
+            };
+            tray.refresh();
+            let site_menu = Submenu::with_items(app, "Site", true, &[&tray.prod, &tray.dev])?;
             let menu = Menu::with_items(
                 app,
                 &[
-                    &scan,
-                    &fda,
+                    &tray.scan,
+                    &tray.fda,
                     &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "scan_now", "Scan now", true, None::<&str>)?,
                     &MenuItem::with_id(app, "window", "Open disky", true, None::<&str>)?,
                     &MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?,
-                    &MenuItem::with_id(app, "logs", "Show logs", true, None::<&str>)?,
+                    &site_menu,
                     &PredefinedMenuItem::separator(app)?,
-                    &scheduled,
-                    &login,
+                    &tray.scheduled,
+                    &tray.login,
+                    &MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "logs", "Show logs", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "quit", "Quit disky", true, None::<&str>)?,
                 ],
             )?;
 
-            let (scheduled_c, login_c) = (scheduled.clone(), login.clone());
             TrayIconBuilder::with_id("disky")
                 // Monochrome template: macOS tints it for light/dark menu bars.
                 .icon(Image::from_bytes(include_bytes!("../icons/tray-template@2x.png"))?)
@@ -144,64 +277,63 @@ pub fn run() {
                 .tooltip("disky")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "scan_now" => {
-                        let label = if status::job_state(status::SCAN_LABEL).loaded {
-                            status::SCAN_LABEL
-                        } else {
-                            status::LEGACY_SCAN_LABEL
-                        };
-                        let _ = status::kickstart(label);
-                    }
-                    "scheduled" => {
-                        let on = !services::agents_enabled();
-                        for p in services::AGENT_PLISTS {
-                            let s = services::Service::Agent(p);
-                            let r = if on { services::register(s) } else { services::unregister(s) };
-                            if let Err(e) = r {
-                                eprintln!("disky: {p}: {e}");
+                .on_menu_event(|app, event| {
+                    match event.id().as_ref() {
+                        "scan_now" => {
+                            if let Err(e) = status::scan_now() {
+                                jobs::note(&format!("disky: scan now: {e}"));
                             }
                         }
-                        let _ = scheduled_c.set_checked(services::agents_enabled());
-                    }
-                    "login" => {
-                        let s = services::Service::LoginItem;
-                        let on = services::status(s) != "enabled";
-                        let r = if on { services::register(s) } else { services::unregister(s) };
-                        if let Err(e) = r {
-                            eprintln!("disky: login item: {e}");
-                            services::open_login_items_settings();
+                        "window" => show_window(app, None),
+                        "browser" => open(&site_url()),
+                        "site_prod" => set_site(app, "prod"),
+                        "site_dev" => set_site(app, "dev"),
+                        "settings" => show_settings(app),
+                        "logs" => open(&jobs::logs_dir().to_string_lossy()),
+                        "fda" => open(FDA_PANE),
+                        "scheduled" => {
+                            if let Err(e) = set_agents(!services::agents_enabled()) {
+                                jobs::note(&format!("disky: scheduled scans: {e}"));
+                            }
                         }
-                        let _ = login_c.set_checked(services::status(s) == "enabled");
+                        "login" => {
+                            if let Err(e) = set_login(!login_enabled()) {
+                                jobs::note(&format!("disky: login item: {e}"));
+                                services::open_login_items_settings();
+                            }
+                        }
+                        "quit" => app.exit(0),
+                        _ => {}
                     }
-                    "window" => show_window(app, None),
-                    "browser" => open(&site_url()),
-                    "logs" => {
-                        let home = std::env::var("HOME").unwrap_or_default();
-                        open(&format!("{home}/Library/Logs/disk-tree"));
+                    if let Some(t) = app.try_state::<Tray>() {
+                        t.refresh();
                     }
-                    "fda" => open(FDA_PANE),
-                    "quit" => app.exit(0),
-                    _ => {}
                 })
                 .build(app)?;
+            app.manage(tray);
 
-            // Keep the status lines fresh (launchd + the log are the record).
+            // First run, or no Full Disk Access yet: open Settings (onboarding).
+            if !settings::exists() || !agent::has_full_disk_access() {
+                if !settings::exists() {
+                    let _ = settings::save(&Settings::default());
+                }
+                show_settings(app.handle());
+            }
+
+            // Keep the menu fresh (launchd, the run state and settings are the record).
+            let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(20));
-                let _ = scan.set_text(status::scan_line());
-                let granted = agent::has_full_disk_access();
-                let _ = fda.set_text(fda_line(granted));
-                let _ = fda.set_enabled(!granted);
-                let _ = scheduled.set_checked(services::agents_enabled());
-                let _ = login.set_checked(services::status(services::Service::LoginItem) == "enabled");
+                if let Some(t) = handle.try_state::<Tray>() {
+                    t.refresh();
+                }
             });
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error building disky")
         .run(|app, event| match event {
-            // Closing the window leaves the menu-bar item running.
+            // Closing a window leaves the menu-bar item running.
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
