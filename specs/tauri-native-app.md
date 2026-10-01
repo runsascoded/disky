@@ -187,8 +187,8 @@ the walk carries the app's identity with no child-process caveat — the core v2
 - **Phase 5** — scheduled scans under the app's TCC identity. ✅ code, ⏳ Ryan's FDA grant + routing.
   See "Scheduled scans" below.
 - **Phase 6** — whole-machine coverage (not just `~`). ⏳ walker half done. See "Whole-machine coverage".
-- **Phase 7** — menu-bar presence ✅ (first cut); `SMAppService`-registered agents and in-app
-  sign-in open. The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
+- **Phase 7** — menu-bar presence ✅, `SMAppService`-registered agents ✅, login item ✅,
+  template icon ✅; in-app sign-in open (base is building the auth hand-off). The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
 
 ## Scheduled scans (Phase 5)
 
@@ -317,10 +317,31 @@ window leaves it running. The menu (verified via System Events: items and enable
   `native_walk_stats` command are gone (routed agents already walk as the app, via the bundled
   `dt-walker`); `ui/` + Flask stay available outside the app.
 
-Still to do: `SMAppService.agent` registration (bundle the plists in
-`Contents/Library/LaunchAgents`, so they appear as "disky" in Login Items and hand-written plists
-go away); a template (monochrome) tray icon; launch at login; per-scope settings (whole machine /
-home).
+**Bundled agents + login item ✅ 2026-09-30.** The agents moved into the bundle:
+`Contents/Library/LaunchAgents/com.runsascoded.disky.{scan,drain}.plist` (`BundleProgram
+Contents/MacOS/disky`, args `job scan|drain`; scan at 06:00/18:00 with low-priority I/O, drain
+`RunAtLoad` + `KeepAlive {SuccessfulExit: false}`), registered via `SMAppService.agent`
+(`services.rs`; `objc2-service-management`). A bundled plist is signed and static, so per-user
+command/env/log-name live in `~/.config/disk-tree/disky.json`, and `disky job NAME` redirects the
+child's output to `~/Library/Logs/disk-tree/<log>.{out,err}.log` itself (launchd can't expand `~`).
+An unconfigured job logs to `disky.log` and exits 0.
+
+- **Self-signed works:** `SMAppService` registered both agents for the `disk-tree-selfsigned`
+  bundle (no Team ID); they show as "disky" in Login Items. A job launched by the registered agent
+  read `~/Library/Mail` (the app's FDA grant applies).
+- `agentctl adopt` migrated this Mac: the routed hand-written plists' commands/env/log names went
+  into `disky.json`, the plists were booted out and renamed `*.plist.adopted-<stamp>`, the bundled
+  agents registered; the drainer came back as `disky job drain`, same logs. `agentctl unadopt`
+  reverts.
+- Tray: **Scheduled scans** (registers/unregisters both agents; verified both ways) and **Open at
+  login** (`SMAppService.mainApp`; on). The scan status line reads the bundled agent (schedule
+  from the bundled plist, log from `disky.json`), falling back to the legacy label.
+- **Template tray icon:** a 36 px treemap glyph (`icons/tray-template@2x.png`, black on
+  transparent), `icon_as_template(true)`, so macOS tints it for light/dark menu bars.
+
+Still to do: a scope setting (whole machine / home) once `laptop-scan`'s `/` capture lands
+(`m3`); a schedule setting (bundled plists fix 06:00/18:00; changing it means a rebuild, or a
+second bundled variant).
 
 ### Sign-in inside the window (open)
 

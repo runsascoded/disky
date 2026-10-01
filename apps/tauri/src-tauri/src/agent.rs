@@ -11,6 +11,10 @@
 //!   again, which is exactly the fragile grant this replaces. When the
 //!   bundle carries `dt-walker` and `DISK_TREE_WALKER` is unset, the child
 //!   gets it, so disk-tree scans under the agent use the native walker.
+//! - `disky job NAME` — the bundled LaunchAgents' program: run job NAME from
+//!   `~/.config/disk-tree/disky.json` the same way (`jobs.rs`).
+//! - `disky agents register|unregister|status`, `disky login-item on|off|status`
+//!   — `SMAppService` registration (`services.rs`).
 //! - `disky probe` — try reading TCC-protected locations *in this
 //!   process* and print one line per location (`ok` / `denied` / `absent`).
 //!   Exit 0 when every present location was readable, 3 otherwise. Run it via
@@ -40,6 +44,20 @@ pub fn dispatch(args: &[OsString]) -> Option<i32> {
     match args.get(1).and_then(|a| a.to_str()) {
         Some("agent") => Some(agent(&args[2..])),
         Some("probe") => Some(probe()),
+        Some("job") => Some(match args.get(2).and_then(|a| a.to_str()) {
+            Some(name) => crate::jobs::run(name),
+            None => {
+                eprintln!("usage: disky job NAME");
+                2
+            }
+        }),
+        Some(kind @ ("agents" | "login-item")) => {
+            Some(crate::services::cli(
+                kind,
+                args.get(2).and_then(|a| a.to_str()),
+                args.get(3).and_then(|a| a.to_str()),
+            ))
+        }
         _ => None,
     }
 }
@@ -55,13 +73,20 @@ fn agent(rest: &[OsString]) -> i32 {
     };
     let mut cmd = Command::new(program);
     cmd.args(args);
+    run_child(cmd)
+}
+
+/// Spawn `cmd` (with the bundled walker as `DISK_TREE_WALKER` when unset),
+/// forward TERM/INT/HUP to it, and return its exit status (128+signal when
+/// killed). Shared by `agent` and `job`.
+pub fn run_child(mut cmd: Command) -> i32 {
     if let Some(walker) = crate::locate_walker() {
         cmd.env("DISK_TREE_WALKER", walker);
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("disky agent: can't spawn {program:?}: {e}");
+            eprintln!("disky: can't spawn {:?}: {e}", cmd.get_program());
             return 127;
         }
     };
@@ -81,7 +106,7 @@ fn agent(rest: &[OsString]) -> i32 {
             }
         }
         Err(e) => {
-            eprintln!("disky agent: wait failed: {e}");
+            eprintln!("disky: wait failed: {e}");
             1
         }
     }

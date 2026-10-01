@@ -14,7 +14,10 @@ or venv it runs (spec `tauri-native-app.md`, "Scheduled scans").
     agentctl route LABEL…     # prefix LABEL's ProgramArguments with the app wrapper, reload
     agentctl unroute LABEL…   # undo `route`
     agentctl status           # each disk-tree agent: routed or not, last exit
+    agentctl adopt            # hand-written agents → disky.json + the app's bundled (SMAppService) agents
+    agentctl unadopt          # undo `adopt`
 """
+import json
 import os
 import plistlib
 import shutil
@@ -36,6 +39,9 @@ AGENTS = Path.home() / 'Library' / 'LaunchAgents'
 LOGS = Path.home() / 'Library' / 'Logs' / 'disk-tree'
 PREFIX = 'com.runsascoded.disk-tree.'
 DOMAIN = f'gui/{os.getuid()}'
+CONFIG = Path(os.environ.get('DISK_TREE_ROOT') or Path.home() / '.config' / 'disk-tree') / 'disky.json'
+#: legacy hand-written label suffix → the bundled agent's job name
+ADOPT = {'index': 'scan', 'drain': 'drain'}
 
 
 def run(*cmd: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -192,7 +198,8 @@ def unroute(labels: tuple[str, ...]):
 
 @cli.command()
 def status():
-    """Each `com.runsascoded.disk-tree.*` agent: routed or direct, and its last exit."""
+    """Each hand-written `com.runsascoded.disk-tree.*` agent (routed or direct,
+    last exit), then the app's bundled agents and login item."""
     for path in sorted(AGENTS.glob(f'{PREFIX}*.plist')):
         with open(path, 'rb') as f:
             pl = plistlib.load(f)
@@ -200,6 +207,78 @@ def status():
         mode = 'app' if is_routed(args) else 'direct'
         cmd = ' '.join(args[3:] if mode == 'app' else args)
         print(f'{pl["Label"].removeprefix(PREFIX):<14} {mode:<7} exit={last_exit(pl["Label"])}  {cmd}')
+    if EXE.exists():
+        for line in disky('agents', 'status').splitlines() + disky('login-item', 'status').splitlines():
+            label = line.split('.plist:')[0] if '.plist:' in line else None
+            extra = f'  exit={last_exit(label)}' if label else ''
+            print(f'disky: {line}{extra}')
+
+
+def disky(*args: str) -> str:
+    return run(str(EXE), *args, check=False).stdout.strip()
+
+
+@cli.command()
+@option('-f', '--force', is_flag=True, help='Adopt even while the scan agent is running (its scan is killed)')
+def adopt(force: bool):
+    """Move the hand-written agents into the app: write their commands, env and
+    log names to `disky.json`, retire their plists (bootout + rename to
+    `*.plist.adopted-<stamp>`), and register the bundled agents
+    (`com.runsascoded.disky.{scan,drain}`, shown as "disky" in Login Items).
+    """
+    if not EXE.exists():
+        raise SystemExit(f'{EXE} missing; run `agentctl install`')
+    legacy = {s: plist_path(s) for s in ADOPT if plist_path(s).exists()}
+    if not legacy:
+        raise SystemExit(f'no hand-written agents under {AGENTS}')
+    if not force and 'index' in legacy:
+        r = run('launchctl', 'print', f'{DOMAIN}/{PREFIX}index', check=False)
+        if 'state = running' in r.stdout:
+            raise SystemExit('the scan agent is running; wait for it (or -f to kill it)')
+    cfg = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+    jobs = cfg.setdefault('jobs', {})
+    for suffix, path in legacy.items():
+        with open(path, 'rb') as f:
+            pl = plistlib.load(f)
+        args = pl['ProgramArguments']
+        job = {'command': args[3:] if is_routed(args) else args}
+        if pl.get('EnvironmentVariables'):
+            job['env'] = pl['EnvironmentVariables']
+        if out := pl.get('StandardOutPath'):
+            job['log'] = Path(out).name.split('.')[0]
+        jobs[ADOPT[suffix]] = job
+    if CONFIG.exists():
+        shutil.copy2(CONFIG, CONFIG.with_suffix(f'.json.bak-{time.strftime("%Y%m%dT%H%M%S")}'))
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(json.dumps(cfg, indent=2) + '\n')
+    err(f'wrote {CONFIG}: jobs {sorted(jobs)}')
+    stamp = time.strftime('%Y%m%dT%H%M%S')
+    for suffix, path in legacy.items():
+        label = f'{PREFIX}{suffix}'
+        run('launchctl', 'bootout', f'{DOMAIN}/{label}', check=False)
+        deadline = time.monotonic() + 60
+        while loaded(label):
+            if time.monotonic() > deadline:
+                raise SystemExit(f'{label}: still loaded 60s after bootout')
+            time.sleep(0.25)
+        path.rename(path.with_suffix(f'.plist.adopted-{stamp}'))
+        err(f'{label}: unloaded, plist retired')
+    print(disky('agents', 'register'))
+
+
+@cli.command()
+def unadopt():
+    """Undo `adopt`: unregister the bundled agents, restore the newest retired
+    hand-written plists, and load them. `disky.json` is left as is."""
+    print(disky('agents', 'unregister'))
+    for suffix in ADOPT:
+        retired = sorted(AGENTS.glob(f'{PREFIX}{suffix}.plist.adopted-*'))
+        if not retired:
+            continue
+        path = plist_path(suffix)
+        retired[-1].rename(path)
+        reload(path, f'{PREFIX}{suffix}')
+        err(f'{PREFIX}{suffix}: restored and loaded')
 
 
 if __name__ == '__main__':

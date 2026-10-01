@@ -53,16 +53,31 @@ grant survives rebuilds and TCC shows "disk-tree" — same identity and bundle i
   instead of `gfind` (the host sets this automatically when it finds the bundled
   walker next to its executable).
 
-## Headless modes (LaunchAgents)
+## Menu bar, agents, login item
 
-The app binary doubles as the laptop agents' TCC identity (spec Phase 5):
+`disky` is a menu-bar app (no Dock icon): scan status, Full Disk Access status, Scan now, a window on
+disk.rbw.sh (`DISKY_URL`), and toggles for **Scheduled scans** and **Open at login**.
+
+Scheduled work runs as the app's bundled LaunchAgents
+(`Contents/Library/LaunchAgents/com.runsascoded.disky.{scan,drain}.plist`, registered with
+`SMAppService`, listed as "disky" in Login Items), so the app's Full Disk Access grant covers it.
+A bundled plist is static, so the per-user part (command, env, log name) lives in
+`~/.config/disk-tree/disky.json`:
+
+```json
+{"jobs": {"scan":  {"command": ["…/.venv/bin/python", "…/aws/laptop-scan"], "env": {"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}, "log": "index"},
+          "drain": {"command": ["…/.venv/bin/python", "…/aws/laptop-drain"], "log": "drain"}}}
+```
 
 ```bash
-disky agent -- CMD ARGS…          # spawn CMD as a child; FDA granted to the app covers it
-disky probe                       # read TCC-protected dirs in-process; exit 3 if any denied
-scripts/agentctl install           # target/…/disky.app → ~/Applications (stable grant path)
-scripts/agentctl check             # run the probe as launchd jobs: is FDA granted to the app?
-scripts/agentctl route index drain # route com.runsascoded.disk-tree.{index,drain} through the app
+disky job scan                      # what the scan agent runs (06:00, 18:00); output → ~/Library/Logs/disk-tree/<log>.{out,err}.log
+disky agents register|unregister|status [scan|drain]
+disky login-item on|off|status
+disky agent -- CMD ARGS…            # run any command as the app's child (its FDA grant covers it)
+disky probe                         # read TCC-protected dirs in-process; exit 3 if any denied
+scripts/agentctl install            # target/…/disky.app → ~/Applications (stable grant path)
+scripts/agentctl check              # the probe, as launchd jobs: is FDA granted to the app?
+scripts/agentctl adopt              # hand-written agents → disky.json + bundled agents (`unadopt` reverts)
 scripts/agentctl status
 ```
 

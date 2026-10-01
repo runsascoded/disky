@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-/// The scheduled-scan LaunchAgent the menu reports on.
-pub const SCAN_LABEL: &str = "com.runsascoded.disk-tree.index";
+/// The bundled scan agent (`SMAppService`-registered; `services.rs`).
+pub const SCAN_LABEL: &str = "com.runsascoded.disky.scan";
+/// The hand-written agent it replaces, reported on while it's still loaded.
+pub const LEGACY_SCAN_LABEL: &str = "com.runsascoded.disk-tree.index";
 
 pub fn uid() -> u32 {
     unsafe { libc::getuid() }
@@ -24,25 +26,43 @@ pub struct Agent {
     pub schedule: Vec<(u32, u32)>,
 }
 
+fn calendar(d: &plist::Dictionary) -> Vec<(u32, u32)> {
+    let entries: Vec<plist::Value> = match d.get("StartCalendarInterval") {
+        Some(plist::Value::Array(a)) => a.clone(),
+        Some(v @ plist::Value::Dictionary(_)) => vec![v.clone()],
+        _ => vec![],
+    };
+    entries
+        .iter()
+        .filter_map(|e| {
+            let e = e.as_dictionary()?;
+            let get = |k: &str| e.get(k).and_then(|v| v.as_unsigned_integer()).map(|n| n as u32);
+            Some((get("Hour")?, get("Minute").unwrap_or(0)))
+        })
+        .collect()
+}
+
+/// This bundle's `Contents/Library/LaunchAgents/<label>.plist`.
+fn bundled_plist(label: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let p = exe.parent()?.join(format!("../Library/LaunchAgents/{label}.plist"));
+    p.is_file().then_some(p)
+}
+
 impl Agent {
-    pub fn load(label: &str) -> Option<Agent> {
-        let v = plist::Value::from_file(agents_dir().join(format!("{label}.plist"))).ok()?;
+    /// The scan agent: the bundled one when launchd has it loaded, else the
+    /// legacy hand-written plist (before `agentctl adopt`).
+    pub fn scan() -> Option<Agent> {
+        if job_state(SCAN_LABEL).loaded {
+            let d = plist::Value::from_file(bundled_plist(SCAN_LABEL)?).ok()?.into_dictionary()?;
+            let cfg = crate::jobs::load().unwrap_or_default();
+            let (out, _) = crate::jobs::log_paths("scan", cfg.jobs.get("scan"));
+            return Some(Agent { label: SCAN_LABEL.to_string(), out_log: Some(out), schedule: calendar(&d) });
+        }
+        let v = plist::Value::from_file(agents_dir().join(format!("{LEGACY_SCAN_LABEL}.plist"))).ok()?;
         let d = v.as_dictionary()?;
         let out_log = d.get("StandardOutPath").and_then(|v| v.as_string()).map(PathBuf::from);
-        let entries: Vec<plist::Value> = match d.get("StartCalendarInterval") {
-            Some(plist::Value::Array(a)) => a.clone(),
-            Some(v @ plist::Value::Dictionary(_)) => vec![v.clone()],
-            _ => vec![],
-        };
-        let schedule = entries
-            .iter()
-            .filter_map(|e| {
-                let e = e.as_dictionary()?;
-                let get = |k: &str| e.get(k).and_then(|v| v.as_unsigned_integer()).map(|n| n as u32);
-                Some((get("Hour")?, get("Minute").unwrap_or(0)))
-            })
-            .collect();
-        Some(Agent { label: label.to_string(), out_log, schedule })
+        Some(Agent { label: LEGACY_SCAN_LABEL.to_string(), out_log, schedule: calendar(d) })
     }
 }
 
@@ -120,7 +140,7 @@ pub fn next_run(schedule: &[(u32, u32)], now: (u32, u32)) -> Option<(u32, u32)> 
 /// The menu's scan line, e.g. "Scanned 3h ago · next 18:00", "Scanning…",
 /// "Last scan failed (exit 1) 2h ago · next 06:00", "No scan agent".
 pub fn scan_line() -> String {
-    let Some(agent) = Agent::load(SCAN_LABEL) else {
+    let Some(agent) = Agent::scan() else {
         return "No scheduled scan".to_string();
     };
     let job = job_state(&agent.label);

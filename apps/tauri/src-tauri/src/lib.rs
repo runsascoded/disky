@@ -9,13 +9,16 @@
 //! See `specs/tauri-native-app.md` (Phases 5–7).
 
 mod agent;
+mod jobs;
+mod services;
 mod status;
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::image::Image;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -86,6 +89,11 @@ pub fn run() {
             let scan = MenuItem::with_id(app, "scan_status", status::scan_line(), false, None::<&str>)?;
             let granted = agent::has_full_disk_access();
             let fda = MenuItem::with_id(app, "fda", fda_line(granted), !granted, None::<&str>)?;
+            let scheduled = CheckMenuItem::with_id(app, "scheduled", "Scheduled scans", true, services::agents_enabled(), None::<&str>)?;
+            let login = CheckMenuItem::with_id(
+                app, "login", "Open at login", true,
+                services::status(services::Service::LoginItem) == "enabled", None::<&str>,
+            )?;
             let menu = Menu::with_items(
                 app,
                 &[
@@ -97,19 +105,50 @@ pub fn run() {
                     &MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?,
                     &MenuItem::with_id(app, "logs", "Show logs", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
+                    &scheduled,
+                    &login,
+                    &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "quit", "Quit disky", true, None::<&str>)?,
                 ],
             )?;
 
+            let (scheduled_c, login_c) = (scheduled.clone(), login.clone());
             TrayIconBuilder::with_id("disky")
-                .icon(app.default_window_icon().cloned().expect("bundle icon"))
-                .icon_as_template(false)
+                // Monochrome template: macOS tints it for light/dark menu bars.
+                .icon(Image::from_bytes(include_bytes!("../icons/tray-template@2x.png"))?)
+                .icon_as_template(true)
                 .tooltip("disky")
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| match event.id().as_ref() {
+                .on_menu_event(move |app, event| match event.id().as_ref() {
                     "scan_now" => {
-                        let _ = status::kickstart(status::SCAN_LABEL);
+                        let label = if status::job_state(status::SCAN_LABEL).loaded {
+                            status::SCAN_LABEL
+                        } else {
+                            status::LEGACY_SCAN_LABEL
+                        };
+                        let _ = status::kickstart(label);
+                    }
+                    "scheduled" => {
+                        let on = !services::agents_enabled();
+                        for p in services::AGENT_PLISTS {
+                            let s = services::Service::Agent(p);
+                            let r = if on { services::register(s) } else { services::unregister(s) };
+                            if let Err(e) = r {
+                                eprintln!("disky: {p}: {e}");
+                            }
+                        }
+                        let _ = scheduled_c.set_checked(services::agents_enabled());
+                    }
+                    "login" => {
+                        let s = services::Service::LoginItem;
+                        let on = services::status(s) != "enabled";
+                        let r = if on { services::register(s) } else { services::unregister(s) };
+                        if let Err(e) = r {
+                            eprintln!("disky: login item: {e}");
+                            services::open_login_items_settings();
+                        }
+                        let _ = login_c.set_checked(services::status(s) == "enabled");
                     }
                     "window" => show_window(app),
                     "browser" => open(&site_url()),
@@ -130,6 +169,8 @@ pub fn run() {
                 let granted = agent::has_full_disk_access();
                 let _ = fda.set_text(fda_line(granted));
                 let _ = fda.set_enabled(!granted);
+                let _ = scheduled.set_checked(services::agents_enabled());
+                let _ = login.set_checked(services::status(services::Service::LoginItem) == "enabled");
             });
             Ok(())
         })

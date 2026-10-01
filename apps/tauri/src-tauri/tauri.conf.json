@@ -29,7 +29,11 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0",
-      "signingIdentity": "disk-tree-selfsigned"
+      "signingIdentity": "disk-tree-selfsigned",
+      "files": {
+        "Library/LaunchAgents/com.runsascoded.disky.scan.plist": "launchd/com.runsascoded.disky.scan.plist",
+        "Library/LaunchAgents/com.runsascoded.disky.drain.plist": "launchd/com.runsascoded.disky.drain.plist"
+      }
     },
     "resources": {
       "../target/release/dt-walker": "dt-walker"
