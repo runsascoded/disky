@@ -12,7 +12,28 @@ use std::io::{self, Write};
 use std::os::raw::c_void;
 
 use attrlist::{getattrlistbulk, Attrlist, Request};
-use record::Record;
+pub use record::Record;
+
+/// Where walked records go: the gfind-format byte stream ([`Walker::walk`]) or
+/// a callback ([`Walker::walk_records`], e.g. the in-process capture).
+pub trait Sink {
+    fn record(&mut self, r: &Record) -> io::Result<()>;
+}
+
+/// `%y %b %T@ %p\0` to a writer.
+struct WriteSink<'w, W: Write>(&'w mut W);
+
+impl<W: Write> Sink for WriteSink<'_, W> {
+    fn record(&mut self, r: &Record) -> io::Result<()> {
+        r.write_to(self.0)
+    }
+}
+
+impl<F: FnMut(&Record) -> io::Result<()>> Sink for F {
+    fn record(&mut self, r: &Record) -> io::Result<()> {
+        self(r)
+    }
+}
 
 /// Directories proxying to cloud services (macOS File Provider); walking them
 /// blocks on network I/O, so we prune them — mirroring `local.py`'s
@@ -96,12 +117,28 @@ impl<'a> Walker<'a> {
         self
     }
 
-    /// Walk `root` (an absolute path, no trailing slash except "/"), writing
-    /// records to `out` and permission errors to `err`.
-    pub fn walk<W: Write, E: Write>(
+    /// Walk `root`, writing gfind-format records to `out` and permission
+    /// errors to `err`.
+    pub fn walk<W: Write, E: Write>(&mut self, root: &[u8], out: &mut W, err: &mut E) -> io::Result<()> {
+        self.walk_into(root, &mut WriteSink(out), err)
+    }
+
+    /// Walk `root`, handing each record to `f` (paths are borrowed for the call).
+    pub fn walk_records<F: FnMut(&Record) -> io::Result<()>, E: Write>(
         &mut self,
         root: &[u8],
-        out: &mut W,
+        mut f: F,
+        err: &mut E,
+    ) -> io::Result<()> {
+        self.walk_into(root, &mut f, err)
+    }
+
+    /// Walk `root` (an absolute path, no trailing slash except "/"), writing
+    /// records to `out` and permission errors to `err`.
+    fn walk_into<S: Sink + ?Sized, E: Write>(
+        &mut self,
+        root: &[u8],
+        out: &mut S,
         err: &mut E,
     ) -> io::Result<()> {
         let root = normalize_root(root);
@@ -124,11 +161,11 @@ impl<'a> Walker<'a> {
         Ok(())
     }
 
-    fn walk_dir<W: Write, E: Write>(
+    fn walk_dir<S: Sink + ?Sized, E: Write>(
         &mut self,
         dir: &[u8],
         stack: &mut Vec<Vec<u8>>,
-        out: &mut W,
+        out: &mut S,
         err: &mut E,
     ) -> io::Result<()> {
         let cpath = match cstring(dir) {
@@ -203,8 +240,8 @@ impl<'a> Walker<'a> {
     }
 
     #[inline]
-    fn emit<W: Write>(&mut self, r: Record, out: &mut W) -> io::Result<()> {
-        r.write_to(out)?;
+    fn emit<S: Sink + ?Sized>(&mut self, r: Record, out: &mut S) -> io::Result<()> {
+        out.record(&r)?;
         self.records += 1;
         Ok(())
     }

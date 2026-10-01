@@ -1,9 +1,10 @@
 # Cargo workspace for the disk-tree Tauri v2 native app.
 #   crates/dt-walker — the native getattrlistbulk walker (Phase 1)
+#   crates/dt-capture — `capture` in Rust: walk → layer-1 shards + manifest
 #   src-tauri        — the Tauri v2 host that wraps the UI + walker (Phase 2)
 [workspace]
 resolver = "2"
-members = ["crates/dt-walker", "src-tauri"]
+members = ["crates/dt-walker", "crates/dt-capture", "src-tauri"]
 
 [profile.release]
 opt-level = 3

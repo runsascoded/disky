@@ -1,0 +1,24 @@
+[package]
+name = "dt-capture"
+version = "0.1.0"
+edition = "2021"
+description = "disk-tree `capture` in Rust: native walk → layer-1 listing shards + `_SUCCESS.json`, byte-compatible with the Python CLI"
+license = "MIT"
+
+[lib]
+name = "dt_capture"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dt-capture"
+path = "src/bin/dt-capture.rs"
+
+[dependencies]
+dt-walker = { path = "../dt-walker" }
+arrow-array = "60"
+arrow-schema = "60"
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+plist = "1"
+libc = "0.2"
