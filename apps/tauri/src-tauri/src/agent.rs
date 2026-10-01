@@ -52,6 +52,20 @@ pub fn dispatch(args: &[OsString]) -> Option<i32> {
                 2
             }
         }),
+        Some("scan") => Some(match args.get(2).and_then(|a| a.to_str()) {
+            // The menu's "Scan now": force the next agent run, and start it.
+            Some("now") => match crate::status::scan_now() {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("disky scan now: {e}");
+                    1
+                }
+            },
+            _ => {
+                eprintln!("usage: disky scan now");
+                2
+            }
+        }),
         Some(kind @ ("agents" | "login-item")) => {
             Some(crate::services::cli(
                 kind,

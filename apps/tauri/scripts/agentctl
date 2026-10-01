@@ -39,6 +39,7 @@ AGENTS = Path.home() / 'Library' / 'LaunchAgents'
 LOGS = Path.home() / 'Library' / 'Logs' / 'disk-tree'
 PREFIX = 'com.runsascoded.disk-tree.'
 DOMAIN = f'gui/{os.getuid()}'
+SCAN_LABEL = 'com.runsascoded.disky.scan'
 CONFIG = Path(os.environ.get('DISK_TREE_ROOT') or Path.home() / '.config' / 'disk-tree') / 'disky.json'
 #: legacy hand-written label suffix → the bundled agent's job name
 ADOPT = {'index': 'scan', 'drain': 'drain'}
@@ -95,10 +96,13 @@ def cli():
 
 
 @cli.command()
-def install():
+@option('-f', '--force', is_flag=True, help='Install even while a scan is running (re-registering the agents kills it)')
+def install(force: bool):
     """Copy the built bundle to ~/Applications (a stable path for the FDA grant)."""
     if not BUILT.exists():
         raise SystemExit(f'no bundle at {BUILT}; build it with `cargo tauri build --bundles app`')
+    if not force and 'state = running' in run('launchctl', 'print', f'{DOMAIN}/{SCAN_LABEL}', check=False).stdout:
+        raise SystemExit('a scan is running (re-registering the agents would kill it); wait for it, or -f')
     run('codesign', '--verify', '--deep', '--strict', str(BUILT))
     # Re-register around the swap so the installed plists are re-rendered from
     # the new bundle's templates (plain LaunchAgents; see services.rs for why

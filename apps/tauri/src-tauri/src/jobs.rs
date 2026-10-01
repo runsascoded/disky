@@ -90,9 +90,18 @@ pub fn run_scheduled_scan() -> i32 {
             let _ = settings::save_state(&st);
             return 0;
         }
-        if !settings::due(&s.times(), st.last_start, now) {
+        // A run killed mid-scan (an app reinstall, a logout) already claimed
+        // its slot: retry it once at the next wake rather than wait for the
+        // next slot. A retry that is itself interrupted waits.
+        let retry = !st.retried && st.interrupted();
+        if !settings::due(&s.times(), st.last_start, now) && !retry {
             return 0;
         }
+        if retry {
+            note("disky job scan: retrying an interrupted run");
+        }
+        st.retried = retry;
+        let _ = settings::save_state(&st);
     }
     run("scan")
 }

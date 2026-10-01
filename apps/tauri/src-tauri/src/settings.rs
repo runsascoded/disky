@@ -110,6 +110,23 @@ pub struct ScanState {
     /// Epoch seconds the last scan ended, and its exit code.
     pub last_end: Option<i64>,
     pub last_exit: Option<i32>,
+    /// The current run is the one automatic retry of an interrupted run.
+    pub retried: bool,
+}
+
+impl ScanState {
+    /// The last run didn't finish on its own: killed by a signal (exit 128+N,
+    /// e.g. 143 when an app reinstall boots the agent out mid-scan), or the
+    /// runner itself died before recording an end. Not running now: launchd
+    /// never starts a job that is already running, so this is only asked
+    /// between runs.
+    pub fn interrupted(&self) -> bool {
+        match (self.last_start, self.last_end, self.last_exit) {
+            (_, _, Some(code)) if code >= 128 && self.last_end >= self.last_start => true,
+            (Some(start), Some(end), _) => end < start,
+            _ => false,
+        }
+    }
 }
 
 fn state_path() -> std::path::PathBuf {
@@ -196,6 +213,23 @@ mod tests {
         // Never ran: not due (no surprise scan at install); empty schedule: never.
         assert!(!due(&t, None, at(19, 15)));
         assert!(!due(&[], Some(0), at(19, 15)));
+    }
+
+    #[test]
+    fn interrupted_runs() {
+        let st = |last_start, last_end, last_exit| ScanState { last_start, last_end, last_exit, ..Default::default() };
+        assert_eq!(
+            [
+                st(None, None, None),              // fresh install
+                st(Some(100), None, None),         // baseline recorded, never ran
+                st(Some(100), Some(200), Some(0)), // finished
+                st(Some(100), Some(200), Some(1)), // failed on its own: no retry
+                st(Some(100), Some(200), Some(143)), // SIGTERM'd (bootout)
+                st(Some(300), Some(200), Some(0)), // runner died mid-run
+            ]
+            .map(|s| s.interrupted()),
+            [false, false, false, false, true, true],
+        );
     }
 
     #[test]

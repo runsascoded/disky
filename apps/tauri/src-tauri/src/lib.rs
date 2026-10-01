@@ -45,7 +45,7 @@ pub(crate) fn locate_walker() -> Option<PathBuf> {
     [dir.join("dt-walker"), dir.join("../Resources/dt-walker")].into_iter().find(|c| c.is_file())
 }
 
-/// A headless mode (`agent`, `job`, `probe`, `agents`, `login-item`) when
+/// A headless mode (`agent`, `job`, `probe`, `scan now`, `agents`, `login-item`) when
 /// `args` selects one: its exit code. Checked before `run()`, so launchd jobs
 /// never touch Tauri/AppKit.
 pub fn headless(args: &[std::ffi::OsString]) -> Option<i32> {
