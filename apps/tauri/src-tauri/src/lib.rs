@@ -76,7 +76,7 @@ fn wait_until_up(port: u16, timeout: Duration) -> bool {
 /// The bundled `dt-walker` binary, if we can find it next to our own executable
 /// (how it's laid out in a bundle) — used to point the Python backend at the
 /// native walker. Respects an existing `DISK_TREE_WALKER` env.
-fn locate_walker() -> Option<PathBuf> {
+pub(crate) fn locate_walker() -> Option<PathBuf> {
     if std::env::var_os("DISK_TREE_WALKER").is_some() {
         return None; // already set by the environment; don't override
     }

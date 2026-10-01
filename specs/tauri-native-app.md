@@ -252,11 +252,16 @@ Paths keep their usual spelling (`/Users/ryan/…`), so a `/` scan and a `~` sca
 `/Users`.
 
 **Plan:**
-1. `local.py`: a `one_fs` option (walker `--one-fs`; gfind has no equivalent from `/`, so a `/`
-   scan requires the walker). `laptop-scan` then captures `/` instead of `~` (≈+17% entries).
-2. **Volume rows:** the scan records the APFS container (`diskutil apfs list -plist` +
-   `listSnapshots`) as a sidecar; the UI shows the non-Data volumes and free space as synthetic
-   top-level cells, so the map's root is the *container*, and the numbers add up to the disk.
+1. ✅ `index`/`capture` `-o/--one-fs` (`0f8558c`): the walker checks each dir's mount status;
+   gfind prunes the mount points below the root (from `mount`), which is equivalent, and now
+   prints pruned dirs as empty leaves like the walker does. gfind and walker frames are identical
+   on `/Volumes` and `/System/Volumes`. Remaining: `laptop-scan` captures `/` instead of `~`
+   (≈+17% entries; `m3`'s call, after Phase 5's routing).
+2. **Volume rows:** ✅ capture side. `disk-tree volumes [PATH]` (`d48c637`) and
+   `_SUCCESS.json.container` (`3e71190`) record the APFS container (volumes' `CapacityInUse`,
+   mount points, snapshots, free). Remaining (site/ingest): carry it to the snapshot and show the
+   non-Data volumes and free space as top-level cells, so the map's root is the *container* and
+   the numbers add up to the disk.
 3. **Residual:** `Data CapacityInUse − Σprivate(walked Data files)` bounds what the walk couldn't
    see (root-only dirs, snapshots' private blocks). Needs `--private` in the capture (+55% walk
    time), or accept the apparent-size version with the clone caveat.
@@ -283,8 +288,11 @@ offline/external-drive use. (a) is the cheaper default.
    `--waitress`, reusing `packaging/macos/disk-tree.spec`) so it's self-contained; today the
    host spawns `disk-tree-server` from PATH. Sign the sidecar with inheritance. (Lower priority
    if the window loads disk.rbw.sh.)
-2. **Ship `dt-walker` as a bundle resource** and confirm `locate_walker()` resolves it, so the
-   packaged backend (and routed agents, via `DISK_TREE_WALKER`) scan via the native walker.
+2. ~~**Ship `dt-walker` as a bundle resource**~~ ✅ 2026-09-30: `bundle.resources` +
+   `beforeBuildCommand` put it at `Contents/Resources/dt-walker`; `locate_walker()` resolves it,
+   and `agent` sets `DISK_TREE_WALKER` for its child when unset (verified under launchd). So once
+   routed, the scheduled `capture`/`index` walk natively. Known difference from gfind: the walker
+   also lists *unreadable* dirs (as 0-byte leaves) that gfind omits; sizes are identical.
 3. **In-process walk → aggregation** — stream `native_walk_stats`'s records straight into the
    Python aggregation (or a Rust port) instead of the subprocess seam.
 4. Real app icon (current is a placeholder).

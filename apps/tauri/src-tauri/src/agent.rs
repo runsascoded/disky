@@ -8,7 +8,9 @@
 //!   the scan (`gfind`/`dt-walker`) under a venv `python`. The child is
 //!   spawned, never `exec`ed: an `exec` would replace this image with the
 //!   interpreter, and the job's responsible code would become `python3.x`
-//!   again, which is exactly the fragile grant this replaces.
+//!   again, which is exactly the fragile grant this replaces. When the
+//!   bundle carries `dt-walker` and `DISK_TREE_WALKER` is unset, the child
+//!   gets it, so disk-tree scans under the agent use the native walker.
 //! - `disk-tree-app probe` — try reading TCC-protected locations *in this
 //!   process* and print one line per location (`ok` / `denied` / `absent`).
 //!   Exit 0 when every present location was readable, 3 otherwise. Run it via
@@ -51,7 +53,12 @@ fn agent(rest: &[OsString]) -> i32 {
         eprintln!("usage: disk-tree-app agent [--] CMD [ARGS…]");
         return 2;
     };
-    let mut child = match Command::new(program).args(args).spawn() {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some(walker) = crate::locate_walker() {
+        cmd.env("DISK_TREE_WALKER", walker);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("disk-tree-app agent: can't spawn {program:?}: {e}");
