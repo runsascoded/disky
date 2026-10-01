@@ -145,3 +145,27 @@ def resolve_blob_env(env, blob):
     )
     return subprocess.run([sys.executable, '-c', code], env=env,
                           capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_a_stale_scan_warns_on_stderr(scanned: Path):
+    """A scan blob more than 7 days old says so (stderr; stdout unchanged): the
+    blob store isn't refreshed any more on m3, and `du -p` reads the current
+    path index."""
+    r = _run_dt(scanned, 'du', '-j', 'gcs://b1')
+    assert r.returncode == 0, r.stderr
+    scan_id = json.loads(r.stdout)['scan_id']
+    assert r.stderr.rstrip('\n').split('\n') == [
+        f'du: scan {scan_id} of gcs://b1 is from 2026-07-01 (more than 7 days old) — '
+        'pass `-p` (or set $DISK_TREE_PATH_INDEX) to read the current path index',
+    ]
+
+
+def test_a_fresh_scan_does_not_warn(tmp_path: Path):
+    env_root = tmp_path / 'root'
+    env_root.mkdir()
+    listing = tmp_path / 'l.parquet'
+    now = dt.datetime.now(dt.timezone.utc)
+    pd.DataFrame([{'bucket': 'b1', 'name': 'a.txt', 'size_bytes': 100, 'created': now, 'storage_class_id': 1}]).to_parquet(listing)
+    assert _run_dt(env_root, 'import', '-l', str(listing), '-b', 'b1', '-t', now.isoformat()).returncode == 0
+    r = _run_dt(env_root, 'du', 'gcs://b1')
+    assert (r.returncode, r.stderr) == (0, '')

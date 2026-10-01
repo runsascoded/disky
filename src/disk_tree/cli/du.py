@@ -13,6 +13,7 @@ from datetime import datetime
 
 from click import argument, option
 from humanize import naturalsize
+from utz import err
 
 from disk_tree.cli.base import cli
 from disk_tree.config import SQLITE_PATH
@@ -56,6 +57,7 @@ def du_cmd(all_kinds: bool, depth: int, no_human: bool, as_json: bool, top: int,
     con.close()
     if not scan:
         raise SystemExit(f"no scan covering {uri!r}")
+    _warn_if_stale(scan, uri)
 
     rel = '.' if scan['path'] == uri else uri[len(scan['path'].rstrip('/') + '/'):]
     blob, rebased = resolve_chunk_for_path(scan['blob'], rel)
@@ -77,6 +79,20 @@ def du_cmd(all_kinds: bool, depth: int, no_human: bool, as_json: bool, top: int,
     meta = {'scan_id': scan['id'], 'time': scan['time']}
     header = f"scan {scan['id']} of {scan['path']}, {str(scan['time'])[:19]}"
     _print_tree(df, root_size, uri, top, no_human, as_json, meta, header, recl_map=recl_map, recl=_recl)
+
+
+#: A scan blob older than this gets a stderr warning: nothing refreshes the
+#: blob store on the laptop any more (`du -p` reads the ingest's path index).
+STALE_DAYS = 7
+
+
+def _warn_if_stale(scan, uri: str) -> None:
+    import pandas as pd
+    t = pd.Timestamp(scan['time'])
+    t = t.tz_localize('UTC') if t.tzinfo is None else t
+    if pd.Timestamp.now(tz='UTC') - t > pd.Timedelta(days=STALE_DAYS):
+        err(f"du: scan {scan['id']} of {uri} is from {t.date()} (more than {STALE_DAYS} days old) — "
+            "pass `-p` (or set $DISK_TREE_PATH_INDEX) to read the current path index")
 
 
 def _print_tree(df, root_size: int, uri: str, top: int, no_human: bool, as_json: bool, meta: dict, header: str, *, recl_map, recl) -> None:

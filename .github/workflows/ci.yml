@@ -1,10 +1,11 @@
 name: CI
 
+# Every long-lived branch (cloud, local and the deployments that merge them);
+# `dist/**` branches are build outputs.
 on:
   push:
-    branches: [main]
+    branches-ignore: ['dist/**']
   pull_request:
-    branches: [main]
 
 jobs:
   test:
@@ -97,3 +98,54 @@ jobs:
 
       - name: Test
         run: cd packages/react && pnpm test
+
+  dt-cloud-test:
+    name: dt-cloud tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      # One workspace env from the root lockfile (`cloud/` is a member), at the
+      # pins the job images install `--frozen`.
+      - name: Sync dt-cloud
+        run: uv sync --frozen --all-packages --all-extras --all-groups
+
+      - name: Run dt-cloud tests
+        run: cd cloud && uv run --no-sync pytest tests -v
+
+  site:
+    name: Site typecheck, build + tests
+    runs-on: ubuntu-latest
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        # pnpm version comes from root package.json's `packageManager` field.
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24  # the D1 test fake uses `node:sqlite` (Node ≥ 22.5)
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `pnpm build` = `tsc -b && vite build`: typechecks the SPA and the
+      # Functions, then bundles.
+      - name: Build site (typecheck + bundle)
+        run: cd site && pnpm build
+
+      - name: Site tests
+        run: cd site && timeout 900 pnpm vitest run --testTimeout=20000

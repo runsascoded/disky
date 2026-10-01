@@ -910,6 +910,9 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
     min-height: 0;
     .treemap { height: 100%; gap: 0; }
     .dt-treemap-map { flex-basis: 0% !important; height: 100%; min-height: 0; }
+    // The docked detail panel (totals, "hover a cell…") is for the live map;
+    // the card is the map alone.
+    .dt-treemap-tip.dock { display: none; }
   }
   .og-legend {
     display: flex;
@@ -918,6 +921,9 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
     .sw { width: 14px; height: 14px; border-radius: 4px; }
   }
 }
+
+// The help chip/card floats over every page; on the card it covered the legend.
+body:has(.og) :is(.help-chip, .help-card) { display: none; }
 
 .legend .gradli {
   gap: 6px;

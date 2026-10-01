@@ -197,8 +197,8 @@ class Scan(Base):
     ) -> 'Scan | None':
         from .db import db
 
-        abspath = os.path.abspath(path).rstrip('/')
-        return db.session.query(cls).filter_by(path=abspath).order_by(cls.time.desc()).first()
+        from disk_tree.backends import canonical
+        return db.session.query(cls).filter_by(path=canonical(path)).order_by(cls.time.desc()).first()
 
     def df(self) -> pd.DataFrame:
         backend = get_backend()
@@ -210,8 +210,10 @@ class Scan(Base):
     def load_reachable(cls, path: str) -> 'Scan | None':
         """The freshest scan of `path` whose blob is reachable now — skips scans
         whose parquet is on an unmounted volume (spec `r2-scan-target.md`)."""
+        from disk_tree.backends import canonical
         from disk_tree.config import blob_reachable
-        scans = db.session.query(cls).filter_by(path=os.path.abspath(path).rstrip('/')).order_by(cls.time.desc()).all()
+        from .db import db
+        scans = db.session.query(cls).filter_by(path=canonical(path)).order_by(cls.time.desc()).all()
         return next((s for s in scans if blob_reachable(s.blob)), None)
 
     @classmethod
