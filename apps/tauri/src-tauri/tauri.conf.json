@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "disk-tree",
+  "productName": "disky",
   "version": "0.1.0",
   "identifier": "com.runsascoded.disk-tree",
   "build": {
@@ -34,5 +34,6 @@
     "resources": {
       "../target/release/dt-walker": "dt-walker"
     }
-  }
+  },
+  "mainBinaryName": "disky"
 }

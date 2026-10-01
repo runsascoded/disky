@@ -29,9 +29,9 @@ from click import argument, group, option
 err = partial(print, file=sys.stderr)
 
 TAURI = Path(__file__).resolve().parent.parent
-BUILT = TAURI / 'target' / 'release' / 'bundle' / 'macos' / 'disk-tree.app'
-APP = Path.home() / 'Applications' / 'disk-tree.app'
-EXE = APP / 'Contents' / 'MacOS' / 'disk-tree-app'
+BUILT = TAURI / 'target' / 'release' / 'bundle' / 'macos' / 'disky.app'
+APP = Path.home() / 'Applications' / 'disky.app'
+EXE = APP / 'Contents' / 'MacOS' / 'disky'
 AGENTS = Path.home() / 'Library' / 'LaunchAgents'
 LOGS = Path.home() / 'Library' / 'Logs' / 'disk-tree'
 PREFIX = 'com.runsascoded.disk-tree.'
@@ -51,7 +51,9 @@ def wrapper() -> list[str]:
 
 
 def is_routed(args: list[str]) -> bool:
-    return args[:3] == wrapper()
+    """Routed through *an* app wrapper — this one or a previous install
+    (e.g. `disk-tree.app` before the rename); `route` replaces a stale one."""
+    return len(args) >= 3 and '/Contents/MacOS/' in args[0] and args[1:3] == ['agent', '--']
 
 
 def last_exit(label: str) -> str | None:
@@ -65,8 +67,19 @@ def last_exit(label: str) -> str | None:
     return None
 
 
-def reload(path: Path, label: str) -> None:
+def loaded(label: str) -> bool:
+    return run('launchctl', 'print', f'{DOMAIN}/{label}', check=False).returncode == 0
+
+
+def reload(path: Path, label: str, timeout: float = 60) -> None:
+    """bootout, wait until the label is gone (a KeepAlive job takes a few
+    seconds to tear down; bootstrapping before that fails with exit 5), bootstrap."""
     run('launchctl', 'bootout', f'{DOMAIN}/{label}', check=False)
+    deadline = time.monotonic() + timeout
+    while loaded(label):
+        if time.monotonic() > deadline:
+            raise SystemExit(f'{label}: still loaded {timeout:.0f}s after bootout')
+        time.sleep(0.25)
     run('launchctl', 'bootstrap', DOMAIN, str(path))
 
 
@@ -140,10 +153,12 @@ def rewrite(labels: tuple[str, ...], routed: bool) -> None:
         with open(path, 'rb') as f:
             pl = plistlib.load(f)
         args = pl['ProgramArguments']
-        if is_routed(args) == routed:
+        inner = args[3:] if is_routed(args) else args
+        new = [*wrapper(), *inner] if routed else inner
+        if new == args:
             err(f'{pl["Label"]}: already {"routed" if routed else "unrouted"}')
             continue
-        pl['ProgramArguments'] = [*wrapper(), *args] if routed else args[3:]
+        pl['ProgramArguments'] = new
         backup = path.with_suffix(f'.plist.bak-{time.strftime("%Y%m%dT%H%M%S")}')
         shutil.copy2(path, backup)
         with open(path, 'wb') as f:
@@ -158,8 +173,10 @@ def route(labels: tuple[str, ...]):
     """Prefix each agent's ProgramArguments with `disk-tree-app agent --` and reload it.
 
     LABEL may omit the `com.runsascoded.disk-tree.` prefix (`index`, `drain`).
-    Run `agentctl check` first: a routed agent without the app's FDA grant
-    silently scans less.
+    Re-routes an agent wrapped by a previous install (e.g. `disk-tree.app`) to
+    this one. Run `agentctl check` first: a routed agent without the app's FDA
+    grant silently scans less. Reloading stops a running job (a scan in flight
+    is killed), so pick a quiet moment.
     """
     if not EXE.exists():
         raise SystemExit(f'{EXE} missing; run `agentctl install`')

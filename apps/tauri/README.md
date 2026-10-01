@@ -36,7 +36,7 @@ apps/tauri/
 #    Needs `disk-tree-server` on PATH (the project venv provides it).
 cargo tauri dev            # from apps/tauri/
 
-# 3. Bundle + sign → src-tauri/target/release/bundle/macos/disk-tree.app
+# 3. Bundle + sign → src-tauri/target/release/bundle/macos/disky.app
 cargo tauri build --bundles app
 ```
 
@@ -58,9 +58,9 @@ grant survives rebuilds and TCC shows "disk-tree" — same identity and bundle i
 The app binary doubles as the laptop agents' TCC identity (spec Phase 5):
 
 ```bash
-disk-tree-app agent -- CMD ARGS…   # spawn CMD as a child; FDA granted to the app covers it
-disk-tree-app probe                # read TCC-protected dirs in-process; exit 3 if any denied
-scripts/agentctl install           # target/…/disk-tree.app → ~/Applications (stable grant path)
+disky agent -- CMD ARGS…          # spawn CMD as a child; FDA granted to the app covers it
+disky probe                       # read TCC-protected dirs in-process; exit 3 if any denied
+scripts/agentctl install           # target/…/disky.app → ~/Applications (stable grant path)
 scripts/agentctl check             # run the probe as launchd jobs: is FDA granted to the app?
 scripts/agentctl route index drain # route com.runsascoded.disk-tree.{index,drain} through the app
 scripts/agentctl status

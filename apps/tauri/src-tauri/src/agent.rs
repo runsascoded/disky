@@ -1,9 +1,9 @@
 //! Headless modes of the app binary, dispatched on `argv[1]` before any Tauri
 //! (or AppKit) initialization, so they never show a window or a Dock icon.
 //!
-//! - `disk-tree-app agent [--] CMD [ARGS…]` — run CMD as a *child* and exit
+//! - `disky agent [--] CMD [ARGS…]` — run CMD as a *child* and exit
 //!   with its status. For LaunchAgents: when launchd execs this binary, TCC
-//!   treats the signed `disk-tree.app` as the responsible process for the job
+//!   treats the signed `disky.app` as the responsible process for the job
 //!   and everything it spawns, so one Full Disk Access grant to the app covers
 //!   the scan (`gfind`/`dt-walker`) under a venv `python`. The child is
 //!   spawned, never `exec`ed: an `exec` would replace this image with the
@@ -11,7 +11,7 @@
 //!   again, which is exactly the fragile grant this replaces. When the
 //!   bundle carries `dt-walker` and `DISK_TREE_WALKER` is unset, the child
 //!   gets it, so disk-tree scans under the agent use the native walker.
-//! - `disk-tree-app probe` — try reading TCC-protected locations *in this
+//! - `disky probe` — try reading TCC-protected locations *in this
 //!   process* and print one line per location (`ok` / `denied` / `absent`).
 //!   Exit 0 when every present location was readable, 3 otherwise. Run it via
 //!   launchd to check the app's Full Disk Access grant.
@@ -50,7 +50,7 @@ fn agent(rest: &[OsString]) -> i32 {
         _ => rest,
     };
     let Some((program, args)) = rest.split_first() else {
-        eprintln!("usage: disk-tree-app agent [--] CMD [ARGS…]");
+        eprintln!("usage: disky agent [--] CMD [ARGS…]");
         return 2;
     };
     let mut cmd = Command::new(program);
@@ -61,7 +61,7 @@ fn agent(rest: &[OsString]) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("disk-tree-app agent: can't spawn {program:?}: {e}");
+            eprintln!("disky agent: can't spawn {program:?}: {e}");
             return 127;
         }
     };
@@ -81,7 +81,7 @@ fn agent(rest: &[OsString]) -> i32 {
             }
         }
         Err(e) => {
-            eprintln!("disk-tree-app agent: wait failed: {e}");
+            eprintln!("disky agent: wait failed: {e}");
             1
         }
     }

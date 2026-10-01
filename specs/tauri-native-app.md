@@ -187,7 +187,8 @@ the walk carries the app's identity with no child-process caveat — the core v2
 - **Phase 5** — scheduled scans under the app's TCC identity. ✅ code, ⏳ Ryan's FDA grant + routing.
   See "Scheduled scans" below.
 - **Phase 6** — whole-machine coverage (not just `~`). ⏳ walker half done. See "Whole-machine coverage".
-- **Phase 7** — menu-bar presence + `SMAppService`-registered agents. Proposed. See "Menu bar".
+- **Phase 7** — menu-bar presence + `SMAppService`-registered agents; the window loads
+  disk.rbw.sh (Ryan agreed 2026-09-30). Next up. See "Menu bar".
 
 ## Scheduled scans (Phase 5)
 
@@ -201,14 +202,14 @@ reads "python3.14".
 `m3`'s `macos-agent-app.md` proposed a separate tiny `disk-tree agent.app` with a C launcher. This
 bundle already is one: same signed identity, no second app. So:
 
-- **`disk-tree-app agent [--] CMD…`** (`src-tauri/src/agent.rs`), dispatched on argv *before*
+- **`disky agent [--] CMD…`** (`src-tauri/src/agent.rs`), dispatched on argv *before*
   Tauri/AppKit start (no window, no Dock icon). It **spawns** CMD as a child and exits with its
   status, forwarding TERM/INT/HUP. Correction to `macos-agent-app.md`, which said the launcher
   `execv`s python: an `exec` replaces the signed image with the interpreter's, and the job's
   responsible code is `python3.x` again.
-- **`disk-tree-app probe`** reads the protected dirs in-process and prints `ok`/`denied`/`absent`
+- **`disky probe`** reads the protected dirs in-process and prints `ok`/`denied`/`absent`
   per dir; exit 0 iff none denied.
-- **`apps/tauri/scripts/agentctl`**: `install` (bundle → `~/Applications/disk-tree.app`, a stable
+- **`apps/tauri/scripts/agentctl`**: `install` (bundle → `~/Applications/disky.app`, a stable
   path), `check` (runs `probe` and `agent -- /bin/ls ~/Library/Mail` *as launchd jobs*, so TCC sees
   the app rather than the terminal), `route LABEL…` / `unroute LABEL…` (prefix or strip the
   plist's `ProgramArguments` with the wrapper, back it up, reload), `status`.
@@ -219,7 +220,7 @@ bundle already is one: same signed identity, no second app. So:
   (the `disk-tree-selfsigned` cert), so the grant survives rebuilds.
 
 **Cut-over (Ryan + `m3`):**
-1. System Settings → Privacy & Security → Full Disk Access → **+** → `~/Applications/disk-tree.app`.
+1. System Settings → Privacy & Security → Full Disk Access → **+** → `~/Applications/disky.app` (done 2026-09-30, as `disk-tree.app`; carried over).
 2. `apps/tauri/scripts/agentctl check` → `FDA: granted`.
 3. `agentctl route index drain`, then `launchctl kickstart gui/$UID/com.runsascoded.disk-tree.index`;
    its total must match a shell run (Σalloc over `~` was 398 GiB on 2026-09-30).
@@ -270,6 +271,37 @@ Paths keep their usual spelling (`/Users/ryan/…`), so a `/` scan and a `~` sca
    bundle for daemons; if not, `sudo` scans (which lose the TCC identity) are the fallback, and
    the residual is honest enough.
 
+### Scope policy (Ryan, 2026-09-30: "users should be able to give the app whatever perms are
+needed to scan the full disk, or just their homedir")
+
+Permissions and scope are separate axes; the default is **the whole machine, with whatever the
+user can read**:
+
+| user | what `capture -o /` sees | unseen (shown as a residual cell) |
+|---|---|---|
+| admin + FDA granted to disky | everything except root-only dirs | ~285 root-only dirs (`/private/var/db`, …) |
+| any user, no FDA | the above minus TCC-protected trees (`~/Library/{Mail,Messages,Safari,Containers…}`, `~/.Trash`, other users' homes) | those too (69 GiB on this Mac) |
+| any user, scope "home" | `~` only (opt-in, for privacy) | everything else |
+
+- Without FDA, a walk of `/` reads `/Applications`, `/Library`, `/opt/homebrew`, `/usr/local`,
+  `/Users/Shared`, most of `/System` and `/private/var` (all world-readable); the TCC trees fail
+  as permission errors, they don't prompt. `~/Desktop`, `~/Documents`, `~/Downloads` and
+  removable volumes *do* prompt once per app identity — one more reason the walk runs as the app.
+- The app knows which row it's in: `disky probe` (FDA) and the volume table (residual size). The
+  menu bar shows it and links to the FDA pane (`x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles`).
+- Root-only dirs need a privileged helper (`SMAppService.daemon`); open whether that accepts a
+  self-signed bundle. Until then they're the residual, which `disk-tree volumes` bounds.
+- A `/` capture reduces cleanly (checked 2026-09-30 with a synthetic `/`-rooted capture: scan path
+  `/`, rows `Users/…`, `Applications/…`); capture dir slug is `root`. Ingest + site handling of a
+  `/` root is `m3`'s.
+
+## Naming
+
+The app is **disky** (`productName`/`mainBinaryName`, 2026-09-30), matching the repo and the
+site; the bundle id stays `com.runsascoded.disk-tree`, so the FDA grant carried over (verified:
+`agentctl check` passes for `~/Applications/disky.app` with the grant made for `disk-tree.app`).
+Changing the bundle id would need a re-grant; the CLI/package stay `disk-tree`.
+
 ## Menu bar (Phase 7, proposed)
 
 A tray item beats a window for a background tool: last scan age and total, next scheduled run,
@@ -280,7 +312,7 @@ so they show in Login Items as "disk-tree" and hand-written plists go away.
 Open: what the window shows. Today it wraps `ui/` + a local Flask server; the laptop's live UI is
 `site/` on disk.rbw.sh (R2 + D1 + Batch ingest). Options: (a) the window loads disk.rbw.sh (the
 app is scheduling + permissions + walker, the UI stays in the cloud); (b) keep a local `ui/` for
-offline/external-drive use. (a) is the cheaper default.
+offline/external-drive use. (a) is the cheaper default. **Decided (2026-09-30): (a).**
 
 ## Remaining work (v2 not yet "real")
 
