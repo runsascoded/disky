@@ -38,8 +38,8 @@ def backend_for(url: str) -> Backend:
 
     `r2://` is S3-compatible: it lists through the bucket's Cloudflare endpoint
     (`DISK_TREE_R2_ENDPOINT_URL`, else the bucket's `endpoint_url` in
-    buckets.yml — resolved here, missing reported at list time). `gcs://` has
-    and any other non-`file` scheme have no live lister (see `UnsupportedBackend`).
+    buckets.yml — resolved here, missing reported at list time). `gcs://`, like
+    any other scheme but `file`/`s3`/`r2`, has no live lister (see `UnsupportedBackend`).
     """
     parsed = parse_url(url)
     if parsed.scheme == 's3':

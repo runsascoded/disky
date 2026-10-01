@@ -166,7 +166,7 @@ class Scan(Base):
         db.session.commit()
         err(f"{path}: saved {len(df)} rows to {blob_ref} ({backend.name})")
         if result.error_count > 0:
-            err(f"{path}: {result.error_count} permission errors")
+            err(f"{path}: {result.error_count} listing errors")
         if gc:
             cls.gc(path, now)
 

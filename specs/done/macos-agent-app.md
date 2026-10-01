@@ -1,6 +1,6 @@
 # The laptop agents as a macOS app (TCC identity)
 
-**Status:** superseded (2026-09-30) by `tauri-native-app.md` Phase 5: the Tauri `disk-tree.app` is the agents' identity (`disk-tree-app agent -- CMD…`), not a second bundle. One correction carried over: the wrapper must *spawn* the interpreter, not `execv` it (an exec makes the job's responsible code `python3.x` again). Follow-up to `m3-site.md` Phase 3.
+**Status:** superseded (2026-10-01): folded into `wt/app`'s `specs/tauri-native-app.md` Phase 5. disky.app's `agent` launcher spawns (never execs) the agents, so TCC charges them to the app; after an SMAppService launch-constraint failure on rebuild, the app writes plain `com.runsascoded.disky.{scan,drain}` plists.
 
 ## Problem
 

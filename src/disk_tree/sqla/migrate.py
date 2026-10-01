@@ -7,10 +7,10 @@ names every mapped column: ``no such column: deletion_run.batch_job``). This
 pass diffs each model against ``PRAGMA table_info`` and ``ALTER TABLE … ADD
 COLUMN`` the gaps, so the next added column needs no hand-written migration.
 
-Runs after every ``create_all`` (``sqla.db.init``, ``staged_backend``) and from
-``disk-tree migrate``. Only additive: a column the DB has that the model
-doesn't is left alone; a NOT NULL column without a scalar default can't be
-added to a populated SQLite table and raises rather than guessing.
+Runs after every ``create_all`` (``sqla.db.init``, ``staged_backend``). Only
+additive: a column the DB has that the model doesn't is left alone; a NOT NULL
+column without a scalar default can't be added to a populated SQLite table and
+raises rather than guessing.
 """
 from __future__ import annotations
 

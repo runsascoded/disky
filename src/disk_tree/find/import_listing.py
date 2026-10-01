@@ -105,7 +105,7 @@ def import_listing(
     # so missing sub-dir rows means the sub-dir wouldn't count toward its
     # parent's direct-child tally).
     # Include '' (scan root) so root's n_desc includes-self, matching walk
-    # backends (gfind emits `path='' kind='dir'` for the scan root).
+    # backends (gfind and the S3 lister emit `path='' kind='dir'` for the scan root).
     dir_paths = {''}
     for p in files['parent']:
         while p and p not in dir_paths:

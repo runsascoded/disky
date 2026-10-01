@@ -1,6 +1,6 @@
 # disk-tree
 
-Disk and cloud storage analyzer: a scanning/indexing CLI, and a Cloudflare-hosted treemap site (`site/`) over its indexes.
+Disk and cloud storage analyzer: a scanning/indexing CLI for local filesystems and S3 / R2 / GCS buckets, and a Cloudflare-hosted treemap site (`site/`) over its indexes.
 
 [![disk-tree treemap of an R2 bucket](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
 
@@ -44,6 +44,8 @@ disk-tree index --help
 
 disk-tree scans           # List cached scans (JSON)
 ```
+
+`gcs://` buckets have no live lister: list one with `disk-tree bulk-list`, then `disk-tree import -l <listing>`.
 
 ### Examples
 

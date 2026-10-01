@@ -24,7 +24,7 @@ interface NodeFs {
   readFileSync(file: URL, encoding: 'utf8'): string
 }
 
-export const LINEAGES = ['cw', 'gcs'] as const
+export const LINEAGES = ['cw'] as const
 
 /** The lineage's migration files, sorted (`NNNN_name.sql`). */
 export async function migrations(lineage: typeof LINEAGES[number]): Promise<{ name: string; sql: string }[]> {

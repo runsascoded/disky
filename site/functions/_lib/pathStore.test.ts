@@ -281,7 +281,7 @@ describe('buildView on a store generation', () => {
   })
 
   it('a lens on a store generation reads the store’s own sorts, filtered per row — not a missing or stale v1 `user` sort', async () => {
-    const { db, raw } = await sqliteD1('gcs')
+    const { db, raw } = await sqliteD1('cw')
     const v1 = await readJson<Record<string, D1Variant>>('path-index-zstd.d1.json')
     const v2Lens = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
     seedGeneration(raw, { date: V2_LENS, gen: 'g0', dir: `listing/${V2_LENS}/index/g0`, variants: { user: v1.path }, files: { user: { parquet: 'path-index-zstd.parquet', groups: 'path-index-zstd.groups.json' } } })

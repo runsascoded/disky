@@ -6,7 +6,7 @@ Disk/cloud space usage analyzer: a scanning/indexing CLI (`disk-tree`), a cloud 
 
 Track disk space usage across:
 - Local filesystems (laptop, external SSDs)
-- S3 buckets
+- Object stores: S3, R2 and GCS buckets
 
 Key goals:
 - **Always-ready index**: Run overnight scans so you don't wait when running out of space
@@ -57,7 +57,8 @@ disk-tree index [URL]     # Scan a directory, an s3:// bucket, or an r2:// bucke
   -s, --sudo              # Run gfind with sudo (implies `-C`: a cached scan can't be known to be sudo)
   -t, --to TARGET         # Write this scan's blob to a dir or fsspec URL (r2://bucket/prefix, s3://…,
                           # gs://…) instead of the configured write dir; it joins the search path for
-                          # this run, so the scan reads back through it (spec `remote-scan-targets.md`)
+                          # this run, so the scan reads back through it (spec `remote-scan-targets.md`).
+                          # A URL target also gets a `<blob>.scan.json` manifest (the Scan row, portable)
   -x, --extents           # Map physical extents → per-dir reclaimable bytes (APFS clones/hardlinks),
                           # written as a `<blob>.reclaim.parquet` sidecar. macOS + local scans only;
                           # exact when the scan root contains the sharing sources (home/full scan),

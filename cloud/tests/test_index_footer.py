@@ -195,10 +195,10 @@ def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch):
     from dt_cloud.index_footer import gc_d1
 
     con = sqlite3.connect(":memory:")
-    # The schema from the gcs lineage, whichever shape it has: one squashed
+    # The schema from the cw lineage, whichever shape it has: one squashed
     # `0001_init.sql` (creates every table itself), or the migration that
     # introduced `index_row_groups` on top of an earlier `index_schema`.
-    mig = Path(__file__).parents[2] / "site/migrations/gcs"
+    mig = Path(__file__).parents[2] / "site/migrations/cw"
     (ddl_path,) = [f for f in sorted(mig.glob("*.sql")) if "CREATE TABLE index_row_groups" in f.read_text()]
     ddl = ddl_path.read_text()
     if "CREATE TABLE index_schema" not in ddl:

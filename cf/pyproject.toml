@@ -1,0 +1,8 @@
+[project]
+name = "gcs-usage-cf-iac"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "pulumi>=3.0.0,<4.0.0",
+    "pulumi-cloudflare>=6.0.0,<7.0.0",
+]

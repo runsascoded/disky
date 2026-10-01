@@ -143,11 +143,10 @@ const META_ROWS = (d: string, d2: string) => `
     ('meta', '${d}', 'meta:path', 'g1', 0, 0, 1, 'a', 'b', 1, 0, 1, '[1,"ZSTD",[]]');
 `
 const envs = (db: Env['DB']) => ({ primary: { ...PRIMARY, DB: db } as Env, meta: storeEnv({ ...PRIMARY, DB: db } as Env, 'meta', META) })
-const STORE_MIGRATION = { cw: '0006_store_scoped_index.sql', gcs: '0030_store_scoped_index.sql' } as const
+const STORE_MIGRATION = { cw: '0006_store_scoped_index.sql' } as const
 
 describe.each([
   { lineage: 'cw' as const, d: '2026-07-01', d2: '2026-07-02' },
-  { lineage: 'gcs' as const, d: '2026-07-11', d2: '2026-07-12' },
 ])('D1, $lineage lineage', ({ lineage, d, d2 }) => {
   it('primary reads work on the un-migrated schema (their SQL predates stores); a secondary store refuses loudly', async () => {
     const { db, raw } = await sqliteD1(lineage, { before: STORE_MIGRATION[lineage] })

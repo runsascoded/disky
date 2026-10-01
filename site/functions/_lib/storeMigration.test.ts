@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { migrations, sqliteD1 } from './testD1'
 
-// The store-scoped index migration (specs/multi-store.md phase 1), in both D1
-// lineages, applied over a seeded DB with foreign keys ON (as D1 enforces
-// them): existing rows become the primary store's, nothing else moves, and
-// the rebuilt pointer admits a second store's scan under the same id.
+// The store-scoped index migration (specs/multi-store.md phase 1), in the `cw`
+// D1 lineage (the only one `cloud` carries; gcs's lives on the `gcs` branch),
+// applied over a seeded DB with foreign keys ON (as D1 enforces them): existing
+// rows become the primary store's, nothing else moves, and the rebuilt pointer
+// admits a second store's scan under the same id.
 // `after`: what follows the store migration in its lineage today — a new
 // migration is added here deliberately (and must not touch the index tables
 // this file's specs pin).
 const CASES = [
   { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0007_agents.sql', '0008_freed_bytes.sql', '0009_allowlist_read_only.sql'] },
-  { lineage: 'gcs', file: '0030_store_scoped_index.sql', after: ['0031_agents.sql', '0032_freed_bytes.sql', '0033_allowlist_read_only.sql'] },
 ] as const
 
 const SCHEMA_COLS = 'store, date, variant, version, schema_json, floor_bytes, gen, dir'

@@ -12,8 +12,8 @@ import pytest
 from dt_cloud import index_footer
 from dt_cloud.index_footer import gc_d1, index_dir, retire_d1, sync_d1, synced_variants
 
-MIG = Path(__file__).parents[2] / "site/migrations/gcs"
-STORE_MIG = "0030_store_scoped_index.sql"
+MIG = Path(__file__).parents[2] / "site/migrations/cw"
+STORE_MIG = "0006_store_scoped_index.sql"
 ROWS = [
     {"rg": i, "d_min": 1, "d_max": 2, "p_min": "a", "p_max": "b", "b_max": 10, "u_min": None, "u_max": None, "row_start": 0, "row_end": 1, "rg_json": "[1]"}
     for i in range(2)
@@ -21,7 +21,7 @@ ROWS = [
 
 
 def _db(monkeypatch, *, migrated: bool) -> sqlite3.Connection:
-    """The gcs lineage from scratch (FKs ON, as D1), with or without the store
+    """The cw lineage from scratch (FKs ON, as D1), with or without the store
     migration, wired in as the D1 every `index_footer` query runs against."""
     con = sqlite3.connect(":memory:")
     con.execute("PRAGMA foreign_keys = ON")

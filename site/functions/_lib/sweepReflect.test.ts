@@ -11,10 +11,10 @@ const job = (id: string, state: string, digest?: string): SweepBatchJob => ({
 
 describe('reflectSweepRuns — gcs: the digest lands once the executor recorded the end', () => {
   it('copies PLAN_DIGEST onto finished rows, closes rows whose job died, leaves the rest; idempotent', async () => {
-    const { db } = await sqliteD1('gcs')
+    const { db } = await sqliteD1('cw')
     await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
     const row = async (runId: string, jobId: string, finished: number | null) => db.prepare(`
-      INSERT INTO deletion_runs (run_id, plan, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
+      INSERT INTO deletion_runs (run_id, manifest, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
       VALUES (?, ?, '2026-09-28', 0, 0, 'ann@openathena.ai', 'dry', 100, ?, ?, 1)
     `).bind(runId, runDir(jobId), finished, runDir(jobId)).run()
     await row('2026-09-28-p1/a', 'gcs-sweep-dry-a', 500)   // executor recorded the end
