@@ -333,6 +333,11 @@ An unconfigured job logs to `disky.log` and exits 0.
   into `disky.json`, the plists were booted out and renamed `*.plist.adopted-<stamp>`, the bundled
   agents registered; the drainer came back as `disky job drain`, same logs. `agentctl unadopt`
   reverts.
+- **Reinstall gotcha (2026-09-30):** `SMAppService` pins the registered build. After replacing the
+  bundle, launchd SIGKILLs the agent at spawn ("Code Signature Invalid", Launch Constraint
+  Violation, EX_CONFIG): the drainer crash-looped until re-registered. `agentctl install` now
+  unregisters registered agents around the swap and re-registers them (verified: the drainer
+  comes back).
 - Tray: **Scheduled scans** (registers/unregisters both agents; verified both ways) and **Open at
   login** (`SMAppService.mainApp`; on). The scan status line reads the bundled agent (schedule
   from the bundled plist, log from `disky.json`), falling back to the legacy label.

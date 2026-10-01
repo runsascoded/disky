@@ -100,9 +100,17 @@ def install():
     if not BUILT.exists():
         raise SystemExit(f'no bundle at {BUILT}; build it with `cargo tauri build --bundles app`')
     run('codesign', '--verify', '--deep', '--strict', str(BUILT))
+    # SMAppService pins the registered build: launchd then refuses a rebuilt
+    # binary ("Launch Constraint Violation", SIGKILL at spawn, seen 2026-09-30),
+    # so registered agents are unregistered around the swap and re-registered.
+    registered = EXE.exists() and 'enabled' in disky('agents', 'status')
+    if registered:
+        err(disky('agents', 'unregister'))
     if APP.exists():
         shutil.rmtree(APP)
     run('ditto', str(BUILT), str(APP))
+    if registered:
+        err(disky('agents', 'register'))
     dr = run('codesign', '-d', '-r-', str(APP)).stdout.strip().splitlines()[-1]
     err(f'installed {APP}')
     err(f'  {dr}')
