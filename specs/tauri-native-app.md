@@ -187,8 +187,8 @@ the walk carries the app's identity with no child-process caveat — the core v2
 - **Phase 5** — scheduled scans under the app's TCC identity. ✅ code, ⏳ Ryan's FDA grant + routing.
   See "Scheduled scans" below.
 - **Phase 6** — whole-machine coverage (not just `~`). ⏳ walker half done. See "Whole-machine coverage".
-- **Phase 7** — menu-bar presence + `SMAppService`-registered agents; the window loads
-  disk.rbw.sh (Ryan agreed 2026-09-30). Next up. See "Menu bar".
+- **Phase 7** — menu-bar presence ✅ (first cut); `SMAppService`-registered agents and in-app
+  sign-in open. The window loads disk.rbw.sh (Ryan agreed 2026-09-30). See "Menu bar".
 
 ## Scheduled scans (Phase 5)
 
@@ -302,31 +302,57 @@ site; the bundle id stays `com.runsascoded.disk-tree`, so the FDA grant carried 
 `agentctl check` passes for `~/Applications/disky.app` with the grant made for `disk-tree.app`).
 Changing the bundle id would need a re-grant; the CLI/package stay `disk-tree`.
 
-## Menu bar (Phase 7, proposed)
+## Menu bar (Phase 7) — first cut ✅ 2026-09-30
 
-A tray item beats a window for a background tool: last scan age and total, next scheduled run,
-FDA status (the `probe`), "Scan now", "Open disk.rbw.sh". With it, the agents move into the bundle
-(`Contents/Library/LaunchAgents/*.plist`, `BundleProgram`) and register via `SMAppService.agent`,
-so they show in Login Items as "disk-tree" and hand-written plists go away.
+`disky` launches as a menu-bar item (`ActivationPolicy::Accessory`, no Dock icon); closing the
+window leaves it running. The menu (verified via System Events: items and enabled states):
 
-Open: what the window shows. Today it wraps `ui/` + a local Flask server; the laptop's live UI is
-`site/` on disk.rbw.sh (R2 + D1 + Batch ingest). Options: (a) the window loads disk.rbw.sh (the
-app is scheduling + permissions + walker, the UI stays in the cloud); (b) keep a local `ui/` for
-offline/external-drive use. (a) is the cheaper default. **Decided (2026-09-30): (a).**
+- **"Scanned 3h ago · next 18:00"** / "Scanning…" / "Last scan failed (exit 1) …": the scan
+  agent's plist (`StartCalendarInterval`, `StandardOutPath` mtime) + `launchctl print` (running,
+  last exit). No state of disky's own; refreshed every 20 s (`status.rs`, unit-tested).
+- **"Full Disk Access ✓"**, or an enabled "Grant Full Disk Access…" that opens the FDA pane
+  (the in-process probe, so it's the app's own grant).
+- Scan now (`launchctl kickstart`), Open disky (window), Open in browser, Show logs, Quit.
+- The window loads `DISKY_URL` (default https://disk.rbw.sh). The Flask backend spawn and the
+  `native_walk_stats` command are gone (routed agents already walk as the app, via the bundled
+  `dt-walker`); `ui/` + Flask stay available outside the app.
+
+Still to do: `SMAppService.agent` registration (bundle the plists in
+`Contents/Library/LaunchAgents`, so they appear as "disky" in Login Items and hand-written plists
+go away); a template (monochrome) tray icon; launch at login; per-scope settings (whole machine /
+home).
+
+### Sign-in inside the window (open)
+
+disk.rbw.sh is private; its sign-in is Google OAuth (plus access links). Google refuses OAuth in
+embedded webviews (`disallowed_useragent`; WKWebView's UA has no `Safari/` token). Observed
+2026-09-30: clicking "Sign in" in the window left an empty page (no screen-capture permission
+from the session, so not seen directly). Spoofing Safari's UA is against Google's policy. The
+sanctioned shape is **sign in in the system browser, hand a one-time credential to the app**:
+
+1. Register a `disky://` URL scheme (`tauri-plugin-deep-link`).
+2. The site (signed in, in the browser) offers "Open in disky": it mints a short-lived,
+   single-use access link for the *current user* (the existing `@open-athena/auth` grant
+   mechanism: "an access link signs this browser in automatically") and navigates to
+   `disky://open?link=<url>`.
+3. disky loads that link in its window; the grant sets the session cookie in the app's webview.
+
+(2) is a site/`$oa/auth` change (self-mint, scoped to the caller's own email and scopes, a TTL
+of minutes, logged). Until then: "Open in browser".
 
 ## Remaining work (v2 not yet "real")
 
-1. **PyInstaller sidecar** — bundle the Python backend into the app (`externalBin` +
-   `--waitress`, reusing `packaging/macos/disk-tree.spec`) so it's self-contained; today the
-   host spawns `disk-tree-server` from PATH. Sign the sidecar with inheritance. (Lower priority
-   if the window loads disk.rbw.sh.)
+1. ~~**PyInstaller sidecar**~~ — dropped for now: the window loads disk.rbw.sh, and the agents
+   run the project venv's CLI. Revisit if disky ships to machines without a checkout (then the
+   sidecar, or the CLI, is what `agent` runs).
 2. ~~**Ship `dt-walker` as a bundle resource**~~ ✅ 2026-09-30: `bundle.resources` +
    `beforeBuildCommand` put it at `Contents/Resources/dt-walker`; `locate_walker()` resolves it,
    and `agent` sets `DISK_TREE_WALKER` for its child when unset (verified under launchd). So once
    routed, the scheduled `capture`/`index` walk natively. Known difference from gfind: the walker
    also lists *unreadable* dirs (as 0-byte leaves) that gfind omits; sizes are identical.
-3. **In-process walk → aggregation** — stream `native_walk_stats`'s records straight into the
-   Python aggregation (or a Rust port) instead of the subprocess seam.
+3. **In-process walk → aggregation** — a Rust aggregation instead of the subprocess seam. Not
+   needed for TCC (a routed agent's `dt-walker` child already reads as the app, verified);
+   only a throughput/packaging lever now.
 4. Real app icon (current is a placeholder).
 5. Phase 5 cut-over (above), Phase 6 plan, Phase 7.
 6. **Private size in the record stream** (`m3`'s `apfs-sharing.md`): `--private` currently only

@@ -610,8 +610,8 @@ dependencies = [
 name = "disk-tree-app"
 version = "0.1.0"
 dependencies = [
- "dt-walker",
  "libc",
+ "plist",
  "serde",
  "serde_json",
  "tauri",

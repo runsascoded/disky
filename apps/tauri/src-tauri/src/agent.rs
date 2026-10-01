@@ -105,21 +105,33 @@ fn probe_targets() -> Vec<PathBuf> {
     .collect()
 }
 
+/// `(path, verdict)` per probe target; verdict `ok N` / `absent` / `denied` / `error …`.
+pub fn probe_results() -> Vec<(PathBuf, String)> {
+    probe_targets()
+        .into_iter()
+        .map(|path| {
+            let verdict = match std::fs::read_dir(&path) {
+                Ok(entries) => format!("ok {}", entries.count()),
+                Err(e) if e.kind() == ErrorKind::NotFound => "absent".to_string(),
+                Err(e) if e.kind() == ErrorKind::PermissionDenied => "denied".to_string(),
+                Err(e) => format!("error {e}"),
+            };
+            (path, verdict)
+        })
+        .collect()
+}
+
+/// Whether this process can read every present TCC-protected probe dir.
+pub fn has_full_disk_access() -> bool {
+    probe_results().iter().all(|(_, v)| v.starts_with("ok") || v == "absent")
+}
+
 fn probe() -> i32 {
     let mut denied = 0;
-    for path in probe_targets() {
-        let verdict = match std::fs::read_dir(&path) {
-            Ok(entries) => format!("ok {}", entries.count()),
-            Err(e) if e.kind() == ErrorKind::NotFound => "absent".to_string(),
-            Err(e) if e.kind() == ErrorKind::PermissionDenied => {
-                denied += 1;
-                "denied".to_string()
-            }
-            Err(e) => {
-                denied += 1;
-                format!("error {e}")
-            }
-        };
+    for (path, verdict) in probe_results() {
+        if !(verdict.starts_with("ok") || verdict == "absent") {
+            denied += 1;
+        }
         println!("{verdict}\t{}", path.display());
     }
     if denied == 0 { 0 } else { 3 }

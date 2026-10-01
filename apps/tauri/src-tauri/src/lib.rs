@@ -1,113 +1,43 @@
-//! disk-tree native macOS app (Tauri v2 host).
+//! disky — the disk-tree macOS app (Tauri v2 host).
 //!
-//! Opens a system-WKWebView window on the existing Flask+React UI. For now the
-//! Python backend runs as a spawned subprocess (waitress/Flask on a loopback
-//! port), exactly like the v1 pywebview app (`disk_tree.desktop`) — the window
-//! loads that server's URL, so the whole `/api/*` contract works unchanged.
+//! A menu-bar item (no Dock icon) that reports the scheduled scan and Full
+//! Disk Access, kicks a scan, and opens a window on the web UI (disk.rbw.sh by
+//! default; `DISKY_URL` overrides). The app binary is also the LaunchAgents'
+//! TCC identity: `disky agent -- CMD…` (see `agent.rs`), so the scans it
+//! schedules read what the app was granted.
 //!
-//! The native `getattrlistbulk` walker (`dt-walker`) is compiled *into* this
-//! binary (a workspace dependency), so a walk done here carries the signed app's
-//! TCC identity with no child-process caveat — the core v2 win. Two ways it
-//! reaches a scan:
-//!   1. `native_walk_stats` command — an in-process walk (proves the walk lives
-//!      in the app binary; direct streaming into aggregation is the next step).
-//!   2. the spawned Python backend is pointed at the bundled `dt-walker` binary
-//!      via `DISK_TREE_WALKER`, so its scans use the native walker too.
-//!
-//! See `specs/tauri-native-app.md`.
-
-use std::io::Write;
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+//! See `specs/tauri-native-app.md` (Phases 5–7).
 
 mod agent;
+mod status;
 
-use serde::Serialize;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::Duration;
 
-/// The spawned Python backend, killed when the app exits.
-struct Backend(Mutex<Option<Child>>);
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-#[derive(Serialize)]
-struct WalkStats {
-    records: u64,
-    errors: u64,
+const DEFAULT_URL: &str = "https://disk.rbw.sh";
+/// System Settings → Privacy & Security → Full Disk Access.
+const FDA_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+fn site_url() -> String {
+    std::env::var("DISKY_URL").unwrap_or_else(|_| DEFAULT_URL.to_string())
 }
 
-/// Walk `root` in-process via the native getattrlistbulk walker, returning
-/// counts. Demonstrates the walk running inside the signed app binary (the TCC
-/// win); the record stream itself is discarded here.
-#[tauri::command]
-fn native_walk_stats(root: String) -> Result<WalkStats, String> {
-    let excludes = dt_walker::default_excludes();
-    let mut walker = dt_walker::Walker::new(&excludes);
-    let mut sink = std::io::sink();
-    let mut errbuf: Vec<u8> = Vec::new();
-    walker
-        .walk(root.as_bytes(), &mut sink, &mut errbuf)
-        .map_err(|e| e.to_string())?;
-    Ok(WalkStats { records: walker.records, errors: walker.errors.count })
-}
-
-/// A free loopback TCP port (bound then released — the OS won't immediately
-/// reuse it for the backend we hand it to).
-fn free_loopback_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind loopback")
-        .local_addr()
-        .expect("local_addr")
-        .port()
-}
-
-fn wait_until_up(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
-}
-
-/// The bundled `dt-walker` binary, if we can find it next to our own executable
-/// (how it's laid out in a bundle) — used to point the Python backend at the
-/// native walker. Respects an existing `DISK_TREE_WALKER` env.
+/// The bundled `dt-walker` (`Contents/Resources/dt-walker`), unless
+/// `DISK_TREE_WALKER` is already set. `agent` hands it to its child.
 pub(crate) fn locate_walker() -> Option<PathBuf> {
     if std::env::var_os("DISK_TREE_WALKER").is_some() {
-        return None; // already set by the environment; don't override
+        return None;
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    for cand in [dir.join("dt-walker"), dir.join("../Resources/dt-walker")] {
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
-}
-
-/// Spawn the Python backend on `port`. Command: `$DISK_TREE_SERVER_CMD`
-/// (space-split) or `disk-tree-server`. The v1 freezer note applies to the
-/// packaged sidecar (waitress, not Flask's dev server); in dev, `disk-tree-server`
-/// (Flask, honoring `PORT`) is fine.
-fn spawn_backend(port: u16) -> std::io::Result<Child> {
-    let cmdline = std::env::var("DISK_TREE_SERVER_CMD")
-        .unwrap_or_else(|_| "disk-tree-server".to_string());
-    let mut parts = cmdline.split_whitespace();
-    let program = parts.next().unwrap_or("disk-tree-server");
-    let mut cmd = Command::new(program);
-    cmd.args(parts)
-        .env("PORT", port.to_string())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    if let Some(walker) = locate_walker() {
-        cmd.env("DISK_TREE_WALKER", walker);
-    }
-    cmd.spawn()
+    [dir.join("dt-walker"), dir.join("../Resources/dt-walker")]
+        .into_iter()
+        .find(|c| c.is_file())
 }
 
 /// A headless mode (`agent`, `probe`) when `args` selects one: its exit code.
@@ -116,42 +46,100 @@ pub fn headless(args: &[std::ffi::OsString]) -> Option<i32> {
     agent::dispatch(args)
 }
 
+fn open(target: &str) {
+    let _ = Command::new("/usr/bin/open").arg(target).spawn();
+}
+
+fn show_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let url = site_url();
+    let Ok(parsed) = url.parse() else {
+        eprintln!("disky: bad DISKY_URL {url:?}");
+        return;
+    };
+    let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
+        .title("disky")
+        .inner_size(1280.0, 860.0)
+        .min_inner_size(480.0, 400.0)
+        .build();
+}
+
+fn fda_line(granted: bool) -> &'static str {
+    if granted {
+        "Full Disk Access ✓"
+    } else {
+        "Grant Full Disk Access…"
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let port = free_loopback_port();
-
     tauri::Builder::default()
-        .manage(Backend(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![native_walk_stats])
-        .setup(move |app| {
-            let child = spawn_backend(port).map_err(|e| {
-                format!("failed to spawn Python backend (is `disk-tree-server` on PATH?): {e}")
-            })?;
-            *app.state::<Backend>().0.lock().unwrap() = Some(child);
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            if !wait_until_up(port, Duration::from_secs(20)) {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "disk-tree-app: backend did not come up on 127.0.0.1:{port}"
-                );
-            }
+            let scan = MenuItem::with_id(app, "scan_status", status::scan_line(), false, None::<&str>)?;
+            let granted = agent::has_full_disk_access();
+            let fda = MenuItem::with_id(app, "fda", fda_line(granted), !granted, None::<&str>)?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &scan,
+                    &fda,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, "scan_now", "Scan now", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "window", "Open disky", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?,
+                    &MenuItem::with_id(app, "logs", "Show logs", true, None::<&str>)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, "quit", "Quit disky", true, None::<&str>)?,
+                ],
+            )?;
 
-            let url = format!("http://127.0.0.1:{port}/");
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
-                .title("disk-tree")
-                .inner_size(1200.0, 820.0)
-                .min_inner_size(720.0, 480.0)
-                .build()?;
+            TrayIconBuilder::with_id("disky")
+                .icon(app.default_window_icon().cloned().expect("bundle icon"))
+                .icon_as_template(false)
+                .tooltip("disky")
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "scan_now" => {
+                        let _ = status::kickstart(status::SCAN_LABEL);
+                    }
+                    "window" => show_window(app),
+                    "browser" => open(&site_url()),
+                    "logs" => {
+                        let home = std::env::var("HOME").unwrap_or_default();
+                        open(&format!("{home}/Library/Logs/disk-tree"));
+                    }
+                    "fda" => open(FDA_PANE),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+
+            // Keep the status lines fresh (launchd + the log are the record).
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(20));
+                let _ = scan.set_text(status::scan_line());
+                let granted = agent::has_full_disk_access();
+                let _ = fda.set_text(fda_line(granted));
+                let _ = fda.set_enabled(!granted);
+            });
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("error building disk-tree app")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Reap the backend so it doesn't outlive the window.
-                if let Some(mut child) = app.state::<Backend>().0.lock().unwrap().take() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+        .expect("error building disky")
+        .run(|_app, event| {
+            // Closing the window leaves the menu-bar item running.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
                 }
             }
         });
