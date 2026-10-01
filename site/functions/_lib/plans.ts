@@ -32,6 +32,10 @@ export function prefixShape(env: { STORE_SCHEME?: string; STORE_BUCKETS?: string
  * the primary (specs/cw-multi-bucket.md §4). */
 export function bucketOf(raw: string, buckets: readonly string[] = CW_BUCKETS): string {
   const s = raw.trim().replace(SCHEME_RE, "").replace(/^\/+/, "")
+  // `*` (`STORE_BUCKETS = "*"`): every top-level segment is a root — a
+  // filesystem-root capture's `Applications`, `Users`, … — so a prefix's
+  // bucket is its first segment, never a fallback to the primary.
+  if (buckets.includes("*")) return s.split("/")[0]
   return buckets.find(b => s === b || s.startsWith(`${b}/`)) ?? buckets[0]
 }
 
@@ -47,9 +51,10 @@ export interface PlanRow {
 
 /** `s3://bucket/a/b/` (any scheme) or `/a/b` or `a/b` -> `a/b/` (relative, trailing slash). */
 export function relPrefix(raw: string, bucket: string = CW_BUCKET): string {
-  let s = raw.trim().replace(SCHEME_RE, "")
+  // Leading slashes go first: a `file:///` URI leaves `/Users/…` after the
+  // scheme, which must still match its bucket.
+  let s = raw.trim().replace(SCHEME_RE, "").replace(/^\/+/, "")
   if (s.startsWith(`${bucket}/`)) s = s.slice(bucket.length + 1)
-  s = s.replace(/^\/+/, "")
   if (!s.endsWith("/")) s += "/"
   return s
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { blobKey, groupMatches, storeCreds, storePrefixes, storeReady, storeScheme, storeTarget } from './index'
+import { AGE_COLS, blobKey, groupMatches, storeCreds, storePrefixes, storeReady, storeScheme, storeTarget, toRow } from './index'
 
 // The blob handle's in-memory span selection must be the predicate
 // `selectSpans` sends D1 (index.ts), NULL semantics included.
@@ -66,5 +66,16 @@ describe('store seam', () => {
     expect(storePrefixes(gcs, ['listing/'])).toEqual(['listing/'])
     const cw = { ...(gcs as object), STORE_PREFIXES: 'listing/, snapshots/,sweep/,cw-sweep/,cw-l2/,' } as never
     expect(storePrefixes(cw, ['listing/'])).toEqual(['listing/', 'snapshots/', 'sweep/', 'cw-sweep/', 'cw-l2/'])
+  })
+})
+
+describe('toRow: bytes by age', () => {
+  const base = { path: 'b/x', depth: 2, usr: null, kind: 'dir', size: 70, n_files: 3, n_children: 2, n_desc: 3, mtime: 0, mtime_mean: null, last_read: null, sum_storage_class_id_2: 0, sum_storage_class_id_3: 0, sum_storage_class_id_4: 0 }
+  it('a generation with the age columns decodes them in bucket order', () => {
+    const r = toRow({ version: 2 })({ ...base, ...Object.fromEntries(AGE_COLS.map((c, i) => [c, BigInt(i * 10)])) })
+    expect(r.ages).toEqual([0, 10, 20, 30, 40, 50, 60])
+  })
+  it('one without them decodes `ages: null`', () => {
+    expect(toRow({ version: 2 })(base).ages).toBe(null)
   })
 })

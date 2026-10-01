@@ -116,6 +116,50 @@ def write_v2(here: str) -> None:
     write_text(join(out_dir, 'plans.json'), json.dumps(plans, indent=1))
 
 
+def write_v2_lens(here: str) -> None:
+    """`v2-lens/`: the v2 generation with an owner label (`usr`) — `nest`'s
+    subtree is `alice`'s, `flat`'s `bob`'s, the rest unclaimed — so a lens view
+    on a store generation (which writes no `user` sort; `path-index -U`) has
+    rows to filter. `path` + `bysize` only, as gcs writes them."""
+    out_dir = join(here, 'v2-lens')
+    shutil.rmtree(out_dir, ignore_errors=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        listing = join(tmp, 'listing.parquet')
+        rows = v2_rows()
+        pd.DataFrame({
+            'bucket': ['bk'] * len(rows),
+            'name': [n for n, _ in rows],
+            'size_bytes': [s for _, s in rows],
+            'created': [TS] * len(rows),
+            'storage_class_id': [1] * len(rows),
+        }).to_parquet(listing)
+        con = duckdb.connect()
+        bare = join(tmp, 'bare.parquet')
+        aggregate_listing_to_parquet(prepare_listing(con, (listing,)), bucket='bk', scheme='s3', out_parquet=bare, con=con, mean_mtime=True)
+        l2 = join(tmp, 'l2.parquet')
+        con.execute(f"""
+            COPY (
+              SELECT path,
+                CASE WHEN path = 'nest' OR path LIKE 'nest/%' THEN 'alice'
+                     WHEN path = 'flat' OR path LIKE 'flat/%' THEN 'bob' END AS usr,
+                * EXCLUDE (path)
+              FROM read_parquet('{bare}')
+            ) TO '{l2}' (FORMAT parquet)
+        """)
+        ix.ROW_GROUP_SIZE = 2048
+        ix.write_index([('bk', l2)], join(tmp, 'out'), mem='1GB', threads=1)
+        shutil.os.makedirs(out_dir)
+        files = {}
+        for variant, stem in SORTS.items():
+            dst = join(out_dir, f'{stem}.parquet')
+            shutil.copy(join(tmp, 'out', f'{stem}.parquet'), dst)
+            files[variant] = dst
+    d1 = d1_json(files)
+    for variant, stem in SORTS.items():
+        write_text(join(out_dir, f'{stem}.groups.json'), groups_blob(d1[variant]['schema'], d1[variant]['rows']))
+    write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
+
+
 def write_v1(here: str) -> None:
     parquet = join(here, 'path-index-zstd.parquet')
     write_text(join(here, 'path-index-zstd.d1.json'), json.dumps(d1_json({'path': parquet}), separators=(',', ':')))
@@ -125,6 +169,7 @@ def main() -> None:
     here = dirname(__file__)
     write_v1(here)
     write_v2(here)
+    write_v2_lens(here)
 
 
 if __name__ == '__main__':

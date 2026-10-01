@@ -77,7 +77,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promis
         const b = cols.b as Float64Array, o = cols.o as Float64Array, wts = cols.wts as Float64Array, wb = cols.wb as Float64Array
         const c2 = cols.c2 as Float64Array, c3 = cols.c3 as Float64Array, c4 = cols.c4 as Float64Array, a = cols.a as Int32Array, depth = cols.depth as Uint8Array
         rows = new Array(hdr.n)
-        for (let i = 0; i < hdr.n; i++) rows[i] = { path: ps[i], depth: depth[i], usr: us[i] || null, kind: 'dir', size: b[i], n_files: o[i], n_children: null, n_desc: null, mtime: null, mtime_mean: wb[i] > 0 ? wts[i] / wb[i] : null, mtime_w: wb[i], cls2: c2[i], cls3: c3[i], cls4: c4[i], last_read: a[i] < 0 ? null : a[i] }
+        for (let i = 0; i < hdr.n; i++) rows[i] = { path: ps[i], depth: depth[i], usr: us[i] || null, kind: 'dir', size: b[i], n_files: o[i], n_children: null, n_desc: null, mtime: null, mtime_mean: wb[i] > 0 ? wts[i] / wb[i] : null, mtime_w: wb[i], cls2: c2[i], cls3: c3[i], cls4: c4[i], last_read: a[i] < 0 ? null : a[i], ages: null }
         lap('shape', s)
       } else {
         const text = new TextDecoder().decode(buf)
@@ -88,10 +88,10 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promis
           const c = parsed as Record<string, unknown[]>
           const n = c.path.length
           rows = new Array(n)
-          for (let i = 0; i < n; i++) rows[i] = { path: c.path[i] as string, depth: c.depth[i] as number, usr: (c.usr[i] as string | null) ?? null, kind: 'dir', size: c.b[i] as number, n_files: c.o[i] as number, n_children: null, n_desc: null, mtime: null, mtime_mean: (c.wb[i] as number) > 0 ? (c.wts[i] as number) / (c.wb[i] as number) : null, mtime_w: c.wb[i] as number, cls2: c.c2[i] as number, cls3: c.c3[i] as number, cls4: c.c4[i] as number, last_read: (c.a[i] as number | null) ?? null }
+          for (let i = 0; i < n; i++) rows[i] = { path: c.path[i] as string, depth: c.depth[i] as number, usr: (c.usr[i] as string | null) ?? null, kind: 'dir', size: c.b[i] as number, n_files: c.o[i] as number, n_children: null, n_desc: null, mtime: null, mtime_mean: (c.wb[i] as number) > 0 ? (c.wts[i] as number) / (c.wb[i] as number) : null, mtime_w: c.wb[i] as number, cls2: c.c2[i] as number, cls3: c.c3[i] as number, cls4: c.c4[i] as number, last_read: (c.a[i] as number | null) ?? null, ages: null }
         } else {
           const r = (parsed as { rows: unknown[][] }).rows
-          rows = r.map(v => ({ path: v[0] as string, depth: v[1] as number, usr: (v[2] as string | null) ?? null, kind: 'dir' as const, size: v[3] as number, n_files: v[4] as number, n_children: null, n_desc: null, mtime: null, mtime_mean: (v[6] as number) > 0 ? (v[5] as number) / (v[6] as number) : null, mtime_w: v[6] as number, cls2: v[7] as number, cls3: v[8] as number, cls4: v[9] as number, last_read: (v[10] as number | null) ?? null }))
+          rows = r.map(v => ({ path: v[0] as string, depth: v[1] as number, usr: (v[2] as string | null) ?? null, kind: 'dir' as const, size: v[3] as number, n_files: v[4] as number, n_children: null, n_desc: null, mtime: null, mtime_mean: (v[6] as number) > 0 ? (v[5] as number) / (v[6] as number) : null, mtime_w: v[6] as number, cls2: v[7] as number, cls3: v[8] as number, cls4: v[9] as number, last_read: (v[10] as number | null) ?? null, ages: null }))
         }
         lap('shape', s)
       }

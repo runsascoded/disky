@@ -55,6 +55,9 @@ export interface Env {
   STORE_REGION?: string
   /** Comma-separated allowed key prefixes; unset = the GCS default set. */
   STORE_PREFIXES?: string
+  /** Comma-separated scanned buckets whose objects `/v1/objects` serves to
+   *  members (read with the store creds); unset = none. */
+  OBJECT_BUCKETS?: string
   /** The plans prefix convention (`_lib/plans.ts`): the URI scheme
    *  stored prefixes carry (`s3://`, `gs://`) and the comma-separated buckets
    *  the scan covers, first = primary. Unset = the CoreWeave deployment's. */

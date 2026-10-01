@@ -116,6 +116,11 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
 function signInError(code: string | null): string | undefined {
   if (!code) return undefined
   if (code === 'link') return 'That sign-in link is no longer valid — it may have expired or already been used. Ask for a fresh code below.'
+  if (code.startsWith('app-link:')) {
+    return code === 'app-link:not-allowed'
+      ? "This address isn't on the list for this site."
+      : 'That disky sign-in link is no longer valid — it expires after a minute and works once. Click "Open in disky" again in your browser.'
+  }
   if (code.startsWith('google:')) {
     const why = code.slice('google:'.length)
     const replay = /state|nonce/.test(why)

@@ -56,6 +56,21 @@ L2_REQUIRED = ("path", "size", "depth", "kind", "n_files", "n_children", "n_desc
 L2_OPTIONAL: dict[str, str] = {"mtime_mean": "DOUBLE", "created": "BIGINT", "last_read": "INTEGER"}
 #: The label column (`import --label`), right after `path` when any source has it.
 LABEL_COL = "usr"
+#: Bytes by age at the scan date (specs/row-age-strata.md): `age_b<i>` holds the
+#: bytes whose created day is under `AGE_EDGES_DAYS[i]` days old (and at least
+#: the previous edge); the last bucket is everything older. Rolled up like
+#: `size`. Only where a source computes them (`path-index`), so stores built
+#: without them keep their schema.
+AGE_EDGES_DAYS = (1, 7, 30, 91, 365, 1095)
+AGE_COLS = tuple(f"age_b{i}" for i in range(len(AGE_EDGES_DAYS) + 1))
+
+
+def age_bucket_sql(created: str, asof_day: str) -> str:
+    """The `age_b<i>` index for an object `created` (a TIMESTAMP expression) at
+    epoch day `asof_day`: a future stamp counts as the newest bucket."""
+    age = f"({asof_day} - floor(epoch({created}) / 86400))"
+    arms = " ".join(f"WHEN {age} < {e} THEN {i}" for i, e in enumerate(AGE_EDGES_DAYS))
+    return f"CASE {arms} ELSE {len(AGE_EDGES_DAYS)} END"
 PIVOT_PREFIX = "sum_storage_class_id_"
 
 # The per-path created-day strata behind a path-aware `AgeChart` (specs/age-index.md).
@@ -108,7 +123,8 @@ def store_columns(shapes: list[tuple[list[str], dict[str, str]]]) -> list[str]:
         key=lambda c: int(c[len(PIVOT_PREFIX):]),
     )
     label = [LABEL_COL] if any(LABEL_COL in cols for cols, _ in shapes) else []
-    return ["path", *label, "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", *L2_OPTIONAL, *pivots]
+    ages = list(AGE_COLS) if any(AGE_COLS[0] in cols for cols, _ in shapes) else []
+    return ["path", *label, "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", *L2_OPTIONAL, *ages, *pivots]
 
 
 def store_rows_sql(l2: str, bucket: str, shape: tuple[list[str], dict[str, str]], columns: list[str]) -> str:

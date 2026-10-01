@@ -20,6 +20,11 @@ export function dateColor(t: number): string {
   return `rgb(${c[0]},${c[1]},${c[2]})`
 }
 
+/** The age buckets of `TreeNode.ag`, newest first, and each one's ramp colour
+ * (the date gradient: newest yellow → oldest purple). */
+export const AGE_BUCKETS = ['<1d', '<1w', '<1mo', '<3mo', '<1y', '<3y', '≥3y']
+export const ageBucketColor = (i: number): string => dateColor(1 - i / (AGE_BUCKETS.length - 1))
+
 export const dateGradientCss = (): string =>
   `linear-gradient(90deg, ${DATE_STOPS.join(', ')})`
 

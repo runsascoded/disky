@@ -6,6 +6,7 @@ import { stringParam, useUrlState } from 'use-prms'
 import { useRenderer, useTiling } from './prefs'
 import { useUnits } from './units'
 import { buildTree } from './diffModel'
+import { diffCellAction } from './diffRows'
 import type { AreaMode, DiffData, DiffNode } from './diffModel'
 import { usePerfCommit } from './perf'
 
@@ -81,6 +82,7 @@ export function useDiffModel(data: DiffData | null, atRoot: boolean, label: stri
     const root: DiffNode = {
       key: label,
       label,
+      k: 'dir',
       weight: cells.reduce((s, c) => s + c.weight, 0),
       delta: data.total_b - data.total_a,
       added: cells.reduce((s, c) => s + c.added, 0),
@@ -206,12 +208,15 @@ function DiffModes({ model }: { model: DiffModel }) {
   )
 }
 
-export function DiffTreemap({ model, onDrill }: {
+export function DiffTreemap({ model, onDrill, onOpen }: {
   model: DiffModel
-  /** A cell was drilled: its path segments relative to the diff's scope. The
-   *  page drills there (and this diff re-reads at that prefix), so the map
-   *  never holds a drill of its own. */
+  /** A directory cell was drilled: its path segments relative to the diff's
+   *  scope. The page drills there (and this diff re-reads at that prefix), so
+   *  the map never holds a drill of its own. */
   onDrill?: (segs: string[]) => void
+  /** An object cell was clicked: its segments relative to the diff's scope
+   *  (the page opens it in the leaf viewer). */
+  onOpen?: (segs: string[]) => void
 }) {
   usePerfCommit('dtm')
   const { root, areaMode, label, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
@@ -231,14 +236,16 @@ export function DiffTreemap({ model, onDrill }: {
     <div className="diff-tm">
       <DtTreemap<DiffNode>
         root={root}
-        // Controlled at its root: a drill is the page's, not this map's. Any
-        // directory cell drills — a leaf here (no enumerated children in the
-        // diff) is still a directory on the page, so it must not pin a tip the
-        // way the core's default click on a leaf does.
+        // Controlled at its root: a drill is the page's, not this map's. `k`
+        // decides (`diffCellAction`): an object opens, a directory drills —
+        // with or without enumerated children (the page's own read brings
+        // them) — and a fold or filler pins its tip.
         path={[root]}
-        onCellClick={n => {
-          if (!onDrill || n.status === 'filler' || n.status === 'root' || n.label.startsWith('(')) return false
-          onDrill(n.key.split('/'))
+        onCellClick={(n, _p, e) => {
+          const act = diffCellAction(n, e.altKey)
+          const go = act === 'open' ? onOpen : act === 'drill' ? onDrill : undefined
+          if (!go) return false
+          go(n.key.split('/'))
           return true
         }}
         getSize={n => n.weight}

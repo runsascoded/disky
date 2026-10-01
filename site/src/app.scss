@@ -333,6 +333,15 @@ button.mini.neg {
   .store-link .dim { color: var(--ink-3); font-size: 12px; }
   &.user-menu { min-width: 250px; .user-card { padding: 4px 6px 2px; } }
 }
+// "Open in disky" fallback hint: bottom-center, click or 8 s to dismiss.
+.app-hint {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  z-index: 10001; max-width: calc(100vw - 32px);
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 14px; font-size: 13.5px; cursor: pointer;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+}
 .scan-tip { display: grid; gap: 3px; b { color: inherit; } .classmix { margin-top: 4px; } }
 
 // Nav links: quiet tabs// Nav links: quiet tabs, not underlined prose links; the current page reads
@@ -1029,10 +1038,10 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
 }
 @keyframes busy-spin { to { transform: rotate(360deg); } }
 .skel { width: 100%; border-radius: 6px; background: var(--panel); animation: tm-pulse 1.4s ease-in-out infinite; }
-// /files parquet cells that keep their tail: an RTL block clips at the visual
-// left (`…thoughts3_0/shard-7.parquet`); the `<bdi>` inside stays LTR.
-.files-page .cell-tail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
-// The full value behind a clipped table cell (/files parquet viewer, via
+// Parquet cells that keep their tail (the leaf viewer): an RTL block clips at
+// the visual left (`…thoughts3_0/shard-7.parquet`); the `<bdi>` inside stays LTR.
+.object-panel .cell-tail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+// The full value behind a clipped table cell (the leaf viewer's tables, via
 // file-tree's `elide.tooltip`): a long GCS path, wrapped so it fits the panel.
 .tooltip-content .pin-hint { color: var(--ink-3); font-size: 10.5px; margin-top: 5px; }
 .tooltip-content.pinned { border-color: var(--ink-3); }
@@ -1642,6 +1651,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       // ramp both read against the row — the swatch was invisible at each end.
       i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 35%, transparent); }
     }
+    // Bytes by age (`TreeNode.ag`): one stacked bar per row, newest (yellow) →
+    // oldest (purple), widths ∝ bytes.
+    td.created.agebar {
+      .bar { display: inline-flex; width: 64px; height: 9px; border-radius: 2px; overflow: hidden; vertical-align: middle; box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 25%, transparent); }
+      .bar > span { min-width: 1px; }
+    }
     td.owners { white-space: nowrap; }
     // The row's actions: the trash gesture (a staging store) and the assign
     // select (an attribution store, admins).
@@ -2039,6 +2054,31 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 #tree-map.leaf .dt-treemap-map { flex-basis: 0 !important; height: 0; }
 #tree-map.leaf .hint { display: none; }  // "click a directory to drill in" — nothing to click
 
+// The leaf viewer (`?open=`): an opened object under the map — its name, size,
+// date and a download link over file-tree's renderer for its type.
+#object { scroll-margin-top: var(--topbar-h, 48px); }
+.object-panel {
+  margin: 8px 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 8px 12px 12px;
+  min-width: 0;
+  header {
+    display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
+    .obj-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; overflow-wrap: anywhere; cursor: copy; }
+    .obj-meta { color: var(--ink-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    .obj-dl { font-size: 12.5px; }
+    .obj-close {
+      margin-left: auto; border: none; background: none; color: var(--ink-2);
+      font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px;
+      &:hover { color: var(--ink); }
+    }
+  }
+  .obj-uri { margin: 2px 0 8px; font-size: 11.5px; color: var(--ink-3); overflow-wrap: anywhere; }
+  .obj-body { overflow-x: auto; max-width: 100%; }
+}
+
 // Assignments heatmap (/assignments): assigner rows × assignee columns.
 .assignments-page {
   padding: 1rem; max-width: 1100px; margin: 0 auto;
@@ -2327,4 +2367,11 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     b { color: var(--ink-2); font-weight: 500; }
     .srv { color: var(--ink-2); }
   }
+}
+
+// The age bar's tip: one line per non-empty bucket.
+.agebar-tip {
+  font-size: 12px; white-space: nowrap;
+  i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: -1px; margin-right: 3px; }
+  .dim { opacity: 0.7; }
 }

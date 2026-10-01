@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isFold, pathCrumbs, pathUri } from './pathCrumbs'
+import { fromUrlSegs, isFold, pathCopy, pathCrumbs, pathDisplay, pathText, pathUri, toUrlSegs } from './pathCrumbs'
 import type { Crumb } from './pathCrumbs'
 
 describe('pathCrumbs', () => {
@@ -32,5 +32,46 @@ describe('pathUri', () => {
   it('a directory prefix ends in `/`, except the root', () => {
     expect(pathUri('gs://', ['marin-us-central2', 'checkpoints'], true)).toBe('gs://marin-us-central2/checkpoints/')
     expect(pathUri('gs://', [], true)).toBe('gs://')
+  })
+})
+
+describe('pathDisplay / pathText / pathCopy', () => {
+  const home = ['Users', 'ryan']
+  it('folds the store home to `~`, at and below it', () => {
+    expect(pathDisplay('file:///', ['Users', 'ryan', 'c'], home)).toEqual({ lead: '~', leadSegs: 2, rest: ['c'] })
+    expect(pathText('file:///', ['Users', 'ryan'], home)).toBe('~')
+    expect(pathText('file:///', ['Users', 'ryan', 'c', 'disky'], home, true)).toBe('~/c/disky/')
+  })
+  it('a file store outside home reads as a plain absolute path', () => {
+    expect(pathDisplay('file:///', ['Users'], home)).toEqual({ lead: '/', leadSegs: 0, rest: ['Users'] })
+    expect(pathText('file:///', ['Applications', 'Slack.app'], home)).toBe('/Applications/Slack.app')
+    expect(pathText('file:///', ['Users', 'ryanw'], home)).toBe('/Users/ryanw')
+    expect(pathText('file:///', [], home)).toBe('/')
+  })
+  it('other schemes read as their URI, home or not', () => {
+    expect(pathText('gs://', ['b', 'x'], undefined, true)).toBe('gs://b/x/')
+    expect(pathText('r2://', [])).toBe('r2://')
+  })
+  it('copies a file store as an absolute path, other stores as the URI', () => {
+    expect(pathCopy('file:///', ['Users', 'ryan', 'c'], true)).toBe('/Users/ryan/c/')
+    expect(pathCopy('file:///', [])).toBe('/')
+    expect(pathCopy('gs://', ['b', 'x'])).toBe('gs://b/x')
+  })
+})
+
+describe('toUrlSegs / fromUrlSegs', () => {
+  const home = ['Users', 'ryan']
+  it('home folds to a leading `~` and expands back', () => {
+    expect(toUrlSegs(['Users', 'ryan', 'c', 'disky'], home)).toEqual(['~', 'c', 'disky'])
+    expect(toUrlSegs(['Users', 'ryan'], home)).toEqual(['~'])
+    expect(fromUrlSegs(['~', 'c', 'disky'], home)).toEqual(['Users', 'ryan', 'c', 'disky'])
+    expect(fromUrlSegs(['~'], home)).toEqual(['Users', 'ryan'])
+  })
+  it('paths outside home, and stores without one, pass through', () => {
+    expect(toUrlSegs(['Applications', 'Slack.app'], home)).toEqual(['Applications', 'Slack.app'])
+    expect(toUrlSegs(['Users'], home)).toEqual(['Users'])
+    expect(toUrlSegs(['b', 'x'])).toEqual(['b', 'x'])
+    expect(fromUrlSegs(['~', 'x'])).toEqual(['~', 'x'])
+    expect(fromUrlSegs(['Users', 'ryan', 'c'], home)).toEqual(['Users', 'ryan', 'c'])
   })
 })

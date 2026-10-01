@@ -308,6 +308,14 @@ endpoint counts as all-on. `ui/wrangler.toml` binds the bucket (`SCANS`, `SCANS_
 (`ui/cfn/tests/fixtures/gen.py`). Not yet served statically: hybrid chunk following, single-child
 auto-expand.
 
+### Cloud site auth routes (`site/functions/`)
+
+One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
+- `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
+- `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
+- `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
+- `POST /api/app-link` → `GET /auth/app-link?token=` — the macOS app's sign-in hand-off ("Open in disky" in the user menu): a session mints a single-use, 60 s grant for its own email + scopes (same-origin POST only); the app's webview redeems it into an ordinary email session and the grant is revoked. Contract: `specs/app-link.md`
+
 ## Development
 
 ```bash

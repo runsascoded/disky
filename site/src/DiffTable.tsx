@@ -7,11 +7,12 @@ import { defaultAsc, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow, SortKey } from './diffRows'
 import { Tooltip } from './Tooltip'
 import { usePerfCommit } from './perf'
+import { pathText } from './pathCrumbs'
 
 // The diff map's tabular twin (like ChildrenTable under the main map): one
 // row per cell of the drilled node — before / after / Δ bytes and objects,
-// every column sortable, a named directory drilling the page exactly as its
-// cell does. Rows are the map's cells, so the two always agree: a fold or a
+// every column sortable, a named row acting exactly as its cell does (a
+// directory drills the page, an object opens in the leaf viewer). Rows are the map's cells, so the two always agree: a fold or a
 // filler is listed (and never drills); a depth-1 row the map dropped (an
 // unchanged directory in Δ mode, weight 0) is counted in the footer instead.
 
@@ -22,14 +23,18 @@ const STATUS_LABEL: Record<DiffTableRow['status'], string> = {
   added: 'added', first: 'first scanned', removed: 'removed', changed: 'changed', unchanged: 'unchanged',
 }
 
-export function DiffTable({ model, scheme, segs, onDrill }: {
+export function DiffTable({ model, scheme, home, segs, onDrill, onOpen }: {
   model: DiffModel
   scheme: string
+  /** The store home, read as `~` (`Store.home`). */
+  home?: string[]
   /** The page's drill: path segments from the store root to the diffed node. */
   segs: string[]
   /** A named directory row was opened: its segments below the diffed node
    *  (the map's `onDrill` contract). */
   onDrill: (segs: string[]) => void
+  /** A named object row was opened: its segments below the diffed node. */
+  onOpen: (segs: string[]) => void
 }) {
   usePerfCommit('dtable')
   const { root, data, fmtBytes, fmtDelta, fmtN, fmtNDelta } = model
@@ -39,7 +44,7 @@ export function DiffTable({ model, scheme, segs, onDrill }: {
   const PAGE = PAGE_SIZES.includes(nP) ? nP : 20
 
   const rows = useMemo(() => sortDiffRows(diffTableRows(root.children ?? []), sort.k, sort.asc), [root, sort])
-  // Depth-1 rows the map left undrawn (weight 0: unchanged, in Δ mode).
+  // Depth-1 rows (objects or directories) the map left undrawn (weight 0: unchanged, in Δ mode).
   const unlisted = useMemo(() => {
     const listed = new Set(rows.map(r => r.key))
     return data.rows.filter(r => r.d === 1 && !listed.has(r.p)).length
@@ -101,7 +106,8 @@ export function DiffTable({ model, scheme, segs, onDrill }: {
         </thead>
         <tbody>
           {shown.map(r => {
-            const uri = scheme + [...segs, ...r.segs].join('/')
+            const uri = pathText(scheme, [...segs, ...r.segs], home)
+            const go = () => (r.kind === 'file' ? onOpen : onDrill)(r.segs)
             return (
               <tr key={r.key}>
                 <td className="prefix">
@@ -109,8 +115,8 @@ export function DiffTable({ model, scheme, segs, onDrill }: {
                     <span>{elideMid(r.name, NAME_MAX)}</span>
                   ) : (
                     <Tooltip content={<code className="elide-full">{uri}</code>}>
-                      <a role="link" tabIndex={0} onClick={() => onDrill(r.segs)}
-                        onKeyDown={(e: KeyboardEvent) => { if (e.key === 'Enter') onDrill(r.segs) }}>
+                      <a role="link" tabIndex={0} onClick={go}
+                        onKeyDown={(e: KeyboardEvent) => { if (e.key === 'Enter') go() }}>
                         {elideMid(r.name, NAME_MAX)}
                       </a>
                     </Tooltip>
@@ -146,7 +152,7 @@ export function DiffTable({ model, scheme, segs, onDrill }: {
       {pager && <div className="pager">{pager}</div>}
       {/* The map draws only what moved (Δ mode): say what the table is
           leaving out, so the rows and the totals agree. */}
-      {unlisted > 0 && <p className="tbl-note">{fmtN(unlisted)} unchanged {unlisted === 1 ? 'directory' : 'directories'} not listed</p>}
+      {unlisted > 0 && <p className="tbl-note">{fmtN(unlisted)} unchanged {unlisted === 1 ? 'path' : 'paths'} not listed</p>}
     </section>
   )
 }

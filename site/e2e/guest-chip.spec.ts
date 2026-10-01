@@ -46,5 +46,5 @@ test('guest chip shows the grant subject (avatar + name), not registry initials'
   await expect(card.locator('.uc-sub')).toHaveText('howley.robert@gmail.com')
   await expect(card.getByText('guest share link')).toBeVisible()
   await expect(card.locator('.uc-warn')).toHaveCount(0)
-  await expect(card.getByText('storage breakdown')).toHaveCount(0)
+  await expect(card.getByText('Storage Breakdown')).toHaveCount(0)
 })

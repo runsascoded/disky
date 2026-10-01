@@ -145,13 +145,11 @@ The rewrite is a base CLI, `disk-tree recompress PATH…` (`src/disk_tree/recomp
 
 **Open (the deployments' half):** the per-deployment Batch job invoking `recompress` over `cw-l2/…` and gcs's `listing/` (`listing-format` first, to size the v1 set), the R2 mirror question, zstd on or off for the rewrite (`$DISK_TREE_PARQUET_CODEC`, gated on the `/files` viewer per phase 1). Nothing here has run against a real bucket.
 
-## Phase 3: cross-scan consolidation (the big one)
+## Phase 3: cross-scan consolidation — superseded by `path-store.md`
 
-Same idea as the over-time groups (`obs-axis-indexing.md`), but at the **object** level and lossless for the listing's columns: SCD-2 intervals `(path, size, mtime, …, __scan_lo, __scan_hi)` over K-scan sealed groups via pyrmts' `consolidate_parquet_duckdb`. Object churn is higher than path-total churn: cw's 13-day diff shows +22.3 M objects over a 46 M base, roughly 3–4 % per 12 h scan. So 100 scans should cost about 5–10 single scans rather than 100. Rough estimate, to be measured on one group first: **10–20 GiB instead of ≈ 250 GiB**. Policy: the latest N scans stay raw (the hot reads: index builds, sweep manifests, `/files`), and older scans are served from the group (`extract_scan`) when anything needs them.
-
-Readers to wire before dropping raw copies: reindex (`job/cw-reindex.sh`), `/files` / `/v1/files` for historical listings, and sweep/plan manifests for a past scan. That's the same "drop after digest-verify, latest exempt" rule as `pyrmts-adoption.md` §6.
+This phase planned an object-level SCD-2 archive of the raw listings. Since `path-store.md` (2026-09-30), the served store holds every object row, and the raw listing is being retired (path-store §4.6). So the archive this phase described is the path store's consolidation: path-store §4.7 (one archive for both sorts, a factor-2 reverse-chronological build ladder capped by a read-amplification budget, zero-decode row-group stitching shared with pyrmts, and optional exponential thinning as a per-deployment retention policy). Nothing further is built under this spec; phases 1–2 (the v2 format, `recompress`, zstd, the R2 dedup) stand as implemented.
 
 ## Out of scope
 
-- Consolidating the *indexes* (path-index, tiers, age pyramid) across scans: ≈ 55 GiB total on cw, and needed by the treemap and diff readers (see `pyrmts-adoption.md`). A smaller, harder win than the listings.
+- (Was: "consolidating the indexes". With objects in the store, consolidating the store is the only consolidation left; it lives in `path-store.md` §4.7.)
 - gcs `access/` logs (2.43 TiB): a separate retention question for the gcs session.

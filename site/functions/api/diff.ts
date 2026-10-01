@@ -13,7 +13,7 @@
  * user lens, and edge-cached accordingly.
  */
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { storeReady, type Lens } from '../_lib/index.js'
+import { pathGens, storeReady, type Lens } from '../_lib/index.js'
 import { ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, parseQuery } from '../_lib/scope.js'
 import { ATTEN_DEFAULT, buildDiff, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT } from '../_lib/view.js'
@@ -64,10 +64,10 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   // One guard over the D1 pre-step, the cache match and the build (see
   // subtree.ts): a D1 stall becomes a retryable 503, not a raw 500 page.
   try {
-    const head = lens && ctx.env.DB ? await st.time('pre', ledgerHead(ctx.env)) : 0
+    const [head, g] = await st.time('pre', Promise.all([lens && ctx.env.DB ? ledgerHead(ctx.env) : Promise.resolve(0), pathGens(ctx.env, [from, to])]))
     const cacheKey = cacheKeyFor('diff',
       `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensRaw ?? ''}` +
-        `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}`,
+        `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}`,
       storeKey(ctx.env),
     )
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))

@@ -63,12 +63,15 @@ const AUTH_MODE = process.env.VITE_AUTH_MODE ?? VARS.AUTH_MODE ?? 'app'
 // `STORE` in wrangler.toml, or `VITE_STORES_EXTRA` in the environment; unset →
 // the single-store build, unchanged.
 const STORES_EXTRA = process.env.VITE_STORES_EXTRA ?? VARS.STORES_EXTRA ?? ''
+// A file store's home dir (`Users/ryan`), shown as `~` (`HOME` under [vars]).
+const HOME = process.env.VITE_HOME ?? VARS.HOME ?? ''
 
 export default defineConfig({
   define: {
     'import.meta.env.VITE_STORE': JSON.stringify(STORE),
     'import.meta.env.VITE_AUTH_MODE': JSON.stringify(AUTH_MODE),
     'import.meta.env.VITE_STORES_EXTRA': JSON.stringify(STORES_EXTRA),
+    'import.meta.env.VITE_HOME': JSON.stringify(HOME),
   },
   plugins: [react(), devSeriesIndex],
   server: {

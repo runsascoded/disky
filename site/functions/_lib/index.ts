@@ -66,7 +66,13 @@ export interface Row {
   cls2: number
   cls3: number
   cls4: number
+  /** Bytes by age at the scan date, `AGE_COLS` order (<1d … ≥3y;
+   *  specs/row-age-strata.md); null where the generation has no age columns. */
+  ages: number[] | null
 }
+
+/** The store's bytes-by-age columns (`dt_cloud.index.AGE_COLS`). */
+export const AGE_COLS = ['age_b0', 'age_b1', 'age_b2', 'age_b3', 'age_b4', 'age_b5', 'age_b6']
 
 interface GroupSpan {
   rowStart: number
@@ -117,9 +123,19 @@ interface D1Handle {
  * objects included, and a `bysize` sort exists beside `path`. */
 export const isStore = (h: IndexHandle): boolean => h.version >= 2
 
-/** A user lens filter: `usr` column = `key`, applied on the by-user index
- * variant (the only sort besides path — ownership has no group facet). */
+/** A user lens filter: `usr` column = `key`. On a version-1 scan it reads the
+ * by-user variant (rows keyed by `usr` first); on a store generation it reads
+ * the store's own sorts, whose groups mix users, filtered per row. */
 export type Lens = { key: string }
+
+/** A variant whose rows are sorted by `usr` first (`user`, `bysize-user`,
+ * `coarse<E>-user`, store-prefixed or not): its group's path stats only hold
+ * inside a single-user group, so a lens tests the user range first. Every
+ * other sort keeps its path rect, and a lens is one more condition on it. */
+export const lensSorted = (variant: string): boolean => {
+  const v = variant.slice(variant.indexOf(':') + 1)
+  return v === 'user' || v.endsWith('-user')
+}
 /** Blob-backed: the same stats + compact metadata D1 holds for a tier, as
  * one document beside its parquet (`<tier>.groups.json`, written by
  * `index-sync`), held in memory. What a scan whose row groups retention
@@ -233,6 +249,31 @@ export function schemaRow<T>(env: Env, cols: string, date: string, variant: stri
     : env.DB!.prepare(`SELECT ${cols} FROM index_schema WHERE store = ? AND date = ? AND variant = ?`).bind(storeKey(env), date, d1Variant(env, variant)).first<T>()
 }
 
+/** The `path` pointer's generation for each of `dates`, folded into one short
+ * token (FNV-1a over `date=gen` in date order; '' without a D1). An edge-cache
+ * key carries it, so re-syncing a date (a new generation, e.g. a store
+ * generation over an earlier v1 one) is a new key instead of serving views
+ * cached from the old generation for the cache's whole TTL. One query per 90
+ * dates (D1's bind limit is 100). */
+export async function pathGens(env: Env, dates: string[]): Promise<string> {
+  if (!env.DB || !dates.length) return ''
+  const gens = new Map<string, string>()
+  const uniq = [...new Set(dates)]
+  for (let i = 0; i < uniq.length; i += 90) {
+    const chunk = uniq.slice(i, i + 90)
+    const marks = chunk.map(() => '?').join(', ')
+    const { results } = isPrimary(env)
+      ? await env.DB.prepare(`SELECT date, gen FROM index_schema WHERE variant = 'path' AND date IN (${marks})`).bind(...chunk).all<{ date: string; gen: string | null }>()
+      : await env.DB.prepare(`SELECT date, gen FROM index_schema WHERE store = ? AND variant = ? AND date IN (${marks})`).bind(storeKey(env), d1Variant(env, 'path'), ...chunk).all<{ date: string; gen: string | null }>()
+    for (const r of results) gens.set(r.date, r.gen ?? '')
+  }
+  let h = 0x811c9dc5
+  for (const d of [...uniq].sort()) {
+    for (const ch of `${d}=${gens.get(d) ?? ''};`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193)
+  }
+  return (h >>> 0).toString(36)
+}
+
 /** Every scan of the env's store with a synced floor-free (`path`) index —
  * the primary's query as it always was, a secondary store's scoped. */
 export function pathScans(env: Env, order: boolean): Promise<{ results: { date: string }[] }> {
@@ -297,7 +338,7 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
  * names on a v1 index, the layer-2's on a store sort (§1.1). `usr` and the
  * class pivots only where the file has them (cw has neither). */
 export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'c2', 'c3', 'c4', 'a']
-export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_2', 'sum_storage_class_id_3', 'sum_storage_class_id_4']
+export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_2', 'sum_storage_class_id_3', 'sum_storage_class_id_4', ...AGE_COLS]
 
 /** What a shaped read projects: a v1 index reads every column (its columns
  * are the row); a store sort reads the `Row` columns it has, so a bridge
@@ -382,6 +423,7 @@ const toRowV1 = (r: Record<string, unknown>): Row => {
     cls2: num(r.c2),
     cls3: num(r.c3),
     cls4: num(r.c4),
+    ages: null,
   }
 }
 
@@ -405,6 +447,7 @@ const toRowV2 = (r: Record<string, unknown>): Row => {
     cls2: num(r.sum_storage_class_id_2),
     cls3: num(r.sum_storage_class_id_3),
     cls4: num(r.sum_storage_class_id_4),
+    ages: r.age_b0 == null ? null : AGE_COLS.map(c => num(r[c])),
   }
 }
 
@@ -526,12 +569,12 @@ async function mapLimit<T, R>(items: T[], limit: number, f: (t: T) => Promise<R>
 /** The span query's predicate, for a blob handle's in-memory groups — the
  * same test `selectSpans` sends D1, SQL NULL semantics included (a group with
  * no usr stats never matches a lens). */
-export function groupMatches(g: { dMin: number; dMax: number; pMin: string; pMax: string; bMax: number; uMin?: string | null; uMax?: string | null }, rects: Rect[], bMin = 0, lens?: Lens): boolean {
+export function groupMatches(g: { dMin: number; dMax: number; pMin: string; pMax: string; bMax: number; uMin?: string | null; uMax?: string | null }, rects: Rect[], bMin = 0, lens?: Lens, keyed = true): boolean {
   if (bMin > 0 && g.bMax < Math.floor(bMin)) return false
   const rect = (r: Rect) => g.dMax >= r.dLo && g.dMin <= r.dHi && (g.dMin !== g.dMax || (g.pMax >= r.pLo && g.pMin <= r.pHi))
   if (!lens) return rects.some(rect)
   if (g.uMin == null || g.uMax == null || !(g.uMin <= lens.key && g.uMax >= lens.key)) return false
-  return g.uMin !== g.uMax || rects.some(rect)
+  return keyed ? g.uMin !== g.uMax || rects.some(rect) : rects.some(rect)
 }
 
 /** Candidate row groups for a set of (depth, path-range) rectangles — one SQL
@@ -540,7 +583,7 @@ export function groupMatches(g: { dMin: number; dMax: number; pMin: string; pMax
  * the path test only applies within a single depth (`d_min = d_max`). */
 async function selectSpans(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0, lens?: Lens): Promise<Span[]> {
   if (h.mode === 'blob') {
-    const out = h.groups.filter(g => groupMatches(g, rects, bMin, lens))
+    const out = h.groups.filter(g => groupMatches(g, rects, bMin, lens, lensSorted(h.variant)))
     if (out.length > cap) throw new Error(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
   }
@@ -549,12 +592,19 @@ async function selectSpans(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0, 
   // The (depth, path) rect; valid within a single primary-key group only
   // (single-depth for the path index, single-user for the lens index).
   const rectSql = '(d_max >= ? AND d_min <= ? AND (d_min <> d_max OR (p_max >= ? AND p_min <= ?)))'
+  const keyed = lensSorted(h.variant)
   for (const r of rects) {
-    if (lens) {
-      // Prune to groups whose usr range covers the lens key; the rect is a
-      // secondary test that only holds inside a single-key group.
+    if (lens && keyed) {
+      // A `usr`-first sort: prune to groups whose usr range covers the lens
+      // key; the rect is a secondary test that only holds inside a
+      // single-key group.
       where.push(`(u_min <= ? AND u_max >= ? AND (u_min <> u_max OR ${rectSql}))`)
       binds.push(lens.key, lens.key, r.dLo, r.dHi, r.pLo, r.pHi)
+    } else if (lens) {
+      // A path-first sort (a store generation's `path`): the rect holds, and
+      // the usr range is one more condition (groups mix users).
+      where.push(`(${rectSql} AND u_min <= ? AND u_max >= ?)`)
+      binds.push(r.dLo, r.dHi, r.pLo, r.pHi, lens.key, lens.key)
     } else {
       where.push(rectSql)
       binds.push(r.dLo, r.dHi, r.pLo, r.pHi)
@@ -615,9 +665,10 @@ export async function readRects(
   rects: Rect[],
   thrAt?: (depth: number) => number,
   lens?: Lens,
+  plan?: Span[],
 ): Promise<Row[]> {
   if (!rects.length) return []
-  const kept = await planRects(h, rects, thrAt, lens)
+  const kept = plan ?? await planRects(h, rects, thrAt, lens)
   // A row passes the lens iff its usr equals the key.
   const lensOk = (r: Row) => !lens || r.usr === lens.key
   const inRect = (r: Row) => rects.some(q => r.depth >= q.dLo && r.depth <= q.dHi && r.path >= q.pLo && r.path <= q.pHi)
@@ -765,9 +816,10 @@ export async function readSizeRects(
   rects: Rect[],
   thrAt: (depth: number) => number,
   lens?: Lens,
+  plan?: Span[],
 ): Promise<Row[]> {
   if (!rects.length) return []
-  const kept = await planSizeRects(h, rects, thrAt, lens)
+  const kept = plan ?? await planSizeRects(h, rects, thrAt, lens)
   const lensOk = (r: Row) => !lens || r.usr === lens.key
   const inRect = (r: Row) => rects.some(q => r.depth >= q.dLo && r.depth <= q.dHi && r.path >= q.pLo && r.path < q.pHi)
   return decodeSpans(h, kept, r => r.size >= thrAt(r.depth) && inRect(r) && lensOk(r))

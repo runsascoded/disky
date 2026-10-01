@@ -7,7 +7,8 @@ import type { CellCtx, CellStyle } from '@disk-tree/react'
 import { Avatar } from './Avatar'
 import { CopyName, copyText } from './CopyName'
 import { FaRegCopy } from 'react-icons/fa6'
-import { pathCrumbs, pathUri } from './pathCrumbs'
+import { pathCopy, pathCrumbs, pathDisplay, pathText } from './pathCrumbs'
+import { cellAction } from './objects'
 import { canonId, UserChip, ghHandle, shortName } from './UserChip'
 import { dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonth, inkFor, slotColor, userColor } from './colors'
 import type { UserIndexEntry } from './colors'
@@ -36,17 +37,24 @@ const LI_METRIC_CHIPS: [LiMetric, string, string][] = [
  * to the CLI (via `copyText`, which also works off the tailnet dev server's
  * insecure origin). Its own component so the copy state has somewhere to live
  * (renderTooltip is a plain function). */
-function PathBar({ path, scheme, onDrill }: { path: TreeNode[]; scheme: string; onDrill?: (p: TreeNode[]) => void }) {
+function PathBar({ path, scheme, home, onDrill }: { path: TreeNode[]; scheme: string; home?: string[]; onDrill?: (p: TreeNode[]) => void }) {
   const [copied, setCopied] = useState(false)
-  const crumbs = pathCrumbs(path.slice(1).map(n => n.n))
-  const uri = pathUri(scheme, crumbs.map(c => c.name))
+  const names = path.slice(1).map(n => n.n)
+  const uri = pathCopy(scheme, names)
+  // A store home folds to a `~` lead (drilling to the home dir); a file
+  // store's other paths lead with `/`, not `file:///`.
+  const { lead, leadSegs } = pathDisplay(scheme, names, home)
+  const crumbs = pathCrumbs(names).slice(leadSegs)
+  const homeNode = leadSegs ? path.slice(0, leadSegs + 1) : null
   return (
     <div className="path" onClick={e => e.stopPropagation()}>
       <span className="crumbs">
-        <span className="dirname">{scheme}</span>
+        {homeNode && onDrill && crumbs.length
+          ? <button type="button" className="seg" onClick={() => onDrill(homeNode)}>~</button>
+          : <span className={'dirname' + (homeNode && !crumbs.length ? ' basename' : '')}>{lead}</span>}
         {crumbs.map(({ name, segs, drillable, last }, i) => (
           <span key={i}>
-            {i > 0 && <span className="sep">/</span>}
+            {(i > 0 || homeNode) && <span className="sep">/</span>}
             {onDrill && drillable
               ? <button type="button" className="seg" onClick={() => onDrill(path.slice(0, segs.length + 1))}>{name}</button>
               : <span className={'seg' + (last ? ' basename' : '')}>{name}</span>}
@@ -161,7 +169,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnclaimed, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnclaimed, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -184,6 +192,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   ownerLensed?: boolean
   // URI scheme for cell paths — `gs://` for GCS, `s3://` for CoreWeave.
   scheme?: string
+  /** The store home, shown as `~` in the path bar (`Store.home`). */
+  home?: string[]
   // OG-image mode: hide every text detail (cell labels, crumb/rollup bars, hint)
   // and render just the colored cells. Never set by the live app.
   redact?: boolean
@@ -196,6 +206,12 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // app keep the drill in the URL and command drills from worklist rows.
   path?: TreeNode[]
   onPathChange?: (p: TreeNode[]) => void
+  /** The scan lists objects (a store generation — `listsObjects`): every
+   *  directory cell drills, childless or not. A v1 scan's leaves are all
+   *  directories, and one holding a single object pins instead (`cellAction`). */
+  objects?: boolean
+  /** An object cell was clicked: its path from the root (the leaf viewer opens it). */
+  onOpen?: (p: TreeNode[]) => void
 }) {
   usePerfCommit('treemap')
   const { fmtBytes, fmtBytesLike } = useUnits()
@@ -579,7 +595,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     )
     return (
       <>
-        <PathBar path={path} scheme={scheme} onDrill={onPathChange} />
+        <PathBar path={path} scheme={scheme} home={home} onDrill={onPathChange} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
           {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
@@ -594,7 +610,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         {/* The passive preview says where the controls are: any cell, at any
             depth, assigns from its pinned box (the table below only lists the
             drilled node's children). Gone once pinned or hovered into. */}
-        {ownerIdx && !n.n.startsWith('(') && <div className="tt-hint tt-pin-hint">{n.c?.length ? '⌥-click' : 'click'} to pin · assign it here</div>}
+        {ownerIdx && !n.n.startsWith('(') && <div className="tt-hint tt-pin-hint">{cellAction(n, objects) === 'pin' ? 'click' : '⌥-click'} to pin · assign it here</div>}
       </>
     )
   }
@@ -605,14 +621,15 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       initialPath={initialPath}
       path={path}
       onPathChange={onPathChange}
-      // A directory whose children fell below this view's pixel budget
-      // arrives without `c` — the core would treat it as a leaf and pin its
-      // tooltip. It's still a branch: drilling fetches its own budget's
-      // children (the URL path drives the fetch). Only a lone object pins.
-      onCellClick={(n, p) => {
-        if (n.c?.length || n.o <= 1 || n.n.startsWith('(') || !onPathChange) return false
-        onPathChange(p)
-        return true
+      // `k` decides (`cellAction`): an object opens in the leaf viewer; a
+      // directory drills even when it arrived without `c` (its children fell
+      // below this view's pixel budget — the drill's own fetch brings them),
+      // where the core would treat it as a leaf and pin its tip.
+      onCellClick={(n, p, e) => {
+        const act = cellAction(n, objects, e.altKey)
+        if (act === 'open' && onOpen) { onOpen(p); return true }
+        if (act === 'drill' && onPathChange) { onPathChange(p); return true }
+        return false
       }}
       getSize={n => n.b}
       getChildren={n => n.c}
@@ -655,12 +672,12 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // current view, so the panel never collapses to an empty stub.
       renderTipDefault={(n, p) => (
         <div className="tip-viewcard">
-          <div className="vc-scope">{p.length > 1 ? uriOf(p) : n.n}</div>
+          <div className="vc-scope">{p.length > 1 ? pathText(scheme, p.slice(1).map(x => x.n), home) : n.n}</div>
           <div className="nums">
             {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
             {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
           </div>
-          <div className="vc-hint">Hover a cell for its details · click one to pin it.</div>
+          <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>
       )}
       renderCellExtra={renderCellExtra}
@@ -677,7 +694,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         : node => (
           <div className="hint">
             <span className="stats">{fmtBytes(node.b)} · {fmtN(node.o)} objects{pricing && <> · est. {fmtUsd(estUsd(node))}/mo</>}</span>
-            <Tooltip content={<>Click a directory to drill in · click an object to pin its details · click the path above (or Backspace) to go up · small children fold into “(other)” · j/k select rows in the table below</>}>
+            <Tooltip content={<>Click a directory to drill in · click an object to open it · ⌥-click any cell to pin its details · click the path above (or Backspace) to go up · small children fold into “(other)” · j/k select rows in the table below</>}>
               <span className="info" aria-label="how to use the map" tabIndex={0}>ⓘ</span>
             </Tooltip>
             {!hasPanel && keys}

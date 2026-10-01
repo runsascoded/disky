@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { buildTree } from './diffModel'
 import type { DiffData, DiffRow } from './diffModel'
-import { deltaPct, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
+import { deltaPct, diffCellAction, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
 
-const row = (p: string, s: DiffRow['s'], a: number, b: number, oa: number, ob: number, x?: true): DiffRow =>
-  ({ p, d: p.split('/').length, k: 'dir', s, a, b, oa, ob, ...(x ? { x } : {}) })
+const row = (p: string, s: DiffRow['s'], a: number, b: number, oa: number, ob: number, x?: true, k: DiffRow['k'] = 'dir'): DiffRow =>
+  ({ p, d: p.split('/').length, k, s, a, b, oa, ob, ...(x ? { x } : {}) })
 
 const data = (rows: DiffRow[]): DiffData => ({
   prev: '2026-09-01', curr: '2026-09-02',
@@ -29,19 +29,19 @@ const ROWS: DiffRow[] = [
   row('(other)', 'changed', 90, 100, 900, 950),
 ]
 
-const strip = (rs: DiffTableRow[]) => rs.map(({ key, status, synthetic, segs, a, b, delta, pct, oa, ob, odelta }) =>
-  ({ key, status, synthetic, segs, a, b, delta, pct, oa, ob, odelta }))
+const strip = (rs: DiffTableRow[]) => rs.map(({ key, kind, status, synthetic, segs, a, b, delta, pct, oa, ob, odelta }) =>
+  ({ key, kind, status, synthetic, segs, a, b, delta, pct, oa, ob, odelta }))
 
 describe('diffTableRows', () => {
   it('lists the map’s cells (Δ mode: what moved) with before/after/Δ per side; the fold never drills', () => {
     const { cells } = buildTree(data(ROWS), 'delta', false)
     // Δ mode orders cells by |Δ| (their area); `static` (Δ 0) is not a cell.
     expect(strip(diffTableRows(cells))).toEqual([
-      { key: 'logs', status: 'changed', synthetic: false, segs: ['logs'], a: 800, b: 200, delta: -600, pct: -0.75, oa: 80, ob: 20, odelta: -60 },
-      { key: 'ckpt', status: 'changed', synthetic: false, segs: ['ckpt'], a: 1000, b: 1500, delta: 500, pct: 0.5, oa: 10, ob: 12, odelta: 2 },
-      { key: 'new', status: 'added', synthetic: false, segs: ['new'], a: 0, b: 300, delta: 300, pct: null, oa: 0, ob: 3, odelta: 3 },
-      { key: 'gone', status: 'removed', synthetic: false, segs: ['gone'], a: 250, b: 0, delta: -250, pct: -1, oa: 5, ob: 0, odelta: -5 },
-      { key: '(other)', status: 'changed', synthetic: true, segs: [], a: 90, b: 100, delta: 10, pct: 10 / 90, oa: 900, ob: 950, odelta: 50 },
+      { key: 'logs', kind: 'dir', status: 'changed', synthetic: false, segs: ['logs'], a: 800, b: 200, delta: -600, pct: -0.75, oa: 80, ob: 20, odelta: -60 },
+      { key: 'ckpt', kind: 'dir', status: 'changed', synthetic: false, segs: ['ckpt'], a: 1000, b: 1500, delta: 500, pct: 0.5, oa: 10, ob: 12, odelta: 2 },
+      { key: 'new', kind: 'dir', status: 'added', synthetic: false, segs: ['new'], a: 0, b: 300, delta: 300, pct: null, oa: 0, ob: 3, odelta: 3 },
+      { key: 'gone', kind: 'dir', status: 'removed', synthetic: false, segs: ['gone'], a: 250, b: 0, delta: -250, pct: -1, oa: 5, ob: 0, odelta: -5 },
+      { key: '(other)', kind: 'dir', status: 'changed', synthetic: true, segs: [], a: 90, b: 100, delta: 10, pct: 10 / 90, oa: 900, ob: 950, odelta: 50 },
     ])
   })
   it('max mode also lists the unchanged directory, and a first-scanned root reads `first`', () => {
@@ -62,6 +62,44 @@ describe('diffTableRows', () => {
       ['ckpt/run-1', ['ckpt', 'run-1'], 'changed'],
       ['ckpt/run-2', ['ckpt', 'run-2'], 'unchanged'],
     ])
+  })
+  it('an object row keeps its kind: added / removed objects are rows of their own, beside directories', () => {
+    const rows = [
+      row('ckpt', 'changed', 1000, 1300, 10, 11, true),
+      row('ckpt/model.safetensors', 'added', 0, 300, 0, 1, undefined, 'file'),
+      row('ckpt/run-1', 'unchanged', 1000, 1000, 10, 10),
+      row('notes.md', 'removed', 40, 0, 1, 0, undefined, 'file'),
+    ]
+    const { cells } = buildTree(data(rows), 'max', false)
+    expect(strip(diffTableRows(cells))).toEqual([
+      { key: 'ckpt', kind: 'dir', status: 'changed', synthetic: false, segs: ['ckpt'], a: 1000, b: 1300, delta: 300, pct: 0.3, oa: 10, ob: 11, odelta: 1 },
+      { key: 'notes.md', kind: 'file', status: 'removed', synthetic: false, segs: ['notes.md'], a: 40, b: 0, delta: -40, pct: -1, oa: 1, ob: 0, odelta: -1 },
+    ])
+    expect(strip(diffTableRows(cells[0].children!))).toEqual([
+      { key: 'ckpt/model.safetensors', kind: 'file', status: 'added', synthetic: false, segs: ['ckpt', 'model.safetensors'], a: 0, b: 300, delta: 300, pct: null, oa: 0, ob: 1, odelta: 1 },
+      { key: 'ckpt/run-1', kind: 'dir', status: 'unchanged', synthetic: false, segs: ['ckpt', 'run-1'], a: 1000, b: 1000, delta: 0, pct: 0, oa: 10, ob: 10, odelta: 0 },
+    ])
+  })
+})
+
+describe('diffCellAction', () => {
+  it('`k` decides: an object opens, a directory drills (enumerated below or not); root, fold, filler and ⌥-click pin', () => {
+    // `ckpt`'s one enumerated child leaves 10 MB unexplained: an `(unchanged)` filler.
+    const { cells } = buildTree(data([
+      row('ckpt', 'changed', 10_000_000, 13_000_000, 10, 11, true),
+      row('ckpt/model.safetensors', 'added', 0, 3_000_000, 0, 1, undefined, 'file'),
+      row('logs', 'changed', 800, 200, 80, 20),
+      row('(other)', 'changed', 90, 100, 900, 950),
+    ]), 'max', false)
+    const all = [...cells, ...cells.flatMap(c => c.children ?? [])]
+    expect(all.map(n => [n.key, diffCellAction(n), diffCellAction(n, true)])).toEqual([
+      ['ckpt', 'drill', 'pin'],
+      ['(other)', 'pin', 'pin'],
+      ['logs', 'drill', 'pin'],
+      ['ckpt/model.safetensors', 'open', 'pin'],
+      ['ckpt/__unchanged__', 'pin', 'pin'],
+    ])
+    expect(diffCellAction({ k: 'dir', status: 'root', label: 'ctbk' })).toBe('pin')
   })
 })
 

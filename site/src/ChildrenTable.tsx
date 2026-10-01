@@ -3,7 +3,7 @@ import type { MouseEvent } from 'react'
 import { intParam, useUrlState } from 'use-prms'
 import { useCanAssign, useCanStage } from './auth'
 import { FaRegTrashCan } from 'react-icons/fa6'
-import { dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonthShort } from './colors'
+import { AGE_BUCKETS, ageBucketColor, dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonthShort } from './colors'
 import type { UserIndexEntry } from './colors'
 import type { OwnerIndex } from './owners'
 import { OwnerBar, ownerShares } from './OwnerBar'
@@ -14,13 +14,16 @@ import { AssignSelect } from './AssignSelect'
 import { OwnerFactChip } from './OwnerFactChip'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { useStage } from './plans'
+import { actionPrefix, rowTarget } from './objects'
 import type { TreeNode } from './types'
 import { fmtN } from './types'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
+import { pathText } from './pathCrumbs'
 
 // Sortable, paged listing of the treemap's current node's children — the
-// tabular twin of the map above it (same drill: clicking a row opens it).
+// tabular twin of the map above it: every named row is a link, a directory
+// drilling like its cell, an object opening in the leaf viewer.
 // Row selection + bulk staging / assignment: specs/children-table-selection.md.
 
 type SortKey = 'n' | 'b' | 'o' | 'd' | 'a'
@@ -32,18 +35,23 @@ const PAGE_SIZES = [20, 50, 100, 200]
  *  tooltip); ~60 chars fills the column's 480px at 12px mono. */
 const NAME_MAX = 60
 
-export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUser, onOpen }: {
+export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject }: {
   /** The treemap's currently-viewed node. */
   node: TreeNode
   /** Path segments from the tree root to `node` (no scheme, no root). */
   segs: string[]
   scheme: string
+  /** The store home, read as `~` in row tooltips (`Store.home`). */
+  home?: string[]
   /** The ownership ledger (`Store.owners`): assignments show as the row's
    *  owner, and admins assign from the actions column. */
   ownerIdx?: OwnerIndex | null
   userIdx?: Map<string, UserIndexEntry>
   onPickUser?: (u: string) => void
+  /** A directory row was opened: drill there (segments from the root). */
   onOpen: (segs: string[]) => void
+  /** An object row was opened: show it in the leaf viewer. */
+  onOpenObject: (segs: string[]) => void
 }) {
   usePerfCommit('table')
   const { fmtBytes } = useUnits()
@@ -62,7 +70,7 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
   const stage = useStage()
   const assigning = !!ownerIdx && store.owners && canAssign
   const showSel = staging ? canStage : assigning
-  const trash = (uri: string) => stage.mutate({ prefixes: [uri + '/'] })
+  const trash = (uri: string, k: TreeNode['k']) => stage.mutate({ prefixes: [actionPrefix(uri, k)] })
   // One memo for the whole multi-select gesture (stored on the stage batch).
   const [memo, setMemo] = useState('')
 
@@ -133,8 +141,10 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [selCount, clearSel])
-  const selUris = [...sel.selected]
-  const trashSel = () => { if (selUris.length) stage.mutate({ prefixes: selUris.map(u => u + '/'), note: memo }, { onSuccess: () => { sel.clear(); setMemo('') } }) }
+  // What each selected row acts on: an object's key, a directory's prefix.
+  const kindOf = new Map(kids.map(k => [uriOfKid(k), k.k]))
+  const selPrefixes = [...sel.selected].map(u => actionPrefix(u, kindOf.get(u)))
+  const trashSel = () => { if (selPrefixes.length) stage.mutate({ prefixes: selPrefixes, note: memo }, { onSuccess: () => { sel.clear(); setMemo('') } }) }
   const selBytes = kids.filter(k => sel.selected.has(uriOfKid(k))).reduce((s, k) => s + k.b, 0)
   // Everything a row derives from the tree and the ledger — owner shares and
   // the resolved assignment — computed once per page of rows × ledger, so a
@@ -144,7 +154,8 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
     const kidSegs = [...segs, k.n]
     const uri = scheme + kidSegs.join('/')
     const cl = ownerIdx && !synthetic ? ownerIdx.claimOf(uri) : null
-    return { k, synthetic, kidSegs, uri, shares: ownerShares(k), cl, si: selectable.indexOf(k) }
+    const to = rowTarget(segs, k.n, k.k, synthetic)
+    return { k, synthetic, kidSegs, uri, to, shares: ownerShares(k), cl, si: selectable.indexOf(k) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [shown, path, scheme, ownerIdx, selectable])
   // Every hook above runs on every render: an empty page (a drill can leave
@@ -155,7 +166,12 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
   // part lines up down the page; the year column only exists when a listed
   // row is outside the current year.
   const createdParts = (d: number) => epochDaysToMonthShort(d).split(' ')
-  const hasYr = shown.some(k => k.d != null && createdParts(k.d).length > 1)
+  // A generation with bytes-by-age (`ag`) shows each row's age mix as a bar
+  // — a mean of mixed stamps (`.cargo`: 2006 crate sources + this month's
+  // builds) describes neither — else the mean's swatch · month · year.
+  const hasAg = shown.some(k => k.ag)
+  const hasYr = !hasAg && shown.some(k => k.d != null && createdParts(k.d).length > 1)
+  const createdCols = hasAg ? 1 : hasYr ? 3 : 2
   const selBar = showSel && sel.selected.size > 0 && (
     <span className="sel-bar">
       <b>{sel.selected.size}</b> selected · {fmtBytes(selBytes)}
@@ -168,7 +184,7 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
             <button type="button" className="trash" onClick={trashSel} aria-label="trash selected"><FaRegTrashCan /> trash {sel.selected.size}</button>
           </Tooltip>
         </>)}
-        {assigning && <AssignSelect prefix={selUris.map(u => u + '/')} label={`assign ${sel.selected.size}…`} />}
+        {assigning && <AssignSelect prefix={selPrefixes} label={`assign ${sel.selected.size}…`} />}
         <button type="button" className="quiet" onClick={sel.clear}>deselect</button>
       </span>
     </span>
@@ -203,12 +219,12 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
             <th className="num">share</th>
             {th('o', 'objects')}
             <th
-              colSpan={hasYr ? 3 : 2}
+              colSpan={createdCols}
               className={'num sortable' + (sort.k === 'd' ? ' on' : '')}
               onClick={() => setSort(s => ({ k: 'd', asc: s.k === 'd' ? !s.asc : false }))}
               title="sort"
             >
-              created{sort.k === 'd' ? (sort.asc ? ' ▲' : ' ▼') : ''}
+              {hasAg ? 'age' : 'created'}{sort.k === 'd' ? (sort.asc ? ' ▲' : ' ▼') : ''}
               {dMax > dMin && (
                 <Tooltip content={<>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
@@ -216,7 +232,7 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
                     <span className="gradbar" style={{ background: dateGradientCss(), width: 90, height: 8, borderRadius: 2, display: 'inline-block' }} />
                     {epochDaysToMonthShort(dMax)}
                   </span>
-                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = the directory’s mean write date, old → new, over the rows listed here.</div>
+                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = each row’s write date (a directory’s byte-weighted mean), old → new, over the rows listed here.</div>
                 </>}>
                   <span className="info" tabIndex={0} onClick={e => e.stopPropagation()} aria-label="about the created colour"> ⓘ</span>
                 </Tooltip>
@@ -228,30 +244,35 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
           </tr>
         </thead>
         <tbody>
-          {rowData.map(({ k, synthetic, kidSegs, uri, shares, cl, si }) => {
+          {rowData.map(({ k, synthetic, kidSegs, uri, to, shares, cl, si }) => {
             return (
               <tr key={k.n} ref={si >= 0 ? sel.rowRef(si) : undefined} {...(si >= 0 && showSel ? sel.rowProps(si) : {})}>
                 {showSel && <td className="col-sel">{!synthetic && <input type="checkbox" checked={sel.isSelected(k)} onChange={() => sel.toggle(si)} />}</td>}
                 <td className="prefix">
-                  <Tooltip content={<code className="elide-full">{uri}</code>}>
-                    {synthetic || !k.c?.length ? (
-                      <span>{elideMid(k.n, NAME_MAX)}</span>
+                  <Tooltip content={<code className="elide-full">{pathText(scheme, kidSegs, home)}</code>}>
+                    {to ? (
+                      <a role="link" tabIndex={0}
+                        onClick={() => (to.kind === 'open' ? onOpenObject : onOpen)(to.segs)}
+                        onKeyDown={e => { if (e.key === 'Enter') (to.kind === 'open' ? onOpenObject : onOpen)(to.segs) }}>
+                        {elideMid(k.n, NAME_MAX)}
+                      </a>
                     ) : (
-                      <a role="link" tabIndex={0} onClick={() => onOpen(kidSegs)}>{elideMid(k.n, NAME_MAX)}</a>
+                      <span>{elideMid(k.n, NAME_MAX)}</span>
                     )}
                   </Tooltip>
                 </td>
                 <td className="num">{fmtBytes(k.b)}</td>
                 <td className="num">{node.b ? ((100 * k.b) / node.b).toFixed(1) : 0}%</td>
                 <td className="num">{fmtN(k.o)}</td>
-                {k.d != null ? (() => {
+                {hasAg ? <td className="created agebar">{k.ag ? <AgeBar ag={k.ag} d={k.d} /> : '—'}</td>
+                : k.d != null ? (() => {
                   const [mon, yr] = createdParts(k.d)
                   return <>
                     <td className="created sw"><i style={{ background: ageInk(k.d) }} /></td>
                     <td className="created mon">{mon}</td>
                     {hasYr && <td className="created yr">{yr ?? ''}</td>}
                   </>
-                })() : <td className="created none num" colSpan={hasYr ? 3 : 2}>—</td>}
+                })() : <td className="created none num" colSpan={createdCols}>—</td>}
                 {hasRead && <td title={k.a != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : undefined}>
                   {k.a != null ? epochDaysToDate(k.a) : '—'}
                 </td>}
@@ -263,7 +284,7 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
                     : shares.length === 1 && shares[0][1] >= 0.98 * k.b ? <OwnerFactChip who={shares[0][0]} inferred={k.pv ?? null} />
                     // Picking a person from a ROW's bar means "this directory,
                     // theirs only": drill into the row, then apply the lens.
-                    : shares.length ? <OwnerBar node={k} userIdx={userIdx} width={70} onPickUser={onPickUser && !synthetic ? u => { onOpen(kidSegs); onPickUser(u) } : undefined} />
+                    : shares.length ? <OwnerBar node={k} userIdx={userIdx} width={70} onPickUser={onPickUser && to?.kind === 'drill' ? u => { onOpen(kidSegs); onPickUser(u) } : undefined} />
                     : <span className="none">—</span>}
                 </td>
                 )}
@@ -273,10 +294,10 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
                       <>
                         {staging && (
                           <Tooltip content="Stage this prefix for deletion — an admin approves and dispatches from /staged">
-                            <button type="button" className="trash" onClick={() => trash(uri)} aria-label="trash"><FaRegTrashCan /></button>
+                            <button type="button" className="trash" onClick={() => trash(uri, k.k)} aria-label="trash"><FaRegTrashCan /></button>
                           </Tooltip>
                         )}
-                        {assigning && <AssignSelect prefix={uri + '/'} assigned={cl?.who ?? null} compact />}
+                        {assigning && <AssignSelect prefix={actionPrefix(uri, k.k)} assigned={cl?.who ?? null} compact />}
                       </>
                     )}
                   </td>
@@ -293,7 +314,7 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
             <td className="num">{fmtBytes(kids.reduce((s, k) => s + k.b, 0))}</td>
             <td className="num">{node.b ? ((100 * kids.reduce((s, k) => s + k.b, 0)) / node.b).toFixed(1) : 0}%</td>
             <td className="num">{kids.reduce((s, k) => s + k.o, 0).toLocaleString('en-US')}</td>
-            <td colSpan={(hasYr ? 3 : 2) + (hasRead ? 1 : 0) + (hasOwners ? 1 : 0) + (showSel ? 1 : 0)} />
+            <td colSpan={createdCols + (hasRead ? 1 : 0) + (hasOwners ? 1 : 0) + (showSel ? 1 : 0)} />
           </tr>
         </tfoot>
       </table>
@@ -305,5 +326,26 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
           of the page either. */}
       {showSel && <div className="sel-bar-dock">{selBar}</div>}
     </section>
+  )
+}
+
+/** A row's bytes by age (`TreeNode.ag`) as one stacked bar, newest (yellow)
+ * to oldest (purple), each bucket's width its share of the row's bytes; the
+ * tip lists the buckets and the mean written date. */
+function AgeBar({ ag, d }: { ag: number[]; d?: number }) {
+  const { fmtBytes } = useUnits()
+  const total = ag.reduce((s, v) => s + v, 0)
+  if (!total) return <>—</>
+  return (
+    <Tooltip content={<div className="agebar-tip">
+      {ag.map((v, i) => v > 0 && (
+        <div key={i}><i style={{ background: ageBucketColor(i) }} /> {AGE_BUCKETS[i]} <b>{fmtBytes(v)}</b> <span className="dim">{(100 * v / total).toFixed(v / total < 0.1 ? 1 : 0)}%</span></div>
+      ))}
+      {d != null && <div className="dim">mean written {epochDaysToMonthShort(d)}</div>}
+    </div>}>
+      <span className="bar" role="img" aria-label={ag.map((v, i) => v > 0 ? `${AGE_BUCKETS[i]} ${Math.round(100 * v / total)}%` : '').filter(Boolean).join(', ')}>
+        {ag.map((v, i) => v > 0 && <span key={i} style={{ flexGrow: v, background: ageBucketColor(i) }} />)}
+      </span>
+    </Tooltip>
   )
 }

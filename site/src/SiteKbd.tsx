@@ -36,14 +36,12 @@ export function SiteKbd({ extra = [], placeholder = 'Pages, users, actions…' }
   const reg = useRegistry()
   const USERS = [...new Set(Object.values(reg).map(i => i.u))].sort()
   // Site-wide pages, in nav order — the omnibar's "Pages" group on every
-  // route. The map and the scan browser are the subtree's store's (`/meta`,
-  // `/meta/files` on a secondary store); the other configured stores follow
-  // as switches (a single-store build has none).
+  // route. The map is the subtree's store's (`/meta` on a secondary store);
+  // the other configured stores follow as switches (a single-store build has
+  // none).
   const store = useStore()
-  const base = store.path === '/' ? '' : store.path
   const PAGES: [string, string][] = [
     [store.path, 'Map (home)'],
-    [`${base}/files`, 'Browse scans'],
     ['/users', 'Users — storage by owner'],
   ]
   useActions({

@@ -41,6 +41,9 @@ export type AreaMode = 'max' | 'delta'
 export interface DiffNode {
   key: string
   label: string
+  /** An object or a directory (the row's `k`); a synthesized parent, the
+   *  `(unchanged)` filler and the root are directories. */
+  k: 'file' | 'dir'
   weight: number
   delta: number
   /** Bytes that arrived / left under this node (Σ over the frontier below
@@ -93,7 +96,7 @@ export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): 
     if (!parent) {
       // Expanded-but-net-zero dir whose children were emitted without it.
       parent = {
-        key: parentPath, label: parentPath.split('/').pop()!, weight: 0, delta: 0, added: 0, removed: 0,
+        key: parentPath, label: parentPath.split('/').pop()!, k: 'dir', weight: 0, delta: 0, added: 0, removed: 0,
         status: 'unchanged', size_old: 0, size_new: 0, n_desc_delta: 0, n_old: 0, n_new: 0, n_added: 0, n_removed: 0, children: [],
       }
       attach(parent, parentPath)
@@ -106,6 +109,7 @@ export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): 
     attach({
       key: r.p,
       label: r.p.split('/').pop() || r.p,
+      k: r.k,
       weight: 0,
       delta: r.b - r.a,
       added: r.x ? 0 : max(0, r.b - r.a),
@@ -141,7 +145,7 @@ export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): 
     const gap = node.weight - kidSum
     if (areaMode === 'max' && gap > max(1_000_000, node.weight * 0.002)) {
       node.children.push({
-        key: `${node.key}/__unchanged__`, label: '(unchanged)', weight: gap, delta: 0, added: 0, removed: 0,
+        key: `${node.key}/__unchanged__`, label: '(unchanged)', k: 'dir', weight: gap, delta: 0, added: 0, removed: 0,
         status: 'filler', size_old: gap, size_new: gap, n_desc_delta: 0, n_old: 0, n_new: 0, n_added: 0, n_removed: 0,
       })
     }

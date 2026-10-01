@@ -14,6 +14,9 @@ from disk_tree import find
 from disk_tree.backends import LocalBackend, S3Backend, UnsupportedBackend, backend_for
 from disk_tree.blobfs import R2_ENDPOINT_VAR
 
+#: The Tauri app's native walker (`apps/tauri`, on the app's branch); its seam test skips where it isn't built.
+DT_WALKER = join(dirname(dirname(__file__)), 'apps', 'tauri', 'target', 'release', 'dt-walker')
+
 TESTDATA = join(dirname(__file__), 'data')
 EP = 'https://acct.r2.cloudflarestorage.com'
 

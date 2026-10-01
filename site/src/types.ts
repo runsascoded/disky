@@ -7,6 +7,7 @@ export interface TreeNode {
   b: number
   o: number
   d?: number                   // bytes-weighted mean created date, epoch days
+  ag?: number[]                // bytes by age at the scan date: <1d, <1w, <1mo, <3mo, <1y, <3y, older (specs/row-age-strata.md)
   a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
   us?: [string, number][]      // top users -> bytes
   cb?: Record<string, number>  // non-STANDARD class -> bytes ("2" NL, "3" CL, "4" AR); STANDARD = b - sum

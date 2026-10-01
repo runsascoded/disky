@@ -135,3 +135,15 @@ describe('realGate', () => {
     expect(realGate([run({ plan_digest: '' })], '', 3)).toEqual({ ok: false, reason: 'the plan changed since the last dry-run; dry-run it again' })
   })
 })
+
+describe('a `*` bucket list (a filesystem-root store)', () => {
+  const shape = prefixShape({ STORE_SCHEME: 'file:///', STORE_BUCKETS: '*' })
+  it('takes each prefix’s first segment as its bucket — no fallback to a primary', () => {
+    expect(bucketOf('file:///Applications/Slack.app/', shape.buckets)).toBe('Applications')
+    expect(bucketOf('Users/ryan/c/', shape.buckets)).toBe('Users')
+  })
+  it('canonicalizes outside-home prefixes where they are, not under `Users`', () => {
+    expect(canonicalPrefix('file:///Applications/Slack.app', shape)).toBe('file:///Applications/Slack.app/')
+    expect(canonicalPrefix('file:///Users/ryan/c/x/', shape)).toBe('file:///Users/ryan/c/x/')
+  })
+})

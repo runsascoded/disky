@@ -10,7 +10,7 @@ import { migrations, sqliteD1 } from './testD1'
 // this file's specs pin).
 const CASES = [
   { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0007_agents.sql'] },
-  { lineage: 'gcs', file: '0030_store_scoped_index.sql', after: [] },
+  { lineage: 'gcs', file: '0030_store_scoped_index.sql', after: ['0031_agents.sql'] },
 ] as const
 
 const SCHEMA_COLS = 'store, date, variant, version, schema_json, floor_bytes, gen, dir'

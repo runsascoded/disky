@@ -4,6 +4,7 @@
 // numbers the map's tooltip shows, plus the column sorts. Pure, so the
 // derivation and every sort order are unit-tested (`diffRows.test.ts`).
 import type { DiffNode } from './diffModel'
+import type { CellAction } from './objects'
 
 const { abs } = Math
 
@@ -12,6 +13,8 @@ export type DiffStatus = 'added' | 'removed' | 'changed' | 'unchanged' | 'first'
 export interface DiffTableRow {
   key: string
   name: string
+  /** An object (opens in the leaf viewer) or a directory (drills). */
+  kind: 'file' | 'dir'
   /** Path segments below the diffed node — the drill target for a named
    *  directory; empty for a fold / filler, which never drills. */
   segs: string[]
@@ -40,12 +43,20 @@ export const statusOf = (n: DiffNode): DiffStatus =>
 
 export const isSynthetic = (n: DiffNode): boolean => n.status === 'filler' || n.label.startsWith('(')
 
+/** A diff cell's click: an object opens, any named directory drills (a leaf
+ *  here is just one the diff didn't enumerate below), and the root, a fold or
+ *  the filler — or an ⌥-click — pins its tip. Every scan generation alike: a
+ *  v1 pair simply has no object rows. */
+export const diffCellAction = (n: Pick<DiffNode, 'k' | 'status' | 'label'>, alt = false): CellAction =>
+  alt || n.status === 'root' || isSynthetic(n as DiffNode) ? 'pin' : n.k === 'file' ? 'open' : 'drill'
+
 export function diffTableRows(cells: DiffNode[]): DiffTableRow[] {
   return cells.map(n => {
     const synthetic = isSynthetic(n)
     return {
       key: n.key,
       name: n.label,
+      kind: n.k,
       segs: synthetic ? [] : n.key.split('/'),
       status: statusOf(n),
       synthetic,

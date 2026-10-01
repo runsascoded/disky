@@ -8,7 +8,8 @@
  *
  *   → { uri: "r2://idx", prefixes: ["listing/", …] }
  */
-import { type Ctx, json, requireViewer } from '../_lib/auth.js'
+import { type Ctx, baseScope, json, requireViewer } from '../_lib/auth.js'
+import { objectBuckets } from '../v1/objects/[[path]].js'
 import { withStore } from '../_lib/stores.js'
 import { storePrefixes, storeScheme, storeTarget } from '../_lib/index.js'
 
@@ -21,5 +22,9 @@ export const onRequest = async (ctx0: Ctx): Promise<Response> => {
   const id = await requireViewer(ctx)
   if (id instanceof Response) return id
   const target = storeTarget(ctx.env)
-  return json({ uri: `${storeScheme(target.endpoint)}://${target.bucket}`, prefixes: storePrefixes(ctx.env, FILES_PREFIXES) })
+  // Scanned buckets `/v1/objects` serves: reported only to a member (the
+  // full base scope), so a guest's panel says "no preview" rather than 403s.
+  const member = id.via !== 'public' && (id.scopes.includes(baseScope(ctx.env)) || id.scopes.includes('*'))
+  const objects = member ? objectBuckets(ctx.env) : []
+  return json({ uri: `${storeScheme(target.endpoint)}://${target.bucket}`, prefixes: storePrefixes(ctx.env, FILES_PREFIXES), ...(objects.length ? { objectBuckets: objects } : {}) })
 }

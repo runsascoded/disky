@@ -368,67 +368,102 @@ def reply(day: DayRow, variant: str, site_url: str = DEFAULT_URL) -> Reply:
 
 # ---- Diff treemap data ------------------------------------------------------
 
+RESIDUAL = "…"
+TREE_OTHER = "(other)"
+
 
 @dataclass(frozen=True)
-class DiffCell:
-    """One cell of the month's diff treemap: a depth-2 path (`marin/skyrl`,
-    `tmp/ttl=14d`), its top-level ``group``, and its byte delta base→latest.
-    ``<group>/…`` is a group's residual (children pruned from the tree or below
-    the fold threshold); ``other`` gathers whole groups below the threshold."""
+class DiffNode:
+    """One box of the diff treemap: ``name`` is a path segment, a collapsed
+    single-child chain (`curriculum-sft/snowball`), or :data:`RESIDUAL` — what
+    a dir's drawn children don't account for (children pruned from the tree,
+    or folded as too small). ``delta`` is the net byte Δ base→latest. A node
+    with ``kids`` draws as a labeled box around them; a leaf as a cell
+    colored by the sign of its Δ."""
 
-    path: str
-    group: str
+    name: str
     delta: int
+    kids: tuple[DiffNode, ...] = ()
+
+    @property
+    def area(self) -> int:
+        """Treemap area: |Δ| for a leaf, the sum of the kids' areas for a box —
+        gross change, so a dir whose children grew and shrank in about equal
+        measure still gets the room to show both."""
+        return sum(k.area for k in self.kids) if self.kids else abs(self.delta)
+
+
+@dataclass(frozen=True)
+class _Raw:
+    name: str
+    delta: int
+    gross: int
+    kids: tuple[_Raw, ...]
 
 
 def _kids(node: dict) -> dict[str, dict]:
-    return {c["n"]: c for c in node.get("c", [])}
+    """A tree node's named children; the builder's `(other)` (direct files +
+    children below its size floor, `tree_build`) is left out — it's residual,
+    and its membership differs scan to scan."""
+    return {c["n"]: c for c in node.get("c", []) if c["n"] != TREE_OTHER}
 
 
-def tree_diff(base: dict, latest: dict, min_frac: float = 0.0) -> list[DiffCell]:
-    """Diff two size trees (the bucket node of each scan's `tree.json`, nodes
-    `{n,b,o,d,c}`) into depth-2 cells by path: each top-level dir's children
-    get a cell (a dir present on one side only counts as fully grown/shrunk),
-    and whatever the children don't account for — the tree is pruned at 0.02%
-    of bytes, so small dirs vanish from `c` — lands in the group's `…` cell.
-    A top-level dir with no children on either side is its own single cell.
-
-    ``min_frac`` folds small cells: a cell under ``min_frac`` of the total
-    |Δ| joins its group's `…`; a whole group under it joins `other`. Groups
-    are ordered by Σ|Δ| desc, cells within a group by |Δ| desc then path."""
+def _raw_diff(name: str, base: dict, latest: dict) -> _Raw:
+    """The full diff of two tree nodes (`{n,b,c}`): per child (a dir present on
+    one side only counts as fully grown/shrunk), plus a residual for what the
+    named children don't account for (direct files, and dirs below the trees'
+    size floor). ``gross`` = Σ|Δ| over the leaves."""
     bk, lk = _kids(base), _kids(latest)
-    groups: dict[str, list[DiffCell]] = {}
-    for name in sorted(set(bk) | set(lk)):
-        b, l = bk.get(name, {}), lk.get(name, {})
-        dtotal = l.get("b", 0) - b.get("b", 0)
-        bc, lc = _kids(b), _kids(l)
-        cells = [DiffCell(f"{name}/{k}", name, lc.get(k, {}).get("b", 0) - bc.get(k, {}).get("b", 0)) for k in sorted(set(bc) | set(lc))]
-        cells = [c for c in cells if c.delta]
-        if not bc and not lc:
-            cells = [DiffCell(name, name, dtotal)] if dtotal else []
-        elif (rest := dtotal - sum(c.delta for c in cells)):
-            cells.append(DiffCell(f"{name}/…", name, rest))
-        if cells:
-            groups[name] = cells
-    total = sum(abs(c.delta) for cs in groups.values() for c in cs)
-    thresh = min_frac * total
-    out: list[DiffCell] = []
-    other = 0
-    for name, cells in groups.items():
-        if sum(abs(c.delta) for c in cells) < thresh:
-            other += sum(c.delta for c in cells)
-            continue
-        keep = [c for c in cells if abs(c.delta) >= thresh and not c.path.endswith("/…")]
-        rest = sum(c.delta for c in cells if c not in keep)
-        if rest:
-            keep.append(DiffCell(f"{name}/…", name, rest))
-        out.extend(sorted(keep, key=lambda c: (-abs(c.delta), c.path)))
-    if other:
-        out.append(DiffCell("other", "other", other))
-    order = {}
-    for c in out:
-        order[c.group] = order.get(c.group, 0) + abs(c.delta)
-    return sorted(out, key=lambda c: (-order[c.group], c.group, -abs(c.delta), c.path))
+    delta = latest.get("b", 0) - base.get("b", 0)
+    kids = [k for k in (_raw_diff(n, bk.get(n, {}), lk.get(n, {})) for n in sorted(set(bk) | set(lk))) if k.gross]
+    if kids and (rest := delta - sum(k.delta for k in kids)):
+        kids.append(_Raw(RESIDUAL, rest, abs(rest), ()))
+    return _Raw(name, delta, sum(k.gross for k in kids) if kids else abs(delta), tuple(kids))
+
+
+def _fold(n: _Raw, thresh: float, depth: int, max_depth: int) -> DiffNode:
+    """``n`` as a drawable node at nesting ``depth``: children whose gross
+    change is under ``thresh`` fold into the residual; a dir with one
+    surviving child (and a negligible residual) collapses into it — one node
+    named `a/b`, not a box holding a single box; a chain down to a leaf names
+    the whole chain (`users/romain/<run>/…`), so the cell says *whose* change
+    it is. Below ``max_depth`` boxes, everything's a leaf."""
+    leaf = DiffNode(n.name, n.delta)
+    if depth >= max_depth or not n.kids:
+        return leaf
+    keep = [k for k in n.kids if k.gross >= thresh and k.name != RESIDUAL]
+    rest = n.delta - sum(k.delta for k in keep)
+    if not keep:
+        return leaf
+    if len(keep) == 1 and (not rest or abs(rest) < thresh):
+        sub = _fold(keep[0], thresh, depth, max_depth)
+        return DiffNode(f"{n.name}/{sub.name}", n.delta, sub.kids)
+    return _box(n.name, n.delta, [_fold(k, thresh, depth + 1, max_depth) for k in keep])
+
+
+def _box(name: str, delta: int, kids: list[DiffNode]) -> DiffNode:
+    """A box over ``kids``, plus a residual cell for the rest of ``delta``.
+    Kids with no area (a dir whose ups and downs each fell under the fold,
+    netting ~0) can't be drawn — their Δ joins the residual. Area desc, then
+    name."""
+    kids = [k for k in kids if k.area]
+    if rest := delta - sum(k.delta for k in kids):
+        kids.append(DiffNode(RESIDUAL, rest))
+    return DiffNode(name, delta, tuple(sorted(kids, key=lambda k: (-k.area, k.name))))
+
+
+def diff_tree(base: dict, latest: dict, min_frac: float = 0.0, max_depth: int = 6) -> DiffNode:
+    """Diff two size trees (the bucket node of each scan's `tree.json`, nodes
+    `{n,b,o,d,c}`) into a nested treemap: the root's kids are the top-level
+    dirs, and any dir whose gross change is at least ``min_frac`` of the
+    whole's opens into its own children, down to ``max_depth`` levels of
+    boxes. Smaller changes fold into their parent's `…` (at the top level,
+    that's everything below the fold). Kids are ordered by area desc, then
+    name."""
+    raw = _raw_diff("", base, latest)
+    thresh = min_frac * raw.gross
+    keep = [k for k in raw.kids if k.gross >= thresh and k.name != RESIDUAL]
+    return _box("", raw.delta, [_fold(k, thresh, 1, max_depth) for k in keep])
 
 
 # ---- IO (side-effecting) --------------------------------------------------
@@ -536,7 +571,7 @@ def render_plot(month: Month, m: dt.date, out_path, root: str | None = None) -> 
     from .cw_digest_plot import render
 
     base, last = month.base, month.rows[-1]
-    diff = tree_diff(load_tree(root, base.scan), load_tree(root, last.scan), min_frac=0.01) if root and base is not last else None
+    diff = diff_tree(load_tree(root, base.scan), load_tree(root, last.scan), min_frac=0.01) if root and base is not last else None
     render([{"scan": r.scan, "tb": r.tb} for r in month.rows], Path(out_path), f"CoreWeave usage — {m:%B %Y}", diff=diff, diff_label=f"{_md(base.date)} → {_md(last.date)}")
 
 

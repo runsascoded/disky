@@ -49,8 +49,27 @@ function d1Of(raw: Sqlite): D1Database {
       const r = raw.prepare(sql).run(...params)
       return { success: true, meta: { changes: Number(r.changes) } }
     },
+    /** For `batch`: a read returns its rows, a write its changes. */
+    async step(): Promise<{ results: unknown[]; success: true; meta: Record<string, unknown> }> {
+      if (/^\s*(SELECT|WITH)\b/i.test(sql)) return this.all()
+      const r = raw.prepare(sql).run(...params)
+      return { results: [], success: true, meta: { changes: Number(r.changes) } }
+    },
   })
-  return { prepare: (sql: string) => prepare(sql) } as unknown as D1Database
+  // `batch`: D1 runs the statements in order, as one transaction.
+  const batch = async (stmts: { step(): Promise<unknown> }[]) => {
+    raw.exec('BEGIN')
+    try {
+      const out = []
+      for (const st of stmts) out.push(await st.step())
+      raw.exec('COMMIT')
+      return out
+    } catch (e) {
+      raw.exec('ROLLBACK')
+      throw e
+    }
+  }
+  return { prepare: (sql: string) => prepare(sql), batch } as unknown as D1Database
 }
 
 /** A fresh in-memory DB with `lineage`'s migrations applied — all of them,

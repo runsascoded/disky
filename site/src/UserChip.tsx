@@ -78,7 +78,7 @@ export function UserCard({ who, avatar, extra }: { who: string; avatar?: string;
           @{gh} on GitHub
         </a>
       )}
-      {id && <Link className="uc-link" to={`/user/${id}`}>storage breakdown →</Link>}
+      {id && <Link className="uc-link" to={`/user/${id}`}>Storage Breakdown →</Link>}
       {extra}
     </div>
   )

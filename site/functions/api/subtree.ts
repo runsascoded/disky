@@ -12,7 +12,7 @@
  * re-hit the cache.
  */
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { storeReady, type Lens } from '../_lib/index.js'
+import { pathGens, storeReady, type Lens } from '../_lib/index.js'
 import { ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, parseQuery, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
@@ -71,10 +71,10 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   // as Cloudflare's raw "Worker threw exception" page (2026-09-28); now it is
   // a 503 the client can retry, with the message the ledger head gave.
   try {
-    const [head, xtra] = await st.time('pre', Promise.all([lens && ctx.env.DB ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date)]))
+    const [head, xtra, g] = await st.time('pre', Promise.all([lens && ctx.env.DB ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date])]))
     const cacheKey = cacheKeyFor('subtree',
       `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensRaw ?? ''}` +
-        `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}`,
+        `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}`,
       storeKey(ctx.env),
     )
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))

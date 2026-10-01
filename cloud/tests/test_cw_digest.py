@@ -369,38 +369,68 @@ LATEST_TREE = _node("bkt", 165, [
 ])
 
 
-def _cells(cs):
-    return [(c.path, c.group, round(c.delta / TIB, 1)) for c in cs]
+def _shape(n):
+    """A `DiffNode` as `(name, Δ Ti)` for a leaf, `(name, Δ Ti, [kids…])` for a box."""
+    d = round(n.delta / TIB, 1)
+    return (n.name, d, [_shape(k) for k in n.kids]) if n.kids else (n.name, d)
 
 
-def test_tree_diff():
-    # depth-2 cells by path; a dir on one side only is fully grown/shrunk; a
-    # childless top-level dir is its own cell; groups by Σ|Δ| desc, cells by |Δ| desc then path
-    assert _cells(D.tree_diff(BASE_TREE, LATEST_TREE)) == [
-        ("marin/s", "marin", 30.0), ("marin/a", "marin", -10.0), ("marin/new", "marin", 10.0),
-        ("tmp/t14", "tmp", -30.0), ("tmp/t30", "tmp", 10.0),
-        ("models", "models", -10.0),
-        ("iris/x", "iris", 5.0),
-    ]
+def test_diff_tree():
+    # per-dir Δ, nested; a dir on one side only is fully grown/shrunk; a box's
+    # kids by area desc then name; `iris` → its one child `x` collapses to `iris/x`
+    assert _shape(D.diff_tree(BASE_TREE, LATEST_TREE)) == ("", 5.0, [
+        ("marin", 30.0, [("s", 30.0), ("a", -10.0), ("new", 10.0)]),
+        ("tmp", -20.0, [("t14", -30.0), ("t30", 10.0)]),
+        ("models", -10.0),
+        ("iris/x", 5.0),
+    ])
+    assert D.diff_tree(BASE_TREE, BASE_TREE).kids == ()
 
 
-def test_tree_diff_residual():
-    # what the (pruned) children don't account for lands in `<group>/…`
-    base = _node("bkt", 100, [_node("marin", 100, [_node("a", 60)])])
-    latest = _node("bkt", 130, [_node("marin", 130, [_node("a", 50)])])
-    assert _cells(D.tree_diff(base, latest)) == [("marin/…", "marin", 40.0), ("marin/a", "marin", -10.0)]
-    assert D.tree_diff(base, base) == []
+def test_diff_tree_area_is_gross():
+    # a box's area is its kids' (Σ|Δ| of the leaves), not its net Δ
+    d = D.diff_tree(BASE_TREE, LATEST_TREE)
+    assert [(k.name, round(k.area / TIB, 1)) for k in d.kids] == [("marin", 50.0), ("tmp", 40.0), ("models", 10.0), ("iris/x", 5.0)]
 
 
-def test_tree_diff_folds_small():
-    # total |Δ| = 105 Ti; min_frac 0.2 → 21 Ti: small cells join their group's `…`
-    # (tmp/t30; marin's a and new cancel to nothing), small groups (models −10,
-    # iris +5) join `other`; groups re-rank on what's left (tmp 40 > marin 30)
-    assert _cells(D.tree_diff(BASE_TREE, LATEST_TREE, min_frac=0.2)) == [
-        ("tmp/t14", "tmp", -30.0), ("tmp/…", "tmp", 10.0),
-        ("marin/s", "marin", 30.0),
-        ("other", "other", -5.0),
-    ]
+def test_diff_tree_residual():
+    # what the named children don't account for lands in `…` — including the
+    # tree builder's `(other)` (direct files + sub-floor dirs), never drawn by name
+    base = _node("bkt", 100, [_node("marin", 100, [_node("a", 60), _node("(other)", 40)])])
+    latest = _node("bkt", 130, [_node("marin", 130, [_node("a", 50), _node("(other)", 80)])])
+    assert _shape(D.diff_tree(base, latest)) == ("", 30.0, [("marin", 30.0, [("…", 40.0), ("a", -10.0)])])
+
+
+def test_diff_tree_folds_small():
+    # gross |Δ| = 105 Ti; min_frac 0.2 → 21 Ti: `models` and `iris` fold into the
+    # top-level `…`; `marin`'s and `tmp`'s small kids fold away, leaving each one
+    # child, so each collapses to a leaf named for its dominant path (carrying the dir's net Δ)
+    assert _shape(D.diff_tree(BASE_TREE, LATEST_TREE, min_frac=0.2)) == ("", 5.0, [
+        ("marin/s", 30.0),
+        ("tmp/t14", -20.0),
+        ("…", -5.0),
+    ])
+
+
+def test_diff_tree_max_depth():
+    # boxes nest at most `max_depth` deep; below that a dir is a leaf with its net Δ
+    assert _shape(D.diff_tree(BASE_TREE, LATEST_TREE, max_depth=1)) == ("", 5.0, [
+        ("marin", 30.0), ("tmp", -20.0), ("models", -10.0), ("iris", 5.0),
+    ])
+
+
+def test_diff_tree_chain():
+    # single-child chains collapse into one box named by the whole chain
+    base = _node("bkt", 10, [_node("u", 10, [_node("v", 10, [_node("p", 5), _node("q", 5)])])])
+    latest = _node("bkt", 14, [_node("u", 14, [_node("v", 14, [_node("p", 8), _node("q", 6)])])])
+    assert _shape(D.diff_tree(base, latest)) == ("", 4.0, [("u/v", 4.0, [("p", 3.0), ("q", 1.0)])])
+
+
+def test_diff_tree_drops_churn():
+    # `d` churned (+3/−3, each under the 4-Ti fold): net 0 → no area, not drawn
+    base = _node("bkt", 20, [_node("big", 10), _node("d", 10, [_node("p", 5), _node("q", 5)])])
+    latest = _node("bkt", 30, [_node("big", 20), _node("d", 10, [_node("p", 8), _node("q", 2)])])
+    assert _shape(D.diff_tree(base, latest, min_frac=0.25)) == ("", 10.0, [("big", 10.0)])
 
 
 def test_squarify():
@@ -426,7 +456,7 @@ def test_render_smoke(tmp_path: Path):
 
     rows = [{"scan": s, "tb": D.rows_from_meta([(s, m)])[0].tb} for s, m in SEPT]
     out = tmp_path / "p.png"
-    render(rows, out, "t", diff=D.tree_diff(BASE_TREE, LATEST_TREE), diff_label="8/31 → 9/2")
+    render(rows, out, "t", diff=D.diff_tree(BASE_TREE, LATEST_TREE), diff_label="8/31 → 9/2")
     assert out.stat().st_size > 10_000
     render(rows, tmp_path / "s.png", "t")  # sparkline only
     assert (tmp_path / "s.png").stat().st_size > 5_000

@@ -3,7 +3,7 @@ import { DEFAULT_STORE } from './stores'
 import { useStore } from './store'
 
 // The suffix every tab title carries; the page-specific crumbs sit in front of
-// it, most-specific first (`Sweep · Marin GCS usage`, `runs · Files · Marin GCS
+// it, most-specific first (`Sweep · Marin GCS usage`, `user_emails · DB · Admin · Marin GCS
 // usage`). Kept in sync with the `<title>` in index.html and the GCS store's
 // `title` (stores.ts). A secondary store's pages carry its own title instead.
 export const SITE = DEFAULT_STORE.title

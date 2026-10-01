@@ -83,3 +83,48 @@ def test_index_sync_fails_when_nothing_is_there(tmp_path: Path, synced, logged):
         "index-sync: 2026-09-30 gen G1 @ listing/2026-09-30/index/G1 — skipped 2 absent variant(s): path, user",
         f"index-sync: no variant file under {tmp_path}",
     ]
+
+
+@pytest.mark.parametrize("version, variant, store, retired", [
+    (2, "path", "primary", [
+        "DELETE FROM index_row_groups WHERE date='2026-09-30' AND variant LIKE 'coarse%';",
+        "DELETE FROM index_row_groups WHERE date='2026-09-30' AND variant='user' AND gen IN (SELECT gen FROM index_schema WHERE date='2026-09-30' AND variant='user' AND version < 2);",
+        "DELETE FROM index_schema WHERE date='2026-09-30' AND variant LIKE 'coarse%';",
+        "DELETE FROM index_schema WHERE date='2026-09-30' AND variant='user' AND version < 2;",
+    ]),
+    (2, "path", "meta", [
+        "DELETE FROM index_row_groups WHERE store='meta' AND date='2026-09-30' AND variant LIKE 'meta:coarse%';",
+        "DELETE FROM index_row_groups WHERE store='meta' AND date='2026-09-30' AND variant='meta:user' AND gen IN (SELECT gen FROM index_schema WHERE store='meta' AND date='2026-09-30' AND variant='meta:user' AND version < 2);",
+        "DELETE FROM index_schema WHERE store='meta' AND date='2026-09-30' AND variant LIKE 'meta:coarse%';",
+        "DELETE FROM index_schema WHERE store='meta' AND date='2026-09-30' AND variant='meta:user' AND version < 2;",
+    ]),
+    (2, "bysize", "primary", []),
+    (1, "path", "primary", []),
+])
+def test_sync_d1_retires_coarse_tiers_after_a_store_flip(monkeypatch, version, variant, store, retired):
+    """A store generation's `path` sort replaces the dir-only index: after the
+    pointer flip, the same date's coarse tiers and v1 `user` sort (an earlier
+    generation's) go — their rows first (the `user` rows are found through its
+    pointer), then the pointers. Nothing is retired for a v1 sync or another
+    sort."""
+    sent: list[str] = []
+    monkeypatch.setattr(F, "extract", lambda p: ({"version": version, "schema": [], "floor_bytes": None}, []))
+    monkeypatch.setattr(F, "write_groups_blob", lambda *a: ("", 0))
+    monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(F, "_d1_query", lambda sql, acct, tok, db_id: sent.append(sql) or [])
+    F.sync_d1("2026-09-30", "x.parquet", variant=variant, gen="g2", key="k", store=store)
+    flip = [i for i, s in enumerate(sent) if s.startswith("INSERT OR REPLACE INTO index_schema")]
+    assert len(flip) == 1
+    assert sent[flip[0] + 1:] == retired
+
+
+def test_path_index_no_user_sorts_flag(monkeypatch, tmp_path: Path):
+    """`-U` turns the `-by-user` sorts off; without it they're on (click needs
+    `flag_value=False` for a default-True flag — `-U` was silently a no-op)."""
+    seen: list[bool] = []
+    import dt_cloud.viz as V
+    monkeypatch.setattr(V, "write_path_index", lambda *a, **kw: seen.append(kw["user_sorts"]) or {"total_bytes": 0, "total_objects": 0})
+    for args in ([], ["-U"]):
+        r = CliRunner().invoke(main, ["path-index", "-d", "2026-09-30", "-l", "x.parquet", "-o", str(tmp_path / "out"), *args])
+        assert r.exit_code == 0, r.output
+    assert seen == [True, False]

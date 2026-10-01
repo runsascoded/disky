@@ -7,23 +7,28 @@ stacked panels:
   above it make the used/free split legible without squashing the month into
   the top of the axis (the site's "Size over time" chart with `fit`).
 - **Diff treemap** over the OP headline's interval (lead-in scan → latest):
-  green cells grew, red shrank, area = |Δ|, nested one level so `tmp/ttl=14d`,
-  `marin/skyrl`, `users/<name>` … read as their own cells inside their
-  top-level group; small cells fold into `<group>/…` and small groups into
-  `other` (see `digest.tree_diff`). Layout is a hand-rolled squarify.
+  green cells grew, red shrank, area = |Δ|, nested as deep as the change is
+  big — any dir holding ≥1% of the gross change opens into its children
+  (`tmp` › `ttl=14d` › `skyrl` › `users` › `<name>`, up to 6 boxes deep), so
+  a cell names *whose* run moved; single-child chains collapse to one
+  `a/b/…` node, small cells fold into their box's `…`, and small top-level
+  dirs into `other` (see `digest.diff_tree`). Layout is a hand-rolled
+  squarify.
 
 In-package (not a standalone `uv run` script under `job/`) so the Batch image
 runs it: `digest.render_plot` imports and calls :func:`render` in-process (the
 slim image has neither `uv` nor, without the `[plot]` extra, matplotlib).
 Ad-hoc renders: `python -m dt_cloud.cw_digest_plot -d … -o …`.
 
-Input: per-scan `{scan, tb}` rows + optional `DiffCell`s. Output: a PNG sized
+Input: per-scan `{scan, tb}` rows + an optional `DiffNode` tree. Output: a PNG sized
 for a Slack image block. The digest renders this per run and cache-busts the
 OP's image URL so `chat.update` refetches."""
 from json import load
 from pathlib import Path
 
 from click import Path as CP, command, option
+
+from .cw_digest import RESIDUAL
 
 BG = "#0d1117"
 INK = "#c9d1d9"
@@ -85,45 +90,77 @@ def _fmt_delta(d: int) -> str:
     return ("+" if d >= 0 else "−") + f"{abs(d) / TIB:.1f} Ti"
 
 
-def _draw_treemap(ax, diff, label: str) -> None:
-    """The nested diff treemap on ``ax`` (axes coords 0..1): groups squarified
-    by Σ|Δ|, each group's cells squarified inside its rect."""
+def _fit(s: str, n: int) -> str:
+    """``s`` cut to ``n`` characters, ellipsized; empty when ``n`` can't hold
+    more than the ellipsis."""
+    return s if len(s) <= n else (s[: n - 1] + "…" if n > 3 else "")
+
+
+# Text metrics in the treemap axes' units (0..1 each way; the panel is ~8.5 in
+# × ~4.3 in on the 9 in figure): bold character width and line height per pt.
+CHAR_W = 0.0085 / 8
+LINE_H = 0.0042
+HEADER_PT = 7.5
+PAD_X, PAD_Y = 0.003, 0.005
+
+
+def _draw_node(ax, node, x: float, y: float, w: float, h: float, depth: int, top: bool = False) -> None:
+    """``node`` into the rect ``(x, y, w, h)``: a leaf fills it (green grew,
+    red shrank) labeled `name  Δ` on one line or two; a box outlines it,
+    heads it `name  Δ` when it has room, and squarifies its kids inside."""
     from matplotlib.patches import Rectangle
 
+    name = "other" if top and node.name == RESIDUAL else node.name
+    delta = _fmt_delta(node.delta)
+    if not node.kids:
+        ax.add_patch(Rectangle((x, y), w, h, facecolor=GREW if node.delta > 0 else SHRANK, edgecolor=BG, linewidth=0.8, alpha=0.85))
+        pt = 8 if depth <= 1 else 7
+        fit = int(w / (CHAR_W * pt))
+        # the whole label on one line; else name over Δ; else one line, the name cut to fit
+        if fit >= len(name) + 2 + len(delta) and h > LINE_H * pt * 1.4:
+            label = f"{name}  {delta}"
+        elif fit >= len(delta) and h > LINE_H * pt * 2.6:
+            label, pt = f"{_fit(name, fit)}\n{delta}".strip(), pt - 0.5
+        elif fit >= len(delta) and h > LINE_H * pt * 1.4:
+            label = f"{_fit(name, fit - len(delta) - 2)}  {delta}".strip()
+        else:
+            return
+        ax.text(x + w / 2, y + h / 2, label, ha="center", va="center", color="#ffffff", fontsize=pt, fontweight="bold")
+        return
+    ax.add_patch(Rectangle((x, y), w, h, facecolor="none", edgecolor=INK, linewidth=0.9 if depth <= 1 else 0.6, alpha=0.75 if depth <= 1 else 0.5))
+    header_h = LINE_H * HEADER_PT * 1.3
+    fit = int((w - 2 * PAD_X) / (CHAR_W * HEADER_PT))
+    header = h > 2 * header_h and fit >= 4
+    if header:
+        label = f"{name}  {delta}" if fit >= len(name) + 2 + len(delta) else _fit(name, fit)
+        ax.text(x + PAD_X + 0.002, y + PAD_Y * 0.6, label, ha="left", va="top", color=INK if depth <= 1 else DIM, fontsize=HEADER_PT, fontweight="bold")
+    iy = y + (header_h if header else PAD_Y)
+    rects = squarify([k.area for k in node.kids], x + PAD_X, iy, w - 2 * PAD_X, y + h - iy - PAD_Y)
+    for k, r in zip(node.kids, rects):
+        _draw_node(ax, k, *r, depth + 1)
+
+
+def _draw_treemap(ax, diff, label: str) -> None:
+    """The nested diff treemap (a `DiffNode` root, see `digest.diff_tree`) on
+    ``ax`` (axes coords 0..1, y down): the top-level dirs squarified by area,
+    each box's kids squarified inside it, recursively."""
     ax.set_xlim(0, 1)
     ax.set_ylim(1, 0)  # y down, like a screen
     ax.axis("off")
-    groups: dict[str, list] = {}
-    for c in diff:
-        groups.setdefault(c.group, []).append(c)
-    names = sorted(groups, key=lambda g: -sum(abs(c.delta) for c in groups[g]))
-    gaps = 0.004
-    for gname, (gx, gy, gw, gh) in zip(names, squarify([sum(abs(c.delta) for c in groups[g]) for g in names], 0, 0, 1, 1)):
-        cells = groups[gname]
-        ax.add_patch(Rectangle((gx + gaps / 2, gy + gaps / 2), gw - gaps, gh - gaps, facecolor="none", edgecolor=INK, linewidth=0.9, alpha=0.7))
-        # a group header when the box has room; single-cell groups label the cell itself
-        header = gh > 0.09 and gw > 0.12 and not (len(cells) == 1 and cells[0].path == gname)
-        top = gy + (0.045 if header else 0) + gaps
-        if header:
-            ax.text(gx + 0.008, gy + 0.012, gname, ha="left", va="top", color=INK, fontsize=8.5, fontweight="bold")
-        inner = squarify([abs(c.delta) for c in cells], gx + gaps, top, gw - 2 * gaps, gy + gh - top - gaps)
-        for c, (cx, cy, cw, ch) in zip(cells, inner):
-            col = GREW if c.delta > 0 else SHRANK
-            ax.add_patch(Rectangle((cx, cy), cw, ch, facecolor=col, edgecolor=BG, linewidth=0.8, alpha=0.85))
-            name = c.path if c.path in (gname, "other") else c.path.split("/", 1)[1]
-            delta = _fmt_delta(c.delta)
-            # ~0.0085 axes-width per bold character at fontsize 8 on a 9in figure
-            fit = int(cw / 0.0085)
-            if fit >= len(name) + 2 + len(delta) and ch > 0.035:
-                ax.text(cx + cw / 2, cy + ch / 2, f"{name}  {delta}", ha="center", va="center", color="#ffffff", fontsize=8, fontweight="bold")
-            elif fit >= len(delta) and ch > 0.06:
-                # two lines, the name ellipsized to the cell's width
-                shown = name if len(name) <= fit else (name[: fit - 1] + "…" if fit > 3 else "")
-                ax.text(cx + cw / 2, cy + ch / 2, f"{shown}\n{delta}".strip(), ha="center", va="center", color="#ffffff", fontsize=7.5, fontweight="bold")
-    grew = sum(c.delta for c in diff if c.delta > 0)
-    shrank = -sum(c.delta for c in diff if c.delta < 0)
+    for k, r in zip(diff.kids, squarify([k.area for k in diff.kids], 0, 0, 1, 1)):
+        _draw_node(ax, k, *r, 1, top=True)
+    leaves = list(_leaves(diff))
+    grew = sum(n.delta for n in leaves if n.delta > 0)
+    shrank = -sum(n.delta for n in leaves if n.delta < 0)
     ax.set_title(f"What changed — {label}", color=INK, fontsize=12, fontweight="bold", loc="left", pad=8)
     ax.text(1.0, 1.012, f"grew +{grew / TIB:,.1f} Ti · shrank −{shrank / TIB:,.1f} Ti · area = |Δ|", transform=ax.transAxes, ha="right", va="bottom", color=DIM, fontsize=8.5)
+
+
+def _leaves(node):
+    if not node.kids:
+        yield node
+    for k in node.kids:
+        yield from _leaves(k)
 
 
 def render(
@@ -135,7 +172,7 @@ def render(
     diff_label: str = "",
 ) -> None:
     """Render the PNG for ``rows`` (each ``{scan, tb}``) to ``out``; with
-    ``diff`` (`DiffCell`s, see `digest.tree_diff`) the treemap panel is added
+    ``diff`` (a `DiffNode` root, see `digest.diff_tree`) the treemap panel is added
     below. matplotlib imported lazily — the `[plot]` extra. ``redact`` drops
     the numbers (y tick labels, the call-out, cell deltas) — the shape of the
     month without the sizes, for the public README."""

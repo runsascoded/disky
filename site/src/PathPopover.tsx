@@ -20,7 +20,7 @@ import { copyText } from './CopyName'
 // only on a deliberate tap (never on load), holds the full `gs://…/` prefix and
 // a copy button, and dismisses on Esc / tap-away. Ancestor crumbs stay plain
 // navigating links.
-export function PathPopover({ label, fullPath }: { label: string; fullPath: string }) {
+export function PathPopover({ label, fullPath, copy = fullPath }: { label: string; fullPath: string; copy?: string }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const { refs, floatingStyles, context } = useFloating({
@@ -44,7 +44,7 @@ export function PathPopover({ label, fullPath }: { label: string; fullPath: stri
             <code className="full">{fullPath}</code>
             <button
               type="button" className="path-copy" aria-label="Copy path to clipboard" title={copied ? 'copied ✓' : 'Copy path to clipboard'}
-              onClick={() => copyText(fullPath).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) })}
+              onClick={() => copyText(copy).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) })}
             >{copied ? <span className="copied">✓</span> : <FaRegCopy aria-hidden />}</button>
           </div>
         </FloatingPortal>

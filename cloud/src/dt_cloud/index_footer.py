@@ -379,6 +379,24 @@ def sync_d1(
         f"({sv}'{date}', '{variant}', {schema['version']}, '{_sql_escape(json.dumps(schema['schema'], separators=(',', ':')))}', "
         f"{'NULL' if floor is None else int(floor)}, '{_sql_escape(gen)}', '{_sql_escape(key)}');"
     )
+    # A store generation's `path` sort replaces the dir-only index outright: the
+    # coarse tiers an earlier generation of the same date synced are stale (and
+    # a reader that found them would answer from them). Retire them after the
+    # flip — rows first (the `user` rows are found through its pointer), then
+    # the pointers; the reader ignores both on a store date meanwhile.
+    retire_sql: list[str] = []
+    if schema["version"] >= 2 and variant == d1_variant("path", store):
+        like = _sql_escape(d1_variant("coarse", store)) + "%"
+        # …and a version-1 `user` sort (a store generation serves lenses from
+        # its own sorts; a v2 `user` sort, where a deployment writes one, stays)
+        user = _sql_escape(d1_variant("user", store))
+        v1_user = f"SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2"
+        retire_sql = [
+            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant LIKE '{like}';",
+            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{user}' AND gen IN ({v1_user});",
+            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant LIKE '{like}';",
+            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2;",
+        ]
 
     def group_values(r: dict) -> str:
         return (
@@ -393,7 +411,7 @@ def sync_d1(
     # re-sending it must be a no-op, not a PK collision (date, variant, gen, rg).
     head = f"INSERT OR REPLACE INTO index_row_groups {cols} VALUES "
     if not remote:  # dev: local wrangler D1
-        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in rows] + [schema_sql]
+        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in rows] + [schema_sql] + retire_sql
         site = _site_dir()
         for i in range(0, len(stmts), 300):
             with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as tf:
@@ -407,6 +425,8 @@ def sync_d1(
     for chunk in _pack(head, [group_values(r) for r in rows], insert_bytes):
         _d1_query(chunk, acct, tok, db_id)
     _d1_query(schema_sql, acct, tok, db_id)  # the pointer flip: schema row last
+    for sql in retire_sql:  # rows, then pointers
+        _d1_query(sql, acct, tok, db_id)
     return len(rows)
 
 
