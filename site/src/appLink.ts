@@ -7,6 +7,12 @@ export const APP_SCHEME_URL = (link: string): string => `disky://open?link=${enc
 
 interface Nav { userAgent: string; platform?: string; maxTouchPoints?: number }
 
+/** Inside the app's own window: its `disky/<version>` UA token, or the Tauri
+ *  globals its webview injects. */
+export function inApp(nav: Nav, win: object = {}): boolean {
+  return /\bdisky\//.test(nav.userAgent) || '__TAURI_INTERNALS__' in win || '__TAURI__' in win
+}
+
 /**
  * Offer the button only in a desktop Mac browser — where the app can exist —
  * and not inside the app's own window. `platform` is deprecated but still
@@ -18,8 +24,31 @@ interface Nav { userAgent: string; platform?: string; maxTouchPoints?: number }
 export function offerAppLink(nav: Nav, win: object = {}): boolean {
   const mac = (nav.platform ?? '').startsWith('Mac') || /Macintosh/.test(nav.userAgent)
   const touch = (nav.maxTouchPoints ?? 0) > 1
-  const inApp = /\bdisky\//.test(nav.userAgent) || '__TAURI_INTERNALS__' in win || '__TAURI__' in win
-  return mac && !touch && !inApp
+  return mac && !touch && !inApp(nav, win)
+}
+
+/** The query param that asks a browser page to hand its session to the app as
+ *  soon as it has one: the in-app wall's "sign in with your browser" link opens
+ *  the same page in the default browser with it set (the app routes new-window
+ *  links there), the person signs in as usual, and the page fires "Open in
+ *  disky" by itself. */
+export const HANDOFF_PARAM = 'open-in-disky'
+
+/** `loc` with the hand-off param set. */
+export function handoffUrl(loc: { origin: string; pathname: string; search: string }): string {
+  const sp = new URLSearchParams(loc.search)
+  sp.set(HANDOFF_PARAM, '1')
+  return `${loc.origin}${loc.pathname}?${sp}`
+}
+
+/** Whether this page load asked for the hand-off; strips the param either way,
+ *  so a reload or a bookmarked URL doesn't fire it again. */
+export function takeHandoff(): boolean {
+  const url = new URL(window.location.href)
+  if (!url.searchParams.has(HANDOFF_PARAM)) return false
+  url.searchParams.delete(HANDOFF_PARAM)
+  window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
+  return true
 }
 
 /** Mint a link for the current page, then hand it to the app. Resolves once the

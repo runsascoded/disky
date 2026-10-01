@@ -741,6 +741,9 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
       &:hover { filter: brightness(1.08); }
       &:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
     }
+    // Inside the macOS app: Google sign-in goes to the default browser.
+    .signin-browser { display: block; text-align: center; }
+    .signin-browser + .signin-how { margin: 8px 0 18px; text-align: center; }
     // <SignInPanel>: Google button (`.signin`, primary), then an emailed-code
     // form and request-access for the non-Google tail. Left-aligned inputs,
     // full-width controls, an "or" divider between the affordances.

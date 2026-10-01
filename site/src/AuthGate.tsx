@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AuthGate as Gate, deniedEmail, RequestAccessForm, SignInPanel, useForgetWhoami } from '@open-athena/auth/react'
 import { AUTH_MODE, devIdentity, WHOAMI_SOURCE } from './auth'
+import { handoffUrl, inApp } from './appLink'
 import { DEFAULT_STORE } from './stores'
 
 /** The public Google client id, or null where Google sign-in isn't configured
@@ -62,6 +63,11 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
   const google = useGoogleClient()
   const clientId = google.data ?? null
   const googleUrl = next ? `/auth/google?next=${encodeURIComponent(next)}` : '/auth/google'
+  // Inside the macOS app Google refuses OAuth (embedded webview), and its
+  // in-page button's popup goes nowhere: send Google sign-in to the default
+  // browser, which hands the session back via "Open in disky" (`?open-in-disky`,
+  // fired unprompted once signed in there). The emailed code works in-app.
+  const app = inApp(navigator, window)
   // A verified-but-not-allowed address from the in-page button: land on the
   // same `?denied=` the redirect flow bounces to, so the wall unfolds
   // request-access pre-filled with it.
@@ -79,12 +85,20 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         {error && <p className="signin-error" role="alert">{error}</p>}
         {/* Wait for the client id (one small request) rather than flash the
             redirect button and swap it for Google's. */}
+        {app && clientId && (
+          <>
+            <a className="signin signin-browser" href={handoffUrl(window.location)} target="_blank" rel="noopener">
+              Continue with Google in your browser
+            </a>
+            <p className="signin-how">Signs you in there, then hands the session back to disky.</p>
+          </>
+        )}
         {google.isFetched && (
           <SignInPanel
             title={null}   // the card's own <h1> + `restrict` line already say what this is
-            googleUrl={clientId ? googleUrl : undefined}
+            googleUrl={clientId && !app ? googleUrl : undefined}
             withNext={!next}
-            oneTap={clientId ? {
+            oneTap={clientId && !app ? {
               clientId,
               nonceEndpoint: '/auth/google/onetap/nonce',
               verifyEndpoint: '/auth/google/onetap',

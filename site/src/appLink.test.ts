@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { APP_SCHEME_URL, offerAppLink } from './appLink'
+import { APP_SCHEME_URL, handoffUrl, offerAppLink } from './appLink'
 
 const SAFARI = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15'
 const CHROME_MAC = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
@@ -33,5 +33,19 @@ describe('offerAppLink — desktop Mac browsers only, never inside the app', () 
   it('wraps the link in the app scheme, percent-encoded', () => {
     expect(APP_SCHEME_URL('https://disk.example/auth/app-link?token=ab_c-1&next=%2Fc'))
       .toBe('disky://open?link=https%3A%2F%2Fdisk.example%2Fauth%2Fapp-link%3Ftoken%3Dab_c-1%26next%3D%252Fc')
+  })
+})
+
+describe('handoffUrl — the in-app wall\'s "sign in with your browser" target', () => {
+  it('sets the param, keeping the rest of the query', () => {
+    expect([
+      handoffUrl({ origin: 'https://disk.example', pathname: '/', search: '' }),
+      handoffUrl({ origin: 'https://disk.example', pathname: '/Users/x', search: '?depth=2' }),
+      handoffUrl({ origin: 'https://disk.example', pathname: '/', search: '?open-in-disky=1' }),
+    ]).toEqual([
+      'https://disk.example/?open-in-disky=1',
+      'https://disk.example/Users/x?depth=2&open-in-disky=1',
+      'https://disk.example/?open-in-disky=1',
+    ])
   })
 })

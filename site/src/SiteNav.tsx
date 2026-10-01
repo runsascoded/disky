@@ -20,7 +20,7 @@ import { FaGithub } from 'react-icons/fa'
 import { MdMenu } from 'react-icons/md'
 import { Link, useLocation } from 'react-router-dom'
 import { AboutModal } from './About'
-import { offerAppLink, openInApp } from './appLink'
+import { offerAppLink, openInApp, takeHandoff } from './appLink'
 import { Avatar } from './Avatar'
 import { AUTH_MODE, signInUrl, useCanAssign, useIdent, useSignOut } from './auth'
 import { useRegistry } from './identities'
@@ -230,19 +230,9 @@ function UserMenu() {
     const t = setTimeout(() => setAppHint(null), 8000)
     return () => clearTimeout(t)
   }, [appHint])
-  // Public deploys have no auth — no sign-in affordance.
-  if (!ident) return AUTH_MODE === 'public' ? null : <a className="tb-signin" href={signInUrl()}>sign in</a>
-  const who = myUser ?? ident.email
-  // A guest (share-link) session shows its own subject — the name + avatar the
-  // admin minted it with — not the owner-registry lookup (which an external
-  // guest isn't in, so it'd fall back to an email-derived initial + "ping Ryan").
-  const guest = ident.guest
-  const dispName = guest ? (ident.name ?? ident.email) : shortName(who)
-  // "Open in disky" (specs/app-link.md): a signed-in session on a desktop Mac
-  // hands its sign-in to the app. A guest link can't (the server refuses a
-  // grant minting a grant). An unregistered `disky://` scheme navigates
-  // nowhere, silently; if the page still has focus a moment later, say why.
-  const showAppLink = !guest && offerAppLink(navigator, window)
+  // "Open in disky" (specs/app-link.md): hand this session to the app. An
+  // unregistered `disky://` scheme navigates nowhere, silently; if the page
+  // still has focus a moment later, say why.
   const openApp = () => {
     m.setOpen(false)
     openInApp().then(
@@ -252,6 +242,22 @@ function UserMenu() {
       (e: Error) => setAppHint(`Couldn't open disky: ${e.message}`),
     )
   }
+  // Opened by the app's sign-in wall (`?open-in-disky`): hand off unprompted,
+  // once, as soon as there's a (non-guest) session to hand.
+  useEffect(() => {
+    if (ident && !ident.guest && offerAppLink(navigator, window) && takeHandoff()) openApp()
+  }, [ident])
+  // Public deploys have no auth — no sign-in affordance.
+  if (!ident) return AUTH_MODE === 'public' ? null : <a className="tb-signin" href={signInUrl()}>sign in</a>
+  const who = myUser ?? ident.email
+  // A guest (share-link) session shows its own subject — the name + avatar the
+  // admin minted it with — not the owner-registry lookup (which an external
+  // guest isn't in, so it'd fall back to an email-derived initial + "ping Ryan").
+  const guest = ident.guest
+  const dispName = guest ? (ident.name ?? ident.email) : shortName(who)
+  // Offered to a signed-in session on a desktop Mac. A guest link can't (the
+  // server refuses a grant minting a grant).
+  const showAppLink = !guest && offerAppLink(navigator, window)
   return (
     <>
       {tokenOpen && <TokenModal onClose={() => setTokenOpen(false)} />}

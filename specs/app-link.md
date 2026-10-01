@@ -43,6 +43,12 @@ The link has to survive: the browser's "Open disky?" confirmation (a human click
 
 `offerAppLink` (`site/src/appLink.ts`): `navigator.platform` starts with `Mac` (or the UA has `Macintosh`), `maxTouchPoints ≤ 1` (excludes iPadOS, which reports a Mac UA), and **not** inside the app itself — recognized by a `disky/<version>` token in the UA or Tauri's `__TAURI_INTERNALS__` / `__TAURI__` globals. **App side:** append `disky/<version>` to the webview's user agent so the button hides there. Guest (grant) sessions never see the button.
 
+## Signing in from inside the app
+
+Google's in-page button opens a popup, which WKWebView drops (a silent no-op), and Google refuses OAuth in embedded webviews anyway. So the wall, inside the app (`inApp`: the `disky/` UA token or Tauri globals), replaces Google with **"Continue with Google in your browser"**: a `target=_blank` link to the same page plus `?open-in-disky=1`. The app routes every new-window request to the default browser (`on_new_window` → `open`). There the person signs in as usual, and `UserMenu` sees the param once a non-guest session exists, strips it, and fires "Open in disky" unprompted. The emailed code still works in-app.
+
+The app accepts a link from either known site (prod or dev), not just the configured one. A link from the other one switches the app's site setting (logged to `disky.log`). An explicit `DISKY_URL` pins the site. Before this, clicking "Open in disky" on dev with the app set to prod was refused silently: the app activated with no window.
+
 ## Residual risks
 
 - Before it is redeemed, the token is a 60 s credential for the caller: anyone who reads it off the `disky://` URL first (another app registered for the scheme, a process watching URL opens) could redeem it. The app should be the sole `disky://` handler; the short TTL and single use bound this.
