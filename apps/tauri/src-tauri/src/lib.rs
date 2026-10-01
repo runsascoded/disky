@@ -87,6 +87,23 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
         .build();
 }
 
+/// Whether macOS launched the app as a login item: the launch's `oapp` Apple
+/// event says so (`keyAEPropData` = `keyAELaunchedAsLogInItem`). Only
+/// meaningful while that event is current, i.e. during launch (`setup`).
+#[cfg(target_os = "macos")]
+fn launched_as_login_item() -> bool {
+    use objc2_foundation::NSAppleEventManager;
+    let code = |s: &[u8; 4]| u32::from_be_bytes(*s);
+    let Some(ev) = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent() else { return false };
+    ev.eventID() == code(b"oapp")
+        && ev.paramDescriptorForKeyword(code(b"prdt")).is_some_and(|d| d.enumCodeValue() == code(b"lgit"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launched_as_login_item() -> bool {
+    false
+}
+
 /// The local Settings window (`settings/index.html`, the only window with IPC).
 fn show_settings(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
@@ -346,11 +363,15 @@ pub fn run() {
             app.manage(tray);
 
             // First run, or no Full Disk Access yet: open Settings (onboarding).
+            // Otherwise a launch the person asked for (Spotlight, Finder, `open`)
+            // opens the window; a login-item launch stays in the menu bar.
             if !settings::exists() || !agent::has_full_disk_access() {
                 if !settings::exists() {
                     let _ = settings::save(&Settings::default());
                 }
                 show_settings(app.handle());
+            } else if !launched_as_login_item() {
+                show_window(app.handle(), None);
             }
 
             // Keep the menu fresh (launchd, the run state and settings are the record).
@@ -368,6 +389,9 @@ pub fn run() {
         .run(|app, event| match event {
             // Closing a window leaves the menu-bar item running.
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
+            // Opened again while running (Spotlight, Finder, the Dock): show the window.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { has_visible_windows: false, .. } => show_window(app, None),
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
                 for u in &urls {
