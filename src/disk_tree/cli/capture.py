@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sys
 from datetime import datetime, timezone
 from os import getcwd
 
@@ -146,6 +147,18 @@ def capture_cmd(
         'error_count': errors.count,
         'error_paths': errors.paths,
     }
+    if sys.platform == 'darwin':
+        # The APFS container the walk sits on (volumes, snapshots, free): what
+        # the walk can't attribute, so a UI can draw the whole disk. A root on a
+        # non-APFS volume (ExFAT external) legitimately has none; and the field
+        # is an annotation, so a `diskutil` failure is logged rather than
+        # costing the walk its manifest.
+        from subprocess import CalledProcessError
+        from disk_tree.apfs import container_for
+        try:
+            manifest['container'] = container_for(root).to_json()
+        except (ValueError, CalledProcessError) as e:
+            err(f'{root}: no APFS container recorded: {e}')
     blobfs.write_text(blobfs.join(out, MARKER), json.dumps(manifest, indent=2) + '\n')
     tail = f', {errors.count} permission errors' if errors.count else ''
     err(f'{root}: {n_rows:,} files in {n_shards} shard(s) → {out}{tail}')

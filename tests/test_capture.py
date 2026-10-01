@@ -104,6 +104,15 @@ def test_capture_writes_files_only_shards_and_a_manifest(tree: Path, tmp_path: P
     assert_frame_equal(_listing(cap), _expected_listing(tree))
     m = json.loads((cap / MARKER).read_text())
     assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+00:00', m['time'])
+    # On macOS the manifest also records the APFS container the tree is on
+    # (machine-dependent values: assert its shape; `test_apfs.py` covers content).
+    container = m.pop('container', None)
+    if sys.platform == 'darwin':
+        assert sorted(container) == ['capacity', 'device', 'free', 'used', 'volumes']
+        assert container['used'] == container['capacity'] - container['free']
+        assert [sorted(v) for v in container['volumes']][:1] == [['device', 'mount', 'name', 'roles', 'snapshots', 'used']]
+    else:
+        assert container is None
     assert m == {
         'format': 'disk-tree-capture', 'version': 1, 'scheme': 'file',
         'root': str(tree), 'host': HOST, 'time': m['time'],

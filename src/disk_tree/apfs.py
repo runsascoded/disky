@@ -89,7 +89,12 @@ def build_container(
 
 def container_for(path: str = '/') -> Container:
     """The live APFS container holding `path` (macOS; raises elsewhere)."""
-    info = plistlib.loads(subprocess.run(['diskutil', 'info', '-plist', path], check=True, capture_output=True).stdout)
+    # `diskutil info` takes a device or mount point, not any path: `df -P`
+    # names the device a path is on (`/dev/disk3s5` for anything under `/Users`).
+    dev = subprocess.run(['df', '-P', path], check=True, capture_output=True, text=True).stdout.splitlines()[-1].split()[0]
+    if not dev.startswith('/dev/'):
+        raise ValueError(f'{path} is on {dev}, not a local disk')
+    info = plistlib.loads(subprocess.run(['diskutil', 'info', '-plist', dev], check=True, capture_output=True).stdout)
     if 'APFSContainerReference' not in info:
         raise ValueError(f'{path} is not on an APFS volume')
     apfs_list = plistlib.loads(subprocess.run(['diskutil', 'apfs', 'list', '-plist'], check=True, capture_output=True).stdout)
