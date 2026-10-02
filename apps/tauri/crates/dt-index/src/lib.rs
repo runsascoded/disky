@@ -18,6 +18,9 @@
 //! Not written: the `.groups.json` / `.groups.parquet` footer sidecars (a
 //! serverless reader's range-read plan; a local reader has the footer).
 
+pub mod http;
+pub mod view;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io;
@@ -40,7 +43,7 @@ use serde_json::json;
 /// days before the scan day (and at least the previous edge); the last bucket
 /// is everything older. A future stamp counts as the newest.
 pub const AGE_EDGES_DAYS: [i64; 6] = [1, 7, 30, 91, 365, 1095];
-const N_AGE: usize = AGE_EDGES_DAYS.len() + 1;
+pub const N_AGE: usize = AGE_EDGES_DAYS.len() + 1;
 /// The store's range-read unit (`index.ROW_GROUP_SIZE`).
 pub const ROW_GROUP_ROWS: usize = 8192;
 pub const PATH_FILE: &str = "path-index.parquet";
