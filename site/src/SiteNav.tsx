@@ -223,6 +223,10 @@ function UserMenu() {
   const emails = useUserEmails(ownersOn)
   const [tokenOpen, setTokenOpen] = useState(false)
   const [appHint, setAppHint] = useState<string | null>(null)
+  // This tab was opened by the app's sign-in wall and has handed its session
+  // over: it has nothing left to do, so say so (it can't close itself — the OS
+  // opened it, not a script).
+  const [handedOff, setHandedOff] = useState(false)
   const { units, suffixB, toggleUnits, toggleSuffixB } = useUnits()
   const m = useMenu('bottom-end')
   useEffect(() => {
@@ -233,19 +237,26 @@ function UserMenu() {
   // "Open in disky" (specs/app-link.md): hand this session to the app. An
   // unregistered `disky://` scheme navigates nowhere, silently; if the page
   // still has focus a moment later, say why.
-  const openApp = () => {
+  const openApp = (handoff = false) => {
     m.setOpen(false)
     openInApp().then(
-      () => setTimeout(() => {
-        if (document.visibilityState === 'visible' && document.hasFocus()) setAppHint('Nothing happened? Install the disky app.')
-      }, 1500),
+      () => {
+        if (handoff) {
+          setHandedOff(true)
+          window.close()  // honored only where a script opened the tab; harmless elsewhere
+          return
+        }
+        setTimeout(() => {
+          if (document.visibilityState === 'visible' && document.hasFocus()) setAppHint('Nothing happened? Install the disky app.')
+        }, 1500)
+      },
       (e: Error) => setAppHint(`Couldn't open disky: ${e.message}`),
     )
   }
   // Opened by the app's sign-in wall (`?open-in-disky`): hand off unprompted,
   // once, as soon as there's a (non-guest) session to hand.
   useEffect(() => {
-    if (ident && !ident.guest && offerAppLink(navigator, window) && takeHandoff()) openApp()
+    if (ident && !ident.guest && offerAppLink(navigator, window) && takeHandoff()) openApp(true)
   }, [ident])
   // Public deploys have no auth — no sign-in affordance.
   if (!ident) return AUTH_MODE === 'public' ? null : <a className="tb-signin" href={signInUrl()}>sign in</a>
@@ -262,6 +273,12 @@ function UserMenu() {
     <>
       {tokenOpen && <TokenModal onClose={() => setTokenOpen(false)} />}
       {appHint && <div className="app-hint" role="status" onClick={() => setAppHint(null)}>{appHint}</div>}
+      {handedOff && (
+        <div className="app-handed-off" role="status">
+          Signed in to disky. You can close this tab.
+          <button type="button" onClick={() => setHandedOff(false)} aria-label="Dismiss">×</button>
+        </div>
+      )}
       <button type="button" className="tb-avatar" ref={m.refs.setReference} {...m.getReferenceProps()} aria-label={`Signed in as ${dispName}`} title={dispName}>
         {guest || ident.avatar
           ? <Avatar src={ident.avatar} name={dispName} size={26} />
@@ -292,7 +309,7 @@ function UserMenu() {
               )}
               {showAppLink && (
                 <Explain text="Sign the disky macOS app in as you, with a single-use link (expires in a minute)">
-                  <button type="button" role="menuitem" className="mi" onClick={openApp}>Open in disky</button>
+                  <button type="button" role="menuitem" className="mi" onClick={() => openApp()}>Open in disky</button>
                 </Explain>
               )}
               <button type="button" role="menuitem" className="mi" onClick={signOut}>Log Out</button>

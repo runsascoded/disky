@@ -2,6 +2,23 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render } from '@testing-library/react'
 import { BytesOverTime, TimeSeries } from '../src/TimeSeries'
 
+// jsdom has no `PointerEvent`: without one, `fireEvent.pointer*` builds a bare
+// `Event` that drops `clientX`/`button`/`isPrimary`.
+if (typeof globalThis.PointerEvent === 'undefined') {
+  class PointerEventPolyfill extends MouseEvent {
+    pointerId: number
+    pointerType: string
+    isPrimary: boolean
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init)
+      this.pointerId = init.pointerId ?? 1
+      this.pointerType = init.pointerType ?? 'mouse'
+      this.isPrimary = init.isPrimary ?? true
+    }
+  }
+  globalThis.PointerEvent = PointerEventPolyfill as unknown as typeof PointerEvent
+}
+
 /** Force a non-zero SVG size in jsdom (ResizeObserver mock never fires). */
 function forceSize(container: HTMLElement, w = 400, h = 200) {
   const wrap = container.querySelector('.dt-timeseries') as HTMLElement
@@ -182,8 +199,8 @@ describe('<TimeSeries>', () => {
     expect(svg.style.cursor).toBe('crosshair')
     expect(bandOf(container)).toBeNull()
     // Press near t=2, drag back to t=1: the in-progress band is solid (no dash).
-    fireEvent.mouseDown(svg, { clientX: 390, button: 0 })
-    fireEvent.mouseMove(svg, { clientX: 225 })
+    fireEvent.pointerDown(svg, { clientX: 390, button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 225 })
     expect(svg.style.cursor).toBe('col-resize')
     expect(bandOf(container)).toEqual({
       x: 220,
@@ -192,7 +209,7 @@ describe('<TimeSeries>', () => {
       edges: [[220, null], [384, null]],
     })
     // Release past the plot's left edge: snaps to t=0, committed as (min, max).
-    fireEvent.mouseUp(window, { clientX: 10 })
+    fireEvent.pointerUp(window, { clientX: 10, pointerId: 1 })
     expect(onBrush.mock.calls).toEqual([[0, 2]])
     expect(onPickX).not.toHaveBeenCalled()
     expect(bandOf(container)).toBeNull()
@@ -206,15 +223,43 @@ describe('<TimeSeries>', () => {
       render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} onBrush={onBrush} onPickX={onPickX} />),
     )
     const svg = container.querySelector('svg') as SVGSVGElement
-    fireEvent.mouseDown(svg, { clientX: 56, button: 0 })
-    fireEvent.mouseUp(window, { clientX: 60 })
+    fireEvent.pointerDown(svg, { clientX: 56, button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerUp(window, { clientX: 60, pointerId: 1 })
     expect(onPickX.mock.calls).toEqual([[0]])
     expect(onBrush).not.toHaveBeenCalled()
-    // With a brush the pick resolves in mouseup only: a hover + click must not
+    // With a brush the pick resolves in pointerup only: a hover + click must not
     // fire it a second time.
-    fireEvent.mouseMove(svg, { clientX: 225 })
+    fireEvent.pointerMove(svg, { clientX: 225 })
     fireEvent.click(svg)
     expect(onPickX.mock.calls).toEqual([[0]])
+  })
+
+  it('onBrush: a finger brushes like a mouse; the chart leaves vertical swipes to the page (`touch-action: pan-y`)', () => {
+    const onBrush = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} onBrush={onBrush} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    expect(svg.style.touchAction).toBe('pan-y')
+    fireEvent.pointerDown(svg, { clientX: 56, button: 0, isPrimary: true, pointerId: 7, pointerType: 'touch' })
+    fireEvent.pointerMove(svg, { clientX: 225, pointerId: 7, pointerType: 'touch' })
+    fireEvent.pointerUp(window, { clientX: 390, pointerId: 7, pointerType: 'touch' })
+    expect(onBrush.mock.calls).toEqual([[0, 2]])
+  })
+
+  it('onBrush: a gesture the browser takes over (pointercancel: it became a scroll) drops the drag, committing nothing', () => {
+    const onBrush = vi.fn()
+    const onPickX = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} onBrush={onBrush} onPickX={onPickX} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    fireEvent.pointerDown(svg, { clientX: 56, button: 0, isPrimary: true, pointerId: 7, pointerType: 'touch' })
+    fireEvent.pointerMove(svg, { clientX: 225, pointerId: 7, pointerType: 'touch' })
+    fireEvent.pointerCancel(window, { pointerId: 7 })
+    expect(bandOf(container)).toBeNull()
+    fireEvent.pointerUp(window, { clientX: 390, pointerId: 7 })
+    expect([onBrush.mock.calls, onPickX.mock.calls]).toEqual([[], []])
   })
 
   it('window renders a dashed band between the two x’s', () => {
@@ -230,8 +275,8 @@ describe('<TimeSeries>', () => {
     // No brush → no drag affordance, and a press does nothing.
     const svg = container.querySelector('svg') as SVGSVGElement
     expect(svg.style.cursor).toBe('')
-    fireEvent.mouseDown(svg, { clientX: 390, button: 0 })
-    fireEvent.mouseMove(svg, { clientX: 225 })
+    fireEvent.pointerDown(svg, { clientX: 390, button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 225 })
     expect(bandOf(container)!.edges).toEqual([[56, '2 3'], [220, '2 3']])
   })
 
@@ -268,7 +313,7 @@ describe('<TimeSeries>', () => {
     expect(area.getAttribute('fill')).toBe('#abc')
     expect(area.getAttribute('fill-opacity')).toBe('0.35')
     // Hover at t=0 → tooltip value is the band height (80 − 30), not the top.
-    fireEvent.mouseMove(container.querySelector('svg')!, { clientX: 56 })
+    fireEvent.pointerMove(container.querySelector('svg')!, { clientX: 56 })
     expect([...container.querySelectorAll('.dt-timeseries > div b')].map(b => b.textContent)).toEqual(['50'])
   })
 
@@ -376,7 +421,7 @@ describe('<TimeSeries> series flags + band callouts', () => {
     )
     // One line path (a's); the total has none.
     expect(container.querySelectorAll('svg path[fill="none"]').length).toBe(1)
-    fireEvent.mouseMove(container.querySelector('svg')!, { clientX: 56 })
+    fireEvent.pointerMove(container.querySelector('svg')!, { clientX: 56 })
     expect([...container.querySelectorAll('.dt-timeseries > div b')].map(b => b.textContent)).toEqual(['10', '1,000'])
   })
 

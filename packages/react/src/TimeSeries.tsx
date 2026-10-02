@@ -262,7 +262,7 @@ export function TimeSeries<T>({
     const el = svgRef.current
     return el ? snapX(clientX - el.getBoundingClientRect().left) : null
   }
-  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+  const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const x = xAt(e.clientX)
     setHoverX(x)
     const d = dragRef.current
@@ -275,11 +275,23 @@ export function TimeSeries<T>({
       if (x0 !== d.x0) setDrag({ x0, x1: xsSorted[i0 + s.span] })
     } else if (x !== d.x1) setDrag({ x0: d.x0, x1: x })
   }
-  const onDown = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!onBrush || e.button !== 0) return
+  // Pointer events, so a finger brushes like a mouse: `touch-action: pan-y`
+  // leaves vertical swipes to the page, and a horizontal drag reaches here. A
+  // cancelled gesture (the browser took it over as a scroll) drops the drag.
+  const onEnd = (commit: (up: PointerEvent) => void) => {
+    const up = (ev: PointerEvent) => { off(); commit(ev) }
+    const cancel = () => { off(); slideRef.current = null; setDrag(null) }
+    const off = () => { window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel) }
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+  }
+  const onDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!onBrush || !e.isPrimary || e.button !== 0) return
     e.preventDefault() // no text selection while dragging
     const x = xAt(e.clientX)
     if (x == null) return
+    setHoverX(x)
+    e.currentTarget.setPointerCapture?.(e.pointerId)
     // A press inside the current window slides it (keeps its point span); a
     // press outside brushes a fresh window.
     if (inWindow(x) && xWindow && xsSorted.length > 1) {
@@ -287,7 +299,7 @@ export function TimeSeries<T>({
       const span = Math.max(1, idxOf(xWindow[1]) - i0)
       slideRef.current = { i0, span, start: idxOf(x) }
       setDrag({ x0: xsSorted[i0], x1: xsSorted[i0 + span] })
-      window.addEventListener('mouseup', (up: MouseEvent) => {
+      onEnd(up => {
         const s = slideRef.current
         const d = dragRef.current
         slideRef.current = null
@@ -296,20 +308,20 @@ export function TimeSeries<T>({
         const xi = idxOf(xAt(up.clientX) ?? x)
         if (xi === s.start) onPickX?.(x) // a click inside the window is still a pick
         else onBrush(d.x0, d.x1)
-      }, { once: true })
+      })
       return
     }
     setDrag({ x0: x, x1: x })
     // Commit on the release wherever it lands (a drag often ends past the
     // plot's edge), from the pointer's own x rather than the last move.
-    window.addEventListener('mouseup', (up: MouseEvent) => {
+    onEnd(up => {
       const d = dragRef.current
       if (!d) return
       setDrag(null)
       const x1 = xAt(up.clientX) ?? d.x1
       if (x1 === d.x0) onPickX?.(d.x0)
       else onBrush(Math.min(d.x0, x1), Math.max(d.x0, x1))
-    }, { once: true })
+    })
   }
   const band = drag ? [Math.min(drag.x0, drag.x1), Math.max(drag.x0, drag.x1)] as const : xWindow
 
@@ -335,13 +347,13 @@ export function TimeSeries<T>({
           ref={svgRef}
           width={dims.w}
           height={dims.h}
-          onMouseMove={onMove}
-          onMouseLeave={() => setHoverX(null)}
-          onMouseDown={onDown}
+          onPointerMove={onMove}
+          onPointerLeave={() => { if (!dragRef.current) setHoverX(null) }}
+          onPointerDown={onDown}
           // With a brush, clicks resolve in mouseup (a zero-width drag) — a
           // separate click handler would fire the pick twice.
           onClick={onPickX && !onBrush ? () => { if (hoverX != null) onPickX(hoverX) } : undefined}
-          style={{ display: 'block', cursor: drag ? (slideRef.current ? 'grabbing' : 'col-resize') : onBrush ? (inWindow(hoverX) ? 'grab' : 'crosshair') : onPickX ? 'pointer' : undefined, userSelect: 'none' }}
+          style={{ display: 'block', cursor: drag ? (slideRef.current ? 'grabbing' : 'col-resize') : onBrush ? (inWindow(hoverX) ? 'grab' : 'crosshair') : onPickX ? 'pointer' : undefined, userSelect: 'none', touchAction: onBrush ? 'pan-y' : undefined }}
         >
           {/* Window band (the highlighted x-range, or the drag in progress) */}
           {band && band[1] > band[0] && (

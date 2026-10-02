@@ -1,23 +1,30 @@
-"""Shape-C monthly GCS-usage digest -> a Slack thread (`dt-cloud digest`),
-or its Discord twin (`dt-cloud digest -P discord`).
+"""The monthly usage digest engine (`dt-cloud digest`): one Slack thread (or
+its Discord twin) per calendar month — an OP edited in place as scans land
+(month-to-date headline, per-ISO-week bullets, a hosted plot) plus one reply
+per scan or per day, each reply's arrow colour-coding its trend. Posts through
+`thrds`; converge state is a per-month JSON beside the snapshots, so every run
+is idempotent and an interrupted backfill resumes.
 
-One thread per calendar month: an OP (month-to-date headline, per-week rollup
-bullets, and a 2-panel mosaic plot) that's edited in place as the month
-progresses, plus one reply per scan. Each reply's sender name is the scan's
-headline (date . TB . delta), its body the $/mo + a linked arrow to the day's
-scan, and its avatar a colour-coded trend arrow (`av_deg{N}.png?v=REV`). Posts
-via the `thrds` `SlackClient` (per-message username/icon overrides need a bot
-token). Converge state lives in a per-month JSON in the data bucket.
+What a deployment chooses is DATA, a :class:`DigestConfig` (a preset in
+:data:`PRESETS`, overlaid by ``--config FILE``): its template, title, site,
+snapshot root, state layout, plot host, bucket labels and quotas, prices.
+What differs in the posts lives in two TEMPLATES — opinionated styles,
+neither intrinsic to one store:
 
-Design + rationale: specs/done/slack-digest-shape-c.md.
+- ``gcs`` (`digest_gcs`): a reply per scan, the headline as the sender name,
+  $/mo by storage class in the body, a storage-class mosaic plot.
+- ``cw`` (`digest_cw`): a reply per UTC day in two variants (``sender``: the
+  headline as the sender name, posted once from the morning scan; ``body``:
+  bold in the body, edited as the day's scans land), multi-bucket `% of quota
+  (free)` clauses when quotas are configured, a quota sparkline + diff
+  treemap plot.
 
-The pure content functions (`deg`, `op_body`, `reply`, `rows_from_meta`,
-`discordify`) hold all the formatting and are unit-tested; `post_digest` is the
-thin side-effecting shell (render+host plot, post/edit OP, post new replies,
-persist state). The Discord twin reuses every content function: `converge_discord`
-drives thrds's webhook + bot clients (the OP is a webhook message with the plot
-attached, the bot opens the thread off it, replies are webhook posts under their
-headline sender), and `post_digest_discord` is its shell."""
+A template is a small object (`load`, `op_body`, `units`, `render_plot`);
+this module holds everything else: arrow math, formatters, scan ids and
+`?d=` link tokens, Discord emoji, snapshot listing, state IO, plot hosting
+(`wrangler pages deploy`), and the converge shells (`converge_slack`,
+`converge_discord`, `redo_replies`). Design: specs/digest-unification.md;
+history: specs/done/slack-digest-shape-c.md, specs/cw-slack-digest.md."""
 from __future__ import annotations
 
 import datetime as dt
@@ -26,30 +33,188 @@ import os
 import re
 import secrets
 import sys
-from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, replace
+from pathlib import Path
+from typing import Any, Protocol
 
 TIB = 1024**4
 GIB = 1024**3
-# US list $/GiB-mo by GCS storage class id (1 Standard / 2 Nearline / 3 Coldline / 4 Archive).
-PRICE = {"1": 0.02, "2": 0.01, "3": 0.004, "4": 0.0012}
 # Weekly-halving arrow buckets: |dpct| >= THRESH[i] -> deg (i+1)*10 (capped 80).
 THRESH = [0.39, 0.78, 1.5, 3.1, 6.25, 12.5, 25, 50]
 MINUS = "−"  # matches the site's unicode minus
-DEFAULT_URL = "https://gcs.oa.dev"
-ICONS_BASE = "https://gcs-usage-icons.pages.dev"
+HOURS_PER_WEEK = 168.0
 # bump when the av_deg glyphs change: Slack caches avatars per-URL at post
 # time, so a stable URL serves MIXED generations after a redesign.
 AVATAR_REV = 4
+ICONS_BASE = "https://gcs-usage-icons.pages.dev"
+SCAN_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})(\d{2}))?$")
+
+
+# ---- config -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Quota:
+    """A bucket's quota: ``bytes``, its long ``name`` (the OP + plot: `1 PB`)
+    and an optional ``short`` label (the reply tail: `1P`; None → SI from
+    ``bytes``, see `digest_cw._qlabel`)."""
+
+    bytes: int
+    name: str
+    short: str | None = None
+
+
+@dataclass(frozen=True)
+class Bucket:
+    """Per-bucket display config: the reply tail's short ``label`` (default:
+    the bucket name) and its ``quota`` (None: the tail shows raw TiB)."""
+
+    label: str | None = None
+    quota: Quota | None = None
+
+
+@dataclass(frozen=True)
+class DigestConfig:
+    """Everything a deployment passes the digest; no code forks.
+
+    ``root``/``state``/``discord_state`` are templates: ``{DATA_BUCKET}`` reads
+    the env (default `oa-gcs-usage-dvx`); ``state`` is the Slack state dir
+    under the data root (``{channel}``, ``{variant}`` interpolated),
+    ``discord_state`` the Discord one (``{webhook}`` = the webhook id — a
+    webhook can only edit its own messages), ``discord_webhook_env`` the env
+    var holding the Discord webhook URL (None: `-w` only). ``icons_dir`` is where the plot is
+    rendered and `wrangler pages deploy`ed from (relative: the cwd's or the
+    repo checkout's); it lands on ``plot_project``'s ``plot_branch``, served at
+    ``plot_base`` unless wrangler names its deployment URL. ``primary`` +
+    ``buckets`` (cw template) pick the headline bucket and label/quota each;
+    ``prices`` (gcs template) are $/GiB-month by storage-class id."""
+
+    template: str
+    title: str
+    site_url: str
+    root: str
+    state: str
+    discord_state: str = "digest/discord/{webhook}"
+    discord_webhook_env: str | None = None
+    icons_base: str = ICONS_BASE
+    icons_dir: str = "job/icons"
+    plot_project: str = "gcs-usage-icons"
+    plot_branch: str = "main"
+    plot_base: str = ICONS_BASE
+    variant: str = "sender"
+    reply_hour: int = 12
+    primary: str | None = None
+    buckets: dict[str, Bucket] = field(default_factory=dict)
+    prices: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def primary_quota(self) -> Quota | None:
+        b = self.buckets.get(self.primary) if self.primary else None
+        return b.quota if b else None
+
+    @property
+    def host(self) -> str:
+        """The site's host, the plot's corner credit."""
+        return self.site_url.split("://", 1)[-1].rstrip("/")
+
+    @property
+    def slug(self) -> str:
+        """`GCS usage` → `gcs-usage` (the Discord plot attachment's name)."""
+        return re.sub(r"\s+", "-", self.title.strip().lower())
+
+    def resolve_root(self) -> str:
+        return self.root.format(DATA_BUCKET=os.environ.get("DATA_BUCKET", "oa-gcs-usage-dvx"))
+
+
+PRESETS: dict[str, DigestConfig] = {
+    "gcs": DigestConfig(
+        template="gcs",
+        title="GCS usage",
+        site_url="https://gcs.oa.dev",
+        root="gs://{DATA_BUCKET}/snapshots",
+        state="digest",
+        discord_webhook_env="DISCORD_GCS_USAGE_WEBHOOK",
+        # US list $/GiB-mo by GCS storage class id (1 Standard / 2 Nearline / 3 Coldline / 4 Archive)
+        prices={"1": 0.02, "2": 0.01, "3": 0.004, "4": 0.0012},
+    ),
+    "cw": DigestConfig(
+        template="cw",
+        title="CoreWeave usage",
+        site_url="https://cw-s3.oa.dev",
+        root="gs://{DATA_BUCKET}/snapshots/cw",
+        # namespaced under cw/ (gcs's prod state is digest/<YYYY-MM>.json), keyed by
+        # channel so a staging converge never masquerades as prod, and by variant so
+        # both can be staged side by side
+        state="digest/cw/{channel}/{variant}",
+        icons_dir="job/icons-cw",
+        # cw's plots go to the icons project's `cw` preview branch, so a cw deploy
+        # never replaces what the production alias (the shared arrow avatars) serves
+        plot_branch="cw",
+        plot_base="https://cw.gcs-usage-icons.pages.dev",
+        primary=os.environ.get("CW_BUCKET", "marin-us-east-02a"),
+        # quotas authoritative from CoreWeave's own `cwobject_quota_info` metric
+        # (per zone; via finelog / Grafana `storage.usage`): 02a = exactly 910 TiB
+        # (≈ 1.0006 PB decimal, "1 PB"); hero-checkpoints = the US-EAST-08A ZONE
+        # quota, 100 TiB, shared with rhoarnet-us-east-08a (~3 TiB, unscanned) — so
+        # hero's "free" overstates true zone headroom by ~3 TiB
+        buckets={
+            "marin-us-east-02a": Bucket("02a", Quota(910 * TIB, "1 PB", "1P")),
+            "hero-checkpoints": Bucket("hero", Quota(100 * TIB, "100 TiB", "100Ti")),
+        },
+    ),
+}
+
+_UNITS = {"": 1, "B": 1, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15, "KI": 2**10, "MI": 2**20, "GI": 2**30, "TI": 2**40, "PI": 2**50}
+
+
+def parse_bytes(v: int | str) -> int:
+    """`910 TiB` / `100Ti` / `1 PB` / `10**15`-style int → bytes."""
+    if isinstance(v, int):
+        return v
+    m = re.fullmatch(r"\s*([\d.]+)\s*([KMGTP]i?)?B?\s*", str(v), re.I)
+    if not m:
+        raise ValueError(f"not a size: {v!r}")
+    return round(float(m.group(1)) * _UNITS[(m.group(2) or "").upper()])
+
+
+def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
+    """A config from a parsed YAML/JSON mapping, overlaid on ``base`` (default:
+    the preset its ``template`` names). ``buckets`` map names to ``{label,
+    quota: {bytes, name, short}}`` (``bytes`` may be `910 TiB`); unknown keys
+    are an error."""
+    d = dict(d)
+    base = base or PRESETS[d.get("template", "gcs")]
+    known = {f.name for f in fields(DigestConfig)}
+    if bad := set(d) - known:
+        raise ValueError(f"unknown digest config keys: {sorted(bad)}")
+    if "buckets" in d:
+        d["buckets"] = {
+            name: Bucket(b.get("label"), Quota(parse_bytes(b["quota"]["bytes"]), b["quota"]["name"], b["quota"].get("short")) if b.get("quota") else None)
+            for name, b in (d["buckets"] or {}).items()
+        }
+    return replace(base, **d)
+
+
+def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
+    """The ``template`` preset, overlaid by the YAML/JSON file at ``path``."""
+    if path is None:
+        return PRESETS[template]
+    import yaml
+
+    d = yaml.safe_load(Path(path).read_text()) or {}
+    return config_from_dict(d, PRESETS[d.get("template", template)])
+
+
+# ---- pure helpers ---------------------------------------------------------------
 
 
 def deg(pct_signed: float, mult: float = 1.0) -> int:
     """Signed arrow degree for a percent change, time-normalized by ``mult``.
 
     Anchored on a weekly halving (deg80 ~ +/-50%/week). A daily reply passes
-    ``mult=7`` (project the day's rate to a weekly-equivalent), a weekly bullet
-    ``mult=1``, month-to-date ``mult=7/days_elapsed`` -- so a daily arrow and a
-    weekly arrow mean the same underlying rate."""
+    ``168 / hours`` (7 for a clean 24 h), a weekly bullet ``mult=1``,
+    month-to-date ``7 / days_elapsed`` -- so every arrow means the same
+    underlying rate."""
     a = abs(pct_signed) * mult
     d = 0
     for i, t in enumerate(THRESH):
@@ -63,10 +228,6 @@ def _tb(v: float) -> str:
     return f"+{v:.1f}" if v >= 0 else f"{MINUS}{abs(v):.1f}"
 
 
-def _usd(v: float) -> str:
-    return ("+$" if v >= 0 else f"{MINUS}$") + f"{abs(v):,}"
-
-
 def _pct(dtb: float, tb: float) -> str:
     prev = tb - dtb
     return f"{abs(dtb / prev * 100) if prev else 0:.1f}"
@@ -77,128 +238,55 @@ def _pct_val(dtb: float, tb: float) -> float:
     return dtb / prev * 100 if prev else 0.0
 
 
-def _yy(date: str) -> str:
-    return date[2:].replace("-", "")
+def _md(date: str) -> str:
+    d = dt.date.fromisoformat(date)
+    return f"{d.month}/{d.day}"
+
+
+def scan_ts(scan: str) -> dt.datetime:
+    """A scan id's UTC instant; date-only ids read as midnight (site/src/scan.ts)."""
+    m = SCAN_RE.match(scan)
+    if not m:
+        raise ValueError(f"not a scan id: {scan!r}")
+    y, mo, d, hh, mm = m.groups()
+    return dt.datetime(int(y), int(mo), int(d), int(hh or 0), int(mm or 0), tzinfo=dt.timezone.utc)
+
+
+def _dlink(scan: str) -> str:
+    """The site's compact `?d=` token for a scan (`260915-0001`; date-only ids
+    stay `260915`)."""
+    y, mo, d, hh, mm = SCAN_RE.match(scan).groups()
+    return f"{y[2:]}{mo}{d}" + (f"-{hh}{mm}" if hh else "")
+
+
+def _span(a: dt.datetime, b: dt.datetime) -> str:
+    """`?d=` look-back token for the interval a→b (`1d12h`, `7d`, `12h`),
+    matching the site's `encodeSpan`."""
+    # round to whole hours first so a scan that drifted a minute (00:02 →
+    # 12:01) still reads `1d`, not `24h`
+    hours, days = divmod(round((b - a).total_seconds() / 3600), 24)[::-1]
+    return (f"{days}d" if days else "") + (f"{hours}h" if hours else "") or "0h"
 
 
 @dataclass(frozen=True)
-class Scan:
-    """One scan's row: TiB total + per-class TiB + $/mo, with deltas vs. the
-    previous scan (``dtb``/``dcost`` are ``None`` only if no prior scan)."""
+class Reply:
+    """A reply's post parameters: ``username``/``icon_url``/``icon_emoji`` are
+    fixed at post time (Slack), ``body`` is what an edit can change."""
 
-    date: str
-    tb: float
-    cost: int
-    dtb: float | None
-    dcost: int | None
-    std: float
-    near: float
-    cold: float
-    arch: float
+    username: str
+    body: str
+    icon_url: str | None = None
+    icon_emoji: str | None = None
 
 
-def _cost(class_bytes: dict) -> float:
-    return sum(class_bytes.get(c, 0) / GIB * PRICE[c] for c in PRICE)
+@dataclass(frozen=True)
+class Unit:
+    """One reply slot in the month's thread: its state ``key`` (the UTC date),
+    the ``scan`` it renders, and the rendered ``reply``."""
 
-
-def rows_from_meta(dated_meta: list[tuple[str, dict]]) -> list[Scan]:
-    """Build ``Scan`` rows from ``(date, meta.json)`` pairs in date order.
-
-    The first pair seeds the delta for the second; callers pass one scan of
-    lead-in before the window they want, then slice it off."""
-    out: list[Scan] = []
-    ptb = pcost = None
-    for date, m in dated_meta:
-        tb = m["total_bytes"] / TIB
-        cb = m["class_bytes"]
-        cost = round(_cost(cb))
-        out.append(
-            Scan(
-                date=date,
-                tb=round(tb, 1),
-                cost=cost,
-                dtb=round(tb - ptb, 1) if ptb is not None else None,
-                dcost=cost - pcost if pcost is not None else None,
-                std=round(cb.get("1", 0) / TIB, 1),
-                near=round(cb.get("2", 0) / TIB, 1),
-                cold=round(cb.get("3", 0) / TIB, 1),
-                arch=round(cb.get("4", 0) / TIB, 1),
-            )
-        )
-        ptb, pcost = tb, cost
-    return out
-
-
-def op_body(rows: list[Scan], month: dt.date, plot_url: str | None, site_url: str = DEFAULT_URL) -> str:
-    """OP markdown: month-to-date headline, per-week bullets, trailing plot image.
-
-    The month/year title is NOT in the body -- it's folded into the OP's sender
-    name by the poster. ``plot_url=None`` omits the image line (Discord attaches
-    the plot as a file instead of hosting it)."""
-    base_tb = rows[0].tb - (rows[0].dtb or 0)
-    base_cost = rows[0].cost - (rows[0].dcost or 0)
-    mdtb = rows[-1].tb - base_tb
-    mweekly = (mdtb / base_tb * 100 * 7 / len(rows)) if base_tb else 0
-    lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TB** month-to-date · [dashboard]({site_url}/)",
-        "",
-        "*Weekly summaries*",
-    ]
-    weeks: OrderedDict[dt.date, list[Scan]] = OrderedDict()
-    for r in rows:
-        d = dt.date.fromisoformat(r.date)
-        mon = d - dt.timedelta(days=d.weekday())
-        weeks.setdefault(mon, []).append(r)
-    prev_end: Scan | None = None
-    last_mon = list(weeks)[-1]
-    # the lead-in scan (sliced off `rows`) is the first week's baseline; the
-    # daily cadence puts it one day before the first row
-    base_date = dt.date.fromisoformat(rows[0].date) - dt.timedelta(days=1)
-    for mon, ws in weeks.items():
-        end = ws[-1]
-        b_tb, b_cost = (prev_end.tb, prev_end.cost) if prev_end is not None else (base_tb, base_cost)
-        b_date = dt.date.fromisoformat(prev_end.date) if prev_end is not None else base_date
-        wdtb = end.tb - b_tb
-        wpct = wdtb / b_tb * 100 if b_tb else 0
-        partial = " _(partial)_" if len(ws) < 7 and mon == last_mon else ""
-        # the link selects exactly this bullet's span on the site (`?d=<end>-<N>d`:
-        # the end scan, N days back to the baseline) and lands on the
-        # size-over-time chart, where the week shows as the highlighted window
-        # with the Diff section right below it
-        span = (dt.date.fromisoformat(end.date) - b_date).days
-        lines.append(
-            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({site_url}/?d={_yy(end.date)}-{span}d#over-time){partial} — "
-            f"**{end.tb:,.0f} TB** ({_tb(wdtb)}, {_pct(wdtb, end.tb)}%) · ${end.cost:,}/mo ({_usd(end.cost - b_cost)})"
-        )
-        prev_end = end
-    if plot_url is not None:
-        lines += ["", f"![GCS usage — {month:%B %Y}]({plot_url})"]
-    return "\n".join(lines)
-
-
-def reply(r: Scan, site_url: str = DEFAULT_URL, platform: str = "slack") -> tuple[str, str, str]:
-    """One scan's reply -> (sender_username, body, avatar_url).
-
-    Style B, mobile-first: the SENDER is the size headline (bold, plain text --
-    Slack renders no links/emoji/markdown there), sized to not wrap on a phone;
-    the BODY is one line: the cost + a link to the day's Diff section at EOL.
-    The link text is per platform: Slack renders the bare ↗︎ glyph
-    fine, Discord's is too small to notice, so there it reads "view →"
-    (picked from a dozen candidates on 2026-09-15).
-    The avatar is the day's colour-coded trend arrow (URL carries AVATAR_REV --
-    Slack caches avatars per-URL, so glyph redesigns must bust it)."""
-    d = dt.date.fromisoformat(r.date)
-    dtb = r.dtb or 0
-    dcost = r.dcost or 0
-    sender = f"{d.month}/{d.day} — {r.tb:,.0f} TB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
-    # \u2197\ufe0e = NE arrow + text-presentation selector: renders as a font
-    # glyph in link colour (bare \u2197 gets emoji-ized by Slack into the
-    # cartoonish :arrow_upper_right:)
-    url = f"{site_url}/?d={_yy(r.date)}#diff"
-    link = f"\u00b7 [view \u2192]({url})" if platform == "discord" else f"[\u2197\ufe0e]({url})"
-    body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
-    avatar = f"{ICONS_BASE}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 7)}.png?v={AVATAR_REV}"
-    return sender, body, avatar
+    key: str
+    scan: str
+    reply: Reply
 
 
 _EMOJI_RE = re.compile(r":arrow_deg(-?\d+):")
@@ -224,42 +312,105 @@ def discordify(text: str, emoji: dict[str, str]) -> str:
     return _EMOJI_RE.sub(sub, text)
 
 
-# ---- IO (side-effecting) --------------------------------------------------
+# ---- templates ------------------------------------------------------------------
+
+
+class Template(Protocol):
+    """A digest style over one deployment's :class:`DigestConfig`.
+
+    ``variants`` are its reply styles (the first is the default);
+    ``edited_variants`` re-edit a day's reply when a later scan of it lands;
+    ``track_scan`` stores each posted reply as ``{ts, scan}`` (else the bare
+    ts — the gcs template's existing state format)."""
+
+    cfg: DigestConfig
+    variants: tuple[str, ...]
+    edited_variants: tuple[str, ...]
+    track_scan: bool
+
+    def load(self, root: str, month: dt.date) -> Any | None: ...
+    def n_scans(self, data: Any) -> int: ...
+    def op_body(self, data: Any, month: dt.date, plot_url: str | None) -> str: ...
+    def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
+    def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
+
+
+def template(cfg: DigestConfig) -> Template:
+    if cfg.template == "gcs":
+        from .digest_gcs import Gcs
+
+        return Gcs(cfg)
+    if cfg.template == "cw":
+        from .digest_cw import Cw
+
+        return Cw(cfg)
+    raise ValueError(f"unknown digest template {cfg.template!r} (gcs | cw)")
+
+
+# ---- IO (side-effecting) --------------------------------------------------------
 
 
 def _err(*a) -> None:
     print(*a, file=sys.stderr)
 
 
-def load_month(root: str, month: dt.date) -> list[Scan]:
-    """Per-scan ``Scan`` rows for ``month`` (UTC), read from ``root`` snapshots.
-
-    ``root`` = ``gs://<bucket>/snapshots``. Lists the scan dates (one
-    ``meta.json`` per published scan), keeps the month's dates plus one lead-in
-    scan for the first delta, reads each scan's ``meta.json``, then slices the
-    lead-in off."""
-    import re
-
+def list_scans(root: str) -> list[str]:
+    """The scan ids under ``root`` (one ``<id>/meta.json`` per published scan),
+    sorted — ids sort chronologically."""
     import fsspec
 
     fs, _, _ = fsspec.get_fs_token_paths(root)
-    dates = sorted(
+    return sorted(
         m.group(1)
         for p in fs.glob(f"{root.split('://', 1)[-1]}/*/meta.json")
-        if (m := re.search(r"/(\d{4}-\d{2}-\d{2})/meta\.json$", p))
+        if (m := re.search(r"/(\d{4}-\d{2}-\d{2}(?:T\d{4})?)/meta\.json$", p))
     )
+
+
+def load_window(root: str, month: dt.date) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]] | None:
+    """``(lead, in_month)`` ``(scan id, meta.json)`` pairs for ``month``: the
+    month's scans, and ``lead`` = every scan of the last calendar day before it
+    (the first delta's baseline; empty for the first month ever). None if the
+    month has no scans."""
+    import fsspec
+
+    scans = list_scans(root)
     pfx = f"{month:%Y-%m}-"
-    in_month = [d for d in dates if d.startswith(pfx)]
+    in_month = [s for s in scans if s.startswith(pfx)]
     if not in_month:
-        return []
-    first_idx = dates.index(in_month[0])
-    window = dates[max(0, first_idx - 1) : dates.index(in_month[-1]) + 1]
-    dated_meta: list[tuple[str, dict]] = []
-    for d in window:
-        with fsspec.open(f"{root}/{d}/meta.json", "rt") as f:
-            dated_meta.append((d, json.load(f)))
-    rows = rows_from_meta(dated_meta)
-    return rows[1:] if first_idx > 0 else rows
+        return None
+    before = [s for s in scans if s < in_month[0]]
+    lead = [s for s in before if s[:10] == before[-1][:10]] if before else []
+
+    def read(s: str) -> tuple[str, dict]:
+        with fsspec.open(f"{root}/{s}/meta.json", "rt") as f:
+            return s, json.load(f)
+
+    return [read(s) for s in lead], [read(s) for s in in_month]
+
+
+def state_path(root: str, month: dt.date, state_dir: str) -> str:
+    """The converge-state JSON for one month's thread: ``<data
+    root>/<state_dir>/<YYYY-MM>.json``, beside ``root``'s `snapshots/`."""
+    base = root.rsplit("/snapshots", 1)[0]
+    return f"{base}/{state_dir}/{month:%Y-%m}.json"
+
+
+def load_state(path: str) -> dict:
+    import fsspec
+
+    try:
+        with fsspec.open(path, "rt") as f:
+            return json.load(f)
+    except (FileNotFoundError, OSError):
+        return {}
+
+
+def save_state(path: str, state: dict) -> None:
+    import fsspec
+
+    with fsspec.open(path, "wt", auto_mkdir=True) as f:
+        json.dump(state, f, indent=2)
 
 
 def _wait_reachable(url: str, timeout: float = 90, interval: float = 3) -> None:
@@ -280,127 +431,165 @@ def _wait_reachable(url: str, timeout: float = 90, interval: float = 3) -> None:
     _err(f"digest: WARN {url} not reachable after {timeout:.0f}s — posting anyway")
 
 
-def _state_path(root: str, month: dt.date, platform: str = "slack", key: str | None = None) -> str:
-    """Converge-state JSON for one month's thread. Slack: ``digest/<YYYY-MM>.json``
-    (one prod thread). Discord: ``digest/discord/<webhook_id>/<YYYY-MM>.json`` —
-    keyed by webhook because a webhook can only edit its own messages, so the
-    OP/replies it recorded are only reachable through it (and a staging webhook
-    never masquerades as the prod thread)."""
-    base = root.rsplit("/snapshots", 1)[0]
-    if platform == "slack":
-        return f"{base}/digest/{month:%Y-%m}.json"
-    if platform == "discord":
-        if not key:
-            raise ValueError("discord digest state is keyed by webhook id")
-        return f"{base}/digest/discord/{key}/{month:%Y-%m}.json"
-    raise ValueError(f"unknown digest platform {platform!r}")
+def pages_deploy(icons_dir: Path, project: str, branch: str) -> str | None:
+    """`wrangler pages deploy` ``icons_dir`` (the CORS `_headers` + the fresh
+    plot) to ``project``'s ``branch``; needs CLOUDFLARE_* + wrangler. Returns
+    the deployment-specific URL (served instantly), which the OP image uses to
+    avoid racing alias propagation (→ Slack `invalid_blocks`)."""
+    import shutil
+    import subprocess
+
+    # The job image installs wrangler globally (`npm install -g`) but has
+    # no `npx` shim, so prefer the binary; `npx` only serves a laptop run.
+    wrangler = [shutil.which("wrangler")] if shutil.which("wrangler") else ["npx", "wrangler"] if shutil.which("npx") else None
+    if wrangler is None:
+        raise SystemExit("digest: neither `wrangler` nor `npx` on PATH — can't publish the plot")
+    r = subprocess.run(
+        [*wrangler, "pages", "deploy", str(icons_dir), "--project-name", project, "--branch", branch, "--commit-dirty=true"],
+        check=True, capture_output=True, text=True,
+    )
+    _err(r.stdout)
+    m = re.search(rf"https://[a-z0-9]+\.{re.escape(project)}\.pages\.dev", r.stdout + r.stderr)
+    return m.group(0) if m else None
 
 
-def load_state(root: str, month: dt.date, platform: str = "slack", key: str | None = None) -> dict:
-    import fsspec
-
-    try:
-        with fsspec.open(_state_path(root, month, platform, key), "rt") as f:
-            return json.load(f)
-    except (FileNotFoundError, OSError):
-        return {}
+def _record(tpl: Template, ts: str, scan: str) -> str | dict:
+    return {"ts": ts, "scan": scan} if tpl.track_scan else ts
 
 
-def save_state(root: str, month: dt.date, state: dict, platform: str = "slack", key: str | None = None) -> None:
-    import fsspec
-
-    with fsspec.open(_state_path(root, month, platform, key), "wt") as f:
-        json.dump(state, f, indent=2)
+def _ts(rec: str | dict) -> str:
+    return rec["ts"] if isinstance(rec, dict) else rec
 
 
-def render_plot(rows: list[Scan], month: dt.date, out_path) -> None:
-    """Render the mosaic PNG for ``rows`` to ``out_path`` (in-process; needs
-    the `[plot]` extra — matplotlib)."""
-    from pathlib import Path
+def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0) -> dict:
+    """Converge the month's Slack thread: render+host the plot, post/edit the
+    OP, then per reply unit post it if none exists — or, on an edited variant,
+    edit it when a later scan has landed. Persist and return state.
 
-    from .digest_plot import render
-
-    tiers = [{"date": r.date, "std": r.std, "near": r.near, "cold": r.cold, "arch": r.arch} for r in rows]
-    render(tiers, Path(out_path), f"GCS usage — {month:%B %Y}")
-
-
-def post_digest(root, month, token, channel, site_url=DEFAULT_URL, icons_dir=None, deploy_plot=None, reply_delay=0.0) -> dict:
-    """Converge the month's thread: render+host the plot, post/edit the OP, post
-    one reply per not-yet-posted scan, persist and return state. ``icons_dir`` is
-    where to write the PNG; ``deploy_plot(local_png, basename)`` publishes it.
-    ``reply_delay`` sleeps that many seconds between replies (>0 for a spaced
-    backfill, so Slack doesn't collapse the per-reply sender chrome)."""
+    ``icons_dir`` is where to write the PNG; ``deploy_plot(local, basename)``
+    publishes it and returns the host serving it (None → ``cfg.plot_base``).
+    ``reply_delay`` sleeps between new replies (>0 for a spaced backfill, so
+    Slack doesn't collapse same-sender chrome). ``client`` is a thrds
+    ``SlackClient`` (or a fake)."""
     import time
-    from pathlib import Path
 
-    from thrds.slack import SlackClient
-
-    rows = load_month(root, month)
-    if not rows:
+    cfg = tpl.cfg
+    variant = variant or tpl.variants[0]
+    data = tpl.load(root, month)
+    if not data:
         _err(f"digest: no scans for {month:%Y-%m}")
         return {}
-    state = load_state(root, month)
-    client = SlackClient(token, channel)
+    path = state_path(root, month, cfg.state.format(channel=channel, variant=variant))
+    state = load_state(path)
 
     plot_name = state.get("plot_name") or f"plot-{secrets.token_hex(16)}.png"
-    base = ICONS_BASE
+    base = cfg.plot_base
     if icons_dir is not None:
         local = Path(icons_dir) / plot_name
-        render_plot(rows, month, local)
+        tpl.render_plot(data, month, local, root)
         if deploy_plot is not None:
             # the deployment-specific host serves the just-uploaded plot
-            # immediately (no root-alias propagation race → no invalid_blocks)
+            # immediately (no alias propagation race → no invalid_blocks)
             dep = deploy_plot(local, plot_name)
             if dep:
                 base = dep
     plot_url = f"{base}/{plot_name}?v={int(dt.datetime.now(dt.timezone.utc).timestamp())}"
     state["plot_name"] = plot_name
-    # A just-deployed Pages asset isn't instantly served at the root alias; if we
-    # post before it propagates, Slack's image-block validation 500s the whole
-    # message with `invalid_blocks`. Poll until the URL is live (or give up + warn).
+    if len(tpl.variants) > 1:
+        state["variant"] = variant
+    # A just-deployed Pages asset isn't instantly served at an alias; if we post
+    # before it propagates, Slack's image-block validation 500s the whole message
+    # with `invalid_blocks`. Poll until the URL is live (or give up + warn).
     if icons_dir is not None and deploy_plot is not None:
         _wait_reachable(plot_url)
 
-    body = op_body(rows, month, plot_url, site_url)
+    body = tpl.op_body(data, month, plot_url)
     op_ts = state.get("op_ts")
     if op_ts:
         client.edit(op_ts, body)
-        _err(f"digest: edited OP {op_ts} ({len(rows)} scans)")
+        _err(f"digest: edited OP {op_ts} ({tpl.n_scans(data)} scans)")
     else:
-        m = client.post(body, username=f"GCS usage — {month:%B %Y}", icon_emoji=":calendar:")
-        op_ts = m.id
+        op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", icon_emoji=":calendar:").id
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
 
     posted = state.setdefault("posted", {})
-    todo = [r for r in rows if r.date not in posted]
-    for i, r in enumerate(todo):
-        sender, rbody, avatar = reply(r, site_url)
-        rm = client.post(rbody, thread_id=op_ts, username=sender, icon_url=avatar)
-        posted[r.date] = rm.id
-        save_state(root, month, state)   # persist after each → a spaced backfill is resumable
-        _err(f"digest: reply {r.date} -> {rm.id}")
-        if reply_delay and i < len(todo) - 1:
-            time.sleep(reply_delay)
+    new = 0
+    for u in tpl.units(data, variant):
+        r = u.reply
+        have = posted.get(u.key)
+        if have is None:
+            if new and reply_delay:
+                time.sleep(reply_delay)
+            rm = client.post(r.body, thread_id=op_ts, username=r.username, icon_url=r.icon_url, icon_emoji=r.icon_emoji)
+            posted[u.key] = _record(tpl, rm.id, u.scan)
+            new += 1
+            save_state(path, state)   # persist after each → a spaced backfill is resumable
+            _err(f"digest: reply {u.key} ({u.scan}) -> {rm.id}")
+        elif variant in tpl.edited_variants and have["scan"] != u.scan:
+            client.edit(have["ts"], r.body)
+            have["scan"] = u.scan
+            save_state(path, state)
+            _err(f"digest: edited reply {u.key} -> {u.scan}")
 
-    save_state(root, month, state)
+    save_state(path, state)
     return state
 
 
-# ---- Discord twin ---------------------------------------------------------
+def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
+    """Re-post the month's replies under the CURRENT unit rule and retire the
+    old ones (a rule change, e.g. evening→morning scan). Post-new-then-delete-
+    old on purpose: no empty-thread window, and the old block vanishes at
+    once. No strike/edit step — the headline lives in the sender name, which
+    `chat.update` can't touch, so a strike would look broken.
 
-CALENDAR_URL = f"{ICONS_BASE}/calendar.png?v=2"  # the OP sender's avatar (Slack uses :calendar:); ?v busts Discord's per-URL avatar cache
+    Dry-run (default) returns the plan — ``old`` replies (key, record) and
+    ``new`` (key, scan, headline) — and posts nothing. ``for_real``: the old
+    ts list is stashed in the state as ``stale`` first, ``posted`` is
+    cleared, the normal converge appends the new replies to the same thread,
+    and only if every post succeeded are the stale ts deleted (a failed
+    delete is logged and left for a re-run — a leftover old reply is
+    harmless); a failed post stops before any delete, ``stale`` persisted."""
+    variant = variant or tpl.variants[0]
+    data = tpl.load(root, month)
+    if not data:
+        _err(f"digest: no scans for {month:%Y-%m}")
+        return {}
+    path = state_path(root, month, tpl.cfg.state.format(channel=channel, variant=variant))
+    state = load_state(path)
+    old = list(state.get("posted", {}).items())
+    new = [(u.key, u.scan, u.reply.username if variant == "sender" else u.reply.body) for u in tpl.units(data, variant)]
+    if not for_real:
+        return {"old": old, "new": new}
+    if not state.get("op_ts"):
+        raise SystemExit(f"digest: no OP for {month:%Y-%m} in {channel} — nothing to re-thread under")
+    state["stale"] = [_ts(e) for _, e in old] + state.get("stale", [])
+    state["posted"] = {}
+    save_state(path, state)
+    state = converge_slack(tpl, root, month, client, channel, variant, icons_dir=icons_dir, deploy_plot=deploy_plot, reply_delay=reply_delay)
+    failed = []
+    for ts in state.pop("stale", []):
+        try:
+            client.delete(ts, orphans_ok=True)
+            _err(f"digest: deleted old reply {ts}")
+        except Exception as e:  # noqa: BLE001 — leave it for a re-run; an old reply lingering is harmless
+            _err(f"digest: WARN could not delete old reply {ts}: {e}")
+            failed.append(ts)
+    if failed:
+        state["stale"] = failed
+    save_state(path, state)
+    return state
 
 
-def converge_discord(rows: list[Scan], month: dt.date, state: dict, *, hook, bot, emoji: dict[str, str], plot, site_url: str = DEFAULT_URL, save=None, edit_replies: bool = False, reply_hook=None) -> dict:
+def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, hook, bot, emoji: dict[str, str], plot, save=None, edit_replies: bool = False, reply_hook=None) -> dict:
     """Bring one month's Discord thread to the desired state; returns ``state``.
 
-    The Slack twin's shape on Discord's split transports: the OP is a *webhook*
-    message (custom sender = month title + calendar avatar; the plot rides
-    along as a file attachment, re-uploaded on every edit) that the *bot* then
-    opens a thread off (webhooks can't); each not-yet-posted scan becomes a
-    webhook reply into that thread under its headline sender + trend-arrow
-    avatar. Discord groups consecutive messages by *displayed* sender and every
+    The Slack thread's shape on Discord's split transports: the OP is a
+    *webhook* message (custom sender = month title + calendar avatar; the plot
+    rides along as a file attachment, re-uploaded on every edit) that the
+    *bot* then opens a thread off (webhooks can't); each not-yet-posted unit
+    becomes a webhook reply into that thread under its sender + avatar.
+    Discord groups consecutive messages by *displayed* sender and every
     headline differs, so replies need no spacing (Slack needs ~5 min).
 
     ``hook``/``bot`` are thrds's `DiscordWebhookClient`/`DiscordClient` (or
@@ -411,63 +600,81 @@ def converge_discord(rows: list[Scan], month: dt.date, state: dict, *, hook, bot
     bound to the thread — a webhook edit inside a thread must carry the thread
     id, which the OP-level ``hook`` doesn't."""
     save = save or (lambda s: None)
-    title = f"GCS usage — {month:%B %Y}"
-    body = discordify(op_body(rows, month, None, site_url), emoji)
+    title = f"{tpl.cfg.title} — {month:%B %Y}"
+    body = discordify(tpl.op_body(data, month, None), emoji)
     op_id = state.get("op_id")
     if op_id:
         hook.edit(op_id, body, files=[plot])
-        _err(f"digest: edited OP {op_id} ({len(rows)} scans)")
+        _err(f"digest: edited OP {op_id} ({tpl.n_scans(data)} scans)")
     else:
-        op_id = hook.post(body, username=title, icon_url=CALENDAR_URL, files=[plot]).id
+        op_id = hook.post(body, username=title, icon_url=f"{tpl.cfg.icons_base}/calendar.png?v=2", files=[plot]).id
         state["op_id"] = op_id
         state["thread_id"] = bot.create_thread(op_id, title)
         save(state)
         _err(f"digest: posted OP {op_id}, thread {state['thread_id']}")
     thread_id = state["thread_id"]
     posted = state.setdefault("posted", {})
-    for r in rows:
-        sender, rbody, avatar = reply(r, site_url, "discord")
-        if r.date in posted:
+    for u in tpl.units(data, tpl.variants[0], "discord"):
+        r = u.reply
+        if u.key in posted:
             if edit_replies:
-                reply_hook.edit(posted[r.date], rbody)
-                _err(f"digest: re-edited reply {r.date} ({posted[r.date]})")
+                reply_hook.edit(_ts(posted[u.key]), r.body)
+                _err(f"digest: re-edited reply {u.key} ({_ts(posted[u.key])})")
             continue
-        posted[r.date] = hook.post(rbody, thread_id=thread_id, username=sender, icon_url=avatar).id
+        posted[u.key] = _record(tpl, hook.post(r.body, thread_id=thread_id, username=r.username, icon_url=r.icon_url).id, u.scan)
         save(state)
-        _err(f"digest: reply {r.date} -> {posted[r.date]}")
+        _err(f"digest: reply {u.key} -> {_ts(posted[u.key])}")
     save(state)
     return state
 
 
-def post_digest_discord(root: str, month: dt.date, webhook: str, bot_token: str, site_url: str = DEFAULT_URL, plot_dir=None, edit_replies: bool = False) -> dict:
+def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, bot_token: str, plot_dir=None, edit_replies: bool = False) -> dict:
     """`converge_discord` against real Discord: resolve the webhook's channel,
     load that webhook's month state, render the plot, converge, persist. There
     is no plot-hosting step — the PNG is an attachment."""
     import tempfile
-    from pathlib import Path
 
     from thrds.discord import NO_MENTIONS, DiscordClient, DiscordWebhookClient
 
     from . import discord_api
 
-    rows = load_month(root, month)
-    if not rows:
+    data = tpl.load(root, month)
+    if not data:
         _err(f"digest: no scans for {month:%Y-%m}")
         return {}
     info = discord_api.webhook_info(webhook)
     channel, key = info["channel_id"], info["id"]
-    state = load_state(root, month, "discord", key)
-    plot = Path(plot_dir or tempfile.gettempdir()) / f"gcs-usage-{month:%Y-%m}.png"
-    render_plot(rows, month, plot)
+    path = state_path(root, month, tpl.cfg.discord_state.format(webhook=key))
+    state = load_state(path)
+    plot = Path(plot_dir or tempfile.gettempdir()) / f"{tpl.cfg.slug}-{month:%Y-%m}.png"
+    tpl.render_plot(data, month, plot, root)
     thread_id = state.get("thread_id")
     return converge_discord(
-        rows, month, state,
+        tpl, data, month, state,
         hook=DiscordWebhookClient(webhook, suppress_embeds=True, allowed_mentions=NO_MENTIONS),
         reply_hook=DiscordWebhookClient(webhook, thread_id, suppress_embeds=True, allowed_mentions=NO_MENTIONS) if thread_id else None,
         edit_replies=edit_replies,
         bot=DiscordClient(bot_token, channel),
         emoji=discord_api.app_emojis(bot_token),
         plot=plot,
-        site_url=site_url,
-        save=lambda s: save_state(root, month, s, "discord", key),
+        save=lambda s: save_state(path, s),
     )
+
+
+def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None, plot_dir=None) -> str:
+    """Render the plot (into ``plot_dir``, default the temp dir) and return the
+    OP + every reply as text; posts and hosts nothing."""
+    import tempfile
+
+    variant = variant or tpl.variants[0]
+    data = tpl.load(root, month)
+    if not data:
+        raise SystemExit(f"digest: no scans for {month:%Y-%m}")
+    out = Path(plot_dir or tempfile.gettempdir()) / f"{tpl.cfg.slug}-{month:%Y%m}.png"
+    tpl.render_plot(data, month, out, root)
+    _err(f"rendered plot → {out}")
+    lines = [tpl.op_body(data, month, "<plot-url>"), "", f"--- replies ({variant}: username | body | icon) ---"]
+    for u in tpl.units(data, variant):
+        r = u.reply
+        lines.append(f"{r.username} | {r.body} | {(r.icon_url or r.icon_emoji or '').split('/')[-1]}")
+    return "\n".join(lines)
