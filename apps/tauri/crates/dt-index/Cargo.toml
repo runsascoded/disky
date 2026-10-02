@@ -1,0 +1,21 @@
+[package]
+name = "dt-index"
+version = "0.1.0"
+edition = "2021"
+description = "disk-tree's path store in Rust: a layer-1 capture → the `path` / `bysize` sorts + `meta.json` / `age.json`, row-compatible with `dt-cloud path-index -g`"
+license = "MIT"
+
+[lib]
+name = "dt_index"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dt-index"
+path = "src/bin/dt-index.rs"
+
+[dependencies]
+arrow-array = "60"
+arrow-schema = "60"
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+libc = "0.2"

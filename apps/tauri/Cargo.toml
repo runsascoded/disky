@@ -4,7 +4,7 @@
 #   src-tauri        — the Tauri v2 host that wraps the UI + walker (Phase 2)
 [workspace]
 resolver = "2"
-members = ["crates/dt-walker", "crates/dt-capture", "src-tauri"]
+members = ["crates/dt-walker", "crates/dt-capture", "crates/dt-index", "src-tauri"]
 
 [profile.release]
 opt-level = 3
