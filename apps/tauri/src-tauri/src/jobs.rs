@@ -5,10 +5,18 @@
 //! a `~` log path. The per-user part lives in `~/.config/disk-tree/disky.json`:
 //!
 //! ```json
-//! {"jobs": {"scan":  {"command": ["/…/.venv/bin/python", "/…/aws/laptop-scan"],
-//!                     "env": {"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}, "log": "index"},
+//! {"jobs": {"scan":  {"to": "r2://disk-tree/captures", "host": "m3",
+//!                     "env": {"AWS_PROFILE": "m3"}, "log": "index",
+//!                     "then": {"command": ["/…/.venv/bin/python", "/…/aws/submit"], "env": {"AWS_PROFILE": "r"}}},
 //!           "drain": {"command": […], "log": "drain"}}}
 //! ```
+//!
+//! A job with a `command` runs it as a child. The scan job may instead name a
+//! `to` (a dir or `r2://` / `s3://` / `file://` URL): disky then captures the
+//! scan root itself (`dt-capture`, in this process, so the walk is the app's
+//! own under TCC) with `env` applied, and runs the optional `then` command with
+//! the capture dir appended (the Batch submit, until a cloud-side trigger picks
+//! up new captures; spec `rust-engine.md` phase 3).
 //!
 //! The job's stdout/stderr are appended to `~/Library/Logs/disk-tree/<log>.{out,err}.log`
 //! (`log` defaults to the job name). An unconfigured job logs one line to
@@ -28,12 +36,26 @@ pub struct Config {
     pub jobs: BTreeMap<String, Job>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Default)]
 pub struct Job {
+    #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     pub log: Option<String>,
+    /// In-process capture target (the scan job, when it has no `command`).
+    pub to: Option<String>,
+    /// The capture's host segment (default `DISK_TREE_HOST`, else the hostname).
+    pub host: Option<String>,
+    /// Run after an in-process capture, with the capture dir appended.
+    pub then: Option<Step>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct Step {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 fn home() -> PathBuf {
@@ -118,10 +140,6 @@ pub fn run(name: &str) -> i32 {
         note(&format!("disky job {name}: not configured in {} — nothing to run", config_path().display()));
         return 0;
     };
-    let Some((program, args)) = job.command.split_first() else {
-        note(&format!("disky job {name}: empty command"));
-        return 1;
-    };
     let (out, err) = log_paths(name, Some(job));
     let _ = std::fs::create_dir_all(logs_dir());
     let open = |p: &PathBuf| OpenOptions::new().create(true).append(true).open(p);
@@ -129,22 +147,90 @@ pub fn run(name: &str) -> i32 {
         note(&format!("disky job {name}: can't open {} / {}", out.display(), err.display()));
         return 1;
     };
-    let mut cmd = Command::new(program);
-    cmd.args(args).envs(&job.env).stdout(out_f).stderr(err_f);
+    let in_process = name == "scan" && job.command.is_empty() && job.to.is_some();
+    let cmd = if in_process {
+        None
+    } else {
+        let Some((program, args)) = job.command.split_first() else {
+            note(&format!("disky job {name}: empty command"));
+            return 1;
+        };
+        let mut cmd = Command::new(program);
+        cmd.args(args).envs(&job.env).stdout(out_f.try_clone().unwrap()).stderr(err_f.try_clone().unwrap());
+        Some(cmd)
+    };
     if name != "scan" {
-        return crate::agent::run_child(cmd);
+        return crate::agent::run_child(cmd.unwrap());
     }
     use crate::settings;
-    cmd.env("DISKY_SCAN_ROOT", settings::load().scan_root());
+    let root = settings::load().scan_root();
     let mut st = settings::load_state();
     st.last_start = Some(settings::now());
     st.force = false;
     let _ = settings::save_state(&st);
-    let code = crate::agent::run_child(cmd);
+    let code = match cmd {
+        Some(mut cmd) => {
+            cmd.env("DISKY_SCAN_ROOT", &root);
+            crate::agent::run_child(cmd)
+        }
+        None => capture(job, &root, out_f, err_f),
+    };
     let mut st = settings::load_state();
     st.last_end = Some(settings::now());
     st.last_exit = Some(code);
     let _ = settings::save_state(&st);
+    code
+}
+
+/// `[2026-10-01T12:00:00Z] msg`, as `aws/laptop-scan` logs.
+fn stamped(msg: &str) -> String {
+    let (_, iso) = dt_capture::stamps(crate::settings::now(), 0);
+    format!("[{}Z] {msg}", &iso[..19])
+}
+
+/// The in-process scan: capture `root` to `job.to` (with `job.env` applied to
+/// this process, where the credential lookup reads it), then `job.then`.
+fn capture(job: &Job, root: &str, mut out: std::fs::File, mut err: std::fs::File) -> i32 {
+    for (k, v) in &job.env {
+        std::env::set_var(k, v);
+    }
+    let to = job.to.as_deref().unwrap_or_default();
+    let target = match dt_capture::target::Target::parse(to) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = writeln!(err, "{}", stamped(&format!("dt-capture: {e}")));
+            return 1;
+        }
+    };
+    let opts = dt_capture::Opts {
+        root: root.into(),
+        to: target,
+        host: job.host.clone().unwrap_or_else(dt_capture::host),
+        batch_rows: 200_000,
+        // `/` stays on one filesystem: the Data volume is reached through its
+        // firmlinks once, not walked again at `/System/Volumes/Data`.
+        one_fs: root == "/",
+        container: cfg!(target_os = "macos"),
+    };
+    let _ = writeln!(out, "{}", stamped(&format!("capture {root} → {to}")));
+    let s = match dt_capture::capture(&opts) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(err, "{}", stamped(&format!("dt-capture: {e}")));
+            return 1;
+        }
+    };
+    let _ = writeln!(
+        out,
+        "{}",
+        stamped(&format!("captured {} ({} files, {} shards, {} errors)", s.dir, s.n_rows, s.n_shards, s.error_count))
+    );
+    let Some(then) = &job.then else { return 0 };
+    let Some((program, args)) = then.command.split_first() else { return 0 };
+    let mut cmd = Command::new(program);
+    cmd.args(args).arg(&s.dir).envs(&then.env).stdout(out.try_clone().unwrap()).stderr(err.try_clone().unwrap());
+    let code = crate::agent::run_child(cmd);
+    let _ = writeln!(out, "{}", stamped(&format!("then {program}: exit {code}")));
     code
 }
 
@@ -168,5 +254,16 @@ mod tests {
         assert_eq!(names(log_paths("scan", Some(scan))), ("index.out.log".into(), "index.err.log".into()));
         assert_eq!(names(log_paths("drain", cfg.jobs.get("drain"))), ("drain.out.log".into(), "drain.err.log".into()));
         assert!(serde_json::from_str::<Config>("{}").unwrap().jobs.is_empty());
+        let cfg: Config = serde_json::from_str(
+            r#"{"jobs": {"scan": {"to": "r2://disk-tree/captures", "host": "m3", "env": {"AWS_PROFILE": "m3"},
+                                  "then": {"command": ["/py", "/submit"], "env": {"AWS_PROFILE": "r"}}}}}"#,
+        )
+        .unwrap();
+        let scan = &cfg.jobs["scan"];
+        assert!(scan.command.is_empty());
+        assert_eq!((scan.to.as_deref(), scan.host.as_deref()), (Some("r2://disk-tree/captures"), Some("m3")));
+        let then = scan.then.as_ref().unwrap();
+        assert_eq!(then.command, ["/py", "/submit"]);
+        assert_eq!(then.env.get("AWS_PROFILE").map(String::as_str), Some("r"));
     }
 }
