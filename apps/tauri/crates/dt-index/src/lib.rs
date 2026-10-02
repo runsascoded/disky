@@ -95,6 +95,44 @@ pub struct Row {
     pub age: [i64; N_AGE],
 }
 
+/// The file rows, columnar: paths in one buffer (a `String` + a `Row` per
+/// file held a whole-disk reduce at 3.2 GB; the rest of a file's row is
+/// implied: `n_files` 1, no children, `mtime`/`created`/`mtime_mean` its stamp).
+#[derive(Default)]
+struct Files {
+    buf: String,
+    ends: Vec<usize>,
+    depth: Vec<u16>,
+    size: Vec<i64>,
+    secs: Vec<i64>,
+    age: Vec<u8>,
+}
+
+impl Files {
+    fn path(&self, i: usize) -> &str {
+        &self.buf[if i == 0 { 0 } else { self.ends[i - 1] }..self.ends[i]]
+    }
+
+    fn row(&self, i: usize) -> Row {
+        let mut age = [0; N_AGE];
+        age[self.age[i] as usize] = self.size[i];
+        let secs = self.secs[i];
+        Row {
+            path: self.path(i).to_string(),
+            size: self.size[i],
+            depth: self.depth[i] as i32,
+            dir: false,
+            n_files: 1,
+            n_children: 0,
+            n_desc: 0,
+            mtime: secs,
+            mtime_mean: Some(secs as f64),
+            created: Some(secs),
+            age,
+        }
+    }
+}
+
 /// The age bucket of a stamp created on epoch day `day`, at scan day `asof`.
 fn age_bucket(asof: i64, day: i64) -> usize {
     let age = asof - day;
@@ -110,7 +148,7 @@ pub struct Reducer {
     asof_day: i64,
     /// Per dir (`fp` = bucket[/dir]): its own files' totals (`dir_stats`).
     dirs: HashMap<String, Agg>,
-    files: Vec<Row>,
+    files: Files,
     /// `(created day, no dir, first dir segment)` → (bytes, objects)
     /// (`age.json`): the engine's `ORDER BY ALL` puts a NULL segment (files
     /// directly in the root) after the named ones.
@@ -120,7 +158,7 @@ pub struct Reducer {
 impl Reducer {
     /// `asof_day`: the scan's epoch day (the age buckets' "now").
     pub fn new(asof_day: i64) -> Self {
-        Reducer { asof_day, dirs: HashMap::new(), files: vec![], ages: BTreeMap::new() }
+        Reducer { asof_day, dirs: HashMap::new(), files: Files::default(), ages: BTreeMap::new() }
     }
 
     /// One file. A capture's `bucket` is its scan root (`/Users/ryan`): the
@@ -152,20 +190,15 @@ impl Reducer {
         let e = self.ages.entry((day, dir.is_empty(), d1)).or_default();
         e.0 += size;
         e.1 += 1;
-        let path = format!("{bucket}/{name}");
-        self.files.push(Row {
-            depth: segments(&path) as i32,
-            path,
-            size,
-            dir: false,
-            n_files: 1,
-            n_children: 0,
-            n_desc: 0,
-            mtime: secs,
-            mtime_mean: Some(secs as f64),
-            created: Some(secs),
-            age,
-        });
+        let f = &mut self.files;
+        f.buf.push_str(bucket);
+        f.buf.push('/');
+        f.buf.push_str(name);
+        f.ends.push(f.buf.len());
+        f.depth.push((segments(bucket) + segments(name)) as u16);
+        f.size.push(size);
+        f.secs.push(secs);
+        f.age.push(bucket_i as u8);
     }
 
     /// Every file of the capture dir `dir` (its `shard-*.parquet`).
@@ -223,7 +256,7 @@ impl Reducer {
                 *below.entry(q).or_default() += nd + 1;
             }
         }
-        let mut rows: Vec<Row> = ptu
+        let dirs: Vec<Row> = ptu
             .iter()
             .map(|(p, (depth, a))| Row {
                 path: p.clone(),
@@ -241,22 +274,63 @@ impl Reducer {
             .collect();
         let (total_bytes, total_objects) =
             self.dirs.values().fold((0, 0), |(b, o), a| (b + a.b, o + a.o));
-        rows.extend(self.files);
+
         let ages = self
             .ages
             .into_iter()
             .map(|((d, files, d1), (b, o))| (d, (!files).then_some(d1), b, o))
             .collect::<Vec<_>>();
-        Store { rows, total_bytes, total_objects, ages }
+        Store { dirs, files: self.files, total_bytes, total_objects, ages }
     }
 }
 
 pub struct Store {
-    pub rows: Vec<Row>,
+    dirs: Vec<Row>,
+    files: Files,
     pub total_bytes: i64,
     pub total_objects: i64,
     /// `(day, d1, bytes, objects)`, ordered `(day, d1)` with no-dir rows last.
     ages: Vec<(i64, Option<String>, i64, i64)>,
+}
+
+impl Store {
+    /// Rows: the dirs, then the files.
+    pub fn len(&self) -> usize {
+        self.dirs.len() + self.files.ends.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Row `i`, materialized.
+    pub fn row(&self, i: usize) -> Row {
+        match i.checked_sub(self.dirs.len()) {
+            None => self.dirs[i].clone(),
+            Some(f) => self.files.row(f),
+        }
+    }
+
+    fn path(&self, i: usize) -> &str {
+        match i.checked_sub(self.dirs.len()) {
+            None => &self.dirs[i].path,
+            Some(f) => self.files.path(f),
+        }
+    }
+
+    fn depth(&self, i: usize) -> i32 {
+        match i.checked_sub(self.dirs.len()) {
+            None => self.dirs[i].depth,
+            Some(f) => self.files.depth[f] as i32,
+        }
+    }
+
+    fn size(&self, i: usize) -> i64 {
+        match i.checked_sub(self.dirs.len()) {
+            None => self.dirs[i].size,
+            Some(f) => self.files.size[f],
+        }
+    }
 }
 
 fn size_bucket(size: i64) -> Option<u32> {
@@ -283,25 +357,38 @@ fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
-fn batch(rows: &[&Row]) -> io::Result<RecordBatch> {
-    let n = rows.len();
-    let i64s = |f: &dyn Fn(&Row) -> i64| Arc::new(Int64Array::from_iter_values(rows.iter().map(|r| f(r)))) as ArrayRef;
+fn batch(st: &Store, idx: &[u32]) -> io::Result<RecordBatch> {
+    let n = idx.len();
+    let d = st.dirs.len();
+    let f = &st.files;
+    // A row's fields: a dir's from its `Row`, a file's from the columns.
+    let pick = |i: u32, dir: &dyn Fn(&Row) -> i64, file: &dyn Fn(usize) -> i64| {
+        let i = i as usize;
+        if i < d { dir(&st.dirs[i]) } else { file(i - d) }
+    };
+    let i64s = |dir: &dyn Fn(&Row) -> i64, file: &dyn Fn(usize) -> i64| Arc::new(Int64Array::from_iter_values(idx.iter().map(|&i| pick(i, dir, file)))) as ArrayRef;
     let mut cols: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.path.as_str()))),
+        Arc::new(StringArray::from_iter_values(idx.iter().map(|&i| st.path(i as usize)))),
         Arc::new(StringArray::new_null(n)),
-        i64s(&|r| r.size),
-        Arc::new(Int32Array::from_iter_values(rows.iter().map(|r| r.depth))),
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| if r.dir { "dir" } else { "file" }))),
-        i64s(&|r| r.n_files),
-        i64s(&|r| r.n_children),
-        i64s(&|r| r.n_desc),
-        i64s(&|r| r.mtime),
-        Arc::new(Float64Array::from_iter(rows.iter().map(|r| r.mtime_mean))),
-        Arc::new(Int64Array::from_iter(rows.iter().map(|r| r.created))),
+        i64s(&|r| r.size, &|j| f.size[j]),
+        Arc::new(Int32Array::from_iter_values(idx.iter().map(|&i| st.depth(i as usize)))),
+        Arc::new(StringArray::from_iter_values(idx.iter().map(|&i| if (i as usize) < d { "dir" } else { "file" }))),
+        i64s(&|r| r.n_files, &|_| 1),
+        i64s(&|r| r.n_children, &|_| 0),
+        i64s(&|r| r.n_desc, &|_| 0),
+        i64s(&|r| r.mtime, &|j| f.secs[j]),
+        Arc::new(Float64Array::from_iter(idx.iter().map(|&i| {
+            let i = i as usize;
+            if i < d { st.dirs[i].mtime_mean } else { Some(f.secs[i - d] as f64) }
+        }))),
+        Arc::new(Int64Array::from_iter(idx.iter().map(|&i| {
+            let i = i as usize;
+            if i < d { st.dirs[i].created } else { Some(f.secs[i - d]) }
+        }))),
         Arc::new(Int32Array::new_null(n)),
     ];
-    for i in 0..N_AGE {
-        cols.push(i64s(&move |r| r.age[i]));
+    for a in 0..N_AGE {
+        cols.push(i64s(&move |r| r.age[a], &move |j| if f.age[j] as usize == a { f.size[j] } else { 0 }));
     }
     for _ in 2..=4 {
         cols.push(Arc::new(Int64Array::from(vec![0i64; n])));
@@ -309,8 +396,8 @@ fn batch(rows: &[&Row]) -> io::Result<RecordBatch> {
     RecordBatch::try_new(schema(), cols).map_err(err)
 }
 
-/// Write `rows` (already in tier order) to `path`; returns the row groups.
-fn write_tier(path: &Path, rows: &[&Row], kv: &[(&str, &str)]) -> io::Result<usize> {
+/// Write `st`'s rows in the order `idx` to `path`; returns the row groups.
+fn write_tier(path: &Path, st: &Store, idx: &[u32], kv: &[(&str, &str)]) -> io::Result<usize> {
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
@@ -319,8 +406,8 @@ fn write_tier(path: &Path, rows: &[&Row], kv: &[(&str, &str)]) -> io::Result<usi
     let tmp = path.with_extension("parquet.tmp");
     let opts = ArrowWriterOptions::new().with_properties(props).with_skip_arrow_metadata(true);
     let mut w = ArrowWriter::try_new_with_options(File::create(&tmp)?, schema(), opts).map_err(err)?;
-    for chunk in rows.chunks(ROW_GROUP_ROWS) {
-        w.write(&batch(chunk)?).map_err(err)?;
+    for chunk in idx.chunks(ROW_GROUP_ROWS) {
+        w.write(&batch(st, chunk)?).map_err(err)?;
         w.flush().map_err(err)?;
     }
     let meta = w.close().map_err(err)?;
@@ -338,27 +425,32 @@ impl Store {
     /// Write `path-index.parquet` + `path-index-bysize.parquet` into `dir`.
     pub fn write_index(&self, dir: &Path) -> io::Result<[Sort; 2]> {
         std::fs::create_dir_all(dir)?;
-        let mut by_path: Vec<&Row> = self.rows.iter().collect();
-        by_path.sort_unstable_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.path.cmp(&b.path)));
-        let path_groups = write_tier(&dir.join(PATH_FILE), &by_path, &[("tier", "path"), ("sort", "depth,path,usr")])?;
+        let mut by_path: Vec<u32> = (0..self.len() as u32).collect();
+        by_path.sort_unstable_by(|&a, &b| {
+            let (a, b) = (a as usize, b as usize);
+            self.depth(a).cmp(&self.depth(b)).then_with(|| self.path(a).cmp(self.path(b)))
+        });
+        let path_groups = write_tier(&dir.join(PATH_FILE), self, &by_path, &[("tier", "path"), ("sort", "depth,path,usr")])?;
         // `⌊log2 size⌋` descending, size 0 (no bucket) last, then path.
         let mut by_size = by_path;
-        by_size.sort_unstable_by(|a, b| {
-            let (x, y) = (size_bucket(a.size), size_bucket(b.size));
+        by_size.sort_unstable_by(|&a, &b| {
+            let (a, b) = (a as usize, b as usize);
+            let (x, y) = (size_bucket(self.size(a)), size_bucket(self.size(b)));
             match (x, y) {
                 (Some(x), Some(y)) => y.cmp(&x),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
                 (None, None) => std::cmp::Ordering::Equal,
             }
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| self.path(a).cmp(self.path(b)))
         });
         let size_groups = write_tier(
             &dir.join(BYSIZE_FILE),
+            self,
             &by_size,
             &[("tier", "bysize"), ("sort", "size_bucket desc,path,usr"), ("bucket", "log2")],
         )?;
-        let n = self.rows.len();
+        let n = self.len();
         Ok([Sort { rows: n, groups: path_groups }, Sort { rows: n, groups: size_groups }])
     }
 
@@ -460,7 +552,8 @@ mod tests {
         r.push("/", "Users/ryan/c/z", 1024, ms);
         r.push("/", ".file", 1, ms);
         let s = r.finish();
-        let mut rows: Vec<_> = s.rows.iter().map(|r| (r.path.as_str(), r.depth, r.size, r.n_children, r.n_desc)).collect();
+        let all: Vec<Row> = (0..s.len()).map(|i| s.row(i)).collect();
+        let mut rows: Vec<_> = all.iter().map(|r| (r.path.as_str(), r.depth, r.size, r.n_children, r.n_desc)).collect();
         rows.sort();
         assert_eq!(
             rows,
