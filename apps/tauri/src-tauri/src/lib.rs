@@ -64,13 +64,14 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
         }
         let _ = w.show();
         let _ = w.set_focus();
+        activate(app);
         return;
     }
     let target = match url.or_else(|| site_url().parse().ok()) {
         Some(u) => u,
         None => return jobs::note(&format!("disky: bad site URL {:?}", site_url())),
     };
-    let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target))
+    let built = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(target))
         .title("disky")
         .user_agent(&applink::user_agent())
         .inner_size(1280.0, 860.0)
@@ -84,8 +85,41 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
             }
             tauri::webview::NewWindowResponse::Deny
         })
+        // No menu bar (an accessory app), so no View › Reload: ⌘R reloads
+        // here, e.g. after a site deploy.
+        .initialization_script(RELOAD_KEY)
         .build();
+    // An accessory app isn't activated by its launch: without this a new
+    // window opens behind the frontmost app's and the launch looks like a nop.
+    if let Ok(w) = built {
+        let _ = w.show();
+        let _ = w.set_focus();
+        activate(app);
+    }
 }
+
+/// Bring the app forward with a window open. An accessory (menu-bar only)
+/// app can't take the front from a launch or reopen on macOS 14+: tao's
+/// `activateIgnoringOtherApps:` and `activate` both leave it behind the
+/// frontmost app. So while a window is open disky is a regular app (Dock icon,
+/// menu bar, ⌘-Tab), and goes back to accessory when the last one closes.
+#[cfg(target_os = "macos")]
+fn activate(app: &AppHandle) {
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    let _ = app.run_on_main_thread(|| unsafe {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        let ns_app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, activate];
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate(_: &AppHandle) {}
+
+const RELOAD_KEY: &str = "addEventListener('keydown', e => {
+  if (e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'r') { e.preventDefault(); location.reload() }
+}, true)";
 
 /// Whether macOS launched the app as a login item: the launch's `oapp` Apple
 /// event says so (`keyAEPropData` = `keyAELaunchedAsLogInItem`). Only
@@ -109,13 +143,18 @@ fn show_settings(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("settings") {
         let _ = w.show();
         let _ = w.set_focus();
+        activate(app);
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
+    let built = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
         .title("disky settings")
         .inner_size(520.0, 720.0)
         .resizable(true)
         .build();
+    if let Ok(w) = built {
+        let _ = w.set_focus();
+        activate(app);
+    }
 }
 
 /// A `disky://` URL from LaunchServices (the browser's "Open in disky"). A
@@ -392,6 +431,15 @@ pub fn run() {
             // Opened again while running (Spotlight, Finder, the Dock): show the window.
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { has_visible_windows: false, .. } => show_window(app, None),
+            // A window built in `setup` predates the end of launch, when an
+            // activation is still overridden: activate again once launched.
+            tauri::RunEvent::Ready if app.get_webview_window("main").is_some() => activate(app),
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } => {
+                if app.webview_windows().keys().all(|l| *l == label) {
+                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { urls } => {
                 for u in &urls {
