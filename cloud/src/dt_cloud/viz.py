@@ -190,7 +190,7 @@ def _write_store(
     attr_join = f"LEFT JOIN dir_attr t ON t.bucket = x.bucket AND t.dir = ({obj_dir})" if attr else ""
     obj_exprs = {
         "path": "x.bucket || '/' || x.name", "usr": 't."user"' if attr else "NULL::VARCHAR",
-        "size": "x.size_bytes::BIGINT", "depth": "(len(string_split(x.name, '/')) + 1)::INTEGER", "kind": "'file'",
+        "size": "x.size_bytes::BIGINT", "depth": "len(string_split(x.bucket || '/' || x.name, '/'))::INTEGER", "kind": "'file'",
         "n_files": "1::BIGINT", "n_children": "0::BIGINT", "n_desc": "0::BIGINT",
         "mtime": "coalesce(floor(epoch(coalesce(x.updated, x.created))), 0)::BIGINT",
         "mtime_mean": "floor(epoch(x.created))::DOUBLE",

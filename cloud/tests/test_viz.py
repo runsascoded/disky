@@ -475,6 +475,30 @@ def test_filesystem_root_capture_splits_on_first_segment(tmp_path: Path):
     ]
 
 
+def test_home_capture_object_depth(tmp_path: Path):
+    """A capture of a nested root (`/Users/ryan`) has a multi-segment bucket
+    (`Users/ryan`): an object's depth counts the bucket's segments too, so a
+    file sits one level below its dir (the `(depth, path)` range a drill reads)."""
+    listing_path = tmp_path / "listing.parquet"
+    pd.DataFrame(
+        {
+            "bucket": ["/Users/ryan"] * 2,
+            "name": ["top.txt", "c/a.bin"],
+            "size_bytes": [1 * GB, 2 * GB],
+            "created": [TS["d0701"]] * 2,
+            "storage_class_id": [1] * 2,
+        }
+    ).to_parquet(listing_path)
+    pidx = tmp_path / "idx" / "path-index.parquet"
+    write_path_index((str(listing_path),), tmp_path / "out", "2026-07-20", path_index=pidx)
+    df = pd.read_parquet(pidx)
+    assert _rows(df, ["path", "kind", "depth"]) == [
+        ("Users", "dir", 1), ("Users/ryan", "dir", 2),
+        ("Users/ryan/c", "dir", 3), ("Users/ryan/top.txt", "file", 3),
+        ("Users/ryan/c/a.bin", "file", 4),
+    ]
+
+
 def test_rows_carry_bytes_by_age(tmp_path: Path):
     """Every row carries `age_b0`..`age_b6`: bytes by age at the scan date in
     log buckets (<1d, <1w, <1mo, <3mo, <1y, <3y, older), rolled up like
