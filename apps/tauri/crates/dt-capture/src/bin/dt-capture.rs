@@ -54,6 +54,7 @@ fn main() -> ExitCode {
         batch_rows,
         one_fs,
         container: container && cfg!(target_os = "macos"),
+        progress: None,
     };
     match dt_capture::capture(&opts) {
         Ok(s) => {

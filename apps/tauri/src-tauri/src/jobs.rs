@@ -175,6 +175,7 @@ pub fn run(name: &str) -> i32 {
         }
         None => capture(job, &root, out_f, err_f),
     };
+    settings::clear_progress();
     let mut st = settings::load_state();
     st.last_end = Some(settings::now());
     st.last_exit = Some(code);
@@ -202,6 +203,8 @@ fn capture(job: &Job, root: &str, mut out: std::fs::File, mut err: std::fs::File
             return 1;
         }
     };
+    use crate::settings::{save_progress, Progress};
+    let since = crate::settings::now();
     let opts = dt_capture::Opts {
         root: root.into(),
         to: target,
@@ -211,7 +214,9 @@ fn capture(job: &Job, root: &str, mut out: std::fs::File, mut err: std::fs::File
         // firmlinks once, not walked again at `/System/Volumes/Data`.
         one_fs: root == "/",
         container: cfg!(target_os = "macos"),
+        progress: Some(Box::new(move |files, bytes| save_progress(&Progress { phase: "capture".into(), files, bytes, since }))),
     };
+    save_progress(&Progress { phase: "capture".into(), files: 0, bytes: 0, since });
     let _ = writeln!(out, "{}", stamped(&format!("capture {root} → {to}")));
     let s = match dt_capture::capture(&opts) {
         Ok(s) => s,
@@ -227,6 +232,7 @@ fn capture(job: &Job, root: &str, mut out: std::fs::File, mut err: std::fs::File
     );
     let Some(then) = &job.then else { return 0 };
     let Some((program, args)) = then.command.split_first() else { return 0 };
+    save_progress(&Progress { phase: "then".into(), files: s.n_rows, bytes: s.n_bytes, since });
     let mut cmd = Command::new(program);
     cmd.args(args).arg(&s.dir).envs(&then.env).stdout(out.try_clone().unwrap()).stderr(err.try_clone().unwrap());
     let code = crate::agent::run_child(cmd);

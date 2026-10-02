@@ -41,12 +41,16 @@ pub struct Opts {
     pub one_fs: bool,
     /// Record the APFS container in the manifest (macOS).
     pub container: bool,
+    /// Called after each shard is written, with the files and bytes so far.
+    pub progress: Option<Box<dyn Fn(u64, u64)>>,
 }
 
 pub struct Summary {
     /// The capture dir: a path, or a URL under `--to`'s.
     pub dir: String,
     pub n_rows: u64,
+    /// Σ `size_bytes`.
+    pub n_bytes: u64,
     pub n_shards: u64,
     pub error_count: u64,
 }
@@ -100,6 +104,7 @@ struct Shards {
     sizes: Vec<i64>,
     mtimes: Vec<i64>,
     n_rows: u64,
+    n_bytes: u64,
     n_shards: u64,
 }
 
@@ -109,6 +114,7 @@ impl Shards {
             return Ok(());
         }
         let n = self.names.len();
+        self.n_bytes += self.sizes.iter().sum::<i64>() as u64;
         let cols: Vec<ArrayRef> = vec![
             Arc::new(LargeStringArray::from(vec![self.root.as_str(); n])),
             Arc::new(LargeStringArray::from(std::mem::take(&mut self.names))),
@@ -142,7 +148,7 @@ pub fn capture(opts: &Opts) -> io::Result<Summary> {
 
     let excludes = dt_walker::default_excludes();
     let mut walker = dt_walker::Walker::new(&excludes).one_fs(opts.one_fs);
-    let mut shards = Shards { dir, root: root.clone(), names: vec![], sizes: vec![], mtimes: vec![], n_rows: 0, n_shards: 0 };
+    let mut shards = Shards { dir, root: root.clone(), names: vec![], sizes: vec![], mtimes: vec![], n_rows: 0, n_bytes: 0, n_shards: 0 };
     let prefix: Vec<u8> = if root == "/" { b"/".to_vec() } else { format!("{root}/").into_bytes() };
     let batch_rows = opts.batch_rows.max(1);
     let mut errbuf: Vec<u8> = Vec::new();
@@ -158,6 +164,9 @@ pub fn capture(opts: &Opts) -> io::Result<Summary> {
             shards.mtimes.push(r.mtime * 1000);
             if shards.names.len() >= batch_rows {
                 shards.flush()?;
+                if let Some(f) = &opts.progress {
+                    f(shards.n_rows, shards.n_bytes);
+                }
             }
             Ok(())
         },
@@ -187,7 +196,7 @@ pub fn capture(opts: &Opts) -> io::Result<Summary> {
         }
     }
     shards.dir.put(MARKER, (serde_json::to_string_pretty(&manifest)? + "\n").into_bytes())?;
-    Ok(Summary { dir: shards.dir.display(), n_rows: shards.n_rows, n_shards: shards.n_shards, error_count: walker.errors.count })
+    Ok(Summary { dir: shards.dir.display(), n_rows: shards.n_rows, n_bytes: shards.n_bytes, n_shards: shards.n_shards, error_count: walker.errors.count })
 }
 
 /// `DISK_TREE_HOST`, else the hostname (what `capture.py` uses).

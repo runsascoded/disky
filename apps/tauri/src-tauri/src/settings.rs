@@ -144,6 +144,35 @@ pub fn save_state(st: &ScanState) -> Result<(), String> {
     write_json(&p, &v)
 }
 
+/// A running in-process scan's progress (`disky-progress.json`), for the menu:
+/// written by the scan job as it goes, removed when it ends.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Progress {
+    /// `capture`, then `then` (the follow-on step, e.g. the ingest submit).
+    pub phase: String,
+    pub files: u64,
+    pub bytes: u64,
+    /// Epoch seconds the scan started.
+    pub since: i64,
+}
+
+fn progress_path() -> std::path::PathBuf {
+    crate::jobs::config_path().with_file_name("disky-progress.json")
+}
+
+pub fn load_progress() -> Option<Progress> {
+    serde_json::from_slice(&std::fs::read(progress_path()).ok()?).ok()
+}
+
+pub fn save_progress(p: &Progress) {
+    let _ = write_json(&progress_path(), &serde_json::to_value(p).unwrap());
+}
+
+pub fn clear_progress() {
+    let _ = std::fs::remove_file(progress_path());
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }

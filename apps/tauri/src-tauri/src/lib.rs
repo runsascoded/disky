@@ -413,10 +413,12 @@ pub fn run() {
                 show_window(app.handle(), None);
             }
 
-            // Keep the menu fresh (launchd, the run state and settings are the record).
+            // Keep the menu fresh (launchd, the run state and settings are the
+            // record): every 3 s while a scan runs (its progress line), else 20 s.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(20));
+                let busy = settings::load_progress().is_some() || settings::load_state().force;
+                std::thread::sleep(Duration::from_secs(if busy { 3 } else { 20 }));
                 if let Some(t) = handle.try_state::<Tray>() {
                     t.refresh();
                 }
