@@ -1,6 +1,6 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { describe, expect, it } from 'vitest'
-import { APP_LINK_NAME, APP_LINK_TTL_S, mintAppLink, redeemAppLink } from './appLink'
+import { APP_LINK_NAME, APP_LINK_TTL_S, appHandoff, mintAppLink, redeemAppLink } from './appLink'
 import { type Env, gateFor, identify } from './auth'
 import { sqliteD1 } from './testD1'
 
@@ -216,5 +216,69 @@ describe('GET /auth/app-link — redeem', () => {
     const s = await mintFor(VIEWER)
     const res = await redeemAppLink({ request: new Request(s.url, { method: 'POST' }), env: s.env })
     expect(res.status).toBe(405)
+  })
+})
+
+describe('GET /auth/app-handoff — the browser leg, no SPA', () => {
+  const get = (path: string, headers: Record<string, string> = {}) => new Request(`${ORIGIN}${path}`, { headers })
+  /** The page's shape: its <h1>, and the `disky://` link it opens (token
+   *  normalized), if any. */
+  async function page(res: Response) {
+    const text = await res.text()
+    const app = text.match(/location\.href = "([^"]+)"/)?.[1] ?? null
+    let link: string | null = null
+    let token: string | null = null
+    if (app) {
+      const u = new URL(new URL(app).searchParams.get('link')!)
+      token = u.searchParams.get('token')
+      u.searchParams.set('token', '<token>')
+      link = decodeURIComponent(u.toString())
+    }
+    return {
+      status: res.status,
+      type: res.headers.get('content-type'),
+      h1: text.match(/<h1>([^<]*)<\/h1>/)?.[1] ?? null,
+      scheme: app && new URL(app).protocol,
+      link,
+      token,
+    }
+  }
+
+  it('signed out → Google sign-in, returning here with `next`', async () => {
+    const s = await setup()
+    const res = await appHandoff({ request: get('/auth/app-handoff?next=%2FUsers%2Fx'), env: s.env })
+    expect([res.status, res.headers.get('location')]).toEqual([303, '/auth/google?next=%2Fauth%2Fapp-handoff%3Fnext%3D%252FUsers%252Fx'])
+  })
+
+  it('signed in, opened by the OS (`Sec-Fetch-Site: none`) → a page that opens disky with a fresh link to `next`', async () => {
+    const s = await setup()
+    const cookie = await s.session(VIEWER)
+    const res = await appHandoff({ request: get('/auth/app-handoff?next=%2FUsers%2Fx', { cookie, 'sec-fetch-site': 'none' }), env: s.env })
+    const { token, ...rest } = await page(res)
+    expect(rest).toEqual({
+      status: 200,
+      type: 'text/html; charset=utf-8',
+      h1: 'Signed in to disky',
+      scheme: 'disky:',
+      link: `${ORIGIN}/auth/app-link?token=<token>&next=/Users/x`,
+    })
+    expect(token).toMatch(TOKEN_RE)
+    // The link redeems like one minted by "Open in disky".
+    const red = await redeemAppLink({ request: redeem(`${ORIGIN}/auth/app-link?token=${token}&next=%2FUsers%2Fx`), env: s.env })
+    expect([red.status, red.headers.get('location')]).toEqual([303, '/Users/x'])
+  })
+
+  it('back from the sign-in redirect (`same-origin`) also mints', async () => {
+    const s = await setup()
+    const res = await appHandoff({ request: get('/auth/app-handoff', { cookie: await s.session(VIEWER), 'sec-fetch-site': 'same-origin' }), env: s.env })
+    const { token: _, ...rest } = await page(res)
+    expect(rest).toEqual({ status: 200, type: 'text/html; charset=utf-8', h1: 'Signed in to disky', scheme: 'disky:', link: `${ORIGIN}/auth/app-link?token=<token>` })
+  })
+
+  it('a cross-site navigation mints nothing: a button to continue instead', async () => {
+    const s = await setup()
+    const res = await appHandoff({ request: get('/auth/app-handoff', { cookie: await s.session(VIEWER), 'sec-fetch-site': 'cross-site' }), env: s.env })
+    expect(await page(res)).toEqual({ status: 200, type: 'text/html; charset=utf-8', h1: 'Open disky?', scheme: null, link: null, token: null })
+    expect(await grants(s.db)).toEqual([])
   })
 })

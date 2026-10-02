@@ -15,7 +15,7 @@
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { pathGens, storeReady, type Lens } from '../_lib/index.js'
 import { ledgerHead } from '../_lib/ledger.js'
-import { classKey, parseClasses, parseOwner, parseQuery } from '../_lib/scope.js'
+import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
 import { ATTEN_DEFAULT, buildDiff, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT } from '../_lib/view.js'
 import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
@@ -56,7 +56,16 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   const owner = parseOwner(rawOwner)
   const classes = parseClasses(url.searchParams.get('cl'))
   const qRaw = url.searchParams.get('q') ?? ''
-  const query = parseQuery(qRaw) ?? undefined
+  // `q=` in `qs=`'s syntax: a parse error (or an unknown syntax) is a 400
+  // whose text the filter box shows under itself.
+  let qp: ReturnType<typeof queryParam>
+  try {
+    qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX)
+  } catch (e) {
+    if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
+    throw e
+  }
+  const query = qp.query
 
   const gated = await st.time('auth', requireViewer(ctx as never))
   if (gated instanceof Response) return gated
@@ -67,7 +76,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
     const [head, g] = await st.time('pre', Promise.all([lens && ctx.env.DB ? ledgerHead(ctx.env) : Promise.resolve(0), pathGens(ctx.env, [from, to])]))
     const cacheKey = cacheKeyFor('diff',
       `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensRaw ?? ''}` +
-        `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}`,
+        `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}`,
       storeKey(ctx.env),
     )
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))

@@ -10,28 +10,12 @@ import type { TreeNode } from './types'
 export type NamePred = (name: string) => boolean
 export type NodePred = (n: TreeNode) => boolean
 
-/** `/…/` = regex (case-insensitive); anything else = substring (ci), with
- * `|` splitting alternatives (`grug|swarm` = either). Predicates receive the
- * node's full path below the root (`bucket/dir/sub`), so `grug/swarm` matches
- * across segments and regexes can span `/`. */
-export function parseQuery(q: string): NamePred | null {
-  const s = q.trim()
-  if (!s) return null
-  if (s.length > 2 && s.startsWith('/') && s.endsWith('/')) {
-    try {
-      const re = new RegExp(s.slice(1, -1), 'i')
-      return path => re.test(path)
-    } catch {
-      return null
-    }
-  }
-  const needles = s.toLowerCase().split('|').map(t => t.trim()).filter(Boolean)
-  if (!needles.length) return null
-  return path => {
-    const p = path.toLowerCase()
-    return needles.some(t => p.includes(t))
-  }
-}
+/** The path filter, the server's own code: the syntaxes and their registry
+ * (`functions/_lib/querySyntax.ts`, text → AST) and the predicate
+ * (`functions/_lib/pathQuery.ts`, AST → test on the node's full path below
+ * the root, `bucket/dir/sub`). */
+export { compileQuery, parseQuery } from '../functions/_lib/pathQuery'
+export { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from '../functions/_lib/querySyntax'
 
 /** Re-aggregate a node's stats (b/o/tm/sh/us/d) from a filtered kid set. */
 export function reaggregate(n: TreeNode, kids: TreeNode[]): TreeNode {

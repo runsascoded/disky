@@ -215,6 +215,8 @@ def write_sorts(
     groups: bool = True,
     row_group_rows: int = ROW_GROUP_SIZE,
     variant_tiers: tuple[str, ...] | None = None,
+    search: bool = False,
+    search_opts: dict | None = None,
 ) -> dict[str, dict]:
     """Cut the store's two sorts (+ ``sort_variants`` of each) from the union
     at ``store`` into ``out_dir`` under their served names, with the
@@ -223,7 +225,12 @@ def write_sorts(
 
     ``row_group_rows``: the HTTP range-read unit — and the D1 footer's row
     count per sort. A fleet the size of gcs (777M rows) needs 32K to keep
-    two sorts × 120 scans under D1's 10 GB (specs/path-store.md §1.6)."""
+    two sorts × 120 scans under D1's 10 GB (specs/path-store.md §1.6).
+
+    ``search``: also write the search sidecars beside the `path` sort
+    (`path-index.{rows,trigrams,rows-search}.parquet`, specs/path-store-search.md;
+    ``search_opts`` passes `write_search`'s sizes) — reported as the `path`
+    entry's ``search`` (names, rows, postings, files)."""
     import pyarrow.parquet as pq
     from disk_tree.find.groups import groups_parquet_path, groups_path
     from disk_tree.find.tiers import TIERS, tier_path, write_tiers
@@ -246,6 +253,12 @@ def write_sorts(
             name = variant_name(tier, variant)
             result[name] = {"file": dst, "rows": written[src], "groups": pq.read_metadata(dst).num_row_groups}
             err(f"{name}: {written[src]:,} rows, {result[name]['groups']:,} row groups → {dst}")
+    if search:
+        from disk_tree.find.search import write_search
+
+        st = write_search(result["path"]["file"], con=con, **(search_opts or {}))
+        result["path"]["search"] = {"names": st.names, "rows": st.rows, "postings": st.postings, "files": st.files}
+        err(f"search: {st.names:,} names, {st.rows:,} rows, {st.postings:,} trigram postings → {st.files['search']}")
     return result
 
 
@@ -411,6 +424,8 @@ def write_index(
     sort_variants: tuple[tuple[str, ...], ...] = (),
     row_group_rows: int = ROW_GROUP_SIZE,
     variant_tiers: tuple[str, ...] | None = None,
+    search: bool = False,
+    search_opts: dict | None = None,
 ) -> dict:
     """Write the store's sorts (`path-index.parquet`, `path-index-bysize.parquet`,
     + `sort_variants` copies) and the age pyramid under ``out_dir`` from
@@ -422,7 +437,10 @@ def write_index(
     ``age_only``: write *only* the age pyramid (skip the sorts). For a
     ladder-only backfill, where the layer-2s are unchanged so the sorts would
     come out byte-identical — sync just the `age-pyramid-*` variants
-    (`index-sync -A`) and the sort pointers keep their generation."""
+    (`index-sync -A`) and the sort pointers keep their generation.
+
+    ``search``: the search sidecars beside the `path` sort (`write_sorts`);
+    the summary's ``search`` names them."""
     out = Path(out_dir)
     con = duckdb.connect()
     con.execute(f"SET memory_limit='{mem}'; SET threads={threads}")
@@ -437,7 +455,7 @@ def write_index(
                 "pyramid": pyramid,
                 "files": {AGE_PYRAMID_VARIANTS[b]: s["file"] for b, s in pyramid["bins"].items()},
             }
-        sorts = write_sorts(con, store, out, sort_variants=sort_variants, row_group_rows=row_group_rows, variant_tiers=variant_tiers)
+        sorts = write_sorts(con, store, out, sort_variants=sort_variants, row_group_rows=row_group_rows, variant_tiers=variant_tiers, search=search, search_opts=search_opts)
         n = sorts["path"]["rows"]
         err(f"store: {n:,} rows ({', '.join(columns)}) over {buckets}")
         pyramid = write_age_pyramid(con, store, out)
@@ -449,6 +467,7 @@ def write_index(
         "columns": columns,
         "sorts": {v: {"rows": s["rows"], "groups": s["groups"]} for v, s in sorts.items()},
         "pyramid": pyramid,
+        **({"search": sorts["path"]["search"]} if search else {}),
         "files": {
             **{v: s["file"] for v, s in sorts.items()},
             **{AGE_PYRAMID_VARIANTS[b]: s["file"] for b, s in pyramid["bins"].items()},

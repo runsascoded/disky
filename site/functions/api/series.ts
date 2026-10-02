@@ -21,6 +21,7 @@ import { classKey, parseClasses, parseOwner } from '../_lib/scope.js'
 import { readRootAgg, readRootRows } from '../_lib/view.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
+import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
 import { metaRoots, rootPoints, type RootRow } from '../_lib/series.js'
 import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
@@ -80,7 +81,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // is the sum of one root read per scan. Bounded like a view's region reads.
   const paths = parsePaths(url.searchParams.getAll('paths'))
   if (paths.some(p => p.includes('..') || p.startsWith('/'))) return json({ error: 'bad paths' }, 400)
-  if (paths.length > 24) return json({ error: 'too many paths (max 24)' }, 400)
+  if (paths.length > SERIES_MAX_PATHS) return json({ error: `too many paths (max ${SERIES_MAX_PATHS})` }, 400)
   const lensRaw = url.searchParams.get('lens')
   let lens: Lens | undefined
   if (lensRaw) {

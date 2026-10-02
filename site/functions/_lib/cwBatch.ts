@@ -6,7 +6,6 @@
 // region (`BATCH_REGION`).
 import { BATCH_REGION, GCP_PROJECT, batchJobsUrl } from "./gcp.js"
 
-export const JOB_SA = `gcs-usage-job@${GCP_PROJECT}.iam.gserviceaccount.com`
 // The CoreWeave-scan image (built by job/build.sh, tag `cw`); carries the marin
 // CLI with `sweep manifest`/`execute` and the `.[s3]` (boto3) extras.
 export const CW_IMAGE = `us-central1-docker.pkg.dev/${GCP_PROJECT}/cloud-run-source-deploy/gcs-usage-snapshot:cw`
@@ -26,10 +25,10 @@ export const secretRef = (name: string): string =>
   `projects/${GCP_PROJECT}/secrets/${name}/versions/latest`
 
 /** The standard cw-sweep Batch job spec (mirrors job/cw-batch-submit.sh): the cw
- * image running `bash -c <script>`, the data bucket FUSE-mounted at /gcs/<bucket>,
- * and the CAIOS S3 creds from Secret Manager. `env` merges in per-job variables,
- * `secrets` per-job Secret Manager refs. */
-export function sweepBatchSpec(script: string, env: Record<string, string> = {}, secrets: Record<string, string> = {}): unknown {
+ * image running `bash -c <script>` as `jobSa`, the data bucket FUSE-mounted at
+ * /gcs/<bucket>, and the CAIOS S3 creds from Secret Manager. `env` merges in
+ * per-job variables, `secrets` per-job Secret Manager refs. */
+export function sweepBatchSpec(jobSa: string, script: string, env: Record<string, string> = {}, secrets: Record<string, string> = {}): unknown {
   return {
     taskGroups: [{
       taskCount: 1,
@@ -68,7 +67,7 @@ export function sweepBatchSpec(script: string, env: Record<string, string> = {},
     }],
     allocationPolicy: {
       instances: [{ policy: { machineType: "n2-standard-8", bootDisk: { type: "pd-balanced", sizeGb: "100" } } }],
-      serviceAccount: { email: JOB_SA },
+      serviceAccount: { email: jobSa },
       location: { allowedLocations: [`regions/${BATCH_REGION}`] },
     },
     logsPolicy: { destination: "CLOUD_LOGGING" },

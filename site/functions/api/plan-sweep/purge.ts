@@ -25,6 +25,7 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   if (gated instanceof Response) return gated
   if (!ctx.env.DB) return json({ error: "not configured (no D1 binding)" }, 503)
   if (!ctx.env.GCP_SA_KEY) return json({ error: "not configured (no GCP_SA_KEY)" }, 503)
+  if (!ctx.env.JOB_SA) return json({ error: "not configured (no JOB_SA)" }, 503)
   const db = ctx.env.DB
 
   const runId = ((await ctx.request.json().catch(() => null)) as { run_id?: string } | null)?.run_id ?? ""
@@ -43,7 +44,7 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   const jobId = `cw-purge-${jobStamp()}z`
   const script = `set -euo pipefail\ndt-cloud plan-sweep purge "${runMountPath(runId)}"`
   const token = await gcpToken(ctx.env.GCP_SA_KEY)
-  const { ok, status, text } = await submitBatch(token, jobId, sweepBatchSpec(script, { OP: "purge", TARGET_RUN: runId }))
+  const { ok, status, text } = await submitBatch(token, jobId, sweepBatchSpec(ctx.env.JOB_SA, script, { OP: "purge", TARGET_RUN: runId }))
   if (!ok) {
     console.error("purge submit failed", status, text.slice(0, 2000))
     return json({ error: `batch submit failed (${status})`, status }, 500)

@@ -65,8 +65,8 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
   const googleUrl = next ? `/auth/google?next=${encodeURIComponent(next)}` : '/auth/google'
   // Inside the macOS app Google refuses OAuth (embedded webview), and its
   // in-page button's popup goes nowhere: send Google sign-in to the default
-  // browser, which hands the session back via "Open in disky" (`?open-in-disky`,
-  // fired unprompted once signed in there). The emailed code works in-app.
+  // browser's `/auth/app-handoff`, a server page that signs in there and hands
+  // the session back to the app. The emailed code works in-app.
   const app = inApp(navigator, window)
   // A verified-but-not-allowed address from the in-page button: land on the
   // same `?denied=` the redirect flow bounces to, so the wall unfolds

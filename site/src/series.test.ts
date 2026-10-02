@@ -196,6 +196,22 @@ describe('bandCallouts', () => {
       { x: 3, y: 115, y0: 95, h: 20, below: false }, // last
     ])
   })
+  it('skips the x’s where the band is the whole stack (a lone root): its label would repeat the total’s', () => {
+    // The bottom band is alone at x=1,2 (top = its own edge), joined from x=3.
+    const bottom = [
+      { x: 1, y0: 0, y: 900 },
+      { x: 2, y0: 0, y: 600 },
+      { x: 3, y0: 0, y: 800 },
+      { x: 4, y0: 0, y: 850 },
+      { x: 5, y0: 0, y: 820 },
+    ]
+    const top = new Map([[1, 900], [2, 600], [3, 880], [4, 940], [5, 900]])
+    expect(bandCallouts(bottom, undefined, 0, top)).toEqual([
+      { x: 4, y: 850, y0: 0, h: 850, below: false }, // max height (multi-root x's only)
+      { x: 3, y: 800, y0: 0, h: 800, below: true }, // min height (= first)
+      { x: 5, y: 820, y0: 0, h: 820, below: true }, // last
+    ])
+  })
 })
 
 describe('unitTicks', () => {

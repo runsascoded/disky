@@ -407,6 +407,7 @@ def wandb_mine(
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", "out_dir", type=Path, default=None, help="Output dir for JSON files [default: site/public/data/<asof>]")
 @option("-r", "--row-group-rows", default=None, type=int, help="Parquet row-group size for the store's sorts (default 8192 — the reader decodes ~one group per depth of a drilled subtree, so 32768 pushed small drills past its decode cap; specs/path-store.md §1.6)")
+@option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/path-store-search.md); upload them with the generation dir")
 @option("-u", "--user-sort-tiers", default=None, help="Only these sorts get a `-by-user` copy, comma-separated (`bysize`: the copy a lens view reads; default every sort)")
 @option("-U", "--no-user-sorts", "user_sorts", is_flag=True, flag_value=False, default=True, help="Skip every `-by-user` sort copy (a lens then reads the mixed-user sorts, filtered per row — fine below the root, too wide at a user's root view; see -u)")
 @option("-P", "--path-index", "path_index", type=Path, default=None, help="Write the path store here (`<dir>/path-index.parquet`, the `path` sort; `path-index-bysize.parquet` and the by-user copies land beside it — specs/path-store.md §4.3)")
@@ -421,6 +422,7 @@ def build_path_index(
     out_dir: Path | None,
     path_index: Path | None,
     row_group_rows: int | None,
+    search: bool,
     user_sort_tiers: str | None,
     user_sorts: bool,
     access: tuple[str, ...],
@@ -439,7 +441,7 @@ def build_path_index(
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
         listings, out_dir, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-        user_sorts=user_sorts, row_group_rows=row_group_rows, age_strata=age_strata,
+        user_sorts=user_sorts, row_group_rows=row_group_rows, age_strata=age_strata, search=search,
         user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
@@ -523,8 +525,6 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
     from .site import creds
 
     base, tok = creds(token, url)
-    if not tok:
-        raise SystemExit("error: no token — pass --token or set $GCS_USAGE_TOKEN")
     sub = subdir if subdir is not None else os.environ.get("SNAPSHOTS_SUBDIR", "")
     resolved, checks = run_checks(base, tok, date, max_age_days=max_age_days, subdir=sub)
     err(f"healthcheck {base} @ {resolved or '?'}")
@@ -535,6 +535,56 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
     err(f"{'PASS' if ok else 'FAIL'} ({n_ok}/{len(checks)})")
     if as_json:
         print(json.dumps(as_dict(resolved, checks), indent=2))
+    if not ok:
+        raise SystemExit(1)
+
+
+@main.command()
+@option("-b", "--budget", default=None, type=float, help="Fail a scenario whose slowest request exceeds this many seconds")
+@option("-c", "--cold", is_flag=True, help="Key subtree and diff reads past the edge cache (a random `minArea` ≈ the default), to measure uncached cost")
+@option("-j", "--json", "as_json", is_flag=True, help="Emit the run record (every request) as JSON to stdout")
+@option("-o", "--out", default=None, help="Write the run record to this path or prefix (`…/` or `gs://…/` → `<prefix><ts>.json`)")
+@option("-q", "--hit", default=None, help="Filter term the filter-hit scenario searches for (default: the largest bucket's largest child)")
+@option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ (default: $SNAPSHOTS_SUBDIR)")
+@option("-S", "--serial", is_flag=True, help="Send each scenario's requests one at a time (default: concurrently, as a page load does)")
+@option("-t", "--token", default=None, help="Bearer token (default: $GCS_USAGE_TOKEN; none for a public deployment like r2.rbw.sh)")
+@option("-u", "--url", default=None, help=f"Site base URL (default: $GCS_USAGE_URL or {SITE_DEFAULT_URL})")
+def probe(budget: float | None, cold: bool, as_json: bool, out: str | None, hit: str | None, subdir: str | None, serial: bool, token: str | None, url: str | None) -> None:
+    """Replay the site's page loads (root, largest bucket, a matching and a
+    non-matching path filter) against a live deployment.
+
+    Each scenario's API requests go out concurrently, like the browser's, and
+    each response's status, wall time, edge-cache tier and server time is
+    recorded. Exits nonzero on any 5xx or transport failure (and on a scenario
+    over `--budget`). `-o` keeps the record, so a prefix of runs is a latency
+    time series.
+    """
+    import fsspec
+
+    import random
+
+    from .probe import cold_min_area, http_fetch, record, resolve_targets, run, scenarios, summarize
+    from .site import creds
+
+    base, tok = creds(token, url)
+    sub = subdir if subdir is not None else os.environ.get("SNAPSHOTS_SUBDIR", "")
+    fetch = http_fetch(base, tok)
+    t = resolve_targets(fetch, sub, hit)
+    min_area = cold_min_area(random.Random()) if cold else ""
+    err(f"probe {base} @ {t.date} (vs {t.prev}; bucket {t.bucket}; filter hit {t.hit!r}{'; cold' if cold else ''})")
+    results = run(fetch, scenarios(t, min_area), parallel=not serial)
+    ok, lines = summarize(results, round(budget * 1000) if budget is not None else None)
+    for line in lines:
+        err(line)
+    err("PASS" if ok else "FAIL")
+    rec = {**record(base, t, results), "cold": cold}
+    if out:
+        path = f"{out}{rec['ts']}.json" if out.endswith("/") else out
+        with fsspec.open(path, "w") as fh:
+            json.dump(rec, fh)
+        err(f"wrote {path}")
+    if as_json:
+        print(json.dumps(rec, indent=2))
     if not ok:
         raise SystemExit(1)
 
@@ -555,10 +605,11 @@ def bucket_sources(specs: tuple[str, ...], default_bucket: str) -> list[tuple[st
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Output dir: path-index.parquet + path-index-bysize.parquet (+ .groups.json sidecars) + age-pyramid-*.parquet")
 @option("-r", "--row-group-rows", default=8192, type=int, help="Parquet row-group size for the sorts — the range-read unit and the D1 footer's row count per sort (default 8192; a gcs-sized fleet uses 32768, specs/path-store.md §1.6)")
+@option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`, specs/path-store-search.md)")
 @option("-t", "--threads", default=8, type=int, help="DuckDB threads")
 @option("-T", "--tmp", "tmp_dir", type=Path, default=None, help="DuckDB spill dir (default: <out>/.duckdb-tmp)")
 @argument("sources", nargs=-1, required=True)
-def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row_group_rows: int, threads: int, tmp_dir: Path | None, sources: tuple[str, ...]) -> None:
+def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row_group_rows: int, search: bool, threads: int, tmp_dir: Path | None, sources: tuple[str, ...]) -> None:
     """Write the scan's path store from its layer-2 parquet(s) — SOURCES are
     `<bucket>=<l2.parquet>` pairs, one per bucket of the scan (a bare path is
     `-b`'s bucket): every row (objects and dirs), bucket-prefixed, in the
@@ -572,7 +623,7 @@ def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row
 
     s = write_index(
         bucket_sources(sources, bucket or CW_BUCKET), out_dir,
-        mem=mem, threads=threads, tmp_dir=tmp_dir, age_only=age_only, row_group_rows=row_group_rows,
+        mem=mem, threads=threads, tmp_dir=tmp_dir, age_only=age_only, row_group_rows=row_group_rows, search=search,
     )
     if age_only:
         err(f"index-write: age pyramid only — floor {s['pyramid']['floor']}, {len(s['pyramid']['bins'])} tiers over {s['buckets']}")

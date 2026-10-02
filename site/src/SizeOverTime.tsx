@@ -15,6 +15,7 @@ import { DAY, fmtScan } from './scan'
 import type { Band } from './series'
 import { stringParam } from 'use-prms'
 import { perf, usePerfCommit } from './perf'
+import { SERIES_MAX_PATHS } from '../functions/_lib/seriesLimits'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -192,6 +193,9 @@ export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, w
   // The store root, unscoped: one trace per root (specs/done/root-geneses.md §2).
   const split = !prefix && !user && !pool && !paths?.length && !filterLabel
   const scope = (user ? `&lens=user:${encodeURIComponent(user)}` : pool ? `&o=${pool}` : '') + (paths?.length ? `&paths=${encodeURIComponent(paths.join(','))}` : '') + (split ? '&split=roots' : '')
+  // A filter with more match roots than one series request charts: say so,
+  // rather than send a request the server refuses (or the URL can't carry).
+  const tooMany = (paths?.length ?? 0) > SERIES_MAX_PATHS
   // The subtree's store: its key in the query key (two mounted stores may
   // share a prefix spelling), its `store=` on the request.
   const store = useStore()
@@ -200,7 +204,7 @@ export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, w
     queryKey: ['series', store.key, prefix, scope, scans.length],
     // Under a filter, wait for its match roots: the whole-store series is not
     // what the page asked for.
-    enabled: scans.length > 1 && !(filterLabel && !paths?.length),
+    enabled: scans.length > 1 && !(filterLabel && !paths?.length) && !tooMany,
     staleTime: 5 * 60_000,
     queryFn: async () => {
       const pf = perf.start('series', `${prefix || '/'}${scope}|n${scans.length}`)
@@ -282,9 +286,12 @@ export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, w
       // their own callouts), so the total's labels always go above.
       .map(c => ({ x: c.x, y: c.y, label: fmtY(c.y), below: stacked ? false : c.below }))
     if (stacked) {
+      // The stack's top edge per x, from the bands themselves (their own sums).
+      const top = new Map<number, number>()
+      for (const s of series) if (s.key !== 'total') for (const b of s.points as Band[]) top.set(b.x, Math.max(top.get(b.x) ?? -Infinity, b.y))
       for (const s of series) {
         if (s.key === 'total') continue
-        for (const c of bandCallouts(s.points as Band[], radius, floor)) out.push({ x: c.x, y: c.y, y0: c.y0, label: fmtBytes(c.h) })
+        for (const c of bandCallouts(s.points as Band[], radius, floor, top)) out.push({ x: c.x, y: c.y, y0: c.y0, label: fmtBytes(c.h) })
       }
     }
     return out
@@ -366,7 +373,9 @@ export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, w
         </div>
       )}
       {seriesQ.isError && <p className="sub"><i>series unavailable</i></p>}
-      {allZero ? (
+      {tooMany ? (
+        <p className="loading">size over time charts up to {SERIES_MAX_PATHS} matches; this filter has {paths!.length.toLocaleString()}. Narrow it to chart.</p>
+      ) : allZero ? (
         <p className="loading">
           {user ? <><b>{shortName(user)}</b> owns nothing{prefix ? <> under <code>{prefix}</code></> : ''} in any scan</>
             : pool === 'unowned' ? <>nothing{prefix ? <> under <code>{prefix}</code></> : ''} is unowned in any scan</>

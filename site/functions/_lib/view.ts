@@ -33,6 +33,8 @@ import { type IndexHandle, isStore, type Lens, openIndex, planRects, planSizeRec
 import { ownerLens, type OwnerLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
+import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
+import { planNegative, planPositive } from './searchQuery.js'
 import { ownerClaims } from './ownerTotals.js'
 import { shared } from './shared.js'
 import { storeKey } from './stores.js'
@@ -54,6 +56,15 @@ const COARSE_EXPS = [16, 20, 24]
  * is cheaper (gcs's 32K-row groups: a 2K-row dir 20 levels deep decoded
  * ~1.3M rows from `path`). The two span queries cost ~20 ms. */
 export const SMALL_SUBTREE_ROWS = 0
+/** A v1 floor-free tier is sorted `(depth, path)`, so a size threshold can't
+ * prune it: the filter's no-match fallback reads every row under the path.
+ * For a whole bucket that read exceeds the Worker's limits (a bucket-level
+ * filter on 2026-10-01 died with 1102 and took its isolate's other requests
+ * with it), so past this many objects under the path (v1 rows carry no row
+ * count; a subtree's dirs are far fewer than its objects) the fallback is
+ * skipped and the matches are the coarse tiers'. A 390k-object subtree
+ * read in 5–8 s. */
+export const V1_FILTER_SCAN_OBJECTS = 500_000
 
 /** A node of the served tree. `k`: what the path is — an object (`file`) or
  * a directory; a v1 generation only has directories, and a fold (`(other)`)
@@ -95,9 +106,14 @@ export interface ViewOpts {
   /** With `query`: the fast first paint — the forest read from the coarsest
    * tier regardless of the budget (specs/filter-views.md §2). The client
    * re-requests with `full=1` for the planned tiers. */
-  partial?: boolean
+  firstPaint?: boolean
   /** The store's small-subtree cutoff, rows (default `SMALL_SUBTREE_ROWS`). */
   smallRows?: number
+  /** With `query` on a v1 scan: the largest subtree (objects) the no-match
+   * fallback reads (default `V1_FILTER_SCAN_OBJECTS`). */
+  v1ScanObjects?: number
+  /** The search index's read budgets (default `SEARCH_LIMITS`). */
+  searchLimits?: SearchLimits
 }
 
 export interface View {
@@ -113,11 +129,48 @@ export interface View {
   truncated: boolean
   /** With `query`: the outermost matching paths (what a bulk action targets). */
   matches?: string[]
-  /** With `query`: each match root's scoped total (the series / subtitles). */
+  /** With `query`: each match root's scoped total (the series / subtitles),
+   * net of its excluded descendants (NOT). */
   matched?: { path: string; b: number; o: number }[]
+  /** With a NOT query: the outermost excluded paths under the match roots
+   * (subtracted from their roots' totals, absent from the tree). */
+  excluded?: string[]
   /** With `query`: read from the coarsest tier for the first paint. */
-  partial?: boolean
+  firstPaint?: boolean
+  /** With `query`: a read budget stopped the search — some matches may be
+   * missing (`partialReason` says why). Never silent. */
+  partial?: true
+  partialReason?: string
+  /** With `query`: the matches came from a thresholded read, not the search
+   * index — small ones may be missing (`approximateReason` says why). */
+  approximate?: true
+  approximateReason?: string
 }
+
+/** Whether a filtered read may be missing matches, and why (the response's
+ * `partial` / `approximate`): every way the filter view can see fewer
+ * matches than exist sets one. */
+export interface Coverage {
+  partial?: string[]
+  approximate?: string[]
+}
+export const APPROX_NO_INDEX = 'this scan has no search index; small matches may be missing'
+export const APPROX_V1_TOO_BIG = 'this scan has no search index and this view is too big to scan; small matches may be missing'
+export const APPROX_UNINDEXED = 'this query can’t use the search index; small matches may be missing'
+export const APPROX_LENS = 'a user lens filters only the rows it read; small matches may be missing'
+export const APPROX_EXCL_NO_INDEX = 'this scan has no search index; small exclusions may be missed'
+export const APPROX_EXCL_UNINDEXED = 'this query’s exclusions can’t use the search index; small ones may be missed'
+/** Add a reason (once) to a coverage flag. */
+export function noteCoverage(cov: Coverage, flag: keyof Coverage, why: string | undefined): void {
+  if (!why) return
+  const have = (cov[flag] ??= [])
+  if (!have.includes(why)) have.push(why)
+}
+/** A coverage as response fields. */
+export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason'> => ({
+  ...(c.partial ? { partial: true as const, partialReason: c.partial.join(' · ') } : {}),
+  ...(c.approximate ? { approximate: true as const, approximateReason: c.approximate.join(' · ') } : {}),
+})
 
 export class NotFound extends Error {}
 /** The scan has no synced index for this lens (older scans) — a client-side
@@ -427,7 +480,11 @@ interface Read {
   truncated: boolean
   matches?: string[]
   matched?: { path: string; b: number; o: number }[]
-  partial?: boolean
+  /** With a NOT query: the outermost excluded paths under the match roots. */
+  excluded?: string[]
+  /** …and their scoped aggregates (what a diff's point lookups subtract). */
+  excl?: Map<string, Agg>
+  firstPaint?: boolean
   /** The claims fold behind a user lens (null: no lens, or no claims). */
   ownerLens: OwnerLens | null
   /** A path's scoped share of its total (owner pool / lens applied). `all` =
@@ -436,7 +493,9 @@ interface Read {
   scoped: (p: string, all: Agg | null, mine: Agg | null) => Agg
 }
 
-async function readView(env: Env, o: ViewOpts): Promise<Read | null> {
+/** `cov` collects why a filtered read may be missing matches — also when it
+ * found none (`null`). */
+async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read | null> {
   const { date, path, w, h, minArea, atten, lens, owner, query, maxDepth, classes } = o
   const dP = path === '' ? 0 : path.split('/').length
   const sort = lens ? await lensSort(env, date) : 'path'
@@ -550,11 +609,27 @@ async function readView(env: Env, o: ViewOpts): Promise<Read | null> {
   // each root's subtree as a region at one forest threshold (the budget split
   // by bytes), attenuated from the root's own depth. Under a user lens the
   // claims fold owns the read; the post-read filter below stays for that.
-  if (query && !ol && !query(path)) {
+  // NOT (`-x`): a match root's totals exclude every descendant path the
+  // negative part holds — its outermost such descendants' totals are
+  // subtracted, and they drop out of the drawn tree (the `(other)` fold is
+  // then P − Σ kept on the net values). A view root the query matches is
+  // its own single match root when there are negatives to exclude.
+  const negP = query?.neg ?? null
+  const rootHit = !!query && query(path)
+  if (query && !ol && (!rootHit || negP)) {
     const sumAgg = (into: Agg, from: Agg) => {
       for (const k of ['b', 'o', 'wts', 'wb'] as const) into[k] += from[k]
       if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
       for (const key of ['cb', 'ub'] as const) for (const [k, v] of Object.entries(from[key])) into[key][k] = (into[key][k] ?? 0) + v
+    }
+    // `a` less `cut`, keeping what the row says the path is.
+    const minus = (a: Agg, cut: Agg | undefined, lostKids = 0): Agg => {
+      if (!cut && !lostKids) return a
+      const out = cut ? subtract(a, [cut]) : { ...a }
+      out.kind = a.kind
+      out.nd = a.nd
+      out.nc = a.nc == null ? null : Math.max(0, a.nc - lostKids)
+      return out
     }
     // Scoped aggregates per path from a row set (class + owner pool).
     const aggregate = (rs: Row[]): { all: Map<string, Agg>; mine: Map<string, Agg>; depth: Map<string, number> } => {
@@ -568,55 +643,125 @@ async function readView(env: Env, o: ViewOpts): Promise<Read | null> {
       }
       return { all, mine, depth }
     }
-    const tierOf = (name: string) => tiers.find(t => t.name === name)
-    // Phase 1.
+    // Phase 1. A store generation with the search sidecars answers from
+    // them (specs/path-store-search.md): the match roots anywhere under P,
+    // exact unless a budget cut the search; anything else reads as before.
     t0 = performance.now()
     let roots: string[] = []
     let p1: ReturnType<typeof aggregate> | null = null
     let p1Tier = ''
-    for (const t of tiers) {
-      const rs = await readRows(t.idx, dP + 1, 1e9, pLo, pHi, t === tiers[0] ? undefined : thrAt)
-      p1 = aggregate(rs)
-      roots = matchRoots(p1.depth.keys(), query, path)
-      p1Tier = t.name
-      if (roots.length) break
-    }
-    if (!roots.length) {
-      const fineIdx = fine ?? withTrace(await openFine(env, date, 'path'), tr)
-      const got = await readSubtree(env, date, fineIdx, [{ dLo: dP + 1, dHi: maxDepth != null ? dP + maxDepth : 1e9, pLo, pHi }], thrAt, undefined, nDesc, smallRows, tr)
-      p1 = aggregate(got.rows)
-      roots = matchRoots(p1.depth.keys(), query, path)
-      p1Tier = isStore(fineIdx) ? got.variant : 'fine'
+    let searchCut = false
+    // The search reads the `path` sort (its names' row groups are that
+    // sort's); a lens without claims keeps the old read.
+    const pathIdx = !tiers.length && !lens ? (sort === 'path' && fine ? fine : withTrace(await openFine(env, date, 'path'), tr)) : null
+    const store = !!pathIdx && isStore(pathIdx)
+    const pq = query.ast
+    const traceSearch = (what: string, f: SearchFound) => tr?.('search', performance.now() - t0, `${what} ${f.stats.mode} c${f.stats.candidates} ${f.stats.layout === 2 ? `r${f.stats.rowsRgs}` : `n${f.stats.namesRgs} g${f.stats.pathRgs}`}${f.truncated ? ' cut' : ''}`)
+    if (rootHit) {
+      // The view root is the match: its aggregate is the root read's.
+      roots = [path]
+      p1 = { all: new Map([[path, rootAll]]), mine: new Map([[path, rootMine]]), depth: new Map([[path, dP]]) }
+      p1Tier = 'root'
+    } else {
+      const plan = store && pq ? planPositive(pq) : null
+      const searched = plan ? await searchRoots(env, pathIdx!, query, plan, path, o.searchLimits, `pos:${JSON.stringify(pq)}`) : null
+      if (searched) traceSearch('pos', searched)
+      // A search cut before it found anything (its heaviest name alone is
+      // over budget) says nothing: the thresholded read below answers instead.
+      const found = searched && (searched.roots.length || !searched.truncated) ? searched : null
+      if (found) {
+        p1 = aggregate(found.rows)
+        roots = found.roots
+        p1Tier = 'search'
+        searchCut = found.truncated
+        noteCoverage(cov, 'partial', found.reason)
+      } else if (searched) {
+        noteCoverage(cov, 'partial', `the search stopped before finding a match (${searched.reason}); showing a thresholded read`)
+      } else {
+        // Phase 1 is a thresholded read: what it can't see, it can't match.
+        noteCoverage(cov, 'approximate', lens ? APPROX_LENS : !store || plan ? APPROX_NO_INDEX : APPROX_UNINDEXED)
+      }
+      for (const t of found ? [] : tiers) {
+        const rs = await readRows(t.idx, dP + 1, 1e9, pLo, pHi, t === tiers[0] ? undefined : thrAt)
+        p1 = aggregate(rs)
+        roots = matchRoots(p1.depth.keys(), query, path)
+        p1Tier = t.name
+        if (roots.length) break
+      }
+      const fineIdx = roots.length || found ? null : pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
+      if (fineIdx && !isStore(fineIdx) && rootAll.o > (o.v1ScanObjects ?? V1_FILTER_SCAN_OBJECTS)) noteCoverage(cov, 'approximate', APPROX_V1_TOO_BIG)
+      if (fineIdx && (isStore(fineIdx) || rootAll.o <= (o.v1ScanObjects ?? V1_FILTER_SCAN_OBJECTS))) {
+        // Every depth: `maxDepth` caps what phase 2 draws, never where
+        // matches are found (a `depth=1` first paint must still find deep ones).
+        const got = await readSubtree(env, date, fineIdx, [{ dLo: dP + 1, dHi: 1e9, pLo, pHi }], thrAt, undefined, nDesc, smallRows, tr)
+        p1 = aggregate(got.rows)
+        roots = matchRoots(p1.depth.keys(), query, path)
+        p1Tier = isStore(fineIdx) ? got.variant : 'fine'
+      }
     }
     tr?.('match', performance.now() - t0)
     if (!roots.length) return null
-    const rootAggOf = new Map<string, Agg>()
-    const aggsF = new Map<string, Agg>()
-    const depthF = new Map<string, number>()
-    const matchedAgg = newAgg()
-    for (const r of roots) {
-      const a = scoped(r, p1!.all.get(r)!, p1!.mine.get(r)!)
-      rootAggOf.set(r, a); aggsF.set(r, a); depthF.set(r, p1!.depth.get(r)!)
-      sumAgg(matchedAgg, a)
-      for (let q = parentOf(r); q.length > path.length; q = parentOf(q)) {
-        let e = aggsF.get(q)
-        if (!e) { aggsF.set(q, (e = newAgg())); depthF.set(q, q.split('/').length) }
-        sumAgg(e, a)
-        if (q === '') break
+    const rootSet = new Set(roots)
+    const depthF = new Map<string, number>(roots.map(r => [r, p1!.depth.get(r)!]))
+    // The match root a path is strictly under (null: none).
+    const rootFor = (p: string): string | null => {
+      if (p === path) return null
+      for (let q = parentOf(p); q.length >= path.length; q = parentOf(q)) { if (rootSet.has(q)) return q; if (q === '') return null }
+      return null
+    }
+    const rootAggOf = new Map<string, Agg>(roots.map(r => [r, scoped(r, p1!.all.get(r)!, p1!.mine.get(r)!)]))
+    // Excluded paths (NOT): the outermost paths under a match root the
+    // negative part holds — from the index, else from the rows phase 1 read.
+    const excl = new Map<string, Agg>()
+    /** Σ excluded aggregates under each path, and excluded direct children. */
+    const cut = new Map<string, Agg>()
+    const lostKids = new Map<string, number>()
+    const exclude = (e: string, a: Agg) => {
+      excl.set(e, a)
+      const r = rootFor(e)!
+      lostKids.set(parentOf(e), (lostKids.get(parentOf(e)) ?? 0) + 1)
+      for (let q = parentOf(e); ; q = parentOf(q)) {
+        let c = cut.get(q)
+        if (!c) cut.set(q, (c = newAgg()))
+        sumAgg(c, a)
+        if (q === r) break
       }
     }
-    if (matchedAgg.b <= 0) return null
+    const underExcl = (p: string): boolean => {
+      for (let q = p; q.length > path.length; q = parentOf(q)) { if (excl.has(q)) return true; if (q === '') break }
+      return false
+    }
+    if (negP && pq) {
+      t0 = performance.now()
+      const nplan = store ? planNegative(pq) : null
+      const ns = nplan ? await searchRoots(env, pathIdx!, negP, nplan, path, o.searchLimits, `neg:${JSON.stringify(pq)}`) : null
+      if (ns) {
+        traceSearch('neg', ns)
+        if (ns.truncated) searchCut = true
+        noteCoverage(cov, 'partial', ns.reason && `exclusions: ${ns.reason}`)
+        const an = aggregate(ns.rows)
+        for (const e of ns.roots) if (rootFor(e)) exclude(e, scoped(e, an.all.get(e)!, an.mine.get(e)!))
+      } else if (p1) {
+        // (Already approximate for the same cause: one note says it.)
+        if (!cov.approximate) noteCoverage(cov, 'approximate', store && !nplan ? APPROX_EXCL_UNINDEXED : APPROX_EXCL_NO_INDEX)
+        for (const e of matchRoots(p1.depth.keys(), negP, path)) if (rootFor(e)) exclude(e, scoped(e, p1.all.get(e)!, p1.mine.get(e)!))
+      }
+    }
+    const netRoot = (r: string) => minus(rootAggOf.get(r)!, cut.get(r), lostKids.get(r))
+    const matchedPre = newAgg()
+    for (const r of roots) sumAgg(matchedPre, netRoot(r))
+    if (matchedPre.b <= 0) return null
     // Phase 2.
-    const T = o.threshold ?? filterThreshold(matchedAgg.b, w, h, minArea)
+    const T = o.threshold ?? filterThreshold(matchedPre.b, w, h, minArea)
     const withFloors = tiers.filter(t => floorOf(t.idx) != null).map(t => ({ name: t.name, floor: floorOf(t.idx)!, idx: t.idx }))
-    const chosen = o.partial ? (withFloors[0] ?? 'fine') : pickTier(withFloors, T)
+    const chosen = o.firstPaint ? (withFloors[0] ?? 'fine') : pickTier(withFloors, T)
     const regionIdx = chosen === 'fine' ? (fine ?? withTrace(await openFine(env, date, 'path'), tr)) : chosen.idx
     let tierName = chosen === 'fine' ? 'fine' : chosen.name
-    const readRoots = [...roots].sort((x, y) => rootAggOf.get(y)!.b - rootAggOf.get(x)!.b).slice(0, REGION_READS)
+    const readRoots = [...roots].sort((x, y) => netRoot(y).b - netRoot(x).b).slice(0, REGION_READS)
       .map(r => ({ path: r, depth: depthF.get(r)! }))
     const loose = looseThreshold(T, atten, readRoots.map(r => r.depth))
     // The forest's rows: Σ n_desc over the roots read (null = a root without it).
-    const forestRows = readRoots.reduce<number | null>((n, r) => { const nd = p1!.all.get(r.path)?.nd; return n == null || nd == null ? null : n + nd }, 0)
+    const forestRows = rootHit ? nDesc : readRoots.reduce<number | null>((n, r) => { const nd = p1!.all.get(r.path)?.nd; return n == null || nd == null ? null : n + nd }, 0)
     t0 = performance.now()
     let rows2: Row[] = []
     let variant: string | undefined
@@ -628,13 +773,34 @@ async function readView(env: Env, o: ViewOpts): Promise<Read | null> {
     }
     tr?.('rows', performance.now() - t0, variant)
     const p2 = aggregate(rows2)
-    const rootSet = new Set(roots)
-    const rootFor = (p: string): string | null => { for (let q = parentOf(p); q.length >= 0; q = parentOf(q)) { if (rootSet.has(q)) return q; if (q === '') return null } return null }
+    // Excluded paths only phase 2 saw (without the index, below phase 1's read).
+    if (negP) {
+      const fresh = matchRoots([...p2.depth.keys()].filter(p => rootFor(p) && !underExcl(p)), negP, path)
+      for (const e of fresh) exclude(e, scoped(e, p2.all.get(e)!, p2.mine.get(e)!))
+    }
+    const aggsF = new Map<string, Agg>()
+    const matchedAgg = newAgg()
+    const rootNet = new Map<string, Agg>()
+    for (const r of roots) {
+      const a = netRoot(r)
+      rootNet.set(r, a)
+      sumAgg(matchedAgg, a)
+      if (r === path) continue
+      aggsF.set(r, a)
+      for (let q = parentOf(r); q.length > path.length; q = parentOf(q)) {
+        let e = aggsF.get(q)
+        if (!e) { aggsF.set(q, (e = newAgg())); depthF.set(q, q.split('/').length) }
+        sumAgg(e, a)
+        if (q === '') break
+      }
+    }
+    if (matchedAgg.b <= 0) return null
     const foldedF = new Map<string, number>()
     const below: string[] = []
     for (const [p, d] of p2.depth) {
       const r = rootFor(p); if (!r) continue
-      const a = scoped(p, p2.all.get(p)!, p2.mine.get(p)!)
+      if (underExcl(p)) continue
+      const a = minus(scoped(p, p2.all.get(p)!, p2.mine.get(p)!), cut.get(p), lostKids.get(p))
       if (a.b <= 0) continue
       if (a.b >= rebasedThreshold(T, atten, depthF.get(r)!)(d)) { aggsF.set(p, a); depthF.set(p, d) }
       else below.push(p)
@@ -645,9 +811,12 @@ async function readView(env: Env, o: ViewOpts): Promise<Read | null> {
     }
     return {
       rootAll, rootAgg: matchedAgg, kept: aggsF, aggDepth: depthF, foldedOf: foldedF, threshold: T, thrAt: loose,
-      tier: `${p1Tier}+${tierName}`, idx: regionIdx, truncated: roots.length > HARD_CAP,
-      matches: [...roots].sort(), matched: roots.map(r => ({ path: r, b: Math.round(rootAggOf.get(r)!.b), o: Math.round(rootAggOf.get(r)!.o) })),
-      ...(o.partial ? { partial: true } : {}), ownerLens: ol, scoped,
+      tier: `${p1Tier}+${tierName}`, idx: regionIdx, truncated: searchCut || roots.length > HARD_CAP,
+      matches: [...roots].sort(),
+      // Heaviest first (ties by path): the list a bulk action and the series read.
+      matched: roots.map(r => ({ path: r, b: Math.round(rootNet.get(r)!.b), o: Math.round(rootNet.get(r)!.o) })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
+      ...(excl.size ? { excluded: [...excl.keys()].sort(), excl } : {}),
+      ...(o.firstPaint ? { firstPaint: true } : {}), ownerLens: ol, scoped,
     }
   }
 
@@ -655,9 +824,11 @@ async function readView(env: Env, o: ViewOpts): Promise<Read | null> {
   // attenuated threshold bounds both row count and depth by construction.
   // `maxDepth` caps the band read at dP + N: the rows at the cap come back
   // childless (the client treats a `c`-less branch as drillable), and the
-  // deeper bands — the bulk of the work — are never touched.
+  // deeper bands — the bulk of the work — are never touched. Not with a
+  // query (a lens's claims fold filters these rows): matches are found at
+  // every depth.
   t0 = performance.now()
-  const sub = await readSubtree(env, date, idx, [{ dLo: dP + 1, dHi: maxDepth != null ? dP + maxDepth : 1e9, pLo, pHi }], thrAt, lens, nDesc, smallRows, tr)
+  const sub = await readSubtree(env, date, idx, [{ dLo: dP + 1, dHi: maxDepth != null && !query ? dP + maxDepth : 1e9, pLo, pHi }], thrAt, lens, nDesc, smallRows, tr)
   const rows = sub.rows
   tr?.('rows', performance.now() - t0, sub.variant)
   // A store generation names the sort that answered; a v1 one its tier.
@@ -755,6 +926,7 @@ async function readView(env: Env, o: ViewOpts): Promise<Read | null> {
   }
   let matches: string[] | undefined
   if (query) {
+    noteCoverage(cov, 'approximate', APPROX_LENS)
     const f = nameFilter(
       { path, agg: rootAgg },
       new Map([...aggs].map(([p, agg]) => [p, { depth: aggDepth.get(p)!, agg }])),
@@ -828,9 +1000,10 @@ const rootName = (path: string, env?: Env) => (path === '' ? env?.ROOT_LABEL ?? 
 export async function buildView(env: Env, o: ViewOpts): Promise<View> {
   const { path, query } = o
   const dP = path === '' ? 0 : path.split('/').length
-  const [v, ex] = await Promise.all([readView(env, o), extrasFor(env, o.date, path)])
+  const cov: Coverage = {}
+  const [v, ex] = await Promise.all([readView(env, o, cov), extrasFor(env, o.date, path)])
   if (!v) {
-    return { tree: { n: rootName(path, env), k: 'dir', b: 0, o: 0 }, tier: 'none', index: 'none', threshold: 0, nodes: 0, truncated: false, ...(query ? { matches: [], matched: [] } : {}) }
+    return { tree: { n: rootName(path, env), k: 'dir', b: 0, o: 0 }, tier: 'none', index: 'none', threshold: 0, nodes: 0, truncated: false, ...(query ? { matches: [], matched: [], ...coverageFields(cov) } : {}) }
   }
   const { kept, aggDepth, foldedOf, thrAt } = v
   const nodeOf = (name: string, a: Agg): ViewNode => ({
@@ -872,7 +1045,7 @@ export async function buildView(env: Env, o: ViewOpts): Promise<View> {
     return node
   }
   const tree = build(path, v.rootAgg)
-  return { tree, tier: v.tier, index: v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matches ? { matches: v.matches } : {}), ...(v.matched ? { matched: v.matched } : {}), ...(v.partial ? { partial: true } : {}) }
+  return { tree, tier: v.tier, index: v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matches ? { matches: v.matches } : {}), ...(v.matched ? { matched: v.matched } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(query ? coverageFields(cov) : {}) }
 }
 
 // --- the diff: two scans, one byte floor -----------------------------------
@@ -923,6 +1096,12 @@ export interface Diff {
   lookups_capped: boolean
   /** With `q=`: the union of both scans' match roots. */
   matched?: { path: string; b: number; o: number }[]
+  /** With `q=`: either side's `partial` / `approximate` (`View`), reasons
+   * merged. */
+  partial?: true
+  partialReason?: string
+  approximate?: true
+  approximateReason?: string
 }
 
 const LOOKUP_CAP = 240
@@ -953,18 +1132,25 @@ export async function buildDiff(env: Env, o: DiffOpts): Promise<Diff> {
   // A depth-capped walk only ever consults rows down to that depth, so the
   // views read just those bands (`depth=1`: two groups instead of ~25 a side).
   const cap = o.depth != null ? { maxDepth: o.depth } : {}
+  // Either side's coverage notes, merged (a re-read below adds the same ones).
+  const cov: Coverage = {}
   let [va, vb] = await Promise.all([
-    ra ? readView(env, { ...o, date: from, ...(query ? {} : { threshold }), ...cap }) : null,
-    rb ? readView(env, { ...o, date: to, ...(query ? {} : { threshold }), ...cap }) : null,
+    ra ? readView(env, { ...o, date: from, ...(query ? {} : { threshold }), ...cap }, cov) : null,
+    rb ? readView(env, { ...o, date: to, ...(query ? {} : { threshold }), ...cap }, cov) : null,
   ])
   // A filtered diff plans each side's forest by its own matched bytes; the
   // shared floor is the larger, and the other side is re-read at it.
   if (query && va && vb && va.threshold !== vb.threshold) {
     const shared = Math.max(va.threshold, vb.threshold)
-    if (va.threshold < shared) va = await readView(env, { ...o, date: from, threshold: shared, ...cap })
-    else vb = await readView(env, { ...o, date: to, threshold: shared, ...cap })
+    if (va.threshold < shared) va = await readView(env, { ...o, date: from, threshold: shared, ...cap }, cov)
+    else vb = await readView(env, { ...o, date: to, threshold: shared, ...cap }, cov)
   }
   tr?.('views', performance.now() - t0)
+  // Nothing in scope on either side (a filter with no matches, an empty owner
+  // pool): an empty diff, not a crash on the missing views.
+  if (!va && !vb) {
+    return { rows: [], total_a: 0, total_b: 0, objects_a: 0, objects_b: 0, threshold: 0, tier: 'none', ...(query ? { matched: [], ...coverageFields(cov) } : {}), expansions: 0, truncated: false, lookups: 0, lookups_capped: false }
+  }
   // One side a v1 generation (dirs only), the other a store (objects too):
   // the objects have no counterpart to be compared with, so they fold into
   // `(other)` on the store side rather than reading as added / removed.
@@ -981,6 +1167,7 @@ export async function buildDiff(env: Env, o: DiffOpts): Promise<Diff> {
     threshold: query ? ((vb ?? va)!.threshold) : threshold,
     tier: (vb ?? va)!.tier,
     ...(matchedUnion ? { matched: matchedUnion } : {}),
+    ...(query ? coverageFields(cov) : {}),
   }
   if (o.summary) return { rows: [], ...totals, expansions: 0, truncated: false, lookups: 0, lookups_capped: false }
   const kidsA = va ? kidsIndex(va.kept, path) : new Map<string, string[]>()
@@ -1002,7 +1189,17 @@ export async function buildDiff(env: Env, o: DiffOpts): Promise<Diff> {
   let lookups = 0
   let capped = false
   const inQuery = (p: string, v: Read): boolean =>
-    !query || (v.matches ?? []).some(m => p === m || p.startsWith(m + '/'))
+    !query || ((v.matches ?? []).some(m => p === m || p.startsWith(m + '/')) && !(v.excluded ?? []).some(e => p === e || p.startsWith(e + '/')))
+  // A path's lookup total less the side's excluded paths under it (NOT).
+  const net = (v: Read, p: string, a: Agg): Agg => {
+    if (!v.excl) return a
+    const cut = newAgg()
+    for (const [e, ea] of v.excl) if (p === '' || e.startsWith(p + '/')) { cut.b += ea.b; cut.o += ea.o; cut.wts += ea.wts; cut.wb += ea.wb; for (const key of ['cb', 'ub'] as const) for (const [k, x] of Object.entries(ea[key])) cut[key][k] = (cut[key][k] ?? 0) + x }
+    if (!cut.b && !cut.o) return a
+    const out = subtract(a, [cut])
+    out.kind = a.kind
+    return out
+  }
   const lookup = async (date: string, v: Read, p: string, depth: number): Promise<Agg | null> => {
     if (!inQuery(p, v)) return null
     if (lookups >= LOOKUP_CAP) { capped = true; return null }
@@ -1015,7 +1212,7 @@ export async function buildDiff(env: Env, o: DiffOpts): Promise<Diff> {
     const mine = newAgg()
     for (const r of allRows) merge(all, classRow(r, o.classes))
     for (const r of rows) if (ownerOk(r.usr, owner)) merge(mine, classRow(r, o.classes))
-    const a = v.scoped(p, v.ownerLens && !needTot ? null : all, mine)
+    const a = net(v, p, v.scoped(p, v.ownerLens && !needTot ? null : all, mine))
     return a.b > 0 ? a : null
   }
 
@@ -1064,7 +1261,7 @@ export async function buildDiff(env: Env, o: DiffOpts): Promise<Diff> {
     for (const q of take) {
       const e = byPath.get(q.cp)
       if (!e) { out.set(q.cp, null); continue }
-      const a = v.scoped(q.cp, e.all, e.mine)
+      const a = net(v, q.cp, v.scoped(q.cp, e.all, e.mine))
       out.set(q.cp, a.b > 0 ? a : null)
     }
     return out

@@ -34,6 +34,10 @@ export interface DiffData {
   lookups: number
   lookups_capped: boolean
   rows: DiffRow[]
+  /** With `q=`: either scan's search was budget-cut / read without the index
+   * (`FilterNote.tsx`). */
+  partialReason?: string
+  approximateReason?: string
 }
 
 export type AreaMode = 'max' | 'delta'

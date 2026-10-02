@@ -11,6 +11,9 @@ import type { NotifyEnv } from './stagedSlack.js'
 export type ExecEnv = NotifyEnv & {
   DB?: D1Database
   GCP_SA_KEY?: string
+  /** The service account a dispatched Batch job runs as (a `[vars]` entry;
+   *  the dispatcher behind `GCP_SA_KEY` must be able to act as it). */
+  JOB_SA?: string
   EXECUTOR?: string
   STORE_SCHEME?: string
   STORE_BUCKETS?: string

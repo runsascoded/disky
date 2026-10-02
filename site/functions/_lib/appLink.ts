@@ -3,7 +3,10 @@
  * inside the app's WKWebView, so the person signs in here in the system
  * browser and "Open in disky" hands the app a one-time credential:
  *
- *   POST /api/app-link            (browser, signed in) → { url }
+ *   GET  /auth/app-handoff        (browser, opened by the app's sign-in wall:
+ *                                  signs in if needed, then a tiny page —
+ *                                  no SPA — that hands `url` to the app)
+ *   POST /api/app-link            (the SPA's "Open in disky") → { url }
  *   disky://open?link=<url>       (the browser hands `url` to the app)
  *   GET  /auth/app-link?token=…   (the app's webview) → session cookie, 303 → next
  *
@@ -38,6 +41,7 @@ export const APP_LINK_NAME = 'disky app sign-in'
  *  beside the gate's generic `mint` / `redeem` / `revoke` / `signin` rows. */
 export const APP_LINK_EVENT = 'app-link'
 export const REDEEM_PATH = '/auth/app-link'
+export const HANDOFF_PATH = '/auth/app-handoff'
 
 interface Grantish {
   name: string | null
@@ -115,7 +119,21 @@ export async function mintAppLink(ctx: Ctx, nowMs = Date.now()): Promise<Respons
     const body = await req.json().catch(() => null) as { next?: unknown } | null
     next = safeNext(body?.next)
   }
-  const email = id.email.toLowerCase()
+  const { url, expiresAt } = await mint(ctx, gate, id, next, nowMs)
+  return json({ url, expires_at: expiresAt }, 200, noStore)
+}
+
+type Gate = NonNullable<ReturnType<typeof gateFor>>
+
+/** Mint `id`'s link (a signed-in session's, checked by the caller). */
+async function mint(
+  ctx: Ctx,
+  gate: Gate,
+  id: { email: string | null; scopes: Iterable<string> },
+  next: string,
+  nowMs: number,
+): Promise<{ url: string; expiresAt: number | null }> {
+  const email = (id.email as string).toLowerCase()
   const nowS = sec(nowMs)
   const { grant, token } = await gate.mint({
     name: APP_LINK_NAME,
@@ -129,10 +147,71 @@ export async function mintAppLink(ctx: Ctx, nowMs = Date.now()): Promise<Respons
     createdBy: email,
   }, nowMs)
   await audit(ctx, nowMs, { grantId: grant.id, email, reason: 'mint' })
-  const url = new URL(REDEEM_PATH, req.url)
+  const url = new URL(REDEEM_PATH, ctx.request.url)
   url.searchParams.set('token', token)
   if (next !== '/') url.searchParams.set('next', next)
-  return json({ url: url.toString(), expires_at: grant.expiresAt }, 200, noStore)
+  return { url: url.toString(), expiresAt: grant.expiresAt }
+}
+
+const esc = (t: string) => t.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`)
+
+/** The hand-off tab's whole page: no SPA. It opens the app (the button is the
+ *  fallback, and a user gesture where a browser wants one), then closes once
+ *  the app has taken focus — closing in the same tick as the `disky://`
+ *  navigation cancels Chrome's launch. */
+function handoffHtml(body: string, appUrl?: string): string {
+  const go = appUrl ? `<p><a class="btn" href="${esc(appUrl)}">Open disky</a></p>
+<script>
+location.href = ${JSON.stringify(appUrl).replace(/</g, '\\u003c')}
+const close = () => setTimeout(() => window.close(), 1000)
+if (!document.hasFocus()) close(); else addEventListener('blur', close, { once: true })
+</script>` : ''
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>disky sign-in</title>
+<style>
+:root { color-scheme: light dark; --bg: #f6f6f4; --ink: #1d1d1b; --mute: #6b6b66; --acc: #2f6fde }
+@media (prefers-color-scheme: dark) { :root { --bg: #1b1b1b; --ink: #ececea; --mute: #a3a39e; --acc: #3d7ee8 } }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, sans-serif }
+main { max-width: 420px; padding: 32px 16px; text-align: center }
+h1 { font-size: 22px; margin: 0 0 8px } p { color: var(--mute); margin: 8px 0 }
+.btn { display: inline-block; margin-top: 8px; padding: 9px 18px; border-radius: 6px; background: var(--acc); color: #fff; text-decoration: none; font-weight: 600 }
+</style></head>
+<body><main>${body}${go}</main></body></html>
+`
+}
+
+const html = (body: string, status = 200) =>
+  new Response(body, { status, headers: { 'content-type': 'text/html; charset=utf-8', ...noStore } })
+
+/**
+ * `GET /auth/app-handoff[?next=/path]` — the macOS app's sign-in wall opens
+ * this in the default browser. No session → Google sign-in, returning here. A
+ * session → mint its link and hand it to the app from a tiny page (never the
+ * SPA). Minting on a GET is gated on `Sec-Fetch-Site`: `none` (the OS opened
+ * the tab) or `same-origin` (back from the sign-in redirect); a cross-site
+ * navigation gets a button to click instead, so another site can't make a
+ * visitor's browser mint one unprompted.
+ */
+export async function appHandoff(ctx: Ctx, nowMs = Date.now()): Promise<Response> {
+  const { request: req } = ctx
+  if (req.method !== 'GET') return json({ error: 'method not allowed' }, 405, { allow: 'GET' })
+  const params = new URL(req.url).searchParams
+  const next = safeNext(params.get('next'))
+  const self = next === '/' ? HANDOFF_PATH : `${HANDOFF_PATH}?next=${encodeURIComponent(next)}`
+  const gate = gateFor(ctx.env)
+  if (!gate) return html(handoffHtml('<h1>Sign-in unavailable</h1><p>The auth backend isn’t configured.</p>'), 503)
+  const id = await identify(ctx)
+  if (!id || id.via !== 'session' || !id.email) {
+    return new Response(null, { status: 303, headers: { location: `/auth/google?next=${encodeURIComponent(self)}`, ...noStore } })
+  }
+  const site = req.headers.get('sec-fetch-site')
+  if (site !== null && site !== 'none' && site !== 'same-origin') {
+    return html(handoffHtml(`<h1>Open disky?</h1><p>Signed in as ${esc(id.email)}.</p><p><a class="btn" href="${esc(self)}">Continue</a></p>`))
+  }
+  const { url } = await mint(ctx, gate, id, next, nowMs)
+  const appUrl = `disky://open?link=${encodeURIComponent(url)}`
+  return html(handoffHtml(`<h1>Signed in to disky</h1><p>As ${esc(id.email)}. You can close this tab.</p>`, appUrl))
 }
 
 const fail = (reason: string): Response =>

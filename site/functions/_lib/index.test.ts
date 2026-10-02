@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AGE_COLS, blobKey, groupMatches, storeCreds, storePrefixes, storeReady, storeScheme, storeTarget, toRow } from './index'
+import { AGE_COLS, blobKey, chunkSpan, groupMatches, planRuns, storeCreds, storePrefixes, storeReady, storeScheme, storeTarget, toRow } from './index'
 
 // The blob handle's in-memory span selection must be the predicate
 // `selectSpans` sends D1 (index.ts), NULL semantics included.
@@ -77,5 +77,33 @@ describe('toRow: bytes by age', () => {
   })
   it('one without them decodes `ages: null`', () => {
     expect(toRow({ version: 2 })(base).ages).toBe(null)
+  })
+})
+
+describe('planRuns', () => {
+  const sp = [{ start: 300, end: 400 }, { start: 0, end: 100 }, { start: 150, end: 250 }, { start: 1000, end: 1100 }]
+  it('merges spans in byte order while the gap is within `gap`', () => {
+    expect(planRuns(sp, 50, 1000)).toEqual([{ start: 0, end: 400, items: [sp[1], sp[2], sp[0]] }, { start: 1000, end: 1100, items: [sp[3]] }])
+    expect(planRuns(sp, 49, 1000).map(r => [r.start, r.end])).toEqual([[0, 100], [150, 250], [300, 400], [1000, 1100]])
+  })
+  it('a run stays within `max` bytes; a bigger span is a run of its own', () => {
+    expect(planRuns(sp, 50, 300).map(r => [r.start, r.end])).toEqual([[0, 250], [300, 400], [1000, 1100]])
+    expect(planRuns([{ start: 0, end: 10 }, { start: 10, end: 500 }], 0, 100).map(r => [r.start, r.end])).toEqual([[0, 10], [10, 500]])
+  })
+  it('no spans, no runs', () => {
+    expect(planRuns([])).toEqual([])
+  })
+})
+
+describe('chunkSpan', () => {
+  const col = (name: string, data: number, size: number, dict?: number) => ({ meta_data: { path_in_schema: [name], data_page_offset: BigInt(data), total_compressed_size: BigInt(size), ...(dict != null ? { dictionary_page_offset: BigInt(dict) } : {}) } })
+  const rg = { columns: [col('a', 4, 10), col('b', 20, 30, 14), col('c', 44, 6)] }
+  it('from the first chunk (its dictionary page, if any) to the last chunk’s end', () => {
+    expect(chunkSpan(rg)).toEqual([4, 50])
+    expect(chunkSpan(rg, ['b'])).toEqual([14, 44])
+    expect(chunkSpan(rg, ['a', 'c'])).toEqual([4, 50])
+  })
+  it('no chunk to read is an error', () => {
+    expect(() => chunkSpan(rg, ['z'])).toThrow('row group has no column chunks to read')
   })
 })

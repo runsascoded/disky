@@ -37,18 +37,20 @@ wheels = [
 ]
 
 [[package]]
-name = "gcs-usage-cf-iac"
+name = "disky-infra"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "pulumi" },
     { name = "pulumi-cloudflare" },
+    { name = "pulumi-gcp" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pulumi", specifier = ">=3.0.0,<4.0.0" },
     { name = "pulumi-cloudflare", specifier = ">=6.0.0,<7.0.0" },
+    { name = "pulumi-gcp", specifier = ">=9.0.0,<10.0.0" },
 ]
 
 [[package]]
@@ -282,6 +284,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/4b/a9/3ff14763a173d13babe7e5f7a2c97f0d21d08e51d9e13c2575cdb5a20bd8/pulumi_cloudflare-6.21.0.tar.gz", hash = "sha256:8c65d2828ea0c3acd96adea80c16ede34f045e087dfc91e9790808a5413bcc47", size = 1977438, upload-time = "2026-09-18T16:47:15.844Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d6/12/a57e3cc0f790b3ac7be531051801e7a9d4ac7721b3899d764cfd9c225ad2/pulumi_cloudflare-6.21.0-py3-none-any.whl", hash = "sha256:8fa302ec375df67a467f016c1f1604d8f9d23657b45e62aa0d4d4b056de75889", size = 2980875, upload-time = "2026-09-18T16:47:13.932Z" },
+]
+
+[[package]]
+name = "pulumi-gcp"
+version = "9.37.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pulumi" },
+    { name = "semver" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f8/8f/8559eb06fe9682360131315495f26385c8f6b48be2ab14c03a58b8c1a654/pulumi_gcp-9.37.0.tar.gz", hash = "sha256:4cd5f23730c18e1d78a9294ef4e3de32c829426497a662b98f7636f5a2a19a90", size = 11359293, upload-time = "2026-09-14T17:30:33.248Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ee/49/ff97bc60601a0bc9c8154c331a7d18fda56fa1d69b93a536887d414344c1/pulumi_gcp-9.37.0-py3-none-any.whl", hash = "sha256:f08c06cf7c11dd331acfbb40d6d4c33d01ce537748a5ac0741558d4e3a2d7171", size = 13865258, upload-time = "2026-09-14T17:30:30.332Z" },
 ]
 
 [[package]]

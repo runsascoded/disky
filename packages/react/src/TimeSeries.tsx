@@ -55,6 +55,53 @@ export interface Annotation {
 
 /** A band callout needs this many px of band to sit inside. */
 const MIN_BAND_PX = 13
+/** Annotation font size, and the box estimate collision culling uses: a
+ *  semibold digit run is ~0.62 em wide per char, a line ~1.15 em tall. */
+const ANNO_PT = 10.5
+const ANNO_CHAR_W = ANNO_PT * 0.62
+const ANNO_LINE_H = ANNO_PT * 1.15
+
+interface PlacedAnnotation { a: Annotation; px: number; py: number; anchor: 'start' | 'middle' | 'end'; dx: number }
+
+/** Where each annotation's label goes, in order, dropping a band callout whose
+ *  band is too thin on screen and any label whose (estimated) box overlaps a
+ *  label already placed — so earlier annotations win. */
+function placeAnnotations(
+  annotations: Annotation[],
+  xToPx: (x: number) => number,
+  yToPx: (y: number) => number,
+  left: number,
+  top: number,
+  plotW: number,
+  plotH: number,
+): PlacedAnnotation[] {
+  const placed: PlacedAnnotation[] = []
+  const boxes: [number, number, number, number][] = []
+  for (const a of annotations) {
+    const px = xToPx(a.x)
+    const anchor = px < left + plotW * 0.15 ? 'start' : px > left + plotW * 0.85 ? 'end' : 'middle'
+    const dx = anchor === 'start' ? 5 : anchor === 'end' ? -5 : 0
+    let py: number
+    let y0: number
+    if (a.y0 != null) {
+      const t = Math.max(top, Math.min(yToPx(a.y), yToPx(a.y0)))
+      const b = Math.min(top + plotH, Math.max(yToPx(a.y), yToPx(a.y0)))
+      if (b - t < MIN_BAND_PX) continue
+      py = (t + b) / 2
+      y0 = py - ANNO_LINE_H / 2
+    } else {
+      py = yToPx(a.y) + (a.below ? 14 : -7)
+      y0 = py - ANNO_PT // `py` is the baseline
+    }
+    const w = a.label.length * ANNO_CHAR_W
+    const x0 = px + dx - (anchor === 'start' ? 0 : anchor === 'end' ? w : w / 2)
+    const box: [number, number, number, number] = [x0, y0, x0 + w, y0 + ANNO_LINE_H]
+    if (boxes.some(o => box[0] < o[2] && o[0] < box[2] && box[1] < o[3] && o[1] < box[3])) continue
+    boxes.push(box)
+    placed.push({ a, px, py, anchor, dx })
+  }
+  return placed
+}
 
 export interface TimeSeriesProps<T> {
   series: Series<T>[]
@@ -495,38 +542,28 @@ export function TimeSeries<T>({
           </g>
           {/* Annotations: a haloed label beside the point, leaning away from
               the nearest side edge; a band callout (`y0`) sits inside the
-              band, centred, and only where the band is tall enough */}
-          {annotations?.map((a, i) => {
-            const px = xToPx(a.x)
-            const anchor = px < PAD.left + plotW * 0.15 ? 'start' : px > PAD.left + plotW * 0.85 ? 'end' : 'middle'
-            const dx = anchor === 'start' ? 5 : anchor === 'end' ? -5 : 0
-            let py: number
-            if (a.y0 != null) {
-              const top = Math.max(PAD.top, Math.min(yToPx(a.y), yToPx(a.y0)))
-              const bot = Math.min(PAD.top + plotH, Math.max(yToPx(a.y), yToPx(a.y0)))
-              if (bot - top < MIN_BAND_PX) return null
-              py = (top + bot) / 2
-            } else py = yToPx(a.y) + (a.below ? 14 : -7)
-            return (
-              <text
-                key={`a${i}`}
-                x={px + dx}
-                y={py}
-                textAnchor={anchor}
-                dominantBaseline={a.y0 != null ? 'middle' : undefined}
-                clipPath={a.y0 != null ? `url(#${clipId})` : undefined}
-                fontSize={10.5}
-                fontWeight={600}
-                fill="var(--dt-ts-anno-ink, #e6e6ea)"
-                stroke="var(--dt-ts-anno-halo, rgba(20,20,24,0.85))"
-                strokeWidth={3}
-                paintOrder="stroke"
-                pointerEvents="none"
-              >
-                {a.label}
-              </text>
-            )
-          })}
+              band, centred, and only where the band is tall enough. A label
+              whose box would overlap one already placed is dropped, so the
+              caller's order is the priority. */}
+          {placeAnnotations(annotations ?? [], xToPx, yToPx, PAD.left, PAD.top, plotW, plotH).map(({ a, px, py, anchor, dx }, i) => (
+            <text
+              key={`a${i}`}
+              x={px + dx}
+              y={py}
+              textAnchor={anchor}
+              dominantBaseline={a.y0 != null ? 'middle' : undefined}
+              clipPath={a.y0 != null ? `url(#${clipId})` : undefined}
+              fontSize={ANNO_PT}
+              fontWeight={600}
+              fill="var(--dt-ts-anno-ink, #e6e6ea)"
+              stroke="var(--dt-ts-anno-halo, rgba(20,20,24,0.85))"
+              strokeWidth={3}
+              paintOrder="stroke"
+              pointerEvents="none"
+            >
+              {a.label}
+            </text>
+          ))}
           {/* Hover crosshair */}
           {hoverX != null && (
             <line

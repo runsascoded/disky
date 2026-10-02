@@ -22,6 +22,8 @@ export const DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/
 
 async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<Prepared | ReturnType<typeof refuse>> {
   if (!env.GCP_SA_KEY) return refuse(503, 'dispatch not configured (GCP_SA_KEY secret missing)')
+  if (!env.JOB_SA) return refuse(503, 'dispatch not configured (JOB_SA var missing)')
+  const jobSa = env.JOB_SA
   let snapshot: Awaited<ReturnType<typeof snapshotPlan>>
   try {
     snapshot = await snapshotPlan(db, req.planId)
@@ -58,7 +60,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     ].join('\n')
 
     // the executor deletes from the plan's bucket (`CW_BUCKET` in the job env)
-    const spec = sweepBatchSpec(script, { JOB_ID: jobId, SWEEP_DATE: date, CW_BUCKET: plan.bucket, SITE_URL: req.siteUrl },
+    const spec = sweepBatchSpec(jobSa, script, { JOB_ID: jobId, SWEEP_DATE: date, CW_BUCKET: plan.bucket, SITE_URL: req.siteUrl },
       { GCS_USAGE_TOKEN: secretRef('cw-s3-job-grant') })
     const { ok, status, text } = await submitBatch(token, jobId, spec)
     if (!ok) {

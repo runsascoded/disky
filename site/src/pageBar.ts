@@ -25,7 +25,7 @@ export interface BarControls {
   classes: boolean
   /** The owner pool / user filter. */
   ownerFilter: boolean
-  /** The path filter box (text, `a|b`, `/regex/`). */
+  /** The path filter box (`text · a|b · a b · -x · *`). */
   pathFilter: true
 }
 

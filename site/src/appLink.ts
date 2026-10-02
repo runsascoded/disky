@@ -27,28 +27,13 @@ export function offerAppLink(nav: Nav, win: object = {}): boolean {
   return mac && !touch && !inApp(nav, win)
 }
 
-/** The query param that asks a browser page to hand its session to the app as
- *  soon as it has one: the in-app wall's "sign in with your browser" link opens
- *  the same page in the default browser with it set (the app routes new-window
- *  links there), the person signs in as usual, and the page fires "Open in
- *  disky" by itself. */
-export const HANDOFF_PARAM = 'open-in-disky'
-
-/** `loc` with the hand-off param set. */
+/** The in-app wall's "sign in with your browser" target: a server page (no
+ *  SPA) that signs the browser in if needed, then hands its session to the app
+ *  (`functions/_lib/appLink.ts` `appHandoff`). The app routes new-window links
+ *  to the default browser. Lands the app back on the page it was on. */
 export function handoffUrl(loc: { origin: string; pathname: string; search: string }): string {
-  const sp = new URLSearchParams(loc.search)
-  sp.set(HANDOFF_PARAM, '1')
-  return `${loc.origin}${loc.pathname}?${sp}`
-}
-
-/** Whether this page load asked for the hand-off; strips the param either way,
- *  so a reload or a bookmarked URL doesn't fire it again. */
-export function takeHandoff(): boolean {
-  const url = new URL(window.location.href)
-  if (!url.searchParams.has(HANDOFF_PARAM)) return false
-  url.searchParams.delete(HANDOFF_PARAM)
-  window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
-  return true
+  const next = loc.pathname + loc.search
+  return next === '/' ? `${loc.origin}/auth/app-handoff` : `${loc.origin}/auth/app-handoff?next=${encodeURIComponent(next)}`
 }
 
 /** Mint a link for the current page, then hand it to the app. Resolves once the

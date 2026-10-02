@@ -1,7 +1,8 @@
 # Daily r2.rbw.sh ingestion, moved off the laptop LaunchAgent to GHA (reliable
 # scheduling; the LaunchAgent never fired): list the three public buckets →
 # the union's path store (`path` + `bysize` sorts, objects included;
-# specs/path-store.md §4.4) + snapshot → upload to
+# specs/path-store.md §4.4), its search sidecars (specs/path-store-search.md;
+# ~21 MiB beside a 12 MiB `path` sort, <1 s) + snapshot → upload to
 # disk-tree-demo → publish footers to the D1 the Map reads. Idempotent per date
 # (a fresh generation flips the pointer). Run it by hand anytime via "Run
 # workflow" (workflow_dispatch).
@@ -57,9 +58,9 @@ jobs:
           list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" ctbk     "$HCCS_ENDPOINT"
           list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" crashes  "$HCCS_ENDPOINT"
           list "${{ secrets.R2_DEMO_SRC_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_DEMO_SRC_RO_SECRET_ACCESS_KEY }}" jc-taxes "$RAC_ENDPOINT"
-      - name: Union → path store (path + bysize sorts) + snapshot
+      - name: Union → path store (path + bysize sorts + search sidecars) + snapshot
         run: |
-          cd cloud && uv run dt-cloud path-index -d "${{ steps.d.outputs.date }}" \
+          cd cloud && uv run dt-cloud path-index -S -d "${{ steps.d.outputs.date }}" \
             -l "$GITHUB_WORKSPACE/work/listing/*/*.parquet" \
             -P "$GITHUB_WORKSPACE/work/index/path-index.parquet" \
             -o "$GITHUB_WORKSPACE/work/snap"

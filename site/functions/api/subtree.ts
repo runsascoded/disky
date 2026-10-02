@@ -14,7 +14,7 @@
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { pathGens, storeReady, type Lens } from '../_lib/index.js'
 import { ledgerHead } from '../_lib/ledger.js'
-import { parseOwner, parseQuery, classKey, parseClasses } from '../_lib/scope.js'
+import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT } from '../_lib/view.js'
 import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
@@ -58,7 +58,16 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   const classes = parseClasses(url.searchParams.get('cl'))
   const qRaw = url.searchParams.get('q') ?? ''
   const full = url.searchParams.get('full') === '1'
-  const query = parseQuery(qRaw) ?? undefined
+  // `q=` in `qs=`'s syntax: a parse error (or an unknown syntax) is a 400
+  // whose text the filter box shows under itself.
+  let qp: ReturnType<typeof queryParam>
+  try {
+    qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX)
+  } catch (e) {
+    if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
+    throw e
+  }
+  const query = qp.query
 
   // Data is gated (store-specific scope), like /data/*.
   const gated = await st.time('auth', requireViewer(ctx as never))
@@ -74,13 +83,13 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
     const [head, xtra, g] = await st.time('pre', Promise.all([lens && ctx.env.DB ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date])]))
     const cacheKey = cacheKeyFor('subtree',
       `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensRaw ?? ''}` +
-        `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}`,
+        `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}`,
       storeKey(ctx.env),
     )
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return hit
 
-    const view = await buildView(ctx.env, { date, path, w, h, minArea, atten, lens, owner, by, maxDepth: depth, query, classes, partial: !!query && !full, trace: st.trace })
+    const view = await buildView(ctx.env, { date, path, w, h, minArea, atten, lens, owner, by, maxDepth: depth, query, classes, firstPaint: !!query && !full, trace: st.trace })
     const body = JSON.stringify({
       date,
       path,
@@ -95,7 +104,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
       nodes: view.nodes,
       truncated: view.truncated,
       ...(owner ? { owner } : {}),
-      ...(query ? { q: qRaw, matches: view.matches, matched: view.matched ?? [], ...(view.partial ? { partial: true } : {}) } : {}),
+      ...(query ? { q: qRaw, matches: view.matches, matched: view.matched ?? [], ...(view.excluded ? { excluded: view.excluded } : {}), ...(view.firstPaint ? { firstPaint: true } : {}), partial: view.partial, partialReason: view.partialReason, approximate: view.approximate, approximateReason: view.approximateReason } : {}),
       tree: view.tree,
     })
     return await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))

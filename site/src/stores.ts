@@ -49,6 +49,9 @@ export interface Store {
    *  Off = the table has no delete gesture. Mirrors the Functions' `STAGING`
    *  var (the `stage_batches` table exists there). */
   staging: boolean
+  /** The path filter's default syntax (`functions/_lib/querySyntax.ts` ids;
+   *  `?qs=` overrides). Mirrors the Functions' `QUERY_SYNTAX`. Unset = `simple`. */
+  querySyntax?: string
   /** Attribution + ownership: the owner axes (`?o=`), claims / assignments
    *  (admins assign; `POST /api/actions`), the `/users`, `/user/:id`,
    *  `/assignments` pages and the email → user map. Only the actions-ledger

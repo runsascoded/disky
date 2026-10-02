@@ -342,17 +342,6 @@ button.mini.neg {
   padding: 8px 14px; font-size: 13.5px; cursor: pointer;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
 }
-// The sign-in hand-off tab, once the app has the session: a sticky banner.
-.app-handed-off {
-  position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-  z-index: 10001; max-width: calc(100vw - 32px);
-  display: flex; align-items: center; gap: 12px;
-  background: var(--panel); color: var(--ink);
-  border: 1px solid var(--accent, var(--line)); border-radius: 8px;
-  padding: 10px 12px 10px 16px; font-size: 15px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
-  button { background: none; border: 0; color: var(--ink-2); font-size: 18px; cursor: pointer; padding: 0 4px; }
-}
 .scan-tip { display: grid; gap: 3px; b { color: inherit; } .classmix { margin-top: 4px; } }
 
 // Nav links: quiet tabs// Nav links: quiet tabs, not underlined prose links; the current page reads
@@ -1855,7 +1844,47 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     align-items: center;
     white-space: nowrap;
     button { background: none; border: none; color: var(--ink-2); cursor: pointer; padding: 0 2px; }
+    &.ferr { color: #d33; white-space: normal; }
   }
+  input[aria-invalid='true'] { border-color: #d33; }
+  .qhelp { display: inline-flex; color: var(--ink-2); font-size: 16px; cursor: help; }
+}
+
+// A filtered response's completeness (`FilterNote.tsx`): beside the match
+// count and in the diff heading.
+.fflag {
+  font-size: 11.5px;
+  font-weight: normal;
+  color: var(--s4);
+  white-space: normal;
+  &::before { content: '· '; color: var(--ink-3); }
+}
+.fflags { margin-left: 8px; }
+
+// The filter box's syntax card (`QueryHelp.tsx`), inside a pinnable tooltip.
+.qhelp-card {
+  font-size: 12px;
+  p { margin: 4px 0; }
+  .qhelp-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    button {
+      background: none;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: inherit;
+      cursor: pointer;
+      font-size: 11.5px;
+      padding: 0 6px;
+      &.on { border-color: var(--ink-2); font-weight: 600; }
+    }
+  }
+  table { border-collapse: collapse; margin: 4px 0; }
+  td { padding: 2px 6px 2px 0; vertical-align: top; }
+  td:first-child, td:last-child { white-space: nowrap; }
+  .qhelp-note { color: var(--ink-2); }
 }
 
 // Totals footer on children/worklist tables.

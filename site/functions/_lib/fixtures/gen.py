@@ -18,6 +18,16 @@
   the v2 sorts, the cold footer tier `.groups.parquet`
   (`index_footer.write_groups_parquet`) at `FOOTER_ROWS` rows per footer
   group, so a retired generation's footer reads prune between groups.
+- `v2-search/`: a store generation over names shaped for the filter view
+  (`ttl` dirs nested in `ttl` dirs, case variants, `.safetensors` objects, a
+  `ckpt…final` path that only a cross-segment regex matches, a Kelvin-sign
+  `Key`, 6000 filler objects so the `path` sort spans several 2048-row groups)
+  in two buckets, written with the search sidecars
+  (`path-index.{rows,trigrams,rows-search}.parquet`, layout v2,
+  specs/path-store-search.md) at `SEARCH_ROWS_RG`-row rows groups, 2048-row
+  postings groups and `SEARCH_DIR_ROWS` rows per directory group — beside
+  layout v1's `path-index.{names,search}.parquet`, kept as committed (the
+  writer no longer emits them; their postings are v2's).
 - `v2/plans.json`: `disk-tree tiers plan -j -C` over each v2 sidecar for a
   set of reads — the engine planner's group selection, which the reader's
   span queries must reproduce exactly (`pathStore.test.ts`).
@@ -47,6 +57,18 @@ MiB = 1 << 20
 #: sorts' 4 row groups are 4 footer groups the reader must prune between.
 FOOTER_ROWS = 1
 SORTS = {'path': 'path-index', 'bysize': 'path-index-bysize'}
+#: Rows per directory group of the search fixture's directory: two, so a
+#: query's directory reads prune between groups.
+SEARCH_DIR_ROWS = 2
+#: Rows per rows-file group of the search fixture: 12 groups, so candidates
+#: scatter across them and the row budget can cut between them.
+SEARCH_ROWS_RG = 512
+#: The search sidecars the writer emits (layout v2).
+SEARCH_SIDECARS = ('rows', 'trigrams', 'rows-search')
+#: Layout v1's own sidecars, kept as committed: the writer no longer emits
+#: them, and the reader still serves them (`search.test.ts` runs both). Its
+#: postings are v2's (same ids, same `postings_rg_rows`).
+SEARCH_V1_FILES = ('names', 'search')
 #: The reads cross-checked against the reader (path, thr, atten, max_depth).
 PLANS = [
     ('', 32768, 1, None),
@@ -168,6 +190,63 @@ def write_v2_lens(here: str) -> None:
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
 
 
+def search_rows() -> dict[str, list[tuple[str, int]]]:
+    """`v2-search`'s objects per bucket (key, size)."""
+    bk = [(f'fill/f{i:05d}', 1 << (i % 12)) for i in range(6000)]
+    bk += [('fill/zz-ttl-a/x.bin', 5000), ('fill/zz-TTL-b', 7000)]
+    bk += [('tmp/ttl=14d/run-a/ckpt/x.bin', 4 * MiB), ('tmp/ttl=14d/run-a/y.bin', MiB), ('tmp/ttl=7d/z.bin', 2 * MiB), ('tmp/scratch/q.bin', 3 * MiB)]
+    bk += [('iris/TTL-misc/inner-ttl/w.bin', 300), ('iris/TTL-misc/v.bin', 200), ('iris/notes.txt', 50)]
+    bk += [('models/llama/model-00001-of-00002.safetensors', 8 * MiB), ('models/llama/model-00002-of-00002.safetensors', 8 * MiB), ('models/llama/config.json', 900), ('models/tiny.safetensors', 10)]
+    bk += [('ckpt/final/step-100/a.bin', 6000), ('runs/grug/swarm/ckpt-final.pt', 9000), ('runs/grug/swarmy/b.pt', 100)]
+    bk += [('\u212aey/k.bin', 77), ('keys/k2.bin', 88)]
+    zz = [('Checkpoints/ttl/a.bin', 10), ('data/x.parquet', 20)]
+    return {'bk': bk, 'zz': zz}
+
+
+def write_v2_search(here: str) -> None:
+    out_dir = join(here, 'v2-search')
+    v1 = {}
+    for side in SEARCH_V1_FILES:
+        with open(join(out_dir, f'path-index.{side}.parquet'), 'rb') as f:
+            v1[side] = f.read()
+    shutil.rmtree(out_dir, ignore_errors=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        con = duckdb.connect()
+        sources = []
+        for bucket, rows in search_rows().items():
+            listing = join(tmp, f'{bucket}.listing.parquet')
+            pd.DataFrame({
+                'bucket': [bucket] * len(rows),
+                'name': [n for n, _ in rows],
+                'size_bytes': [s for _, s in rows],
+                'created': [TS] * len(rows),
+                'storage_class_id': [1] * len(rows),
+            }).to_parquet(listing)
+            l2 = join(tmp, f'{bucket}.l2.parquet')
+            aggregate_listing_to_parquet(prepare_listing(con, (listing,)), bucket=bucket, scheme='s3', out_parquet=l2, con=con, mean_mtime=True)
+            sources.append((bucket, l2))
+        summary = ix.write_index(
+            sources, join(tmp, 'out'), mem='1GB', threads=1, row_group_rows=2048,
+            search=True, search_opts={'rows_rg_rows': SEARCH_ROWS_RG, 'postings_rg_rows': 2048, 'dir_rg_rows': SEARCH_DIR_ROWS},
+        )
+        print(json.dumps({'rows': summary['rows'], 'sorts': summary['sorts'], 'search': {k: v for k, v in summary['search'].items() if k != 'files'}}, indent=2), file=sys.stderr)
+        shutil.os.makedirs(out_dir)
+        files = {}
+        for variant, stem in SORTS.items():
+            dst = join(out_dir, f'{stem}.parquet')
+            shutil.copy(join(tmp, 'out', f'{stem}.parquet'), dst)
+            files[variant] = dst
+        for side in SEARCH_SIDECARS:
+            shutil.copy(join(tmp, 'out', f'path-index.{side}.parquet'), join(out_dir, f'path-index.{side}.parquet'))
+    for side, data in v1.items():
+        with open(join(out_dir, f'path-index.{side}.parquet'), 'wb') as f:
+            f.write(data)
+    d1 = d1_json(files)
+    for variant, stem in SORTS.items():
+        write_text(join(out_dir, f'{stem}.groups.json'), groups_blob(d1[variant]['schema'], d1[variant]['rows']))
+    write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
+
+
 def write_v1(here: str) -> None:
     parquet = join(here, 'path-index-zstd.parquet')
     write_text(join(here, 'path-index-zstd.d1.json'), json.dumps(d1_json({'path': parquet}), separators=(',', ':')))
@@ -178,6 +257,7 @@ def main() -> None:
     write_v1(here)
     write_v2(here)
     write_v2_lens(here)
+    write_v2_search(here)
 
 
 if __name__ == '__main__':

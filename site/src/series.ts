@@ -138,10 +138,13 @@ export interface BandCallout extends Callout { y0: number; h: number }
 /** Callouts inside a stacked band, of the band's own height (the root's size,
  * not the stack's running sum): the same roles as `pickAnnotations` applied to
  * the height series, each placed at the band's `[y0, y]` at that x, `h` the
- * height to label. */
-export function bandCallouts(band: Band[], radius?: number, minPromFrac = 0): BandCallout[] {
-  const at = new Map(band.map(b => [b.x, b]))
-  const heights = band.map(b => ({ x: b.x, y: b.y - b.y0 }))
+ * height to label. With `top` (the stack's top edge per x), the x's where
+ * this band is the whole stack (a lone root, before the others' geneses) are
+ * skipped: there its height is the total, whose own callouts already say it. */
+export function bandCallouts(band: Band[], radius?: number, minPromFrac = 0, top?: ReadonlyMap<number, number>): BandCallout[] {
+  const shared = top ? band.filter(b => !(b.y0 === 0 && top.get(b.x) === b.y)) : band
+  const at = new Map(shared.map(b => [b.x, b]))
+  const heights = shared.map(b => ({ x: b.x, y: b.y - b.y0 }))
   return pickAnnotations(heights, undefined, radius, minPromFrac).map(c => {
     const b = at.get(c.x)!
     return { x: c.x, y: b.y, y0: b.y0, h: c.y, below: c.below }

@@ -26,6 +26,7 @@ One mirror failing doesn't stop the others; the job exits non-zero if any did. T
 ```bash
 deploy/sheet-mirror/build.sh  <deployment>/sheet-mirror.yml   # Cloud Build → the config's image (default :latest)
 deploy/sheet-mirror/deploy.sh <deployment>/sheet-mirror.yml   # Cloud Run job + Scheduler trigger + IAM
+deploy/sheet-mirror/deploy.sh -P <deployment>/sheet-mirror.yml  # just the job, when infra/gcp owns trigger + IAM
 gcloud run jobs execute <job> --project <project> --region <region> --wait   # one-off test
 ```
 

@@ -573,3 +573,53 @@ def test_store_with_only_the_bysize_user_sort(tmp_path: Path, listing: str, attr
         "path-index-bysize.parquet", "path-index.groups.parquet", "path-index.parquet",
     ]
     assert _kv(pidx.with_name("path-index-bysize-by-user.parquet")) == {"tier": "bysize", "sort": "usr,size_bucket desc,path", "bucket": "log2"}
+
+
+def test_filesystem_root_capture_splits_on_first_segment(tmp_path: Path):
+    """A `capture /`'s rows all carry bucket `/` (the scan root). Its top-level
+    dirs become the depth-1 roots (`Applications`, `Users`), as `Users/ryan`'s
+    first segment does for a home capture — not one '' root with `/`-led
+    children, whose parent walk never terminates. Files directly under `/`
+    (`.file`, `.VolumeIcon.icns`) have no root to sit in and are dropped."""
+    listing_path = tmp_path / "listing.parquet"
+    pd.DataFrame(
+        {
+            "bucket": ["/"] * 3,
+            "name": ["Users/ryan/a.bin", "Applications/X.app/b", ".file"],
+            "size_bytes": [2 * GB, 1 * GB, 0],
+            "created": [TS["d0701"]] * 3,
+            "storage_class_id": [1] * 3,
+        }
+    ).to_parquet(listing_path)
+    pidx = tmp_path / "idx" / "path-index.parquet"
+    write_path_index((str(listing_path),), tmp_path / "out", "2026-07-20", path_index=pidx)
+    df = pd.read_parquet(pidx)
+    assert _rows(df, ["path", "kind", "size"]) == [
+        ("Applications", "dir", 1 * GB), ("Users", "dir", 2 * GB),
+        ("Applications/X.app", "dir", 1 * GB), ("Users/ryan", "dir", 2 * GB),
+        ("Applications/X.app/b", "file", 1 * GB), ("Users/ryan/a.bin", "file", 2 * GB),
+    ]
+
+
+def test_home_capture_object_depth(tmp_path: Path):
+    """A capture of a nested root (`/Users/ryan`) has a multi-segment bucket
+    (`Users/ryan`): an object's depth counts the bucket's segments too, so a
+    file sits one level below its dir (the `(depth, path)` range a drill reads)."""
+    listing_path = tmp_path / "listing.parquet"
+    pd.DataFrame(
+        {
+            "bucket": ["/Users/ryan"] * 2,
+            "name": ["top.txt", "c/a.bin"],
+            "size_bytes": [1 * GB, 2 * GB],
+            "created": [TS["d0701"]] * 2,
+            "storage_class_id": [1] * 2,
+        }
+    ).to_parquet(listing_path)
+    pidx = tmp_path / "idx" / "path-index.parquet"
+    write_path_index((str(listing_path),), tmp_path / "out", "2026-07-20", path_index=pidx)
+    df = pd.read_parquet(pidx)
+    assert _rows(df, ["path", "kind", "depth"]) == [
+        ("Users", "dir", 1), ("Users/ryan", "dir", 2),
+        ("Users/ryan/c", "dir", 3), ("Users/ryan/top.txt", "file", 3),
+        ("Users/ryan/c/a.bin", "file", 4),
+    ]

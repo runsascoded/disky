@@ -27,7 +27,9 @@ import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
-import { collectFlagged } from './filterTree'
+import { collectFlagged, DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
+import { QueryHelpTip } from './QueryHelp'
+import { FilterFlags, FilterNote } from './FilterNote'
 import { BulkBar } from './BulkBar'
 import { setCurrentScan, useMyUser, useOwnerIndex, useOwners } from './owners'
 import { MultiSelect } from './MultiSelect'
@@ -176,7 +178,21 @@ function AppContent() {
   // server with every view (see `scopeQs` below). The owner axis replaces the
   // old review *lenses* (`?l=user|unclaimed`, `?lu=`, and the `?u=` legend
   // pin). Old links normalize below.
-  const [fq, setFq] = useUrlState('f', stringParam())
+  const [fqRaw, setFq] = useUrlState('f', stringParam())
+  // `?qs=`: the filter's syntax (`functions/_lib/querySyntax.ts`), over the
+  // store's default. The box parses with it as it goes: a query that doesn't
+  // parse (or an unknown `?qs=`) is shown under the box and not applied, so
+  // `fq` below is the applied filter (undefined: none).
+  const [qsP, setQsP] = useUrlState('qs', stringParam(), true)
+  const storeSyntax = syntaxById(store.querySyntax ?? '') ?? DEFAULT_SYNTAX
+  const syntax = (qsP && syntaxById(qsP)) || storeSyntax
+  const fParse = useMemo((): { ok: boolean; error?: string } => {
+    if (qsP && !syntaxById(qsP)) return { ok: false, error: `unknown query syntax '${qsP}' (want ${SYNTAXES.map(x => x.id).join('|')})` }
+    if (!fqRaw) return { ok: false }
+    const r = syntax.parse(fqRaw)
+    return r.error !== undefined ? { ok: false, error: r.error } : { ok: !!r.ast }
+  }, [fqRaw, qsP, syntax])
+  const fq = fParse.ok ? fqRaw : undefined
   // The box edits a local draft; the URL (and every query keyed on it) follows
   // after a 250 ms pause — one request pair per phrase, not per keystroke.
   const [fqDraft, setFqDraft] = useState<string | null>(null)
@@ -243,7 +259,7 @@ function AppContent() {
     (ownerMode === 'owned' || ownerMode === 'unowned' ? `&o=${ownerMode}` : '') +
     (notUsers.length ? `&o=!${notUsers.map(encodeURIComponent).join(',')}` : '') +
     (classSet ? `&cl=${CLASS_AXES.filter(c => classSet.has(c)).join('')}` : '') +
-    (fq ? `&q=${encodeURIComponent(fq)}` : '')
+    (fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : '')
   // One-time legacy-param rewrite onto the two axes, so old links (Slack
   // digests, /user pages) work and re-share in the current form:
   //   ?l=todo → ?k=u · ?l=unclaimed|communal, ?t=unattributed|communal → ?o=unclaimed
@@ -358,7 +374,7 @@ function AppContent() {
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw new Error(`${r.status}: ${(await r.text()).slice(0, 120)}`) }
-        const j = await r.json() as { tree: TreeNode; tier?: string; matches?: string[]; matched?: { path: string; b: number; o: number }[]; threshold?: number }
+        const j = await r.json() as { tree: TreeNode; tier?: string; matches?: string[]; matched?: { path: string; b: number; o: number }[]; threshold?: number; partialReason?: string; approximateReason?: string }
         pf.decoded()
         return j
       },
@@ -416,6 +432,8 @@ function AppContent() {
   // answers alike, so the first that has landed says.
   const objects = listsObjects([...subtreeQs, ...coarseQs].find(q => q.data?.tier)?.data?.tier)
   const rootErr = subtreeQs[0]?.error as Error | undefined
+  // The box's error: the client's own parse, else the server's 400.
+  const fErr = fParse.error ?? /^400: bad query: (.*)/s.exec(rootErr?.message ?? '')?.[1]
   // useQueries returns a fresh array each render; stamp the data so the graft
   // memo re-runs exactly when a response lands.
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
@@ -423,8 +441,13 @@ function AppContent() {
   const subStamp = [...subtreeQs, ...coarseQs].map(q => q.dataUpdatedAt).join(',')
   const tree = useMemo((): TreeNode | null => {
     if (!baseTree) return null
-    const graftAt = (t: TreeNode, segs: string[], sub: TreeNode): TreeNode => {
+    const graftAt = (t: TreeNode, segs: string[], sub: TreeNode, coarse: boolean): TreeNode => {
       const rec = (n: TreeNode, i: number): TreeNode => {
+        // A depth-1 stand-in never replaces deeper children the parent's
+        // tree already carries for this node: a drill into a tile the parent
+        // drew to depth would otherwise flatten it to one level until the
+        // full subtree lands (seconds, on a cold path).
+        if (i === segs.length && coarse && n.c?.some(k => k.c?.length)) return n
         // Keep own totals; adopt the finer children — and the response root's
         // provenance (`pv`), which a parent-level view may have skipped.
         if (i === segs.length) return { ...n, c: sub.c, ...(sub.pv ? { pv: sub.pv } : {}) }
@@ -446,7 +469,7 @@ function AppContent() {
     let t = baseTree
     subtreePaths.forEach((p, i) => {
       const sub = dataFor(i)
-      if (p && sub) t = graftAt(t, p.split('/'), sub)
+      if (p && sub) t = graftAt(t, p.split('/'), sub, !subtreeQs[i]?.data)
     })
     return t
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -480,6 +503,13 @@ function AppContent() {
     if (!fq) return undefined
     const m = subtreeQs[subtreeQs.length - 1]?.data?.matched ?? subtreeQs[0]?.data?.matched
     return m?.map(x => x.path)
+  }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The same response's completeness: a budget-cut search (`partial`) or a
+  // read without the search index (`approximate`) — shown beside the count.
+  const fCoverage = useMemo(() => {
+    if (!fq) return undefined
+    const d = subtreeQs[subtreeQs.length - 1]?.data ?? subtreeQs[0]?.data
+    return d && { partialReason: d.partialReason, approximateReason: d.approximateReason }
   }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
   const meta: Meta | null = metaQ.data ?? null
   // Section `#hash` both ways (deep link in, scroll-spy out). Re-armed as the
@@ -613,9 +643,12 @@ function AppContent() {
   // First paint: the bucket-level diff (`depth=1` — the two root reads plus
   // one level of lookups, ~2 s cold) stands in for the full walk while it
   // aligns, so the map shows the shape of the change before its detail.
+  // Not under a path filter: its matches are found at every depth either way
+  // (`depth` only caps what's drawn), so without a search index the "first"
+  // paint costs as much as the full walk (gcs 2026-10-02: 9.3 s vs 4.5 s).
   const diffQ1 = useQuery<DiffData, Error>({
     queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs, 'l1'],
-    enabled: !!asof && !!diffPrev,
+    enabled: !!asof && !!diffPrev && !fq,
     staleTime: Infinity,
     retry: false,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
@@ -876,9 +909,12 @@ function AppContent() {
 
   // Catch-all route: a first path segment that isn't one of the store's
   // buckets is a typo'd URL (/sweeps), not a drillable prefix — 404 it
-  // instead of silently rendering the root view at a bogus address.
+  // instead of silently rendering the root view at a bogus address. Only an
+  // unscoped root lists every bucket: under a filter or owner scope a real
+  // bucket with nothing in scope is absent from it, and is "no matches", not
+  // a 404.
   const seg0 = drillPath.split('/')[0]
-  if (baseTree?.c && seg0 && !baseTree.c.some(k => k.n === seg0)) {
+  if (!scopeQs && baseTree?.c && seg0 && !baseTree.c.some(k => k.n === seg0)) {
     return (
       <main>
         <SiteNav />
@@ -1043,19 +1079,20 @@ function AppContent() {
         )}
         {bar.pathFilter && (
           <span className="filterbox">
-            <input
-              value={fqDraft ?? fq ?? ''}
-              onChange={e => setFqDraft(e.target.value)}
-              placeholder="filter paths — text, a|b, or /regex/"
-              aria-label="Filter tree by segment name"
-              size={32}
-            />
-            {fq && tree && (
-              <span className="fnote">
-                {tree.b > 0 ? <>{fmtBytes(tree.b)} matched</> : 'no matches'}
-                <Explain text="Clear the path filter"><button type="button" onClick={() => { setFqDraft(null); setFq(undefined) }}>✕</button></Explain>
-              </span>
-            )}
+            <Explain text={`Filter paths (${syntax.describe().label}): ${syntax.describe().summary} — the ? lists the forms.`}>
+              <input
+                value={fqDraft ?? fqRaw ?? ''}
+                onChange={e => setFqDraft(e.target.value)}
+                placeholder={syntax.describe().placeholder}
+                aria-label="Filter tree by path"
+                aria-invalid={!!fErr}
+                size={30}
+              />
+            </Explain>
+            <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />
+            <FilterNote error={fErr} matched={fq && tree ? (tree.b > 0 ? `${fmtBytes(tree.b)} matched` : 'no matches') : null} coverage={fCoverage}>
+              <Explain text="Clear the path filter"><button type="button" onClick={() => { setFqDraft(null); setFq(undefined) }}>✕</button></Explain>
+            </FilterNote>
           </span>
         )}
         {fq && fMatches.length > 0 && (
@@ -1226,6 +1263,8 @@ function AppContent() {
               {diff.lookups_capped && <> Some small one-sided names went unread (lookup budget); they may sit in “(other)”.</>}
               {diff.truncated && <> Largest changes shown — the diff walk was budget-capped, so the smallest movements aren’t enumerated (the totals are exact).</>}
             </>}><span className="info" tabIndex={0} aria-label="how this diff is read"> ⓘ</span></Tooltip>
+          )}{diff && fq && (diff.partialReason || diff.approximateReason) && (
+            <span className="fflags"><FilterFlags partialReason={diff.partialReason} approximateReason={diff.approximateReason} /></span>
           )}</h2>
           {/* 2-row header band above the map: scan pickers + presets (with the
               status/error line) sit as `controls`, the colour legend beneath

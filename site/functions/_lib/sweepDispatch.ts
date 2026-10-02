@@ -59,12 +59,13 @@ export const sweepScript = ({ mode, jobId, buckets, plan }: SweepScript): string
 }
 
 const IMAGE = `us-central1-docker.pkg.dev/${GCP_PROJECT}/cloud-run-source-deploy/gcs-usage-snapshot:latest`
-const JOB_SA = `gcs-usage-job@${GCP_PROJECT}.iam.gserviceaccount.com`
 const CF_ACCOUNT_ID = '74981a43be0de7712369306c7b19133d'
 const SECRET = (name: string) => `projects/${GCP_PROJECT}/secrets/${name}/versions/latest`
 
 async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<Prepared | ReturnType<typeof refuse>> {
   if (!env.GCP_SA_KEY) return refuse(503, 'dispatch not configured (GCP_SA_KEY secret missing)')
+  if (!env.JOB_SA) return refuse(503, 'dispatch not configured (JOB_SA var missing)')
+  const jobSa = env.JOB_SA
   const requested = req.buckets ?? []
   if (requested.some(b => !/^marin-[a-z0-9-]+$/.test(b))) return refuse(400, 'bad bucket name')
   const shape = prefixShape(env)
@@ -112,7 +113,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
       }],
       allocationPolicy: {
         instances: [{ policy: { machineType: 'n2-highmem-8', bootDisk: { type: 'pd-balanced', sizeGb: '100' } } }],
-        serviceAccount: { email: JOB_SA },
+        serviceAccount: { email: jobSa },
         location: { allowedLocations: [`regions/${region}`] },
       },
       logsPolicy: { destination: 'CLOUD_LOGGING' },

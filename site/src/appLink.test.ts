@@ -37,15 +37,13 @@ describe('offerAppLink — desktop Mac browsers only, never inside the app', () 
 })
 
 describe('handoffUrl — the in-app wall\'s "sign in with your browser" target', () => {
-  it('sets the param, keeping the rest of the query', () => {
+  it('is the server hand-off page, returning to the current path + query', () => {
     expect([
       handoffUrl({ origin: 'https://disk.example', pathname: '/', search: '' }),
       handoffUrl({ origin: 'https://disk.example', pathname: '/Users/x', search: '?depth=2' }),
-      handoffUrl({ origin: 'https://disk.example', pathname: '/', search: '?open-in-disky=1' }),
     ]).toEqual([
-      'https://disk.example/?open-in-disky=1',
-      'https://disk.example/Users/x?depth=2&open-in-disky=1',
-      'https://disk.example/?open-in-disky=1',
+      'https://disk.example/auth/app-handoff',
+      'https://disk.example/auth/app-handoff?next=%2FUsers%2Fx%3Fdepth%3D2',
     ])
   })
 })

@@ -140,6 +140,26 @@ describe('<TimeSeries>', () => {
     expect(anno.map(t => t.getAttribute('pointer-events'))).toEqual(['none', 'none'])
   })
 
+  it('drops a label whose box would overlap an earlier one (earlier = higher priority)', () => {
+    const { container } = withSize(() =>
+      render(
+        <TimeSeries
+          series={[{ key: 'a', points: [{ t: 0, y: 1000 }, { t: 0.5, y: 1500 }, { t: 1, y: 2000 }] }]}
+          getX={p => p.t}
+          getY={p => p.y}
+          annotations={[
+            { x: 0.5, y: 1500, label: 'kept' },
+            { x: 0.51, y: 1510, label: 'collides' },
+            { x: 0.5, y: 1500, label: 'below, clear', below: true },
+            { x: 1, y: 2000, label: 'last' },
+          ]}
+        />,
+      ),
+    )
+    const anno = [...container.querySelectorAll('svg text[paint-order="stroke"]')]
+    expect(anno.map(t => t.textContent)).toEqual(['kept', 'below, clear', 'last'])
+  })
+
   it('onPickX sets a pointer cursor and only fires once a hover x is snapped', () => {
     const onPickX = vi.fn()
     const { container } = withSize(() =>

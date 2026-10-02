@@ -60,7 +60,7 @@ async function setup(env: Partial<ExecEnv> = {}) {
   }
   const calls: string[] = []
   const executors = { 'plan-sweep': fake('plan-sweep', db, calls), sweep: fake('sweep', db, calls), laptop: EXECUTORS.laptop }
-  return { db, calls, executors, env: { DB: db, GCP_SA_KEY: 'test', ...env } as ExecEnv }
+  return { db, calls, executors, env: { DB: db, GCP_SA_KEY: 'test', JOB_SA: 'job@test.iam.gserviceaccount.com', ...env } as ExecEnv }
 }
 
 const req = (o: Partial<DispatchReq>): DispatchReq => ({ planId: 1, mode: 'dry', actor: 'bo@openathena.ai', siteUrl: 'https://site.test', ...o })
@@ -89,7 +89,7 @@ describe('dispatchPlan — executor selection', () => {
     ])
   })
 
-  it('validates the scan id per executor, needs D1, and the GCP executors need their key', async () => {
+  it('validates the scan id per executor, needs D1, and the GCP executors need their key and job account', async () => {
     const s = await setup()
     // the key check is each GCP executor's own (`prepare`), not the seam's
     const real = { ...s.executors, sweep: EXECUTORS.sweep, 'plan-sweep': EXECUTORS['plan-sweep'] }
@@ -98,12 +98,16 @@ describe('dispatchPlan — executor selection', () => {
       await dispatchPlan(s.env, req({}), 'plan-sweep', s.executors),
       await dispatchPlan({ ...s.env, GCP_SA_KEY: undefined }, req({ date: '2026-09-28' }), 'sweep', real),
       await dispatchPlan({ ...s.env, GCP_SA_KEY: undefined }, req({ date: '2026-09-28' }), 'plan-sweep', real),
+      await dispatchPlan({ ...s.env, JOB_SA: undefined }, req({ date: '2026-09-28' }), 'sweep', real),
+      await dispatchPlan({ ...s.env, JOB_SA: undefined }, req({ date: '2026-09-28' }), 'plan-sweep', real),
       await dispatchPlan({ ...s.env, DB: undefined }, req({ date: '2026-09-28' }), 'sweep', s.executors),
     ]).toEqual([
       { ok: false, status: 400, error: 'date must be a scan id (YYYY-MM-DD)' },
       { ok: false, status: 400, error: 'date required for a dry run (YYYY-MM-DD[THHMM])' },
       { ok: false, status: 503, error: 'dispatch not configured (GCP_SA_KEY secret missing)' },
       { ok: false, status: 503, error: 'dispatch not configured (GCP_SA_KEY secret missing)' },
+      { ok: false, status: 503, error: 'dispatch not configured (JOB_SA var missing)' },
+      { ok: false, status: 503, error: 'dispatch not configured (JOB_SA var missing)' },
       { ok: false, status: 503, error: 'plans store not configured (no D1 binding)' },
     ])
     expect(s.calls).toEqual([])

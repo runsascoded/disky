@@ -67,6 +67,9 @@ export interface Env {
    *  (`POST /api/plans/stage`, `stage_batches` in this D1); mirrors the
    *  client's `Store.staging`. Unset = admins curate plans directly. */
   STAGING?: string
+  /** The path filter's default syntax (`q=` without `qs=`; `querySyntax.ts`
+   *  ids). Mirrors the client's `Store.querySyntax`. Unset = `simple`. */
+  QUERY_SYNTAX?: string
   STORE_ACCESS_KEY_ID?: string
   STORE_SECRET_ACCESS_KEY?: string
   /** Global second cache tier behind the colo cache (`_lib/edgeCache.ts`). */
@@ -84,6 +87,8 @@ export interface Env {
   SNAPSHOTS_SUBDIR?: string
   /** Dedicated SA key (Batch submit + actAs the job SA) for the sweep dispatch bridge. */
   GCP_SA_KEY?: string
+  /** The service account dispatched Batch jobs run as (a `[vars]` entry). */
+  JOB_SA?: string
   /** Secondary stores served beside the primary (`_lib/stores.ts`,
    *  specs/multi-store.md): `{<key>: {scope?, vars?, secrets?}}` as JSON. */
   STORES_JSON?: string
