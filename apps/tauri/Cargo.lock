@@ -867,6 +867,7 @@ name = "disk-tree-app"
 version = "0.1.1"
 dependencies = [
  "dt-capture",
+ "dt-index",
  "libc",
  "objc2",
  "objc2-foundation",

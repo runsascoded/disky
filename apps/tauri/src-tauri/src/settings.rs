@@ -4,7 +4,8 @@
 //! {"settings": {"site": "prod", "scope": "machine", "schedule": ["06:00", "18:00"]}, "jobs": {…}}
 //! ```
 //!
-//! - `site`: `prod` (https://disk.rbw.sh), `dev` (https://dev.disk.rbw.sh), or a URL.
+//! - `site`: `prod` (https://disk.rbw.sh), `dev` (https://dev.disk.rbw.sh), `local`
+//!   (this Mac's own scans, served by the app on loopback), or a URL.
 //!   `DISKY_URL` overrides.
 //! - `scope`: `machine` (scan `/`, one filesystem) or `home` (`$HOME`); exported to
 //!   the scan job as `DISKY_SCAN_ROOT`.
@@ -18,6 +19,9 @@ use serde_json::Value;
 
 pub const PROD_URL: &str = "https://disk.rbw.sh";
 pub const DEV_URL: &str = "https://dev.disk.rbw.sh";
+/// The app's own server (`dt_index::http`) over this Mac's local scans.
+pub const LOCAL_ADDR: &str = "127.0.0.1:7792";
+pub const LOCAL_URL: &str = "http://127.0.0.1:7792";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -41,6 +45,7 @@ impl Settings {
         match self.site.as_str() {
             "prod" => PROD_URL.into(),
             "dev" => DEV_URL.into(),
+            "local" => LOCAL_URL.into(),
             other => other.into(),
         }
     }

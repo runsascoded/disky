@@ -1,6 +1,6 @@
 # Rust engine: a self-contained disky
 
-**Status:** in progress (2026-10-01). Phases 1–2 done (`capture` to a local dir or `r2://` / `s3://` / `file://`); phase 3 done (disky captures in-process; m3's R2-event ingest trigger live since 2026-10-02); phase 4a (Rust reduce) and 4b (local read API) done. Ryan: "i like the sound of porting to Rust"; support **both** a local-only mode and the hosted mode.
+**Status:** in progress (2026-10-01). Phases 1–2 done (`capture` to a local dir or `r2://` / `s3://` / `file://`); phase 3 done (disky captures in-process; m3's R2-event ingest trigger live since 2026-10-02); phase 4 (local-only mode: Rust reduce, local read API, app wiring) done; open items below. Ryan: "i like the sound of porting to Rust"; support **both** a local-only mode and the hosted mode.
 
 ## Why
 
@@ -37,7 +37,16 @@ Each phase lands with a parity test against the Python implementation (`tests/te
      - Parity vs prod disk.rbw.sh (2026-10-02, the same capture reduced locally: 8,364,555 rows / 1,022 groups, identical to prod's index): 7 `/api/subtree` views were compared (root, `~`, `~` at `depth=1`, `~/c/oa`, `Library` at `minArea=6`, `~/Library/Caches`, `Applications` at `atten=1.5`). Every node's name, kind, b, o, d, f, ag and child order is identical, as are the threshold, node count and chosen sort, except the root label (`ROOT_LABEL`). The series point matches too.
      - Perf (8.4M-row scan): 13–100 ms per view, 3 ms per series, 340 MB RSS. CIC: the SPA renders the map, drills, `~` crumbs, table and age column with no console errors.
      - The reduce of that scan: 23 s / **3.2 GB RSS** with a `String` + `Row` per file; with file rows held columnar (one path buffer + per-column vecs) **17 s / 1.87 GB**, identical output. The rest is the per-dir maps (~1M dirs, three of them alive at once in `finish`); next lever if it matters.
-   - **4c app wiring:** a `local` scan target (`to` = a local scans dir, `~/Library/Application Support/disky/scans/`) reduces right after the capture, ideally from the walk with no shards. Add a `local` site setting that points the window at the loopback server, plus retention (the disk is the constraint: 18 GB free on m3).
+   - **4c ✅ app wiring.**
+     - **The scan job indexes locally** when it has `"local": true`, when the site is `local`, or when it isn't configured at all (local is the app's default mode). The walk feeds `dt_index::Reducer` directly: `dt_capture::walk` with no target, or `capture_tee` when an R2 `to` is also set, so one walk serves both. The scan is written whole to `<local_dir or ~/Library/Application Support/disky/scans>/<YYYY-MM-DDTHHMM UTC>` (built in `<id>.tmp`, then renamed in), keeping the newest `keep` (default 8, ~300 MB each for the whole disk). Progress phase `index` while it writes.
+     - **The GUI serves** `dt_index::http` on `127.0.0.1:7792` over that dir, with the bundled SPA (`Contents/Resources/web`, built by `scripts/build-web` in `beforeBuildCommand`: `laptop` store, `AUTH_MODE=public`, `~` = the builder's `$HOME`).
+     - **Site `local`** ("This Mac (local)" in the menu's Site submenu and Settings) points the window there.
+     - Verified on m3 (2026-10-02): `disky job scan` with `{"local": true}` walked `/` (7,440,516 files, 285 errors) and indexed 8,387,739 rows in **2.5 min, 1.88 GB peak RSS**. The app's server lists it, and the SPA renders the whole machine (455 GiB) in Chrome.
+   - Open:
+     - `q=` (the name filter / search syntax `local` just gained) isn't implemented by the local server, which returns the unfiltered view.
+     - `~` is baked in at build time (fine for one user, wrong for anyone else's build).
+     - No diffs locally.
+     - Reduce memory (~1.9 GB for the whole disk) is transient, in the scan job's process.
    - Diffs between local scans: port `diff-index` later.
 5. **Hosted mode for other people:** per-user storage + auth on a shared deployment (the path store is already multi-store; `@open-athena/auth` handles sign-in). Upload = phase 2 against a per-user prefix with a scoped credential minted by the site (no AWS keys on the laptop). Shape TBD with Ryan.
 

@@ -5,7 +5,7 @@
   "identifier": "com.runsascoded.disk-tree",
   "build": {
     "frontendDist": "../settings",
-    "beforeBuildCommand": "cargo build --release -p dt-walker"
+    "beforeBuildCommand": "cargo build --release -p dt-walker && \"$(git rev-parse --show-toplevel)/apps/tauri/scripts/build-web\""
   },
   "app": {
     "withGlobalTauri": true,
@@ -36,7 +36,8 @@
       }
     },
     "resources": {
-      "../target/release/dt-walker": "dt-walker"
+      "../target/release/dt-walker": "dt-walker",
+      "../web/": "web/"
     }
   },
   "mainBinaryName": "disky"

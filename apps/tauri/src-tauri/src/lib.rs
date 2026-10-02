@@ -283,6 +283,7 @@ struct Tray {
     fda: MenuItem<Wry>,
     prod: CheckMenuItem<Wry>,
     dev: CheckMenuItem<Wry>,
+    local: CheckMenuItem<Wry>,
     scheduled: CheckMenuItem<Wry>,
     login: CheckMenuItem<Wry>,
 }
@@ -296,6 +297,7 @@ impl Tray {
         let site = settings::load().site;
         let _ = self.prod.set_checked(site == "prod");
         let _ = self.dev.set_checked(site == "dev");
+        let _ = self.local.set_checked(site == "local");
         let _ = self.scheduled.set_checked(services::agents_enabled());
         let _ = self.login.set_checked(login_enabled());
     }
@@ -320,6 +322,22 @@ fn set_site(app: &AppHandle, site: &str) {
     }
 }
 
+/// Serve this Mac's local scans (`jobs::local_scans_dir`) and the bundled
+/// SPA (`Contents/Resources/web`, built for the `laptop` store with no
+/// sign-in) on `settings::LOCAL_ADDR`, for the `local` site. Loopback only.
+fn start_local_server(app: &AppHandle) {
+    let Ok(web) = app.path().resource_dir().map(|d| d.join("web")) else { return };
+    if !web.join("index.html").exists() {
+        return jobs::note(&format!("disky: no local site build at {}", web.display()));
+    }
+    let cfg = dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into() };
+    std::thread::spawn(move || {
+        if let Err(e) = dt_index::http::serve(cfg, settings::LOCAL_ADDR, 4) {
+            jobs::note(&format!("disky: local server on {}: {e}", settings::LOCAL_ADDR));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -327,6 +345,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            start_local_server(app.handle());
 
             let site = settings::load().site;
             let tray = Tray {
@@ -334,11 +353,12 @@ pub fn run() {
                 fda: MenuItem::with_id(app, "fda", fda_line(true), false, None::<&str>)?,
                 prod: CheckMenuItem::with_id(app, "site_prod", "disk.rbw.sh", true, site == "prod", None::<&str>)?,
                 dev: CheckMenuItem::with_id(app, "site_dev", "dev.disk.rbw.sh", true, site == "dev", None::<&str>)?,
+                local: CheckMenuItem::with_id(app, "site_local", "This Mac (local)", true, site == "local", None::<&str>)?,
                 scheduled: CheckMenuItem::with_id(app, "scheduled", "Scheduled scans", true, false, None::<&str>)?,
                 login: CheckMenuItem::with_id(app, "login", "Open at login", true, false, None::<&str>)?,
             };
             tray.refresh();
-            let site_menu = Submenu::with_items(app, "Site", true, &[&tray.prod, &tray.dev])?;
+            let site_menu = Submenu::with_items(app, "Site", true, &[&tray.local, &tray.prod, &tray.dev])?;
             let menu = Menu::with_items(
                 app,
                 &[
@@ -377,6 +397,7 @@ pub fn run() {
                         "browser" => open(&site_url()),
                         "site_prod" => set_site(app, "prod"),
                         "site_dev" => set_site(app, "dev"),
+                        "site_local" => set_site(app, "local"),
                         "settings" => show_settings(app),
                         "logs" => open(&jobs::logs_dir().to_string_lossy()),
                         "fda" => open(FDA_PANE),

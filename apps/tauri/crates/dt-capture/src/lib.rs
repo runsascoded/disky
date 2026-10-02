@@ -138,43 +138,69 @@ impl Shards {
     }
 }
 
+/// What a [`walk`] saw besides its files.
+pub struct Walked {
+    pub error_count: u64,
+    pub error_paths: Vec<String>,
+}
+
+/// Walk `root` (normalized) in-process: `f(name, size_bytes, mtime_ms)` per
+/// file, `name` relative to the root (lossy UTF-8, like `run_gfind`), sizes
+/// = blocks × 512. Directories aren't rows (the engines imply them);
+/// CloudStorage is excluded, and `one_fs` stays on the root's filesystem.
+pub fn walk(root: &str, one_fs: bool, mut f: impl FnMut(&str, i64, i64) -> io::Result<()>) -> io::Result<Walked> {
+    let excludes = dt_walker::default_excludes();
+    let mut walker = dt_walker::Walker::new(&excludes).one_fs(one_fs);
+    let prefix: Vec<u8> = if root == "/" { b"/".to_vec() } else { format!("{root}/").into_bytes() };
+    let mut errbuf: Vec<u8> = Vec::new();
+    walker.walk_records(
+        root.as_bytes(),
+        |r| {
+            if r.kind == b'd' || !r.path.starts_with(&prefix) {
+                return Ok(());
+            }
+            f(&String::from_utf8_lossy(&r.path[prefix.len()..]), (r.blocks * 512) as i64, r.mtime * 1000)
+        },
+        &mut errbuf,
+    )?;
+    let error_paths = walker.errors.paths.iter().map(|p| String::from_utf8_lossy(p).into_owned()).collect();
+    Ok(Walked { error_count: walker.errors.count, error_paths })
+}
+
 /// Capture `opts.root` under `opts.to`; returns the capture dir and counts.
 pub fn capture(opts: &Opts) -> io::Result<Summary> {
+    capture_tee(opts, None)
+}
+
+/// [`capture`], also handing each file to `tee` (`name`, size, mtime ms), so
+/// one walk can feed a local index too.
+pub fn capture_tee(opts: &Opts, mut tee: Option<&mut dyn FnMut(&str, i64, i64)>) -> io::Result<Summary> {
     let root = normalize_root(&opts.root);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     let (stamp, iso) = stamps(now.as_secs() as i64, now.subsec_micros());
     let dir = opts.to.join(&format!("{}/{}/{stamp}", opts.host, slug(&root)));
     dir.create()?;
 
-    let excludes = dt_walker::default_excludes();
-    let mut walker = dt_walker::Walker::new(&excludes).one_fs(opts.one_fs);
     let mut shards = Shards { dir, root: root.clone(), names: vec![], sizes: vec![], mtimes: vec![], n_rows: 0, n_bytes: 0, n_shards: 0 };
-    let prefix: Vec<u8> = if root == "/" { b"/".to_vec() } else { format!("{root}/").into_bytes() };
     let batch_rows = opts.batch_rows.max(1);
-    let mut errbuf: Vec<u8> = Vec::new();
-    walker.walk_records(
-        root.as_bytes(),
-        |r| {
-            // Directories (and the root itself) aren't rows: the engines imply dirs.
-            if r.kind == b'd' || !r.path.starts_with(&prefix) {
-                return Ok(());
+    let walked = walk(&root, opts.one_fs, |name, size, mtime| {
+        if let Some(t) = tee.as_mut() {
+            t(name, size, mtime);
+        }
+        shards.names.push(name.to_string());
+        shards.sizes.push(size);
+        shards.mtimes.push(mtime);
+        if shards.names.len() >= batch_rows {
+            shards.flush()?;
+            if let Some(f) = &opts.progress {
+                f(shards.n_rows, shards.n_bytes);
             }
-            shards.names.push(String::from_utf8_lossy(&r.path[prefix.len()..]).into_owned());
-            shards.sizes.push((r.blocks * 512) as i64);
-            shards.mtimes.push(r.mtime * 1000);
-            if shards.names.len() >= batch_rows {
-                shards.flush()?;
-                if let Some(f) = &opts.progress {
-                    f(shards.n_rows, shards.n_bytes);
-                }
-            }
-            Ok(())
-        },
-        &mut errbuf,
-    )?;
+        }
+        Ok(())
+    })?;
     shards.flush()?;
 
-    let error_paths: Vec<String> = walker.errors.paths.iter().map(|p| String::from_utf8_lossy(p).into_owned()).collect();
+    let error_paths = walked.error_paths;
     let mut manifest = json!({
         "format": FORMAT,
         "version": VERSION,
@@ -184,7 +210,7 @@ pub fn capture(opts: &Opts) -> io::Result<Summary> {
         "time": iso,
         "n_rows": shards.n_rows,
         "n_shards": shards.n_shards,
-        "error_count": walker.errors.count,
+        "error_count": walked.error_count,
         "error_paths": error_paths,
     });
     if opts.container {
@@ -196,7 +222,7 @@ pub fn capture(opts: &Opts) -> io::Result<Summary> {
         }
     }
     shards.dir.put(MARKER, (serde_json::to_string_pretty(&manifest)? + "\n").into_bytes())?;
-    Ok(Summary { dir: shards.dir.display(), n_rows: shards.n_rows, n_bytes: shards.n_bytes, n_shards: shards.n_shards, error_count: walker.errors.count })
+    Ok(Summary { dir: shards.dir.display(), n_rows: shards.n_rows, n_bytes: shards.n_bytes, n_shards: shards.n_shards, error_count: walked.error_count })
 }
 
 /// `DISK_TREE_HOST`, else the hostname (what `capture.py` uses).
