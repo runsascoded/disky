@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveStores, storeFetch, storeForPath, storeQuery, storeUrl, type Store } from './stores'
+import { resolveStores, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
 // The build-time store resolution (specs/multi-store.md phase 2): `VITE_STORE`
@@ -103,5 +103,17 @@ describe('storeForPath', () => {
   })
   it('a single-store build is always the primary', () => {
     expect(['/', '/meta', '/meta/x'].map(p => storeForPath(p, resolveStores('cw', '', TEST_REGISTRY)).key)).toEqual(['cw', 'cw', 'cw'])
+  })
+})
+
+describe('withPageConfig', () => {
+  const laptop = resolveStores('laptop', '', TEST_REGISTRY)[0]
+  it('the served page’s home and title replace the build’s', () => {
+    const s = withPageConfig(laptop, { home: '/Users/someone/', title: 'disky — Some Mac' })
+    expect([s.key, s.home, s.title, s.base]).toEqual(['laptop', ['Users', 'someone'], 'disky — Some Mac', laptop.base])
+  })
+  it('no page config (any hosted deploy): the store as built', () => {
+    expect(withPageConfig(laptop, undefined)).toBe(laptop)
+    expect(withPageConfig(laptop, {})).toEqual(laptop)
   })
 })

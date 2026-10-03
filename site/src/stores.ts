@@ -131,7 +131,24 @@ export function resolveStores(primary: string | undefined, extra: string | undef
   return out
 }
 
-export const STORES: Store[] = resolveStores(import.meta.env.VITE_STORE, import.meta.env.VITE_STORES_EXTRA)
+/** What a served page knows that its build can't: the macOS app's local
+ *  server injects `window.__DISKY__ = {home, title}` into `index.html` (this
+ *  user's home dir under the root, `Users/ryan`; this Mac's name). */
+export interface PageConfig { home?: string; title?: string }
+
+/** The primary store with a page's `PageConfig` applied. */
+export function withPageConfig(s: Store, c: PageConfig | undefined): Store {
+  if (!c) return s
+  return {
+    ...s,
+    ...(c.home != null ? { home: c.home.split('/').filter(Boolean) } : {}),
+    ...(c.title ? { title: c.title } : {}),
+  }
+}
+
+export const STORES: Store[] = (([first, ...rest]) => [withPageConfig(first, (globalThis as { __DISKY__?: PageConfig }).__DISKY__), ...rest])(
+  resolveStores(import.meta.env.VITE_STORE, import.meta.env.VITE_STORES_EXTRA),
+)
 
 /** The primary store: `/`, and every request as it was before stores existed. */
 export const DEFAULT_STORE = STORES[0]
