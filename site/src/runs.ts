@@ -97,6 +97,7 @@ export const EXEC_CAPS: Record<'plan-sweep' | 'sweep' | 'laptop', ExecCaps> = {
   laptop: {
     stop: false, stopHint: '',
     undo: false, undoUnwindowed: false, purge: false, bucketCut: false, runFiles: false,
+    startHint: 'when the drainer picks it up (its next poll: 30 s, up to 2½ min while idle)',
   },
 }
 
