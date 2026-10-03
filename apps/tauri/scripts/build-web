@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # The site's SPA for the app's local site (`apps/tauri/web`, bundled as
-# `Contents/Resources/web`): the `laptop` store, no sign-in, `~` = $HOME.
-# Served with this Mac's scans by `dt_index::http` on loopback.
+# `Contents/Resources/web`): the `laptop` store, no sign-in.
+# Served with this Mac's scans by `dt_index::http` on loopback, which injects
+# `~` and the title at runtime (`window.__DISKY__`).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root/site"
-VITE_STORE=laptop VITE_AUTH_MODE=public VITE_HOME="${HOME#/}" \
+VITE_STORE=laptop VITE_AUTH_MODE=public \
   pnpm exec vite build --outDir "$root/apps/tauri/web" --emptyOutDir --logLevel warn

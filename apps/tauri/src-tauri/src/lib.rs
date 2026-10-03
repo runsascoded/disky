@@ -322,6 +322,18 @@ fn set_site(app: &AppHandle, site: &str) {
     }
 }
 
+/// This Mac's name as Sharing shows it ("Ryan's MacBook Pro"), else its hostname.
+fn computer_name() -> String {
+    std::process::Command::new("/usr/sbin/scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(dt_capture::host)
+}
+
 /// Serve this Mac's local scans (`jobs::local_scans_dir`) and the bundled
 /// SPA (`Contents/Resources/web`, built for the `laptop` store with no
 /// sign-in) on `settings::LOCAL_ADDR`, for the `local` site. Loopback only.
@@ -330,7 +342,10 @@ fn start_local_server(app: &AppHandle) {
     if !web.join("index.html").exists() {
         return jobs::note(&format!("disky: no local site build at {}", web.display()));
     }
-    let cfg = dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into() };
+    // `~` and the title are this user's and this Mac's, at runtime (the
+    // bundled build is anyone's).
+    let home = std::env::var("HOME").ok().map(|h| h.trim_matches('/').to_string());
+    let cfg = dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())) };
     std::thread::spawn(move || {
         if let Err(e) = dt_index::http::serve(cfg, settings::LOCAL_ADDR, 4) {
             jobs::note(&format!("disky: local server on {}: {e}", settings::LOCAL_ADDR));

@@ -26,6 +26,29 @@ pub struct Config {
     pub store: String,
     /// The store root's name in the tree (the Functions' `ROOT_LABEL`).
     pub root_label: String,
+    /// The store's home dir under the root (`Users/ryan`; `~` in the SPA)
+    /// and the page's title: what a build can't know, injected into
+    /// `index.html` as `window.__DISKY__` (`site/src/stores.ts`).
+    pub home: Option<String>,
+    pub title: Option<String>,
+}
+
+/// `index.html` with `<script>window.__DISKY__ = {…}</script>` ahead of the
+/// SPA's module (an inline classic script runs first).
+fn page(cfg: &Config, html: Vec<u8>) -> Vec<u8> {
+    let mut o = serde_json::Map::new();
+    if let Some(h) = &cfg.home {
+        o.insert("home".into(), h.as_str().into());
+    }
+    if let Some(t) = &cfg.title {
+        o.insert("title".into(), t.as_str().into());
+    }
+    let html = String::from_utf8_lossy(&html);
+    if o.is_empty() || !html.contains("</head>") {
+        return html.into_owned().into_bytes();
+    }
+    let js = serde_json::to_string(&o).unwrap().replace("</", "<\\/");
+    html.replacen("</head>", &format!("<script>window.__DISKY__ = {js}</script></head>"), 1).into_bytes()
 }
 
 type Resp = Response<Cursor<Vec<u8>>>;
@@ -240,10 +263,13 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
         p => {
             let rel = p.trim_start_matches('/');
             let f = cfg.web.join(rel);
-            if !rel.is_empty() && !rel.split('/').any(|s| s == "..") && f.is_file() {
+            if !rel.is_empty() && rel != "index.html" && !rel.split('/').any(|s| s == "..") && f.is_file() {
                 file(&f).unwrap()
             } else {
-                file(&cfg.web.join("index.html")).unwrap_or_else(|| text(404, "no SPA build"))
+                match std::fs::read(cfg.web.join("index.html")) {
+                    Ok(html) => body(200, "text/html; charset=utf-8", page(cfg, html)),
+                    Err(_) => text(404, "no SPA build"),
+                }
             }
         }
     }
@@ -278,6 +304,15 @@ pub fn serve(cfg: Config, addr: &str, threads: usize) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injects_page_config() {
+        let cfg = Config { scans: "s".into(), web: "w".into(), store: "laptop".into(), root_label: "r".into(), home: Some("Users/a".into()), title: Some("x </script>".into()) };
+        let out = page(&cfg, b"<html><head><title>t</title></head><body></body></html>".to_vec());
+        assert_eq!(String::from_utf8(out).unwrap(), r#"<html><head><title>t</title><script>window.__DISKY__ = {"home":"Users/a","title":"x <\/script>"}</script></head><body></body></html>"#);
+        let bare = Config { home: None, title: None, ..cfg };
+        assert_eq!(page(&bare, b"<head></head>".to_vec()), b"<head></head>");
+    }
 
     #[test]
     fn decodes_queries() {
