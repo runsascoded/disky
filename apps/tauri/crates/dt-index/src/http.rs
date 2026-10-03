@@ -34,7 +34,8 @@ pub struct Config {
 }
 
 /// `index.html` with `<script>window.__DISKY__ = {…}</script>` ahead of the
-/// SPA's module (an inline classic script runs first).
+/// SPA's module (an inline classic script runs first); `staging: false`
+/// always, this server being read-only (no plans API).
 fn page(cfg: &Config, html: Vec<u8>) -> Vec<u8> {
     let mut o = serde_json::Map::new();
     if let Some(h) = &cfg.home {
@@ -43,8 +44,9 @@ fn page(cfg: &Config, html: Vec<u8>) -> Vec<u8> {
     if let Some(t) = &cfg.title {
         o.insert("title".into(), t.as_str().into());
     }
+    o.insert("staging".into(), false.into());
     let html = String::from_utf8_lossy(&html);
-    if o.is_empty() || !html.contains("</head>") {
+    if !html.contains("</head>") {
         return html.into_owned().into_bytes();
     }
     let js = serde_json::to_string(&o).unwrap().replace("</", "<\\/");
@@ -309,9 +311,10 @@ mod tests {
     fn injects_page_config() {
         let cfg = Config { scans: "s".into(), web: "w".into(), store: "laptop".into(), root_label: "r".into(), home: Some("Users/a".into()), title: Some("x </script>".into()) };
         let out = page(&cfg, b"<html><head><title>t</title></head><body></body></html>".to_vec());
-        assert_eq!(String::from_utf8(out).unwrap(), r#"<html><head><title>t</title><script>window.__DISKY__ = {"home":"Users/a","title":"x <\/script>"}</script></head><body></body></html>"#);
+        assert_eq!(String::from_utf8(out).unwrap(), r#"<html><head><title>t</title><script>window.__DISKY__ = {"home":"Users/a","title":"x <\/script>","staging":false}</script></head><body></body></html>"#);
         let bare = Config { home: None, title: None, ..cfg };
-        assert_eq!(page(&bare, b"<head></head>".to_vec()), b"<head></head>");
+        assert_eq!(page(&bare, b"<head></head>".to_vec()), br#"<head><script>window.__DISKY__ = {"staging":false}</script></head>"#);
+        assert_eq!(page(&bare, b"<p>no head</p>".to_vec()), b"<p>no head</p>");
     }
 
     #[test]
