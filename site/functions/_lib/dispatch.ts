@@ -29,6 +29,8 @@ export interface DispatchReq {
   siteUrl: string
   /** gcs only: a `-b` cut of the plan's buckets (empty/absent = all). */
   buckets?: string[]
+  /** gcs only: the executor's machine (`SWEEP_MACHINES`; absent = the default). */
+  machine?: 'n2-highmem-8' | 'n2-highmem-32'
 }
 
 export interface DispatchErr { ok: false; status: number; error: string; extra?: Record<string, unknown> }

@@ -149,10 +149,67 @@ export function planStaging(have: readonly string[], add: readonly string[]): { 
 export interface StageBatchRow { id: number; plan_id: number; note: string | null; created_by: string; created_ts: number }
 export interface PlanItemRow { prefix: string; note: string | null; added_by: string; added_ts: number; batch_id: number | null }
 
+/** A `plan_items` audit row (`admin_edits`, `tbl = 'plan_items'`, pk = the plan id). */
+export interface PlanEdit { action: string; old_json: string | null; new_json: string | null }
+
+/** A stage batch with no items left, and what became of what it staged
+ * (specs/staged-runs.md): `absorbed` into later batches (a gesture that staged
+ * an ancestor), `unstaged` (taken back), and `covered` — named by an already
+ * staged ancestor when it was staged, so never added. `staged` = the prefixes
+ * it added. */
+export interface EmptiedBatch extends StageBatchRow {
+  staged: number
+  covered: number
+  absorbed: { into: number; n: number }[]
+  unstaged: number
+}
+
+/** The plan's emptied stage batches, by replaying its `plan_items` audit trail
+ * (pure): who held each prefix, and which gesture took it away. */
+export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[]): EmptiedBatch[] {
+  const live = new Set(items.map(i => i.batch_id))
+  const parse = (s: string | null): Record<string, unknown> => { try { return (s ? JSON.parse(s) : {}) as Record<string, unknown> } catch { return {} } }
+  const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  const owner = new Map<string, number | null>()
+  const fate = new Map<number, { staged: number; covered: number; absorbed: Map<number, number>; unstaged: number }>()
+  const of = (b: number) => { let f = fate.get(b); if (!f) fate.set(b, f = { staged: 0, covered: 0, absorbed: new Map(), unstaged: 0 }); return f }
+  for (const e of edits) {
+    const o = parse(e.old_json)
+    const n = parse(e.new_json)
+    if (e.action === 'insert') {
+      const batch = typeof n.batch_id === 'number' ? n.batch_id : null
+      for (const p of strs(o.absorbed)) {
+        const was = owner.get(p)
+        if (was != null && batch != null) { const a = of(was).absorbed; a.set(batch, (a.get(batch) ?? 0) + 1) }
+        owner.delete(p)
+      }
+      // A stage gesture's `staged` (a re-staged prefix keeps its first batch);
+      // an admin's curation (`prefixes`, no batch).
+      for (const p of [...strs(n.staged), ...strs(n.prefixes)]) {
+        if (owner.has(p)) continue
+        owner.set(p, batch)
+        if (batch != null) of(batch).staged++
+      }
+      if (batch != null) of(batch).covered += strs(n.covered).length
+    } else if (e.action === 'delete') {
+      for (const p of strs(o.prefixes)) {
+        const was = owner.get(p)
+        if (was != null) of(was).unstaged++
+        owner.delete(p)
+      }
+    }
+  }
+  return batches.filter(b => !live.has(b.id)).map(b => {
+    const f = fate.get(b.id) ?? { staged: 0, covered: 0, absorbed: new Map<number, number>(), unstaged: 0 }
+    return { ...b, staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged }
+  })
+}
+
 /** A plan with its items (memo joined from the stage batch where the deployment
- * stages), its stage batches and its runs — what `/staged` and `/api/plans/:id`
- * render. `staging` = the `stage_batches` table exists here. */
-export async function planDetail(db: D1Database, id: number, staging: boolean): Promise<{ plan: PlanRow; items: PlanItemRow[]; batches: StageBatchRow[]; runs: Record<string, unknown>[] } | null> {
+ * stages), its stage batches (`emptied`: those with no items left, with their
+ * fate) and its runs — what `/staged` and `/api/plans/:id` render. `staging` =
+ * the `stage_batches` table exists here. */
+export async function planDetail(db: D1Database, id: number, staging: boolean): Promise<{ plan: PlanRow; items: PlanItemRow[]; batches: StageBatchRow[]; emptied: EmptiedBatch[]; runs: Record<string, unknown>[] } | null> {
   const plan = await db.prepare('SELECT * FROM plans WHERE id = ?').bind(id).first<PlanRow>()
   if (!plan) return null
   const items = staging
@@ -166,7 +223,19 @@ export async function planDetail(db: D1Database, id: number, staging: boolean): 
     ? (await db.prepare('SELECT * FROM stage_batches WHERE plan_id = ? ORDER BY created_ts DESC').bind(id).all<StageBatchRow>()).results
     : []
   const runs = await db.prepare('SELECT * FROM deletion_runs WHERE plan_id = ? ORDER BY started_ts DESC').bind(id).all<Record<string, unknown>>()
-  return { plan, items: items.results, batches, runs: runs.results }
+  const edits = staging
+    ? (await db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()).results
+    : []
+  return { plan, items: items.results, batches, emptied: emptiedBatches(batches, items.results, edits), runs: runs.results }
+}
+
+/** One run's D1 record and its per-band rows (largest first) — the run detail
+ * `/staged` expands a run row into (`GET /api/plans/run?id=`). */
+export async function runDetail(db: D1Database, runId: string): Promise<{ run: Record<string, unknown>; bands: Record<string, unknown>[] } | null> {
+  const run = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(runId).first<Record<string, unknown>>()
+  if (!run) return null
+  const bands = await db.prepare('SELECT prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects FROM deletion_bands WHERE run_id = ? ORDER BY bytes DESC, prefix').bind(runId).all<Record<string, unknown>>()
+  return { run, bands: bands.results }
 }
 
 /** The shared open plan trash gestures land in (the newest open one), or null. */

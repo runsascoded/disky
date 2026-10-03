@@ -1,7 +1,8 @@
 // GET /api/sweep/jobs — the recent `gcs-sweep-*` Batch jobs with their live
 // state, so the console can show a dispatch from the moment it is submitted
 // (the executor only writes `deletion_runs` once its manifest step is done,
-// which can be an hour of listing). Read via the same dispatch SA as
+// which can be an hour of listing), and the `gcs-undo-*` jobs undoing runs
+// (`op: 'undo'`, `target` = the run id). Read via the same dispatch SA as
 // `dispatch.ts` (`batch.jobsEditor` covers list). Any signed-in viewer of the
 // console may read this; the payload holds no bucket data.
 //
@@ -12,16 +13,18 @@
 // ends.
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
 import type { ExecEnv } from '../../_lib/dispatch.js'
-import { batchConfig, notConfigured } from '../../_lib/batchConfig.js'
+import { type BatchConfig, batchConfig, notConfigured } from '../../_lib/batchConfig.js'
 import { gcpToken } from '../../_lib/gcp.js'
 import { runDir } from '../../_lib/sweepDispatch.js'
 import { announceFinished } from '../../_lib/stagedSlack.js'
-import { isSweepJob, jobIdOf, listSweepJobs, reflectSweepRuns } from '../../_lib/sweepReflect.js'
+import { isSweepJob, isUndoJob, jobIdOf, listSweepJobs, reflectSweepRuns, type SweepBatchJob } from '../../_lib/sweepReflect.js'
 
 type Env = AuthEnv & ExecEnv
 
 export interface SweepJob {
   job_id: string
+  /** `sweep` = a dry / real run; `undo` = an undo of `target`. */
+  op: 'sweep' | 'undo'
   mode: 'dry' | 'real'
   state: string
   created: string
@@ -29,6 +32,11 @@ export interface SweepJob {
   run_secs: number | null
   by: string | null
   date: string | null
+  /** The plan the job was dispatched for (`PLAN_ID`; null: an undo, or a job
+   *  dispatched before jobs carried it). */
+  plan_id: number | null
+  /** An undo's run id (`TARGET_RUN`). */
+  target: string | null
   /** The `-b` cut the job was dispatched with (empty = every bucket). */
   buckets: string[]
   /** The Batch region it runs in (its bucket's, for a one-bucket cut). */
@@ -38,6 +46,37 @@ export interface SweepJob {
   plan: string
   last_event: string | null
   logs: string
+}
+
+/** One listed Batch job as the console reads it (pure). */
+export function sweepJobView(cfg: Pick<BatchConfig, 'project' | 'dataBucket' | 'bucketRegions'>, j: SweepBatchJob): SweepJob {
+  const job_id = jobIdOf(j)
+  const vars = j.taskGroups?.[0]?.taskSpec?.environment?.variables ?? {}
+  const script = j.taskGroups?.[0]?.taskSpec?.runnables?.[0]?.container?.commands?.join(' ') ?? ''
+  const buckets = [...new Set([...script.matchAll(/(?:^|\s)-b\s+(\S+)/g)].map(m => m[1]))].sort()
+  const ev = j.status?.statusEvents ?? []
+  const last = ev.length ? ev[ev.length - 1] : null
+  const dur = j.status?.runDuration
+  const undo = isUndoJob(j)
+  return {
+    job_id,
+    op: undo ? 'undo' : 'sweep',
+    mode: undo || job_id.startsWith('gcs-sweep-real-') ? 'real' : 'dry',
+    state: j.status?.state ?? 'UNKNOWN',
+    created: j.createTime,
+    updated: j.updateTime ?? null,
+    run_secs: dur ? Number(dur.replace(/s$/, '')) : null,
+    by: vars.USER ?? null,
+    date: vars.SWEEP_DATE ?? null,
+    plan_id: vars.PLAN_ID ? Number(vars.PLAN_ID) : null,
+    target: vars.TARGET_RUN ?? null,
+    buckets,
+    region: j.region,
+    bucket_region: buckets.length === 1 ? cfg.bucketRegions[buckets[0]] ?? null : null,
+    plan: runDir(cfg, job_id),
+    last_event: last?.description ?? null,
+    logs: `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${j.uid}"`)}?project=${cfg.project}`,
+  }
 }
 
 export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
@@ -62,33 +101,6 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
     }
   }
 
-  const out: SweepJob[] = jobs
-    .filter(isSweepJob)
-    .slice(0, 20)
-    .map(j => {
-      const job_id = jobIdOf(j)
-      const vars = j.taskGroups?.[0]?.taskSpec?.environment?.variables ?? {}
-      const script = j.taskGroups?.[0]?.taskSpec?.runnables?.[0]?.container?.commands?.join(' ') ?? ''
-      const buckets = [...new Set([...script.matchAll(/(?:^|\s)-b\s+(\S+)/g)].map(m => m[1]))].sort()
-      const ev = j.status?.statusEvents ?? []
-      const last = ev.length ? ev[ev.length - 1] : null
-      const dur = j.status?.runDuration
-      return {
-        job_id,
-        mode: job_id.startsWith('gcs-sweep-real-') ? 'real' : 'dry',
-        state: j.status?.state ?? 'UNKNOWN',
-        created: j.createTime,
-        updated: j.updateTime ?? null,
-        run_secs: dur ? Number(dur.replace(/s$/, '')) : null,
-        by: vars.USER ?? null,
-        date: vars.SWEEP_DATE ?? null,
-        buckets,
-        region: j.region,
-        bucket_region: buckets.length === 1 ? cfg.bucketRegions[buckets[0]] ?? null : null,
-        plan: runDir(cfg, job_id),
-        last_event: last?.description ?? null,
-        logs: `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${j.uid}"`)}?project=${cfg.project}`,
-      }
-    })
+  const out = jobs.filter(j => isSweepJob(j) || isUndoJob(j)).slice(0, 30).map(j => sweepJobView(cfg, j))
   return json({ jobs: out, configured: true }, 200, { 'cache-control': 'private, max-age=10' })
 }

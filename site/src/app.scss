@@ -2408,6 +2408,52 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     &.danger { border-color: var(--danger); color: var(--danger); font-weight: 650; }
     &.danger.armed { background: var(--danger); color: #fff; }
   }
+  .close-plan button, .run-detail button.more, .runs-pg button {
+    font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+    &:hover { border-color: var(--ink-2); }
+    &:disabled { opacity: 0.45; cursor: default; }
+    &.on { border-color: var(--ink-2); font-weight: 600; }
+    &.danger.armed { background: var(--danger); color: #fff; border-color: var(--danger); }
+  }
+  // Which plan the page shows (the open one, or a closed one's runs).
+  .plan-pick { display: inline-block; margin: 8px 0 0; font-size: 13px; color: var(--ink-2); select { font: inherit; max-width: 100%; } }
+  .plan-note { margin: 6px 0 0; font-style: italic; }
+  .close-plan { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 0; }
+  .dispatch-buckets {
+    font-size: 13px;
+    summary { cursor: pointer; }
+    label { display: block; margin: 2px 0 2px 12px; &.off { opacity: 0.55; } }
+    p { margin: 4px 0 0; }
+  }
+  // A gesture whose prefixes all went elsewhere: one folded line.
+  .stage-batch.emptied .batch-head { opacity: 0.8; }
+  .runs-pg { flex-wrap: wrap; }
+  table.runs {
+    th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    td.nb, td.num { white-space: nowrap; }
+    .tag.real { margin-left: 0; color: var(--danger); border-color: var(--danger); font-weight: 650; }
+    .fold { background: none; border: 0; padding: 0 2px; color: var(--ink-2); &:hover { color: var(--ink); } }
+    .prog progress { width: 64px; height: 8px; vertical-align: middle; }
+    td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
+    tr.live td.rid { font-weight: 600; }
+    tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
+  }
+  .run-detail {
+    font-size: 13px;
+    h4 { margin: 10px 0 4px; font-size: 12.5px; color: var(--ink-2); }
+    p { margin: 2px 0; }
+    .rd-totals { margin: 0; display: grid; gap: 2px;
+      > div { display: flex; gap: 8px; flex-wrap: wrap; }
+      dt { color: var(--ink-3); min-width: 6.5em; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+    }
+    table.runs { margin-top: 2px; font-size: 12.5px; tr.total td { font-weight: 600; } }
+    .rd-checks { list-style: none; margin: 0; padding: 0;
+      li.ok { color: var(--ink-2); }
+      li.off { color: var(--danger); }
+    }
+  }
 }
 
 // A table of arbitrary prefixes and their numbers at a scan (`PrefixTable`):

@@ -82,6 +82,8 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
 # CF_ACCOUNT_ID = "<cf-account-id>"            # `sweep`: the Cloudflare account its runs are recorded to (D1)
+# D1_DB_ID = "<d1-database-id>"               # `sweep`: the D1 its runs are recorded to (dispatch requires it; = the `DB` binding's id)
+# D1_DB_NAME = "<d1-database-name>"           # `sweep`: that D1's name
 # SWEEP_S3_ENDPOINT = "https://s3.example.com"  # `plan-sweep`: the S3 endpoint its runs delete through
 # SLACK_ADMIN_CHANNEL = "C0123456789"          # channel id staged-plan threads post to (with SLACK_BOT_TOKEN); unset = no Slack
 

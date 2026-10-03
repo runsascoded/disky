@@ -38,6 +38,7 @@ An audit of `cloud`'s source (2026-10-03) found 237 OA/Marin mentions:
 | `BUCKET_REGIONS` (JSON) | `gcp.ts`'s bucket→region map | every job in `BATCH_REGION` |
 | `SWEEP_IMAGE`, `CF_ACCOUNT_ID` | the sweep job's image and account | dispatch 503 |
 | `SWEEP_S3_ENDPOINT` | `cwBatch`'s S3 endpoint | plan-sweep 503 |
+| `D1_DB_ID`, `D1_DB_NAME` | (new, 10-03) the D1 the `sweep` executor's jobs record their runs to | sweep dispatch and undo 503 |
 | `REPO_URL` (build) | the GitHub link in `SiteKbd`/`SiteNav` | this repo |
 | `STORE_SCHEME` / `STORE_BUCKETS` (existing) | the plans' default bucket shape, the `marin-` regexes in `actions.ts`, `sweepDispatch`, `api/sweep/jobs.ts` | plans routes refuse |
 

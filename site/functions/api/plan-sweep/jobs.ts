@@ -41,14 +41,21 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
     }
   }
 
-  const out = sweepJobs(jobs).map(j => {
+  // The sweep runs, then the undo / purge ops on them (`op`, `target` = the
+  // run id), which /staged shows on their run's row while they're live.
+  const ops = jobs.filter(j => /\/jobs\/cw-(undo|purge)-/.test(j.name)).slice(0, 20)
+  const out = [...sweepJobs(jobs), ...ops].map(j => {
     const jobId = jobIdOf(j)
     const vars = j.taskGroups?.[0]?.taskSpec?.environment?.variables ?? {}
     const ev = j.status?.statusEvents ?? []
     const dur = j.status?.runDuration
+    const op = vars.OP === "undo" || vars.OP === "purge" ? vars.OP : "sweep"
     return {
       job_id: jobId,
-      mode: jobId.startsWith("cw-sweep-real-") ? "real" : "dry",
+      op,
+      target: op === "sweep" ? null : vars.TARGET_RUN ?? null,
+      plan_id: null,
+      mode: op !== "sweep" || jobId.startsWith("cw-sweep-real-") ? "real" : "dry",
       state: j.status?.state ?? "UNKNOWN",
       created: j.createTime,
       updated: j.updateTime ?? null,

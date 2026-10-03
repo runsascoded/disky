@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { planBuckets } from './plans'
-import { bucketCut, planJsonObject, planJsonPath, runDir, sweepScript } from './sweepDispatch'
+import { bucketCut, jobStampOf, planJsonObject, planJsonPath, RUN_ID_RE, runDir, sweepJobSpec, sweepScript, undoScript } from './sweepDispatch'
 
 const GCS = ['gcs-a', 'gcs-b', 'gcs-c']
 const E1 = 'gcs-b'
@@ -54,9 +54,57 @@ describe('sweepScript — the Batch container\'s bash', () => {
       `dt-cloud sweep execute -b ${W4} -b ${E1} --for-real "gs://my-data/sweep/runs/${jobId}"`,
     ].join('\n'))
   })
+  it('undo: `sweep undo` of the job\'s TARGET_RUN, behind the same exit trap', () => {
+    expect(undoScript()).toBe([
+      'set -euo pipefail',
+      trap,
+      'dt-cloud sweep undo "$TARGET_RUN"',
+    ].join('\n'))
+  })
   it('run dir + plan.json paths agree (gs:// for the executor, the object name for the upload)', () => {
     expect(runDir(CFG, jobId)).toBe(`gs://my-data/sweep/runs/${jobId}`)
     expect(planJsonPath(CFG, jobId)).toBe(`gs://my-data/sweep/runs/${jobId}/plan.json`)
     expect(planJsonObject(jobId)).toBe(`sweep/runs/${jobId}/plan.json`)
+  })
+})
+
+describe('sweepJobSpec — the Batch spec every gcs executor job shares (a run, an undo)', () => {
+  it('the image runs the script as the job account, beside its buckets, per-job env first', () => {
+    const cfg = { project: 'my-project', image: 'img:1', cfAccountId: 'acct', dataBucket: 'my-data', d1DbId: 'd1-id', d1DbName: 'my-db' }
+    expect(sweepJobSpec({
+      cfg, jobSa: 'job@my-project.iam.gserviceaccount.com', region: 'us-east1', script: 'echo hi',
+      actor: 'ann', siteUrl: 'https://site.example', env: { OP: 'undo', TARGET_RUN: '2026-09-28-p1/20260928T120000Z' },
+    })).toEqual({
+      taskGroups: [{
+        taskCount: 1,
+        taskSpec: {
+          runnables: [{ container: { imageUri: 'img:1', entrypoint: '/bin/bash', commands: ['-c', 'echo hi'] } }],
+          computeResource: { cpuMilli: 8000, memoryMib: 60000 },
+          maxRetryCount: 0,
+          maxRunDuration: '259200s',
+          environment: {
+            variables: {
+              OP: 'undo', TARGET_RUN: '2026-09-28-p1/20260928T120000Z',
+              USER: 'ann', CLOUDFLARE_ACCOUNT_ID: 'acct', DATA_BUCKET: 'my-data', D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', SITE_URL: 'https://site.example',
+            },
+            secretVariables: {
+              SITE_TOKEN: 'projects/my-project/secrets/gcs-sheet-sync-token/versions/latest',
+              CLOUDFLARE_API_TOKEN: 'projects/my-project/secrets/cf-pages-token/versions/latest',
+            },
+          },
+        },
+      }],
+      allocationPolicy: {
+        instances: [{ policy: { machineType: 'n2-highmem-8', bootDisk: { type: 'pd-balanced', sizeGb: '100' } } }],
+        serviceAccount: { email: 'job@my-project.iam.gserviceaccount.com' },
+        location: { allowedLocations: ['regions/us-east1'] },
+      },
+      logsPolicy: { destination: 'CLOUD_LOGGING' },
+    })
+  })
+  it('job stamps and run ids', () => {
+    expect(jobStampOf(new Date('2026-10-03T20:44:48.123Z'))).toBe('20261003-204448')
+    expect(['2026-09-28-p1/20260928T120000Z', '2026-09-28-p12/20260928T120000Z', 'gcs-sweep-real-20260928-120000z', '2026-09-28-p1', '2026-09-28-p1/x'].map(r => RUN_ID_RE.test(r)))
+      .toEqual([true, true, false, false, false])
   })
 })
