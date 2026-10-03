@@ -109,8 +109,9 @@ describe('storeForPath', () => {
 describe('withPageConfig', () => {
   const laptop = resolveStores('laptop', '', TEST_REGISTRY)[0]
   it('the served page’s home and title replace the build’s', () => {
-    const s = withPageConfig(laptop, { home: '/Users/someone/', title: 'disky — Some Mac' })
-    expect([s.key, s.home, s.title, s.base]).toEqual(['laptop', ['Users', 'someone'], 'disky — Some Mac', laptop.base])
+    const s = withPageConfig(laptop, { home: '/Users/someone/', title: 'disky — Some Mac', staging: false })
+    expect([s.key, s.home, s.title, s.staging, s.base]).toEqual(['laptop', ['Users', 'someone'], 'disky — Some Mac', false, laptop.base])
+    expect(laptop.staging).toBe(true)
   })
   it('no page config (any hosted deploy): the store as built', () => {
     expect(withPageConfig(laptop, undefined)).toBe(laptop)

@@ -132,9 +132,10 @@ export function resolveStores(primary: string | undefined, extra: string | undef
 }
 
 /** What a served page knows that its build can't: the macOS app's local
- *  server injects `window.__DISKY__ = {home, title}` into `index.html` (this
- *  user's home dir under the root, `Users/ryan`; this Mac's name). */
-export interface PageConfig { home?: string; title?: string }
+ *  server injects `window.__DISKY__ = {home, title, staging}` into
+ *  `index.html` (this user's home dir under the root, `Users/ryan`; this
+ *  Mac's name; `staging: false`, a read-only server with no plans API). */
+export interface PageConfig { home?: string; title?: string; staging?: boolean }
 
 /** The primary store with a page's `PageConfig` applied. */
 export function withPageConfig(s: Store, c: PageConfig | undefined): Store {
@@ -143,6 +144,7 @@ export function withPageConfig(s: Store, c: PageConfig | undefined): Store {
     ...s,
     ...(c.home != null ? { home: c.home.split('/').filter(Boolean) } : {}),
     ...(c.title ? { title: c.title } : {}),
+    ...(c.staging != null ? { staging: c.staging } : {}),
   }
 }
 

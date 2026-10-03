@@ -1128,7 +1128,7 @@ function AppContent() {
             </FilterNote>
           </span>
         )}
-        {fq && fMatches.length > 0 && (
+        {fq && fMatches.length > 0 && ownersMode && canAssign && (
           <BulkBar matches={fMatches} scheme={store.scheme} query={fq} />
         )}
       </SiteNav>
