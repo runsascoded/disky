@@ -73,6 +73,8 @@ export interface ExecCaps {
   /** The run dir (plan / progress / summaries / logs) reads through the
    *  deployment's `/v1/files` proxy. */
   runFiles: boolean
+  /** When a just-dispatched run shows up, for the dispatch notice. */
+  startHint: string
 }
 
 export const EXEC_CAPS: Record<'plan-sweep' | 'sweep' | 'laptop', ExecCaps> = {
@@ -81,18 +83,21 @@ export const EXEC_CAPS: Record<'plan-sweep' | 'sweep' | 'laptop', ExecCaps> = {
   'plan-sweep': {
     stop: true, stopHint: 'Cancel the Batch job: deletes already made are logged and recoverable; a re-dispatch re-lists and skips them.',
     undo: true, undoUnwindowed: true, purge: true, bucketCut: false, runFiles: false,
+    startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
   // gcs: a plan may span buckets; soft delete expires deleted generations on
   // its own (nothing to purge); its files proxy serves the data bucket.
   sweep: {
     stop: true, stopHint: 'Drop the STOP file: roots already listing finish and log, the rest are left for a re-run; the job ends red.',
     undo: true, undoUnwindowed: false, purge: false, bucketCut: true, runFiles: true,
+    startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
   // m3: the drainer pulls a dispatched run from D1 and trashes on the laptop;
   // no Batch job to stop, and undo is the Trash, not a site action.
   laptop: {
     stop: false, stopHint: '',
     undo: false, undoUnwindowed: false, purge: false, bucketCut: false, runFiles: false,
+    startHint: 'when the drainer picks it up (its next poll: 30 s, up to 2½ min while idle)',
   },
 }
 

@@ -424,7 +424,7 @@ export function StagedPage() {
               </div>
               {pendingJob && (
                 <p className="dispatch-pending">
-                  Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Its run appears below once the job starts (a few minutes while Batch brings up the VM).
+                  Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Its run appears below {CAPS.startHint}.
                 </p>
               )}
               <p className="dispatch-note dim">A run reads the scan you pick and deletes only what it listed; new objects since are left alone.{machine && <> Runs on <code>{machine}</code>.</>}</p>
