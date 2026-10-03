@@ -30,7 +30,7 @@ const DEV_WHOAMI: Whoami = {
   kind: 'sso',
   email: import.meta.env.VITE_DEV_EMAIL ?? 'dev@example.test',
   admin: true,
-  scopes: ['gcs', 'cw', 'admin', 'requests'],
+  scopes: [DEFAULT_STORE.key, 'admin', 'requests'],
   subject: null,
 }
 const forceWall = new URLSearchParams(window.location.search).has('wall')
