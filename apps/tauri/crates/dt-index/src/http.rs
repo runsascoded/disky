@@ -143,16 +143,25 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
             let (w, h) = ((num("w", 1280.0) / QUANT).ceil() * QUANT, (num("h", 800.0) / QUANT).ceil() * QUANT);
             let (min_area, atten) = (num("minArea", 12.0), num("atten", 2.0));
             let max_depth = get("depth").and_then(|v| v.parse().ok()).filter(|d| *d != 0);
+            let query = match crate::query::parse(get("q").unwrap_or(""), get("qs")) {
+                Ok(q) => q,
+                Err(e) => return text(400, &format!("bad query: {e}")),
+            };
             let scan = match scans.get(date) {
                 Ok(s) => s,
                 Err(_) => return text(404, "no such scan"),
             };
-            let o = ViewOpts { path: &p, w, h, min_area, atten, max_depth, root_label: &cfg.root_label };
+            let o = ViewOpts { path: &p, w, h, min_area, atten, max_depth, root_label: &cfg.root_label, query: query.as_ref() };
             match view::subtree(&scan, &o) {
                 Ok(Some(v)) => {
                     let mut out = serde_json::Map::new();
                     out.extend([("date".into(), date.into()), ("path".into(), p.clone().into()), ("w".into(), js_num(w)), ("h".into(), js_num(h)), ("minArea".into(), js_num(min_area)), ("atten".into(), js_num(atten))]);
-                    out.extend(v);
+                    for (k, x) in v {
+                        if k == "matches" {
+                            out.insert("q".into(), get("q").unwrap_or("").into());
+                        }
+                        out.insert(k, x);
+                    }
                     json_resp(200, &out.into())
                 }
                 Ok(None) => text(404, "path not found"),
@@ -164,7 +173,20 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
             if p.contains("..") || p.starts_with('/') {
                 return json_resp(400, &json!({"error": "bad path"}));
             }
-            match view::series(scans, &p, get("split") == Some("roots")) {
+            // `paths=` (repeated or comma-joined): the filter's match roots.
+            let mut paths: Vec<String> = vec![];
+            for v in q.iter().filter(|(n, _)| n == "paths") {
+                for x in v.1.split(',') {
+                    let x = x.trim().trim_end_matches('/');
+                    if !x.is_empty() && !paths.iter().any(|y| y == x) {
+                        paths.push(x.into());
+                    }
+                }
+            }
+            if paths.iter().any(|x| x.contains("..") || x.starts_with('/')) {
+                return json_resp(400, &json!({"error": "bad paths"}));
+            }
+            match view::series(scans, &p, &paths, get("split") == Some("roots")) {
                 Ok(v) => json_resp(200, &v),
                 Err(e) => json_resp(500, &json!({"error": e.to_string()})),
             }

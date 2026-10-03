@@ -975,6 +975,7 @@ dependencies = [
  "arrow-schema",
  "libc",
  "parquet",
+ "regex",
  "serde_json",
  "tiny_http",
 ]

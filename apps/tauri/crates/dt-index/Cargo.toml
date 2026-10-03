@@ -19,6 +19,7 @@ arrow-schema = "60"
 parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 libc = "0.2"
+regex = "1"
 tiny_http = "0.12"
 
 [[bin]]

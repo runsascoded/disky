@@ -19,6 +19,7 @@
 //! serverless reader's range-read plan; a local reader has the footer).
 
 pub mod http;
+pub mod query;
 pub mod view;
 
 use std::collections::{BTreeMap, HashMap};

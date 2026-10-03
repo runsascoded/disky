@@ -1,6 +1,6 @@
 # Rust engine: a self-contained disky
 
-**Status:** in progress (2026-10-01). Phases 1–2 done (`capture` to a local dir or `r2://` / `s3://` / `file://`); phase 3 done (disky captures in-process; m3's R2-event ingest trigger live since 2026-10-02); phase 4 (local-only mode: Rust reduce, local read API, app wiring) done; open items below. Ryan: "i like the sound of porting to Rust"; support **both** a local-only mode and the hosted mode.
+**Status:** in progress (2026-10-01). Phases 1–2 done (`capture` to a local dir or `r2://` / `s3://` / `file://`); phase 3 done (disky captures in-process; m3's R2-event ingest trigger live since 2026-10-02); phase 4 (local-only mode: Rust reduce, local read API, app wiring, the filter) done; open items below. Ryan: "i like the sound of porting to Rust"; support **both** a local-only mode and the hosted mode.
 
 ## Why
 
@@ -42,8 +42,27 @@ Each phase lands with a parity test against the Python implementation (`tests/te
      - **The GUI serves** `dt_index::http` on `127.0.0.1:7792` over that dir, with the bundled SPA (`Contents/Resources/web`, built by `scripts/build-web` in `beforeBuildCommand`: `laptop` store, `AUTH_MODE=public`, `~` = the builder's `$HOME`).
      - **Site `local`** ("This Mac (local)" in the menu's Site submenu and Settings) points the window there.
      - Verified on m3 (2026-10-02): `disky job scan` with `{"local": true}` walked `/` (7,440,516 files, 285 errors) and indexed 8,387,739 rows in **2.5 min, 1.88 GB peak RSS**. The app's server lists it, and the SPA renders the whole machine (455 GiB) in Chrome.
+   - **4d ✅ the filter (`q=`, `qs=`)** in the local server (`dt_index::query` + `view.rs` `filtered`), exact where the site approximates.
+     - **Syntax:** `query.rs` ports `querySyntax.ts` / `pathQuery.ts`.
+       - `simple`: AND, `|` OR, `-x` NOT, `*` within a segment, `"…"` literal, `/…/` regex, the 3-character minimum.
+       - `regex`: one case-insensitive regex (the Rust `regex` crate, not JS's).
+       - A parse error is a 400 `bad query: …`, which the box shows under itself.
+     - **Semantics:** `readView`'s filter branch.
+       - The match roots are the outermost paths under P that the query holds.
+       - The exclusions are the outermost paths under a root that its negative part holds; their bytes and children come off every ancestor up to the root.
+       - One threshold applies, the matched total's pixel budget, attenuated from each root's depth.
+       - Responses carry `matches` / `matched` / `excluded` and `m: 1` on match nodes. A root matching with no negatives is the plain view, marked. `/api/series` takes `paths=`, summing the match roots per scan.
+     - **Exact:** every row under P is read, in two passes in parallel over row groups.
+       - Pass 1 decodes only `path`/`depth`/`size`. Substring and glob tests are monotone along a path, so only each chain's top is a candidate.
+       - Pass 2 decodes full columns only for the groups that hold a root's or exclusion's own row, or a descendant big enough to keep.
+       - Ancestor checks probe only the depths where roots sit.
+       - One deliberate difference from the site: a root under the view's threshold folds into its parent's `(other)` instead of becoming a tile, and `matches` / `matched` are capped at the 50K heaviest (`truncated`). The site draws every root it found, but its reads keep that number small; read exactly, `/\.py$/` holds ~300K roots.
+     - **Perf** (whole disk, 8.5M rows; machine at load ~18): 0.2–0.8 s for typical filters at the root, 0.2–0.3 s under `~/c/oa`. `test|tests` takes 1.1 s, and `/\.py$/` (~300K roots) 5.3 s. The first version, single-threaded with every column decoded, took 4–6.5 s for typical filters and 20 s for `/\.py$/`.
+     - **vs prod** (disk.rbw.sh `2026-10-02`, its capture `22-13-23Z` reduced locally, 8,477,715 rows on both sides):
+       - Where prod's answer is complete, the matches agree exactly, bytes and objects. That covers the 15 largest `node_modules` under `~/c/oa`, the 1 `ckpt` above prod's floor, and all 56 of prod's root `node_modules` matches.
+       - Prod misses 61 more above its own smallest match (e.g. `~/c/hccs/ctbk/wt/deckgl/www/node_modules`, 1.0 GB). It also returns nothing for `-.git`, `*.safetensors`, `test|tests`, `marin src` and `/\.py$/`, all without `partial` / `approximate`. That's a site-side bug (the laptop store has no search sidecars, and the thresholded fallback's coverage note doesn't reach the response); flagged for the site side, not fixed here.
+     - Test: `view.rs` `filter_view` (roots, an exclusion's net bytes, an only-negatives query, a matching root, no match). CIC: the bundled SPA filters (`?f=node_modules+-.pnpm`: 5.7 GiB matched, 107 prefixes) and shows the short-term error, with no console errors.
    - Open:
-     - `q=` (the name filter / search syntax `local` just gained) isn't implemented by the local server, which returns the unfiltered view.
      - `~` is baked in at build time (fine for one user, wrong for anyone else's build).
      - No diffs locally.
      - Reduce memory (~1.9 GB for the whole disk) is transient, in the scan job's process.
