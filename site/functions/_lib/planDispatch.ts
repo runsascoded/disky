@@ -58,15 +58,15 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     const script = [
       'set -euo pipefail',
       // Ping the site on exit (success or failure) so it reflects the run now.
-      `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $GCS_USAGE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
+      `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
       `RUN="${runMnt}"`,
       `dt-cloud plan-sweep manifest --plan "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"`,
       `dt-cloud plan-sweep execute ${req.mode === 'real' ? '--for-real ' : ''}"$RUN"`,
     ].join('\n')
 
-    // the executor deletes from the plan's bucket (`CW_BUCKET` in the job env)
+    // the executor deletes from the plan's bucket (`SWEEP_BUCKET` in the job env)
     const spec = sweepBatchSpec(cfg, jobSa, script, plan.bucket, { JOB_ID: jobId, SWEEP_DATE: date, SITE_URL: req.siteUrl },
-      { GCS_USAGE_TOKEN: secretRef(cfg, 'cw-s3-job-grant') })
+      { SITE_TOKEN: secretRef(cfg, 'cw-s3-job-grant') })
     const { ok, status, text } = await submitBatch(cfg, token, jobId, spec)
     if (!ok) {
       console.error('batch submit failed', status, text.slice(0, 2000))

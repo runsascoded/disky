@@ -143,7 +143,7 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     url = f"{cfg.site_url}/?d={_yy(r.date)}#diff"
     link = f"· [view →]({url})" if platform == "discord" else f"[↗︎]({url})"
     body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
-    avatar = f"{cfg.icons_base}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 7)}.png?v={AVATAR_REV}"
+    avatar = f"{cfg.need('icons_base')}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 7)}.png?v={AVATAR_REV}"
     return Reply(sender, body, icon_url=avatar)
 
 

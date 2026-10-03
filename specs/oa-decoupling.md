@@ -1,9 +1,8 @@
 # OA decoupling: OA-specific behavior leaves `cloud`, as deployment config
 
-**Status (2026-10-03):** in progress, per `branch-layout.md` §0.
-- **Done on `cloud`:** step 0 is on both branches (gcs 5ee710e, cw-s3 1011f72); steps 1–5, 6a + its client part, 7, 8, 9–10; the people's-names part of 18. Step 5's harness replayed every executor request under each branch's env, byte-identical, except one intended addition: `DATA_BUCKET` in gcs's sweep job env (a8385dd).
-- **Store modules:** gcs carries `stores/gcs.tsx`, cw-s3 `stores/{cw,meta}.ts`, and `local` `stores/laptop.ts`.
-- **Next:** 6b (remove the inline entries), 11–16 (the rest of dt-cloud; then each branch rebuilds its image once), 17, the rest of 18.
+**Status (2026-10-03):** steps 1–17 done on `cloud`, plus 18's names, comments and package name. dt-cloud carries no OA default (only a credit line in `usernames.py` mentions Marin).
+- **Next:** gcs and cw-s3 rebuild their images (one build each; their step-0 scripts cover every key), then switch to the renamed env vars at leisure. Old names (`GCS_USAGE_TOKEN`/`_URL`, `CW_BUCKET`/`_ENDPOINT`) are accepted for one release. After that, the site's job specs (`planDispatch`, `sweepDispatch`, `cwBatch`) switch to the new names too.
+- **Left:** the test fixtures' Marin-shaped bucket names (examples); the secret names (Ryan: OK as they are).
 
 ## Goal
 
@@ -39,6 +38,7 @@ An audit of `cloud`'s source (2026-10-03) found 237 OA/Marin mentions:
 | `BUCKET_REGIONS` (JSON) | `gcp.ts`'s bucket→region map | every job in `BATCH_REGION` |
 | `SWEEP_IMAGE`, `CF_ACCOUNT_ID` | the sweep job's image and account | dispatch 503 |
 | `SWEEP_S3_ENDPOINT` | `cwBatch`'s S3 endpoint | plan-sweep 503 |
+| `D1_DB_ID`, `D1_DB_NAME` | (new, 10-03) the D1 the `sweep` executor's jobs record their runs to | sweep dispatch and undo 503 |
 | `REPO_URL` (build) | the GitHub link in `SiteKbd`/`SiteNav` | this repo |
 | `STORE_SCHEME` / `STORE_BUCKETS` (existing) | the plans' default bucket shape, the `marin-` regexes in `actions.ts`, `sweepDispatch`, `api/sweep/jobs.ts` | plans routes refuse |
 

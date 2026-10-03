@@ -23,7 +23,7 @@ import pandas as pd
 from click import Choice, UsageError, argument, group, option
 
 from .identity import IDENTITIES_ENV, load_identities
-from .deploy import data_bucket, site_url as resolve_site_url
+from .deploy import data_bucket, site_token, site_url as resolve_site_url
 from .secrets import env_secret, secret
 from .index_footer import INDEX_VARIANTS
 from .prefixes import load_prefix_map
@@ -144,16 +144,18 @@ def executor_mine(listings: tuple[str, ...], out_path: Path, workers: int) -> No
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, required=True, help=f"identities.yaml path or URL (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", required=True, type=Path, help="Output parquet path for wandb attribution rows")
+@option("-p", "--run-root", "run_roots", multiple=True, default=("checkpoints",), help="Top-level dir holding run-named dirs (repeatable; default `checkpoints`)")
 @option("-r", "--runs", "runs_path", required=True, type=Path, help="wandb-mine output parquet")
 @option("-x", "--executor-infos", "executor_path", type=Path, default=None, help="executor-mine output parquet (adds executor-wandb rows)")
 def wandb_attr(
     identities_path: str,
     listings: tuple[str, ...],
     out: Path,
+    run_roots: tuple[str, ...],
     runs_path: Path,
     executor_path: Path | None,
 ) -> None:
-    """Attribution rows from W&B runs: run-name ↔ checkpoints/grug dirs + writer-path configs."""
+    """Attribution rows from W&B runs: run-name ↔ dirs under the run roots (`-p`) + writer-path configs."""
     from .wandb_signal import executor_rows, run_name_rows, writer_path_rows
 
     identities = load_identities(identities_path)
@@ -164,9 +166,10 @@ def wandb_attr(
     from disk_tree.listing import prepare_listing
 
     src = prepare_listing(con, listings)
-    # Run-named dirs live at level 2 (checkpoints/<run>/) but also deeper under
-    # namespace dirs — checkpoints/isoflop/<run>/, even
-    # checkpoints/isoflop/isoflop/<run>/ — so emit levels 2-4 as (parent, leaf).
+    # Run-named dirs live at level 2 (<root>/<run>/) but also deeper under
+    # namespace dirs — <root>/<ns>/<run>/, even <root>/<ns>/<ns>/<run>/ — so
+    # emit levels 2-4 as (parent, leaf).
+    roots = " OR ".join("name LIKE '" + r.strip("/").replace("'", "''") + "/%'" for r in run_roots)
     run_dirs = con.execute(
         f"""
         WITH l AS (
@@ -176,7 +179,7 @@ def wandb_attr(
             regexp_extract(name, '^[^/]+/[^/]+/([^/]+)/', 1) AS d3,
             regexp_extract(name, '^[^/]+/[^/]+/[^/]+/([^/]+)/', 1) AS d4
           FROM {src}
-          WHERE (name LIKE 'checkpoints/%' OR name LIKE 'grug/%')
+          WHERE ({roots})
         )
         SELECT DISTINCT bucket, d1 AS parent, d2 AS leaf FROM l WHERE d2 IS NOT NULL
         UNION
@@ -185,7 +188,7 @@ def wandb_attr(
         SELECT DISTINCT bucket, d1 || '/' || d2 || '/' || d3 AS parent, d4 AS leaf FROM l WHERE d4 IS NOT NULL
         """
     ).df()
-    err(f"{len(run_dirs)} checkpoints/grug level-2/3/4 dirs")
+    err(f"{len(run_dirs)} level-2/3/4 dirs under {', '.join(run_roots)}")
     rows = run_name_rows(runs, run_dirs, identities, asof) + writer_path_rows(runs, identities, asof)
     if executor_path is not None:
         executor_df = pd.read_parquet(executor_path)
@@ -362,7 +365,7 @@ def gaps(
 
 
 @main.command("wandb-mine")
-@option("-e", "--entity", default="marin-community", help="W&B entity to mine")
+@option("-e", "--entity", envvar="WANDB_ENTITY", required=True, help="W&B entity to mine (default $WANDB_ENTITY)")
 @option("-E", "--print-edges", is_flag=True, help="Print bisection-tree edges (valid --since/--until values for parallel workers) and exit")
 @option("-j", "--jobs", default=1, help="Concurrent (project, window) mining tasks — network-bound threads; ~8 is safe per API key")
 @option("-M", "--no-merge", is_flag=True, help="Skip the final concat (parallel range-workers; run once without to merge)")
@@ -509,8 +512,8 @@ def rules(identities_path: str, out: Path | None) -> None:
 @option("-f", "--max-age-days", default=2, type=int, help="Freshness: latest scan must be within this many days")
 @option("-j", "--json", "as_json", is_flag=True, help="Emit machine-readable JSON to stdout")
 @option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ (default: $SNAPSHOTS_SUBDIR; `cw` for the CoreWeave deployment, empty for the default store)")
-@option("-t", "--token", default=None, help="Bearer token (default: $GCS_USAGE_TOKEN)")
-@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL, else $GCS_USAGE_URL)")
+@option("-t", "--token", default=None, help="Bearer token (default: $SITE_TOKEN)")
+@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
 def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str | None, token: str | None, url: str | None) -> None:
     """Live-site health: is the latest scan actually *servable* end-to-end?
 
@@ -547,8 +550,8 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 @option("-q", "--hit", default=None, help="Filter term the filter-hit scenario searches for (default: the largest bucket's largest child)")
 @option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ (default: $SNAPSHOTS_SUBDIR)")
 @option("-S", "--serial", is_flag=True, help="Send each scenario's requests one at a time (default: concurrently, as a page load does)")
-@option("-t", "--token", default=None, help="Bearer token (default: $GCS_USAGE_TOKEN; none for a public deployment like r2.rbw.sh)")
-@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL, else $GCS_USAGE_URL)")
+@option("-t", "--token", default=None, help="Bearer token (default: $SITE_TOKEN; none for a public deployment like r2.rbw.sh)")
+@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
 def probe(budget: float | None, cold: bool, as_json: bool, out: str | None, hit: str | None, subdir: str | None, serial: bool, token: str | None, url: str | None) -> None:
     """Replay the site's page loads (root, largest bucket, a matching and a
     non-matching path filter) against a live deployment.
@@ -601,7 +604,7 @@ def bucket_sources(specs: tuple[str, ...], default_bucket: str) -> list[tuple[st
 
 @main.command("index-write")
 @option("-A", "--age-only", is_flag=True, help="Only the age pyramid — skip the store's sorts (a ladder-only backfill; sync with `index-sync -A`, the sort pointers keep their generation)")
-@option("-b", "--bucket", default=None, help="Bucket a bare (no `<bucket>=`) layer-2 argument describes (default $CW_BUCKET)")
+@option("-b", "--bucket", default=None, help="Bucket a bare (no `<bucket>=`) layer-2 argument describes (default $SWEEP_BUCKET)")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Output dir: path-index.parquet + path-index-bysize.parquet (+ .groups.json sidecars) + age-pyramid-*.parquet")
 @option("-r", "--row-group-rows", default=8192, type=int, help="Parquet row-group size for the sorts — the range-read unit and the D1 footer's row count per sort (default 8192; a gcs-sized fleet uses 32768, specs/path-store.md §1.6)")
@@ -619,10 +622,11 @@ def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row
     footer sidecars beside them, plus the age pyramid (specs/path-store.md
     §4.2). `index-sync` then publishes their footers to D1."""
     from .index import write_index
-    from .sweep import CW_BUCKET
+    from .sweep import sweep_bucket
 
+    bare = any("=" not in s for s in sources)
     s = write_index(
-        bucket_sources(sources, bucket or CW_BUCKET), out_dir,
+        bucket_sources(sources, bucket or (sweep_bucket() if bare else "")), out_dir,
         mem=mem, threads=threads, tmp_dir=tmp_dir, age_only=age_only, row_group_rows=row_group_rows, search=search,
     )
     if age_only:
@@ -1024,7 +1028,7 @@ def index_extras(attributions: tuple[str, ...], identities_path: str, out_dir: P
 @option("-j", "--jobs", default=4, type=int, help="Concurrent requests (default 4)")
 @option("-n", "--dry-run", is_flag=True, help="Print the request paths; fetch nothing")
 @option("-r", "--root", help="Snapshots root (default gs://$DATA_BUCKET/snapshots)")
-@option("-t", "--token", help="Site read token (default $GCS_USAGE_TOKEN)")
+@option("-t", "--token", help="Site read token (default $SITE_TOKEN)")
 @option("-u", "--url", "site_url", default=None, help="Site base (default $SITE_URL)")
 @option("-W", "--widths", default="512,1280,1536,1792,1920", help="Canvas widths to warm (the client sends ceil(innerWidth/128)*128; default = phone + common laptops)")
 def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, token: str | None, site_url: str | None, widths: str) -> None:
@@ -1044,22 +1048,30 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
     date = date or dates[-1]
     if date not in dates:
         raise SystemExit(f"warm-cache: {date} is not a published scan")
-    paths = wm.plan(date, dates, tuple(int(w) for w in widths.split(",")))
+    # Auth: an agent bearer token (`-t` / SITE_TOKEN — the app gate), or a
+    # Cloudflare Access service-token pair (CF_ACCESS_CLIENT_ID/SECRET — a
+    # whole-host edge-gated deployment). Same request either way.
+    def auth() -> dict[str, str]:
+        tok = site_token(token)
+        cid, csec = env_secret("CF_ACCESS_CLIENT_ID"), env_secret("CF_ACCESS_CLIENT_SECRET")
+        if tok:
+            return {"Authorization": f"Bearer {tok}"}
+        if cid and csec:
+            return {"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": csec}
+        raise SystemExit("warm-cache: need SITE_TOKEN (or -t), or CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET")
+
+    headers: dict[str, str] | None = None
+    targets = wm.env_paths()
+    if targets is None:
+        # No `WARM_PATHS`: the root + its top level, as the site lists them.
+        headers = auth()
+        targets = wm.top_paths(site_url, headers, date)
+    paths = wm.plan(date, dates, targets, tuple(int(w) for w in widths.split(",")))
     if dry_run:
         for p in paths:
             print(p)
         return
-    # Auth: an agent bearer token (`-t` / GCS_USAGE_TOKEN — the app gate), or a
-    # Cloudflare Access service-token pair (CF_ACCESS_CLIENT_ID/SECRET — a
-    # whole-host edge-gated deployment). Same request either way.
-    token = secret(token, "GCS_USAGE_TOKEN")
-    cid, csec = env_secret("CF_ACCESS_CLIENT_ID"), env_secret("CF_ACCESS_CLIENT_SECRET")
-    if token:
-        headers = {"Authorization": f"Bearer {token}"}
-    elif cid and csec:
-        headers = {"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": csec}
-    else:
-        raise SystemExit("warm-cache: need GCS_USAGE_TOKEN (or -t), or CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET")
+    headers = headers or auth()
     res = wm.warm(site_url, headers, paths, jobs=jobs)
     bad = [r for r in res if r[1] != 200]
     err(f"warm-cache: {len(res) - len(bad)}/{len(res)} warmed for {date} in {sum(r[2] for r in res):.0f}s of request time" + (f"; {len(bad)} failed" if bad else ""))
@@ -1093,15 +1105,15 @@ def _lifecycle_clients(buckets: tuple[str, ...]):
     return s3, gcs
 
 
-_LC_BUCKET = option("-b", "--bucket", "buckets", multiple=True, help="`gs://<bucket>` (GCS) or a bare S3 bucket name; repeatable (default $CW_BUCKET)")
+_LC_BUCKET = option("-b", "--bucket", "buckets", multiple=True, help="`gs://<bucket>` (GCS) or a bare S3 bucket name; repeatable (default $SWEEP_BUCKET)")
 
 
 def _lc_buckets(buckets: tuple[str, ...]) -> tuple[str, ...]:
     if buckets:
         return buckets
-    from .sweep import CW_BUCKET
+    from .sweep import sweep_bucket
 
-    return (CW_BUCKET,)
+    return (sweep_bucket(),)
 
 
 @lifecycle.command("pull")
@@ -1518,10 +1530,10 @@ def access() -> None:
 
 
 @access.command("ingest")
-@option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: the marin fleet)")
+@option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: $ACCESS_BUCKETS, space-separated)")
 @option("-c", "--max-chunk-gb", default=32.0, help="Max staged CSV bytes per processing chunk")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", required=True, help="Output/state bucket; default $DATA_BUCKET")
-@option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: marin-usage-logs)")
+@option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: $ACCESS_LOG_BUCKET)")
 @option("-M", "--memory-limit", default=None, help="DuckDB memory limit (default: $DUCKDB_MEM or 8GB)")
 @option("-n", "--max-chunks", default=None, type=int, help="Stop after N chunks per bucket (smoke runs)")
 @option("-s", "--stage-dir", type=Path, default=None, help="Local staging dir (default: $STAGE_DIR or /tmp, + /access-stage)")
@@ -1537,11 +1549,11 @@ def access_ingest(
     workers: int,
 ) -> None:
     """Incrementally ingest new usage CSVs → layer-1a/2a parquet in the data bucket."""
-    from .access import FLEET, USAGE_LOG_BUCKET, ingest
+    from .access import access_buckets, access_log_bucket, ingest
 
     ingest(
-        buckets=buckets or FLEET,
-        log_bucket=log_bucket or USAGE_LOG_BUCKET,
+        buckets=buckets or access_buckets(),
+        log_bucket=log_bucket or access_log_bucket(),
         data_bucket=data_bucket,
         stage_dir=(stage_dir or Path(os.environ.get("STAGE_DIR") or "/tmp") / "access-stage"),
         memory_limit=memory_limit or os.environ.get("DUCKDB_MEM_ACCESS") or "8GB",
@@ -1552,9 +1564,9 @@ def access_ingest(
 
 
 @access.command("sweep")
-@option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: the marin fleet)")
+@option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: $ACCESS_BUCKETS, space-separated)")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", required=True, help="State bucket holding the watermarks; default $DATA_BUCKET")
-@option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: marin-usage-logs)")
+@option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: $ACCESS_LOG_BUCKET)")
 @option("-T", "--through-watermark", is_flag=True, help="Sweep through the watermark itself, not watermark − lag")
 @option("-w", "--workers", default=16, help="Concurrent copy+delete pairs")
 def access_sweep(
@@ -1576,33 +1588,33 @@ def access_sweep(
     """
     from google.cloud import storage
 
-    from .access import FLEET, LAG_HOURS, USAGE_LOG_BUCKET, load_state, sweep_ingested
+    from .access import LAG_HOURS, access_buckets, access_log_bucket, load_state, sweep_ingested
 
     client = storage.Client()
     total = 0
-    for b in buckets or FLEET:
+    for b in buckets or access_buckets():
         state = load_state(client, data_bucket, b)
         total += sweep_ingested(
-            client, log_bucket or USAGE_LOG_BUCKET, b, state.get("watermark"),
+            client, log_bucket or access_log_bucket(), b, state.get("watermark"),
             workers=workers, lag_hours=0 if through_watermark else LAG_HOURS,
         )
     err(f"sweep: {total} CSV(s) moved to ingested/")
 
 
 @access.command("status")
-@option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: the marin fleet)")
+@option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: $ACCESS_BUCKETS, space-separated)")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", required=True, help="Output/state bucket; default $DATA_BUCKET")
-@option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: marin-usage-logs)")
+@option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: $ACCESS_LOG_BUCKET)")
 def access_status(buckets: tuple[str, ...], data_bucket: str, log_bucket: str | None) -> None:
     """Per-bucket watermark vs delivered backlog (files/bytes awaiting ingest)."""
     from google.cloud import storage
 
-    from .access import FLEET, USAGE_LOG_BUCKET, list_new, load_state
+    from .access import access_buckets, access_log_bucket, list_new, load_state
 
     client = storage.Client()
-    for b in buckets or FLEET:
+    for b in buckets or access_buckets():
         state = load_state(client, data_bucket, b)
-        todo = list_new(client, log_bucket or USAGE_LOG_BUCKET, b, state)
+        todo = list_new(client, log_bucket or access_log_bucket(), b, state)
         n_bytes = sum(s for _, s in todo)
         print(
             f"{b:22s}  watermark={state.get('watermark') or '(none)'}  "
@@ -1692,8 +1704,9 @@ def job_watch(interval: int, name: str | None) -> None:
 
 
 @job.command("submit-listing")
-@option("-b", "--bucket", "buckets", multiple=True, help="Bucket(s) to list [default: whole fleet]")
+@option("-b", "--bucket", "buckets", multiple=True, help="Bucket(s) to list [default: $FLEET_BUCKETS, space-separated]")
 @option("-d", "--date", "date", required=True, help="Listing date — output goes to listing/<date>/<bucket>/")
+@option("-L", "--legacy-weights", "legacy", multiple=True, help="`<bucket>=<subdir>`: also take that bucket's chunk weights from an older listing layout under the data bucket (`<subdir>/*`), after its DIY listings; repeatable")
 @option("-m", "--machine", default="n2-standard-32", help="Machine type per task")
 @option("-P", "--procs", default=24, help="bulk-list worker processes per task")
 @option("-w", "--workers", "threads", default=10, help="Concurrent prefix streams per process")
@@ -1701,25 +1714,30 @@ def job_watch(interval: int, name: str | None) -> None:
 def job_submit_listing(
     buckets: tuple[str, ...],
     date: str,
+    legacy: tuple[str, ...],
     machine: str,
     procs: int,
     threads: int,
     wait: bool,
 ) -> None:
-    """Submit the DIY fleet-listing Batch job (one task per bucket).
+    """Submit the DIY fleet-listing Batch job (one task per bucket; one job per
+    region, from `$LISTING_REGIONS`). Runs as `$JOB_SA` from `$JOB_IMAGE` in
+    `$GCP_PROJECT`, writing under `$DATA_BUCKET`.
 
     Tasks reuse completed listings (``-x reuse``), so re-submitting for the
     same date only re-lists buckets that haven't finished — safe to retry.
     """
-    from .batch import BUCKET_JOB_REGIONS, FLEET_BUCKETS, REGION, listing_job_spec, submit_job, wait_jobs
+    from .batch import REGION, fleet_buckets, listing_job_spec, listing_regions, submit_job, wait_jobs
 
-    bkts = list(buckets) or FLEET_BUCKETS
+    bkts = list(buckets) or fleet_buckets()
+    old = dict(spec.split("=", 1) for spec in legacy)
+    regions = listing_regions()
     by_region: dict[str, list[str]] = {}
     for b in bkts:
-        by_region.setdefault(BUCKET_JOB_REGIONS.get(b, REGION), []).append(b)
+        by_region.setdefault(regions.get(b, REGION), []).append(b)
     jobs = []
     for region, rb in by_region.items():
-        spec = listing_job_spec(date, rb, machine=machine, procs=procs, threads=threads, region=region)
+        spec = listing_job_spec(date, rb, machine=machine, procs=procs, threads=threads, region=region, legacy=old)
         name = submit_job(spec, region=region)
         err(f"submitted {name} [{region}]: {len(rb)} bucket task(s) on {machine}")
         print(name)
@@ -1754,11 +1772,8 @@ def sii() -> None:
     """Read-only Storage Insights inventory-report ops."""
 
 
-SII_BUCKETS = ["marin-us-east1", "marin-us-east5", "marin-us-central1", "marin-eu-west4", "marin-us-west4"]
-
-
 @sii.command("status")
-@option("-b", "--bucket", "buckets", multiple=True, help="Bucket(s) to check [default: all 5 SII buckets]")
+@option("-b", "--bucket", "buckets", multiple=True, help="Bucket(s) to check [default: $SII_BUCKETS, space-separated]")
 def sii_status(buckets: tuple[str, ...]) -> None:
     """Per-bucket SII health: report config, latest generated report, and which
     days' shards have actually landed in gs://<bucket>/inventory-reports/."""
@@ -1769,9 +1784,12 @@ def sii_status(buckets: tuple[str, ...]) -> None:
 
     from .gcp import sii_report_configs, sii_report_details
 
+    from .deploy import words
+
     client = storage.Client()
-    for b in buckets or SII_BUCKETS:
-        location = b.removeprefix("marin-")
+    for b in buckets or words("SII_BUCKETS", what="the buckets with Storage Insights reports (or pass -b)"):
+        # The report configs live per location (`us-east1`, `eu`, …): the bucket's own.
+        location = client.get_bucket(b).location.lower()
         print(f"== {b}")
         cfgs = [
             c
@@ -1807,8 +1825,8 @@ def sii_status(buckets: tuple[str, ...]) -> None:
 @option("-l", "--list", "list_sources", is_flag=True, help="Print the sources and their columns, and exit")
 @option("-o", "--out", default="-", help="CSV output path (default: stdout)")
 @option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ for scans.json (default: $SNAPSHOTS_SUBDIR; `cw` on cw-s3)")
-@option("-t", "--token", default=None, help="Bearer token (default: $GCS_USAGE_TOKEN)")
-@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL, else $GCS_USAGE_URL)")
+@option("-t", "--token", default=None, help="Bearer token (default: $SITE_TOKEN)")
+@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
 @option("-U", "--unit", default="B", type=Choice(["B", "GiB", "TiB"]), help="Byte columns as raw bytes (default) or rounded GiB / TiB, header `<col> (<unit>)`")
 @argument("source", required=False)
 def export_cmd(date: str | None, executor: str | None, list_sources: bool, out: str, subdir: str | None, token: str | None, url: str | None, unit: str, source: str | None) -> None:
@@ -1825,7 +1843,7 @@ def export_cmd(date: str | None, executor: str | None, list_sources: bool, out: 
         raise SystemExit("export: SOURCE required (see `dt-cloud export --list`)")
     base, tok = creds(token, url)
     if not tok:
-        raise SystemExit("export: no token (-t or $GCS_USAGE_TOKEN)")
+        raise SystemExit("export: no token (-t or $SITE_TOKEN)")
     args = ExportArgs(date=date, executor=executor, subdir=subdir if subdir is not None else (env_secret("SNAPSHOTS_SUBDIR") or ""), unit=unit)
     columns, rows = export(source, lambda path, params: get_json(base, tok, path, params), args)
     if out == "-":
@@ -2010,7 +2028,7 @@ def _digest_options(template_default: str):
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack; dry-run unless --for-real)"),
         option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)"),
         option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per scan, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
-        option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's: gcs.oa.dev, cw-s3.oa.dev)"),
+        option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's `site_url`, else $SITE_URL)"),
         option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
     ]

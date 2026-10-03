@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import re
 import secrets
 import sys
@@ -48,7 +47,6 @@ HOURS_PER_WEEK = 168.0
 # bump when the av_deg glyphs change: Slack caches avatars per-URL at post
 # time, so a stable URL serves MIXED generations after a redesign.
 AVATAR_REV = 4
-ICONS_BASE = "https://gcs-usage-icons.pages.dev"
 SCAN_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})(\d{2}))?$")
 
 
@@ -101,17 +99,26 @@ class DigestConfig:
     state: str
     discord_state: str = "digest/discord/{webhook}"
     discord_webhook_env: str | None = None
-    icons_base: str = ICONS_BASE
+    icons_base: str = ""
     icons_dir: str = "job/icons"
-    plot_project: str = "gcs-usage-icons"
+    plot_project: str = ""
     plot_branch: str = "main"
-    plot_base: str = ICONS_BASE
+    plot_base: str = ""
     variant: str = "sender"
     reply_hour: int = 12
     provisional: bool = False
     primary: str | None = None
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
+
+    def need(self, key: str) -> str:
+        """A deployment-resource field (``icons_base``, ``plot_base``,
+        ``plot_project``): its value, or an exit naming it when it's unset.
+        The presets carry no deployment's hosts; the ``-C`` file sets them."""
+        v = getattr(self, key)
+        if not v:
+            raise SystemExit(f"digest config `{key}` is unset: set it in the deployment's config file (-C)")
+        return v
 
     @property
     def primary_quota(self) -> Quota | None:
@@ -134,40 +141,25 @@ class DigestConfig:
 
 
 PRESETS: dict[str, DigestConfig] = {
+    # Template shape only: a deployment's site, hosts, buckets and quotas come
+    # from its config file (``-C``); an empty ``site_url`` reads ``$SITE_URL``.
     "gcs": DigestConfig(
         template="gcs",
-        title="GCS usage",
-        site_url="https://gcs.oa.dev",
+        title="Storage usage",
+        site_url="",
         root="gs://{DATA_BUCKET}/snapshots",
         state="digest",
-        discord_webhook_env="DISCORD_GCS_USAGE_WEBHOOK",
         # US list $/GiB-mo by GCS storage class id (1 Standard / 2 Nearline / 3 Coldline / 4 Archive)
         prices={"1": 0.02, "2": 0.01, "3": 0.004, "4": 0.0012},
     ),
     "cw": DigestConfig(
         template="cw",
-        title="CoreWeave usage",
-        site_url="https://cw-s3.oa.dev",
-        root="gs://{DATA_BUCKET}/snapshots/cw",
-        # namespaced under cw/ (gcs's prod state is digest/<YYYY-MM>.json), keyed by
-        # channel so a staging converge never masquerades as prod, and by variant so
-        # both can be staged side by side
-        state="digest/cw/{channel}/{variant}",
-        icons_dir="job/icons-cw",
-        # cw's plots go to the icons project's `cw` preview branch, so a cw deploy
-        # never replaces what the production alias (the shared arrow avatars) serves
-        plot_branch="cw",
-        plot_base="https://cw.gcs-usage-icons.pages.dev",
-        primary=os.environ.get("CW_BUCKET", "marin-us-east-02a"),
-        # quotas authoritative from CoreWeave's own `cwobject_quota_info` metric
-        # (per zone; via finelog / Grafana `storage.usage`): 02a = exactly 910 TiB
-        # (≈ 1.0006 PB decimal, "1 PB"); hero-checkpoints = the US-EAST-08A ZONE
-        # quota, 100 TiB, shared with rhoarnet-us-east-08a (~3 TiB, unscanned) — so
-        # hero's "free" overstates true zone headroom by ~3 TiB
-        buckets={
-            "marin-us-east-02a": Bucket("02a", Quota(910 * TIB, "1 PB", "1P")),
-            "hero-checkpoints": Bucket("hero", Quota(100 * TIB, "100 TiB", "100Ti")),
-        },
+        title="Storage usage",
+        site_url="",
+        root="gs://{DATA_BUCKET}/snapshots",
+        # keyed by channel so a staging converge never masquerades as prod, and by
+        # variant so both can be staged side by side
+        state="digest/{channel}/{variant}",
     ),
 }
 
@@ -390,6 +382,10 @@ class Template(Protocol):
 
 
 def template(cfg: DigestConfig) -> Template:
+    if not cfg.site_url:
+        from .deploy import site_url
+
+        cfg = replace(cfg, site_url=site_url())
     if cfg.template == "gcs":
         from .digest_gcs import Gcs
 
@@ -493,6 +489,8 @@ def pages_deploy(icons_dir: Path, project: str, branch: str) -> str | None:
     import shutil
     import subprocess
 
+    if not project:
+        raise SystemExit("digest config `plot_project` is unset: set it in the deployment's config file (-C)")
     # The job image installs wrangler globally (`npm install -g`) but has
     # no `npx` shim, so prefer the binary; `npx` only serves a laptop run.
     wrangler = [shutil.which("wrangler")] if shutil.which("wrangler") else ["npx", "wrangler"] if shutil.which("npx") else None
@@ -543,7 +541,7 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     state = load_state(path)
 
     plot_name = state.get("plot_name") or f"plot-{secrets.token_hex(16)}.png"
-    base = cfg.plot_base
+    base = cfg.need("plot_base")
     if icons_dir is not None:
         local = Path(icons_dir) / plot_name
         tpl.render_plot(data, month, local, root)
@@ -709,7 +707,7 @@ def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, h
         hook.edit(op_id, body, files=[plot])
         _err(f"digest: edited OP {op_id} ({tpl.n_scans(data)} scans)")
     else:
-        op_id = hook.post(body, username=title, icon_url=f"{tpl.cfg.icons_base}/calendar.png?v=2", files=[plot]).id
+        op_id = hook.post(body, username=title, icon_url=f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", files=[plot]).id
         state["op_id"] = op_id
         state["thread_id"] = bot.create_thread(op_id, title)
         save(state)

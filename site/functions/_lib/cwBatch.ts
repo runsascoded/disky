@@ -12,7 +12,7 @@ export const secretRef = (cfg: BatchConfig, name: string): string =>
 /** The standard plan-sweep Batch job spec: the image running `bash -c <script>`
  * as `jobSa`, the data bucket FUSE-mounted at /gcs/<bucket>, and the S3 creds
  * from Secret Manager. `bucket` is the bucket the executor acts on
- * (`CW_BUCKET`); `env` merges in per-job variables, `secrets` per-job Secret
+ * (`SWEEP_BUCKET`); `env` merges in per-job variables, `secrets` per-job Secret
  * Manager refs. */
 export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, bucket: string, env: Record<string, string> = {}, secrets: Record<string, string> = {}): unknown {
   const DATA_BUCKET = cfg.dataBucket
@@ -38,7 +38,7 @@ export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, 
         }],
         environment: {
           variables: {
-            DATA_BUCKET, CW_BUCKET: bucket, CW_ENDPOINT: cfg.s3Endpoint,
+            DATA_BUCKET, SWEEP_BUCKET: bucket, SWEEP_S3_ENDPOINT: cfg.s3Endpoint,
             AWS_DEFAULT_REGION: "us-east-1",
             AWS_EC2_METADATA_DISABLED: "true",
             DT_S3_ADDRESSING_STYLE: "virtual",

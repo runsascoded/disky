@@ -29,10 +29,31 @@ from concurrent.futures import ThreadPoolExecutor
 
 WIDTHS = (512, 1280, 1536, 1792, 1920)
 SPANS = (1, 3, 7, 14, 30)
-# The root, the (one) bucket, and the top-level dirs everyone drills into.
-# Deployment config: `WARM_PATHS` (comma-separated; `""` = the root) — the
-# CoreWeave job passes its bucket + top-level dirs. Default: the GCS fleet.
-PATHS = tuple(os.environ["WARM_PATHS"].split(",")) if os.environ.get("WARM_PATHS") else ("", "marin-us-central2", "marin-us-east5", "marin-us-central1", "marin-eu-west4", "marin-us-west4", "marin-us-east1")
+
+
+def env_paths() -> tuple[str, ...] | None:
+    """The paths to warm from `$WARM_PATHS` (comma-separated; `""` = the root),
+    e.g. a single-bucket deployment's bucket + its top-level dirs. Unset → None
+    (the caller asks the site: `top_paths`)."""
+    v = os.environ.get("WARM_PATHS")
+    return tuple(v.split(",")) if v else None
+
+
+def root_children(subtree: dict) -> tuple[str, ...]:
+    """The root + its children's names from an `/api/subtree` response, folds
+    (`(other)`) left out: the views everyone opens first."""
+    kids = (subtree.get("tree") or {}).get("c") or []
+    return ("", *(k["n"] for k in kids if not k["n"].startswith("(")))
+
+
+def top_paths(base_url: str, headers: dict[str, str], date: str, timeout: float = 120) -> tuple[str, ...]:
+    """The default paths to warm: the store root and its top level, as the
+    site's root view of ``date`` lists them."""
+    import json
+
+    req = urllib.request.Request(f"{base_url.rstrip('/')}/api/subtree?date={date}&path=&w=1280&h=768&depth=1", headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return root_children(json.load(r))
 
 
 def scan_dates(root: str) -> list[str]:
@@ -70,7 +91,7 @@ def series_url(path: str) -> str:
     return "/api/series?path=&split=roots" if path == "" else f"/api/series?path={path}"
 
 
-def plan(date: str, dates: list[str], widths: tuple[int, ...] = WIDTHS, spans: tuple[int, ...] = SPANS, paths: tuple[str, ...] = PATHS) -> list[str]:
+def plan(date: str, dates: list[str], paths: tuple[str, ...], widths: tuple[int, ...] = WIDTHS, spans: tuple[int, ...] = SPANS) -> list[str]:
     """The request paths (no host) to replay for ``date``, deduplicated: each
     path's series first, then, in the order the page issues them, per width
     the root's subtree and each diff pair's summary + full rows, then the same

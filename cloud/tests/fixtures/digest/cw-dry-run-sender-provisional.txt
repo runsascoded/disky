@@ -1,16 +1,16 @@
-:arrow_deg50: **+84.6 TiB** [month-to-date](https://cw-s3.oa.dev/?d=260908-0001-7d12h#over-time) · 790 TiB · 86.8% of 1 PB · hero-checkpoints 100 TiB (+11.5) · marin-us-west-04a 2 TiB · [dashboard](https://cw-s3.oa.dev/)
+:arrow_deg50: **+84.6 TiB** [month-to-date](https://cw.example.org/?d=260908-0001-7d12h#over-time) · 790 TiB · 86.8% of 1 PB · hot-data 100 TiB (+11.5) · more-data 2 TiB · [dashboard](https://cw.example.org/)
 _as of 9/8 00:01Z_
 
 *Weekly summaries*
-:arrow_deg-10: [wk of 8/31](https://cw-s3.oa.dev/?d=260904-1201-4d#over-time): **−4.4 TiB** → 701 TiB · 77.0% of 1 PB
-:arrow_deg60: [wk of 9/7](https://cw-s3.oa.dev/?d=260908-0001-3d12h#over-time) _(partial)_: **+89.0 TiB** → 790 TiB · 86.8% of 1 PB
+:arrow_deg-10: [wk of 8/31](https://cw.example.org/?d=260904-1201-4d#over-time): **−4.4 TiB** → 701 TiB · 77.0% of 1 PB
+:arrow_deg60: [wk of 9/7](https://cw.example.org/?d=260908-0001-3d12h#over-time) _(partial)_: **+89.0 TiB** → 790 TiB · 86.8% of 1 PB
 
-![CoreWeave usage — September 2026](<plot-url>)
+![S3 usage — September 2026](<plot-url>)
 
 --- replies (sender: username | body | icon) ---
-9/1 — 713 TiB (+7.8, 1.1%) | [02a](https://cw-s3.oa.dev/marin-us-east-02a?d=260901-1201-1d#over-time): 78.4% of 1P (196.8 Ti free) · [hero](https://cw-s3.oa.dev/hero-checkpoints?d=260901-1201-1d#over-time): 89.2% of 100Ti (10.8 Ti free) | av_deg50.png?v=4
-9/2 — 715 TiB (+1.8, 0.3%) | [02a](https://cw-s3.oa.dev/marin-us-east-02a?d=260902-1201-1d#over-time): 78.6% of 1P (195.0 Ti free) · [hero](https://cw-s3.oa.dev/hero-checkpoints?d=260902-1201-1d#over-time): 91.0% of 100Ti (9.0 Ti free) | av_deg30.png?v=4
-9/3 — 760 TiB (+45.5, 6.4%) | [02a](https://cw-s3.oa.dev/marin-us-east-02a?d=260903-0001-12h#over-time): 83.6% of 1P (149.5 Ti free) · [hero](https://cw-s3.oa.dev/hero-checkpoints?d=260903-0001-12h#over-time): 91.0% of 100Ti (9.0 Ti free) | av_deg80.png?v=4
-9/4 — 701 TiB (−59.5, 7.8%) | [02a](https://cw-s3.oa.dev/marin-us-east-02a?d=260904-1201-1d12h#over-time): 77.0% of 1P (209.0 Ti free) · [hero](https://cw-s3.oa.dev/hero-checkpoints?d=260904-1201-1d12h#over-time): 92.5% of 100Ti (7.5 Ti free) · [marin-us-west-04a](https://cw-s3.oa.dev/marin-us-west-04a?d=260904-1201-1d12h#over-time): 2 Ti | av_deg-70.png?v=4
-9/7 — 702 TiB (+1.5, 0.2%) | [02a](https://cw-s3.oa.dev/marin-us-east-02a?d=260907-1201-3d#over-time): 77.2% of 1P (207.5 Ti free) · [hero](https://cw-s3.oa.dev/hero-checkpoints?d=260907-1201-3d#over-time): 99.0% of 100Ti (1.0 Ti free) · [marin-us-west-04a](https://cw-s3.oa.dev/marin-us-west-04a?d=260907-1201-3d#over-time): 2 Ti | av_deg10.png?v=4
-9/8 · so far | :arrow_deg80: **790 TiB (+87.5, 12.5%)** · [as of 00:01Z](https://cw-s3.oa.dev/?d=260908-0001-12h#over-time) · [02a](https://cw-s3.oa.dev/marin-us-east-02a?d=260908-0001-12h#over-time): 86.8% of 1P (120.0 Ti free) · [hero](https://cw-s3.oa.dev/hero-checkpoints?d=260908-0001-12h#over-time): 99.5% of 100Ti (0.5 Ti free) · [marin-us-west-04a](https://cw-s3.oa.dev/marin-us-west-04a?d=260908-0001-12h#over-time): 2 Ti | :hourglass_flowing_sand:
+9/1 — 713 TiB (+7.8, 1.1%) | [main](https://cw.example.org/main-data?d=260901-1201-1d#over-time): 78.4% of 1P (196.8 Ti free) · [hot](https://cw.example.org/hot-data?d=260901-1201-1d#over-time): 89.2% of 100Ti (10.8 Ti free) | av_deg50.png?v=4
+9/2 — 715 TiB (+1.8, 0.3%) | [main](https://cw.example.org/main-data?d=260902-1201-1d#over-time): 78.6% of 1P (195.0 Ti free) · [hot](https://cw.example.org/hot-data?d=260902-1201-1d#over-time): 91.0% of 100Ti (9.0 Ti free) | av_deg30.png?v=4
+9/3 — 760 TiB (+45.5, 6.4%) | [main](https://cw.example.org/main-data?d=260903-0001-12h#over-time): 83.6% of 1P (149.5 Ti free) · [hot](https://cw.example.org/hot-data?d=260903-0001-12h#over-time): 91.0% of 100Ti (9.0 Ti free) | av_deg80.png?v=4
+9/4 — 701 TiB (−59.5, 7.8%) | [main](https://cw.example.org/main-data?d=260904-1201-1d12h#over-time): 77.0% of 1P (209.0 Ti free) · [hot](https://cw.example.org/hot-data?d=260904-1201-1d12h#over-time): 92.5% of 100Ti (7.5 Ti free) · [more-data](https://cw.example.org/more-data?d=260904-1201-1d12h#over-time): 2 Ti | av_deg-70.png?v=4
+9/7 — 702 TiB (+1.5, 0.2%) | [main](https://cw.example.org/main-data?d=260907-1201-3d#over-time): 77.2% of 1P (207.5 Ti free) · [hot](https://cw.example.org/hot-data?d=260907-1201-3d#over-time): 99.0% of 100Ti (1.0 Ti free) · [more-data](https://cw.example.org/more-data?d=260907-1201-3d#over-time): 2 Ti | av_deg10.png?v=4
+9/8 · so far | :arrow_deg80: **790 TiB (+87.5, 12.5%)** · [as of 00:01Z](https://cw.example.org/?d=260908-0001-12h#over-time) · [main](https://cw.example.org/main-data?d=260908-0001-12h#over-time): 86.8% of 1P (120.0 Ti free) · [hot](https://cw.example.org/hot-data?d=260908-0001-12h#over-time): 99.5% of 100Ti (0.5 Ti free) · [more-data](https://cw.example.org/more-data?d=260908-0001-12h#over-time): 2 Ti | :hourglass_flowing_sand:

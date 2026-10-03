@@ -7,7 +7,8 @@
 - `cloud` bf8ff8e: `site/wrangler.example.toml` + `functions/_lib/wranglerExample.test.ts`.
 - **Decided (Ryan, 2026-10-02): config-only programs live upstream.** `cloud` 23a1cc9 has `infra/cf/stack/` (the Cloudflare program, every `Store` field + optional dev site + optional capture trigger) and `CaptureTrigger`. `local` b693f3d has `infra/aws/stack/` (the AWS program), the ingest image (`Dockerfile`, `ingest.sh`), and the `capture-trigger` Worker with `put-secrets USER`. A deployment branch keeps `Pulumi.yaml` (`main: stack/`), `Pulumi.<stack>.yaml`, its real `wrangler.toml`s and its state. The shared programs sit in `stack/` dirs so gcs's and cw-s3's own `__main__.py` don't conflict until phase 4.
 - `infra/README.md` "Starting a deployment": on `cloud` (Cloudflare stack → `wrangler.toml` → migrations → secrets → deploy → the first index), plus the laptop steps L1–L3 on `local`.
-- Next: m3 drops its copies and points both `Pulumi.yaml`s at `stack/` (0-change preview). Phase 4: gcs and cw-s3 onto `infra/cf/stack/`.
+- m3 runs both shared programs (9235e21). Phase 4 is done on 2026-10-03: gcs and cw-s3 run `infra/cf/stack/`, and their previews are unchanged except for a new `d1_database_id` output. It's committed on their branches; `up` is Ryan's call. Mock-checked first: the identical 8 and 10 resources.
+- Open: the GCP stacks (`infra/gcp/__main__.py` per branch) as one config-only program.
 
 ## Goal
 

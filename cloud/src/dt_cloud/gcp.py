@@ -7,14 +7,38 @@ login`` credentials both work.
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-PROJECT = "oa-internal-450019"
-REGION = "us-central1"
+# The default Batch region (`$BATCH_REGION`): a job whose buckets name no
+# region of their own (`$LISTING_REGIONS`) runs here.
+REGION = os.environ.get("BATCH_REGION", "").strip() or "us-central1"
 
 _session = None
+_project: str | None = None
+
+
+def gcp_project() -> str:
+    """The deployment's GCP project: `$GCP_PROJECT`, else the one the ADC
+    credentials name. Neither → exit naming the variable."""
+    global _project
+    if _project is None:
+        from .deploy import env
+
+        p = env("GCP_PROJECT")
+        if not p:
+            import google.auth
+
+            try:
+                _, p = google.auth.default()
+            except google.auth.exceptions.DefaultCredentialsError:
+                p = None
+        if not p:
+            raise SystemExit("GCP_PROJECT is unset (and the default credentials name no project): export the deployment's GCP project")
+        _project = p
+    return _project
 
 
 def session():
@@ -23,7 +47,7 @@ def session():
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
 
-        creds, _ = google.auth.default(quota_project_id=PROJECT)
+        creds, _ = google.auth.default(quota_project_id=gcp_project())
         _session = AuthorizedSession(creds)
     return _session
 
@@ -40,23 +64,26 @@ def _post(url: str, body: dict) -> dict:
     return r.json()
 
 
-def batch_jobs(project: str = PROJECT, region: str = REGION) -> list[dict]:
+def batch_jobs(project: str | None = None, region: str = REGION) -> list[dict]:
     """Recent Batch jobs, newest first."""
+    project = project or gcp_project()
     d = _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs")
     jobs = d.get("jobs", [])
     return sorted(jobs, key=lambda j: j.get("createTime", ""), reverse=True)
 
 
-def batch_job(name: str, project: str = PROJECT, region: str = REGION) -> dict:
+def batch_job(name: str, project: str | None = None, region: str = REGION) -> dict:
+    project = project or gcp_project()
     return _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{name}")
 
 
 def log_entries(
     filter_: str,
-    project: str = PROJECT,
+    project: str | None = None,
     limit: int = 50,
     asc: bool = False,
 ) -> list[dict]:
+    project = project or gcp_project()
     entries: list[dict] = []
     body = {
         "resourceNames": [f"projects/{project}"],
@@ -81,7 +108,7 @@ def task_log_filter(uid: str, grep: str | None = None) -> str:
     return f
 
 
-def job_instance_id(uid: str, project: str = PROJECT) -> str | None:
+def job_instance_id(uid: str, project: str | None = None) -> str | None:
     """The Batch VM's numeric instance id, scraped from agent heartbeat logs."""
     for e in log_entries(f'labels.job_uid="{uid}" log_id("batch_agent_logs")', project, limit=5):
         if m := re.search(r"instance_id:(\d+)", e.get("textPayload", "")):
@@ -100,7 +127,7 @@ def vm_metric(
     instance_id: str,
     metric: str,
     minutes: int = 30,
-    project: str = PROJECT,
+    project: str | None = None,
     start: str | None = None,
     end: str | None = None,
 ) -> list[tuple[str, float]]:
@@ -109,6 +136,7 @@ def vm_metric(
     Default window is the last ``minutes``; pass RFC3339 ``start``/``end`` to
     cover a finished job's lifetime instead.
     """
+    project = project or gcp_project()
     mtype, scale, _unit = METRICS[metric]
     now = datetime.now(timezone.utc)
     d = _get(
@@ -129,12 +157,16 @@ def vm_metric(
     return pts
 
 
-SII_PROJECT = "hai-gcp-models"
+def sii_project() -> str:
+    """The project holding the buckets' Storage Insights report configs (`$SII_PROJECT`)."""
+    from .deploy import require
+
+    return require("SII_PROJECT", what="the GCP project holding the buckets' Storage Insights report configs")
 
 
 def sii_report_configs(location: str) -> list[dict]:
     d = _get(
-        f"https://storageinsights.googleapis.com/v1/projects/{SII_PROJECT}/locations/{location}/reportConfigs"
+        f"https://storageinsights.googleapis.com/v1/projects/{sii_project()}/locations/{location}/reportConfigs"
     )
     return d.get("reportConfigs", [])
 

@@ -5,10 +5,10 @@ Feed the result into ``disk-tree import`` to get canonical per-path scans
 (layer-2). Split so each stage stays independently retriable and cacheable:
 
     # 1. list bucket → shards under out_dir/*.parquet (+ _SUCCESS.json)
-    disk-tree bulk-list gcs://marin-us-central1 -o gs://oa-dvx/listing/2026-08-05/marin-us-central1
+    disk-tree bulk-list gcs://my-bucket -o gs://my-data/listing/2026-08-05/my-bucket
 
     # 2. aggregate into a canonical scan
-    disk-tree import -e duckdb -l 'gs://oa-dvx/listing/2026-08-05/marin-us-central1/*.parquet' -b marin-us-central1
+    disk-tree import -e duckdb -l 'gs://my-data/listing/2026-08-05/my-bucket/*.parquet' -b my-bucket
 """
 
 from __future__ import annotations

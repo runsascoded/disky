@@ -21,7 +21,7 @@ pulumi preview -s <stack>   # read-only; `up` is a human's call
 
 Pulumi runs the program under `uv`, from `infra/pyproject.toml`. Give it its own environment (`UV_PROJECT_ENVIRONMENT=infra/.venv`): in a shell where the repo's `.venv` is active, `uv` would sync infra's dependencies into the engine's venv.
 
-The gcs and cw-s3 branches still carry their own `infra/cf/__main__.py` and `infra/gcp/__main__.py`; moving them onto the shared programs is `specs/iac-templates.md` phase 4.
+Every deployment's Cloudflare stack runs the shared `cf/stack/` program (gcs and cw-s3 moved onto it on 2026-10-03, `specs/iac-templates.md` phase 4, previews unchanged). Their GCP stacks still have their own `infra/gcp/__main__.py`.
 
 ## Tests
 

@@ -7,10 +7,16 @@
 // deployment's executor (`EXEC_API`, `Store.executor`: cw's plan-first Batch
 // bridge, or gcs's sweep bridge). Non-admins see everything read-only.
 // Nothing is deleted by inaction: no deadline, no auto-sweep.
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+//
+// Below the plan, its runs (`StagedRuns.tsx`, specs/staged-runs.md): live
+// progress, totals, undo windows, files and logs, and the run controls the
+// executor offers (`CAPS`). `?plan=<id>` shows another plan — a closed one
+// keeps its runs (and their undo windows) reachable; an admin closes the open
+// plan from here. A gesture whose prefixes all went (absorbed by a later
+// ancestor, taken back) folds to one line.
+import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { boolParam, stringParam, useUrlState } from 'use-prms'
+import { boolParam, optIntParam, stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
@@ -27,10 +33,13 @@ import { useCanStage, useIdent } from './auth'
 import { applyLedger } from './ledgerOverlay'
 import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
-import { useDispatch, useExecJobs, useRunAction, useStagedPlan, useUnstage, LIVE_STATES } from './plans'
-import type { DeletionRun, ExecJob, StagedItem } from './plans'
+import { CAPS, useClosePlan, useDispatch, useExecJobs, usePlanList, useRunAction, useStagedPlan, useUnstage } from './plans'
+import type { EmptiedBatch, StagedItem } from './plans'
+import { joinRuns, LIVE_STATES, viewLive } from './runs'
+import { RunsSection } from './StagedRuns'
 import { type PrefixSortKey, type PrefixStat, relAgo, sortPrefixRows, usePrefixes } from './prefixes'
 import { stagedTree } from './stagedTree'
+import { machineFor } from '../functions/_lib/sweepMachines'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
 const store = DEFAULT_STORE
@@ -60,31 +69,65 @@ function useIsAdmin(): boolean {
 }
 
 type Row = StagedItem & { name: string; to: string; stat?: PrefixStat }
-type Group = { id: number | null; batch?: { created_by: string; created_ts: number; note: string | null }; rows: Row[] }
+type Group = { id: number | null; batch?: { created_by: string; created_ts: number; note: string | null }; rows: Row[]; emptied?: EmptiedBatch }
+
+/** An emptied gesture's fate, as one line: what absorbed it, what was taken
+ * back, what was already covered. */
+function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { created_by: string; created_ts: number }> }) {
+  const n = (k: number) => `${k} ${k === 1 ? 'prefix' : 'prefixes'}`
+  const parts: ReactNode[] = e.absorbed.map(a => {
+    const into = batches.get(a.into)
+    return (
+      <span key={`a${a.into}`}>
+        {n(a.n)} absorbed into {into ? <><UserChip who={into.created_by} size={16} />'s batch <Tooltip content={iso(into.created_ts)}><span>{relAgo(into.created_ts)}</span></Tooltip></> : <>batch #{a.into}</>}
+      </span>
+    )
+  })
+  if (e.unstaged) parts.push(<span key="u">{n(e.unstaged)} unstaged</span>)
+  if (e.covered) parts.push(<span key="c">{n(e.covered)} already covered by a staged ancestor</span>)
+  if (!parts.length) parts.push(<span key="none">nothing new (already staged)</span>)
+  return <span className="emptied-fate">{parts.map((p, i) => <Fragment key={i}>{i > 0 && ' · '}{p}</Fragment>)}</span>
+}
 
 export function StagedPage() {
   const { fmtBytes } = useUnits()
   const ident = useIdent()
   const admin = useIsAdmin()
   const canStage = useCanStage()
-  // Plan-first executors (cw's Batch bridge, the laptop drainer) share the
-  // `/api/plan-sweep/*` console routes; gcs's `sweep` has its own.
-  const planFirst = store.executor !== 'sweep'
 
+  // `?plan=<id>`: a plan other than the shared open one (a closed plan keeps
+  // its runs, and their undo windows, reachable here).
+  const [planP, setPlanP] = useUrlState('plan', optIntParam)
   const [live, setLive] = useState(false)
-  const staged = useStagedPlan(live)
+  const staged = useStagedPlan(live, planP)
+  const plans = usePlanList()
   const jobs = useExecJobs(live)
+  const jobList = useMemo(() => jobs.data?.jobs ?? [], [jobs.data])
   const plan = staged.data?.plan ?? null
+  const closed = plan?.state === 'closed'
   const items = useMemo(() => staged.data?.items ?? [], [staged.data])
   const batches = useMemo(() => staged.data?.batches ?? [], [staged.data])
-  const runs = staged.data?.runs ?? []
-  const anyLive = runs.some(r => LIVE_STATES.has(jobs.data?.[r.run_id]?.state ?? '') || (!r.finished_ts && !jobs.data?.[r.run_id]))
-  useEffect(() => setLive(anyLive), [anyLive])
-
+  const emptied = useMemo(() => staged.data?.emptied ?? [], [staged.data])
+  const batchById = useMemo(() => new Map(batches.map(b => [b.id, b])), [batches])
+  const runs = useMemo(() => staged.data?.runs ?? [], [staged.data])
   const unstage = useUnstage(plan?.id ?? null)
   const dispatch = useDispatch(plan?.id ?? null)
+  const closePlan = useClosePlan()
+  const views = useMemo(() => joinRuns(runs, jobList, plan?.id ?? null), [runs, jobList, plan?.id])
+  // A just-dispatched job before the jobs list shows it (or its executor
+  // records its run row — gcs's does that from inside Batch, once the VM is
+  // up): shown under the buttons, and it keeps the page polling meanwhile.
+  // A job that ended without recording one stops counting.
+  const dispatched = dispatch.data?.job_id
+  const dispatchedState = dispatched ? jobList.find(j => j.job_id === dispatched)?.state : undefined
+  const pendingJob = dispatched && !views.some(v => v.job?.job_id === dispatched && v.run) && !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(dispatchedState ?? '') ? dispatched : null
+  const pendingState = pendingJob ? dispatchedState : undefined
+  const anyLive = !!pendingJob
+    || views.some(v => viewLive(v) || v.ops.some(o => LIVE_STATES.has(o.state)) || (v.run && !v.run.finished_ts && !v.job))
+  useEffect(() => setLive(anyLive), [anyLive])
+
   const runAction = useRunAction()
-  const busy = unstage.isPending || dispatch.isPending || runAction.isPending
+  const busy = unstage.isPending || dispatch.isPending || runAction.isPending || closePlan.isPending
 
   // The scan everything on the page is sized at — and the one a dispatch reads.
   const [scans, setScans] = useState<string[]>([])
@@ -103,7 +146,7 @@ export function StagedPage() {
   })
   const userIdx = useMemo(() => buildUserIndex(metaQ.data?.users ?? []), [metaQ.data])
   const ownerIdx = useOwnerIndex(useOwners(!!store.owners).data)
-  const error = unstage.error ?? dispatch.error ?? runAction.error ?? staged.error ?? statsQ.error
+  const error = unstage.error ?? dispatch.error ?? runAction.error ?? closePlan.error ?? staged.error ?? statsQ.error
 
   const rows: Row[] = useMemo(() => items.map(it => ({ ...it, name: it.prefix, to: `/${prefixToPath(it.prefix)}`, stat: stats?.[it.prefix] })), [items, stats])
   // The view lives in the URL, so a link carries it: `?q=hedy|grace&s=-b`
@@ -135,10 +178,13 @@ export function StagedPage() {
       byBatch.get(r.batch_id)!.push(r)
     }
     const known = new Map(batches.map(b => [b.id, b]))
-    return [...byBatch.entries()]
-      .map(([id, rs]) => ({ id, batch: id != null ? known.get(id) : undefined, rows: sortPrefixRows(rs, sort.k, sort.asc, r => r.added_ts) }))
+    // Gestures whose prefixes all went (absorbed by a later ancestor, taken
+    // back, or covered from the start): one folded line each, in time order.
+    const gone: Group[] = emptied.map(e => ({ id: e.id, batch: e, rows: [], emptied: e }))
+    return [...[...byBatch.entries()]
+      .map(([id, rs]): Group => ({ id, batch: id != null ? known.get(id) : undefined, rows: sortPrefixRows(rs, sort.k, sort.asc, r => r.added_ts) })), ...gone]
       .sort((a, b) => (b.batch?.created_ts ?? 0) - (a.batch?.created_ts ?? 0))
-  }, [shownRows, batches, sP, flat]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [shownRows, batches, emptied, sP, flat]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Collapsed batches and each batch's page.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
@@ -155,11 +201,37 @@ export function StagedPage() {
   useRowSelectionKeys(sel, 'staged', 'Staged')
   const selected = items.filter(it => sel.selected.has(it.prefix)).map(it => it.prefix)
   const mine = (it: StagedItem) => !!ident && it.added_by === ident.email
-  const canRemove = (it: StagedItem) => admin || (canStage && mine(it))
+  const canRemove = (it: StagedItem) => !closed && (admin || (canStage && mine(it)))
   const removable = selected.filter(p => { const it = items.find(i => i.prefix === p); return it ? canRemove(it) : false })
 
   const [armed, setArmed] = useState(false)
   useEffect(() => setArmed(false), [plan?.id, items.length])
+  const [closeArmed, setCloseArmed] = useState(false)
+  useEffect(() => setCloseArmed(false), [plan?.id])
+
+  // A dispatch may be cut to some of the plan's buckets (`CAPS.bucketCut`):
+  // unchecked buckets stay out of the run. The cut's prefixes are what its
+  // digest names, so a real run needs a dry run of the same cut.
+  const [bucketsOff, setBucketsOff] = useState<ReadonlySet<string>>(new Set())
+  const perBucket = useMemo(() => {
+    const m = new Map<string, { n: number; b: number; o: number }>()
+    for (const r of rows) {
+      const bkt = prefixToPath(r.prefix).split('/')[0]
+      const e = m.get(bkt) ?? { n: 0, b: 0, o: 0 }
+      e.n++
+      e.b += r.stat?.b ?? 0
+      e.o += r.stat?.o ?? 0
+      m.set(bkt, e)
+    }
+    return m
+  }, [rows])
+  const planBuckets = [...perBucket.keys()].sort()
+  const onBuckets = planBuckets.filter(b => !bucketsOff.has(b))
+  const cut = CAPS.bucketCut && onBuckets.length < planBuckets.length ? onBuckets : undefined
+  const cutItems = cut ? onBuckets.reduce((n, b) => n + perBucket.get(b)!.n, 0) : items.length
+  // The executor holds a bucket's manifest in memory: a bucket with tens of
+  // millions of planned objects needs the big machine (gcs only).
+  const machine = CAPS.bucketCut ? machineFor(Math.max(0, ...onBuckets.map(b => perBucket.get(b)!.o))) : undefined
 
   const total = (rs: Row[]) => rs.reduce((t, r) => ({ b: t.b + (r.stat?.b ?? 0), o: t.o + (r.stat?.o ?? 0), gone: t.gone + (stats && !r.stat ? 1 : 0) }), { b: 0, o: 0, gone: 0 })
   const all = total(shownRows)
@@ -190,16 +262,26 @@ export function StagedPage() {
         {admin ? ' Dry-run first to see what a real run would delete; a real run deletes recoverably.' : ' An admin reviews and dispatches from here.'}
       </p>
       {error && <p className="staged-err" role="alert">{error.message}</p>}
+      {(planP != null || (plans.data?.length ?? 0) > 1) && (
+        <label className="plan-pick">plan{' '}
+          <select value={planP ?? ''} onChange={e => setPlanP(e.target.value ? Number(e.target.value) : null)} aria-label="plan">
+            <option value="">the open plan (where staging lands)</option>
+            {(plans.data ?? []).map(p => <option key={p.id} value={p.id}>#{p.id}{p.name !== 'Staged' ? ` “${p.name}”` : ''} · {p.state} · {p.items} {p.items === 1 ? 'item' : 'items'} · {p.runs} {p.runs === 1 ? 'run' : 'runs'}</option>)}
+          </select>
+          {closed && <span className="dim"> · closed: read-only, its runs (and their undo windows) stay here</span>}
+        </label>
+      )}
+      {plan?.note && <p className="plan-note">{plan.note}</p>}
 
       {staged.isLoading ? <p className="loading">loading…</p> : !plan || !items.length ? (
-        <p className="staged-empty">Nothing is staged.</p>
+        <p className="staged-empty">{plan && closed ? `Plan #${plan.id} is closed, with nothing left in it.` : 'Nothing is staged.'}</p>
       ) : (
         <>
           <div className="pp-head">
             <h2>
               {shownRows.length !== items.length && <>{shownRows.length} of </>}{items.length} {items.length === 1 ? 'prefix' : 'prefixes'}
               {stats && <> · {fmtBytes(all.b)}{shownRows.length !== items.length && <span className="dim"> of {fmtBytes(everything.b)}</span>} · {fmtN(all.o)} objects</>}
-              <span className="dim"> · plan #{plan.id}{plan.name !== 'Staged' && <> “{plan.name}”</>} · open since {relAgo(plan.created_ts).replace(/ ago$/, '')}</span>
+              <span className="dim"> · plan #{plan.id}{plan.name !== 'Staged' && <> “{plan.name}”</>} · {closed && plan.closed_ts ? <>closed {relAgo(plan.closed_ts)}</> : <>open since {relAgo(plan.created_ts).replace(/ ago$/, '')}</>}</span>
             </h2>
             <label className="scan-pick">sized at scan <select value={date} onChange={e => setDate(e.target.value)} aria-label="scan">{scans.map(s => <option key={s}>{s}</option>)}</select>
               {sizesNote && <span className="dim"> {sizesNote}</span>}
@@ -253,6 +335,16 @@ export function StagedPage() {
             const np = Math.max(1, Math.ceil(g.rows.length / pageSize))
             const setPg = (p: number) => setPages(ps => ({ ...ps, [k]: p }))
             const shown = g.rows.slice(pg * pageSize, (pg + 1) * pageSize)
+            if (g.emptied) return (
+              <section key={k} className="stage-batch folded emptied">
+                <div className="batch-head">
+                  <span className="fold dim" aria-hidden>·</span>
+                  <UserChip who={g.emptied.created_by} size={18} /> staged <Tooltip content={iso(g.emptied.created_ts)}><span>{relAgo(g.emptied.created_ts)}</span></Tooltip>
+                  <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} /></span>
+                  {g.emptied.note && <i className="memo">{g.emptied.note}</i>}
+                </div>
+              </section>
+            )
             return (
               <section key={k} className={`stage-batch${open ? '' : ' folded'}`}>
                 {g.id !== -1 && <div className="batch-head">
@@ -300,81 +392,75 @@ export function StagedPage() {
             )
           })}
 
-          {admin && (
-            <div className="dispatch">
+          {admin && !closed && (
+            <div className="dispatch" id="dispatch">
               <h3>Dispatch</h3>
               <label>scan <select value={date} onChange={e => setDate(e.target.value)}>{scans.map(s => <option key={s}>{s}</option>)}</select></label>
+              {CAPS.bucketCut && planBuckets.length > 1 && (
+                <details className="dispatch-buckets" open={!!cut}>
+                  <summary className="dim">limit this run to some buckets{cut ? <> — <b>{onBuckets.length} of {planBuckets.length}</b> checked</> : ''}</summary>
+                  {planBuckets.map(b => {
+                    const e = perBucket.get(b)!
+                    return (
+                      <label key={b} className={bucketsOff.has(b) ? 'off' : undefined}>
+                        <input type="checkbox" checked={!bucketsOff.has(b)} onChange={ev => { setArmed(false); setBucketsOff(s => { const n = new Set(s); if (ev.target.checked) n.delete(b); else n.add(b); return n }) }} />
+                        {' '}<code>{b}</code> <span className="dim">{e.n} {e.n === 1 ? 'prefix' : 'prefixes'}{stats && <> · {fmtBytes(e.b)}</>}</span>
+                      </label>
+                    )
+                  })}
+                  {cut && <p className="dim">Only the checked buckets are listed and swept; a real run needs a dry run of the same cut.</p>}
+                </details>
+              )}
               <div className="dispatch-btns">
-                <button type="button" className="dry" disabled={busy || !date} onClick={() => dispatch.mutate({ mode: 'dry', date })}>dispatch dry-run</button>
+                <button type="button" className="dry" disabled={busy || !date || !onBuckets.length} onClick={() => dispatch.mutate({ mode: 'dry', date, buckets: cut, machine })}>dispatch dry-run</button>
                 {!armed
-                  ? <button type="button" className="danger" disabled={busy || !date} onClick={() => setArmed(true)}>real delete…</button>
+                  ? <button type="button" className="danger" disabled={busy || !date || !onBuckets.length} onClick={() => setArmed(true)}>real delete…</button>
                   : <>
-                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date }, { onSuccess: () => setArmed(false) })}>confirm REAL delete of {items.length} {items.length === 1 ? 'prefix' : 'prefixes'}</button>
+                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
+                        confirm REAL delete of {cutItems} {cutItems === 1 ? 'prefix' : 'prefixes'}{cut && <> ({onBuckets.length} of {planBuckets.length} buckets)</>}
+                      </button>
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
                     </>}
               </div>
-              <p className="dispatch-note dim">A run reads the scan you pick and deletes only what it listed; new objects since are left alone.</p>
+              {pendingJob && (
+                <p className="dispatch-pending">
+                  Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Its run appears below once the job starts (a few minutes while Batch brings up the VM).
+                </p>
+              )}
+              <p className="dispatch-note dim">A run reads the scan you pick and deletes only what it listed; new objects since are left alone.{machine && <> Runs on <code>{machine}</code>.</>}</p>
             </div>
           )}
         </>
       )}
 
-      {plan && runs.length > 0 && (
-        <>
-          <h3>Runs ({runs.length})</h3>
-          <div className="runs-wrap">
-            <table className="runs">
-              <thead><tr><th>run</th><th>mode</th><th>state</th><th>deleted</th><th>gone</th><th>started</th><th></th></tr></thead>
-              <tbody>
-                {runs.map(r => (
-                  <RunRow key={r.run_id} r={r} job={jobs.data?.[r.run_id]} admin={admin} planFirst={planFirst} busy={busy} fmtBytes={fmtBytes}
-                    act={(action, run_id) => runAction.mutate({ action, run_id })} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
+      {admin && plan && !closed && (
+        <div className="close-plan">
+          {!closeArmed
+            ? <Tooltip content="Close this plan: its items stay with it (read-only, under the plan picker, with its runs), and the next trash gesture opens a fresh plan.">
+                <button type="button" disabled={busy} onClick={() => setCloseArmed(true)}>close plan…</button>
+              </Tooltip>
+            : <>
+                <button type="button" className="danger armed" disabled={busy} onClick={() => closePlan.mutate(plan.id, { onSuccess: () => { setCloseArmed(false); setPlanP(plan.id) } })}>confirm: close plan #{plan.id}</button>
+                <button type="button" onClick={() => setCloseArmed(false)}>cancel</button>
+              </>}
+        </div>
+      )}
+
+      {plan && (
+        <RunsSection
+          planId={plan.id}
+          runs={runs}
+          jobs={jobList}
+          configured={jobs.data?.configured ?? true}
+          jobsError={jobs.error}
+          admin={admin}
+          busy={busy}
+          act={a => runAction.mutate(a)}
+          fmtBytes={fmtBytes}
+          refreshing={staged.isFetching || jobs.isFetching}
+        />
       )}
       <SiteKbd />
     </main>
-  )
-}
-
-function RunRow({ r, job, admin, planFirst, busy, fmtBytes, act }: {
-  r: DeletionRun; job: ExecJob | undefined; admin: boolean; planFirst: boolean; busy: boolean
-  fmtBytes: (b: number) => string
-  act: (action: 'stop' | 'undo' | 'purge', run_id: string) => void
-}) {
-  const state = job?.state ?? (r.finished_ts ? 'done' : 'submitted')
-  const live = LIVE_STATES.has(state)
-  const now = Math.floor(Date.now() / 1000)
-  const canUndo = planFirst && admin && r.mode === 'real' && r.undo_state !== 'full' && (!r.undo_deadline || now < r.undo_deadline) && !!r.finished_ts
-  const canPurge = planFirst && admin && r.mode === 'real' && r.purge_state === 'pending' && r.undo_state !== 'full' && (!r.undo_deadline || now >= r.undo_deadline)
-  return (
-    <tr className={`run ${r.mode} ${state.toLowerCase()}`}>
-      <td className="rid"><code>{r.run_id.replace(/^(cw|gcs)-sweep-(dry|real)-/, '')}</code>{job?.logs && <> <a href={job.logs} target="_blank" rel="noreferrer" className="logs">logs</a></>}</td>
-      <td>{r.mode}</td>
-      <td>
-        <span className="rstate">{state}</span>
-        {state === 'FAILED' && job?.last_event && <details className="why"><summary>why</summary><div>{job.last_event}</div></details>}
-        {r.undo_state === 'full' && <span className="tag">undone</span>}
-        {r.purge_state === 'done' && <span className="tag">purged</span>}
-      </td>
-      <td>
-        {fmtBytes(r.deleted_bytes)} <span className="dim">/ {fmtN(r.deleted_objects)}</span>
-        {r.freed_bytes != null && (
-          <Tooltip content={<>What deleting this set would <b>actually</b> free, measured on the laptop: bytes it shares with a clone or hardlink outside the set (e.g. a <code>.venv</code>’s files cloned from <code>~/.cache/uv</code>) stay on disk. The size before it counts every path in full.</>}>
-            <span className="frees"> · frees <b>{fmtBytes(r.freed_bytes)}</b></span>
-          </Tooltip>
-        )}
-      </td>
-      <td>{fmtN(r.skipped_gone)}</td>
-      <td><TimeCell ts={r.started_ts} /></td>
-      <td className="actions">
-        {planFirst && admin && live && <button type="button" disabled={busy} onClick={() => act('stop', r.run_id)}>stop</button>}
-        {canUndo && <button type="button" disabled={busy} onClick={() => act('undo', r.run_id)}>undo</button>}
-        {canPurge && <button type="button" className="danger" disabled={busy} onClick={() => act('purge', r.run_id)}>purge</button>}
-      </td>
-    </tr>
   )
 }

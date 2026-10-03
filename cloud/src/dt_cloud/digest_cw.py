@@ -311,7 +311,7 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
         url = _diff_url(day.scan, day.since, cfg.site_url)
         return Reply(f"{_md(day.date)} · so far", f":arrow_deg{d}: **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}) · {tail}", icon_emoji=PROVISIONAL_ICON)
     if variant == "sender":
-        return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.icons_base}/arrows/av_deg{d}.png?v={AVATAR_REV}")
+        return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.need('icons_base')}/arrows/av_deg{d}.png?v={AVATAR_REV}")
     if variant == "body":
         url = _diff_url(day.scan, day.since, cfg.site_url)
         return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}** · {tail}", icon_emoji=":calendar:")

@@ -1,5 +1,5 @@
 """The dashboard's HTTP client — the one convention every verb that reads the
-site shares: ``$GCS_USAGE_TOKEN`` / ``$GCS_USAGE_URL`` (or ``-t`` / ``-u``),
+site shares: ``$SITE_TOKEN`` / ``$SITE_URL`` (or ``-t`` / ``-u``),
 a Bearer header, and the server's own error string on a non-2xx.
 """
 
@@ -11,8 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .secrets import secret
-from .deploy import site_url
+from .deploy import site_token, site_url
 
 # a real UA — CF edge-blocks bot UAs (1010), same as healthcheck.UA
 UA = "gcs-usage-cli/1.0"
@@ -32,8 +31,8 @@ class SiteError(Exception):
 
 def creds(token: str | None, url: str | None) -> tuple[str, str | None]:
     """Resolve (base_url, token) from args then env, so every verb shares one
-    convention: ``$GCS_USAGE_TOKEN`` / ``$GCS_USAGE_URL``."""
-    return site_url(url), secret(token, "GCS_USAGE_TOKEN")
+    convention: ``$SITE_TOKEN`` / ``$SITE_URL``."""
+    return site_url(url), site_token(token)
 
 
 def get_json(url: str, token: str, endpoint_path: str, params: dict | None = None, timeout: int = 30) -> dict | list:

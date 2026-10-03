@@ -6,7 +6,7 @@ snapshot tree.
 
 Hand-built series (12-hourly, 00:00Z / 12:00Z): a lead day Mon 8/31 (700,
 705 TiB) then Tue 9/1 (710, 713) and Wed 9/2 (712, 715) — one ISO week, so
-the bullet label is unambiguous. Quota (02a) = 910 TiB."""
+the bullet label is unambiguous. Quota (main) = 910 TiB."""
 import datetime as dt
 import json
 from dataclasses import replace
@@ -19,7 +19,9 @@ from dt_cloud import digest as E
 from dt_cloud import digest_cw as D
 from dt_cloud import digest_plot as DP
 
-CFG = E.PRESETS["cw"]
+from digest_examples import CW_EXAMPLE, config_file
+
+CFG = CW_EXAMPLE
 P = CFG.primary
 
 
@@ -38,8 +40,8 @@ def redo_replies(root, m, token, channel, variant="sender", client=None, reply_h
 
 TIB = 1024**4
 UTC = dt.timezone.utc
-SITE = "https://cw-s3.oa.dev"
-AV = "https://gcs-usage-icons.pages.dev/arrows/av_deg"
+SITE = "https://cw.example.org"
+AV = "https://icons.example.org/arrows/av_deg"
 SEP = date(2026, 9, 1)
 
 
@@ -55,8 +57,8 @@ MONTH = D.Month(lead=_all[:2], rows=_all[2:])
 
 def test_quota_config():
     # 910 TiB — CoreWeave's authoritative zone quota (`cwobject_quota_info`), ≈1 PB decimal
-    assert (P, CFG.primary_quota) == ("marin-us-east-02a", E.Quota(910 * 1024**4, "1 PB", "1P"))
-    assert CFG.buckets["hero-checkpoints"] == E.Bucket("hero", E.Quota(100 * 1024**4, "100 TiB", "100Ti"))
+    assert (P, CFG.primary_quota) == ("main-data", E.Quota(910 * 1024**4, "1 PB", "1P"))
+    assert CFG.buckets["hot-data"] == E.Bucket("hot", E.Quota(100 * 1024**4, "100 TiB", "100Ti"))
     assert (D._quota(715.0, CFG.primary_quota), D._quota(910.0, CFG.primary_quota), D._quota(715.0, None)) == (" · 78.6% of 1 PB", " · 100.0% of 1 PB", "")
 
 
@@ -89,14 +91,14 @@ def test_qlabel_and_bucket_clause():
     assert [D._qlabel(b) for b in (10**15, 10**14, 5 * 10**14, 2 * 10**15)] == ["1P", "100T", "500T", "2P"]
     since = E.scan_ts("2026-09-22T1201")
     # a known-quota bucket → linked `% of quota (free)`; unknown quota → raw TiB
-    assert D._bucket_clause("marin-us-east-02a", 825.9, "2026-09-23T1201", since, CFG) == (
-        f"[02a]({SITE}/marin-us-east-02a?d=260923-1201-1d#over-time): 90.8% of 1P (84.1 Ti free)"
+    assert D._bucket_clause("main-data", 825.9, "2026-09-23T1201", since, CFG) == (
+        f"[main]({SITE}/main-data?d=260923-1201-1d#over-time): 90.8% of 1P (84.1 Ti free)"
     )
-    assert D._bucket_clause("hero-checkpoints", 82.0, "2026-09-23T1201", since, CFG) == (
-        f"[hero]({SITE}/hero-checkpoints?d=260923-1201-1d#over-time): 82.0% of 100Ti (18.0 Ti free)"
+    assert D._bucket_clause("hot-data", 82.0, "2026-09-23T1201", since, CFG) == (
+        f"[hot]({SITE}/hot-data?d=260923-1201-1d#over-time): 82.0% of 100Ti (18.0 Ti free)"
     )
-    assert D._bucket_clause("marin-us-west-04a", 1.9, "2026-09-23T1201", None, CFG) == (
-        f"[marin-us-west-04a]({SITE}/marin-us-west-04a?d=260923-1201#over-time): 2 Ti"
+    assert D._bucket_clause("more-data", 1.9, "2026-09-23T1201", None, CFG) == (
+        f"[more-data]({SITE}/more-data?d=260923-1201#over-time): 2 Ti"
     )
 
 
@@ -105,48 +107,48 @@ def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
     return {
         "total_bytes": round((primary_tib + hero_tib) * TIB), "total_objects": objs + 400_000, "class_bytes": {},
         "buckets": {
-            "marin-us-east-02a": {"total_bytes": round(primary_tib * TIB), "total_objects": objs},
-            "hero-checkpoints": {"total_bytes": round(hero_tib * TIB), "total_objects": 400_000},
+            "main-data": {"total_bytes": round(primary_tib * TIB), "total_objects": objs},
+            "hot-data": {"total_bytes": round(hero_tib * TIB), "total_objects": 400_000},
         },
     }
 
 
 def test_primary_totals():
     assert D.primary_totals(_meta(700), P) == (700 * TIB, 1_000_000, {})
-    assert D.primary_totals(_meta2(700, 89.25), P) == (700 * TIB, 1_000_000, {"hero-checkpoints": 89.25})
+    assert D.primary_totals(_meta2(700, 89.25), P) == (700 * TIB, 1_000_000, {"hot-data": 89.25})
     # a meta whose `buckets` lacks the primary reads as the flat totals
     assert D.primary_totals({**_meta(5), "buckets": {"x": {"total_bytes": TIB, "total_objects": 1}}}, P) == (5 * TIB, 1_000_000, {})
 
 
 def test_rows_from_meta_buckets_switch():
     # flat metas then `buckets` metas: the primary's deltas stay continuous
-    # across the switch (the flat totals were the primary's); the hero clause's
+    # across the switch (the flat totals were the primary's); the hot clause's
     # Δ appears once a prior scan has the bucket
     rows = D.rows_from_meta([("2026-09-01T0000", _meta(710)), ("2026-09-01T1200", _meta2(713, 89.25)), ("2026-09-02T0000", _meta2(712, 90.75))], P)
-    assert [(r.tb, r.dtb, r.extra) for r in rows] == [(710.0, None, {}), (713.0, 3.0, {"hero-checkpoints": 89.2}), (712.0, -1.0, {"hero-checkpoints": 90.8})]
+    assert [(r.tb, r.dtb, r.extra) for r in rows] == [(710.0, None, {}), (713.0, 3.0, {"hot-data": 89.2}), (712.0, -1.0, {"hot-data": 90.8})]
     month = D.Month(lead=[], rows=rows)
     d1, d2 = D.day_rows(month, "body", 12)
-    assert (d1.extra, d1.dextra) == ({"hero-checkpoints": 89.2}, {"hero-checkpoints": None})
-    assert (d2.extra, d2.dextra) == ({"hero-checkpoints": 90.8}, {"hero-checkpoints": 1.6})
+    assert (d1.extra, d1.dextra) == ({"hot-data": 89.2}, {"hot-data": None})
+    assert (d2.extra, d2.dextra) == ({"hot-data": 90.8}, {"hot-data": 1.6})
     assert D.reply(d1, "body", CFG).body == (
         f":arrow_deg0: [9/1]({SITE}/?d=260901-1200#over-time) — **713 TiB (+0.0, 0.0%)** · "
-        f"[02a]({SITE}/marin-us-east-02a?d=260901-1200#over-time): 78.4% of 1P (197.0 Ti free) · "
-        f"[hero]({SITE}/hero-checkpoints?d=260901-1200#over-time): 89.2% of 100Ti (10.8 Ti free)"
+        f"[main]({SITE}/main-data?d=260901-1200#over-time): 78.4% of 1P (197.0 Ti free) · "
+        f"[hot]({SITE}/hot-data?d=260901-1200#over-time): 89.2% of 100Ti (10.8 Ti free)"
     )
     assert D.reply(d2, "sender", CFG) == E.Reply(
         "9/2 — 712 TiB (−1.0, 0.1%)",
-        f"[02a]({SITE}/marin-us-east-02a?d=260902-0000-12h#over-time): 78.2% of 1P (198.0 Ti free) · "
-        f"[hero]({SITE}/hero-checkpoints?d=260902-0000-12h#over-time): 90.8% of 100Ti (9.2 Ti free)",
+        f"[main]({SITE}/main-data?d=260902-0000-12h#over-time): 78.2% of 1P (198.0 Ti free) · "
+        f"[hot]({SITE}/hot-data?d=260902-0000-12h#over-time): 90.8% of 100Ti (9.2 Ti free)",
         icon_url=f"{AV}-30.png?v=4",
     )
     # the OP headline carries the clause too, Δ vs the month's base scan
     assert D.op_body(month, SEP, None, CFG).split("\n")[0] == (
-        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-0000-1d#over-time) · 712 TiB · 78.2% of 1 PB · hero-checkpoints 91 TiB · [dashboard]({SITE}/)"
+        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-0000-1d#over-time) · 712 TiB · 78.2% of 1 PB · hot-data 91 TiB · [dashboard]({SITE}/)"
     )
 
 
 def test_primary_node():
-    a, b = _node("marin-us-east-02a", 1), _node("hero-checkpoints", 2)
+    a, b = _node("main-data", 1), _node("hot-data", 2)
     assert D.primary_node({"n": "root", "c": [b, a]}, P) is a
     assert D.primary_node({"n": "root", "c": [b]}, P) is b  # single-bucket scans: the only child
 
@@ -211,7 +213,7 @@ def test_provisional_reply():
     assert D.Cw(CFG).provisional(half, "sender") == E.Unit("2026-09-02", "2026-09-02T0000", E.Reply(
         "9/2 · so far",
         f":arrow_deg-30: **712 TiB (−1.0, 0.1%)** · [as of 00:00Z]({SITE}/?d=260902-0000-12h#over-time) · "
-        f"[02a]({SITE}/marin-us-east-02a?d=260902-0000-12h#over-time): 78.2% of 1P (198.0 Ti free)",
+        f"[main]({SITE}/main-data?d=260902-0000-12h#over-time): 78.2% of 1P (198.0 Ti free)",
         icon_emoji=":hourglass_flowing_sand:",
     ))
     assert (D.Cw(CFG).provisional(MONTH, "sender"), D.Cw(CFG).provisional(half, "body")) == (None, None)
@@ -238,7 +240,7 @@ buckets:
   lab-scratch: {label: scratch}
 """)
     cfg = E.load_config("cw", f)
-    assert (cfg.template, cfg.title, cfg.site_url, cfg.primary, cfg.state) == ("cw", "Lab usage", "https://lab.example", "lab-main", CFG.state)
+    assert (cfg.template, cfg.title, cfg.site_url, cfg.primary, cfg.state) == ("cw", "Lab usage", "https://lab.example", "lab-main", E.PRESETS["cw"].state)
     assert cfg.buckets == {"lab-main": E.Bucket("main", E.Quota(2 * 10**15, "2 PB", "2P")), "lab-scratch": E.Bucket("scratch")}
     assert E.load_config("gcs") is E.PRESETS["gcs"]
     with pytest.raises(ValueError, match="unknown digest config keys: \\['colour'\\]"):
@@ -275,7 +277,7 @@ def test_config_file_invalid(tmp_path: Path):
     assert str(e.value) == f"digest config {f}: expected a mapping, got list"
     # nulls clear optional fields; an empty file is the preset
     f.write_text("primary: null\ndiscord_webhook_env: null\n")
-    assert E.load_config("cw", f) == replace(CFG, primary=None)
+    assert E.load_config("cw", f) == replace(E.PRESETS["cw"], primary=None)
     f.write_text("")
     assert E.load_config("cw", f) == E.PRESETS["cw"]
 
@@ -292,7 +294,7 @@ def test_no_quota():
         "*Weekly summaries*",
         f":arrow_deg20: [wk of 8/31]({SITE}/?d=260902-1200-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB",
     ]
-    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"[marin-us-east-02a]({SITE}/marin-us-east-02a?d=260901-1200-1d#over-time): 713 Ti"
+    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"[main-data]({SITE}/main-data?d=260901-1200-1d#over-time): 713 Ti"
 
 
 def test_op_body():
@@ -305,7 +307,7 @@ def test_op_body():
         "*Weekly summaries*",
         f":arrow_deg20: [wk of 8/31]({SITE}/?d=260902-1200-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB · 78.6% of 1 PB",
         "",
-        "![CoreWeave usage — September 2026](https://x/p.png)",
+        "![S3 usage — September 2026](https://x/p.png)",
     ]
     assert D.op_body(MONTH, SEP, None, CFG).split("\n")[-1].startswith(":arrow_deg20: [wk of 8/31]")
 
@@ -327,12 +329,12 @@ def test_reply_sender_variant():
     # +8.0 on 705 in 24 h → 1.13%·7 = 7.9%/wk → deg50; +2.0 on 713 → 0.28%·7 = 2.0% → deg30
     assert D.reply(d1, "sender", CFG) == E.Reply(
         "9/1 — 713 TiB (+8.0, 1.1%)",
-        f"[02a]({SITE}/marin-us-east-02a?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+        f"[main]({SITE}/main-data?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)",
         icon_url=f"{AV}50.png?v=4",
     )
     assert D.reply(d2, "sender", CFG) == E.Reply(
         "9/2 — 715 TiB (+2.0, 0.3%)",
-        f"[02a]({SITE}/marin-us-east-02a?d=260902-1200-1d#over-time): 78.6% of 1P (195.0 Ti free)",
+        f"[main]({SITE}/main-data?d=260902-1200-1d#over-time): 78.6% of 1P (195.0 Ti free)",
         icon_url=f"{AV}30.png?v=4",
     )
 
@@ -341,15 +343,15 @@ def test_reply_body_variant():
     d1, d2 = D.day_rows(MONTH, "body", 12)
     # +8.0 on 705 in 24 h → 1.13%·7 = 7.9%/wk → deg50; +2.0 on 713 → deg30
     assert D.reply(d1, "body", CFG) == E.Reply(
-        "CoreWeave usage",
+        "S3 usage",
         f":arrow_deg50: [9/1]({SITE}/?d=260901-1200-1d#over-time) — **713 TiB (+8.0, 1.1%)** · "
-        f"[02a]({SITE}/marin-us-east-02a?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+        f"[main]({SITE}/main-data?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)",
         icon_emoji=":calendar:",
     )
     assert D.reply(d2, "body", CFG) == E.Reply(
-        "CoreWeave usage",
+        "S3 usage",
         f":arrow_deg30: [9/2]({SITE}/?d=260902-1200-1d#over-time) — **715 TiB (+2.0, 0.3%)** · "
-        f"[02a]({SITE}/marin-us-east-02a?d=260902-1200-1d#over-time): 78.6% of 1P (195.0 Ti free)",
+        f"[main]({SITE}/main-data?d=260902-1200-1d#over-time): 78.6% of 1P (195.0 Ti free)",
         icon_emoji=":calendar:",
     )
 
@@ -357,7 +359,7 @@ def test_reply_body_variant():
 def test_reply_first_day_ever():
     # no prior scan: zero delta, flat arrow, link without a look-back
     day = D.day_rows(D.Month(lead=[], rows=MONTH.rows[:2]), "sender", 12)[0]
-    assert D.reply(day, "sender", CFG) == E.Reply("9/1 — 713 TiB (+0.0, 0.0%)", f"[02a]({SITE}/marin-us-east-02a?d=260901-1200#over-time): 78.4% of 1P (197.0 Ti free)", icon_url=f"{AV}0.png?v=4")
+    assert D.reply(day, "sender", CFG) == E.Reply("9/1 — 713 TiB (+0.0, 0.0%)", f"[main]({SITE}/main-data?d=260901-1200#over-time): 78.4% of 1P (197.0 Ti free)", icon_url=f"{AV}0.png?v=4")
 
 
 def test_state_path():
@@ -431,8 +433,8 @@ def test_post_digest_sender_variant(tmp_path: Path):
     state = post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
     plot = state["plot_name"]
     assert plot.startswith("plot-") and plot.endswith(".png")
-    assert [_post(c) for c in fake.calls] == [("post", None, "CoreWeave usage — September 2026", None, ":calendar:")]
-    assert fake.calls[0][1].startswith(":arrow_deg") and f"https://cw.gcs-usage-icons.pages.dev/{plot}?v=" in fake.calls[0][1]
+    assert [_post(c) for c in fake.calls] == [("post", None, "S3 usage — September 2026", None, ":calendar:")]
+    assert fake.calls[0][1].startswith(":arrow_deg") and f"https://cw.icons.example.org/{plot}?v=" in fake.calls[0][1]
     assert state == {"plot_name": plot, "variant": "sender", "op_ts": "m1", "posted": {}}
 
     # 9/1 12:00 lands: OP refreshed + the day's reply (headline as sender, arrow avatar)
@@ -466,17 +468,17 @@ def test_post_digest_body_variant(tmp_path: Path):
     # 9/1 00:00: OP + the day's reply under the static sender, headline in the body (Δ vs 8/31's last = 12 h)
     post_digest(str(root), SEP, "xoxb", "C1", "body", client=fake)
     assert [_post(c) for c in fake.calls] == [
-        ("post", None, "CoreWeave usage — September 2026", None, ":calendar:"),
-        ("post", "m1", "CoreWeave usage", None, ":calendar:"),
+        ("post", None, "S3 usage — September 2026", None, ":calendar:"),
+        ("post", "m1", "S3 usage", None, ":calendar:"),
     ]
-    assert fake.calls[1][1] == f":arrow_deg50: [9/1]({SITE}/?d=260901-0000-12h#over-time) — **710 TiB (+5.0, 0.7%)** · [02a]({SITE}/marin-us-east-02a?d=260901-0000-12h#over-time): 78.0% of 1P (200.0 Ti free)"
+    assert fake.calls[1][1] == f":arrow_deg50: [9/1]({SITE}/?d=260901-0000-12h#over-time) — **710 TiB (+5.0, 0.7%)** · [main]({SITE}/main-data?d=260901-0000-12h#over-time): 78.0% of 1P (200.0 Ti free)"
 
     # 9/1 12:00 lands: the OP AND the day's reply are edited to the latest scan (now a 24 h Δ)
     _publish(root, SEPT[1:2])
     fake.calls.clear()
     state = post_digest(str(root), SEP, "xoxb", "C1", "body", client=fake)
     assert fake.calls[0][:2] == ("edit", "m1")
-    assert fake.calls[1] == ("edit", "m2", f":arrow_deg50: [9/1]({SITE}/?d=260901-1200-1d#over-time) — **713 TiB (+8.0, 1.1%)** · [02a]({SITE}/marin-us-east-02a?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)")
+    assert fake.calls[1] == ("edit", "m2", f":arrow_deg50: [9/1]({SITE}/?d=260901-1200-1d#over-time) — **713 TiB (+8.0, 1.1%)** · [main]({SITE}/main-data?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)")
     assert state["posted"] == {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T1200"}}
 
     # same scans again: nothing but the OP refresh (the reply already reflects the latest scan)
@@ -608,11 +610,11 @@ def test_render_smoke(tmp_path: Path):
 
     rows = [{"ts": E.scan_ts(s), "tb": D.rows_from_meta([(s, m)], P)[0].tb} for s, m in SEPT]
     out = tmp_path / "p.png"
-    render_quota(rows, out, "t", "cw-s3.oa.dev", 910.0, "1 PB", diff=DP.diff_tree(BASE_TREE, LATEST_TREE), diff_label="8/31 → 9/2")
+    render_quota(rows, out, "t", "cw.example.org", 910.0, "1 PB", diff=DP.diff_tree(BASE_TREE, LATEST_TREE), diff_label="8/31 → 9/2")
     assert out.stat().st_size > 10_000
-    render_quota(rows, tmp_path / "s.png", "t", "cw-s3.oa.dev", 910.0, "1 PB")  # sparkline only
+    render_quota(rows, tmp_path / "s.png", "t", "cw.example.org", 910.0, "1 PB")  # sparkline only
     assert (tmp_path / "s.png").stat().st_size > 5_000
-    render_quota(rows, tmp_path / "n.png", "t", "cw-s3.oa.dev")  # no quota: y fit to the data, no headroom band
+    render_quota(rows, tmp_path / "n.png", "t", "cw.example.org")  # no quota: y fit to the data, no headroom band
     assert (tmp_path / "n.png").stat().st_size > 5_000
 
 
@@ -681,7 +683,7 @@ def test_redo_replies_delete_failure_continues(tmp_path: Path):
 
 
 def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
-    """The `cw-digest` CLI must converge with the `cw` template + preset (the
+    """The `cw-digest` CLI must converge with the `cw` template + its config (the
     variant, the morning reply hour, cw's icons dir). A wrong binding once
     raised `TypeError: post_digest() got multiple values for argument
     'site_url'` and silently killed the in-job digest (a best-effort step, so
@@ -697,7 +699,7 @@ def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
     icons = tmp_path / "icons"
     res = CliRunner().invoke(
         cli.main,
-        ["cw-digest", "-c", "C1", "-t", "xoxb", "-r", str(root), "-m", "2026-09", "-i", str(icons), "-V", "sender"],
+        ["cw-digest", "-C", str(config_file(CFG, tmp_path / "digest.yml")), "-c", "C1", "-t", "xoxb", "-r", str(root), "-m", "2026-09", "-i", str(icons), "-V", "sender"],
     )
     assert res.exit_code == 0, (res.output, res.exception)
     assert len(calls) == 1

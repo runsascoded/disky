@@ -31,6 +31,8 @@ export interface SweepBatchJob {
 }
 
 export const isSweepJob = (j: { name: string }): boolean => /\/jobs\/gcs-sweep-(dry|real)-/.test(j.name)
+/** An undo of a run (`api/sweep/undo`; `TARGET_RUN` in its env). */
+export const isUndoJob = (j: { name: string }): boolean => /\/jobs\/gcs-undo-/.test(j.name)
 export const jobIdOf = (j: { name: string }): string => j.name.slice(j.name.lastIndexOf('/') + 1)
 
 /** Every Batch job in each region a sweep can be dispatched to, newest first.
