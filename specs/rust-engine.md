@@ -78,8 +78,15 @@ Each phase lands with a parity test against the Python implementation (`tests/te
      - **vs prod** (disk.rbw.sh `2026-10-02` → `2026-10-03`, both captures reduced locally; `2026-10-03` = `10-15-03Z`, 8,533,237 rows on both sides): the root, `Users/ryan` and `Users/ryan/c` diffs are identical to prod row for row, in order (293 / 391 / 130 rows; same totals, threshold, tier, expansions, lookups). Local takes 0.09–0.25 s; prod takes 3.9–5.3 s.
      - **Filtered** (local only; prod's filter is approximate there): 1–3.6 s at the root. Totals equal each side's filtered `/api/subtree` root, and the `added` rows are real (that day's wrangler / workerd installs).
      - Test: `view.rs` `diff_view` (changed / removed / added / unchanged rows and their order, totals, `summary`, a filtered diff's rows and `matched` union). CIC: the bundled SPA's Diff section on two local scans (`10/2 → 10/3`, +3.3 GiB; with `?f=node_modules+-.pnpm`, +11 MiB), no console errors.
+   - **4f ✅ the bundled SPA is anyone's.**
+     - **`~` and the title at runtime:** `dt_index::http` injects `window.__DISKY__ = {home, title, staging: false}` into `index.html`, and `stores.ts` `withPageConfig` applies it to the primary store. The app passes `$HOME` and "disky — <ComputerName>". `build-web` no longer bakes `VITE_HOME`.
+     - **No dead write controls:** the filter's bulk-assign bar needs an owners store and an admin; `staging: false` hides "Staged" (the local server is read-only).
+   - **4g ✅ other volumes.** A whole-machine local scan (root `/`) adds one row per boot-container volume the walk stays off, `(other volumes)/<name>`, sized by `diskutil apfs list`'s `CapacityInUse` (`src-tauri/src/volumes.rs`, after `apfs.py`): every volume but the System and Data roles. On m3 (2026-10-03) that's VM 29.0, Preboot 20.2, Recovery 2.9 and Update 1.2 GiB, 53 GiB in all.
+     - Snapshots aren't rows (no size short of a diff).
+     - The local index only; R2 captures are unchanged.
+     - This doesn't make the total match `df`: the walk charges APFS clones to every path, so it already over-counts the Data volume.
+     - The first diff against a scan from before this shows `(other volumes)` as added.
    - Open:
-     - `~` is baked in at build time (fine for one user, wrong for anyone else's build).
      - Reduce memory (~1.9 GB for the whole disk) is transient, in the scan job's process.
 5. **Hosted mode for other people:** per-user storage + auth on a shared deployment (the path store is already multi-store; `@open-athena/auth` handles sign-in). Upload = phase 2 against a per-user prefix with a scoped credential minted by the site (no AWS keys on the laptop). Shape TBD with Ryan.
 

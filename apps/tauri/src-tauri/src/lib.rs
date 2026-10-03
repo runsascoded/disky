@@ -14,6 +14,7 @@ mod jobs;
 mod services;
 mod settings;
 mod status;
+mod volumes;
 
 use std::path::PathBuf;
 use std::process::Command;

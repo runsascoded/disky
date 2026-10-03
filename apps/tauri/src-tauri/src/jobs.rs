@@ -297,7 +297,16 @@ fn capture(job: &Job, root: &str, mut out: std::fs::File, mut err: std::fs::File
             }
         }
     };
-    if let Some(r) = index {
+    if let Some(mut r) = index {
+        // A whole-machine scan also files the volumes its walk stays off
+        // (Preboot, VM, Recovery, …) under `(other volumes)`: local index only.
+        if one_fs {
+            let vols = crate::volumes::boot_others();
+            for (name, used) in &vols {
+                r.push(root, &format!("{}/{name}", crate::volumes::DIR), *used as i64, since * 1000);
+            }
+            let _ = writeln!(out, "{}", stamped(&format!("other volumes: {}", vols.iter().map(|(n, b)| format!("{n} {:.1} GiB", *b as f64 / (1u64 << 30) as f64)).collect::<Vec<_>>().join(", "))));
+        }
         let dir = local_scans_dir();
         save_progress(&Progress { phase: "index".into(), files: 0, bytes: 0, since });
         match write_local(r, &dir, &id, &asof, job.keep.unwrap_or(KEEP)) {
