@@ -4,7 +4,7 @@
 //!
 //! - `/data/<store>/scans.json`: scan ids, newest first.
 //! - `/data/<store>/<scan>/{meta,age}.json`: the snapshot files.
-//! - `/api/subtree`, `/api/series`: `view.rs`; `/api/age-pyramid`: the empty
+//! - `/api/subtree`, `/api/diff`, `/api/series`: `view.rs`; `/api/age-pyramid`: the empty
 //!   plan (no pyramid locally; the age lens reads the tree's `ag`).
 //! - Any other path: a file of the SPA's build, else its `index.html` (client
 //!   routes); other `/api/*`, `/auth/*`: 404.
@@ -151,7 +151,7 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
                 Ok(s) => s,
                 Err(_) => return text(404, "no such scan"),
             };
-            let o = ViewOpts { path: &p, w, h, min_area, atten, max_depth, root_label: &cfg.root_label, query: query.as_ref() };
+            let o = ViewOpts { path: &p, w, h, min_area, atten, max_depth, root_label: &cfg.root_label, query: query.as_ref(), threshold: None };
             match view::subtree(&scan, &o) {
                 Ok(Some(v)) => {
                     let mut out = serde_json::Map::new();
@@ -166,6 +166,47 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
                 }
                 Ok(None) => text(404, "path not found"),
                 Err(e) => text(500, &format!("subtree failed: {e}")),
+            }
+        }
+        "/api/diff" => {
+            let (from, to) = (get("from").unwrap_or(""), get("to").unwrap_or(""));
+            let p = get("path").unwrap_or("").trim_end_matches('/').to_string();
+            if !view::is_scan_id(from) || !view::is_scan_id(to) {
+                return text(400, "bad from/to");
+            }
+            if from >= to {
+                return text(400, "from must precede to");
+            }
+            if p.contains("..") || p.starts_with('/') {
+                return text(400, "bad path");
+            }
+            const QUANT: f64 = 128.0;
+            let (w, h) = ((num("w", 1280.0) / QUANT).ceil() * QUANT, (num("h", 800.0) / QUANT).ceil() * QUANT);
+            let (min_area, atten) = (num("minArea", 12.0), num("atten", 2.0));
+            let top = num("top", 500.0).min(5000.0) as usize;
+            let depth = get("depth").and_then(|v| v.parse().ok()).filter(|d| *d != 0);
+            let q_raw = get("q").unwrap_or("");
+            let query = match crate::query::parse(q_raw, get("qs")) {
+                Ok(q) => q,
+                Err(e) => return text(400, &format!("bad query: {e}")),
+            };
+            let (sa, sb) = match (scans.get(from), scans.get(to)) {
+                (Ok(a), Ok(b)) => (a, b),
+                _ => return text(404, "no such scan"),
+            };
+            let o = ViewOpts { path: &p, w, h, min_area, atten, max_depth: depth, root_label: &cfg.root_label, query: query.as_ref(), threshold: None };
+            match view::diff(&sa, &sb, &o, top, get("summary") == Some("1")) {
+                Ok(Some(d)) => {
+                    let mut out = serde_json::Map::new();
+                    out.extend([("prev".into(), from.into()), ("curr".into(), to.into()), ("path".into(), p.clone().into())]);
+                    if query.is_some() {
+                        out.insert("q".into(), q_raw.into());
+                    }
+                    out.extend(d);
+                    json_resp(200, &out.into())
+                }
+                Ok(None) => text(404, "path not found in either scan"),
+                Err(e) => text(500, &format!("diff failed: {e}")),
             }
         }
         "/api/series" => {

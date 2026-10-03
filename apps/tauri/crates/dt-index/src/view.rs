@@ -411,6 +411,7 @@ fn under(path: &str) -> (String, Option<String>) {
     if path.is_empty() { (String::new(), None) } else { (format!("{path}/"), Some(format!("{path}0"))) }
 }
 
+#[derive(Clone, Copy)]
 pub struct ViewOpts<'a> {
     pub path: &'a str,
     pub w: f64,
@@ -422,87 +423,206 @@ pub struct ViewOpts<'a> {
     pub root_label: &'a str,
     /// `q=`: the name filter.
     pub query: Option<&'a Query>,
+    /// A byte floor to read at instead of the canvas's (the diff's shared one).
+    pub threshold: Option<f64>,
+}
+
+/// One view read: the kept paths and what renders them (`view.ts` `Read`).
+struct Read {
+    /// P's aggregate (a filter view: the matched total).
+    root: Agg,
+    root_name: String,
+    /// Kept paths under P: `(depth, aggregate)`.
+    aggs: HashMap<String, (i32, Agg)>,
+    threshold: f64,
+    /// `(other)`'s threshold: `thr · atten^(d − depth − 1)` for `(thr, depth)`.
+    other: (f64, i32),
+    tier: &'static str,
+    truncated: bool,
+    /// Sub-threshold children counted per kept parent (a filter view's `f`).
+    folded: HashMap<String, i64>,
+    marked: HashSet<String>,
+    filter: Option<Filter>,
+}
+
+/// A filter view's matches, exactly.
+struct Filter {
+    matches: Vec<String>,
+    /// `(path, b, o)`, bytes descending (capped at `HARD_CAP`).
+    matched: Vec<(String, i64, i64)>,
+    roots: PathSet,
+    excl: PathSet,
+    /// Each exclusion's own aggregate.
+    excl_aggs: HashMap<String, Agg>,
+    /// Every match root's net aggregate, by path.
+    nets: Vec<(String, Agg)>,
+}
+
+impl Filter {
+    /// Whether `p` is in a match root and not excluded.
+    fn holds(&self, p: &str) -> bool {
+        let d = depth_of(p);
+        (self.roots.contains(p) || self.roots.above(p, d).is_some()) && !self.excl.contains(p) && self.excl.above(p, d).is_none()
+    }
+
+    /// Σ the excluded aggregates strictly under `p`.
+    fn cut_under(&self, p: &str) -> Option<Agg> {
+        let mut cut: Option<Agg> = None;
+        for (e, a) in &self.excl_aggs {
+            if p.is_empty() || e.strip_prefix(p).is_some_and(|r| r.starts_with('/')) {
+                cut.get_or_insert_with(Agg::default).add(a);
+            }
+        }
+        cut
+    }
+
+    /// Σ the net aggregates of the match roots strictly under `p` (what a
+    /// root's ancestor holds in a filter view).
+    fn roots_under(&self, p: &str) -> Option<Agg> {
+        let (lo, hi) = under(p);
+        let i = self.nets.partition_point(|x| x.0 < lo);
+        let mut out: Option<Agg> = None;
+        for (r, a) in &self.nets[i..] {
+            if hi.as_ref().is_some_and(|h| r >= h) {
+                break;
+            }
+            out.get_or_insert_with(|| Agg { dir: Some(true), ..Default::default() }).add(a);
+        }
+        out
+    }
+}
+
+/// P's own aggregate in `scan` (the store root: its depth-1 rows summed).
+fn root_agg(scan: &Scan, path: &str) -> io::Result<Option<Agg>> {
+    let rows = scan.rect(&Rect::at(path))?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut root = Agg::default();
+    for r in &rows {
+        root.merge(r);
+    }
+    if path.is_empty() {
+        root.nc = Some(rows.len() as i64);
+        root.dir = Some(true);
+    }
+    Ok(Some(root))
 }
 
 /// `/api/subtree`'s body fields: `{tier, index, threshold, nodes, truncated, tree}`.
 pub fn subtree(scan: &Scan, o: &ViewOpts) -> io::Result<Option<Map<String, Value>>> {
+    let Some(root) = root_agg(scan, o.path)? else { return Ok(None) };
+    let name = root_name(o);
+    Ok(Some(match read(scan, o, root, &name)? {
+        Some(v) => render(&v, o),
+        None => empty_body(&name, o.query.is_some()),
+    }))
+}
+
+fn root_name(o: &ViewOpts) -> String {
+    if o.path.is_empty() { o.root_label.to_string() } else { o.path.rsplit('/').next().unwrap().to_string() }
+}
+
+/// The empty view: a zero root, or a filter with no matches.
+fn empty_body(name: &str, query: bool) -> Map<String, Value> {
+    let mut n = Map::new();
+    n.insert("n".into(), name.into());
+    n.insert("k".into(), "dir".into());
+    n.insert("b".into(), 0.into());
+    n.insert("o".into(), 0.into());
+    let mut body = Map::new();
+    body.extend([("tier".into(), "none".into()), ("index".into(), "none".into()), ("threshold".into(), 0.into()), ("nodes".into(), 0.into()), ("truncated".into(), false.into())]);
+    if query {
+        body.extend([("matches".into(), json!([])), ("matched".into(), json!([]))]);
+    }
+    body.insert("tree".into(), n.into());
+    body
+}
+
+/// A view of P whose own aggregate is `root`; `None`: a zero root, or a
+/// filter with no matches.
+fn read(scan: &Scan, o: &ViewOpts, root: Agg, root_name: &str) -> io::Result<Option<Read>> {
     let path = o.path;
     let dp = depth_of(path);
-    let root_rows = scan.rect(&Rect::at(path))?;
-    if root_rows.is_empty() {
-        return Ok(None);
-    }
-    let mut root = Agg::default();
-    for r in &root_rows {
-        root.merge(r);
-    }
-    if path.is_empty() {
-        root.nc = Some(root_rows.len() as i64);
-        root.dir = Some(true);
-    }
-    let root_name = if path.is_empty() { o.root_label.to_string() } else { path.rsplit('/').next().unwrap().to_string() };
-    let mut body = Map::new();
     if root.b <= 0.0 {
-        let mut n = Map::new();
-        n.insert("n".into(), root_name.into());
-        n.insert("k".into(), "dir".into());
-        n.insert("b".into(), 0.into());
-        n.insert("o".into(), 0.into());
-        body.extend([("tier".into(), "none".into()), ("index".into(), "none".into()), ("threshold".into(), 0.into()), ("nodes".into(), 0.into()), ("truncated".into(), false.into())]);
-        if o.query.is_some() {
-            body.extend([("matches".into(), json!([])), ("matched".into(), json!([]))]);
-        }
-        body.insert("tree".into(), n.into());
-        return Ok(Some(body));
+        return Ok(None);
     }
     // A filter view, unless the root itself matches with nothing to exclude
     // (then the plain view is the answer, the root its one match).
     let root_hit = o.query.is_some_and(|q| q.matches(path));
     if let Some(q) = o.query.filter(|q| !root_hit || q.has_neg()) {
-        return filtered(scan, o, q, &root, &root_name).map(Some);
+        return filtered(scan, o, q, &root, root_name);
     }
-    let threshold = root.b * o.min_area / (o.w * o.h);
+    let threshold = o.threshold.unwrap_or(root.b * o.min_area / (o.w * o.h));
     let thr_at = |d: i32| threshold * o.atten.powi((d - dp - 1).max(0));
     let (lo, hi) = under(path);
     let d_hi = o.max_depth.map_or(i32::MAX, |m| dp + m);
     let (rows, tier) = scan.subtree(&Rect { d: (dp + 1, d_hi), lo, hi }, threshold)?;
     let mut aggs: HashMap<String, (i32, Agg)> = HashMap::new();
-    let mut order: Vec<String> = vec![];
     for r in rows {
         if (r.size as f64) < thr_at(r.depth) {
             continue;
         }
-        let e = aggs.entry(r.path.clone()).or_insert_with(|| {
-            order.push(r.path.clone());
-            (r.depth, Agg::default())
-        });
-        e.1.merge(&r);
+        aggs.entry(r.path.clone()).or_insert_with(|| (r.depth, Agg::default())).1.merge(&r);
     }
-    order.retain(|p| aggs[p].1.b > 0.0);
-    let truncated = order.len() > HARD_CAP;
+    aggs.retain(|_, (_, a)| a.b > 0.0);
+    let truncated = aggs.len() > HARD_CAP;
     if truncated {
-        order.sort_by(|a, b| aggs[b].1.b.total_cmp(&aggs[a].1.b));
-        order.truncate(HARD_CAP);
+        let mut by_b: Vec<(String, f64)> = aggs.iter().map(|(p, (_, a))| (p.clone(), a.b)).collect();
+        by_b.sort_by(|a, b| b.1.total_cmp(&a.1));
+        for (p, _) in &by_b[HARD_CAP..] {
+            aggs.remove(p);
+        }
     }
-    // Rows arrive in the sort's order; nest them in `(depth, path)` order so
-    // equal-byte siblings keep it (the site's stable sort over its read order).
-    order.sort_by(|a, b| aggs[a].0.cmp(&aggs[b].0).then_with(|| a.cmp(b)));
+    let filter = root_hit.then(|| {
+        let mut roots = PathSet::default();
+        roots.insert(path.into());
+        Filter { matches: vec![path.into()], matched: vec![], roots, excl: PathSet::default(), excl_aggs: HashMap::new(), nets: vec![(path.into(), root.clone())] }
+    });
+    Ok(Some(Read {
+        root,
+        root_name: root_name.into(),
+        aggs,
+        threshold,
+        other: (threshold, dp),
+        tier,
+        truncated,
+        folded: HashMap::new(),
+        marked: if root_hit { [path.to_string()].into() } else { HashSet::new() },
+        filter,
+    }))
+}
+
+/// A read's `/api/subtree` body.
+fn render(v: &Read, o: &ViewOpts) -> Map<String, Value> {
+    let path = o.path;
+    // Nest in `(depth, path)` order so equal-byte siblings keep it (the
+    // site's stable sort over its read order).
+    let mut order: Vec<String> = v.aggs.keys().cloned().collect();
+    order.sort_by(|a, b| v.aggs[a].0.cmp(&v.aggs[b].0).then_with(|| a.cmp(b)));
     let kept: HashSet<&str> = order.iter().map(String::as_str).collect();
     let kids = kids_index(&order, &kept, path);
-    let marked: HashSet<String> = if root_hit { [path.to_string()].into() } else { HashSet::new() };
-    let tree = build(path, &root, &root_name, &aggs, &kids, &thr_at, &HashMap::new(), &marked);
+    let thr_at = |d: i32| v.other.0 * o.atten.powi((d - v.other.1 - 1).max(0));
+    let tree = build(path, &v.root, &v.root_name, &v.aggs, &kids, &thr_at, &v.folded, &v.marked);
+    let mut body = Map::new();
     body.extend([
-        ("tier".into(), tier.into()),
+        ("tier".into(), v.tier.into()),
         ("index".into(), "footer".into()),
-        ("threshold".into(), js_round(threshold).into()),
+        ("threshold".into(), js_round(v.threshold).into()),
         ("nodes".into(), order.len().into()),
-        ("truncated".into(), truncated.into()),
+        ("truncated".into(), v.truncated.into()),
     ]);
-    if root_hit {
-        body.extend([("matches".into(), json!([path])), ("matched".into(), json!([]))]);
+    if let Some(f) = &v.filter {
+        body.insert("matches".into(), json!(f.matches));
+        body.insert("matched".into(), f.matched.iter().map(|(p, b, o)| json!({"path": p, "b": b, "o": o})).collect::<Vec<_>>().into());
+        if !f.excl.set.is_empty() {
+            let mut e: Vec<&String> = f.excl.set.iter().collect();
+            e.sort();
+            body.insert("excluded".into(), json!(e));
+        }
     }
     body.insert("tree".into(), tree);
-    Ok(Some(body))
+    body
 }
 
 /// The view tree under `p` (`buildView`'s `build`): children by bytes, then
@@ -596,7 +716,7 @@ impl PathSet {
 /// root the negative part holds, its bytes subtracted up to the root. The
 /// forest keeps each root's descendants that clear one threshold — the
 /// matched total's pixel threshold, attenuated from the root's own depth.
-fn filtered(scan: &Scan, o: &ViewOpts, q: &Query, root_all: &Agg, root_name: &str) -> io::Result<Map<String, Value>> {
+fn filtered(scan: &Scan, o: &ViewOpts, q: &Query, root_all: &Agg, root_name: &str) -> io::Result<Option<Read>> {
     let path = o.path;
     let dp = depth_of(path);
     let (lo, hi) = under(path);
@@ -659,21 +779,11 @@ fn filtered(scan: &Scan, o: &ViewOpts, q: &Query, root_all: &Agg, root_name: &st
             roots.insert(h.path);
         }
     }
-    let mut body = Map::new();
-    let empty = |body: &mut Map<String, Value>| {
-        let mut n = Map::new();
-        n.insert("n".into(), root_name.into());
-        n.insert("k".into(), "dir".into());
-        n.insert("b".into(), 0.into());
-        n.insert("o".into(), 0.into());
-        body.extend([("tier".into(), "none".into()), ("index".into(), "none".into()), ("threshold".into(), 0.into()), ("nodes".into(), 0.into()), ("truncated".into(), false.into()), ("matches".into(), json!([])), ("matched".into(), json!([])), ("tree".into(), n.into())]);
-    };
     let matched_b = roots.set.iter().map(|r| if r == path { root_all.b } else { bytes[r] as f64 }).sum::<f64>() - excl.set.iter().map(|e| bytes[e] as f64).sum::<f64>();
     if roots.set.is_empty() || matched_b <= 0.0 {
-        empty(&mut body);
-        return Ok(body);
+        return Ok(None);
     }
-    let thr = matched_b * o.min_area / (o.w * o.h);
+    let thr = o.threshold.unwrap_or(matched_b * o.min_area / (o.w * o.h));
     let rebased = |root_depth: i32, d: i32| thr * o.atten.powi((d - root_depth - 1).max(0));
     // A root is a tile when its net bytes clear the view's threshold at its
     // depth (attenuated from P, like the plain view); the rest fold into
@@ -797,12 +907,14 @@ fn filtered(scan: &Scan, o: &ViewOpts, q: &Query, root_all: &Agg, root_name: &st
     let mut aggs: HashMap<String, (i32, Agg)> = HashMap::new();
     let mut matched = Agg::default();
     let mut matched_list = vec![];
+    let mut nets = vec![];
     let mut below: Vec<String> = vec![];
     for r in &roots.set {
         let (d, a) = &aggs1[r];
         let a = net(r, a);
         matched.add(&a);
         matched_list.push((r.clone(), js_round(a.b), js_round(a.o)));
+        nets.push((r.clone(), a.clone()));
         if r == path {
             continue;
         }
@@ -845,33 +957,290 @@ fn filtered(scan: &Scan, o: &ViewOpts, q: &Query, root_all: &Agg, root_name: &st
             *folded.entry(par.into()).or_default() += 1;
         }
     }
-    let mut order: Vec<String> = aggs.keys().cloned().collect();
-    order.sort_by(|a, b| aggs[a].0.cmp(&aggs[b].0).then_with(|| a.cmp(b)));
-    let kept: HashSet<&str> = order.iter().map(String::as_str).collect();
-    let kids = kids_index(&order, &kept, path);
     let mut root_agg = matched;
     root_agg.dir = Some(true);
-    let tree = build(path, &root_agg, root_name, &aggs, &kids, &loose, &folded, &roots.set);
     matched_list.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
     matched_list.truncate(HARD_CAP);
-    let mut matches: Vec<&String> = matched_list.iter().map(|x| &x.0).collect();
+    let mut matches: Vec<String> = matched_list.iter().map(|x| x.0.clone()).collect();
     matches.sort();
-    body.extend([
-        ("tier".into(), "scan+path".into()),
-        ("index".into(), "footer".into()),
-        ("threshold".into(), js_round(thr).into()),
-        ("nodes".into(), order.len().into()),
-        ("truncated".into(), (roots.set.len() > HARD_CAP).into()),
-        ("matches".into(), json!(matches)),
-        ("matched".into(), matched_list.iter().map(|(p, b, o)| json!({"path": p, "b": b, "o": o})).collect::<Vec<_>>().into()),
-    ]);
-    if !excl.set.is_empty() {
-        let mut e: Vec<&String> = excl.set.iter().collect();
-        e.sort();
-        body.insert("excluded".into(), json!(e));
+    nets.sort_by(|x, y| x.0.cmp(&y.0));
+    let excl_aggs = excl.set.iter().map(|e| (e.clone(), aggs1[e].1.clone())).collect();
+    Ok(Some(Read {
+        root: root_agg,
+        root_name: root_name.into(),
+        aggs,
+        threshold: thr,
+        other: (thr, deepest),
+        tier: "scan+path",
+        truncated: roots.set.len() > HARD_CAP,
+        folded,
+        marked: roots.set.clone(),
+        filter: Some(Filter { matches, matched: matched_list, roots, excl, excl_aggs, nets }),
+    }))
+}
+
+/// `/api/diff`'s body fields (`view.ts` `buildDiff`): what changed under P
+/// between scans `a` and `b`, both read at ONE byte floor (the larger side's
+/// pixel threshold), so a path is named on both sides or folded on both. A
+/// name one side kept and the other didn't is read on that other side by an
+/// exact point lookup (it existed below the floor, or it was added /
+/// removed); `(other)` is the parent less its named children on each side.
+/// Read exactly, so there's no lookup budget (`lookups_capped` is false).
+/// With `q=`, each side is its filter view (planned by its own matched
+/// bytes, then re-read at the larger threshold); lookups see only matched,
+/// un-excluded bytes.
+pub fn diff(sa: &Scan, sb: &Scan, o: &ViewOpts, top: usize, summary: bool) -> io::Result<Option<Map<String, Value>>> {
+    let path = o.path;
+    let dp = depth_of(path);
+    let (ra, rb) = (root_agg(sa, path)?, root_agg(sb, path)?);
+    if ra.is_none() && rb.is_none() {
+        return Ok(None);
     }
-    body.insert("tree".into(), tree);
-    Ok(body)
+    let threshold = ra.iter().chain(&rb).map(|a| a.b).fold(0.0, f64::max) * o.min_area / (o.w * o.h);
+    let name = root_name(o);
+    let side = |s: &Scan, r: &Option<Agg>, thr: Option<f64>| -> io::Result<Option<Read>> {
+        match r {
+            Some(root) => read(s, &ViewOpts { threshold: thr, ..*o }, root.clone(), &name),
+            None => Ok(None),
+        }
+    };
+    let floor = o.query.is_none().then_some(threshold);
+    let (mut va, mut vb) = std::thread::scope(|s| {
+        let h = s.spawn(|| side(sb, &rb, floor));
+        let a = side(sa, &ra, floor);
+        (a, h.join().unwrap())
+    });
+    let (va0, vb0) = (va.as_ref().map_err(err)?, vb.as_ref().map_err(err)?);
+    // A filtered diff plans each side by its own matched bytes; the shared
+    // floor is the larger, and the other side is re-read at it.
+    if let (Some(x), Some(y)) = (va0, vb0) {
+        if o.query.is_some() && x.threshold != y.threshold {
+            let shared = x.threshold.max(y.threshold);
+            if x.threshold < shared {
+                va = side(sa, &ra, Some(shared));
+            } else {
+                vb = side(sb, &rb, Some(shared));
+            }
+        }
+    }
+    let (va, vb) = (va?, vb?);
+    let mut body = Map::new();
+    let Some(head) = vb.as_ref().or(va.as_ref()) else {
+        body.extend([("rows".into(), json!([])), ("total_a".into(), 0.into()), ("total_b".into(), 0.into()), ("objects_a".into(), 0.into()), ("objects_b".into(), 0.into()), ("threshold".into(), 0.into()), ("tier".into(), "none".into())]);
+        if o.query.is_some() {
+            body.insert("matched".into(), json!([]));
+        }
+        body.extend([("expansions".into(), 0.into()), ("truncated".into(), false.into()), ("lookups".into(), 0.into()), ("lookups_capped".into(), false.into())]);
+        return Ok(Some(body));
+    };
+    let tot = |v: &Option<Read>, f: fn(&Agg) -> f64| v.as_ref().map_or(0, |v| js_round(f(&v.root)));
+    let mut totals = Map::new();
+    totals.extend([
+        ("total_a".into(), tot(&va, |a| a.b).into()),
+        ("total_b".into(), tot(&vb, |a| a.b).into()),
+        ("objects_a".into(), tot(&va, |a| a.o).into()),
+        ("objects_b".into(), tot(&vb, |a| a.o).into()),
+        ("threshold".into(), js_round(if o.query.is_some() { head.threshold } else { threshold }).into()),
+        ("tier".into(), head.tier.into()),
+    ]);
+    if o.query.is_some() {
+        // The union of both sides' match roots, by path.
+        let mut m: Vec<(String, i64, i64)> = vec![];
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for v in [&va, &vb].into_iter().flatten() {
+            for x in v.filter.iter().flat_map(|f| &f.matched) {
+                match seen.get(&x.0) {
+                    Some(&i) => m[i] = x.clone(),
+                    None => {
+                        seen.insert(x.0.clone(), m.len());
+                        m.push(x.clone());
+                    }
+                }
+            }
+        }
+        m.sort_by(|x, y| x.0.cmp(&y.0));
+        totals.insert("matched".into(), m.iter().map(|(p, b, o)| json!({"path": p, "b": b, "o": o})).collect::<Vec<_>>().into());
+    }
+    if summary {
+        body.insert("rows".into(), json!([]));
+        body.extend(totals);
+        body.extend([("expansions".into(), 0.into()), ("truncated".into(), false.into()), ("lookups".into(), 0.into()), ("lookups_capped".into(), false.into())]);
+        return Ok(Some(body));
+    }
+    let kids_of = |v: &Option<Read>| -> HashMap<String, Vec<String>> {
+        let Some(v) = v else { return HashMap::new() };
+        let mut order: Vec<&String> = v.aggs.keys().collect();
+        order.sort();
+        let mut kids: HashMap<String, Vec<String>> = HashMap::new();
+        for p in order {
+            let par = parent_of(p);
+            let key = if v.aggs.contains_key(par) { par } else { path };
+            kids.entry(key.into()).or_default().push(p.clone());
+        }
+        kids
+    };
+    let (kids_a, kids_b) = (kids_of(&va), kids_of(&vb));
+    let rel = |p: &str| if path.is_empty() { p.to_string() } else { p[path.len() + 1..].to_string() };
+    let rnd = |a: &Option<Agg>| a.as_ref().map_or((0, 0), |a| (js_round(a.b), js_round(a.o)));
+    let status = |a: &Option<Agg>, b: &Option<Agg>| match (a, b) {
+        (None, _) => "added",
+        (_, None) => "removed",
+        _ if rnd(a) != rnd(b) => "changed",
+        _ => "unchanged",
+    };
+    struct Row {
+        v: Value,
+        x: bool,
+        changed: bool,
+        delta: i64,
+    }
+    let mut rows: Vec<Row> = vec![];
+    let mut emit = |p: String, d: i32, a: &Option<Agg>, b: &Option<Agg>, x: bool, l: Option<u8>| {
+        let k = match a.as_ref().or(b.as_ref()).and_then(|a| a.dir) {
+            Some(false) => "file",
+            _ => "dir",
+        };
+        let s = status(a, b);
+        let ((ab, oa), (bb, ob)) = (rnd(a), rnd(b));
+        let mut v = json!({"p": p, "d": d, "k": k, "s": s, "a": ab, "b": bb, "oa": oa, "ob": ob});
+        if x {
+            v["x"] = true.into();
+        }
+        if let Some(l) = l {
+            v["l"] = l.into();
+        }
+        rows.push(Row { v, x, changed: s != "unchanged", delta: (bb - ab).abs() });
+    };
+    struct Item {
+        p: String,
+        d: i32,
+        a: Option<Agg>,
+        b: Option<Agg>,
+        l: Option<u8>,
+    }
+    let mut level = vec![Item { p: path.into(), d: dp, a: va.as_ref().map(|v| v.root.clone()), b: vb.as_ref().map(|v| v.root.clone()), l: None }];
+    let (mut expansions, mut lookups) = (0, 0);
+    while !level.is_empty() {
+        let plans: Vec<(bool, Vec<String>)> = level
+            .iter()
+            .map(|it| {
+                let none = vec![];
+                let ka = kids_a.get(&it.p).unwrap_or(&none);
+                let kb = kids_b.get(&it.p).unwrap_or(&none);
+                let same = it.a.is_some() && it.b.is_some() && rnd(&it.a) == rnd(&it.b);
+                let expand = (it.a.is_some() || it.b.is_some()) && !same && (!ka.is_empty() || !kb.is_empty()) && o.max_depth.is_none_or(|m| it.d - dp < m);
+                let mut names: Vec<String> = if expand { ka.iter().chain(kb).cloned().collect() } else { vec![] };
+                names.sort();
+                names.dedup();
+                (expand, names)
+            })
+            .collect();
+        // The names a side lacks, read on that side.
+        let asks = |v: &Option<Read>| -> Vec<String> {
+            let Some(v) = v else { return vec![] };
+            plans.iter().flat_map(|(_, ns)| ns).filter(|n| !v.aggs.contains_key(*n)).cloned().collect()
+        };
+        let (asks_a, asks_b) = (asks(&va), asks(&vb));
+        lookups += asks_a.len() + asks_b.len();
+        let (got_a, got_b) = std::thread::scope(|s| {
+            let h = s.spawn(|| lookup(sb, vb.as_ref(), &asks_b));
+            let a = lookup(sa, va.as_ref(), &asks_a);
+            (a, h.join().unwrap())
+        });
+        let (got_a, got_b) = (got_a?, got_b?);
+        let mut next = vec![];
+        for (it, (expand, names)) in level.iter().zip(plans) {
+            if it.p != path {
+                emit(rel(&it.p), it.d - dp, &it.a, &it.b, expand, it.l);
+            }
+            if !expand {
+                continue;
+            }
+            expansions += 1;
+            let (mut sa_, mut sb_) = (Agg::default(), Agg::default());
+            for cp in names {
+                let pick = |v: &Option<Read>, got: &HashMap<String, Agg>| v.as_ref().and_then(|v| v.aggs.get(&cp).map(|x| x.1.clone())).or_else(|| got.get(&cp).cloned());
+                let (ca, cb) = (pick(&va, &got_a), pick(&vb, &got_b));
+                let l = if ca.is_some() && got_a.contains_key(&cp) {
+                    Some(1)
+                } else if cb.is_some() && got_b.contains_key(&cp) {
+                    Some(2)
+                } else {
+                    None
+                };
+                if let Some(c) = &ca {
+                    sa_.b += c.b;
+                    sa_.o += c.o;
+                }
+                if let Some(c) = &cb {
+                    sb_.b += c.b;
+                    sb_.o += c.o;
+                }
+                next.push(Item { p: cp, d: it.d + 1, a: ca, b: cb, l });
+            }
+            // A one-sided parent has no residual on its missing side.
+            let rest = |x: &Option<Agg>, s: &Agg| {
+                let a = Agg { b: (x.as_ref().map_or(0.0, |x| x.b) - s.b).max(0.0), o: (x.as_ref().map_or(0.0, |x| x.o) - s.o).max(0.0), ..Default::default() };
+                (a.b > 0.0).then_some(a)
+            };
+            let (oa, ob) = (rest(&it.a, &sa_), rest(&it.b, &sb_));
+            if oa.is_some() || ob.is_some() {
+                let key = if it.p == path { "(other)".to_string() } else { format!("{}/(other)", rel(&it.p)) };
+                emit(key, it.d - dp + 1, &oa, &ob, false, None);
+            }
+        }
+        level = next;
+    }
+    // Every expanded ancestor (the skeleton), then the changed frontier
+    // rows by |Δ|; unchanged frontier rows the renderer infers as filler.
+    let mut frontier: Vec<&Row> = rows.iter().filter(|r| !r.x && r.changed).collect();
+    frontier.sort_by(|x, y| y.delta.cmp(&x.delta));
+    let truncated = frontier.len() > top;
+    let out: Vec<Value> = rows.iter().filter(|r| r.x).chain(frontier.into_iter().take(top)).map(|r| r.v.clone()).collect();
+    body.insert("rows".into(), out.into());
+    body.extend(totals);
+    body.extend([("expansions".into(), expansions.into()), ("truncated".into(), truncated.into()), ("lookups".into(), lookups.into()), ("lookups_capped".into(), false.into())]);
+    Ok(Some(body))
+}
+
+/// Exact point reads of `asks` (paths) on one side of a diff: each path's
+/// own row(s) from the `path` sort; under a filter, only matched,
+/// un-excluded bytes (a root's ancestor: Σ its roots' net bytes).
+fn lookup(scan: &Scan, v: Option<&Read>, asks: &[String]) -> io::Result<HashMap<String, Agg>> {
+    let mut out = HashMap::new();
+    let Some(v) = v else { return Ok(out) };
+    let mut todo: Vec<&String> = vec![];
+    for p in asks {
+        match &v.filter {
+            Some(f) if !f.holds(p) => {
+                if let Some(a) = f.excl.above(p, depth_of(p)).is_none().then(|| f.roots_under(p)).flatten() {
+                    out.insert(p.clone(), a);
+                }
+            }
+            _ => todo.push(p),
+        }
+    }
+    if todo.is_empty() {
+        return Ok(out);
+    }
+    let rects: Vec<Rect> = todo.iter().map(|p| Rect::at(p)).collect();
+    let want: HashSet<&str> = todo.iter().map(|p| p.as_str()).collect();
+    let groups: Vec<usize> = (0..scan.path.groups.len()).filter(|&g| rects.iter().any(|r| scan.path.groups[g].meets(r))).collect();
+    let got = scan.path.par_groups(groups, |g| Ok(scan.path.read(vec![g])?.into_iter().filter(|r| want.contains(r.path.as_str())).collect::<Vec<_>>()))?;
+    let mut aggs: HashMap<String, Agg> = HashMap::new();
+    for r in got.into_iter().flatten() {
+        aggs.entry(r.path.clone()).or_default().merge(&r);
+    }
+    for (p, a) in aggs {
+        let a = match &v.filter {
+            Some(f) => a.minus(f.cut_under(&p).as_ref(), 0),
+            None => a,
+        };
+        if a.b > 0.0 {
+            out.insert(p, a);
+        }
+    }
+    Ok(out)
 }
 
 /// P's `{b, o}` in one scan (a `/api/series` point); `None` when P isn't in it.
@@ -1012,7 +1381,7 @@ mod tests {
         let scan = Scan::open(&dir).unwrap();
         let view = |q: &str, path: &str| {
             let q = crate::query::parse(q, None).unwrap().unwrap();
-            let o = ViewOpts { path, w: 1280.0, h: 768.0, min_area: 12.0, atten: 2.0, max_depth: None, root_label: "root", query: Some(&q) };
+            let o = ViewOpts { path, w: 1280.0, h: 768.0, min_area: 12.0, atten: 2.0, max_depth: None, root_label: "root", query: Some(&q), threshold: None };
             subtree(&scan, &o).unwrap().unwrap()
         };
         let v = view("node_modules -.pnpm", "");
@@ -1049,5 +1418,72 @@ mod tests {
         let v = view("zzzz", "");
         assert_eq!((v["matches"].clone(), v["tree"]["b"].clone(), v["tier"].clone()), (json!([]), json!(0), json!("none")));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn store(tag: &str, files: &[(&str, i64)]) -> (PathBuf, Scan) {
+        let ms = 20728 * 86_400_000;
+        let mut r = crate::Reducer::new(20728);
+        for (name, size) in files {
+            r.push("/", name, *size, ms);
+        }
+        let dir = std::env::temp_dir().join(format!("dt-index-diff-{tag}-{}", std::process::id()));
+        r.finish().write_index(&dir).unwrap();
+        let scan = Scan::open(&dir).unwrap();
+        (dir, scan)
+    }
+
+    /// `(p, s, a, b, oa, ob, x)` per row.
+    fn diff_rows(d: &Map<String, Value>) -> Vec<(String, String, i64, i64, i64, i64, bool)> {
+        d["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["p"].as_str().unwrap().into(), r["s"].as_str().unwrap().into(), r["a"].as_i64().unwrap(), r["b"].as_i64().unwrap(), r["oa"].as_i64().unwrap(), r["ob"].as_i64().unwrap(), r.get("x").is_some()))
+            .collect()
+    }
+
+    #[test]
+    fn diff_view() {
+        let (da, sa) = store("a", &[("a/x", 4096), ("a/y", 4096), ("b/z", 8192), ("c/w", 1000)]);
+        let (db, sb) = store("b", &[("a/x", 4096), ("a/y", 8192), ("c/w", 1000), ("d/n", 2048)]);
+        let run = |q: Option<&Query>, summary: bool| {
+            let o = ViewOpts { path: "", w: 1280.0, h: 768.0, min_area: 12.0, atten: 2.0, max_depth: None, root_label: "root", query: q, threshold: None };
+            diff(&sa, &sb, &o, 500, summary).unwrap().unwrap()
+        };
+        let row = |p: &str, s: &str, a, b, oa, ob, x| (p.to_string(), s.to_string(), a, b, oa, ob, x);
+        let d = run(None, false);
+        // The skeleton (expanded rows, walk order), then the changed frontier
+        // by |Δ|; `c` (unchanged) and `a/x` (unchanged) are left to the renderer.
+        assert_eq!(
+            diff_rows(&d),
+            [
+                row("a", "changed", 8192, 12288, 2, 2, true),
+                row("b", "removed", 8192, 0, 1, 0, true),
+                row("d", "added", 0, 2048, 0, 1, true),
+                row("b/z", "removed", 8192, 0, 1, 0, false),
+                row("a/y", "changed", 4096, 8192, 1, 1, false),
+                row("d/n", "added", 0, 2048, 0, 1, false),
+            ]
+        );
+        assert_eq!((d["total_a"].clone(), d["total_b"].clone(), d["objects_a"].clone(), d["objects_b"].clone(), d["expansions"].clone()), (json!(17384), json!(15336), json!(4), json!(4), json!(4)));
+        let s = run(None, true);
+        assert_eq!((s["rows"].clone(), s["total_a"].clone(), s["total_b"].clone()), (json!([]), json!(17384), json!(15336)));
+        // Filtered: each side's matched bytes only.
+        let q = crate::query::parse("a/y|d/n", None).unwrap().unwrap();
+        let d = run(Some(&q), false);
+        assert_eq!(
+            diff_rows(&d),
+            [
+                row("a", "changed", 4096, 8192, 1, 1, true),
+                row("d", "added", 0, 2048, 0, 1, true),
+                row("a/y", "changed", 4096, 8192, 1, 1, false),
+                row("d/n", "added", 0, 2048, 0, 1, false),
+            ]
+        );
+        assert_eq!(d["matched"], json!([{"path": "a/y", "b": 8192, "o": 1}, {"path": "d/n", "b": 2048, "o": 1}]));
+        assert_eq!((d["total_a"].clone(), d["total_b"].clone()), (json!(4096), json!(10240)));
+        for dir in [da, db] {
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 }

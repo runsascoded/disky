@@ -1,6 +1,6 @@
 # Rust engine: a self-contained disky
 
-**Status:** in progress (2026-10-01). Phases 1–2 done (`capture` to a local dir or `r2://` / `s3://` / `file://`); phase 3 done (disky captures in-process; m3's R2-event ingest trigger live since 2026-10-02); phase 4 (local-only mode: Rust reduce, local read API, app wiring, the filter) done; open items below. Ryan: "i like the sound of porting to Rust"; support **both** a local-only mode and the hosted mode.
+**Status:** in progress (2026-10-01). Phases 1–2 done (`capture` to a local dir or `r2://` / `s3://` / `file://`); phase 3 done (disky captures in-process; m3's R2-event ingest trigger live since 2026-10-02); phase 4 (local-only mode: Rust reduce, local read API, app wiring, the filter, diffs) done; open items below. Ryan: "i like the sound of porting to Rust"; support **both** a local-only mode and the hosted mode.
 
 ## Why
 
@@ -60,13 +60,27 @@ Each phase lands with a parity test against the Python implementation (`tests/te
      - **Perf** (whole disk, 8.5M rows; machine at load ~18): 0.2–0.8 s for typical filters at the root, 0.2–0.3 s under `~/c/oa`. `test|tests` takes 1.1 s, and `/\.py$/` (~300K roots) 5.3 s. The first version, single-threaded with every column decoded, took 4–6.5 s for typical filters and 20 s for `/\.py$/`.
      - **vs prod** (disk.rbw.sh `2026-10-02`, its capture `22-13-23Z` reduced locally, 8,477,715 rows on both sides):
        - Where prod's answer is complete, the matches agree exactly, bytes and objects. That covers the 15 largest `node_modules` under `~/c/oa`, the 1 `ckpt` above prod's floor, and all 56 of prod's root `node_modules` matches.
-       - Prod misses 61 more above its own smallest match (e.g. `~/c/hccs/ctbk/wt/deckgl/www/node_modules`, 1.0 GB). It also returns nothing for `-.git`, `*.safetensors`, `test|tests`, `marin src` and `/\.py$/`, all without `partial` / `approximate`. That's a site-side bug (the laptop store has no search sidecars, and the thresholded fallback's coverage note doesn't reach the response); flagged for the site side, not fixed here.
+       - Prod misses 61 more that are over its own per-depth threshold, at depths 6–10 (e.g. `~/c/hccs/ctbk/wt/deckgl/www/node_modules`, 1.0 GB, depth 9). It returns nothing for `*.safetensors` or `test|tests`. These responses are flagged `approximate` ("this scan has no search index; small matches may be missing"), but the misses aren't small. The laptop store has no search sidecars, so its thresholded fallback is the normal path. Handed to root as `specs/filter-no-index-misses.md` (in `~/c/disky`); not fixed here.
      - Test: `view.rs` `filter_view` (roots, an exclusion's net bytes, an only-negatives query, a matching root, no match). CIC: the bundled SPA filters (`?f=node_modules+-.pnpm`: 5.7 GiB matched, 107 prefixes) and shows the short-term error, with no console errors.
+   - **4e ✅ diffs (`/api/diff`)** in the local server (`view.rs` `diff`), `buildDiff`'s walk read exactly.
+     - **Semantics:**
+       - Both scans are read at one byte floor, the larger side's pixel threshold. Expansion runs level by level: a node expands when it's on either side, its totals differ, and something is named under it.
+       - A name one side lacks gets a point lookup on that side.
+       - `(other)` is the parent less its named children on each side.
+       - Rows are the skeleton, then the changed frontier by |Δ| (`top`, default 500).
+       - `summary=1` returns totals only; `depth=N` caps the walk.
+     - **Exact:** the lookups are point reads of the `path` sort with no budget, so `lookups_capped` is always false (the site caps at 240).
+     - **With `q=`:**
+       - Each side is its filter view, planned by its own matched bytes, then re-read at the larger threshold.
+       - Lookups count only matched, un-excluded bytes. A match root's ancestor sums its roots' net bytes, from a sorted list of every root.
+       - `matched` is the union of both sides' match roots.
+     - **Refactor:** `subtree` now reads (`read` → `Read`: kept aggregates, threshold, the `(other)` base, folds, marks, and the filter's roots / exclusions / nets), then renders. The diff walks the same `Read`s. `/api/subtree` output is byte-identical to before on 18 views (3 paths × plain + 5 filters, whole-disk scan).
+     - **vs prod** (disk.rbw.sh `2026-10-02` → `2026-10-03`, both captures reduced locally; `2026-10-03` = `10-15-03Z`, 8,533,237 rows on both sides): the root, `Users/ryan` and `Users/ryan/c` diffs are identical to prod row for row, in order (293 / 391 / 130 rows; same totals, threshold, tier, expansions, lookups). Local takes 0.09–0.25 s; prod takes 3.9–5.3 s.
+     - **Filtered** (local only; prod's filter is approximate there): 1–3.6 s at the root. Totals equal each side's filtered `/api/subtree` root, and the `added` rows are real (that day's wrangler / workerd installs).
+     - Test: `view.rs` `diff_view` (changed / removed / added / unchanged rows and their order, totals, `summary`, a filtered diff's rows and `matched` union). CIC: the bundled SPA's Diff section on two local scans (`10/2 → 10/3`, +3.3 GiB; with `?f=node_modules+-.pnpm`, +11 MiB), no console errors.
    - Open:
      - `~` is baked in at build time (fine for one user, wrong for anyone else's build).
-     - No diffs locally.
      - Reduce memory (~1.9 GB for the whole disk) is transient, in the scan job's process.
-   - Diffs between local scans: port `diff-index` later.
 5. **Hosted mode for other people:** per-user storage + auth on a shared deployment (the path store is already multi-store; `@open-athena/auth` handles sign-in). Upload = phase 2 against a per-user prefix with a scoped credential minted by the site (no AWS keys on the laptop). Shape TBD with Ryan.
 
 ## Open questions
