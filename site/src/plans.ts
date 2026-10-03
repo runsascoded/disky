@@ -51,8 +51,8 @@ export interface StagedPlan { plan: PlanSummary | null; items: StagedItem[]; bat
 /** A plan as `GET /api/plans` lists it. */
 export interface PlanListing extends PlanSummary { items: number; runs: number }
 
-/** The deployment's executor routes: cw's plan-first Batch bridge or gcs's. */
-export const EXEC_API = `/api/${DEFAULT_STORE.executor}`
+/** The deployment's executor routes: gcs's `sweep`, or the plan-first ones (cw's Batch bridge; m3's laptop drainer dispatches through them too, `planFirstKind`). */
+export const EXEC_API = `/api/${DEFAULT_STORE.executor === 'sweep' ? 'sweep' : 'plan-sweep'}`
 /** What the deployment's executor can do (stop / undo / purge / bucket cut /
  *  run files): the console keys every control on these, never on a name. */
 export const CAPS: ExecCaps = EXEC_CAPS[DEFAULT_STORE.executor]
@@ -191,10 +191,12 @@ export function useRunAction() {
 }
 
 /** The executor's recent jobs (live state from Batch); `configured` false =
- * the deployment has no dispatch credentials (recorded runs only). */
+ * the deployment has no dispatch credentials (recorded runs only). The laptop
+ * drainer has no jobs to list: its runs are the D1 rows. */
 export function useExecJobs(live = false) {
   return useQuery<{ jobs: ExecJob[]; configured: boolean }, Error>({
     queryKey: ['sweep-jobs'],
+    enabled: DEFAULT_STORE.executor !== 'laptop',
     queryFn: async () => {
       const d = await call<{ jobs: ExecJob[]; configured?: boolean }>(`${EXEC_API}/jobs`)
       return { jobs: d.jobs, configured: d.configured !== false }
