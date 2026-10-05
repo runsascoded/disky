@@ -32,7 +32,7 @@ Code lines moved, not grown: engine + templates 1217 vs the two digests' 1219; p
 
 ### Template protocol
 
-A template wraps a `DigestConfig` and supplies `load(root, month)`, `n_scans`, `op_body(data, month, plot_url)`, `units(data, variant, platform) → [Unit(key, scan, Reply)]`, `render_plot(data, month, out, root)`, plus `variants`, `edited_variants` (re-edit a unit's reply when a later scan of it lands: cw `body`) and `track_scan` (posted record `{ts, scan}` vs the bare ts — gcs's existing state format, kept so live state files keep working). The engine does the rest; a third style is a third module, not a third converge loop.
+A template wraps a `DigestConfig` and supplies `load(root, month)`, `n_scans`, `op_body(data, month, plot_url)`, `units(data, variant, platform) → [Unit(key, scan, Reply)]`, `provisional(data, variant) → Unit | None` (the open day's provisional reply; see below), `render_plot(data, month, out, root)`, plus `variants`, `edited_variants` (re-edit a unit's reply when a later scan of it lands: cw `body`) and `track_scan` (posted record `{ts, scan}` vs the bare ts — gcs's existing state format, kept so live state files keep working). The engine does the rest; a third style is a third module, not a third converge loop.
 
 The two styles are opinionated but not store-specific: `gcs` = per-scan cost/class-mix, `cw` = per-day headroom across buckets. Nothing in either reads "gcs" or "cw" except through config. (Renaming them by style, e.g. `cost` / `quota`, is a free follow-up once the job scripts pass `-T`.)
 
@@ -51,13 +51,27 @@ The two styles are opinionated but not store-specific: `gcs` = per-scan cost/cla
 | `icons_dir` | `job/icons` | `job/icons-cw` |
 | `plot_project` / `plot_branch` / `plot_base` | `gcs-usage-icons` / `main` / root alias | `gcs-usage-icons` / `cw` / `https://cw.gcs-usage-icons.pages.dev` |
 | `variant` / `reply_hour` | `sender` / — | `sender` / `12` |
+| `provisional` | — | `false` (see below) |
 | `primary` | — | `$CW_BUCKET` or `marin-us-east-02a` |
 | `buckets` | — | `marin-us-east-02a: {label: 02a, quota: {bytes: 910 TiB, name: 1 PB, short: 1P}}`, `hero-checkpoints: {label: hero, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}` |
 | `prices` | `{1: 0.02, 2: 0.01, 3: 0.004, 4: 0.0012}` | — |
 
 Quotas are optional: a bucket without one shows raw TiB in the reply tail; a primary without one drops the OP's `· NN% of …` clauses and the plot's quota line/headroom band (y fit to the data). Secrets stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL`, `DISCORD_BOT_TOKEN`, the webhook env named by config); the config names env vars, never values.
 
-`-C/--config FILE` (YAML/JSON) overlays the preset its `template:` names; unknown keys are an error; sizes accept `910 TiB` / `1 PB` / ints.
+`-C/--config FILE` (YAML/JSON) overlays the preset its `template:` names (default: `-T`'s); validated — unknown keys at any level (top, `buckets.<b>`, `buckets.<b>.quota`), a wrong-typed value, an unknown `template` or a `reply_hour` outside 0–23 raise; sizes accept `910 TiB` / `1 PB` / ints.
+
+### Provisional daily reply (`provisional: true`, cw `sender`)
+
+At a 6 h cadence (00/06/12/18Z) a `sender` day's reply waits for its reply scan (the first at/after `reply_hour`), because the headline is the sender name + arrow avatar, which `chat.update` can't change. With `provisional`, the day's earlier scans post ONE provisional reply instead, so the thread is never a day behind:
+
+- **Per UTC date of the scan.** With `reply_hour` 12: the 00Z scan posts `M/D · so far` (fixed sender, neutral `:hourglass_flowing_sand:` icon — both fixed at post time, so neither can claim a trend) with the numbers so far in the body (`:arrow_degN: **<TiB> (Δ, %)** · [as of HH:MMZ](<over-time>) · <per-bucket tail>`, Δ vs the prior day's reply scan, like the final reply); the 06Z scan edits that body; the 12Z scan posts the normal final reply, then deletes the provisional. The 18Z scan edits only the OP (the day has its final reply; editing that reply's body would contradict its fixed headline), and the next date's provisional starts with that date's 00Z scan. A finished thread reads exactly as without `provisional`.
+- **Missed scans.** A day whose first scan is already ≥ `reply_hour` never has a provisional. A day whose ≥ `reply_hour` scans all miss keeps its provisional until the next day's first scan: the existing stand-in rule then posts the day's last scan as its final reply, and the provisional goes (final first, then the delete, then the new day's provisional).
+- **Month boundaries.** A provisional belongs to its date's month. The stand-in rule now also applies when the month is `closed` (a later month's scan exists), and the scheduled run (`converge_slack_now`, the CLI without `-m`) first re-converges the previous month whenever its state still holds a provisional — so a 10/31 that never got its 12Z scan is finalised by 11/1's first run. Otherwise the previous month is never touched.
+- **State + idempotency.** The provisional's `{ts, scan}` lives under `state["provisional"][<date>]` beside `posted` (absent when none is up), saved after every post / edit / delete: a re-run with no new scan only edits the OP; a later early scan edits the provisional rather than posting another. A failed delete is logged and left in the state; the next run retries it. Turning `provisional` off deletes any that is up.
+- **`body` is unaffected**: its reply is already edited as the day's scans land, so `provisional` is a no-op there (pinned: `cw-slack-body.txt` / `cw-dry-run-body.txt` are unchanged with it on). The gcs template (a reply per scan) and the Discord twin never post one.
+- `--dry-run` lists the open day's provisional reply after the replies.
+
+Goldens: `cw-slack-sender-provisional.txt` (the 12-hourly fixture), `cw-slack-provisional-6h.txt` (6-hourly across Sep → Oct, 9/30 missing its 12Z/18Z scans, then a re-run), `cw-dry-run-sender-provisional.txt`.
 
 ### CLI
 
@@ -79,4 +93,4 @@ Other non-posted differences: the dry-run plot's temp filename (`<slug>-YYYYMM.p
 
 [`branch-layout.md`]: branch-layout.md
 [branches carry exactly their code]: branch-layout.md#2-proposed-tree
-[`comms-notify.md`]: comms-notify.md
+[`comms-notify.md`]: done/comms-notify.md

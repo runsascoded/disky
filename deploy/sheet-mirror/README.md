@@ -16,7 +16,7 @@ One `sheet-mirror.yml` per deployment (start from [`example.yml`]): the site, th
 
 ## Chain (`sync.sh`, per mirror)
 
-1. `dt-cloud export <source> -u <site>` → the source's CSV, read with the grant token (`$GCS_USAGE_TOKEN`, from Secret Manager).
+1. `dt-cloud export <source> -u <site>` → the source's CSV, read with the grant token (`$SITE_TOKEN`, from Secret Manager).
 2. `dt-cloud sheet-push -k <key> -w <tab> -D <footer>` → a cell-level diff into the one **named** tab, keyed by `key`: existing rows keep their order, a new key is one appended row, a removed key one cleared row (compacted on a later run whose data is otherwise unchanged). The footer's "last change" stamp only advances when data changes, so a no-op run writes nothing and Version History shows only real deltas. Other tabs (derived views people add) are never touched.
 
 One mirror failing doesn't stop the others; the job exits non-zero if any did. The job runs **as** the config's service account: ambient ADC covers the Sheets write (share each sheet with it as Editor), no key material.
@@ -32,7 +32,7 @@ gcloud run jobs execute <job> --project <project> --region <region> --wait   # o
 
 Both read the config through `dt-cloud sheet-mirror env` (so `dt-cloud` must be on `PATH` locally). `deploy.sh` is idempotent: it upserts the job (the config rides in as `$SHEET_MIRROR_CONFIG_B64`), creates or updates the trigger (`<job>-trigger` unless `gcp.trigger` names one), and grants the service account the two roles the wiring needs (`secretmanager.secretAccessor` on the token, `run.invoker` on the job so the Scheduler can trigger it). A mirror change reaches the job by re-running `deploy.sh`; a code change, by re-running `build.sh`.
 
-Run locally against a config (with ADC that can edit the sheets): `GCS_USAGE_TOKEN=… deploy/sheet-mirror/sync.sh <config.yml>`.
+Run locally against a config (with ADC that can edit the sheets): `SITE_TOKEN=… deploy/sheet-mirror/sync.sh <config.yml>`.
 
 ## The grant token
 

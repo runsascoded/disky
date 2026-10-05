@@ -8,6 +8,8 @@ export interface Unfurl {
   desc: string
   image: string
   page: string
+  /** `og:image:type`; unset leaves the shell's. */
+  imageType?: string
 }
 
 interface AssetsEnv {
@@ -24,6 +26,13 @@ export async function unfurlShell(
     new Request(new URL('/', ctx.request.url).toString(), ctx.request),
   )
   if (!shell.ok) return shell
+  return stampMeta(shell, meta)
+}
+
+/** Rewrite an HTML response's title and `og:*` / `twitter:*` / description
+ * meta to `meta` (crawlers never run the React router). Fields left out keep
+ * the response's own. */
+export function stampMeta(html: Response, meta: Partial<Unfurl>): Response {
   return new HTMLRewriter()
     .on('meta', {
       element(el) {
@@ -34,16 +43,17 @@ export async function unfurlShell(
           : key === 'og:description' || key === 'twitter:description' || key === 'description' ? meta.desc
           : key === 'og:image' || key === 'twitter:image' ? meta.image
           : key === 'og:url' ? meta.page
+          : key === 'og:image:type' ? meta.imageType ?? null
           : null
         if (value) el.setAttribute('content', value)
       },
     })
     .on('title', {
       element(el) {
-        el.setInnerContent(meta.title)
+        if (meta.title) el.setInnerContent(meta.title)
       },
     })
-    .transform(shell)
+    .transform(html)
 }
 
 /** `path`'s absolute URL when the deployment ships that image, else null.

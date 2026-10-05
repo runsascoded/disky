@@ -4,7 +4,7 @@ two sorts, cut from the union of the scan's layer-2 parquets (specs/path-store.m
 
 The store is **one row per path, object or directory** (§1). This module
 unions each bucket's layer-2 — every row, the bucket prefixed onto `path`
-(`marin-us-east-02a/marin/…`, `depth + 1`, so depth 1 is the bucket and the
+(`my-bucket/data/…`, `depth + 1`, so depth 1 is the bucket and the
 site's "one bucket" root opens inside it), the layer-2's own column names
 (§1.1: `path, [usr,] size, depth, kind, n_files, n_children, n_desc, mtime,
 mtime_mean, created, last_read, sum_storage_class_id_*`) — into one layer-2

@@ -5,6 +5,7 @@
 // The raw value is also cached in this browser's localStorage at mint, so
 // *this device* can re-show it — any other device sees status only.
 import { useCallback, useEffect, useState } from 'react'
+import { useStore } from './store'
 
 interface Status {
   active: boolean
@@ -51,6 +52,7 @@ async function call(method: 'GET' | 'POST' | 'DELETE'): Promise<Response> {
 }
 
 export default function TokenModal({ onClose }: { onClose: () => void }) {
+  const store = useStore()
   const [phase, setPhase] = useState<Phase>({ k: 'loading' })
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -183,8 +185,8 @@ export default function TokenModal({ onClose }: { onClose: () => void }) {
             <p className="token-muted token-small">Then, in your agent’s environment:</p>
             <pre className="token-recipe">{`export GCS_USAGE_TOKEN=${phase.token}
 curl -sS -H "Authorization: Bearer $GCS_USAGE_TOKEN" -H 'content-type: application/json' \\
-  -d '{"pattern": "gs://marin-us-central1/checkpoints/my-run/", "owner": "@me"}' \\
-  https://gcs.oa.dev/api/actions`}</pre>
+  -d '{"pattern": "${store.scheme}${store.buckets[0] ?? 'my-bucket'}/path/to/my-run/", "owner": "@me"}' \\
+  ${location.origin}/api/actions`}</pre>
             <div className="token-actions">
               <button type="button" onClick={() => void loadStatus()}>Done</button>
             </div>

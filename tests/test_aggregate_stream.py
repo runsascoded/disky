@@ -1,4 +1,4 @@
-"""Tests for the streaming aggregation engine (spec: streaming-aggregation.md).
+"""Tests for the streaming aggregation engine (spec: specs/done/streaming-aggregation.md).
 
 Parity target: byte-identical layer-2 output vs the pandas and DuckDB
 engines on the same listing — including the `_IDENTITY_LISTING` edge-case

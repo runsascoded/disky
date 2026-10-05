@@ -9,7 +9,7 @@
  * row-group selections on the footer stats plus ranged reads of just those
  * groups.
  *
- * The footer stats live in D1 (specs/path-agnostic-serving.md §2.1):
+ * The footer stats live in D1 (specs/done/path-agnostic-serving.md §2.1):
  * `index_schema` is the per-(date, variant) **pointer** — the generation
  * `gen` and bucket dir `dir` of the file set a run published — and
  * `index_row_groups` holds every group's stats + compact (~250 B) metadata,
@@ -39,7 +39,6 @@ import { compressors } from './zstd.js'
 /** A leaf of the stored parquet schema (`index_schema.schema_json`). */
 export interface SchemaElement { type: string; name: string; repetition_type: string; converted_type?: string }
 
-export const BUCKET = 'oa-gcs-usage-dvx'
 
 /** One index row, named by the layer-2's columns (specs/path-store.md §1.1) —
  * the shape both generations decode to (`toRow`). A version-2 store sort
@@ -205,15 +204,17 @@ export const storeCreds = (env: Env) => ({
  *  `GCS_HMAC_*` check, so an r2 deploy passes on `STORE_*`). */
 export const storeReady = (env: Env): boolean => {
   const { accessKeyId, secretAccessKey } = storeCreds(env)
-  return !!(accessKeyId && secretAccessKey)
+  return !!(accessKeyId && secretAccessKey && storeTarget(env).bucket)
 }
 
 /** Where the index store lives: `STORE_ENDPOINT`/`STORE_BUCKET`/`STORE_REGION`
  *  point any S3-compatible store (R2: the account's S3 endpoint + `auto`);
- *  unset = the GCS defaults. One place, so every proxy resolves the same store. */
+ *  endpoint and region unset = GCS. The bucket has no default: unset, the
+ *  store isn't ready (`storeReady`). One place, so every proxy resolves the
+ *  same store. */
 export const storeTarget = (env: Env) => ({
   endpoint: env.STORE_ENDPOINT ?? 'https://storage.googleapis.com',
-  bucket: env.STORE_BUCKET ?? BUCKET,
+  bucket: env.STORE_BUCKET ?? '',
   region: env.STORE_REGION ?? 'us-east1',
 })
 
@@ -832,6 +833,8 @@ async function readGroupsCached<T>(h: IndexHandle, groups: { rg: number; json: s
  * summed, 1.0 s wall) and a 7-day diff's 107 groups fourteen. 32 in flight
  * is ~9 MB of buffers at most — well inside the isolate's memory. */
 export const GROUP_READS = 32
+/** Concurrent span queries (D1, or footer-group decodes) one `readAsks` runs. */
+const SPAN_QUERIES = 6
 
 /** `Promise.all(items.map(f))` with at most `limit` in flight; results in
  * input order. */
@@ -860,6 +863,9 @@ export function groupMatches(g: { dMin: number; dMax: number; pMin: string; pMax
   return keyed ? g.uMin !== g.uMax || rects.some(rect) : rects.some(rect)
 }
 
+/** `selectSpans` refused: the rectangles' candidate groups exceed its cap. */
+export class TooWide extends Error {}
+
 /** Candidate row groups for a set of (depth, path-range) rectangles — one SQL
  * pass (no rg_json yet), carrying each group's stats so the caller can apply a
  * finer per-ask test. A group spanning a depth boundary resets path order, so
@@ -868,7 +874,7 @@ async function selectSpans(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0, 
   if (h.mode !== 'd1') {
     const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant))
     const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
-    if (out.length > cap) throw new Error(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
+    if (out.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
   }
   const where: string[] = []
@@ -901,7 +907,7 @@ async function selectSpans(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0, 
   const sql = `SELECT rg, d_min, d_max, p_min, p_max, b_max, row_start, row_end FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? AND (${where.join(' OR ')})${bFloor} ORDER BY rg LIMIT ${cap + 1}`
   if (bMin > 0) binds.push(Math.floor(bMin))
   const res = await h.env.DB!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, ...binds).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
-  if (res.results.length > cap) throw new Error(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
+  if (res.results.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
   return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
 }
 
@@ -1253,23 +1259,45 @@ export async function readAsks(
   h: IndexHandle,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { columns, maxGroups = 60 }: { columns?: string[]; maxGroups?: number } = {},
+  { columns, maxGroups = 60, spanCap = 4000 }: { columns?: string[]; maxGroups?: number; spanCap?: number } = {},
 ): Promise<{ rows: Row[]; groups: number }> {
-  // Collapse asks to one rectangle per depth (min..max path) to keep the SQL
-  // small; the exact ask set is enforced by `keep` after the read.
-  const byDepth = new Map<number, { pLo: string; pHi: string }>()
+  // One rectangle per depth over its asks' [min, max] path, halved while it
+  // selects more groups than its asks could need: sparse asks across a deep
+  // store (gcs's ~1,260 claim prefixes over 8k-row groups) would otherwise
+  // select every group between the first ask and the last, past any cap.
+  // Exact: each ask stays in exactly one rectangle, a single ask over the cap
+  // still throws, and `groupMayHold` + `keep` narrow what is read.
+  const lo = (a: Ask) => askRect(a).pLo
+  const hi = (a: Ask) => askRect(a).pHi
+  const byDepth = new Map<number, Ask[]>()
   for (const a of asks) {
-    const r = askRect(a)
-    const cur = byDepth.get(a.depth)
-    byDepth.set(a.depth, cur ? { pLo: cur.pLo < r.pLo ? cur.pLo : r.pLo, pHi: cur.pHi > r.pHi ? cur.pHi : r.pHi } : { pLo: r.pLo, pHi: r.pHi })
+    const l = byDepth.get(a.depth)
+    if (l) l.push(a)
+    else byDepth.set(a.depth, [a])
   }
-  const rects = [...byDepth.entries()].map(([d, r]) => ({ dLo: d, dHi: d, pLo: r.pLo, pHi: r.pHi }))
-  // A per-depth [min,max] rectangle over-selects the groups between the
-  // lowest and highest ask; narrow to groups an actual ask falls in.
+  let parts = [...byDepth.entries()].map(([depth, l]) => ({ depth, asks: l.sort((x, y) => (lo(x) < lo(y) ? -1 : lo(x) > lo(y) ? 1 : 0)) }))
+  const found = new Map<number, Span>()
   let t0 = now()
-  const cand = await selectSpans(h, rects)
+  while (parts.length) {
+    const next: typeof parts = []
+    await mapLimit(parts, SPAN_QUERIES, async ({ depth, asks: part }) => {
+      const rect = { dLo: depth, dHi: depth, pLo: lo(part[0]), pHi: part.reduce((m, a) => (hi(a) > m ? hi(a) : m), hi(part[0])) }
+      const cap = part.length > 1 ? Math.min(spanCap, 4 * part.length + 16) : spanCap
+      let cand: Span[]
+      try {
+        cand = await selectSpans(h, [rect], cap)
+      } catch (e) {
+        if (!(e instanceof TooWide) || part.length === 1) throw e
+        const m = part.length >> 1
+        next.push({ depth, asks: part.slice(0, m) }, { depth, asks: part.slice(m) })
+        return
+      }
+      for (const s of cand) if (!found.has(s.rg) && part.some(a => groupMayHold(s, a))) found.set(s.rg, s)
+    })
+    parts = next
+  }
   h.trace?.('spans', now() - t0)
-  const spans = cand.filter(s => asks.some(a => groupMayHold(s, a)))
+  const spans = [...found.values()].sort((a, b) => a.rg - b.rg)
   if (spans.length > maxGroups) throw new Error(`lookup too wide: ${spans.length} row groups (cap ${maxGroups})`)
   t0 = now()
   const jsons = await fetchGroupJson(h, spans.map(s => s.rg))

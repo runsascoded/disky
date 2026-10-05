@@ -1,7 +1,7 @@
 import { encodeScan, fmtScan, type Scan } from './scan'
 
 // Compact, page-agnostic scan picker for the shared nav (see
-// specs/scan-param-all-pages.md). The home map renders its own richer inline
+// specs/done/scan-param-all-pages.md). The home map renders its own richer inline
 // picker (interleaved with byte/cost/published meta); this is the plain
 // select + ambiguous-`?d` disambiguation strip that /users and /user/:id show
 // in SiteNav. Absent on pages that aren't scoped to one scan.

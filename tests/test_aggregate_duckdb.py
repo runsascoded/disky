@@ -319,7 +319,7 @@ def test_cli_engine_duckdb_creates_scan(tmp_path: Path):
     assert rows == [('gcs://b1', 300, 2, 4)]
 
 
-# ---------- Fleet-scale cascade (spec mgu-scale-unification.md, item A) ----------
+# ---------- Fleet-scale cascade (spec specs/done/mgu-scale-unification.md, item A) ----------
 #
 # Both knobs are pure memory levers: output must stay byte-identical to the
 # single in-memory cascade for every `partition_depth` and `db` setting. The
@@ -412,7 +412,7 @@ def test_batch_range_covers_prefix_keys(tmp_path: Path, partition_files: int):
     """Keys sorted as bare strings put `a` before `a-v1`, but `a/…` rows sort
     *after* `a-v1/…` (`/` is 0x2F, `-` is 0x2D), so a batch range built from
     the bare order `[a/, a-v20)` misses every row under `a` — mgu's round-2
-    fleet gate dropped three whole subtrees this way (spec `mgu-scale-a3-gate.md`
+    fleet gate dropped three whole subtrees this way (spec `specs/done/mgu-scale-a3-gate.md`
     ask 6). Batches must be contiguous in `key/` order, at every budget."""
     listing = tmp_path / 'prefix-keys.parquet'
     names = [
@@ -451,7 +451,7 @@ def test_batch_range_covers_prefix_keys(tmp_path: Path, partition_files: int):
 ])
 def test_oversized_keys_split_recursively(tmp_path: Path, partition_files: int, expect: dict):
     """A key over `partition_files` is replaced by its sub-directories until
-    every key fits or is flat (spec `mgu-scale-a3-gate.md` ask 7); the frontier
+    every key fits or is flat (spec `specs/done/mgu-scale-a3-gate.md` ask 7); the frontier
     is then keys at mixed depths, and the output is still byte-identical."""
     listing = tmp_path / 'split.parquet'
     names = [
@@ -490,7 +490,7 @@ def test_folder_placeholders_are_objects_at_their_dir(tmp_path: Path, kw: dict):
     """A listing name ending in `/` (a folder placeholder) is an object at the
     directory it names: the dir row carries it (`n_files`, its size/mtime), it
     is never a file child, and it never duplicates a synthesized dir row
-    (spec mgu-scale-a3-gate.md ask 2). Same rows under every partitioning."""
+    (spec specs/done/mgu-scale-a3-gate.md ask 2). Same rows under every partitioning."""
     listing = tmp_path / 'ph.parquet'
     names = ['profile/', 'profile/1/', 'profile/1/x.bin', 'profile/2/']
     pd.DataFrame({
@@ -580,7 +580,7 @@ def test_cli_engine_duckdb_partitioned_file_backed_creates_scan(tmp_path: Path):
 #: Segments chosen so keys are string-prefixes of siblings with the next byte
 #: on either side of `/` (0x2F): `a` vs `a-v1` (`-` < `/`), `a` vs `a0`/`ab`
 #: (> `/`) — the ordering that dropped subtrees in the batched cascade (spec
-#: `mgu-scale-a3-gate.md` ask 6) and that the ranged final sort's bounds rest
+#: `specs/done/mgu-scale-a3-gate.md` ask 6) and that the ranged final sort's bounds rest
 #: on; plus space, unicode, a `gs:` segment (`gs://` inside names, ask 9).
 _RANDOM_SEGMENTS = ['a', 'a-v1', 'a.bak', 'a0', 'ab', '_x', 'A', ' ', 'b', 'z', '日本', 'gs:']
 

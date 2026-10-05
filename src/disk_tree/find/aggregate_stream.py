@@ -1,4 +1,4 @@
-"""O(depth) streaming aggregation over sorted listings (spec: streaming-aggregation.md).
+"""O(depth) streaming aggregation over sorted listings (spec: specs/done/streaming-aggregation.md).
 
 Third engine alongside pandas (:func:`disk_tree.find.index.aggregate`) and
 DuckDB (:mod:`disk_tree.find.aggregate_duckdb`). Object-store listings are

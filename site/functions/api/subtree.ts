@@ -21,7 +21,17 @@ import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeC
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 
 
-export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
+type SubtreeCtx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
+
+export const onRequestGet = (ctx0: SubtreeCtx): Promise<Response> => subtree(ctx0, true)
+
+/** Fill the edge cache for a subtree URL without a caller identity: what a
+ * share card's unfurl does so the clickthrough's first paint is warm
+ * (`og/serve.ts`). The response never leaves the Worker. */
+export const warmSubtree = (env: Env, url: string, waitUntil?: (p: Promise<unknown>) => void): Promise<Response> =>
+  subtree({ request: new Request(url), env, waitUntil }, false)
+
+async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx = withStore(ctx0)
   if (ctx instanceof Response) return ctx
@@ -70,8 +80,10 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   const query = qp.query
 
   // Data is gated (store-specific scope), like /data/*.
-  const gated = await st.time('auth', requireViewer(ctx as never))
-  if (gated instanceof Response) return gated
+  if (gate) {
+    const gated = await st.time('auth', requireViewer(ctx as never))
+    if (gated instanceof Response) return gated
+  }
 
   // A user lens folds the live ledger (claims repaint attribution): its cache
   // key carries the head.

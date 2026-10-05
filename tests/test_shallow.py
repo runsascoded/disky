@@ -1,4 +1,4 @@
-"""Spec `scan-page-r2-latency.md`: scan blobs are written in bounded row groups
+"""Spec `specs/done/scan-page-r2-latency.md`: scan blobs are written in bounded row groups
 (ask 2); each chunk's depth-1 rows are served from the root blob's
 `.shallow.parquet` sidecar written at save time (ask 3), falling back to a
 filtered, projected, per-process-cached read of the chunk (ask 1) — so a

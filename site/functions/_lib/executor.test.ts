@@ -5,12 +5,12 @@ import { dispatchPlan, EXECUTORS, executorOf, type ExecutorKind, planFirstKind }
 import type { FinishedRun } from './plans'
 import { sqliteD1 } from './testD1'
 
-const A = 's3://marin-us-east-02a/a/'
-const B = 's3://marin-us-east-02a/b/'
-const C = 's3://marin-us-east-02a/c/'
+const A = 's3://primary-bucket/a/'
+const B = 's3://primary-bucket/b/'
+const C = 's3://primary-bucket/c/'
 // planDigest of each item set (pinned in plans.test.ts's scheme)
-const DIGEST_AB = '2cbbbd326302e931'
-const DIGEST_ABC = 'e878752b0b5cb50f'
+const DIGEST_AB = '6c659330217cf7aa'
+const DIGEST_ABC = 'aecc92b130948c2f'
 
 /** A GCP-free executor over the real schema: `prepare` reads the plan's items,
  * `launch` records the run as plan-sweep does, `refresh` closes the runs

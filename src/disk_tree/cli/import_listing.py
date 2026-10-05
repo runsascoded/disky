@@ -8,7 +8,7 @@ Three aggregation engines:
   `--memory-limit`. Handles unsorted / mixed-schema listings.
 - `--engine stream` — O(depth) streaming rollup over sorted raw listings
   (bulk-list output); KBs of working state, one bounded final sort. The
-  100M+-row path (spec: streaming-aggregation.md).
+  100M+-row path (spec: specs/done/streaming-aggregation.md).
 
 All produce byte-identical canonical layer-2 output.
 """
@@ -33,7 +33,7 @@ from disk_tree.find.aggregate_duckdb import DEFAULT_PARTITION_FILES
 @option('-a', '--side', default=None, help='DuckDB engine only: side parquet keyed by `path` (`.` = root; optional `bucket`), e.g. `disk-tree access state` output, joined onto every row by exact path for `--max-col`')
 @option('-b', '--bucket', 'buckets', multiple=True, help='Bucket to import as one scan; repeatable. Default: every distinct bucket in the listings')
 @option('-d', '--db', 'db_path', default=None, help='DuckDB engine only: run the cascade in a file-backed database (a `.duckdb` path, kept; or a directory to create a temporary one in). Inert: every cascade table is TEMP and spills to `--temp-dir` under `--memory-limit` from an in-memory database too. Default: in-memory.')
-@option('-G', '--groups', is_flag=True, help='Tiers: also write each tier\'s group manifest `<tier>.groups.json` beside it — the footer precomputed as compact JSON (schema + per-row-group stats/offsets) for a serverless range reader (spec mgu-engine-audit-2026-09-07.md §4)')
+@option('-G', '--groups', is_flag=True, help='Tiers: also write each tier\'s group manifest `<tier>.groups.json` beside it — the footer precomputed as compact JSON (schema + per-row-group stats/offsets) for a serverless range reader (spec specs/done/mgu-engine-audit-2026-09-07.md §4)')
 @option('-H', '--size-hist', is_flag=True, help='DuckDB engine only: emit `size_hist_n` / `size_hist_bytes` — per path, a log2 histogram (41 bins) of descendant files by size, counts and bytes per bin')
 @option('-i', '--tiers', is_flag=False, flag_value='path,bysize', default=None, help='Also cut the path store\'s sorts from the layer-2 (spec path-store.md §4.1) under `--tiers-dir` as `<scheme>-<bucket>.<tier>.parquet`: `path` (every row, `(depth, path)`) and `bysize` (every row, `(⌊log2 size⌋ desc, path)`), 8K-row groups, `tier`/`sort` in the parquet metadata. Bare `-i` = both; `-i path` / `-i bysize` for one. duckdb/stream engines only.')
 @option('-j', '--jobs', default=1, help='Stream engine only: partition the keyspace into N ranges streamed by parallel worker processes (0 = all cores). Output is byte-identical for any value.')

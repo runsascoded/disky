@@ -1,6 +1,6 @@
 /**
  * Per-user owned bytes from the ownership ledger + the floor-free path index
- * (specs/path-agnostic-serving.md §2.3; the band model of
+ * (specs/done/path-agnostic-serving.md §2.3; the band model of
  * specs/exact-state-totals.md, owner axis only). Pure: callers supply the
  * folded claims and the index aggregates for the prefixes involved; nothing
  * here does I/O.

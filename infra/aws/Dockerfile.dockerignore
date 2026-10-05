@@ -1,0 +1,9 @@
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src
+!cloud/pyproject.toml
+!cloud/src
+!infra/aws/ingest.sh
+**/__pycache__

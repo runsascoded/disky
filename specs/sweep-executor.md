@@ -124,9 +124,9 @@ A root is one sequential listing (GCS pages by continuation token), so a huge *f
 
 - User self-serve deletion (v2, above). — Regex mark patterns (don't exist). — Ledger tombstoning (follow-up). — CW/S3 sweep (separate estate, no marks yet).
 
-[mark-sweep-ui.md]: mark-sweep-ui.md
+[mark-sweep-ui.md]: gcs:specs/done/mark-sweep-ui.md
 [actions-ledger.md]: actions-ledger.md
-[repo-hygiene-audit.md]: repo-hygiene-audit.md
+[repo-hygiene-audit.md]: gcs:specs/done/repo-hygiene-audit.md
 
 ## Deletion records — executed sweeps as first-class data (2026-09-02)
 

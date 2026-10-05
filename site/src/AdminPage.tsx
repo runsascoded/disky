@@ -5,6 +5,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
 import { DEFAULT_STORE } from './stores'
 import { useDocTitle } from './title'
+import { PreviewLinks } from './PreviewLinks'
 
 // Share-link console (staff-only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -51,6 +52,39 @@ interface Grant {
 
 const fmtTs = (ts: number | null): string => (ts ? new Date(ts * 1000).toLocaleString() : '—')
 
+/** A grant's memo (`note`, the admin-side label), editable in place: click to
+ *  edit, Enter or blur saves (`PATCH /api/auth/grants/:id`), Escape cancels. */
+function MemoCell({ grant, onSave, saving }: { grant: Grant; onSave: (note: string | null) => void; saving: boolean }) {
+  const [draft, setDraft] = useState<string | null>(null)
+  if (grant.revokedAt) return <>{grant.note || <em>—</em>}</>
+  if (draft == null) {
+    return (
+      <button type="button" className="memo-edit" aria-label="Edit memo" onClick={() => setDraft(grant.note ?? '')} disabled={saving}>
+        {grant.note || <em>—</em>}
+      </button>
+    )
+  }
+  const save = () => {
+    const note = draft.trim() || null
+    setDraft(null)
+    if (note !== (grant.note || null)) onSave(note)
+  }
+  return (
+    <input
+      className="memo-input"
+      autoFocus
+      value={draft}
+      placeholder="memo"
+      onChange={e => setDraft(e.target.value)}
+      onBlur={save}
+      onKeyDown={e => {
+        if (e.key === 'Enter') save()
+        else if (e.key === 'Escape') setDraft(null)
+      }}
+    />
+  )
+}
+
 const linkFor = (token: string): string => `${window.location.origin}/?key=${token}`
 
 /** `POST /api/auth/grants`' allowlist outcome for a link minted with `allowlist: true`. */
@@ -65,6 +99,61 @@ type AdminResult = 'added' | 'already' | { error: string }
 /** Who a link is for: the person (`subject.name`, then their email), else the
  * grant's admin `name` — the fallback for CLI/agent-token grants. */
 const holderName = (g: Grant): string | null => g.subject?.name || g.subject?.email || g.name || null
+
+/** A body for `PATCH /api/auth/grants/:id`: the memo, or the holder's name and
+ *  face (`avatar` absent = keep it, null = clear, a `data:` URI = replace;
+ *  copied server-side, as at mint). */
+type GrantEdit = { note?: string | null; subjectName?: string | null; avatar?: string | null }
+
+/** Who a link is for, editable in place: click to rename the holder or change
+ *  their face (`<AvatarField>`, the mint form's picker), Save or Cancel. */
+function HolderCell({ grant, onSave, saving, error }: { grant: Grant; onSave: (edit: GrantEdit, done: () => void) => void; saving: boolean; error: string | null }) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState('')
+  // `undefined` = keep the current face; null = clear it; a `data:` URI = replace.
+  const [avatar, setAvatar] = useState<string | null | undefined>(undefined)
+  const face = (
+    <span className="holder">
+      {grant.subject?.avatar && <img className="grant-avi" src={grant.subject.avatar} alt="" />}
+      {holderName(grant) ?? <em>—</em>}
+    </span>
+  )
+  if (grant.revokedAt) return face
+  if (!editing) {
+    return (
+      <button type="button" className="memo-edit" aria-label="Edit holder" onClick={() => { setName(grant.subject?.name ?? ''); setAvatar(undefined); setEditing(true) }}>
+        {face}
+      </button>
+    )
+  }
+  return (
+    <form
+      className="holder-edit"
+      onSubmit={e => {
+        e.preventDefault()
+        onSave({ subjectName: name.trim() || null, ...(avatar === undefined ? {} : { avatar }) }, () => setEditing(false))
+      }}
+      onKeyDown={e => { if (e.key === 'Escape') setEditing(false) }}
+    >
+      <input className="memo-input" autoFocus value={name} placeholder="holder’s name" onChange={e => setName(e.target.value)} />
+      <AvatarField
+        id={`holder-avatar-${grant.id}`}
+        endpoint="/api/auth/avatar"
+        value={avatar === undefined ? (grant.subject?.avatar ?? null) : avatar}
+        onChange={setAvatar}
+        email={grant.subject?.email ?? grant.email}
+        autoGravatar={false}
+        name={name.trim() || null}
+        size={32}
+      />
+      {error && <p className="err">{error}</p>}
+      <div className="row-actions">
+        <button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+        <button type="button" onClick={() => setEditing(false)}>Cancel</button>
+      </div>
+    </form>
+  )
+}
 
 // Persist the in-progress mint form so a reload / redeploy doesn't wipe a draft.
 // Per-tab (sessionStorage), cleared once the link is minted.
@@ -189,6 +278,26 @@ export function AdminPage() {
       } catch {
         // ignore
       }
+      void qc.invalidateQueries({ queryKey: ['auth', 'grants'] })
+    },
+  })
+
+  const editGrant = useMutation({
+    mutationFn: async ({ id, edit }: { id: string; edit: GrantEdit; done?: () => void }) => {
+      const r = await fetch(`/api/auth/grants/${id}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(edit),
+      })
+      if (!r.ok) {
+        // a refused face (e.g. a LinkedIn URL) comes back as 400 `{error, detail}`
+        const b = await r.json().catch(() => null) as { error?: string; detail?: string } | null
+        throw new Error(b?.detail ?? b?.error ?? `update failed: ${r.status}`)
+      }
+    },
+    onSuccess: (_, { done }) => {
+      done?.()
       void qc.invalidateQueries({ queryKey: ['auth', 'grants'] })
     },
   })
@@ -338,12 +447,14 @@ export function AdminPage() {
         <tbody>
           {shown.map(g => (
             <tr key={g.id} className={g.revokedAt ? 'revoked' : ''}>
-              <td>{g.note ?? <em>—</em>}</td>
+              <td className="memo"><MemoCell grant={g} onSave={note => editGrant.mutate({ id: g.id, edit: { note } })} saving={editGrant.isPending} /></td>
               <td>
-                <span className="holder">
-                  {g.subject?.avatar && <img className="grant-avi" src={g.subject.avatar} alt="" />}
-                  {holderName(g) ?? <em>—</em>}
-                </span>
+                <HolderCell
+                  grant={g}
+                  onSave={(edit, done) => editGrant.mutate({ id: g.id, edit, done })}
+                  saving={editGrant.isPending && editGrant.variables?.id === g.id}
+                  error={editGrant.isError && editGrant.variables?.id === g.id ? editGrant.error.message : null}
+                />
               </td>
               <td>{g.scopes.join(' ')}</td>
               <td>{g.redeems}{g.maxRedeems != null ? `/${g.maxRedeems}` : ''}</td>
@@ -368,6 +479,7 @@ export function AdminPage() {
         </tbody>
       </table>
       </div>
+      <PreviewLinks />
     </main>
   )
 }

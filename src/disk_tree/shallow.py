@@ -2,7 +2,7 @@
 root blob: every chunk's depth-1 rows, in chunk-local coordinates (`path` is
 the child's name, `parent == '.'`, `depth == 1`) plus a ``chunk_ref`` column
 naming the chunk blob. Written by `HybridBackend.save`, refreshed after an
-in-place delete, removed with the scan (spec `scan-page-r2-latency.md`).
+in-place delete, removed with the scan (spec `specs/done/scan-page-r2-latency.md`).
 
 A chunked root's top-level view is each chunk's top level — ~100 rows per
 chunk. Reading them from the chunk blobs pulled the whole blob (3.6M rows,

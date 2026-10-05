@@ -6,7 +6,7 @@
  * `/users` uses, then grouped by `(who assigned it, to whom)`.
  * Feeds the `/assignments` heatmap and the homepage `?by=` lens.
  * Every assigner is a person today (`actions.actor`); inferred-attribution
- * signals (W&B, path shapes) are a separate axis — assignment-provenance.md
+ * signals (W&B, path shapes) are a separate axis — gcs:specs/assignment-provenance.md
  * Phase 2 — and are not in this matrix yet.
  */
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'

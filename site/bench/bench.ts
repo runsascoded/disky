@@ -14,7 +14,7 @@ import { aggregate, renderAggs, type BenchFile, type RunResult } from './lib.ts'
 // HTTP cache and the edge's caches are both warm after the first load of a
 // path. cold: a fresh context per load, and `Cache-Control: no-cache` on
 // every /api and /data request. A gated deploy takes a bearer token
-// (`--token`, or $BENCH_TOKEN / $GCS_USAGE_TOKEN), sent as
+// (`--token`, or $BENCH_TOKEN / $SITE_TOKEN / $GCS_USAGE_TOKEN), sent as
 // `Authorization: Bearer` on every request like `playwright.config.ts` does.
 // Runs on Node ≥ 23.6 directly (type stripping; `.ts` imports).
 
@@ -28,7 +28,7 @@ function usage(msg?: string): never {
 
 export function parseArgs(argv: string[], env: Record<string, string | undefined> = {}): Opts {
   const pos: string[] = []
-  let runs = 1, cold = false, token = env.BENCH_TOKEN ?? env.GCS_USAGE_TOKEN, out: string | undefined, note: string | undefined, timeoutS = 60, headed = false
+  let runs = 1, cold = false, token = env.BENCH_TOKEN ?? env.SITE_TOKEN ?? env.GCS_USAGE_TOKEN, out: string | undefined, note: string | undefined, timeoutS = 60, headed = false
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     const val = () => { const v = argv[++i]; if (v === undefined) usage(`${a} needs a value`); return v }

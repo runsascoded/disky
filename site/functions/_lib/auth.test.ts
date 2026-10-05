@@ -60,6 +60,15 @@ describe('scopesFor — the in-app policy that replaces the Access policy', () =
     expect(await scopesFor(env)('ryan@runsascoded.com')).toEqual(['gcs', 'cw', 'admin', 'requests', 'laptop'])
   })
 
+  it('no STAFF_DOMAIN (unset or empty): nobody is staff by domain', async () => {
+    for (const STAFF_DOMAIN of [undefined, '']) {
+      const env = cw({}, { STAFF_DOMAIN })
+      expect(await scopesFor(env)('ryan@openathena.ai')).toBe(null)
+      expect(await scopesFor(env)('anyone@example.com')).toBe(null)
+      expect(await isAdmin(env, 'ryan@openathena.ai')).toBe(false)
+    }
+  })
+
   it('a viewer domain gets the base scope with no allowlist row', async () => {
     expect(await scopesFor(cw({}))('someone@coreweave.com')).toEqual(['cw'])
   })

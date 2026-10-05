@@ -11,13 +11,15 @@
 #
 # Config: `$SHEET_MIRROR_CONFIG_B64` (the deployment's sheet-mirror.yml, set by
 # deploy.sh) or a path as $1 (local runs). Runs AS the job's SA: ambient ADC
-# covers the Sheets write (the SA is Editor on each sheet). GCS_USAGE_TOKEN is
-# injected from Secret Manager. No `set -x`: the token must never reach Cloud
+# covers the Sheets write (the SA is Editor on each sheet). SITE_TOKEN (the
+# site's read grant) is injected from Secret Manager; the older GCS_USAGE_TOKEN
+# is accepted for one release. No `set -x`: the token must never reach Cloud
 # Logging. One mirror failing doesn't stop the others; the job exits non-zero
 # if any failed.
 set -euo pipefail
 
-: "${GCS_USAGE_TOKEN:?GCS_USAGE_TOKEN must be set (Secret Manager)}"
+export SITE_TOKEN="${SITE_TOKEN:-${GCS_USAGE_TOKEN:-}}"
+: "${SITE_TOKEN:?SITE_TOKEN must be set (Secret Manager)}"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

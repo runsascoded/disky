@@ -22,7 +22,7 @@ One-shot CLIs that `from disk_tree.config import SQLITE_PATH` freeze the value a
 ## Design
 
 ### 1. `config.set_root(path)` (+ `current_root()`, `on_root_change(cb)`)
-Recompute and **reassign** the module globals (`ROOT_DIR`, `DEFAULT_SCANS_DIR`, `SQLITE_PATH`, `SCANS_DIR`), `makedirs` the new root (guarded — refuse a path under an unmounted `/Volumes/x`, the makedirs-on-boot-disk trap from `specs/macos-app.md`), then fire registered `on_root_change` hooks. Idempotent for the same path.
+Recompute and **reassign** the module globals (`ROOT_DIR`, `DEFAULT_SCANS_DIR`, `SQLITE_PATH`, `SCANS_DIR`), `makedirs` the new root (guarded — refuse a path under an unmounted `/Volumes/x`, the makedirs-on-boot-disk trap from `specs/done/macos-app.md`), then fire registered `on_root_change` hooks. Idempotent for the same path.
 
 ### 2. `sqla/db.py: reinit()`
 Dispose the current engine, drop the app/db singletons, rebuild against `config.SQLITE_PATH` (create tables). Registered as an `on_root_change` hook.

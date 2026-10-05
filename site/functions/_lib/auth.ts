@@ -81,7 +81,7 @@ export interface Env {
    *  any non-base scope still require a real identity, so mutations stay closed
    *  (specs/federated-scans.md). */
   PUBLIC_READ?: string
-  /** The store root's crumb label (`marin GCS`, `marin CoreWeave`). */
+  /** The store root's crumb label (e.g. `my GCS`); unset = `all buckets`. */
   ROOT_LABEL?: string
   /** Snapshot dir of this store inside the data bucket (`snapshots/<sub>/`); unset = the bare `snapshots/`. */
   SNAPSHOTS_SUBDIR?: string
@@ -117,7 +117,12 @@ export const baseScope = (env: Env): string => env.BASE_SCOPE ?? GCS_SCOPE
  *  (specs/share-link-hardening.md). */
 export const baseReadScope = (env: Env): string => `${baseScope(env)}:read`
 
-const staffDomain = (env: Env) => env.STAFF_DOMAIN ?? 'openathena.ai'
+/** Staff by email domain (`STAFF_DOMAIN`). Unset or empty = nobody is staff by
+ *  domain (an empty domain would otherwise match every address). */
+const isStaff = (env: Env, email: string): boolean => {
+  const d = env.STAFF_DOMAIN?.trim().toLowerCase()
+  return !!d && email.toLowerCase().endsWith(`@${d}`)
+}
 
 const viewerDomains = (env: Env): string[] =>
   (env.VIEWER_DOMAINS ?? '').split(',').map(d => d.trim().toLowerCase()).filter(Boolean)
@@ -157,7 +162,7 @@ export async function allowedRow(db: D1Database, email: string): Promise<{ read_
 export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | null> => {
   const email = raw.toLowerCase()
   const base = baseScope(env)
-  if (email.endsWith(`@${staffDomain(env)}`)) return allScopes(env)
+  if (isStaff(env, email)) return allScopes(env)
   if (!env.DB) return [base]
   const byDomain = viewerDomains(env).some(d => email.endsWith(`@${d}`))
   const row = byDomain ? null : await allowedRow(env.DB, email)
@@ -198,7 +203,7 @@ const withAdmin = (id: Omit<Identity, 'admin'>): Identity => ({ ...id, admin: id
 /** Staff (by domain) or an `admin_emails` row (the deployment's own admin
  *  list, `admin_emails` in `site/migrations/cw/0001_init.sql`, where `ADMIN_EMAILS` says it exists). */
 export async function isAdmin(env: Env, email: string): Promise<boolean> {
-  if (email.toLowerCase().endsWith(`@${staffDomain(env)}`)) return true
+  if (isStaff(env, email)) return true
   return adminRow(env, email.toLowerCase())
 }
 

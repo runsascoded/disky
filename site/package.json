@@ -1,5 +1,5 @@
 {
-  "name": "marin-gcs-usage-site",
+  "name": "disk-tree-site",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -20,9 +20,10 @@
   "dependencies": {
     "@disk-tree/react": "workspace:*",
     "@floating-ui/react": "^0.27.20",
-    "@open-athena/auth": "github:Open-Athena/auth#fa93d1467dcb0072218ce2f951ea3b3d861e11b3",
+    "@open-athena/auth": "github:Open-Athena/auth#64d5544c8a7c3d63d3bef943cdb23258d0c1df56",
     "@rdub/file-tree": "https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b",
     "@rdub/treemap": "workspace:*",
+    "@resvg/resvg-wasm": "^2.6.2",
     "@tanstack/react-query": "^5.101.4",
     "@tanstack/react-table": "^8.21.3",
     "fzstd": "0.1.1",

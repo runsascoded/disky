@@ -9,27 +9,36 @@ own procs x threads prefix streams do the scaling.
 """
 from __future__ import annotations
 
+import json
 import time
-from typing import Sequence
+from typing import Mapping, Sequence
 
-from .gcp import PROJECT, REGION, batch_job, session
+from .deploy import data_bucket as env_data_bucket, env, require, words
+from .gcp import REGION, batch_job, gcp_project, session
 
-FLEET_BUCKETS = [
-    "marin-us-central2",
-    "marin-eu-west4",
-    "marin-us-central1",
-    "marin-us-east5",
-    "marin-us-east1",
-    "marin-us-west4",
-]
-# List from a VM near the bucket: cross-ocean list pages pay full RTT per page
-# (eu-west4 from us-central1 measured ~10x slower than same-continent). US
-# buckets do fine from us-central1; central2 must anyway (no Batch in the
-# limited TPU region).
-BUCKET_JOB_REGIONS = {"marin-eu-west4": "europe-west4"}
-DATA_BUCKET = "oa-gcs-usage-dvx"
-SERVICE_ACCOUNT = f"gcs-usage-job@{PROJECT}.iam.gserviceaccount.com"
-IMAGE = f"us-central1-docker.pkg.dev/{PROJECT}/cloud-run-source-deploy/gcs-usage-snapshot:latest"
+
+def fleet_buckets() -> list[str]:
+    """The buckets the listing covers (`$FLEET_BUCKETS`, space-separated), when
+    `submit-listing` names none with `-b`."""
+    return words("FLEET_BUCKETS", what="the buckets to list (or pass -b per bucket)")
+
+
+def listing_regions() -> dict[str, str]:
+    """`{bucket: region}` (`$LISTING_REGIONS`, JSON): list a bucket from a VM near
+    it. Cross-ocean list pages pay full RTT per page (a European bucket listed
+    from us-central1 measured ~10x slower than same-continent). Unset = every
+    bucket from `REGION`."""
+    return json.loads(env("LISTING_REGIONS") or "{}")
+
+
+def job_sa() -> str:
+    """The service account the listing job runs as (`$JOB_SA`)."""
+    return require("JOB_SA", what="the service account the listing job runs as")
+
+
+def job_image() -> str:
+    """The listing job's container image (`$JOB_IMAGE`)."""
+    return require("JOB_IMAGE", what="the listing job's container image")
 
 
 def listing_dir(data_bucket: str, date: str, bucket: str) -> str:
@@ -39,29 +48,37 @@ def listing_dir(data_bucket: str, date: str, bucket: str) -> str:
 
 def listing_job_spec(
     date: str,
-    buckets: Sequence[str] = tuple(FLEET_BUCKETS),
-    data_bucket: str = DATA_BUCKET,
+    buckets: Sequence[str],
+    data_bucket: str | None = None,
     machine: str = "n2-standard-32",
     procs: int = 24,
     threads: int = 10,
     region: str = REGION,
+    legacy: Mapping[str, str] | None = None,
+    image: str | None = None,
+    service_account: str | None = None,
 ) -> dict:
     """One task per bucket; each runs ``disk-tree bulk-list`` straight to gs://.
 
     Chunk weights come from, in order: the newest prior completed listing of
-    the bucket (DIY layout, then legacy ``central2-listing/`` for central2),
-    else the bucket's newest SII inventory report — unweighted chunks let one
-    worker draw a 100M-object prefix and straggle for hours (eu-west4's first
-    run). All fleet buckets are FUSE-mounted read-only for the weights scan;
-    object pages stream via the API and shards write via gs://.
+    the bucket (DIY layout, then any ``legacy`` dir named for that bucket:
+    ``{bucket: <subdir of the data bucket>}``), else the bucket's newest SII
+    inventory report — unweighted chunks let one worker draw a 100M-object
+    prefix and straggle for hours. The data bucket and the job's buckets are
+    FUSE-mounted (the buckets read-only, for the weights scan); object pages
+    stream via the API and shards write via gs://.
     """
+    data_bucket = data_bucket or env_data_bucket()
+    legacy = dict(legacy or {})
+    old_dirs = "".join(f" /gcs/{data_bucket}/{sub}/*" for sub in legacy.values())
+    old_cases = "".join(f' */{sub}/*) [ "$b" = {b} ] || continue;;' for b, sub in legacy.items())
     script = f"""#!/usr/bin/env bash
 set -euxo pipefail
 BUCKETS=({" ".join(buckets)})
 b=${{BUCKETS[$BATCH_TASK_INDEX]}}
 W=()
-for d in $(ls -d /gcs/{data_bucket}/listing/*/$b /gcs/{data_bucket}/central2-listing/* 2>/dev/null | sort -r); do
-  case "$d" in */listing/{date}/$b) continue;; */central2-listing/*) [ "$b" = marin-us-central2 ] || continue;; esac
+for d in $(ls -d /gcs/{data_bucket}/listing/*/$b{old_dirs} 2>/dev/null | sort -r); do
+  case "$d" in */listing/{date}/$b) continue;;{old_cases} esac
   if [ -f "$d/_SUCCESS.json" ]; then W=(-W "$d/*.parquet"); break; fi
 done
 if [ ${{#W[@]}} -eq 0 ]; then
@@ -70,7 +87,7 @@ if [ ${{#W[@]}} -eq 0 ]; then
 fi
 disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" -P {procs} -w {threads} -x reuse "${{W[@]}}"
 """
-    mounts = [(data_bucket, "rw")] + [(b, "ro") for b in FLEET_BUCKETS]
+    mounts = [(data_bucket, "rw")] + [(b, "ro") for b in buckets]
     # Size the task request off the machine, not a constant: a hardcoded
     # cpuMilli that exceeds the chosen machine's vCPUs is a hard 400 from Batch
     # ("machine_type cannot satisfy compute_resource"). Leave 2 vCPU for the
@@ -85,7 +102,7 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
                     "runnables": [
                         {
                             "container": {
-                                "imageUri": IMAGE,
+                                "imageUri": image or job_image(),
                                 "entrypoint": "/bin/bash",
                                 "commands": ["-c", script],
                                 "volumes": [f"/mnt/disks/gcs/{b}:/gcs/{b}:{m}" for b, m in mounts],
@@ -108,7 +125,7 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
         ],
         "allocationPolicy": {
             "instances": [{"policy": {"machineType": machine, "bootDisk": {"type": "pd-balanced", "sizeGb": "50"}}}],
-            "serviceAccount": {"email": SERVICE_ACCOUNT},
+            "serviceAccount": {"email": service_account or job_sa()},
             "location": {"allowedLocations": [f"regions/{region}"]},
         },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
@@ -117,7 +134,7 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
 
 def submit_job(spec: dict, job_id: str | None = None, region: str = REGION) -> str:
     """POST a Batch job; returns its short name (server-generated if no id)."""
-    url = f"https://batch.googleapis.com/v1/projects/{PROJECT}/locations/{region}/jobs"
+    url = f"https://batch.googleapis.com/v1/projects/{gcp_project()}/locations/{region}/jobs"
     params = {"job_id": job_id} if job_id else None
     r = session().post(url, json=spec, params=params)
     r.raise_for_status()

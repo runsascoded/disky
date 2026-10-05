@@ -16,7 +16,7 @@ import { onRequestGet as subtree } from '../api/subtree'
 
 const META = {
   scope: 'admin',
-  vars: { ROOT_LABEL: 'our storage', SNAPSHOTS_SUBDIR: 'meta', STORE_PREFIXES: 'meta-l2/,snapshots/meta/' },
+  vars: { ROOT_LABEL: 'our storage', SNAPSHOTS_SUBDIR: 'meta', STORE_PREFIXES: 'meta-l2/,snapshots/meta/', STORE_BUCKET: 'meta-data' },
   secrets: { STORE_ACCESS_KEY_ID: 'STORE_META_ACCESS_KEY_ID', STORE_SECRET_ACCESS_KEY: 'STORE_META_SECRET_ACCESS_KEY' },
 }
 const STORES_JSON = JSON.stringify({ meta: META })
@@ -27,6 +27,7 @@ const PRIMARY: Env = {
   ROOT_LABEL: 'marin CoreWeave',
   SNAPSHOTS_SUBDIR: 'cw',
   STORE_PREFIXES: 'cw-l2/,snapshots/',
+  STORE_BUCKET: 'my-data',
   GCS_HMAC_KEY_ID: 'gcs-id',
   GCS_HMAC_SECRET: 'gcs-secret',
   STORES_JSON,
@@ -64,6 +65,7 @@ describe('storeEnv', () => {
       ROOT_LABEL: 'our storage',
       SNAPSHOTS_SUBDIR: 'meta',
       STORE_PREFIXES: 'meta-l2/,snapshots/meta/',
+      STORE_BUCKET: 'meta-data',
       STORE_ACCESS_KEY_ID: 'meta-id',
       STORE_SECRET_ACCESS_KEY: 'meta-secret',
       STORE_KEY: 'meta',
@@ -74,7 +76,7 @@ describe('storeEnv', () => {
     const env = storeEnv(PRIMARY, 'meta', META)
     expect([snapshotsPrefix(env), storeTarget(env), storeCreds(env), storeKey(env)]).toEqual([
       'snapshots/meta/',
-      { endpoint: 'https://storage.googleapis.com', bucket: 'oa-gcs-usage-dvx', region: 'us-east1' },
+      { endpoint: 'https://storage.googleapis.com', bucket: 'meta-data', region: 'us-east1' },
       { accessKeyId: 'meta-id', secretAccessKey: 'meta-secret' },
       'meta',
     ])

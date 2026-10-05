@@ -1,0 +1,71 @@
+{"op": "-- lands", "scan": "2026-09-29T1201"}
+{"op": "post", "content": ":arrow_deg0: **+0.0 TiB** [month-to-date](https://cw.example.org/?d=260929-1201#over-time) · 800 TiB · 87.9% of 1 PB · hot-data 40 TiB · [dashboard](https://cw.example.org/)\n_as of 9/29 12:01Z_\n\n*Weekly summaries*\n:arrow_deg0: [wk of 9/28](https://cw.example.org/?d=260929-1201#over-time) _(partial)_: **+0.0 TiB** → 800 TiB · 87.9% of 1 PB\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)", "thread_id": null, "username": "S3 usage — September 2026", "icon_url": null, "icon_emoji": ":calendar:"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=260929-1201#over-time): 87.9% of 1P (110.0 Ti free) · [hot](https://cw.example.org/hot-data?d=260929-1201#over-time): 40.0% of 100Ti (60.0 Ti free)", "thread_id": "m1", "username": "9/29 — 800 TiB (+0.0, 0.0%)", "icon_url": "https://icons.example.org/arrows/av_deg0.png?v=4", "icon_emoji": null}
+{"op": "-- lands", "scan": "2026-09-29T1801"}
+{"op": "edit", "ts": "m1", "content": ":arrow_deg40: **+1.0 TiB** [month-to-date](https://cw.example.org/?d=260929-1801-6h#over-time) · 801 TiB · 88.0% of 1 PB · hot-data 40 TiB (+0.0) · [dashboard](https://cw.example.org/)\n_as of 9/29 18:01Z_\n\n*Weekly summaries*\n:arrow_deg0: [wk of 9/28](https://cw.example.org/?d=260929-1801-6h#over-time) _(partial)_: **+1.0 TiB** → 801 TiB · 88.0% of 1 PB\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "-- lands", "scan": "2026-09-30T0001"}
+{"op": "edit", "ts": "m1", "content": ":arrow_deg40: **+3.5 TiB** [month-to-date](https://cw.example.org/?d=260930-0001-12h#over-time) · 804 TiB · 88.3% of 1 PB · hot-data 40 TiB (+0.5) · [dashboard](https://cw.example.org/)\n_as of 9/30 00:01Z_\n\n*Weekly summaries*\n:arrow_deg10: [wk of 9/28](https://cw.example.org/?d=260930-0001-12h#over-time) _(partial)_: **+3.5 TiB** → 804 TiB · 88.3% of 1 PB\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": ":arrow_deg40: **804 TiB (+3.5, 0.4%)** · [as of 00:01Z](https://cw.example.org/?d=260930-0001-12h#over-time) · [main](https://cw.example.org/main-data?d=260930-0001-12h#over-time): 88.3% of 1P (106.5 Ti free) · [hot](https://cw.example.org/hot-data?d=260930-0001-12h#over-time): 40.5% of 100Ti (59.5 Ti free)", "thread_id": "m1", "username": "9/30 · so far", "icon_url": null, "icon_emoji": ":hourglass_flowing_sand:"}
+{"op": "-- lands", "scan": "2026-09-30T0601"}
+{"op": "edit", "ts": "m1", "content": ":arrow_deg40: **+5.0 TiB** [month-to-date](https://cw.example.org/?d=260930-0601-18h#over-time) · 805 TiB · 88.5% of 1 PB · hot-data 41 TiB (+1.0) · [dashboard](https://cw.example.org/)\n_as of 9/30 06:01Z_\n\n*Weekly summaries*\n:arrow_deg10: [wk of 9/28](https://cw.example.org/?d=260930-0601-18h#over-time) _(partial)_: **+5.0 TiB** → 805 TiB · 88.5% of 1 PB\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "edit", "ts": "m3", "content": ":arrow_deg40: **805 TiB (+5.0, 0.6%)** · [as of 06:01Z](https://cw.example.org/?d=260930-0601-18h#over-time) · [main](https://cw.example.org/main-data?d=260930-0601-18h#over-time): 88.5% of 1P (105.0 Ti free) · [hot](https://cw.example.org/hot-data?d=260930-0601-18h#over-time): 41.0% of 100Ti (59.0 Ti free)"}
+{"op": "-- lands", "scan": "2026-10-01T0001"}
+{"op": "edit", "ts": "m1", "content": ":arrow_deg40: **+5.0 TiB** [month-to-date](https://cw.example.org/?d=260930-0601-18h#over-time) · 805 TiB · 88.5% of 1 PB · hot-data 41 TiB (+1.0) · [dashboard](https://cw.example.org/)\n_as of 9/30 06:01Z_\n\n*Weekly summaries*\n:arrow_deg10: [wk of 9/28](https://cw.example.org/?d=260930-0601-18h#over-time) _(partial)_: **+5.0 TiB** → 805 TiB · 88.5% of 1 PB\n\n![S3 usage — September 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=260930-0601-18h#over-time): 88.5% of 1P (105.0 Ti free) · [hot](https://cw.example.org/hot-data?d=260930-0601-18h#over-time): 41.0% of 100Ti (59.0 Ti free)", "thread_id": "m1", "username": "9/30 — 805 TiB (+5.0, 0.6%)", "icon_url": "https://icons.example.org/arrows/av_deg40.png?v=4", "icon_emoji": null}
+{"op": "delete", "ts": "m3", "orphans_ok": true}
+{"op": "post", "content": ":arrow_deg-60: **−15.0 TiB** [month-to-date](https://cw.example.org/?d=261001-0001-18h#over-time) · 790 TiB · 86.8% of 1 PB · hot-data 41 TiB (+0.0) · [dashboard](https://cw.example.org/)\n_as of 10/1 00:01Z_\n\n*Weekly summaries*\n:arrow_deg-30: [wk of 9/28](https://cw.example.org/?d=261001-0001-18h#over-time) _(partial)_: **−15.0 TiB** → 790 TiB · 86.8% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)", "thread_id": null, "username": "S3 usage — October 2026", "icon_url": null, "icon_emoji": ":calendar:"}
+{"op": "post", "content": ":arrow_deg-60: **790 TiB (−15.0, 1.9%)** · [as of 00:01Z](https://cw.example.org/?d=261001-0001-18h#over-time) · [main](https://cw.example.org/main-data?d=261001-0001-18h#over-time): 86.8% of 1P (120.0 Ti free) · [hot](https://cw.example.org/hot-data?d=261001-0001-18h#over-time): 41.0% of 100Ti (59.0 Ti free)", "thread_id": "m5", "username": "10/1 · so far", "icon_url": null, "icon_emoji": ":hourglass_flowing_sand:"}
+{"op": "-- lands", "scan": "2026-10-01T0601"}
+{"op": "edit", "ts": "m5", "content": ":arrow_deg-60: **−16.8 TiB** [month-to-date](https://cw.example.org/?d=261001-0601-1d#over-time) · 788 TiB · 86.6% of 1 PB · hot-data 42 TiB (+1.0) · [dashboard](https://cw.example.org/)\n_as of 10/1 06:01Z_\n\n*Weekly summaries*\n:arrow_deg-30: [wk of 9/28](https://cw.example.org/?d=261001-0601-1d#over-time) _(partial)_: **−16.8 TiB** → 788 TiB · 86.6% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "edit", "ts": "m6", "content": ":arrow_deg-60: **788 TiB (−16.8, 2.1%)** · [as of 06:01Z](https://cw.example.org/?d=261001-0601-1d#over-time) · [main](https://cw.example.org/main-data?d=261001-0601-1d#over-time): 86.6% of 1P (121.8 Ti free) · [hot](https://cw.example.org/hot-data?d=261001-0601-1d#over-time): 42.0% of 100Ti (58.0 Ti free)"}
+{"op": "-- lands", "scan": "2026-10-01T1201"}
+{"op": "edit", "ts": "m5", "content": ":arrow_deg-50: **−10.0 TiB** [month-to-date](https://cw.example.org/?d=261001-1201-1d6h#over-time) · 795 TiB · 87.4% of 1 PB · hot-data 42 TiB (+1.0) · [dashboard](https://cw.example.org/)\n_as of 10/1 12:01Z_\n\n*Weekly summaries*\n:arrow_deg-20: [wk of 9/28](https://cw.example.org/?d=261001-1201-1d6h#over-time) _(partial)_: **−10.0 TiB** → 795 TiB · 87.4% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=261001-1201-1d6h#over-time): 87.4% of 1P (115.0 Ti free) · [hot](https://cw.example.org/hot-data?d=261001-1201-1d6h#over-time): 42.0% of 100Ti (58.0 Ti free)", "thread_id": "m5", "username": "10/1 — 795 TiB (−10.0, 1.2%)", "icon_url": "https://icons.example.org/arrows/av_deg-50.png?v=4", "icon_emoji": null}
+{"op": "delete", "ts": "m6", "orphans_ok": true}
+{"op": "-- lands", "scan": "2026-10-01T1801"}
+{"op": "edit", "ts": "m5", "content": ":arrow_deg-40: **−6.0 TiB** [month-to-date](https://cw.example.org/?d=261001-1801-1d12h#over-time) · 799 TiB · 87.8% of 1 PB · hot-data 42 TiB (+1.5) · [dashboard](https://cw.example.org/)\n_as of 10/1 18:01Z_\n\n*Weekly summaries*\n:arrow_deg-10: [wk of 9/28](https://cw.example.org/?d=261001-1801-1d12h#over-time) _(partial)_: **−6.0 TiB** → 799 TiB · 87.8% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "-- lands", "scan": "2026-10-02T0001"}
+{"op": "edit", "ts": "m5", "content": ":arrow_deg50: **+15.0 TiB** [month-to-date](https://cw.example.org/?d=261002-0001-1d18h#over-time) · 820 TiB · 90.1% of 1 PB · hot-data 43 TiB (+2.0) · [dashboard](https://cw.example.org/)\n_as of 10/2 00:01Z_\n\n*Weekly summaries*\n:arrow_deg30: [wk of 9/28](https://cw.example.org/?d=261002-0001-1d18h#over-time) _(partial)_: **+15.0 TiB** → 820 TiB · 90.1% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": ":arrow_deg70: **820 TiB (+25.0, 3.1%)** · [as of 00:01Z](https://cw.example.org/?d=261002-0001-12h#over-time) · [main](https://cw.example.org/main-data?d=261002-0001-12h#over-time): 90.1% of 1P (90.0 Ti free) · [hot](https://cw.example.org/hot-data?d=261002-0001-12h#over-time): 43.0% of 100Ti (57.0 Ti free)", "thread_id": "m5", "username": "10/2 · so far", "icon_url": null, "icon_emoji": ":hourglass_flowing_sand:"}
+{"op": "-- lands", "scan": "2026-10-02T0601"}
+{"op": "edit", "ts": "m5", "content": ":arrow_deg50: **+25.0 TiB** [month-to-date](https://cw.example.org/?d=261002-0601-2d#over-time) · 830 TiB · 91.2% of 1 PB · hot-data 43 TiB (+2.0) · [dashboard](https://cw.example.org/)\n_as of 10/2 06:01Z_\n\n*Weekly summaries*\n:arrow_deg40: [wk of 9/28](https://cw.example.org/?d=261002-0601-2d#over-time) _(partial)_: **+25.0 TiB** → 830 TiB · 91.2% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "edit", "ts": "m8", "content": ":arrow_deg70: **830 TiB (+35.0, 4.4%)** · [as of 06:01Z](https://cw.example.org/?d=261002-0601-18h#over-time) · [main](https://cw.example.org/main-data?d=261002-0601-18h#over-time): 91.2% of 1P (80.0 Ti free) · [hot](https://cw.example.org/hot-data?d=261002-0601-18h#over-time): 43.0% of 100Ti (57.0 Ti free)"}
+{"op": "-- lands", "scan": "2026-10-02T1201"}
+{"op": "edit", "ts": "m5", "content": ":arrow_deg60: **+57.0 TiB** [month-to-date](https://cw.example.org/?d=261002-1201-2d6h#over-time) · 862 TiB · 94.7% of 1 PB · hot-data 43 TiB (+2.0) · [dashboard](https://cw.example.org/)\n_as of 10/2 12:01Z_\n\n*Weekly summaries*\n:arrow_deg50: [wk of 9/28](https://cw.example.org/?d=261002-1201-2d6h#over-time) _(partial)_: **+57.0 TiB** → 862 TiB · 94.7% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+{"op": "post", "content": "[main](https://cw.example.org/main-data?d=261002-1201-1d#over-time): 94.7% of 1P (48.0 Ti free) · [hot](https://cw.example.org/hot-data?d=261002-1201-1d#over-time): 43.0% of 100Ti (57.0 Ti free)", "thread_id": "m5", "username": "10/2 — 862 TiB (+67.0, 8.4%)", "icon_url": "https://icons.example.org/arrows/av_deg80.png?v=4", "icon_emoji": null}
+{"op": "delete", "ts": "m8", "orphans_ok": true}
+{"op": "-- re-run"}
+{"op": "edit", "ts": "m5", "content": ":arrow_deg60: **+57.0 TiB** [month-to-date](https://cw.example.org/?d=261002-1201-2d6h#over-time) · 862 TiB · 94.7% of 1 PB · hot-data 43 TiB (+2.0) · [dashboard](https://cw.example.org/)\n_as of 10/2 12:01Z_\n\n*Weekly summaries*\n:arrow_deg50: [wk of 9/28](https://cw.example.org/?d=261002-1201-2d6h#over-time) _(partial)_: **+57.0 TiB** → 862 TiB · 94.7% of 1 PB\n\n![S3 usage — October 2026](https://cw.icons.example.org/plot-<id>.png?v=<ts>)"}
+--- state ---
+{
+ "2026-09": {
+  "op_ts": "m1",
+  "plot_name": "plot-<id>.png",
+  "posted": {
+   "2026-09-29": {
+    "scan": "2026-09-29T1201",
+    "ts": "m2"
+   },
+   "2026-09-30": {
+    "scan": "2026-09-30T0601",
+    "ts": "m4"
+   }
+  },
+  "variant": "sender"
+ },
+ "2026-10": {
+  "op_ts": "m5",
+  "plot_name": "plot-<id>.png",
+  "posted": {
+   "2026-10-01": {
+    "scan": "2026-10-01T1201",
+    "ts": "m7"
+   },
+   "2026-10-02": {
+    "scan": "2026-10-02T1201",
+    "ts": "m9"
+   }
+  },
+  "variant": "sender"
+ }
+}

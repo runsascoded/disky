@@ -8,8 +8,8 @@
  * then, so results land (and post to Slack) without anyone polling.
  */
 import type { D1Database } from "@cloudflare/workers-types"
-import { batchJobsUrl, BATCH_REGION } from "./gcp.js"
-import { CW_BUCKET, DATA_BUCKET } from "./cwBatch.js"
+import type { BatchConfig } from "./batchConfig.js"
+import { batchJobsUrl } from "./gcp.js"
 import type { FinishedRun } from "./plans.js"
 
 const HOLD_SECS = 7 * 24 * 3600 // undo window before purge (matches gcs's ≥7d soft-delete)
@@ -37,17 +37,17 @@ interface RunSummary {
   bands: { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new: number }[]
 }
 
-async function readSummary(token: string, jobId: string, mode: string): Promise<RunSummary | null> {
+async function readSummary(cfg: BatchConfig, token: string, jobId: string, mode: string): Promise<RunSummary | null> {
   const dir = mode === "real" ? "deleted" : "would-delete"
   const obj = encodeURIComponent(`sweep/cw/runs/${jobId}/${dir}-summary.json`)
-  const r = await fetch(`https://storage.googleapis.com/storage/v1/b/${DATA_BUCKET}/o/${obj}?alt=media`, {
+  const r = await fetch(`https://storage.googleapis.com/storage/v1/b/${cfg.dataBucket}/o/${obj}?alt=media`, {
     headers: { authorization: `Bearer ${token}` },
   })
   if (!r.ok) return null
   return (await r.json().catch(() => null)) as RunSummary | null
 }
 
-async function reflect(db: D1Database, jobId: string, mode: string, s: RunSummary): Promise<void> {
+async function reflect(db: D1Database, jobId: string, mode: string, s: RunSummary, primary: string): Promise<void> {
   const real = mode === "real"
   const undoDeadline = real ? s.finished_ts + HOLD_SECS : null
   const purgeState = real && s.deleted_objects > 0 ? "pending" : "none"
@@ -65,14 +65,14 @@ async function reflect(db: D1Database, jobId: string, mode: string, s: RunSummar
       INSERT OR REPLACE INTO deletion_bands
         (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects)
       VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-    `).bind(jobId, `s3://${s.bucket ?? CW_BUCKET}/${b.prefix}`, b.bytes, b.objects, b.gone, b.overwritten, b.drift_new).run()
+    `).bind(jobId, `s3://${s.bucket ?? primary}/${b.prefix}`, b.bytes, b.objects, b.gone, b.overwritten, b.drift_new).run()
   }
 }
 
 
 /** The recent cw sweep / undo / purge Batch jobs (newest first). */
-export async function listBatchJobs(token: string): Promise<BatchJob[] | { error: string }> {
-  const r = await fetch(`${batchJobsUrl(BATCH_REGION)}?pageSize=100&orderBy=${encodeURIComponent("create_time desc")}`, {
+export async function listBatchJobs(cfg: BatchConfig, token: string): Promise<BatchJob[] | { error: string }> {
+  const r = await fetch(`${batchJobsUrl(cfg, cfg.region)}?pageSize=100&orderBy=${encodeURIComponent("create_time desc")}`, {
     headers: { authorization: `Bearer ${token}` },
   })
   if (!r.ok) return { error: `batch list failed (${r.status})` }
@@ -87,7 +87,7 @@ export const jobIdOf = (j: BatchJob): string => j.name.slice(j.name.lastIndexOf(
  * call finished — the caller announces them. A run that ended without a
  * summary reviewed nothing: its `plan_digest` becomes the empty digest, so a
  * failed dry-run never opens the real gate. */
-export async function reflectRuns(db: D1Database, token: string, jobs: BatchJob[]): Promise<FinishedRun[]> {
+export async function reflectRuns(cfg: BatchConfig, db: D1Database, token: string, jobs: BatchJob[], primary: string): Promise<FinishedRun[]> {
   const done: FinishedRun[] = []
   const pending = new Set(
     (await db.prepare("SELECT run_id FROM deletion_runs WHERE finished_ts IS NULL").all<{ run_id: string }>())
@@ -98,9 +98,9 @@ export async function reflectRuns(db: D1Database, token: string, jobs: BatchJob[
     if (!pending.has(jobId)) continue
     const mode = jobId.startsWith("cw-sweep-real-") ? "real" : "dry"
     const terminal = TERMINAL.has(j.status?.state ?? "")
-    const summary = await readSummary(token, jobId, mode)
+    const summary = await readSummary(cfg, token, jobId, mode)
     if (summary) {
-      await reflect(db, jobId, mode, summary)
+      await reflect(db, jobId, mode, summary, primary)
       done.push({ run_id: jobId, ok: true })
     } else if (terminal) {
       const r = await db.prepare("UPDATE deletion_runs SET finished_ts = ?, plan_digest = '' WHERE run_id = ? AND finished_ts IS NULL")

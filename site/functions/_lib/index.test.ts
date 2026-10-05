@@ -38,13 +38,15 @@ describe('blobKey', () => {
   })
 })
 
-// The store seam: unset `STORE_*` is byte-for-byte the GCS deploy; setting it
-// points every proxy at an S3-compatible store (R2) — specs/done/r2-serving-migration.md.
+// The store seam: `STORE_BUCKET` + the GCS endpoint and HMAC pair by default;
+// `STORE_*` points every proxy at an S3-compatible store (R2) —
+// specs/done/r2-serving-migration.md. The bucket has no default
+// (specs/oa-decoupling.md step 3).
 describe('store seam', () => {
-  const gcs = { GCS_HMAC_KEY_ID: 'gk', GCS_HMAC_SECRET: 'gs' } as never
+  const gcs = { GCS_HMAC_KEY_ID: 'gk', GCS_HMAC_SECRET: 'gs', STORE_BUCKET: 'my-data' } as never
   const r2 = { ...(gcs as object), STORE_ENDPOINT: 'https://acct.r2.cloudflarestorage.com', STORE_BUCKET: 'idx', STORE_REGION: 'auto', STORE_ACCESS_KEY_ID: 'rk', STORE_SECRET_ACCESS_KEY: 'rs' } as never
   it('defaults to GCS + the HMAC pair', () => {
-    expect(storeTarget(gcs)).toEqual({ endpoint: 'https://storage.googleapis.com', bucket: 'oa-gcs-usage-dvx', region: 'us-east1' })
+    expect(storeTarget(gcs)).toEqual({ endpoint: 'https://storage.googleapis.com', bucket: 'my-data', region: 'us-east1' })
     expect(storeCreds(gcs)).toEqual({ accessKeyId: 'gk', secretAccessKey: 'gs' })
     expect(storeReady(gcs)).toBe(true)
   })
@@ -56,6 +58,10 @@ describe('store seam', () => {
     expect(storeScheme('https://storage.googleapis.com')).toBe('gs')
     expect(storeScheme('https://acct.r2.cloudflarestorage.com')).toBe('r2')
     expect(storeScheme('https://s3.us-east-1.amazonaws.com')).toBe('s3')
+  })
+  it('is not ready without a bucket: no deployment\'s bucket is a default', () => {
+    expect(storeTarget({ GCS_HMAC_KEY_ID: 'gk', GCS_HMAC_SECRET: 'gs' } as never).bucket).toBe('')
+    expect(storeReady({ GCS_HMAC_KEY_ID: 'gk', GCS_HMAC_SECRET: 'gs' } as never)).toBe(false)
   })
   it('is not ready without a full credential pair', () => {
     expect(storeReady({} as never)).toBe(false)

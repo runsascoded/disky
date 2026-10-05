@@ -40,7 +40,7 @@ OVER_TIME_FILE = "over-time.parquet"
 #: Scans per sealed multi-scan group (capped so each build is bounded-memory +
 #: parallelizable, and a path's line reads ⌈N/K⌉ groups rather than one giant
 #: monolith; the ≤K-scan tip is served by `/api/series`'s per-scan fallback).
-#: 16 ≈ 8 days at the 12h scan cadence (specs/obs-axis-indexing.md Phase 1).
+#: 16 ≈ 4 days at the 6h scan cadence (8 at the earlier 12h) (specs/obs-axis-indexing.md Phase 1).
 OVER_TIME_GROUP_SIZE = 16
 #: The ordered scan list rides a sidecar JSON the CFW reader fetches — the
 #: D1-footer read path rebuilds row-group stats but not KV metadata, so the

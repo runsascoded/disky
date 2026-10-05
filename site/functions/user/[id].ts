@@ -5,6 +5,7 @@ import { assetImage, unfurlShell } from '../_lib/unfurl.js'
 
 interface Env {
   ASSETS: { fetch: (req: Request) => Promise<Response> }
+  ROOT_LABEL?: string
 }
 
 export const onRequest = async (ctx: { request: Request; env: Env }): Promise<Response> => {
@@ -18,7 +19,7 @@ export const onRequest = async (ctx: { request: Request; env: Env }): Promise<Re
     ?? await assetImage(ctx, '/og-users.jpg')
     ?? `${url.origin}/og.jpg`
   return unfurlShell(ctx, {
-    title: `${name} — Marin GCS usage`,
+    title: `${name} — ${ctx.env.ROOT_LABEL ?? 'Storage'}`,
     desc: 'Per-user storage breakdown: what they own, and what was assigned to them.',
     image,
     page: `${url.origin}${url.pathname}`,

@@ -380,6 +380,26 @@ button.mini.neg {
   a { color: var(--s1); }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
 }
+// The profile dialog: the package's unstyled `<ProfilePanel>`, dressed to match.
+.profile-modal {
+  .pf-form { display: grid; gap: 12px; margin-top: 10px; }
+  .pf-preview { display: flex; justify-content: center; }
+  .pf-field { display: grid; gap: 4px; }
+  .pf-label { font-size: 12px; color: var(--ink-2); }
+  .pf-input {
+    font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 8px; min-width: 0; flex: 1;
+  }
+  .pf-avatar-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pf-btn, .pf-save {
+    font: inherit; color: var(--ink); background: var(--panel-2, transparent); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 10px; cursor: pointer;
+    &:hover:not(:disabled) { border-color: var(--ink-3); }
+    &:disabled { opacity: 0.5; cursor: default; }
+  }
+  .pf-save { justify-self: start; border-color: var(--accent, #58a6ff); }
+  .pf-hint, .pf-msg { font-size: 12px; color: var(--ink-2); margin: 0; }
+}
 .token-modal {
   background: var(--panel);
   color: var(--ink);
@@ -670,7 +690,7 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   // box-shadow here would lose to): depth-based widths via the `borderWidth`
   // prop and per-cell adaptive `edge` colors via `colorForCell`, both in
   // site/src/Treemap.tsx. The old class-level inset rules were dead — dropped
-  // (same cleanup cw-s3 did in `1e5ee40`; see specs/done/branch-parity-discipline.md).
+  // (same cleanup cw-s3 did in `1e5ee40`; see cw-s3:specs/done/branch-parity-discipline.md).
   .hint { color: var(--ink-3); font-size: 12px; }
 }
 
@@ -1405,6 +1425,18 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--ink-3, #4443); }
     // Holder cell: the link's subject — small round avatar + their name.
     .holder { display: inline-flex; align-items: center; gap: 6px; }
+    // The memo edits in place: the text is the button, a dashed underline says so.
+    .memo-edit {
+      background: none; border: 0; padding: 0; font: inherit; color: inherit; text-align: left; cursor: text;
+      border-bottom: 1px dashed var(--ink-3);
+      &:hover { border-bottom-color: var(--ink); }
+    }
+    .memo-input { font: inherit; width: 100%; min-width: 16em; padding: 2px 4px; }
+    // The holder editor: name, the face picker, then Save / Cancel, stacked in the cell.
+    .holder-edit {
+      display: flex; flex-direction: column; gap: 6px; min-width: 18em;
+      .err { margin: 0; color: var(--del, #c33); font-size: 12px; }
+    }
     .grant-avi {
       flex: none;
       width: 20px;
@@ -2207,9 +2239,9 @@ select.assign-sel {
 // The diff crumb's "⊕ first scanned" term: a root that entered the scan.
 .diff-move .first { color: var(--ink-3); }
 
-// The help line (specs/edu-drawer.md): one fixed strip that mirrors the
+// The help line (specs/done/edu-drawer.md): one fixed strip that mirrors the
 // hovered/focused control's explanation; nothing floats over controls.
-// The help card (specs/edu-drawer.md): a bottom-LEFT panel (the SpeedDial
+// The help card (specs/done/edu-drawer.md): a bottom-LEFT panel (the SpeedDial
 // owns bottom-right) that shows the hovered/focused control's explanation,
 // with a real border + shadow so it reads as a surface, not a status strip.
 // Idle it is a small "?" chip. It fades in; a prefers-reduced-motion reader
@@ -2302,35 +2334,46 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
 .staged-page {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 20px 24px 48px;
+  padding: 8px 24px 48px;
+  @media (max-width: 640px) { padding: 8px 12px 40px; }
+  .staged-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .pp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 16px; flex-wrap: wrap; h2 { margin: 18px 0 4px; } }
+  .scan-pick { font-size: 13px; color: var(--ink-2); select { font: inherit; } }
+  // The staged set as a map (and the selection's, beside it when there is one).
+  .staged-maps {
+    display: grid; grid-template-columns: 1fr; gap: 16px; margin: 10px 0 14px;
+    &.two { grid-template-columns: 1fr 1fr; @media (max-width: 900px) { grid-template-columns: 1fr; } }
+    h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+    .map-box { min-width: 0;
+      .dt-treemap-map { flex-basis: 380px !important; height: 380px; @media (max-width: 640px) { flex-basis: 300px !important; height: 300px; } }
+    }
+  }
+  .fold-all { margin-left: auto; display: inline-flex; gap: 4px; }
+  .batch-head {
+    .fold { background: none; border: 0; color: var(--ink-2); cursor: pointer; padding: 0 2px; font-size: 13px; &:hover { color: var(--ink); } }
+    .memo { flex-basis: 100%; padding-left: 20px; }
+  }
+  .stage-batch.folded { margin: 6px 0; }
+  .staged-wrap { overflow-x: auto; max-width: 100%; }
+  .pg { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; font-size: 13px;
+    > span { padding: 0 6px; color: var(--ink-2); }
+    button { font: inherit; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; cursor: pointer; &:disabled { opacity: 0.4; cursor: default; } }
+  }
   h1 { font-size: 22px; margin: 10px 0 4px; }
   h2 { margin-top: 28px; }
   .sub { color: var(--ink-2); max-width: 80ch; }
   .err { color: var(--s3); }
   .dim { color: var(--ink-3); }
+  .staged-filter {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 14px 0 4px; font-size: 13px;
+    input[type=search] { flex: 1 1 320px; min-width: 0; max-width: 560px; padding: 5px 8px; font: inherit; background: var(--bg-2, #1e1e1e); color: inherit; border: 1px solid var(--border, #444); border-radius: 4px; }
+    input.bad { border-color: var(--danger, #e05050); }
+    .err { color: var(--danger, #e05050); font-size: 12px; }
+    .group-by { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  }
   .staged-actions { display: flex; align-items: center; gap: 12px; margin: 6px 0 10px; font-size: 13px; .sel-all { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; } }
   .stage-batch { margin: 12px 0 18px; }
   .batch-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); .memo { color: var(--ink); } }
-  .staged-table {
-    width: 100%; border-collapse: collapse; font-size: 13.5px; margin-top: 4px;
-    td { padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-    code { font-size: 12.5px; }
-    .nb, .user-chip { white-space: nowrap; display: inline-block; }
-    // Selection: the checkbox column is the mouse/touch handle; the path
-    // column comes second and may break anywhere, but never below a readable
-    // width — past that the table scrolls in its box instead of crushing it.
-    td.col-sel { width: 1.6em; padding-right: 0; input { margin: 0; vertical-align: middle; cursor: pointer; } }
-    td:nth-child(2) { overflow-wrap: anywhere; min-width: 16em; }
-    tbody tr { cursor: default; }
-    tr.sel td { background: color-mix(in srgb, var(--accent, #58a6ff) 14%, transparent); }
-    // The cursor is the keyboard row (j/k target) and the anchor a shift-click
-    // or shift+j/k extends *from* — a distinct concept from what's selected.
-    tr.cur td { box-shadow: inset 0 2px 0 var(--accent, #58a6ff), inset 0 -2px 0 var(--accent, #58a6ff); }
-    tr.cur td:first-child { box-shadow: inset 2px 0 0 var(--accent, #58a6ff), inset 0 2px 0 var(--accent, #58a6ff), inset 0 -2px 0 var(--accent, #58a6ff); }
-    tr.cur td:last-child { box-shadow: inset -2px 0 0 var(--accent, #58a6ff), inset 0 2px 0 var(--accent, #58a6ff), inset 0 -2px 0 var(--accent, #58a6ff); }
-    td.actions { width: 2em; text-align: right; }
-    .rm { background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--ink-3); cursor: pointer; padding: 0 6px; &:hover { color: var(--ink); border-color: var(--ink-3); } }
-  }
   .staged-empty { color: var(--ink-3); margin: 18px 0; }
   // A wide table scrolls inside its own box; the page never scrolls sideways.
   .runs-wrap { overflow-x: auto; max-width: 100%; }
@@ -2365,6 +2408,81 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     &.danger { border-color: var(--danger); color: var(--danger); font-weight: 650; }
     &.danger.armed { background: var(--danger); color: #fff; }
   }
+  .close-plan button, .run-detail button.more, .runs-pg button {
+    font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
+    &:hover { border-color: var(--ink-2); }
+    &:disabled { opacity: 0.45; cursor: default; }
+    &.on { border-color: var(--ink-2); font-weight: 600; }
+    &.danger.armed { background: var(--danger); color: #fff; border-color: var(--danger); }
+  }
+  // Which plan the page shows (the open one, or a closed one's runs).
+  .plan-pick { display: inline-block; margin: 8px 0 0; font-size: 13px; color: var(--ink-2); select { font: inherit; max-width: 100%; } }
+  .plan-note { margin: 6px 0 0; font-style: italic; }
+  .close-plan { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 0; }
+  .dispatch-buckets {
+    font-size: 13px;
+    summary { cursor: pointer; }
+    label { display: block; margin: 2px 0 2px 12px; &.off { opacity: 0.55; } }
+    p { margin: 4px 0 0; }
+  }
+  // A gesture whose prefixes all went elsewhere: one folded line.
+  .stage-batch.emptied .batch-head { opacity: 0.8; }
+  .runs-pg { flex-wrap: wrap; }
+  table.runs {
+    th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    td.nb, td.num { white-space: nowrap; }
+    .tag.real { margin-left: 0; color: var(--danger); border-color: var(--danger); font-weight: 650; }
+    .fold { background: none; border: 0; padding: 0 2px; color: var(--ink-2); &:hover { color: var(--ink); } }
+    .prog progress { width: 64px; height: 8px; vertical-align: middle; }
+    td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
+    tr.live td.rid { font-weight: 600; }
+    tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
+  }
+  .run-detail {
+    font-size: 13px;
+    h4 { margin: 10px 0 4px; font-size: 12.5px; color: var(--ink-2); }
+    p { margin: 2px 0; }
+    .rd-totals { margin: 0; display: grid; gap: 2px;
+      > div { display: flex; gap: 8px; flex-wrap: wrap; }
+      dt { color: var(--ink-3); min-width: 6.5em; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+    }
+    table.runs { margin-top: 2px; font-size: 12.5px; tr.total td { font-weight: 600; } }
+    .rd-checks { list-style: none; margin: 0; padding: 0;
+      li.ok { color: var(--ink-2); }
+      li.off { color: var(--danger); }
+    }
+  }
+}
+
+// A table of arbitrary prefixes and their numbers at a scan (`PrefixTable`):
+// /staged's items; the action log and the map's table are to converge on it.
+.prefix-table {
+  width: 100%; border-collapse: collapse; font-size: 13.5px; margin-top: 4px;
+  th { text-align: left; color: var(--ink-3); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; font-size: 12.5px; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th.sortable { cursor: pointer; user-select: none; &:hover, &.on { color: var(--ink); } }
+  td { padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  td.created, td.read, td.owners, td.nb { white-space: nowrap; }
+  .when .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  td.staged-by { display: table-cell; font-size: 12.5px; .user-chip { margin-right: 4px; } }
+  code { font-size: 12.5px; }
+  .nb, .user-chip { white-space: nowrap; display: inline-block; }
+  // Selection: the leading checkbox column is the mouse/touch handle; the
+  // prefix may break anywhere, but never below a readable width — past that
+  // the table scrolls in its box instead of crushing it.
+  th.col-lead, td.col-lead { width: 1.6em; padding-right: 0; input { margin: 0; vertical-align: middle; cursor: pointer; } }
+  td.pfx { overflow-wrap: anywhere; min-width: 16em; code { word-break: break-all; } }
+  tbody tr { cursor: default; }
+  tr.sel td { background: color-mix(in srgb, var(--accent, #58a6ff) 14%, transparent); }
+  // The cursor is the keyboard row (j/k target) and the anchor a shift-click
+  // or shift+j/k extends *from* — a distinct concept from what's selected.
+  tr.cur td { box-shadow: inset 0 2px 0 var(--accent, #58a6ff), inset 0 -2px 0 var(--accent, #58a6ff); }
+  tr.cur td:first-child { box-shadow: inset 2px 0 0 var(--accent, #58a6ff), inset 0 2px 0 var(--accent, #58a6ff), inset 0 -2px 0 var(--accent, #58a6ff); }
+  tr.cur td:last-child { box-shadow: inset -2px 0 0 var(--accent, #58a6ff), inset 0 2px 0 var(--accent, #58a6ff), inset 0 -2px 0 var(--accent, #58a6ff); }
+  td.actions { width: 2em; text-align: right; }
+  .rm { background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--ink-3); cursor: pointer; padding: 0 6px; &:hover { color: var(--ink); border-color: var(--ink-3); } }
 }
 
 // `?perf=1` time-to-render panel (dev/PerfOverlay.tsx). Sits where the help
@@ -2418,4 +2536,49 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   font-size: 12px; white-space: nowrap;
   i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; vertical-align: -1px; margin-right: 3px; }
   .dim { opacity: 0.7; }
+}
+
+.assign-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--warn, #e0a030);
+  button.danger { color: var(--danger, #e05050); border-color: currentColor; }
+}
+
+.action-log {
+  margin-top: 28px;
+  .hrow { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; h2 { margin: 0; font-size: 18px; } }
+  .pg { margin-left: auto; display: inline-flex; gap: 4px; align-items: center; font-size: 12px; }
+  table.log {
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-top: 8px;
+    th, td { padding: 4px 8px; border-bottom: 1px solid var(--border, #333); text-align: left; vertical-align: top; }
+    td.when { white-space: nowrap; }
+    td.prefix { font-family: var(--mono, ui-monospace, monospace); word-break: break-all; min-width: 360px; }
+    td.memo { max-width: 320px; color: var(--dim, #999); .clip { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
+    tr.retracted td:not(:nth-child(5)), tr.superseded td:not(:nth-child(5)), tr.overridden td:not(:nth-child(5)) { opacity: 0.55; }
+    tr.retracted td.prefix a { text-decoration: line-through; }
+    .status { padding: 1px 6px; border-radius: 8px; font-size: 11px; border: 1px solid currentColor; }
+    .status.live { color: var(--ok, #4caf50); }
+    .status.superseded, .status.overridden { color: var(--dim, #999); }
+    .status.retracted { color: var(--danger, #e05050); }
+  }
+}
+
+.share-modal {
+  .share-opt {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    margin: 12px 0;
+    cursor: pointer;
+    input { margin-top: 3px; }
+    .hint { display: block; font-size: 12px; color: var(--dim, #999); margin-top: 2px; }
+    &.disabled { cursor: default; opacity: 0.55; }
+  }
+  .share-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; .err { color: var(--danger, #e05050); font-size: 12px; } }
+  .share-url { display: block; margin-top: 10px; font-size: 11px; word-break: break-all; opacity: 0.8; }
 }

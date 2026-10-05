@@ -35,7 +35,7 @@ const PAGE_SIZES = [20, 50, 100, 200]
  *  tooltip); ~60 chars fills the column's 480px at 12px mono. */
 const NAME_MAX = 60
 
-export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject }: {
+export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, actionable }: {
   /** The treemap's currently-viewed node. */
   node: TreeNode
   /** Path segments from the tree root to `node` (no scheme, no root). */
@@ -52,6 +52,9 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   onOpen: (segs: string[]) => void
   /** An object row was opened: show it in the leaf viewer. */
   onOpenObject: (segs: string[]) => void
+  /** Under a filter: which rows (path below the root) may be assigned or
+   *  trashed — those inside a match root (`inMatchRoots`). Absent: all. */
+  actionable?: (path: string) => boolean
 }) {
   usePerfCommit('table')
   const { fmtBytes } = useUnits()
@@ -69,7 +72,10 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const canStage = useCanStage()
   const stage = useStage()
   const assigning = !!ownerIdx && store.owners && canAssign
-  const showSel = staging ? canStage : assigning
+  // At the store root every row is a whole bucket (on a `*` store, a whole
+  // top-level root), which a plan item can't name: no trash there.
+  const canTrash = staging && segs.length > 0
+  const showSel = staging ? canStage && (canTrash || assigning) : assigning
   const trash = (uri: string, k: TreeNode['k']) => stage.mutate({ prefixes: [actionPrefix(uri, k)] })
   // One memo for the whole multi-select gesture (stored on the stage batch).
   const [memo, setMemo] = useState('')
@@ -121,7 +127,8 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const uriOfKid = (k: TreeNode) => scheme + [...segs, k.n].join('/')
   // Rows select (click / shift / ⌘, checkboxes, j/k) into one set keyed by
   // uri; the bar above the table stages or assigns the whole selection at once.
-  const selectable = useMemo(() => shown.filter(k => !k.n.startsWith('(')), [shown])
+  const acts = (k: TreeNode) => !k.n.startsWith('(') && (!actionable || actionable([...segs, k.n].join('/')))
+  const selectable = useMemo(() => shown.filter(acts), [shown, actionable, segs]) // eslint-disable-line react-hooks/exhaustive-deps
   const sel = useRowSelection(selectable, uriOfKid)
   useRowSelectionKeys(sel, 'tbl', 'Children table')
   // Selection survives paging and sort by key, but not a drill: the rows
@@ -176,7 +183,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
     <span className="sel-bar">
       <b>{sel.selected.size}</b> selected · {fmtBytes(selBytes)}
       <span className="acts">
-        {staging && (<>
+        {canTrash && (<>
           <Tooltip content="Optional: one note for this deletion — why these prefixes go. Stored with the batch, visible to the admin who dispatches.">
             <input className="memo" value={memo} onChange={e => setMemo(e.target.value)} placeholder="note (optional)" aria-label="deletion note" />
           </Tooltip>
@@ -290,9 +297,14 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                 )}
                 {showSel && (
                   <td className="actions">
-                    {!synthetic && (
+                    {!synthetic && !acts(k) && (
+                      <Tooltip content="Under a filter this row shows only its matching bytes, but an action would take the whole prefix. Drill in to the matches (or use the filter's bulk bar) to act on them.">
+                        <span className="none">—</span>
+                      </Tooltip>
+                    )}
+                    {!synthetic && acts(k) && (
                       <>
-                        {staging && (
+                        {canTrash && (
                           <Tooltip content="Stage this prefix for deletion — an admin approves and dispatches from /staged">
                             <button type="button" className="trash" onClick={() => trash(uri, k.k)} aria-label="trash"><FaRegTrashCan /></button>
                           </Tooltip>
@@ -319,6 +331,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
         </tfoot>
       </table>
       {pager && <div className="pager">{pager}</div>}
+      {stage.error && <p className="err stage-err">Couldn’t stage: {stage.error.message}</p>}
       {/* The selection bar docks BELOW the table (sticky), so making a
           selection never shifts the rows you're clicking. The dock is ALWAYS
           rendered when the table is actionable — its height is reserved even

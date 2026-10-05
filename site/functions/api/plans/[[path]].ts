@@ -8,7 +8,8 @@
 //   DELETE /api/plans/:id/items    { prefixes: [...] }                     admin
 //   POST   /api/plans/stage        { prefixes: [...], note? } -> { plan_id, batch_id, staged, covered, absorbed }
 //                                                                          stager (`STAGING` deployments)
-//   GET    /api/plans/staged       the shared open plan (+ items, batches, runs), or { plan: null }   viewer
+//   GET    /api/plans/staged       the shared open plan (+ items, batches, emptied batches, runs), or { plan: null }   viewer
+//   GET    /api/plans/run?id=<run> one run's record + its per-band rows      viewer
 //
 // Reads are open to any authenticated viewer; curating a plan's items and
 // closing plans require admin; staging (the opt-in trash proposal) needs the
@@ -17,8 +18,8 @@
 // deployment's shape (`STORE_SCHEME` / `STORE_BUCKETS`).
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requireViewer } from "../../_lib/auth.js"
-import { audit, canonicalPrefix, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, stageItems } from "../../_lib/plans.js"
-import { notifyPlan, stageEvent, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { audit, canonicalPrefix, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
+import { notifyPlan, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
 
 type Env = AuthEnv & NotifyEnv & { DB?: D1Database }
 type Bg = (p: Promise<unknown>) => void
@@ -49,7 +50,7 @@ async function getPlan(db: D1Database, id: number, staging: boolean): Promise<Re
 
 async function getStaged(db: D1Database, staging: boolean): Promise<Response> {
   const id = await openPlanId(db)
-  if (id == null) return json({ plan: null, items: [], batches: [], runs: [] })
+  if (id == null) return json({ plan: null, items: [], batches: [], emptied: [], runs: [] })
   return json(await planDetail(db, id, staging))
 }
 
@@ -145,6 +146,7 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
     // The full base scope: a read-only guest link can't propose.
     const gated = await requireStager(ctx)
     if (gated instanceof Response) return gated
+    if (!shape) return json({ error: `staging ${NO_SHAPE}` }, 503)
     const body = await readBody(ctx.request)
     const prefixes = Array.isArray(body.prefixes)
       ? (body.prefixes as unknown[]).filter((x): x is string => typeof x === "string")
@@ -158,9 +160,20 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
     if (res.staged.length) {
       const siteUrl = new URL(ctx.request.url).origin
       background(ctx, notifyPlan(ctx.env, db, res.plan_id, siteUrl,
-        stageEvent({ planId: res.plan_id, batchId: res.batch_id, by, prefixes: res.staged, covered: res.covered.length, note, siteUrl })))
+        { stage: { planId: res.plan_id, batchId: res.batch_id, by, prefixes: res.staged, covered: res.covered.length, note, siteUrl } }))
     }
     return json(res, 201)
+  }
+
+  // /api/plans/run?id=<run_id> — one run's record + per-band rows (a run id
+  // may hold a `/`, so it rides in the query).
+  if (segs.length === 1 && segs[0] === "run" && method === "GET") {
+    const gated = await requireViewer(ctx)
+    if (gated instanceof Response) return gated
+    const runId = new URL(ctx.request.url).searchParams.get("id") ?? ""
+    if (!runId) return json({ error: "id required" }, 400)
+    const d = await runDetail(db, runId)
+    return d ? json(d) : json({ error: "no such run" }, 404)
   }
 
   const id = Number(segs[0])
@@ -179,12 +192,25 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
     return json({ error: "method not allowed" }, 405)
   }
 
+  // /api/plans/:id/slack — admin: re-render the plan's Slack thread (parent,
+  // and the stage-batch replies named by `{ replies: { <batch_id>: <ts> } }`),
+  // e.g. after the message format changes. Edits don't notify anyone.
+  if (segs.length === 2 && segs[1] === "slack" && method === "POST") {
+    const gated = await requireAdmin(ctx)
+    if (gated instanceof Response) return gated
+    const body = await readBody(ctx.request)
+    const replies = (body.replies && typeof body.replies === "object" ? body.replies : {}) as Record<string, unknown>
+    const ok = Object.entries(replies).filter((e): e is [string, string] => /^\d+$/.test(e[0]) && typeof e[1] === "string" && /^\d+\.\d+$/.test(e[1]))
+    return json(await refreshThread(ctx.env as NotifyEnv, db, id, new URL(ctx.request.url).origin, Object.fromEntries(ok.map(([b, t]) => [Number(b), t]))))
+  }
+
   // /api/plans/:id/items — admins curate; on a staging deployment a stager
   // may DELETE (unstage) their own items.
   if (segs.length === 2 && segs[1] === "items" && (method === "POST" || method === "DELETE")) {
     const gated = await (staging && method === "DELETE" ? requireStager(ctx) : requireAdmin(ctx))
     if (gated instanceof Response) return gated
     const who = gated.email ?? gated.name ?? 'guest'
+    if (!shape) return json({ error: `plan items ${NO_SHAPE}` }, 503)
     const res = await editItems(db, who, id, method === "POST", await readBody(ctx.request), shape, !gated.admin)
     if (res.ok) {
       const body = (await res.clone().json()) as { added?: string[]; removed?: string[] }

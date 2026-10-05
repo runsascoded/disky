@@ -10,6 +10,7 @@ import { useScan } from './scan'
 import { useUnits } from './units'
 import { useDocTitle } from './title'
 import { Busy, Skeleton } from './Busy'
+import { ActionLog } from './ActionLog'
 
 interface Cell { by: string; to: string; bytes: number; prefixes: string[] }
 
@@ -102,6 +103,7 @@ export function AssignmentsPage() {
           </table>
         </div>
       )}
+      <ActionLog />
       <SiteKbd />
     </main>
   )

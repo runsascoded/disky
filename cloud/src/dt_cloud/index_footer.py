@@ -1,7 +1,7 @@
 """Extract a parquet's footer as hyparquet-compatible JSON (schema + per-row-group
 column metadata) and sync it to the site's D1, so the Cloudflare reader can build
 a subset ``FileMetaData`` for a prefix query without parsing the whole footer on a
-cold isolate (specs/path-agnostic-serving.md §2.1 — the footer-in-D1 seam).
+cold isolate (specs/done/path-agnostic-serving.md §2.1 — the footer-in-D1 seam).
 
 Only the fields a *read* needs are kept, in the compact form the reader revives
 (`reviveRowGroup` in `site/functions/_lib/index.ts`):
@@ -488,24 +488,36 @@ def sync_d1(
     return len(rows)
 
 
-def gc_d1(date: str, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> int:
+def gc_d1(date: str, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE, dry_run: bool = False) -> int:
     """Delete every row group of ``date`` whose generation is not the one its
     variant's schema row points at (leftovers of a flip, or of a sync that
-    failed before flipping). Returns rows deleted. Safe any time: readers only
-    ever query the pointer's generation, and a handle outlives the pointer by
-    at most its cache TTL (`_lib/index.ts`), which the end-of-job call clears."""
+    failed before flipping). Returns rows deleted (``dry_run``: counted, not
+    deleted). Safe any time: readers only ever query the pointer's
+    generation, and a handle outlives the pointer by at most its cache TTL
+    (`_lib/index.ts`), which the end-of-job call clears."""
     tok, acct = _creds()
     # The primary's statement (unchanged) matches each row to the pointer of its
     # own (date, variant), so a secondary store's namespaced rows are judged by
     # their own pointer too; `store=` restricts the sweep to that store.
     sw = "" if check_store(store) == PRIMARY_STORE else f"store = '{_sql_escape(store)}' AND "
-    rows = _d1_query(
-        "DELETE FROM index_row_groups WHERE {sw}date = '{d}' AND gen <> COALESCE("
-        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '') "
-        "RETURNING 1 AS n;".format(sw=sw, d=_sql_escape(date)),
-        acct, tok, db_id,
-    )
+    where = (
+        "WHERE {sw}date = '{d}' AND gen <> COALESCE("
+        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '')"
+    ).format(sw=sw, d=_sql_escape(date))
+    if dry_run:
+        rows = _d1_query(f"SELECT COUNT(*) AS n FROM index_row_groups {where};", acct, tok, db_id)
+        return int(rows[0]["n"]) if rows else 0
+    rows = _d1_query(f"DELETE FROM index_row_groups {where} RETURNING 1 AS n;", acct, tok, db_id)
     return len(rows)
+
+
+def pointers(db_id: str = D1_DB_ID) -> list[tuple[str, str, str]]:
+    """Every ``index_schema`` row as ``(date, variant, dir)``, across every
+    store (a secondary store's variants keep their ``<store>:`` prefix): the
+    generation dirs some reader can reach. `gen_gc` keeps all of them."""
+    tok, acct = _creds()
+    rows = _d1_query("SELECT date, variant, dir FROM index_schema ORDER BY date, variant;", acct, tok, db_id)
+    return [(r["date"], r["variant"], r["dir"]) for r in rows if r.get("dir")]
 
 
 # The path store's sorts (specs/path-store.md §1.2), variant → file under the
@@ -553,7 +565,7 @@ def retire_d1(
     retain: int,
     db_id: str = D1_DB_ID,
     store: str = PRIMARY_STORE,
-    base: str = "oa-gcs-usage-dvx",
+    base: str | None = None,
     has_cold=exists,
 ) -> tuple[list[tuple[str, str, int]], list[tuple[str, str, str]]]:
     """Retention (specs/path-store.md §1.6): drop the store sorts' row groups
@@ -572,6 +584,9 @@ def retire_d1(
     Returns ``(retired, skipped)``: (date, variant, rows deleted) per retired
     variant, (date, variant, missing path) per variant kept for want of its
     cold footer."""
+    if base is None:
+        from .deploy import data_bucket
+        base = data_bucket()
     tok, acct = _creds()
     dates = sorted({d for d, _ in synced_variants(db_id, store)})
     old = set(dates[:-retain] if retain > 0 else dates)

@@ -4,33 +4,33 @@
 // Batch executor consumes. D1 CRUD + snapshot + the admin-edit audit trail
 // live here; the HTTP surface is api/plans/[[path]].ts.
 import type { D1Database } from "@cloudflare/workers-types"
-import { CW_BUCKET, CW_BUCKETS } from "./cwBatch.js"
 
-// A plan prefix stored as `<scheme><bucket>/<path>/` (`s3://` on the
-// CoreWeave deployment, `gs://` on gcs.oa.dev); normalized to a relative key
+// A plan prefix stored as `<scheme><bucket>/<path>/` (the deployment's
+// `STORE_SCHEME`: `s3://`, `gs://`, `file:///`); normalized to a relative key
 // prefix only at snapshot time.
 const PREFIX_RE = /^(?!\/)(?![.]{1,2}\/)[^\\]+\/$/
 const SCHEME_RE = /^[a-z0-9]+:\/\//
 
 /** The deployment's prefix convention: the URI scheme its stored prefixes
  * carry and the buckets its scan covers (first = primary). From `[vars]`
- * (`STORE_SCHEME`, `STORE_BUCKETS`); unset = the CoreWeave deployment's, so
- * an unconfigured store is unchanged. */
+ * (`STORE_SCHEME`, default `s3://`; `STORE_BUCKETS`). No buckets = no shape
+ * (null): the plans and sweep routes refuse until the deployment names them. */
 export interface PrefixShape {
   scheme: string
   buckets: readonly string[]
 }
-export const CW_SHAPE: PrefixShape = { scheme: 's3://', buckets: CW_BUCKETS }
-export function prefixShape(env: { STORE_SCHEME?: string; STORE_BUCKETS?: string }): PrefixShape {
-  const buckets = env.STORE_BUCKETS ? env.STORE_BUCKETS.split(',').map(s => s.trim()).filter(Boolean) : null
-  return { scheme: env.STORE_SCHEME ?? CW_SHAPE.scheme, buckets: buckets?.length ? buckets : CW_SHAPE.buckets }
+export function prefixShape(env: { STORE_SCHEME?: string; STORE_BUCKETS?: string }): PrefixShape | null {
+  const buckets = (env.STORE_BUCKETS ?? '').split(',').map(s => s.trim()).filter(Boolean)
+  return buckets.length ? { scheme: env.STORE_SCHEME ?? 's3://', buckets } : null
 }
+/** The 503 message when `prefixShape` is null. */
+export const NO_SHAPE = 'not configured (STORE_BUCKETS unset)'
 
 /** The bucket a raw prefix names — `<scheme><b>/…` or `<b>/…` for a scanned
  * bucket — else the primary. The treemap's paths start with the bucket, so
- * a plan item under `hero-checkpoints/…` must not canonicalize under
+ * a plan item under a second bucket's `<b>/…` must not canonicalize under
  * the primary (specs/done/cw-multi-bucket.md §4). */
-export function bucketOf(raw: string, buckets: readonly string[] = CW_BUCKETS): string {
+export function bucketOf(raw: string, buckets: readonly string[]): string {
   const s = raw.trim().replace(SCHEME_RE, "").replace(/^\/+/, "")
   // `*` (`STORE_BUCKETS = "*"`): every top-level segment is a root — a
   // filesystem-root capture's `Applications`, `Users`, … — so a prefix's
@@ -50,7 +50,7 @@ export interface PlanRow {
 }
 
 /** `s3://bucket/a/b/` (any scheme) or `/a/b` or `a/b` -> `a/b/` (relative, trailing slash). */
-export function relPrefix(raw: string, bucket: string = CW_BUCKET): string {
+export function relPrefix(raw: string, bucket: string): string {
   // Leading slashes go first: a `file:///` URI leaves `/Users/…` after the
   // scheme, which must still match its bucket.
   let s = raw.trim().replace(SCHEME_RE, "").replace(/^\/+/, "")
@@ -62,7 +62,7 @@ export function relPrefix(raw: string, bucket: string = CW_BUCKET): string {
 /** Canonical stored form of a plan-item prefix: `<scheme><bucket>/<path>/`
  * in the deployment's shape, the bucket resolved from the raw (`bucketOf`
  * over the shape's buckets) unless given. */
-export function canonicalPrefix(raw: string, shape: PrefixShape = CW_SHAPE, bucket: string = bucketOf(raw, shape.buckets)): string | null {
+export function canonicalPrefix(raw: string, shape: PrefixShape, bucket: string = bucketOf(raw, shape.buckets)): string | null {
   const rel = relPrefix(raw, bucket)
   if (!PREFIX_RE.test(rel)) return null
   return `${shape.scheme}${bucket}/${rel}`
@@ -95,8 +95,8 @@ export async function stageItems(
   db: D1Database,
   rawPrefixes: string[],
   who: string,
-  note: string | null = null,
-  shape: PrefixShape = CW_SHAPE,
+  note: string | null,
+  shape: PrefixShape,
 ): Promise<{ plan_id: number; batch_id: number; staged: string[]; covered: string[]; absorbed: string[] } | { error: string }> {
   const prefixes: string[] = []
   for (const r of rawPrefixes) {
@@ -149,10 +149,67 @@ export function planStaging(have: readonly string[], add: readonly string[]): { 
 export interface StageBatchRow { id: number; plan_id: number; note: string | null; created_by: string; created_ts: number }
 export interface PlanItemRow { prefix: string; note: string | null; added_by: string; added_ts: number; batch_id: number | null }
 
+/** A `plan_items` audit row (`admin_edits`, `tbl = 'plan_items'`, pk = the plan id). */
+export interface PlanEdit { action: string; old_json: string | null; new_json: string | null }
+
+/** A stage batch with no items left, and what became of what it staged
+ * (specs/staged-runs.md): `absorbed` into later batches (a gesture that staged
+ * an ancestor), `unstaged` (taken back), and `covered` — named by an already
+ * staged ancestor when it was staged, so never added. `staged` = the prefixes
+ * it added. */
+export interface EmptiedBatch extends StageBatchRow {
+  staged: number
+  covered: number
+  absorbed: { into: number; n: number }[]
+  unstaged: number
+}
+
+/** The plan's emptied stage batches, by replaying its `plan_items` audit trail
+ * (pure): who held each prefix, and which gesture took it away. */
+export function emptiedBatches(batches: readonly StageBatchRow[], items: readonly PlanItemRow[], edits: readonly PlanEdit[]): EmptiedBatch[] {
+  const live = new Set(items.map(i => i.batch_id))
+  const parse = (s: string | null): Record<string, unknown> => { try { return (s ? JSON.parse(s) : {}) as Record<string, unknown> } catch { return {} } }
+  const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+  const owner = new Map<string, number | null>()
+  const fate = new Map<number, { staged: number; covered: number; absorbed: Map<number, number>; unstaged: number }>()
+  const of = (b: number) => { let f = fate.get(b); if (!f) fate.set(b, f = { staged: 0, covered: 0, absorbed: new Map(), unstaged: 0 }); return f }
+  for (const e of edits) {
+    const o = parse(e.old_json)
+    const n = parse(e.new_json)
+    if (e.action === 'insert') {
+      const batch = typeof n.batch_id === 'number' ? n.batch_id : null
+      for (const p of strs(o.absorbed)) {
+        const was = owner.get(p)
+        if (was != null && batch != null) { const a = of(was).absorbed; a.set(batch, (a.get(batch) ?? 0) + 1) }
+        owner.delete(p)
+      }
+      // A stage gesture's `staged` (a re-staged prefix keeps its first batch);
+      // an admin's curation (`prefixes`, no batch).
+      for (const p of [...strs(n.staged), ...strs(n.prefixes)]) {
+        if (owner.has(p)) continue
+        owner.set(p, batch)
+        if (batch != null) of(batch).staged++
+      }
+      if (batch != null) of(batch).covered += strs(n.covered).length
+    } else if (e.action === 'delete') {
+      for (const p of strs(o.prefixes)) {
+        const was = owner.get(p)
+        if (was != null) of(was).unstaged++
+        owner.delete(p)
+      }
+    }
+  }
+  return batches.filter(b => !live.has(b.id)).map(b => {
+    const f = fate.get(b.id) ?? { staged: 0, covered: 0, absorbed: new Map<number, number>(), unstaged: 0 }
+    return { ...b, staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged }
+  })
+}
+
 /** A plan with its items (memo joined from the stage batch where the deployment
- * stages), its stage batches and its runs — what `/staged` and `/api/plans/:id`
- * render. `staging` = the `stage_batches` table exists here. */
-export async function planDetail(db: D1Database, id: number, staging: boolean): Promise<{ plan: PlanRow; items: PlanItemRow[]; batches: StageBatchRow[]; runs: Record<string, unknown>[] } | null> {
+ * stages), its stage batches (`emptied`: those with no items left, with their
+ * fate) and its runs — what `/staged` and `/api/plans/:id` render. `staging` =
+ * the `stage_batches` table exists here. */
+export async function planDetail(db: D1Database, id: number, staging: boolean): Promise<{ plan: PlanRow; items: PlanItemRow[]; batches: StageBatchRow[]; emptied: EmptiedBatch[]; runs: Record<string, unknown>[] } | null> {
   const plan = await db.prepare('SELECT * FROM plans WHERE id = ?').bind(id).first<PlanRow>()
   if (!plan) return null
   const items = staging
@@ -166,7 +223,19 @@ export async function planDetail(db: D1Database, id: number, staging: boolean): 
     ? (await db.prepare('SELECT * FROM stage_batches WHERE plan_id = ? ORDER BY created_ts DESC').bind(id).all<StageBatchRow>()).results
     : []
   const runs = await db.prepare('SELECT * FROM deletion_runs WHERE plan_id = ? ORDER BY started_ts DESC').bind(id).all<Record<string, unknown>>()
-  return { plan, items: items.results, batches, runs: runs.results }
+  const edits = staging
+    ? (await db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()).results
+    : []
+  return { plan, items: items.results, batches, emptied: emptiedBatches(batches, items.results, edits), runs: runs.results }
+}
+
+/** One run's D1 record and its per-band rows (largest first) — the run detail
+ * `/staged` expands a run row into (`GET /api/plans/run?id=`). */
+export async function runDetail(db: D1Database, runId: string): Promise<{ run: Record<string, unknown>; bands: Record<string, unknown>[] } | null> {
+  const run = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(runId).first<Record<string, unknown>>()
+  if (!run) return null
+  const bands = await db.prepare('SELECT prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects FROM deletion_bands WHERE run_id = ? ORDER BY bytes DESC, prefix').bind(runId).all<Record<string, unknown>>()
+  return { run, bands: bands.results }
 }
 
 /** The shared open plan trash gestures land in (the newest open one), or null. */
@@ -184,11 +253,11 @@ export class PlanSpansBuckets extends Error {
 }
 
 /** The one bucket a plan's (canonical) item prefixes live in, and the items
- * relative to it; a plan with no items is the primary's. */
-export function planBucket(prefixes: string[]): { bucket: string; sweep: string[] } {
-  const buckets = [...new Set(prefixes.map(p => bucketOf(p)))]
-  if (buckets.length > 1) throw new PlanSpansBuckets(buckets)
-  const bucket = buckets[0] ?? CW_BUCKET
+ * relative to it; a plan with no items is the primary's (`buckets[0]`). */
+export function planBucket(prefixes: string[], buckets: readonly string[]): { bucket: string; sweep: string[] } {
+  const named = [...new Set(prefixes.map(p => bucketOf(p, buckets)))]
+  if (named.length > 1) throw new PlanSpansBuckets(named)
+  const bucket = named[0] ?? buckets[0]
   return { bucket, sweep: prefixes.map(p => relPrefix(p, bucket)) }
 }
 
@@ -196,7 +265,7 @@ export function planBucket(prefixes: string[]): { bucket: string; sweep: string[
  * to it, buckets and items sorted. The gcs executor takes several `-b`, so a
  * plan there MAY span buckets — this is `planBucket` without the refusal
  * (cw keeps `planBucket`: one bucket per run). */
-export function planBuckets(prefixes: string[], buckets: readonly string[] = CW_BUCKETS): Record<string, string[]> {
+export function planBuckets(prefixes: string[], buckets: readonly string[]): Record<string, string[]> {
   const by: Record<string, string[]> = {}
   for (const p of prefixes) {
     const b = bucketOf(p, buckets)
@@ -217,7 +286,7 @@ export interface PlanBucketsSnapshot {
   buckets: string[]
 }
 
-export async function snapshotPlanBuckets(db: D1Database, planId: number, shape: PrefixShape = CW_SHAPE): Promise<PlanBucketsSnapshot | null> {
+export async function snapshotPlanBuckets(db: D1Database, planId: number, shape: PrefixShape): Promise<PlanBucketsSnapshot | null> {
   const plan = await db.prepare("SELECT id, name FROM plans WHERE id = ?").bind(planId).first<{ id: number; name: string }>()
   if (!plan) return null
   const items = await db.prepare("SELECT prefix FROM plan_items WHERE plan_id = ? ORDER BY prefix").bind(planId).all<{ prefix: string }>()
@@ -246,13 +315,13 @@ export async function audit(
  * (`planBucket`; throws `PlanSpansBuckets`) and the relative sweep prefixes
  * (the plan's items — the whole intent; nothing carves out). Returns null if
  * the plan is missing. */
-export async function snapshotPlan(db: D1Database, planId: number): Promise<
+export async function snapshotPlan(db: D1Database, planId: number, shape: PrefixShape): Promise<
   { plan_id: number; name: string; bucket: string; sweep: string[] } | null
 > {
   const plan = await db.prepare("SELECT id, name FROM plans WHERE id = ?").bind(planId).first<{ id: number; name: string }>()
   if (!plan) return null
   const items = await db.prepare("SELECT prefix FROM plan_items WHERE plan_id = ? ORDER BY prefix").bind(planId).all<{ prefix: string }>()
-  const { bucket, sweep } = planBucket(items.results.map(r => r.prefix))
+  const { bucket, sweep } = planBucket(items.results.map(r => r.prefix), shape.buckets)
   return { plan_id: planId, name: plan.name, bucket, sweep }
 }
 

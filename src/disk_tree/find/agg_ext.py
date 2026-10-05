@@ -1,4 +1,4 @@
-"""Shared bits for the opt-in aggregation extensions (spec: aggregation-extensions.md).
+"""Shared bits for the opt-in aggregation extensions (spec: specs/done/aggregation-extensions.md).
 
 - ``--pivot-sum <col>``: per-category byte sums as layer-2 columns
   ``sum_<col>_<v>`` (files: own value; dirs: bottom-up sum). For enums like
@@ -26,7 +26,7 @@ PIVOT_MAX = 32
 MT_WSUM = 'mt_wsum'
 MTIME_MEAN = 'mtime_mean'
 
-# ``--size-hist`` (spec mgu-scale-unification.md item E): per path, a log2
+# ``--size-hist`` (spec specs/done/mgu-scale-unification.md item E): per path, a log2
 # histogram of descendant files by size — bin 0 holds zero-byte files, bin b
 # (1 ≤ b < SIZE_HIST_BINS) holds sizes in [2^(b−1), 2^b), and the last bin
 # is open-ended (≥ 2^(SIZE_HIST_BINS−2) = 512 GiB). Additive through the

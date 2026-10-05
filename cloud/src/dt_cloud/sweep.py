@@ -32,11 +32,21 @@ import duckdb
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
 
-# CAIOS S3-compatible endpoint (see job/cw-batch-submit.sh). CAIOS rejects
-# path-style requests and ignores the region, but boto3 requires both set.
-CW_ENDPOINT = os.environ.get("CW_ENDPOINT", "https://cwobject.com")
-CW_BUCKET = os.environ.get("CW_BUCKET", "marin-us-east-02a")
-DATA_BUCKET = os.environ.get("DATA_BUCKET", "oa-gcs-usage-dvx")
+
+
+def sweep_endpoint() -> str:
+    """The S3 endpoint a sweep deletes through (`$SWEEP_S3_ENDPOINT`; `$CW_ENDPOINT`
+    deprecated). Some S3-compatible stores reject path-style requests and ignore
+    the region; boto3 still requires both set (see `s3_client`)."""
+    from .deploy import require
+    return require("SWEEP_S3_ENDPOINT", "CW_ENDPOINT", what="the S3 endpoint a sweep deletes through")
+
+
+def sweep_bucket() -> str:
+    """The bucket a sweep deletes from when its plan names none (`$SWEEP_BUCKET`;
+    `$CW_BUCKET` deprecated)."""
+    from .deploy import require
+    return require("SWEEP_BUCKET", "CW_BUCKET", what="the bucket a sweep deletes from")
 
 # S3 `delete_objects` accepts up to 1000 keys per call.
 DELETE_BATCH = 1000
@@ -86,7 +96,7 @@ def normalize_prefix(raw: str, bucket: str) -> str:
 def load_plan(path: str | Path) -> Plan:
     """Read a plan.json (as written by /api/plan-sweep/dispatch), normalizing prefixes."""
     d = json.loads(Path(path).read_text())
-    bucket = d.get("bucket", CW_BUCKET)
+    bucket = d.get("bucket") or sweep_bucket()
     plan = Plan(
         name=d["name"],
         bucket=bucket,
@@ -97,15 +107,16 @@ def load_plan(path: str | Path) -> Plan:
     return plan
 
 
-def s3_client(endpoint: str = CW_ENDPOINT) -> "S3Client":
-    """boto3 S3 client for CAIOS. Creds come from the env (Secret Manager on
-    Batch: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)."""
+def s3_client(endpoint: str | None = None) -> "S3Client":
+    """boto3 S3 client for the sweep's store (`endpoint`, default
+    `sweep_endpoint()`). Creds come from the env (Secret Manager on Batch:
+    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)."""
     import boto3
     from botocore.config import Config
 
     return boto3.client(
         "s3",
-        endpoint_url=endpoint,
+        endpoint_url=endpoint or sweep_endpoint(),
         region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
         config=Config(s3={"addressing_style": "virtual"}, retries={"max_attempts": 10, "mode": "standard"}),
     )

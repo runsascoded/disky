@@ -143,7 +143,7 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     url = f"{cfg.site_url}/?d={_yy(r.date)}#diff"
     link = f"· [view →]({url})" if platform == "discord" else f"[↗︎]({url})"
     body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
-    avatar = f"{cfg.icons_base}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 7)}.png?v={AVATAR_REV}"
+    avatar = f"{cfg.need('icons_base')}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 7)}.png?v={AVATAR_REV}"
     return Reply(sender, body, icon_url=avatar)
 
 
@@ -179,6 +179,10 @@ class Gcs:
 
     def units(self, rows: list[Scan], variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(r.date, r.date, reply(r, self.cfg, platform)) for r in rows]
+
+    def provisional(self, rows: list[Scan], variant: str) -> None:
+        """A reply per scan is never provisional."""
+        return None
 
     def render_plot(self, rows: list[Scan], month: dt.date, out: Path, root: str | None = None) -> None:
         """The storage-class mosaic (needs the `[plot]` extra — matplotlib)."""

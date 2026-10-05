@@ -7,8 +7,8 @@ import { shared } from './shared.js'
 
 export interface Ledger {
   ownerRows: OwnerRow[]
-  /** `MAX(actions.id)`: changes iff the ledger changed — the cache key for
-   * anything folded from it. */
+  /** `MAX(actions.id)` + the tombstoned rows: changes iff the ledger changed —
+   * the cache key for anything folded from it. */
   head: number
 }
 
@@ -33,9 +33,14 @@ async function loadRows(env: Env, head: number): Promise<Ledger> {
 }
 
 /** Just the head (one tiny query) — for cache keys before deciding whether a
- * full fold is needed. */
+ * full fold is needed. A new action raises `MAX(id)`; a retraction (an admin
+ * tombstoning an `owner_prefixes` row) raises the tombstone count. Both only
+ * grow, so the sum strictly increases with every change and never revisits a
+ * stale key (`owner_totals` drops bodies of lower heads). */
 export async function ledgerHead(env: Env): Promise<number> {
   if (!env.DB) throw new Error('ledger backend not configured (DB)')
-  const row = await env.DB.prepare('SELECT COALESCE(MAX(id), 0) AS head FROM actions').first<{ head: number }>()
+  const row = await env.DB.prepare(
+    'SELECT (SELECT COALESCE(MAX(id), 0) FROM actions) + (SELECT COUNT(*) FROM owner_prefixes WHERE tombstoned IS NOT NULL) AS head',
+  ).first<{ head: number }>()
   return row?.head ?? 0
 }

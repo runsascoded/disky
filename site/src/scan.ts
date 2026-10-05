@@ -178,7 +178,7 @@ export interface Scan {
 // via the poll rather than freezing on the day it opened). Every scan-scoped
 // page (home map, /users, /user/:id) uses this so a scan pin is one shareable,
 // page-independent dimension. `scans` is newest-first, so the first prefix match
-// is the newest. See specs/scan-param-all-pages.md.
+// is the newest. See specs/done/scan-param-all-pages.md.
 /** The store's scan list (newest first) — the one definition every page
  * shares, so the poll and error handling are the same wherever it mounts.
  * The list polls so an unpinned tab discovers new scans on its own; the

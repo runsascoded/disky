@@ -1,16 +1,17 @@
 import { defineConfig, devices } from '@playwright/test'
 
-// E2E against a deployed site (prod by default; point BASE_URL at a preview).
-// The Cloudflare Access gate accepts `Authorization: Bearer` (functions/_lib/
-// auth.ts), so a `gcs`-scoped grant token in $GCS_USAGE_TOKEN — set on every
+// E2E against a deployed site: `BASE_URL` (required; a deployment, a preview, or
+// a local dev server). The site accepts `Authorization: Bearer` (functions/_lib/
+// auth.ts), so a grant token in $SITE_TOKEN (or the older $GCS_USAGE_TOKEN) — set on every
 // request via extraHTTPHeaders — authorizes both page navigations and the
 // in-app /api/* + /data/* fetches. Without a token the specs run unauthenticated
 // (they'll hit the sign-in wall — supply the token to actually exercise them).
 //
 // Browsers: Node ≥23 hangs on `playwright install` (see global CLAUDE.md) — use
 // `pw-install` / `pwi`, not the bare installer.
-const BASE_URL = process.env.BASE_URL ?? 'https://gcs.oa.dev'
-const token = process.env.GCS_USAGE_TOKEN
+const BASE_URL = process.env.BASE_URL
+if (!BASE_URL) throw new Error('playwright: set BASE_URL (the deployment, preview or dev server to test)')
+const token = process.env.SITE_TOKEN ?? process.env.GCS_USAGE_TOKEN
 
 export default defineConfig({
   testDir: './e2e',

@@ -1,5 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { DEFAULT_STORE } from './stores'
+import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs'
+
+export type { DeletionRun, ExecJob } from './runs'
+export { LIVE_STATES } from './runs'
 
 // Client for the deletion-plan API (specs/staged-delete.md; the OA build plan
 // `sweep-plan-union.md`). The opt-in trash model: a trash gesture *stages*
@@ -35,32 +39,23 @@ export interface PlanSummary {
 }
 export interface StagedItem { prefix: string; note: string | null; added_by: string; added_ts: number; batch_id: number | null }
 export interface StageBatch { id: number; plan_id: number; note: string | null; created_by: string; created_ts: number }
-/** A deletion run as the deployment's executor records it (cw's columns are a
- *  superset of gcs's; the console reads the common ones). */
-export interface DeletionRun {
-  run_id: string
-  plan_id: number | null
-  mode: 'dry' | 'real'
-  scan?: string
-  actor?: string
-  started_ts: number
-  finished_ts: number | null
-  deleted_bytes: number
-  deleted_objects: number
-  /** A dry run's measured reclaim — what the set as a whole would actually
-   *  free (clone/hardlink-shared bytes don't count); null = not measured. */
-  freed_bytes?: number | null
-  skipped_gone: number
-  skipped_overwritten?: number
-  undo_deadline: number | null
-  undo_state: string
-  purge_state?: string
-  log_dir?: string
+/** A stage batch with no items left, and what became of what it staged
+ *  (`functions/_lib/plans.ts` `emptiedBatches`). */
+export interface EmptiedBatch extends StageBatch {
+  staged: number
+  covered: number
+  absorbed: { into: number; n: number }[]
+  unstaged: number
 }
-export interface StagedPlan { plan: PlanSummary | null; items: StagedItem[]; batches: StageBatch[]; runs: DeletionRun[] }
+export interface StagedPlan { plan: PlanSummary | null; items: StagedItem[]; batches: StageBatch[]; emptied?: EmptiedBatch[]; runs: DeletionRun[] }
+/** A plan as `GET /api/plans` lists it. */
+export interface PlanListing extends PlanSummary { items: number; runs: number }
 
-/** The deployment's executor routes: cw's plan-first Batch bridge or gcs's. */
-export const EXEC_API = `/api/${DEFAULT_STORE.executor}`
+/** The deployment's executor routes: gcs's `sweep`, or the plan-first ones (cw's Batch bridge; m3's laptop drainer dispatches through them too, `planFirstKind`). */
+export const EXEC_API = `/api/${DEFAULT_STORE.executor === 'sweep' ? 'sweep' : 'plan-sweep'}`
+/** What the deployment's executor can do (stop / undo / purge / bucket cut /
+ *  run files): the console keys every control on these, never on a name. */
+export const CAPS: ExecCaps = EXEC_CAPS[DEFAULT_STORE.executor]
 
 async function call<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
   const r = await fetch(url, {
@@ -91,12 +86,70 @@ export function useStage() {
   })
 }
 
-/** The shared open plan (GET /api/plans/staged), polled while a run is live. */
-export function useStagedPlan(live = false) {
+/** The plan /staged shows (polled while a run is live): the shared open plan
+ * (GET /api/plans/staged), or plan `id` (GET /api/plans/:id — a closed one
+ * keeps its runs and their undo windows reachable). */
+export function useStagedPlan(live = false, id: number | null = null) {
   return useQuery<StagedPlan, Error>({
-    queryKey: ['plans', 'staged'],
-    queryFn: () => call<StagedPlan>('/api/plans/staged'),
+    queryKey: ['plans', id ?? 'staged'],
+    queryFn: () => call<StagedPlan>(id == null ? '/api/plans/staged' : `/api/plans/${id}`),
     refetchInterval: live ? 20_000 : false,
+  })
+}
+
+/** Every plan, newest first, with its item and run counts (GET /api/plans). */
+export function usePlanList() {
+  return useQuery<PlanListing[], Error>({
+    queryKey: ['plans', 'list'],
+    queryFn: async () => (await call<{ plans: PlanListing[] }>('/api/plans')).plans,
+    staleTime: 60_000,
+  })
+}
+
+/** Close a plan (admin; PATCH /api/plans/:id): the next trash gesture opens a
+ * fresh one. Its runs stay reachable through the plan picker. */
+export function useClosePlan() {
+  const qc = useQueryClient()
+  return useMutation<unknown, Error, number>({
+    mutationFn: id => call(`/api/plans/${id}`, 'PATCH', { state: 'closed' }),
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }) },
+  })
+}
+
+export interface RunBand { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new_objects: number; undone_objects: number }
+
+/** One run's D1 record and its per-band rows (GET /api/plans/run?id=). */
+export function useRunDetail(runId: string, enabled: boolean, live = false) {
+  return useQuery<{ run: DeletionRun; bands: RunBand[] }, Error>({
+    queryKey: ['run-detail', runId],
+    queryFn: () => call(`/api/plans/run?id=${encodeURIComponent(runId)}`),
+    enabled,
+    refetchInterval: live ? 30_000 : false,
+  })
+}
+
+/** A file in the deployment's files proxy as JSON; null when it isn't there. */
+export async function filesJson<T>(rel: string): Promise<T | null> {
+  const r = await fetch(`/v1/files/get?path=${encodeURIComponent(rel)}`, { credentials: 'include' })
+  if (r.status === 404) return null
+  if (!r.ok) throw new Error(`${rel}: ${r.status}`)
+  return r.json() as Promise<T>
+}
+
+/** Run-dir JSON files (`CAPS.runFiles`), each polled every `poll` ms while
+ * `live(rel)` — only until it appears, with `untilPresent` (a manifest step's
+ * summary lands minutes in, then never changes). */
+export function useRunFiles<T>(rels: readonly string[], live: boolean | ((rel: string) => boolean), { poll = 30_000, untilPresent = false } = {}) {
+  const isLive = typeof live === 'function' ? live : () => live
+  return useQueries({
+    queries: rels.map(rel => ({
+      queryKey: ['run-file', rel],
+      queryFn: () => filesJson<T>(rel),
+      enabled: CAPS.runFiles,
+      retry: false,
+      staleTime: isLive(rel) ? 20_000 : Infinity,
+      refetchInterval: (q: { state: { data?: T | null } }) => (isLive(rel) && !(untilPresent && q.state.data) ? poll : false),
+    })),
   })
 }
 
@@ -117,43 +170,38 @@ export function useUnstage(planId: number | null) {
  *  what a real run would delete; a real run deletes, recoverably. */
 export function useDispatch(planId: number | null) {
   const qc = useQueryClient()
-  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date: string }>({
-    mutationFn: ({ mode, date }) => {
+  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date: string; buckets?: string[]; machine?: string }>({
+    mutationFn: ({ mode, date, buckets, machine }) => {
       if (planId == null) throw new Error('nothing staged')
-      return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date })
+      return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}) })
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: ['sweep-jobs'] }) },
   })
 }
 
-/** A run control (stop / undo / purge) on the plan-first executor. */
+/** A run control: stop (the run's Batch job) or undo / purge (the run). */
+export type RunAction = { action: 'stop'; job_id: string } | { action: 'undo' | 'purge'; run_id: string }
+
 export function useRunAction() {
   const qc = useQueryClient()
-  return useMutation<unknown, Error, { action: 'stop' | 'undo' | 'purge'; run_id: string }>({
-    mutationFn: ({ action, run_id }) => call(`${EXEC_API}/${action}`, 'POST', action === 'stop' ? { job_id: run_id } : { run_id }),
+  return useMutation<unknown, Error, RunAction>({
+    mutationFn: a => call(`${EXEC_API}/${a.action}`, 'POST', a.action === 'stop' ? { job_id: a.job_id } : { run_id: a.run_id }),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: ['sweep-jobs'] }) },
   })
 }
 
-export interface ExecJob {
-  job_id: string
-  state: string
-  mode?: string
-  logs?: string
-  last_event?: string | null
-}
-
-/** The executor's recent jobs, by run id (live state from Batch). */
+/** The executor's recent jobs (live state from Batch); `configured` false =
+ * the deployment has no dispatch credentials (recorded runs only). The laptop
+ * drainer has no jobs to list: its runs are the D1 rows. */
 export function useExecJobs(live = false) {
-  return useQuery<Record<string, ExecJob>, Error>({
+  return useQuery<{ jobs: ExecJob[]; configured: boolean }, Error>({
     queryKey: ['sweep-jobs'],
+    enabled: DEFAULT_STORE.executor !== 'laptop',
     queryFn: async () => {
-      const d = await call<{ jobs: ExecJob[] }>(`${EXEC_API}/jobs`)
-      return Object.fromEntries(d.jobs.map(j => [j.job_id, j]))
+      const d = await call<{ jobs: ExecJob[]; configured?: boolean }>(`${EXEC_API}/jobs`)
+      return { jobs: d.jobs, configured: d.configured !== false }
     },
     refetchInterval: live ? 20_000 : false,
     retry: false,
   })
 }
-
-export const LIVE_STATES = new Set(['QUEUED', 'SCHEDULED', 'RUNNING'])

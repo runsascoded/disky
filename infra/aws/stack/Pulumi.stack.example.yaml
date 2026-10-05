@@ -1,0 +1,39 @@
+# A laptop deployment's AWS Batch ingest (`BatchIngest`). Copy to
+# `infra/aws/Pulumi.<stack>.yaml`; the key prefix is `Pulumi.yaml`'s `name`.
+# Secret values never go here: the `secrets` map names empty Secrets Manager
+# containers, filled out of band (`aws secretsmanager put-secret-value`).
+config:
+  aws:region: us-east-1
+  # Every resource name derives from it: queue `<prefix>`, job def `<prefix>-ingest`, …
+  my-deployment:prefix: my-deployment
+  # The image build's inputs, relative to the repo root (zipped, content-hashed).
+  my-deployment:dockerfile: infra/aws/Dockerfile
+  my-deployment:sources:
+    - pyproject.toml
+    - uv.lock
+    - README.md
+    - src
+    - cloud/pyproject.toml
+    - cloud/src
+    - infra/aws/Dockerfile
+    - infra/aws/ingest.sh
+  # Fargate size per job (path-index peaked at 1.5 GiB over 6.6M files).
+  my-deployment:vcpu: "1"
+  my-deployment:memory_mib: "8192"
+  my-deployment:ephemeral_gib: "30"
+  # Plain job env.
+  my-deployment:env:
+    R2_ENDPOINT_URL: https://<cf-account-id>.r2.cloudflarestorage.com
+    CLOUDFLARE_ACCOUNT_ID: <cf-account-id>
+    D1_DB_ID: <d1-database-id>           # infra/cf's `d1_database_id` output
+    D1_DB_NAME: my-deployment-db
+    INDEX_VARIANTS: path
+  # Job env var → Secrets Manager secret name (created empty).
+  my-deployment:secrets:
+    AWS_ACCESS_KEY_ID: my-deployment/r2-access-key-id
+    AWS_SECRET_ACCESS_KEY: my-deployment/r2-secret-access-key
+    CLOUDFLARE_API_TOKEN: my-deployment/cf-d1-token
+  # --- Optional ---
+  # my-deployment:max_vcpus: "16"          # the queue's Fargate Spot ceiling
+  # my-deployment:timeout_s: "7200"        # per attempt
+  # my-deployment:moved_from_root: "true"  # adopting resources a stack declared inline (infra/README.md)

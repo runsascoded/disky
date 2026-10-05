@@ -1,4 +1,4 @@
-"""Incremental GCS usage-log ingest (specs/access-logs-and-cost.md § Productionize).
+"""Incremental GCS usage-log ingest (gcs:specs/access-logs-and-cost.md § Productionize).
 
 Google delivers hourly usage CSVs *flat* under ``usage/`` in the log bucket,
 with the source bucket as a filename prefix (not a directory):
@@ -41,16 +41,19 @@ from pathlib import Path
 
 err = partial(print, file=sys.stderr)
 
-USAGE_LOG_BUCKET = "marin-usage-logs"
-FLEET = (
-    "marin-us-central1",
-    "marin-us-central2",
-    "marin-us-east1",
-    "marin-us-east5",
-    "marin-eu-west4",
-    "marin-us-west1",
-    "marin-us-west4",
-)
+
+
+def access_log_bucket() -> str:
+    """The bucket the source buckets deliver their usage logs to (`$ACCESS_LOG_BUCKET`)."""
+    from .deploy import require
+    return require("ACCESS_LOG_BUCKET", what="the bucket the usage logs are delivered to")
+
+
+def access_buckets() -> list[str]:
+    """The buckets whose usage logs are ingested (`$ACCESS_BUCKETS`, space-separated)."""
+    from .deploy import words
+    return words("ACCESS_BUCKETS", what="the buckets whose usage logs to ingest (or pass -b)")
+
 # Hours of name-time overlap re-listed each run to catch late-delivered files.
 LAG_HOURS = 6
 

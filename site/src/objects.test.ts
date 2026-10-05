@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { actionPrefix, cellAction, filesRedirect, listsObjects, objectSource, openHref, publicUrl, rowTarget, type CellNode } from './objects'
 import { resolveStores } from './stores'
+import { TEST_REGISTRY } from './testStores'
 
 // Objects as first-class nodes (specs/path-store.md §3): the click / link /
 // open rules, where an object's bytes are read from per store, and where a
@@ -82,15 +83,15 @@ describe('openHref', () => {
   it('the object’s directory is the drill path, its basename `open`; the page’s other params stay', () => {
     expect(openHref('/', ['ctbk', 'gbfs', 'a b.parquet'], '?d=260930&c=w')).toEqual({ pathname: '/ctbk/gbfs', search: '?d=260930&c=w&open=a+b.parquet' })
     expect(openHref('/', ['jc-taxes', 'x.json'], '?open=y.json')).toEqual({ pathname: '/jc-taxes', search: '?open=x.json' })
-    expect(openHref('/meta', ['oa-gcs-usage-dvx', 'listing', 'k.parquet'], '')).toEqual({ pathname: '/meta/oa-gcs-usage-dvx/listing', search: '?open=k.parquet' })
+    expect(openHref('/meta', ['my-data', 'listing', 'k.parquet'], '')).toEqual({ pathname: '/meta/my-data/listing', search: '?open=k.parquet' })
   })
 })
 
 describe('objectSource', () => {
-  const [r2] = resolveStores('r2', '')
-  const [cw, meta] = resolveStores('cw', 'meta')
-  const [gcs] = resolveStores('gcs', '')
-  const [laptop] = resolveStores('laptop', '')
+  const [r2] = resolveStores('r2', '', TEST_REGISTRY)
+  const [cw, meta] = resolveStores('cw', 'meta', TEST_REGISTRY)
+  const [gcs] = resolveStores('gcs', '', TEST_REGISTRY)
+  const [laptop] = resolveStores('laptop', '', TEST_REGISTRY)
   it('r2: a bucket with a public domain is read from it; jc-taxes (its CORS admits only jct.rbw.sh) is not, and the proxy reads the index bucket', () => {
     const proxy = { uri: 'r2://disk-tree-demo', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
     expect([
@@ -105,42 +106,42 @@ describe('objectSource', () => {
   })
   it('cw / gcs: the scanned buckets are neither public nor the proxy’s, so size and dates only', () => {
     expect([
-      objectSource(cw, ['marin-us-east-02a', 'ckpt', 'model.safetensors'], { uri: 'r2://oa-cw-s3-usage-index', prefixes: ['listing/', 'cw-l2/'] }),
-      objectSource(gcs, ['marin-us-central2', 'tokenized', 'x.jsonl.gz'], { uri: 'gs://oa-gcs-usage-dvx', prefixes: ['listing/', 'snapshots/', 'sweep/'] }),
-      objectSource(laptop, ['Users', 'ryan', 'notes.md'], { uri: 'gs://oa-gcs-usage-dvx', prefixes: ['listing/'] }),
+      objectSource(cw, ['data-a', 'ckpt', 'model.safetensors'], { uri: 'r2://my-index', prefixes: ['listing/', 'cw-l2/'] }),
+      objectSource(gcs, ['bucket-1', 'tokenized', 'x.jsonl.gz'], { uri: 'gs://my-data', prefixes: ['listing/', 'snapshots/', 'sweep/'] }),
+      objectSource(laptop, ['Users', 'ryan', 'notes.md'], { uri: 'gs://my-data', prefixes: ['listing/'] }),
     ]).toEqual([
-      { kind: 'none', bucket: 'marin-us-east-02a', key: 'ckpt/model.safetensors' },
-      { kind: 'none', bucket: 'marin-us-central2', key: 'tokenized/x.jsonl.gz' },
+      { kind: 'none', bucket: 'data-a', key: 'ckpt/model.safetensors' },
+      { kind: 'none', bucket: 'bucket-1', key: 'tokenized/x.jsonl.gz' },
       { kind: 'none', bucket: 'Users', key: 'ryan/notes.md' },
     ])
   })
   it('gcs: a scanned bucket the deployment serves to members reads through `/v1/objects/<bucket>`; others, and a guest (no `objectBuckets`), get size and dates', () => {
-    const proxy = { uri: 'gs://oa-gcs-usage-dvx', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
-    const member = { ...proxy, objectBuckets: ['marin-us-central2', 'marin-us-east1'] }
+    const proxy = { uri: 'gs://my-data', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
+    const member = { ...proxy, objectBuckets: ['bucket-1', 'bucket-2'] }
     expect([
-      objectSource(gcs, ['marin-us-central2', 'tokenized', 'x.jsonl.gz'], member),
-      objectSource(gcs, ['marin-eu-west4', 'raw', 'y.parquet'], member),
-      objectSource(gcs, ['marin-us-central2', 'tokenized', 'x.jsonl.gz'], proxy),
-      objectSource(gcs, ['oa-gcs-usage-dvx', 'snapshots', 'rules.json'], member),
+      objectSource(gcs, ['bucket-1', 'tokenized', 'x.jsonl.gz'], member),
+      objectSource(gcs, ['bucket-3', 'raw', 'y.parquet'], member),
+      objectSource(gcs, ['bucket-1', 'tokenized', 'x.jsonl.gz'], proxy),
+      objectSource(gcs, ['my-data', 'snapshots', 'rules.json'], member),
     ]).toEqual([
-      { kind: 'proxy', key: 'tokenized/x.jsonl.gz', api: '/v1/objects/marin-us-central2' },
-      { kind: 'none', bucket: 'marin-eu-west4', key: 'raw/y.parquet' },
-      { kind: 'none', bucket: 'marin-us-central2', key: 'tokenized/x.jsonl.gz' },
+      { kind: 'proxy', key: 'tokenized/x.jsonl.gz', api: '/v1/objects/bucket-1' },
+      { kind: 'none', bucket: 'bucket-3', key: 'raw/y.parquet' },
+      { kind: 'none', bucket: 'bucket-1', key: 'tokenized/x.jsonl.gz' },
       { kind: 'proxy', key: 'snapshots/rules.json', api: '/v1/files' },
     ])
   })
   it('meta: the proxy reads the object’s bucket — under an allowed prefix only', () => {
-    const proxy = { uri: 'gs://oa-gcs-usage-dvx', prefixes: ['meta-l2/', 'snapshots/meta/'] }
+    const proxy = { uri: 'gs://my-data', prefixes: ['meta-l2/', 'snapshots/meta/'] }
     expect([
-      objectSource(meta, ['oa-gcs-usage-dvx', 'snapshots', 'meta', '2026-09-30', 'meta.json'], proxy),
-      objectSource(meta, ['oa-gcs-usage-dvx', 'listing', '2026-09-30', 'x.parquet'], proxy),
-      objectSource(meta, ['oa-cw-s3-usage-index', 'meta-l2', 'a.parquet'], proxy),
-      objectSource(meta, ['oa-gcs-usage-dvx', 'meta-l2', 'a.parquet'], null),
+      objectSource(meta, ['my-data', 'snapshots', 'meta', '2026-09-30', 'meta.json'], proxy),
+      objectSource(meta, ['my-data', 'listing', '2026-09-30', 'x.parquet'], proxy),
+      objectSource(meta, ['my-index', 'meta-l2', 'a.parquet'], proxy),
+      objectSource(meta, ['my-data', 'meta-l2', 'a.parquet'], null),
     ]).toEqual([
       { kind: 'proxy', key: 'snapshots/meta/2026-09-30/meta.json', api: '/v1/files' },
-      { kind: 'none', bucket: 'oa-gcs-usage-dvx', key: 'listing/2026-09-30/x.parquet' },
-      { kind: 'none', bucket: 'oa-cw-s3-usage-index', key: 'meta-l2/a.parquet' },
-      { kind: 'none', bucket: 'oa-gcs-usage-dvx', key: 'meta-l2/a.parquet' },
+      { kind: 'none', bucket: 'my-data', key: 'listing/2026-09-30/x.parquet' },
+      { kind: 'none', bucket: 'my-index', key: 'meta-l2/a.parquet' },
+      { kind: 'none', bucket: 'my-data', key: 'meta-l2/a.parquet' },
     ])
   })
   it('a public URL percent-encodes each key segment and keeps the slashes', () => {
@@ -149,24 +150,24 @@ describe('objectSource', () => {
 })
 
 describe('filesRedirect', () => {
-  const stores = resolveStores('gcs', 'meta')
+  const stores = resolveStores('gcs', 'meta', TEST_REGISTRY)
   const [gcs] = stores
-  const proxy = { uri: 'gs://oa-gcs-usage-dvx', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
+  const proxy = { uri: 'gs://my-data', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
   it('a store that scans the proxy’s bucket shows the key: a directory drills there, an object opens under its directory', () => {
     expect([
       filesRedirect('', proxy, stores, gcs),
       filesRedirect('listing/2026-09-30/', proxy, stores, gcs),
-      filesRedirect('listing/2026-09-30/marin-us-central2/part-0.parquet', proxy, stores, gcs),
+      filesRedirect('listing/2026-09-30/bucket-1/part-0.parquet', proxy, stores, gcs),
       filesRedirect('sweep/runs/a%20b.json', proxy, stores, gcs),
     ]).toEqual([
-      { pathname: '/meta/oa-gcs-usage-dvx', search: '' },
-      { pathname: '/meta/oa-gcs-usage-dvx/listing/2026-09-30', search: '' },
-      { pathname: '/meta/oa-gcs-usage-dvx/listing/2026-09-30/marin-us-central2', search: '?open=part-0.parquet' },
-      { pathname: '/meta/oa-gcs-usage-dvx/sweep/runs', search: '?open=a+b.json' },
+      { pathname: '/meta/my-data', search: '' },
+      { pathname: '/meta/my-data/listing/2026-09-30', search: '' },
+      { pathname: '/meta/my-data/listing/2026-09-30/bucket-1', search: '?open=part-0.parquet' },
+      { pathname: '/meta/my-data/sweep/runs', search: '?open=a+b.json' },
     ])
   })
   it('no configured store scans the proxy’s bucket (r2.rbw.sh), or the proxy is unknown: the store root', () => {
-    const [r2] = resolveStores('r2', '')
+    const [r2] = resolveStores('r2', '', TEST_REGISTRY)
     expect([
       filesRedirect('listing/2026-09-30/', { uri: 'r2://disk-tree-demo', prefixes: ['listing/'] }, [r2], r2),
       filesRedirect('listing/x.parquet', null, stores, gcs),

@@ -28,7 +28,7 @@ different buckets used to merge silently); each bucket gets its own tree with
 its own ``.`` root row. ``last_ts`` propagates as MAX up the parent levels, so
 any prefix's atime is the most recent request anywhere under it.
 
-Hour grain (spec mgu-scale-unification.md D.1): a scan's as-of instant has
+Hour grain (spec specs/done/mgu-scale-unification.md D.1): a scan's as-of instant has
 to cut the access history, and a day-grained row can't be split — hours keep
 the cut within an hour of the instant (``last_ts`` stays exact). Row count
 grows only for paths read across many hours. ``as_of`` (D.2) applies the cut

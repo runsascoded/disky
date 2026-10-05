@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { STORES, resolveStores, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
+import { resolveStores, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
+import { TEST_REGISTRY } from './testStores'
 
 // The build-time store resolution (specs/multi-store.md phase 2): `VITE_STORE`
 // picks the primary, `VITE_STORES_EXTRA` mounts secondaries under their own
@@ -13,15 +14,14 @@ const thrown = (f: () => unknown): string | null => {
 }
 
 describe('resolveStores', () => {
-  it('nothing configured: the registry’s first store alone (the untouched cw-s3 build)', () => {
-    expect(keys(resolveStores(undefined, undefined))).toEqual(['cw'])
-    expect(keys(STORES)).toEqual(['cw'])
+  it('nothing configured: the registry’s first store alone', () => {
+    expect(keys(resolveStores(undefined, undefined, TEST_REGISTRY))).toEqual(['cw'])
   })
   it('VITE_STORE picks the primary; no extras', () => {
-    expect(keys(resolveStores('r2', ''))).toEqual(['r2'])
+    expect(keys(resolveStores('r2', '', TEST_REGISTRY))).toEqual(['r2'])
   })
   it('VITE_STORES_EXTRA mounts secondaries after the primary, each at its own path and base', () => {
-    const [r2, meta] = resolveStores('r2', 'meta')
+    const [r2, meta] = resolveStores('r2', 'meta', TEST_REGISTRY)
     expect([r2.key, r2.path, r2.base]).toEqual(['r2', '/', '/data/r2'])
     expect({ key: meta.key, path: meta.path, base: meta.base, label: meta.label, title: meta.title, staging: meta.staging, owners: meta.owners, prices: meta.prices }).toEqual({
       key: 'meta',
@@ -35,22 +35,22 @@ describe('resolveStores', () => {
     })
   })
   it('extras are trimmed and de-duplicated, empties dropped', () => {
-    expect(keys(resolveStores('cw', ' meta, ,meta,'))).toEqual(['cw', 'meta'])
+    expect(keys(resolveStores('cw', ' meta, ,meta,', TEST_REGISTRY))).toEqual(['cw', 'meta'])
   })
   it('refuses an unknown key, as primary or extra', () => {
-    expect(thrown(() => resolveStores('nope', undefined))).toBe("stores: no registry store 'nope' (have cw, gcs, r2, laptop, meta)")
-    expect(thrown(() => resolveStores('cw', 'nope'))).toBe("stores: no registry store 'nope' (have cw, gcs, r2, laptop, meta)")
+    expect(thrown(() => resolveStores('nope', undefined, TEST_REGISTRY))).toBe("stores: no registry store 'nope' (have cw, gcs, laptop, meta, r2)")
+    expect(thrown(() => resolveStores('cw', 'nope', TEST_REGISTRY))).toBe("stores: no registry store 'nope' (have cw, gcs, laptop, meta, r2)")
   })
   it('refuses the primary among the extras', () => {
-    expect(thrown(() => resolveStores('cw', 'cw'))).toBe("stores: 'cw' is the primary store (VITE_STORE); it can't also be in VITE_STORES_EXTRA")
+    expect(thrown(() => resolveStores('cw', 'cw', TEST_REGISTRY))).toBe("stores: 'cw' is the primary store (VITE_STORE); it can't also be in VITE_STORES_EXTRA")
   })
   it('refuses a secondary that has no path of its own', () => {
-    expect(thrown(() => resolveStores('cw', 'gcs'))).toBe("stores: secondary store 'gcs' has no path of its own (path '/' is the primary's)")
+    expect(thrown(() => resolveStores('cw', 'gcs', TEST_REGISTRY))).toBe("stores: secondary store 'gcs' has no path of its own (path '/' is the primary's)")
   })
 })
 
 describe('store requests', () => {
-  const [r2, meta] = resolveStores('r2', 'meta')
+  const [r2, meta] = resolveStores('r2', 'meta', TEST_REGISTRY)
   it('the primary carries no store param; a secondary carries its key', () => {
     expect([storeQuery(r2, r2), storeQuery(meta, r2)]).toEqual(['', 'store=meta'])
   })
@@ -96,18 +96,18 @@ describe('store requests', () => {
 })
 
 describe('storeForPath', () => {
-  const stores = resolveStores('r2', 'meta')
+  const stores = resolveStores('r2', 'meta', TEST_REGISTRY)
   it('a secondary’s path and everything under it is that store; anything else is the primary', () => {
-    expect(['/', '/ctbk/x', '/files', '/meta', '/meta/', '/meta/oa-gcs-usage-dvx/listing', '/meta/files', '/metadata'].map(p => storeForPath(p, stores).key))
+    expect(['/', '/ctbk/x', '/files', '/meta', '/meta/', '/meta/my-data/listing', '/meta/files', '/metadata'].map(p => storeForPath(p, stores).key))
       .toEqual(['r2', 'r2', 'r2', 'meta', 'meta', 'meta', 'meta', 'r2'])
   })
   it('a single-store build is always the primary', () => {
-    expect(['/', '/meta', '/meta/x'].map(p => storeForPath(p, resolveStores('cw', '')).key)).toEqual(['cw', 'cw', 'cw'])
+    expect(['/', '/meta', '/meta/x'].map(p => storeForPath(p, resolveStores('cw', '', TEST_REGISTRY)).key)).toEqual(['cw', 'cw', 'cw'])
   })
 })
 
 describe('withPageConfig', () => {
-  const laptop = resolveStores('laptop', '')[0]
+  const laptop = resolveStores('laptop', '', TEST_REGISTRY)[0]
   it('the served page’s home and title replace the build’s', () => {
     const s = withPageConfig(laptop, { home: '/Users/someone/', title: 'disky — Some Mac', staging: false })
     expect([s.key, s.home, s.title, s.staging, s.base]).toEqual(['laptop', ['Users', 'someone'], 'disky — Some Mac', false, laptop.base])

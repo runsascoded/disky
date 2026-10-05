@@ -400,6 +400,14 @@ describe('NOT: excluded descendants leave their roots’ totals and the tree', (
     expect([v.matches, v.excluded, v.tree.b]).toEqual([['bk'], ['bk/fill', 'bk/models'], size('bk') - size('bk/fill') - size('bk/models')])
   })
 
+  it('only negatives at the store root: the root is the match root, and still loses its exclusions', async () => {
+    const v = await buildView(env, { ...base, date: SEARCH, path: '', query: parseQuery('-fill -models')! })
+    const all = await allRows(PLAIN)
+    const size = (p: string) => all.filter(r => r.path === p).reduce((n, r) => n + r.size, 0)
+    const total = all.filter(r => r.depth === 1).reduce((n, r) => n + r.size, 0)
+    expect([v.matches, v.excluded, v.tree.b]).toEqual([[''], ['bk/fill', 'bk/models'], total - size('bk/fill') - size('bk/models')])
+  })
+
   it('the index and the pre-index read agree (threshold 0)', async () => {
     const got: unknown[] = []
     const want: unknown[] = []

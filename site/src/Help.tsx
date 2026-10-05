@@ -5,7 +5,7 @@ import { HELP_EMPTY, helpReducer, helpTarget } from './helpState'
 import type { HelpEvent, HelpTarget } from './helpState'
 import { setHelpPref, useHelpPref } from './prefs'
 
-// The help card (specs/edu-drawer.md): explanations of controls leave the
+// The help card (specs/done/edu-drawer.md): explanations of controls leave the
 // floating layer for one fixed card at the bottom-left of the viewport, which
 // mirrors whatever control is hovered or keyboard-focused and collapses to a
 // chip otherwise. Data tips (cells, rows) stay `<Tooltip>`s.
@@ -58,7 +58,7 @@ const HELP_INTRO = (
   Click anywhere else or press <kbd>Esc</kbd> to collapse this card; <b>snooze</b> (or <kbd>h</kbd>) turns help off until you press <kbd>h</kbd> again.</>
 )
 
-/** The help card (specs/edu-drawer.md): a bottom-left panel that shows the
+/** The help card (specs/done/edu-drawer.md): a bottom-left panel that shows the
  * hovered/focused control's explanation and names the control. Idle it
  * collapses to a small "?" chip; clicking the chip OPENS the card with a short
  * intro (so a click does something), and the card's × collapses back to the

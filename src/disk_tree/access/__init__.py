@@ -9,5 +9,5 @@ over ops and egress the way they already work over bytes-at-rest.
 Design mirrors the size-scan split (:mod:`disk_tree.find`): scheme-generic
 aggregation core, per-scheme parser plugins, storage as parquet.
 
-See ``specs/access-logs-and-cost.md``.
+See ``gcs:specs/access-logs-and-cost.md``.
 """

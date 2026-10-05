@@ -4,7 +4,7 @@ import { useState } from 'react'
 // (github.com/<handle>.png) — curated in the deployment's identity map. We deliberately do NOT
 // guess the handle from the email local-part: a guess that resolves to a
 // different person's GitHub would paint the wrong face. No handle → colored
-// initial. See identityRegistry.ts / specs/avatar-sources.md.
+// initial. See identityRegistry.ts / specs/done/avatar-sources.md.
 
 export const avatarHue = (s: string): number => {
   let h = 0

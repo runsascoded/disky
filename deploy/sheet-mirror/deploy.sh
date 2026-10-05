@@ -40,7 +40,7 @@ echo "== Cloud Run job (upsert) ==" >&2
 gcloud run jobs deploy "$JOB" --project "$PROJECT" --region "$REGION" \
   --image "$IMAGE" --service-account "$SA" \
   --set-env-vars "^@^SHEET_MIRROR_CONFIG_B64=$config_b64" \
-  --set-secrets "GCS_USAGE_TOKEN=$TOKEN_SECRET:latest" \
+  --set-secrets "SITE_TOKEN=$TOKEN_SECRET:latest" \
   --max-retries 1 --task-timeout 600
 
 if ! $iac; then

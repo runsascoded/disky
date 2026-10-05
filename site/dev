@@ -93,15 +93,20 @@ fi
 # Boot wrangler in the background. Local mode has no tunnel and needs no auth, so
 # one process suffices. Remote mode rides a long-lived tunnel to the prod D1 —
 # the session needs Workers scopes the direnv CLOUDFLARE_API_TOKEN lacks (mask
-# it so wrangler falls back to the OAuth login, and pin the OA account), and a
+# it so wrangler falls back to the OAuth login, and pin the deployment's account
+# from `deploy.env`), and a
 # network blip ("Network connection lost") turns every D1 call into "internal
 # error" until wrangler exits — so relaunch it until this script is stopped.
+# The deployment's Cloudflare account (`site/deploy.env`), for the remote-D1 tunnel.
+deploy_account() {
+  ( [ -f deploy.env ] && { set -a; . ./deploy.env; set +a; }; : "${CLOUDFLARE_ACCOUNT_ID:?dev: set CLOUDFLARE_ACCOUNT_ID in site/deploy.env}"; echo "$CLOUDFLARE_ACCOUNT_ID" )
+}
 run_wrangler() {
   if [ "$LOCALDB" = 1 ]; then
     npx wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01
   else
     while :; do
-      env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID=74981a43be0de7712369306c7b19133d \
+      env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID="$(deploy_account)" \
         npx wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01 || true
       echo "wrangler exited; restarting in 3s (ctrl-c to stop)" >&2
       sleep 3

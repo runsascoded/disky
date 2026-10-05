@@ -1,4 +1,4 @@
-"""Adaptive range-splitting bulk listing (spec: adaptive-listing.md).
+"""Adaptive range-splitting bulk listing (spec: specs/done/adaptive-listing.md).
 
 The pre-planned sharding in :mod:`disk_tree.find.bulk` needs either prior
 weights (``-W``) or directory-ish fanout at depth ≤ 2 — a first scan of a

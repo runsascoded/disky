@@ -13,7 +13,7 @@ cd site
 pnpm bench -- https://r2.rbw.sh / /ctbk /ctbk/gbfs --runs 3          # warm: one context, caches warm after run 1
 pnpm bench -- https://r2.rbw.sh / --runs 3 --cold                     # cold: fresh context per load + Cache-Control: no-cache on /api, /data
 pnpm bench -- http://localhost:3266 /ctbk/gbfs                        # the dev stack
-BENCH_TOKEN=… pnpm bench -- https://gcs.oa.dev / --runs 2             # a gated deploy (or --token, or $GCS_USAGE_TOKEN)
+BENCH_TOKEN=… pnpm bench -- https://<gated-deploy> / --runs 2         # a gated deploy (or --token, or $SITE_TOKEN)
 pnpm bench:diff -- bench/baselines/r2-2026-09-30.json tmp/bench/20261001-1200.json
 ```
 

@@ -703,7 +703,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     if (!roots.length) return null
     const rootSet = new Set(roots)
     const depthF = new Map<string, number>(roots.map(r => [r, p1!.depth.get(r)!]))
-    // The match root a path is strictly under (null: none).
+    // The match root a path is strictly under (null: none; `''` is the store
+    // root, a real root — test against null, never truthiness).
     const rootFor = (p: string): string | null => {
       if (p === path) return null
       for (let q = parentOf(p); q.length >= path.length; q = parentOf(q)) { if (rootSet.has(q)) return q; if (q === '') return null }
@@ -740,11 +741,11 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         if (ns.truncated) searchCut = true
         noteCoverage(cov, 'partial', ns.reason && `exclusions: ${ns.reason}`)
         const an = aggregate(ns.rows)
-        for (const e of ns.roots) if (rootFor(e)) exclude(e, scoped(e, an.all.get(e)!, an.mine.get(e)!))
+        for (const e of ns.roots) if (rootFor(e) !== null) exclude(e, scoped(e, an.all.get(e)!, an.mine.get(e)!))
       } else if (p1) {
         // (Already approximate for the same cause: one note says it.)
         if (!cov.approximate) noteCoverage(cov, 'approximate', store && !nplan ? APPROX_EXCL_UNINDEXED : APPROX_EXCL_NO_INDEX)
-        for (const e of matchRoots(p1.depth.keys(), negP, path)) if (rootFor(e)) exclude(e, scoped(e, p1.all.get(e)!, p1.mine.get(e)!))
+        for (const e of matchRoots(p1.depth.keys(), negP, path)) if (rootFor(e) !== null) exclude(e, scoped(e, p1.all.get(e)!, p1.mine.get(e)!))
       }
     }
     const netRoot = (r: string) => minus(rootAggOf.get(r)!, cut.get(r), lostKids.get(r))
@@ -775,7 +776,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const p2 = aggregate(rows2)
     // Excluded paths only phase 2 saw (without the index, below phase 1's read).
     if (negP) {
-      const fresh = matchRoots([...p2.depth.keys()].filter(p => rootFor(p) && !underExcl(p)), negP, path)
+      const fresh = matchRoots([...p2.depth.keys()].filter(p => rootFor(p) !== null && !underExcl(p)), negP, path)
       for (const e of fresh) exclude(e, scoped(e, p2.all.get(e)!, p2.mine.get(e)!))
     }
     const aggsF = new Map<string, Agg>()
@@ -798,7 +799,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const foldedF = new Map<string, number>()
     const below: string[] = []
     for (const [p, d] of p2.depth) {
-      const r = rootFor(p); if (!r) continue
+      const r = rootFor(p); if (r === null) continue
       if (underExcl(p)) continue
       const a = minus(scoped(p, p2.all.get(p)!, p2.mine.get(p)!), cut.get(p), lostKids.get(p))
       if (a.b <= 0) continue
@@ -995,7 +996,7 @@ function kidsIndex(kept: Map<string, Agg>, path: string): Map<string, string[]> 
 }
 
 /** The store root's crumb label: `ROOT_LABEL` (wrangler var) per deployment. */
-const rootName = (path: string, env?: Env) => (path === '' ? env?.ROOT_LABEL ?? 'marin GCS' : path.split('/').pop()!)
+const rootName = (path: string, env?: Env) => (path === '' ? env?.ROOT_LABEL ?? 'all buckets' : path.split('/').pop()!)
 
 export async function buildView(env: Env, o: ViewOpts): Promise<View> {
   const { path, query } = o

@@ -1,0 +1,31 @@
+# The capture trigger: consumes the queue that `CaptureTrigger` (infra/cf)
+# feeds from the bucket's `_SUCCESS.json` notifications, and submits each
+# finished capture to the `BatchIngest` job (infra/aws). Copy to
+# `wrangler.toml`; deploy with `pnpm -C infra/cf/capture-trigger run deploy`.
+name = "my-deployment-capture-trigger"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+account_id = "<cf-account-id>"
+workers_dev = false
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "my-captures-bucket"     # infra/cf `capturesBucket`
+
+[[queues.consumers]]
+queue = "my-deployment-captures"       # infra/cf `capturesQueue`
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 10
+# One batch at a time: the `_INGEST.json` check-then-write is per message, so
+# serial delivery keeps a redelivered message from racing its first copy.
+max_concurrency = 1
+
+[vars]
+AWS_REGION = "us-east-1"
+JOB_QUEUE = "my-deployment"             # infra/aws `prefix`
+JOB_DEFINITION = "my-deployment-ingest"  # `<prefix>-ingest`
+BUCKET_NAME = "my-captures-bucket"
+# Secrets (`wrangler secret put`, never here): AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY of IAM user `<prefix>-capture-trigger` (infra/aws
+# output `capture_trigger_user`), which may only `batch:SubmitJob` on the job.

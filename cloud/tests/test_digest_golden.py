@@ -12,12 +12,14 @@ Fixtures: gcs = daily date-id scans with storage-class bytes (a lead-in on
 7/31, a missing 8/6, three ISO weeks); cw = 00:01Z/12:01Z scans with
 `meta.buckets` (a flat pre-`buckets` lead-in, a day missing its morning scan,
 a third quota-less bucket appearing mid-month, and a `tree.json` per scan
-for the diff treemap)."""
+for the diff treemap); cw 6-hourly = 00/06/12/18Z scans across the Sep → Oct
+boundary, 9/30 missing its 12Z + 18Z scans (the provisional reply)."""
 from __future__ import annotations
 
 import json
 import os
 import re
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -26,6 +28,8 @@ from click.testing import CliRunner
 
 from dt_cloud import cli
 from dt_cloud import digest as DG
+
+from digest_examples import CW_EXAMPLE, GCS_EXAMPLE, config_file
 
 TIB = 1024**4
 GOLDEN = Path(__file__).parent / "fixtures" / "digest"
@@ -82,7 +86,7 @@ def gcs_root(tmp_path: Path, upto: str = "9999") -> Path:
     return root
 
 
-P, HERO, WEST = "marin-us-east-02a", "hero-checkpoints", "marin-us-west-04a"
+P, HERO, WEST = "main-data", "hot-data", "more-data"
 # (scan, {bucket: TiB}); the first is a flat pre-`buckets` meta (the primary's totals)
 CW_SCANS = [
     ("2026-08-30T1201", {P: 690.0}),
@@ -99,6 +103,20 @@ CW_SCANS = [
     ("2026-09-08T0001", {P: 790.0, HERO: 99.5, WEST: 2.4}),
 ]
 FLAT = {"2026-08-30T1201", "2026-08-31T0001"}
+# 6-hourly, across a month boundary; 9/30's 12Z + 18Z scans never land
+CW6_SCANS = [
+    ("2026-09-29T1201", {P: 800.0, HERO: 40.0}),
+    ("2026-09-29T1801", {P: 801.0, HERO: 40.0}),
+    ("2026-09-30T0001", {P: 803.5, HERO: 40.5}),
+    ("2026-09-30T0601", {P: 805.0, HERO: 41.0}),
+    ("2026-10-01T0001", {P: 790.0, HERO: 41.0}),
+    ("2026-10-01T0601", {P: 788.2, HERO: 42.0}),
+    ("2026-10-01T1201", {P: 795.0, HERO: 42.0}),
+    ("2026-10-01T1801", {P: 799.0, HERO: 42.5}),
+    ("2026-10-02T0001", {P: 820.0, HERO: 43.0}),
+    ("2026-10-02T0601", {P: 830.0, HERO: 43.0}),
+    ("2026-10-02T1201", {P: 862.0, HERO: 43.0}),
+]
 
 
 def _cw_meta(scan: str, buckets: dict[str, float]) -> dict:
@@ -123,7 +141,7 @@ def _cw_tree(i: int, buckets: dict[str, float]) -> dict:
     tot = buckets[P]
     tmp = 50.0 + 3 * i
     ckpt = 300.0 - 2 * i
-    users = _node("users", 40.0 + (i % 3), [_node("romain", 20.0 + (i % 3), [_node("run-a", 20.0 + (i % 3))]), _node("ahmed", 20.0)])
+    users = _node("users", 40.0 + (i % 3), [_node("dennis", 20.0 + (i % 3), [_node("run-a", 20.0 + (i % 3))]), _node("ahmed", 20.0)])
     kids = [_node("tmp", tmp, [_node("ttl=14d", tmp - 10), _node("ttl=30d", 10.0)]), _node("checkpoints", ckpt), users]
     if i >= 6:
         kids.append(_node("evals", 5.0 * (i - 5), [_node("lm", 3.0 * (i - 5)), _node("vision", 2.0 * (i - 5))]))
@@ -132,9 +150,9 @@ def _cw_tree(i: int, buckets: dict[str, float]) -> dict:
     return {"n": "cw", "b": round(sum(buckets.values()) * TIB), "c": [_node(P, tot, kids)] + [_node(b, t) for b, t in buckets.items() if b != P]}
 
 
-def cw_root(tmp_path: Path, upto: str = "9999") -> Path:
+def cw_root(tmp_path: Path, upto: str = "9999", scans: list = CW_SCANS) -> Path:
     root = tmp_path / "snapshots" / "cw"
-    for i, (scan, buckets) in enumerate(CW_SCANS):
+    for i, (scan, buckets) in enumerate(scans):
         if scan <= upto:
             (root / scan).mkdir(parents=True, exist_ok=True)
             (root / scan / "meta.json").write_text(json.dumps(_cw_meta(scan, buckets)))
@@ -214,8 +232,8 @@ def slack(monkeypatch):
 # ---- adapters: the only lines a refactor of the digest API may touch ---------
 
 
-GCS = DG.template(DG.PRESETS["gcs"])
-CW = DG.template(DG.PRESETS["cw"])
+GCS = DG.template(GCS_EXAMPLE)
+CW = DG.template(CW_EXAMPLE)
 
 
 def _client():
@@ -228,10 +246,11 @@ def converge_gcs(root: Path, month: date) -> dict:
     return DG.converge_slack(GCS, str(root), month, _client(), "C1")
 
 
-def converge_cw(root: Path, month: date, variant: str, reply_hour: int = 12) -> dict:
+def converge_cw(root: Path, month: date, variant: str, reply_hour: int = 12, provisional: bool = False, now: bool = False) -> dict:
     from dataclasses import replace
 
-    return DG.converge_slack(DG.template(replace(DG.PRESETS["cw"], reply_hour=reply_hour)), str(root), month, _client(), "C1", variant)
+    converge = DG.converge_slack_now if now else DG.converge_slack
+    return converge(DG.template(replace(CW_EXAMPLE, reply_hour=reply_hour, provisional=provisional)), str(root), month, _client(), "C1", variant)
 
 
 def redo_cw(root: Path, month: date, for_real: bool) -> dict:
@@ -262,13 +281,25 @@ def _dry_run(monkeypatch, tmp_path: Path, args: list[str]) -> str:
 
 def test_gcs_dry_run(monkeypatch, tmp_path: Path):
     root = gcs_root(tmp_path)
-    golden("gcs-dry-run.txt", _dry_run(monkeypatch, tmp_path, ["digest", "-n", "-r", str(root), "-m", "2026-08"]))
+    golden("gcs-dry-run.txt", _dry_run(monkeypatch, tmp_path, ["digest", "-C", str(config_file(GCS_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-08"]))
 
 
 @pytest.mark.parametrize("variant", ["sender", "body"])
 def test_cw_dry_run(monkeypatch, tmp_path: Path, variant: str):
     root = cw_root(tmp_path)
-    golden(f"cw-dry-run-{variant}.txt", _dry_run(monkeypatch, tmp_path, ["cw-digest", "-n", "-r", str(root), "-m", "2026-09", "-V", variant]))
+    golden(f"cw-dry-run-{variant}.txt", _dry_run(monkeypatch, tmp_path, ["cw-digest", "-C", str(config_file(CW_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-09", "-V", variant]))
+
+
+@pytest.mark.parametrize("variant", ["sender", "body"])
+def test_cw_dry_run_provisional(monkeypatch, tmp_path: Path, variant: str):
+    # `provisional: true` adds the open day's (9/8: only its 00:01Z scan so far) provisional reply to `sender`; `body` is unchanged
+    root = cw_root(tmp_path)
+    config_file(replace(CW_EXAMPLE, provisional=True), tmp_path / "digest.yml")
+    out = _dry_run(monkeypatch, tmp_path, ["digest", "-T", "cw", "-C", str(tmp_path / "digest.yml"), "-n", "-r", str(root), "-m", "2026-09", "-V", variant])
+    if variant == "body":
+        assert out == (GOLDEN / "cw-dry-run-body.txt").read_text()
+    else:
+        golden("cw-dry-run-sender-provisional.txt", out)
 
 
 # ---- converges against fake clients ------------------------------------------
@@ -295,17 +326,39 @@ def test_gcs_discord(tmp_path: Path):
     golden("gcs-discord.txt", _dump(log, state))
 
 
+@pytest.mark.parametrize("provisional", [False, True])
 @pytest.mark.parametrize("variant", ["sender", "body"])
-def test_cw_slack(slack, tmp_path: Path, variant: str):
-    # scan by scan, as the 12-hourly job lands them, then an idempotent re-run
+def test_cw_slack(slack, tmp_path: Path, variant: str, provisional: bool):
+    # scan by scan, as the 12-hourly job lands them, then an idempotent re-run.
+    # `provisional` on `sender`: each day's 00:01Z scan posts a provisional
+    # reply, its 12:01Z scan the final one + deletes it; on `body`: a no-op
     for scan, _ in CW_SCANS:
         root = cw_root(tmp_path, upto=scan)
         if scan >= "2026-09":
             slack.append({"op": "-- lands", "scan": scan})
-            state = converge_cw(root, SEP, variant)
-    state = converge_cw(root, SEP, variant)
+            state = converge_cw(root, SEP, variant, provisional=provisional)
+    state = converge_cw(root, SEP, variant, provisional=provisional)
     assert json.loads((tmp_path / "digest" / "cw" / "C1" / variant / "2026-09.json").read_text()) == state
-    golden(f"cw-slack-{variant}.txt", _dump(slack, state))
+    golden(f"cw-slack-{variant}{'-provisional' if provisional and variant == 'sender' else ''}.txt", _dump(slack, state))
+
+
+def test_cw_slack_provisional_6h(slack, tmp_path: Path):
+    # the 6-hourly job (`converge_slack_now`, the CLI's no-`-m` path), scan by
+    # scan across Sep → Oct, then a re-run. Per UTC date: the 00Z scan posts
+    # the provisional, 06Z edits it, 12Z posts the final + deletes it, 18Z
+    # touches only the OP. 9/30 never gets a ≥12Z scan, so its provisional
+    # outlives September until 10/1's first scan closes the month: 9/30's
+    # 06Z scan stands in as its final reply, the provisional goes, then
+    # October's OP and 10/1's provisional post
+    for scan, _ in CW6_SCANS:
+        root = cw_root(tmp_path, upto=scan, scans=CW6_SCANS)
+        slack.append({"op": "-- lands", "scan": scan})
+        converge_cw(root, date(int(scan[:4]), int(scan[5:7]), 1), "sender", provisional=True, now=True)
+    slack.append({"op": "-- re-run"})
+    oct_ = converge_cw(root, date(2026, 10, 1), "sender", provisional=True, now=True)
+    sep = json.loads((tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json").read_text())
+    assert json.loads((tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-10.json").read_text()) == oct_
+    golden("cw-slack-provisional-6h.txt", _dump(slack, {"2026-09": sep, "2026-10": oct_}))
 
 
 def test_cw_redo(slack, tmp_path: Path):
@@ -316,3 +369,46 @@ def test_cw_redo(slack, tmp_path: Path):
     slack.append({"op": "-- plan", "plan": plan})
     state = redo_cw(root, SEP, for_real=True)
     golden("cw-redo.txt", _dump(slack, state))
+
+
+class FlakyDelete(FakeSlack):
+    """`chat.delete` fails the first ``fails`` times."""
+
+    def __init__(self, log: list, fails: int):
+        super().__init__(log)
+        self.fails = fails
+
+    def delete(self, message_id, orphans_ok=False):
+        if self.fails:
+            self.fails -= 1
+            self.log.append({"op": "delete FAILED", "ts": message_id})
+            raise RuntimeError("ratelimited")
+        super().delete(message_id, orphans_ok)
+
+
+def test_cw_provisional_delete_retried(monkeypatch, tmp_path: Path):
+    # a failed provisional delete stays in the state; the next run retries it (and only it)
+    import thrds.slack
+    from dataclasses import replace
+
+    log: list = []
+    client = FlakyDelete(log, fails=1)
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: client)
+    tpl = DG.template(replace(CW_EXAMPLE, provisional=True))
+    run = lambda upto: DG.converge_slack(tpl, str(cw_root(tmp_path, upto=upto, scans=CW6_SCANS)), SEP, _client(), "C1", "sender")  # noqa: E731
+    assert run("2026-09-30T0001")["provisional"] == {"2026-09-30": {"ts": "m3", "scan": "2026-09-30T0001"}}
+    # 9/30's 12Z scan lands: its final posts, the delete fails, the provisional is kept
+    (tmp_path / "snapshots" / "cw" / "2026-09-30T1201").mkdir()
+    (tmp_path / "snapshots" / "cw" / "2026-09-30T1201" / "meta.json").write_text(json.dumps(_cw_meta("2026-09-30T1201", {P: 806.0, HERO: 41.0})))
+    n = len(log)
+    state = run("2026-09-30T1201")
+    assert [(c["op"], c.get("ts"), c.get("username")) for c in log[n:]] == [
+        ("edit", "m1", None),
+        ("post", None, "9/30 — 806 TiB (+6.0, 0.8%)"),
+        ("delete FAILED", "m3", None),
+    ]
+    assert (state["posted"]["2026-09-30"], state["provisional"]) == ({"ts": "m4", "scan": "2026-09-30T1201"}, {"2026-09-30": {"ts": "m3", "scan": "2026-09-30T0001"}})
+    n = len(log)
+    state = run("2026-09-30T1201")
+    assert [(c["op"], c.get("ts")) for c in log[n:]] == [("edit", "m1"), ("delete", "m3")]
+    assert sorted(state) == ["op_ts", "plot_name", "posted", "variant"]

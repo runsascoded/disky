@@ -1,7 +1,6 @@
 """Sharded live listing of cloud buckets → canonical layer-1 listing parquet.
 
-Ports marin's `bucket_list.py` (`~/c/oa/marin-gcs-usage/src/gcs_usage/bucket_list.py`,
-measured at 32 vCPU × 24 procs × 10 threads on GCS: ~1M objects/min per proc)
+Ports marin-gcs-usage's `bucket_list.py` (measured at 32 vCPU × 24 procs × 10 threads on GCS: ~1M objects/min per proc)
 into `disk-tree` with a scheme-generic backbone and per-scheme streaming
 plugins.
 

@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Build + push the ingest image on CodeBuild; print its pinned ref (`<repo>@sha256:…`).
+
+Run by Pulumi (`BatchIngest` in `batch_ingest.py`, a `command.local.Command`
+keyed on the source hash) after it uploads the source zip; the laptop only uploads and
+waits. Progress goes to stderr, the ref to stdout (Pulumi reads it back).
+"""
+import os
+import sys
+import time
+
+import boto3
+from click import argument, command
+
+err = lambda *a: print(*a, file=sys.stderr, flush=True)
+
+
+@command()
+@argument('project')
+@argument('source')  # `<bucket>/<key>` of the uploaded zip
+@argument('repo')    # ECR repository name
+@argument('tag')
+def main(project: str, source: str, repo: str, tag: str):
+    # The stack's region: `AWS_REGION` / `AWS_DEFAULT_REGION`, else the profile's, else us-east-1.
+    region = os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION') or boto3.Session().region_name or 'us-east-1'
+    session = boto3.Session(region_name=region)
+    cb = session.client('codebuild')
+    build = cb.start_build(
+        projectName=project,
+        sourceTypeOverride='S3',
+        sourceLocationOverride=source,
+        environmentVariablesOverride=[{'name': 'TAG', 'value': tag, 'type': 'PLAINTEXT'}],
+    )['build']
+    err(f'codebuild {build["id"]}: started (tag {tag})')
+    phase = None
+    while True:
+        b = cb.batch_get_builds(ids=[build['id']])['builds'][0]
+        if b.get('currentPhase') != phase:
+            phase = b.get('currentPhase')
+            err(f'codebuild: {phase}')
+        if b['buildStatus'] != 'IN_PROGRESS':
+            break
+        time.sleep(10)
+    if b['buildStatus'] != 'SUCCEEDED':
+        logs = b.get('logs', {}).get('deepLink', '')
+        raise SystemExit(f'codebuild {b["id"]}: {b["buildStatus"]} {logs}')
+    ecr = session.client('ecr')
+    img = ecr.describe_images(repositoryName=repo, imageIds=[{'imageTag': tag}])['imageDetails'][0]
+    uri = ecr.describe_repositories(repositoryNames=[repo])['repositories'][0]['repositoryUri']
+    print(f'{uri}@{img["imageDigest"]}')
+
+
+if __name__ == '__main__':
+    main()

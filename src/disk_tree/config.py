@@ -39,7 +39,7 @@ def _volume_mounted(path: str) -> bool:
 def _ensure_dir(path: str) -> None:
     """`makedirs(path)`, but never on the boot disk behind an unmounted volume.
 
-    Guards the makedirs-on-boot-disk trap (see specs/macos-app.md): a root under
+    Guards the makedirs-on-boot-disk trap (see specs/done/macos-app.md): a root under
     an absent `/Volumes/<name>` would otherwise be created on the boot disk.
     """
     if is_url(path):

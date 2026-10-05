@@ -267,8 +267,8 @@ def test_retire_d1_drops_sort_groups_of_scans_past_the_retention_window(monkeypa
     every = lambda p: checked.append(p) or True  # noqa: E731 — every cold footer exists
     assert retire_d1(2, has_cold=every) == ([("2026-09-01", "path", 2), ("2026-09-01", "user", 2)], [])
     assert checked == [
-        "oa-gcs-usage-dvx/listing/2026-09-01/path-index.groups.parquet",
-        "oa-gcs-usage-dvx/listing/2026-09-01/path-index-by-user.groups.parquet",
+        "my-data/listing/2026-09-01/path-index.groups.parquet",
+        "my-data/listing/2026-09-01/path-index-by-user.groups.parquet",
     ]
     assert con.execute("SELECT date, variant, count(*) FROM index_row_groups GROUP BY 1, 2 ORDER BY 1, 2").fetchall() == [
         ("2026-09-01", "age-pyramid-1d", 2),

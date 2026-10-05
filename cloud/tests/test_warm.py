@@ -26,17 +26,30 @@ def test_plan_one_width():
     ]
 
 
+TOP = ("", "b1", "b2", "b3")
+
+
 def test_plan_dedupes_pairs_and_counts():
     # the previous-scan pair and the 1d chip are the same pair: 5 spans + prev → 5 distinct pairs;
-    # × (root + 6 buckets) × 5 widths
-    paths = W.plan("2026-09-15", DATES)
+    # × (root + 3 buckets) × 5 widths
+    paths = W.plan("2026-09-15", DATES, TOP)
     # plus one width-independent series per path, first
-    assert len(paths) == len(W.PATHS) + len(W.WIDTHS) * len(W.PATHS) * (1 + 2 * 5)
-    assert paths[:2] == ["/api/series?path=&split=roots", "/api/series?path=marin-us-central2"]
-    n = len(W.PATHS)
+    assert len(paths) == len(TOP) + len(W.WIDTHS) * len(TOP) * (1 + 2 * 5)
+    assert paths[:2] == ["/api/series?path=&split=roots", "/api/series?path=b1"]
+    n = len(TOP)
     assert paths[n] == "/api/subtree?date=2026-09-15&path=&w=512&h=307"
-    assert paths[n + 11] == "/api/subtree?date=2026-09-15&path=marin-us-central2&w=512&h=307"
-    assert paths[-1] == "/api/diff?from=2026-08-16&to=2026-09-15&path=marin-us-east1&w=1920&h=1152"
+    assert paths[n + 11] == "/api/subtree?date=2026-09-15&path=b1&w=512&h=307"
+    assert paths[-1] == "/api/diff?from=2026-08-16&to=2026-09-15&path=b3&w=1920&h=1152"
+
+
+def test_paths_from_warm_paths_else_the_sites_root_view(monkeypatch):
+    monkeypatch.setenv("WARM_PATHS", ",b1,b1/hot")
+    assert W.env_paths() == ("", "b1", "b1/hot")
+    monkeypatch.delenv("WARM_PATHS")
+    assert W.env_paths() is None
+    # the root view's children, folds left out
+    assert W.root_children({"tree": {"n": "all buckets", "c": [{"n": "b1"}, {"n": "b2"}, {"n": "(other)"}]}}) == ("", "b1", "b2")
+    assert W.root_children({"tree": {"n": "all buckets"}}) == ("",)
 
 
 # Sub-daily scan ids (`YYYY-MM-DDTHHMM`, the CoreWeave job): spans resolve on
@@ -66,3 +79,15 @@ def test_subdaily_plan_one_width():
         "/api/diff?from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768&summary=1",
         "/api/diff?from=2026-09-08T1201&to=2026-09-15T1201&path=&w=1280&h=768",
     ]
+
+
+def test_widths_match_the_sites_canvas_snap():
+    # The site snaps its canvas to these widths (`site/src/canvas.ts`), so a
+    # width warmed here and not there (or vice versa) is a cache miss for everyone.
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "site" / "src" / "canvas.ts").read_text()
+    m = re.search(r"WARMED_WIDTHS = \[([\d, ]+)\]", src)
+    assert m is not None
+    assert tuple(int(w) for w in m.group(1).split(",")) == W.WIDTHS

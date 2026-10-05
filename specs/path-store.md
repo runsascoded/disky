@@ -282,7 +282,7 @@ bucket 2^20  | …      ← thr(P) falls here: stop
 - Open (from cw-s3): which store `/meta` hangs off. Orthogonal; `/meta` is just another store with the same table.
 
 [view-serving]: ../wt/gcs/specs/view-serving.md
-[mgu-scale-unification]: mgu-scale-unification.md
+[mgu-scale-unification]: done/mgu-scale-unification.md
 [listing-slim]: listing-slim.md
 [multi-store]: multi-store.md
 [obs-axis-indexing]: obs-axis-indexing.md

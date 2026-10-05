@@ -47,7 +47,7 @@ _PARENT_EXPR = (
 # scan predicate this is what keeps DuckDB's row-group pruning on the `name`
 # range alive — the equivalent `name = <canonical expr>` (a regexp_replace)
 # is evaluated over every row of the file first, so a 200K-row batch scan
-# cost a full 2M-row regex pass (~300 ms vs ~15 ms; spec `mgu-scale-a3-gate.md`
+# cost a full 2M-row regex pass (~300 ms vs ~15 ms; spec `specs/done/mgu-scale-a3-gate.md`
 # ask 8).
 _CLEAN_NAME = "NOT contains(name, '//') AND NOT ends_with(name, '/')"
 
@@ -65,7 +65,7 @@ def _part_expr(col: str, k: int, min_nseg: int | None = None) -> str:
     `min_nseg = k + 1` so a key is always a *directory* — a path at exactly
     depth `k` is its own prefix, and keying on it made every depth-`k` file a
     one-file partition (10,848 of them on marin-us-west4 at k = 2, spec
-    `mgu-scale-a3-gate.md` ask 1); those rows belong to the top cascade."""
+    `specs/done/mgu-scale-a3-gate.md` ask 1); those rows belong to the top cascade."""
     nseg = _NSEG_EXPR.format(col=col)
     return (
         f"CASE WHEN {nseg} >= {k if min_nseg is None else min_nseg} "
@@ -75,7 +75,7 @@ def _part_expr(col: str, k: int, min_nseg: int | None = None) -> str:
 
 #: Default batch target for the partitioned cascade: partitions are packed,
 #: in key order, into cascades of up to this many files (a bigger key stands
-#: alone). Measured 2026-09-07 (spec `mgu-scale-a3-gate.md`): 4.8M files with
+#: alone). Measured 2026-09-07 (spec `specs/done/mgu-scale-a3-gate.md`): 4.8M files with
 #: labels + pivots + mean mtime + size histogram peaked at 21 GB RSS.
 DEFAULT_PARTITION_FILES = 4_000_000
 
@@ -109,7 +109,7 @@ def _stage(msg: str) -> None:
     """Stage-boundary log line (stderr): OOM post-mortems need to know which
     statement was in flight — a SIGKILL leaves no traceback. While an
     aggregation runs, each line also carries the process RSS against what
-    DuckDB accounts for (spec `mgu-scale-a3-gate.md` ask 11: the two drift
+    DuckDB accounts for (spec `specs/done/mgu-scale-a3-gate.md` ask 11: the two drift
     apart by tens of GB at fleet scale)."""
     mem = f"  {_mem_probe()}" if _mem_probe is not None else ''
     print(f"[agg {datetime.now().isoformat(timespec='seconds')}] {msg}{mem}", file=sys.stderr, flush=True)
@@ -208,7 +208,7 @@ def _build_dirs_cascade(
     """Bottom-up group-by cascade over `src` → `out` + `n_children` tables.
 
     `max_cols` are columns on `src` folded with MAX at every level, like
-    `mtime` (spec mgu-scale-unification.md D.4: a subtree-max last-read from
+    `mtime` (spec specs/done/mgu-scale-unification.md D.4: a subtree-max last-read from
     a side table); NULL where nothing beneath carries a value.
 
     `sum_cols` are extra monoid columns on `src` (per-file contributions;
@@ -217,7 +217,7 @@ def _build_dirs_cascade(
     float-summation order sensitivity); consumers divide it into the
     `mtime_mean` output column (see find/agg_ext.py).
 
-    `group_cols` are label columns on `src` (spec mgu-scale-unification.md
+    `group_cols` are label columns on `src` (spec specs/done/mgu-scale-unification.md
     item B) carried as additional group keys: every level groups by
     `(parent, *group_cols)`, so a path comes out once per distinct label
     tuple beneath it, and `n_children` counts per (path, labels-of-child).
@@ -233,7 +233,7 @@ def _build_dirs_cascade(
     over `src` itself); nothing is copied. Every table is TEMP: it lives in
     the temp block manager and spills to `temp_directory` under
     `memory_limit`, and never touches a file-backed database's WAL (spec
-    `mgu-scale-a3-gate.md` ask 8 — the `-d` cascade wrote every level
+    `specs/done/mgu-scale-a3-gate.md` ask 8 — the `-d` cascade wrote every level
     through the DB file, ~2× the wall).
     """
     from .agg_ext import MT_WSUM
@@ -449,7 +449,7 @@ def _files_select(
     # billed per op, deleted by a sweep — that names a directory. It is the
     # directory's own row (`kind = 'dir'`, at the stripped path, carrying the
     # object's size/mtime) and counts as one object there (`obj = 1` →
-    # `n_files`), never as a file child. Spec `mgu-scale-a3-gate.md` ask 2.
+    # `n_files`), never as a file child. Spec `specs/done/mgu-scale-a3-gate.md` ask 2.
     # The regexp runs only on the rare names that need it (`//` inside, or a
     # trailing `/`): every scan of the listing pays this projection.
     canonical_name = (
@@ -516,7 +516,7 @@ def _dir_rows_insert(
 
 
 class _Labels:
-    """The attribution label table (spec mgu-scale-unification.md item B): a
+    """The attribution label table (spec specs/done/mgu-scale-unification.md item B): a
     parquet of `prefix → <label columns>`, joined onto every input row by
     deepest matching prefix.
 
@@ -584,7 +584,7 @@ def _prefix_join(
     projected once (`_p<d>` columns, dropped again on the way out) and
     joined by plain column equality. Recomputing the split-slice-join
     expression inside each ON clause cost ~4× as much per batch (spec
-    `mgu-scale-a3-gate.md` ask 8)."""
+    `specs/done/mgu-scale-a3-gate.md` ask 8)."""
     label_depths = labels.depths if labels is not None else []
     parts_desc = sorted(part_depths or (), reverse=True)
     depths = sorted({d for d in [*label_depths, *parts_desc] if d > 0})
@@ -625,7 +625,7 @@ _LAYER2_COLS = ('path', 'size', 'mtime', 'n_desc', 'n_files', 'n_children')
 
 
 class _Side:
-    """A side table keyed by `path` (spec mgu-scale-unification.md D.4): the
+    """A side table keyed by `path` (spec specs/done/mgu-scale-unification.md D.4): the
     access plane's per-scan state, joined onto every input row by exact path
     so `max_cols` (e.g. `last_ts`) can fold through the cascade as a
     subtree MAX. The side's root is `.` (the 2a convention); inputs use `''`.
@@ -686,7 +686,7 @@ def _discover_keys(
     recursively, until every key fits or has no sub-directory to split into
     (a directory of `partition_files`+ direct files stands alone). The direct
     files of a split key have no key and join the top cascade. Spec
-    `mgu-scale-a3-gate.md` ask 7."""
+    `specs/done/mgu-scale-a3-gate.md` ask 7."""
     parts = con.execute(f"""
         SELECT {_part_expr('path', k, min_nseg=k + 1)} AS part, COUNT(*) AS n
         FROM ({files_sql_for('')})
@@ -736,7 +736,7 @@ def _build_partitioned(
     side: "_Side | None" = None,
     partition_files: int = DEFAULT_PARTITION_FILES,
 ) -> tuple[list[list[str]], int, int]:
-    """Prefix-partitioned cascade (spec mgu-scale-unification.md A.2) → `dirs_all` + `n_children_tbl`.
+    """Prefix-partitioned cascade (spec specs/done/mgu-scale-unification.md A.2) → `dirs_all` + `n_children_tbl`.
 
     A dir and all its descendants share their depth-`k` prefix, so each
     distinct prefix is cascaded on its own from a partition-sized input table
@@ -752,7 +752,7 @@ def _build_partitioned(
 
     Keys are *directories* — the depth-`k` prefixes of rows deeper than `k`
     (a file at exactly depth `k` is its own prefix and would be a one-file
-    partition; spec `mgu-scale-a3-gate.md` ask 1). A key over
+    partition; spec `specs/done/mgu-scale-a3-gate.md` ask 1). A key over
     `partition_files` is split into its depth-(k+1) sub-directories,
     recursively (:func:`_discover_keys`; ask 7), so the frontier is a
     prefix-free set of directories at mixed depths and a row's key is the
@@ -909,7 +909,7 @@ def _write_ranged(
 ) -> int:
     """Write the output sorted `(depth, path, …)` without one global sort:
     sort each *path range* on its own, then concatenate the ranges depth by
-    depth (spec `mgu-scale-a3-gate.md` ask 10).
+    depth (spec `specs/done/mgu-scale-a3-gate.md` ask 10).
 
     The global `ORDER BY` over every output row is the one statement whose
     memory does not follow the partition size, and DuckDB's sort over-commits
@@ -1006,7 +1006,7 @@ def aggregate_listing_to_parquet(
     (files + synthesized dirs, n_desc/n_children/depth attached) as a single
     parquet at `out_parquet`. Returns a small stats dict for the caller.
 
-    Fleet-scale knobs (spec mgu-scale-unification.md, item A):
+    Fleet-scale knobs (spec specs/done/mgu-scale-unification.md, item A):
 
     - `db`: run the cascade in a file-backed database (a `.duckdb` path, or a
       directory to create a temporary one in). Inert since every cascade
@@ -1032,7 +1032,7 @@ def aggregate_listing_to_parquet(
     Folder placeholders — listing names ending in `/` — are objects at the
     directory they name: that directory's own row carries them (`n_files`
     counts them, `size`/`mtime` are theirs); they are never file children
-    (spec `mgu-scale-a3-gate.md` ask 2). `a//b` names collapse to `a/b`
+    (spec `specs/done/mgu-scale-a3-gate.md` ask 2). `a//b` names collapse to `a/b`
     (ask 3: the deterministic, subtree-preserving policy is to read them as
     the path the user meant).
 

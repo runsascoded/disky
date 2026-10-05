@@ -9,7 +9,7 @@ export const fmtDate = (ts: number): string =>
   new Date(ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 
 /**
- * One ownership fact, with where it came from (specs/assignment-provenance.md
+ * One ownership fact, with where it came from (gcs:specs/assignment-provenance.md
  * § Surfaces): the owner's chip plus a provenance mark — the assigner's
  * avatar for an assignment, a source glyph for a pipeline signal — and one
  * tooltip. Used wherever an owner is shown: the owner panel, the children

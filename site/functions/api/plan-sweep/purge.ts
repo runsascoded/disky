@@ -5,10 +5,12 @@
 // completion (purge_state -> done).
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
-import { gcpToken } from "../../_lib/gcp.js"
+import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
 import { jobStamp, runMountPath, submitBatch, sweepBatchSpec } from "../../_lib/cwBatch.js"
+import { gcpToken } from "../../_lib/gcp.js"
+import { NO_SHAPE, prefixShape } from "../../_lib/plans.js"
 
-type Env = AuthEnv & { DB?: D1Database }
+type Env = AuthEnv & BatchEnv & { DB?: D1Database; STORE_SCHEME?: string; STORE_BUCKETS?: string }
 
 const RUN_RE = /^cw-sweep-(dry|real)-\d{8}-\d{6}z$/
 
@@ -26,6 +28,10 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   if (!ctx.env.DB) return json({ error: "not configured (no D1 binding)" }, 503)
   if (!ctx.env.GCP_SA_KEY) return json({ error: "not configured (no GCP_SA_KEY)" }, 503)
   if (!ctx.env.JOB_SA) return json({ error: "not configured (no JOB_SA)" }, 503)
+  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "DATA_BUCKET", "SWEEP_IMAGE", "SWEEP_S3_ENDPOINT"])
+  if ("missing" in cfg) return json({ error: notConfigured("purge", cfg.missing) }, 503)
+  const shape = prefixShape(ctx.env)
+  if (!shape) return json({ error: `purge ${NO_SHAPE}` }, 503)
   const db = ctx.env.DB
 
   const runId = ((await ctx.request.json().catch(() => null)) as { run_id?: string } | null)?.run_id ?? ""
@@ -42,9 +48,9 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   }
 
   const jobId = `cw-purge-${jobStamp()}z`
-  const script = `set -euo pipefail\ndt-cloud plan-sweep purge "${runMountPath(runId)}"`
+  const script = `set -euo pipefail\ndt-cloud plan-sweep purge "${runMountPath(cfg, runId)}"`
   const token = await gcpToken(ctx.env.GCP_SA_KEY)
-  const { ok, status, text } = await submitBatch(token, jobId, sweepBatchSpec(ctx.env.JOB_SA, script, { OP: "purge", TARGET_RUN: runId }))
+  const { ok, status, text } = await submitBatch(cfg, token, jobId, sweepBatchSpec(cfg, ctx.env.JOB_SA, script, shape.buckets[0], { OP: "purge", TARGET_RUN: runId }))
   if (!ok) {
     console.error("purge submit failed", status, text.slice(0, 2000))
     return json({ error: `batch submit failed (${status})`, status }, 500)

@@ -1,5 +1,5 @@
 /** Per-user owned bytes for a scan — the ownership ledger folded server-side
- * and priced against the floor-free path index (specs/path-agnostic-serving.md
+ * and priced against the floor-free path index (specs/done/path-agnostic-serving.md
  * §2.3), so every consumer (`/users`, `/user/:id`, `/api/assignments`, the
  * user lens of `/api/subtree`) reads one number.
  *
@@ -15,7 +15,10 @@ import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type ClaimRow, type 
 
 /** The `Row` fields a total needs; `columnsFor` names them per generation. */
 const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'cls2', 'cls3', 'cls4']
-const MAX_GROUPS = 400
+/** Row groups a totals read may decode: each point lookup needs at most two
+ * (its row on a group boundary), so the bound scales with the claim count —
+ * gcs's ~1,260 prefixes on 8k-row store groups need more than a flat 400. */
+const maxGroups = (asks: number) => Math.max(400, 2 * asks)
 
 /** Bump when the body's shape changes: cached bodies with another version are recomputed. */
 export const MANIFEST_VERSION = 1
@@ -47,7 +50,7 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
     idx,
     asks,
     r => isRoot(r) || want.get(r.path) === r.depth,
-    { columns: columnsFor(idx, FIELDS), maxGroups: MAX_GROUPS },
+    { columns: columnsFor(idx, FIELDS), maxGroups: maxGroups(asks.length) },
   )
   const aggs = new Map<string, PathAgg>()
   const buckets = new Set<string>()

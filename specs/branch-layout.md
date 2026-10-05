@@ -1,6 +1,21 @@
 # Branch layout: each long-lived branch carries exactly what its deployments run
 
-**Status:** decided 2026-10-01 (Ryan), in progress. Decisions: (1) delete the Flask server + `ui/` + the interactive CLI; (2) **no `oa` branch** — Slack/Discord posting, healthcheck, warm-cache, lifecycle and GCP helpers stay on `cloud` as a shared toolkit (gcs's and cw's Slack styles as templates); (3) intra-file persistent diffs are intrinsic and their conflicts are wanted — no hooks to avoid them; generic owner/lens machinery stays on `cloud` as bones, gcs's owner *policy* moves to `gcs`; (4) delete the §3 list after re-verifying no branch uses each item; (5) order: deletions → create `local` → removals with `merge -s ours` → retarget m3/app to `local`. The tree is `cloud` → {`gcs`, `cw-s3`, `local` → {`m3`, `tauri-native-app`}}.
+**Status:** decided 2026-10-01 (Ryan), in progress; direction revised 2026-10-03 (§0). Decisions: (1) delete the Flask server + `ui/` + the interactive CLI; (2) **no `oa` branch** — Slack/Discord posting, healthcheck, warm-cache, lifecycle and GCP helpers stay on `cloud` as a shared toolkit (gcs's and cw's Slack styles as templates); (3) intra-file persistent diffs are intrinsic and their conflicts are wanted — no hooks to avoid them; generic owner/lens machinery stays on `cloud` as bones, gcs's owner *policy* moves to `gcs`; (4) delete the §3 list after re-verifying no branch uses each item; (5) order: deletions → create `local` → removals with `merge -s ours` → retarget m3/app to `local`. The tree is `cloud` → {`gcs`, `cw-s3`, `local` → {`m3`, `tauri-native-app`}}.
+
+## 0. Direction (Ryan, 2026-10-03): a maximal shared base
+
+This supersedes §3's "→ `gcs`" and "→ `cw-s3`" moves.
+
+`cloud` provides **orthogonal abstractions** that each deployment mixes in: users/owners and attribution, GCS / S3 / R2 stores, access-log ingest and processing, staged deletes and sweeps, digests, the site. It also carries **end-to-end examples** of them combined:
+- "GCS + users + access logs", modeled on gcs;
+- "plain S3", modeled on cw-s3;
+- the public r2.rbw.sh demo, deployed from `cloud` itself.
+
+Another deployment can reuse the combined helpers or copy an example.
+
+What leaves `cloud` is only what's **truly OA/Marin-specific**: identities, buckets, domains, project and channel ids, people, OA-specific defaults. The examples may be obviously inspired by the OA deployments but carry no OA values. So `cloud..gcs` and `cloud..cw-s3` should each be a minimal OA-specific diff, mostly config: `wrangler.toml` vars, job env, `Pulumi.<stack>.yaml`, identity data.
+
+The work: audit `cloud` for OA-specific behavior (defaults, constants, registry entries) and replace each with a config key whose OA value the deployment branch sets in the same round, so no branch changes behavior on its next merge of `cloud`. Comments that merely use Marin as an example are cosmetic. Whole modules with no use outside OA move to their branch.
 
 Ryan: *"each with exactly the code (and migrations) they need, and nothing they don't … diffs between branches should reflect exactly the changes in both directions, nothing more and nothing less."*
 

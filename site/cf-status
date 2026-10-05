@@ -19,13 +19,25 @@ import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-ACCT = "74981a43be0de7712369306c7b19133d"
 WRANGLER_TOML = Path(__file__).with_name("wrangler.toml")
 if not WRANGLER_TOML.exists():
     sys.exit("cf-status: no site/wrangler.toml: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)")
 PROJECT = re.search(r'^name = "(.*)"$', WRANGLER_TOML.read_text(), re.M).group(1)  # the Pages project this checkout deploys
 
 err = lambda *a: print(*a, file=sys.stderr)
+
+
+def deploy_env() -> dict[str, str]:
+    """`site/deploy.env` (the deployment branch's), as KEY=VALUE pairs."""
+    f = Path(__file__).with_name("deploy.env")
+    if not f.exists():
+        return {}
+    return dict(l.split("=", 1) for l in (l.strip() for l in f.read_text().splitlines()) if l and not l.startswith("#") and "=" in l)
+
+
+ACCT = deploy_env().get("CLOUDFLARE_ACCOUNT_ID") or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+if not ACCT:
+    sys.exit("cf-status: set CLOUDFLARE_ACCOUNT_ID in site/deploy.env")
 
 
 def git(*args: str) -> str:
@@ -36,7 +48,7 @@ def git(*args: str) -> str:
 def latest_deploy() -> dict:
     tok = os.environ.get("CLOUDFLARE_API_TOKEN")
     if not tok:
-        err("CLOUDFLARE_API_TOKEN not set (needs Pages read on the OA account)")
+        err("CLOUDFLARE_API_TOKEN not set (needs Pages read on the account)")
         sys.exit(2)
     url = f"https://api.cloudflare.com/client/v4/accounts/{ACCT}/pages/projects/{PROJECT}/deployments?per_page=10"
     req = Request(url, headers={"Authorization": f"Bearer {tok}"})

@@ -1,4 +1,4 @@
-"""Tests for adaptive range-splitting bulk listing (spec: adaptive-listing.md).
+"""Tests for adaptive range-splitting bulk listing (spec: specs/done/adaptive-listing.md).
 
 The engine runs against :class:`disk_tree.find.bulk_fake.FakeLister` — an
 in-memory PagedLister with S3 semantics — so the full worker/donation/merge
@@ -138,7 +138,7 @@ def test_adaptive_lists_exactly(keys, tmp_path: Path):
     assert success['mode'] == 'adaptive'
     # Ranges partition the keyspace: counts add up.
     assert sum(n for _, _, n in success['ranges']) == len(keys)
-    # The as-of window (spec mgu-scale-unification.md C): UTC, ordered, in the past.
+    # The as-of window (spec specs/done/mgu-scale-unification.md C): UTC, ordered, in the past.
     from datetime import datetime, timezone
     assert sorted(success) == ['bucket', 'finished', 'mode', 'objects', 'prefix', 'ranges', 'started']
     started, finished = (datetime.fromisoformat(success[k]) for k in ('started', 'finished'))

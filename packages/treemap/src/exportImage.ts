@@ -9,7 +9,7 @@
  * map on an offscreen canvas in the page's current theme colours; the base
  * export is the map alone (what the teammate clipped).
  *
- * Consumed by `<Treemap exportable>` (spec `treemap-export-image.md`); the
+ * Consumed by `<Treemap exportable>` (spec `specs/done/treemap-export-image.md`); the
  * helpers are standalone so a consumer can wire its own affordance.
  */
 

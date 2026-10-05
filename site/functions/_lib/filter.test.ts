@@ -49,6 +49,9 @@ describe('rootRects / parsePaths', () => {
       { dLo: 2, dHi: 1e9, pLo: 'iris/', pHi: 'iris0' },
     ])
   })
+  it('the store root: every path, like the plain view\'s range', () => {
+    expect(rootRects([{ path: '', depth: 0 }])).toEqual([{ dLo: 1, dHi: 1e9, pLo: '', pHi: '\uffff' }])
+  })
   it('parsePaths: comma or repeated, trimmed, deduped, trailing slashes dropped', () => {
     expect(parsePaths(['tmp/ttl=14d/,iris', ' tmp/ttl=7d ', 'iris/'])).toEqual(['tmp/ttl=14d', 'iris', 'tmp/ttl=7d'])
     expect(parsePaths([''])).toEqual([])

@@ -116,7 +116,7 @@ class HybridBackend(StorageBackend):
         del df
         root_ref = self._save_parquet_arrow(table)
         # Each chunk's top level beside the root, so a page load at the root
-        # never opens a chunk blob (spec `scan-page-r2-latency.md`).
+        # never opens a chunk blob (spec `specs/done/scan-page-r2-latency.md`).
         write_shallow(self._resolve(root_ref), tops)
         return root_ref
 

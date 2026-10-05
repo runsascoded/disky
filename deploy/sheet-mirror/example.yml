@@ -5,7 +5,7 @@
 # The deployment's own site (its `/api/*` is what the exporters read).
 site: https://usage.example.org
 # Secret Manager secret holding a read-only grant token for `site`; the job
-# gets it as `$GCS_USAGE_TOKEN`.
+# gets it as `$SITE_TOKEN`.
 token_secret: usage-sheet-mirror-token
 # Cloud Scheduler cron (UTC): hourly at :05, off the top-of-hour contention.
 schedule: "5 * * * *"

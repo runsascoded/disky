@@ -4,13 +4,14 @@ import { assetImage, unfurlShell } from './_lib/unfurl.js'
 
 interface Env {
   ASSETS: { fetch: (req: Request) => Promise<Response> }
+  ROOT_LABEL?: string
 }
 
 export const onRequest = async (ctx: { request: Request; env: Env }): Promise<Response> => {
   const origin = new URL(ctx.request.url).origin
   return unfurlShell(ctx, {
-    title: 'Marin GCS usage — users',
-    desc: 'Who owns what across the marin-* buckets: every user’s bytes, largest first.',
+    title: `${ctx.env.ROOT_LABEL ?? 'Storage'} — users`,
+    desc: 'Who owns what across the scanned buckets: every user’s bytes, largest first.',
     image: await assetImage(ctx, '/og-users.jpg') ?? `${origin}/og.jpg`,
     page: `${origin}/users`,
   })

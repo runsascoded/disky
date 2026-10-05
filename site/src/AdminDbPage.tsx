@@ -1,5 +1,6 @@
 import { Link, useParams } from 'react-router-dom'
 import { DbTable } from './DbTable'
+import { SiteNav } from './SiteNav'
 import { useTables } from './db'
 import { useDocTitle } from './title'
 
@@ -14,9 +15,9 @@ export function AdminDbPage() {
   if (error) {
     return (
       <div className="admin-page">
+        <SiteNav />
         <h1>Tables</h1>
         <p className="err">{error.message === 'unauthenticated' ? 'Sign in to view this page.' : error.message}</p>
-        <p><Link to="/">← back</Link></p>
       </div>
     )
   }
@@ -24,8 +25,9 @@ export function AdminDbPage() {
   const meta = tables?.find(t => t.name === table)
   return (
     <div className="admin-page">
+      <SiteNav />
       <p className="crumbs">
-        <Link to="/">dashboard</Link> · <Link to="/admin">admin</Link>
+        <Link to="/admin">admin</Link>
         {table && <> · <Link to="/admin/db">tables</Link></>}
       </p>
       {table ? (

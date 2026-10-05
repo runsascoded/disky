@@ -43,7 +43,6 @@ if TYPE_CHECKING:
 
 err = partial(print, file=sys.stderr)
 
-DATA_BUCKET = os.environ.get("DATA_BUCKET", "oa-gcs-usage-dvx")
 # The GCS md5 rides along as object metadata: the durable identity check a
 # re-run compares against (R2's multipart ETag is not an md5).
 MD5_META = "gcs-md5"
@@ -131,6 +130,49 @@ def is_listing(key: str, layer2_dir: str) -> bool:
 TIER_STEM = re.compile(r"^(path-index|age-index|age-pyramid|over-time)(\.|-)")
 
 
+# A key inside a generation dir: `<…>/index/<gen>/<file>` → `<…>/index/<gen>`
+# (the form D1's `index_schema.dir` stores). Loose files directly under an
+# `index/` (the base's pre-generation layout) have no generation.
+GEN_KEY = re.compile(r"^(?P<dir>.*/index/[^/]+)/[^/]")
+
+
+def gen_dir(key: str, layer2_dir: str) -> str | None:
+    """The generation dir holding ``key``, when it is under ``layer2_dir``."""
+    if not key.startswith(layer2_dir):
+        return None
+    m = GEN_KEY.match(key)
+    return m["dir"] if m and len(m["dir"]) > len(layer2_dir) else None
+
+
+def served(
+    objs: list[Obj],
+    layer2_dir: str,
+    *,
+    listings: bool = True,
+    pointed: set[str] | None = None,
+) -> tuple[list[Obj], dict[str, tuple[int, int]]]:
+    """The objects `publish` copies, and the unpointed generations it leaves
+    out (`{gen dir: (objects, bytes)}`). Without ``listings`` the canonical
+    per-bucket listings stay behind; with ``pointed`` (D1's pointer dirs),
+    every `index/<gen>/` none of them names does too — the site reads
+    generations only through their pointers, so a superseded one in R2 is
+    dead weight (specs/storage-consolidation.md phase 1). Everything outside
+    a generation dir (snapshot JSONs, sidecars beside the layer-2) is kept."""
+    keep = {p.rstrip("/") for p in pointed} if pointed is not None else None
+    out: list[Obj] = []
+    dropped: dict[str, tuple[int, int]] = {}
+    for o in objs:
+        if not listings and is_listing(o.key, layer2_dir):
+            continue
+        d = gen_dir(o.key, layer2_dir) if keep is not None else None
+        if d is not None and d not in keep:
+            n, b = dropped.get(d, (0, 0))
+            dropped[d] = (n + 1, b + o.size)
+            continue
+        out.append(o)
+    return out, dropped
+
+
 @dataclass
 class Report:
     copied: list[str] = field(default_factory=list)
@@ -207,23 +249,29 @@ def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
 def publish(
     scan: str,
     *,
-    src_bucket: str = DATA_BUCKET,
+    src_bucket: str | None = None,
     prefixes: list[str] | None = None,
     subdir: str = SNAPSHOTS_SUBDIR,
     layer2: str = LAYER2_PREFIX,
     dry_run: bool = False,
     workers: int = 8,
     listings: bool = True,
+    pointed: set[str] | None = None,
 ) -> Report:
     """Copy the scan's served subset to R2, skipping what's already there.
     Dry-run lists the keys it would copy on stdout and touches nothing.
     `listings=False` leaves the canonical per-bucket listings (`is_listing`)
-    in GCS only."""
+    in GCS only. ``pointed`` (the D1 pointer dirs, `index_footer.pointers`)
+    leaves out every `index/<gen>/` dir none of them names (`served`); None
+    copies every generation."""
     prefixes = prefixes or served_prefixes(scan, subdir, layer2)
-    objs = list_source(src_bucket, prefixes)
-    if not listings:
-        l2 = layer2.format(scan=scan)
-        objs = [o for o in objs if not is_listing(o.key, l2)]
+    if src_bucket is None:
+        from .deploy import data_bucket
+        src_bucket = data_bucket()
+    objs, dropped = served(list_source(src_bucket, prefixes), layer2.format(scan=scan), listings=listings, pointed=pointed)
+    for d in sorted(dropped):
+        n, b = dropped[d]
+        err(f"publish-r2 {scan}: left out unpointed generation {d}/ ({n} objects, {b:,} B)")
     if not objs:
         raise SystemExit(f"publish-r2: nothing under {', '.join(prefixes)} in gs://{src_bucket}")
     s3, bucket = r2_client(), r2_bucket()

@@ -48,7 +48,7 @@ what ``index_schema`` holds for the tier (``groups_v``, ``version``,
 This is the wire format of mgu's ``index_footer.py`` (``groups_blob``), owned
 here so the serverless reader (``site/functions/_lib/index.ts`` ``openBlob``)
 and the engine converge on one artifact (spec
-``mgu-engine-audit-2026-09-07.md`` §4). Column *names* differ between the two
+``specs/done/mgu-engine-audit-2026-09-07.md`` §4). Column *names* differ between the two
 producers (DT tiers carry ``size``, mgu's path index ``b``; the user slice is
 ``usr`` in both when present), so the size and user columns are resolved by
 name with those defaults; the array layout and field order never change.

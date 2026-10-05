@@ -61,3 +61,55 @@ def test_is_listing_is_a_top_level_parquet_under_the_layer2_dir():
     assert not P.is_listing(l2 + "path-index-coarse24.parquet", l2)
     assert not P.is_listing(l2 + "age-pyramid-1h.parquet", l2)
     assert not P.is_listing(l2 + "over-time.parquet", l2)
+
+
+def test_gen_dir_names_the_generation_holding_a_key():
+    l2 = "cw-l2/2026-09-23T1201/"
+    assert P.gen_dir(l2 + "index/20260923T120000Z/path-index.parquet", l2) == l2 + "index/20260923T120000Z"
+    assert P.gen_dir(l2 + "marin-us-east-02a.parquet", l2) is None
+    assert P.gen_dir("snapshots/cw/2026-09-23T1201/tree.json", l2) is None
+    # the base layout: the layer-2 dir is the `index/` itself; loose pre-generation tiers have no gen
+    assert P.gen_dir("listing/2026-09-23/index/G1/path-index.parquet", "listing/2026-09-23/index/") == "listing/2026-09-23/index/G1"
+    assert P.gen_dir("listing/2026-09-23/index/path-index.parquet", "listing/2026-09-23/index/") is None
+
+
+SCAN = "2026-09-16T0001"
+L2 = f"cw-l2/{SCAN}/"
+SRC = [
+    P.Obj(key=f"snapshots/cw/{SCAN}/tree.json", size=1, md5=None),
+    P.Obj(key=f"{L2}hero-checkpoints.parquet", size=2, md5=None),
+    P.Obj(key=f"{L2}index/g1/path-index.parquet", size=10, md5=None),
+    P.Obj(key=f"{L2}index/g1/path-index.groups.json", size=3, md5=None),
+    P.Obj(key=f"{L2}index/g2/path-index.parquet", size=20, md5=None),
+    P.Obj(key=f"{L2}index/g3/over-time.parquet", size=30, md5=None),
+]
+
+
+def test_served_keeps_only_pointed_generations():
+    pointed = {f"{L2}index/g2", f"{L2}index/g3/", "cw-l2/other/index/g1"}
+    objs, dropped = P.served(SRC, L2, listings=False, pointed=pointed)
+    assert [o.key for o in objs] == [
+        f"snapshots/cw/{SCAN}/tree.json",
+        f"{L2}index/g2/path-index.parquet",
+        f"{L2}index/g3/over-time.parquet",
+    ]
+    assert dropped == {f"{L2}index/g1": (2, 13)}
+    # no pointer set: every generation (the `-a` behavior); listings kept by default
+    objs, dropped = P.served(SRC, L2)
+    assert ([o.key for o in objs], dropped) == ([o.key for o in SRC], {})
+
+
+def test_publish_dry_run_copies_only_pointed_generations(monkeypatch, capsys):
+    monkeypatch.setattr(P, "list_source", lambda bucket, prefixes: list(SRC))
+    monkeypatch.setattr(P, "r2_client", lambda: None)
+    monkeypatch.setattr(P, "r2_bucket", lambda: "serve")
+    monkeypatch.setattr(P, "head_dest", lambda s3, bucket, key: None)
+    logged: list[str] = []
+    monkeypatch.setattr(P, "err", lambda *a: logged.append(" ".join(map(str, a))))
+    r = P.publish(SCAN, subdir="cw", layer2="cw-l2/{scan}/", dry_run=True, listings=False, pointed={f"{L2}index/g2", f"{L2}index/g3"})
+    assert r.copied == [f"snapshots/cw/{SCAN}/tree.json", f"{L2}index/g2/path-index.parquet", f"{L2}index/g3/over-time.parquet"]
+    assert capsys.readouterr().out.splitlines() == r.copied
+    assert logged == [
+        f"publish-r2 {SCAN}: left out unpointed generation {L2}index/g1/ (2 objects, 13 B)",
+        f"publish-r2 {SCAN}: would copy 3 (51 B), skipped 0 up to date",
+    ]

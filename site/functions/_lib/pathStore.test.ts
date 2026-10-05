@@ -216,6 +216,23 @@ describe('reads', () => {
     const got = await readAsks(h, [{ depth: 2, path: 'bk/flat' }, { depth: 3, path: 'bk/small/s1' }], r => want.has(r.path))
     expect(got).toEqual({ rows: [dir('bk/flat', 32767500, 8000, 8000, 8001), file('bk/small/s1', 2000)], groups: 2 })
   })
+
+  it('many point lookups spread across a depth stay under the span cap: exact rows, never a too-wide refusal', async () => {
+    // One `[min, max]` rect per depth from `flat/f00100` to `small/s1` spans
+    // all 4 `path` groups; each ask alone needs at most 3 (the two
+    // multi-depth groups + its own). The owner totals' ~1,260 prefixes on a
+    // 778M-row store overflowed the 4000 cap the same way (gcs 2026-10-01).
+    const paths = ['bk/flat/f00100', 'bk/flat/f04000', 'bk/flat/f07900', 'bk/small/s1']
+    const asks = paths.map(path => ({ depth: 3, path }))
+    const want = new Set(paths)
+    const keep = (r: Row) => want.has(r.path)
+    for (const date of [V2, V2_BLOB, V2_PQ]) {
+      const h = await openIndex(env, date)
+      const truth = (await readRects(h, [{ dLo: 3, dHi: 3, pLo: '', pHi: '\uffff' }])).filter(keep)
+      const got = await readAsks(h, asks, keep, { spanCap: 3 })
+      expect([date, byPath(got.rows).map(r => r.path), byPath(got.rows)]).toEqual([date, paths, byPath(truth)])
+    }
+  })
 })
 
 describe('the cold footer tier (`.groups.parquet`)', () => {

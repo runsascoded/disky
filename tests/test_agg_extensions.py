@@ -1,4 +1,4 @@
-"""Tests for the opt-in aggregation extensions (spec: aggregation-extensions.md).
+"""Tests for the opt-in aggregation extensions (spec: specs/done/aggregation-extensions.md).
 
 `--pivot-sum <col>` (per-category byte sums) + `--mean-mtime` (size-weighted
 mean mtime), byte-identical across all 3 engines, exact expected values on a
@@ -272,7 +272,7 @@ def test_mtime_mean_hugeint_rounding(tmp_path):
 @pytest.mark.parametrize('depth', [1, 2])
 def test_extensions_survive_partitioned_cascade(tmp_path: Path, depth: int):
     """Pivot sums and the exact `mt_wsum` partial must fold across partition
-    stubs exactly as they do through one cascade (spec mgu-scale-unification.md A.2)."""
+    stubs exactly as they do through one cascade (spec specs/done/mgu-scale-unification.md A.2)."""
     listing = _write_ext_listing(tmp_path / 'l.parquet')
     kw = dict(pivot_sums=('storage_class_id',), mean_mtime=True)
     con = duckdb.connect()
@@ -288,7 +288,7 @@ def test_extensions_survive_partitioned_cascade(tmp_path: Path, depth: int):
     pd.testing.assert_frame_equal(_normalize(read_listing(base)), _normalize(read_listing(part)))
 
 
-# ---------- Attribution slices as cascade group keys (spec mgu-scale-unification.md, item B) ----------
+# ---------- Attribution slices as cascade group keys (spec specs/done/mgu-scale-unification.md, item B) ----------
 
 _LABEL_COLS = ['team', 'usr']
 _LABEL_NUMERIC = ['size', 'mtime', 'n_desc', 'n_files', 'n_children', *EXT_COLS[:-1]]
@@ -444,7 +444,7 @@ def test_label_requires_duckdb_engine(tmp_path: Path):
         )
 
 
-# ---------- Side table → subtree MAX columns (spec mgu-scale-unification.md, item D.4) ----------
+# ---------- Side table → subtree MAX columns (spec specs/done/mgu-scale-unification.md, item D.4) ----------
 
 def _write_side(path: Path) -> str:
     """A per-scan access state: `.` is the root (2a convention); a `bucket`
@@ -556,7 +556,7 @@ def test_side_validation(tmp_path: Path):
         )
 
 
-# ---------- Size histogram column (spec mgu-scale-unification.md, item E) ----------
+# ---------- Size histogram column (spec specs/done/mgu-scale-unification.md, item E) ----------
 
 from disk_tree.find.agg_ext import SIZE_HIST_BINS, size_bin
 

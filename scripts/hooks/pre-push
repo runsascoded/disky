@@ -1,21 +1,32 @@
 #!/usr/bin/env bash
-# The push guard for the one-clone layout (specs/done/one-clone-layout.md):
-# OA deployment branches (gcs*, cw-s3*, *-prod, *-dev) may only go to `o`
-# (Open-Athena/marin-gcs-usage); base branches and the personal `m3` deployment
-# only to `r` (runsascoded/disky). Belt to the per-branch `pushRemote`'s
-# suspenders. Installed by `scripts/hooks/install`; `git push --dry-run` runs
+# The push guard for a one-clone, many-remote layout (specs/done/one-clone-layout.md):
+# each branch may only go to the remotes its kind allows. The patterns live in
+# the clone's own git config, not here (they name the deployment's remotes):
+#   git config --add pushguard.baseUrl   '*me/my-repo*'       # base remote URL globs
+#   git config --add pushguard.deployUrl '*org/deploy-repo*'  # deployment remote URL globs
+#   git config --add pushguard.deployRef 'prod*'              # refs that go only to deployment remotes
+#   git config --add pushguard.baseRef   'main'               # refs that go only to base remotes
+# A remote matching neither URL kind is unconstrained (ec2 nodes etc.); a ref
+# matching neither ref kind may go anywhere. Deployment ref patterns are
+# checked first. Installed by `scripts/hooks/install`; `git push --dry-run` runs
 # it, so dry-runs are the test.
 remote=$1; url=$2
-case "$url" in
-  *runsascoded/disk*)              kind=base ;;
-  *Open-Athena/marin-gcs-usage*)   kind=deploy ;;
-  *)                               exit 0 ;;   # ec2 nodes etc.: unconstrained
-esac
+matches() {  # matches <value> <config key>: does any glob under the key match?
+  local v=$1 pat
+  while IFS= read -r pat; do
+    [ -n "$pat" ] && [[ $v == $pat ]] && return 0
+  done < <(git config --get-all "$2")
+  return 1
+}
+if matches "$url" pushguard.baseUrl; then kind=base
+elif matches "$url" pushguard.deployUrl; then kind=deploy
+else exit 0
+fi
 while read -r local_ref local_sha remote_ref remote_sha; do
   name=${remote_ref#refs/heads/}; name=${name#refs/tags/}
-  case "$name" in
-    gcs*|cw-s3*|*-prod|*-dev|pre-public-original) [ "$kind" = deploy ] || { echo "pre-push: refusing deployment ref $name → $remote ($url)" >&2; exit 1; } ;;
-    cloud|flask|www|dev|mgu-scale|tauri-native-app|app|m3*) [ "$kind" = base ] || { echo "pre-push: refusing base ref $name → $remote ($url)" >&2; exit 1; } ;;
-  esac
+  if matches "$name" pushguard.deployRef; then
+    [ "$kind" = deploy ] || { echo "pre-push: refusing deployment ref $name → $remote ($url)" >&2; exit 1; }
+  elif matches "$name" pushguard.baseRef; then
+    [ "$kind" = base ] || { echo "pre-push: refusing base ref $name → $remote ($url)" >&2; exit 1; }
+  fi
 done
-exit 0

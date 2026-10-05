@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 API = "https://discord.com/api/v10"
-USER_AGENT = "DiscordBot (https://github.com/Open-Athena/marin-gcs-usage, 0.1)"
+USER_AGENT = "DiscordBot (https://github.com/runsascoded/disky, 0.1)"
 
 
 def _request(method: str, url: str, *, label: str, token: str | None = None, body: dict | None = None) -> dict:

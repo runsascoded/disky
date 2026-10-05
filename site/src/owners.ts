@@ -8,25 +8,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo } from 'react'
 
-export interface OwnerRow {
-  prefix: string
-  owner: string | null
-  ts: number
-  who: string
-  memo: string | null
-  action_id: number
-}
-
-/** The resolved (effective) owner of a prefix, with provenance. */
-export interface Owner {
-  prefix: string
-  /** Canonical user id (or email, for pre-mapping claims). */
-  who: string
-  ts: number
-  /** The assigner (`actions.actor`) and their memo — provenance. */
-  by: string
-  memo: string | null
-}
+export { foldLatest, newer, ownerIndex } from './ownerIndex'
+export type { Owner, OwnerIndex, OwnerRow } from './ownerIndex'
+import { ownerIndex, type OwnerIndex, type OwnerRow } from './ownerIndex'
 
 // 30s poll: several people assign concurrently, and the map should reflect
 // their assignments without a reload.
@@ -86,58 +70,8 @@ export function useOwnerMutations() {
   return { post, assign }
 }
 
-export interface OwnerIndex {
-  claimOf: (uri: string) => Owner | null
-  /** Latest live row per prefix (normalized, trailing `/`). */
-  owners: Map<string, OwnerRow>
-  count: number
-}
-
-export const newer = (a: { ts: number; action_id: number }, b: { ts: number; action_id: number }): boolean =>
-  a.ts > b.ts || (a.ts === b.ts && a.action_id > b.action_id)
-
-/** Latest live row per prefix (the API may return history rows per prefix). */
-function foldLatest<R extends { prefix: string; ts: number; action_id: number }>(rows: R[]): Map<string, R> {
-  const m = new Map<string, R>()
-  for (const r of rows) {
-    const cur = m.get(r.prefix)
-    if (!cur || newer(r, cur)) m.set(r.prefix, r)
-  }
-  return m
-}
-
-/**
- * Lookups are O(depth): a prefix's owner is decided by the newest live row on
- * one of its ancestors-or-self, so `claimOf` walks the ~6 ancestor prefixes
- * and probes a Map — not a scan over every assignment.
- */
 export function useOwnerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIndex {
-  return useMemo(() => {
-    const norm = (uri: string) => (uri.endsWith('/') ? uri : uri + '/')
-    const owners = foldLatest((data?.owners ?? []).map(r => (r.prefix.endsWith('/') ? r : { ...r, prefix: r.prefix + '/' })))
-    // 'gs://b/x/y/' → ['gs://b/', 'gs://b/x/', 'gs://b/x/y/'] (self last).
-    const ancestors = (p: string): string[] => {
-      const out: string[] = []
-      let i = p.indexOf('/', 'gs://'.length)
-      while (i !== -1) {
-        out.push(p.slice(0, i + 1))
-        i = p.indexOf('/', i + 1)
-      }
-      return out
-    }
-    const claimOf = (uri: string): Owner | null => {
-      const p = norm(uri)
-      let win: OwnerRow | null = null
-      for (const a of ancestors(p)) {
-        const r = owners.get(a)
-        if (r && (!win || newer(r, win))) win = r
-      }
-      return win?.owner != null ? { prefix: win.prefix, who: win.owner, ts: win.ts, by: win.who, memo: win.memo } : null
-    }
-    let count = 0
-    for (const r of owners.values()) if (r.owner != null) count++
-    return { claimOf, owners, count }
-  }, [data])
+  return useMemo(() => ownerIndex(data), [data])
 }
 
 /** D1 `user_emails` as an email → canonical-user map (signed-in readers only). */

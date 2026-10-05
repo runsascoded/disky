@@ -284,7 +284,7 @@ def test_agg_produces_layer2a_tree(tmp_path: Path):
     assert stats == {'rows_in': 7, 'paths_out': 10, 'hours': 2, 'total_bytes_out': 9150}
 
     df = pd.read_parquet(out)
-    # Hour grain (spec mgu-scale-unification.md D.1), UTC, naive TIMESTAMP.
+    # Hour grain (spec specs/done/mgu-scale-unification.md D.1), UTC, naive TIMESTAMP.
     assert df['hour'].dtype == 'datetime64[us]'
     assert sorted(df['hour'].unique()) == [
         pd.Timestamp('2025-08-16 00:00:00'), pd.Timestamp('2025-08-17 00:00:00'),

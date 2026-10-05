@@ -1,6 +1,8 @@
 /**
  * Actions ledger (specs/actions-ledger.md): attribution as an append-only WAL.
  *
+ *   GET  /api/actions?log=1    → { total, rows: [...] } — every owner action,
+ *                                newest first, with its status (actionLog.ts).
  *   GET  /api/actions          → { owners: [...] } — the live expanded owner
  *                                rows joined to their raw action's
  *                                provenance; the client folds them
@@ -18,9 +20,14 @@
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
 import { canonId, loadRegistry } from '../_lib/identity.js'
+import { actionLog } from '../_lib/actionLog.js'
+import { NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
 
-/** gs://marin-<suffix>/<path>/ — the six marin buckets only, dir prefixes only. */
-const PREFIX_RE = /^gs:\/\/marin-[a-z0-9-]+\/(?:[^\s]*\/)?$/
+const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** `<scheme><bucket>/<path>/` over the scanned buckets (`STORE_SCHEME` /
+ * `STORE_BUCKETS`), dir prefixes only. */
+const prefixRe = (shape: PrefixShape): RegExp =>
+  new RegExp(`^${reEscape(shape.scheme)}(?:${shape.buckets.map(reEscape).join('|')})\\/(?:[^\\s]*\\/)?$`)
 
 interface ActionBody {
   pattern?: string
@@ -32,15 +39,15 @@ interface ActionBody {
 
 const bad = (error: string) => ({ error })
 
-function validate(b: ActionBody): { error: string } | {
+function validate(b: ActionBody, shape: PrefixShape): { error: string } | {
   pattern: string
   owner: string | null
   memo: string | null
   scan: string
 } {
   const pattern = b.pattern ?? ''
-  if (!PREFIX_RE.test(pattern) || pattern.length > 512) {
-    return bad('pattern must be gs://marin-<bucket>/<path>/ (trailing slash; regex patterns not accepted yet)')
+  if (!prefixRe(shape).test(pattern) || pattern.length > 512) {
+    return bad(`pattern must be ${shape.scheme}<bucket>/<path>/ over a scanned bucket (trailing slash; regex patterns not accepted yet)`)
   }
   // Touching the axis = the key is present (null = clear); `set_owner` may
   // also be passed explicitly.
@@ -63,6 +70,12 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   if (request.method === 'GET') {
     const gated = await requireViewer(ctx)
     if (gated instanceof Response) return gated
+    // `?log=1[&limit=&offset=]`: every owner action newest first, with its
+    // status (live / superseded / overridden / retracted) — the audit view.
+    const u = new URL(request.url)
+    if (u.searchParams.get('log')) {
+      return json(await actionLog(env, Number(u.searchParams.get('limit') ?? 50), Number(u.searchParams.get('offset') ?? 0)))
+    }
     const owners = await env.DB.prepare(
       'SELECT o.prefix, o.owner, o.ts, a.actor AS who, a.memo, a.id AS action_id ' +
       'FROM owner_prefixes o JOIN actions a ON a.id = o.action_id ' +
@@ -80,7 +93,9 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     const raw = (await request.json()) as ActionBody | ActionBody[]
     const items = Array.isArray(raw) ? raw : [raw]
     if (!items.length || items.length > 500) return json({ error: 'expected 1–500 actions' }, 400)
-    const parsed = items.map(validate)
+    const shape = prefixShape(env)
+    if (!shape) return json({ error: `actions ${NO_SHAPE}` }, 503)
+    const parsed = items.map(b => validate(b, shape))
     const firstErr = parsed.find(p => 'error' in p)
     if (firstErr && 'error' in firstErr) return json(firstErr, 400)
     const ts = Math.floor(Date.now() / 1000)

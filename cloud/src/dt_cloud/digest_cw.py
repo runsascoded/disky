@@ -16,12 +16,22 @@ time (`chat.update` can't change them):
 - ``sender``: the headline IS the sender name, the arrow the avatar. Posted
   once, from the day's MORNING scan — the first at/after ``cfg.reply_hour``
   UTC (12:01Z = 8:01 am ET, the same calendar date in both zones) — with a
-  ~24 h delta to the prior day's reply scan; the 00:01Z scan only
-  re-converges the OP + plot.
+  ~24 h delta to the prior day's reply scan; the day's other scans only
+  re-converge the OP + plot.
 - ``body``: the headline is bold body text under a static sender/avatar, so
   the day's reply is EDITED whenever a later scan of the day lands — text and
-  sparkline agree intra-day (at the cost of the first edit's Δ spanning 12 h
-  until the day's last scan makes it 24 h).
+  sparkline agree intra-day (at the cost of the first edits' Δ spanning less than
+  a day until the day's last scan makes it ~24 h).
+
+``cfg.provisional`` (``sender`` only): a day's scans BEFORE its reply scan
+(at a 6 h cadence and ``reply_hour`` 12: the 00Z and 06Z scans) post one
+PROVISIONAL reply for that UTC date — a fixed neutral sender (`10/3 · so
+far`) and icon, the latest numbers in the body, edited by each later early
+scan — which the engine deletes once the day's final reply posts, so a
+finished thread reads exactly as without it. Scans after the reply scan
+(18Z) belong to no provisional: the day has its final reply, and the next
+date's provisional starts with that date's first scan. ``body`` replies are
+already edited intra-day, so they never have one.
 
 Content + deltas: specs/cw-slack-digest.md; the engine: `digest`."""
 from __future__ import annotations
@@ -34,10 +44,12 @@ from pathlib import Path
 
 from .digest import (
     AVATAR_REV, HOURS_PER_WEEK, TIB, DigestConfig, Quota, Reply, Unit,
-    _dlink, _md, _pct, _pct_val, _span, _tb, deg, load_window, scan_ts,
+    _dlink, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_ts,
 )
 
 VARIANTS = ("sender", "body")
+# a provisional reply's avatar: neutral (no trend), and fixed at post time like its sender
+PROVISIONAL_ICON = ":hourglass_flowing_sand:"
 
 
 def _quota(tb: float, q: Quota | None) -> str:
@@ -157,6 +169,9 @@ class Month:
 
     lead: list[Scan]
     rows: list[Scan]
+    # a scan exists AFTER the month: its last day is over, so `sender`'s
+    # stand-in rule applies to it too (a month converged once it has ended)
+    closed: bool = False
 
     @property
     def base(self) -> Scan:
@@ -179,16 +194,19 @@ class DayRow:
     since: dt.datetime | None  # the prior reply scan's instant (the diff link's look-back)
     extra: dict[str, float] = field(default_factory=dict)  # the other buckets' TiB
     dextra: dict[str, float | None] = field(default_factory=dict)  # …and Δ vs the prior reply scan
+    provisional: bool = False  # `sender`: the day's latest scan before its reply scan has landed
 
 
-def day_rows(month: Month, variant: str, reply_hour: int) -> list[DayRow]:
+def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = False) -> list[DayRow]:
     """One ``DayRow`` per in-month UTC day that has its reply scan.
 
     ``sender``: the day's first scan at/after ``reply_hour`` UTC (the morning
     scan; posted once, never edited). A day whose morning scan hasn't landed
-    yet has no row — unless a later day has already started, in which case
-    the day's LAST scan stands in, so a missed 12:01Z scan still yields
-    exactly one reply per day. ``body``: the day's LAST scan so far (the
+    yet has no row — unless a later day has already started (or the month
+    is ``closed``), in which case the day's LAST scan stands in, so a missed
+    12:01Z scan still yields exactly one reply per day; ``provisional``
+    gives that still-open day (only ever the last) a ``provisional`` row
+    over its latest scan instead. ``body``: the day's LAST scan so far (the
     reply is re-edited as the day's scans land)."""
     if variant not in VARIANTS:
         raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
@@ -201,31 +219,39 @@ def day_rows(month: Month, variant: str, reply_hour: int) -> list[DayRow]:
         if variant == "body":
             s = rs[-1]
         else:
-            later = i + 1 < len(days)  # some scan of a later day exists
+            later = i + 1 < len(days) or month.closed  # some scan of a later day exists
             s = next((r for r in rs if scan_ts(r.scan).hour >= reply_hour), rs[-1] if later else None)
             if s is None:
-                continue  # the day's morning scan is still to come
+                if provisional and date >= month.rows[0].date:
+                    # the day's morning scan is still to come: its numbers so far
+                    out.append(_row(date, rs[-1], prev, provisional=True))
+                continue
         if date >= month.rows[0].date:
-            out.append(
-                DayRow(
-                    date=date,
-                    scan=s.scan,
-                    tb=s.tb,
-                    dtb=round(s.tb - prev.tb, 1) if prev else None,
-                    hours=(scan_ts(s.scan) - scan_ts(prev.scan)).total_seconds() / 3600 if prev else None,
-                    since=scan_ts(prev.scan) if prev else None,
-                    extra=s.extra,
-                    dextra=_dextra(s, prev),
-                )
-            )
+            out.append(_row(date, s, prev))
         prev = s
     return out
 
 
+def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False) -> DayRow:
+    """``date``'s reply over scan ``s``, Δ vs ``prev`` (the prior day's reply scan)."""
+    return DayRow(
+        date=date,
+        scan=s.scan,
+        tb=s.tb,
+        dtb=round(s.tb - prev.tb, 1) if prev else None,
+        hours=(scan_ts(s.scan) - scan_ts(prev.scan)).total_seconds() / 3600 if prev else None,
+        since=scan_ts(prev.scan) if prev else None,
+        extra=s.extra,
+        dextra=_dextra(s, prev),
+        provisional=provisional,
+    )
+
+
 def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -> str:
-    """OP markdown: month-to-date headline, per-ISO-week bullets, trailing
-    sparkline. The month/year title is NOT in the body -- it's folded into the
-    OP's sender name by the poster. ``plot_url=None`` omits the image line."""
+    """OP markdown: month-to-date headline, the latest scan's "as of" line,
+    per-ISO-week bullets, trailing sparkline. The month/year title is NOT in
+    the body -- it's folded into the OP's sender name by the poster.
+    ``plot_url=None`` omits the image line."""
     site_url, q = cfg.site_url, cfg.primary_quota
     rows, base = month.rows, month.base
     last = rows[-1]
@@ -237,6 +263,8 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -
     mtd_url = _diff_url(last.scan, scan_ts(base.scan) if base is not last else None, site_url)
     lines = [
         f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** [month-to-date]({mtd_url}) · {last.tb:,.0f} TiB{_quota(last.tb, q)}{_extras(last.extra, _dextra(last, base if base is not last else None))} · [dashboard]({site_url}/)",
+        # the OP is re-edited every scan, so it is the thread's live view; say which scan it reflects
+        f"_as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_",
         "",
         "*Weekly summaries*",
     ]
@@ -268,7 +296,10 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     Slack renders no links/emoji/markdown there), trend-arrow avatar, the
     per-bucket tail as the body. ``body``: everything in the body under the
     static ``cfg.title`` sender, headline bold, arrow as the leading emoji.
-    The arrow projects the day's Δ% over its real interval to a weekly rate."""
+    The arrow projects the day's Δ% over its real interval to a weekly rate.
+    A ``provisional`` day (``sender``) keeps a fixed sender + neutral icon —
+    both outlive every edit — and carries the numbers so far, as of its
+    latest scan, in the body."""
     dtb = day.dtb or 0
     mult = HOURS_PER_WEEK / day.hours if day.hours else 7.0
     d = deg(_pct_val(dtb, day.tb), mult)
@@ -276,8 +307,11 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     # Each bucket as a linked `% of quota (free)` clause (the bucket names are
     # the over-time links, so no separate ↗ arrow).
     tail = _tail(day, cfg)
+    if day.provisional:
+        url = _diff_url(day.scan, day.since, cfg.site_url)
+        return Reply(f"{_md(day.date)} · so far", f":arrow_deg{d}: **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}) · {tail}", icon_emoji=PROVISIONAL_ICON)
     if variant == "sender":
-        return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.icons_base}/arrows/av_deg{d}.png?v={AVATAR_REV}")
+        return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.need('icons_base')}/arrows/av_deg{d}.png?v={AVATAR_REV}")
     if variant == "body":
         url = _diff_url(day.scan, day.since, cfg.site_url)
         return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}** · {tail}", icon_emoji=":calendar:")
@@ -286,14 +320,15 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
 
 def load_month(root: str, month: dt.date, primary: str) -> Month | None:
     """The month's scans from ``root`` (``gs://<bucket>/snapshots/cw``), with
-    ``lead`` = every scan of the last calendar day before it. None if the
-    month has no scans."""
-    w = load_window(root, month)
+    ``lead`` = every scan of the last calendar day before it, ``closed`` once
+    a later month's scan exists. None if the month has no scans."""
+    scans = list_scans(root)
+    w = load_window(root, month, scans)
     if w is None:
         return None
     lead, in_month = w
     rows = rows_from_meta(lead + in_month, primary)
-    return Month(lead=rows[: len(lead)], rows=rows[len(lead) :])
+    return Month(lead=rows[: len(lead)], rows=rows[len(lead) :], closed=scans[-1] > in_month[-1][0])
 
 
 def primary_node(tree: dict, primary: str) -> dict:
@@ -332,6 +367,14 @@ class Cw:
 
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(day.date, day.scan, reply(day, variant, self.cfg)) for day in day_rows(month, variant, self.cfg.reply_hour)]
+
+    def provisional(self, month: Month, variant: str) -> Unit | None:
+        """The still-open day's provisional reply (``sender`` only), else None."""
+        if variant != "sender":
+            return None
+        rows = day_rows(month, variant, self.cfg.reply_hour, provisional=True)
+        day = rows[-1] if rows and rows[-1].provisional else None
+        return Unit(day.date, day.scan, reply(day, variant, self.cfg)) if day else None
 
     def render_plot(self, month: Month, m: dt.date, out: Path, root: str | None = None) -> None:
         """The quota sparkline, plus — when ``root`` is given and the month

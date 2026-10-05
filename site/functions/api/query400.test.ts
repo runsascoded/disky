@@ -6,7 +6,7 @@ import { onRequestGet as subtree } from './subtree'
 // A query that doesn't parse is a 400 carrying the parser's message (the
 // filter box shows it under itself), before auth or any read — never a silent
 // "no matches".
-const env = { GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+const env = { GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'my-data' } as Env
 const get = async (h: typeof subtree, qs: string, e: Env = env) => {
   const r = await h({ request: new Request(`https://x/api?${qs}`), env: e })
   return [r.status, await r.text()]

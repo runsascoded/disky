@@ -1,19 +1,34 @@
 #!/usr/bin/env node
-// Contract + perf harness for /api/subtree (specs/path-index-lazy-drill.md).
+// Contract + perf harness for /api/subtree (specs/done/path-index-lazy-drill.md).
 // The endpoint's contract is arithmetic, so assert it directly:
 //   - every non-fold child's b ≥ the (attenuated) threshold at its depth
 //   - Σ(children) + (other) ≈ parent, within the fold floor at that level
 //   - node count ≤ w·h/minArea (+1 for the root)
-// Usage: scripts/subtree-check.mjs [base-url]   (default http://localhost:3254)
-const base = process.argv[2] ?? 'http://localhost:3254'
-const date = process.argv[3] ?? '2026-08-26'
+// Usage: scripts/subtree-check.mjs <base-url> <scan date>
+// The cases come from the deployment's own tree: the root, then down the
+// largest child three levels (at two canvas sizes), so any store exercises
+// its deepest heavy path.
+const [base, date] = process.argv.slice(2)
+if (!base || !date) { console.error('usage: subtree-check.mjs <base-url> <scan date>'); process.exit(2) }
 
+async function largestChain(depth) {
+  const chain = []
+  let path = ''
+  for (let i = 0; i < depth; i++) {
+    const r = await fetch(`${base}/api/subtree?date=${date}&path=${encodeURIComponent(path)}&w=1600&h=900`)
+    if (!r.ok) break
+    const kids = ((await r.json()).tree.c ?? []).filter(k => !k.n.startsWith('(')).sort((a, b) => b.b - a.b)
+    if (!kids.length) break
+    path = path ? `${path}/${kids[0].n}` : kids[0].n
+    chain.push(path)
+  }
+  return chain
+}
+const chain = await largestChain(3)
 const CASES = [
   { path: '', w: 1600, h: 900 },
-  { path: 'marin-us-central2', w: 1600, h: 900 },
-  { path: 'marin-us-central2/grug', w: 1600, h: 900 },
-  { path: 'marin-us-east5/checkpoints', w: 1600, h: 900 },
-  { path: 'marin-us-central1/ego-dex/part2', w: 1280, h: 800 },
+  ...chain.map(path => ({ path, w: 1600, h: 900 })),
+  ...chain.slice(-1).map(path => ({ path, w: 1280, h: 800 })),
 ]
 
 let failures = 0

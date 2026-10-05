@@ -1,0 +1,14 @@
+# A laptop deployment's AWS ingest. Copy to `infra/aws/Pulumi.yaml` and rename
+# the project; the program is the shared one in `stack/` (config only).
+name: my-deployment
+description: My laptop deployment's ingest — capture in R2 → path index + snapshot, on AWS Batch
+main: stack/
+runtime:
+  name: python
+  options:
+    toolchain: uv
+# Where Pulumi keeps state: a bucket (`s3://…`), Pulumi Cloud (omit this
+# block), or a local dir (`file://./state`, passphrase-encrypted; keep it out
+# of a public repo).
+backend:
+  url: file://./state

@@ -1,4 +1,4 @@
-// The help card's state (specs/edu-drawer.md §1): one explanation at a time,
+// The help card's state (specs/done/edu-drawer.md §1): one explanation at a time,
 // from whatever control is hovered or keyboard-focused. Pure — the provider
 // in Help.tsx drives it from pointer/focus events.
 

@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Build and deploy to Cloudflare Pages — the project named in wrangler.toml
-# (`oa-gcs-usage` → gcs.oa.dev, `oa-cw-s3-usage` → cw-s3.oa.dev; Open Athena
-# account). CF Access (Zero Trust) gates every hostname, production and preview.
+# Build and deploy to Cloudflare Pages — the project named in wrangler.toml.
+# The deployment's own settings come from `site/deploy.env` (on its branch;
+# specs/oa-decoupling.md): `CLOUDFLARE_ACCOUNT_ID` (required), `PTR_SHORT` (the
+# local deploy-pointer prefix; default the project name) and `PUSH_REMOTE`
+# (default the branch's configured push remote).
 set -euo pipefail
 cd "$(dirname "$0")"
 # The Pages project this checkout deploys: `name = "…"` in wrangler.toml.
 [ -f wrangler.toml ] || { echo "deploy: no site/wrangler.toml: each deployment branch (gcs, cw-s3, m3) carries its own; cloud has only the r2 demo's wrangler.r2*.toml (deployed by .github/workflows/deploy-r2.yml)" >&2; exit 1; }
 PROJECT=$(sed -n 's/^name = "\(.*\)"$/\1/p' wrangler.toml)
 [ -n "$PROJECT" ] || { echo "deploy: no name = ... in wrangler.toml" >&2; exit 1; }
+if [ -f deploy.env ]; then set -a; . ./deploy.env; set +a; fi
+: "${CLOUDFLARE_ACCOUNT_ID:?deploy: set CLOUDFLARE_ACCOUNT_ID (the Pages project account) in site/deploy.env}"
 
 # `--status`: report whether HEAD is deployed (no build/deploy). Delegates to the
 # standalone `cf-status` (queries the CF Pages deployments API, compares to HEAD).
 if [ "${1:-}" = "--status" ]; then exec ./cf-status; fi
 
-# Push is the DEFAULT: everything deployed to gcs.oa.dev is public-facing, so
+# Push is the DEFAULT: everything deployed is public-facing, so
 # the deployed commit (and the branch that contains it) belong on GitHub too —
 # otherwise agents reading the repo infer from stale source (bit us 8/27+8/28).
 # `-P`/`--no-push` keeps a deploy local (rare: experiments off the main branch).
@@ -31,17 +35,15 @@ mode=prod
 for a in "$@"; do case "$a" in -P|--no-push) push=false ;; -d|--dev) mode=dev ;; esac; done
 if [ "$mode" = dev ]; then push=false; fi
 
-# Auth via the repo's direnv CLOUDFLARE_API_TOKEN, which has Pages write on the
-# OA account (as well as Access + oa.dev DNS edit). We deliberately do NOT fall
-# back to `wrangler login` OAuth: that session tends to drift to a personal
-# account and then fails with auth error 10000 against the OA account.
+# Auth via the repo's direnv CLOUDFLARE_API_TOKEN (Pages write on the account).
+# We deliberately do NOT fall back to `wrangler login` OAuth: that session tends
+# to drift to another account and then fails with auth error 10000.
 # A preview build takes the `[env.preview.vars]` overrides (`vite.config.ts`
 # reads `CLOUDFLARE_ENV`, as wrangler does): the dev stack's `STORE`/`AUTH_MODE`
 # are its own, not production's.
 branch=main; [ "$mode" = dev ] && branch=dev
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
-CLOUDFLARE_ACCOUNT_ID=74981a43be0de7712369306c7b19133d \
-  npx wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch"
+npx wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch"
 
 # On a successful deploy, advance the local `<short>-prod` (or, for `--dev`,
 # `<short>-dev`) pointer to exactly what we shipped (HEAD). Kept in sync by deploy itself, so
@@ -49,21 +51,25 @@ CLOUDFLARE_ACCOUNT_ID=74981a43be0de7712369306c7b19133d \
 # authority (it reads CF's own deployment metadata) and this is the git-native
 # convenience for `git log <short>-prod..HEAD` / offline diffing.
 # One pointer per Pages project: `<short>-prod` / `<short>-dev`, where `<short>`
-# is the project name minus the account prefix and the `-usage` suffix
-# (`oa-cw-s3-usage` → `cw-s3-prod`, `oa-gcs-usage` → `gcs-prod`). Branches are
+# is `PTR_SHORT` (default the project name). Branches are
 # shared across worktrees and pushed to the same GitHub repo, so a single `prod`
 # name would have each deployment's deploy clobber the other's (it did,
 # 2026-09-28). No exceptions: a deployment that used the bare `prod` renames
 # its pointer once (`git branch -m prod <short>-prod`).
 sha=$(git rev-parse HEAD)
-short=${PROJECT#oa-}; short=${short%-usage}
+short=${PTR_SHORT:-$PROJECT}
 ptr="$short-prod"; [ "$mode" = dev ] && ptr="$short-dev"
 git branch -f "$ptr" "$sha"
 echo "moved local $ptr → ${sha:0:9}"
 [ "$mode" = dev ] && echo "preview: https://dev.$PROJECT.pages.dev"
 if $push; then
   branch=$(git rev-parse --abbrev-ref HEAD)
-  git push o "$branch" || echo "WARN: push of $branch to o failed (deploy itself succeeded)" >&2
-  git push -f o "$ptr"
-  echo "pushed $branch + $ptr → o (GitHub)"
+  remote=${PUSH_REMOTE:-}
+  if [ -z "$remote" ]; then
+    remote=$(git config "branch.$branch.pushRemote" || git config remote.pushDefault || git config "branch.$branch.remote" || true)
+  fi
+  [ -n "$remote" ] || { echo "deploy: no push remote: set PUSH_REMOTE in site/deploy.env (or branch.$branch.pushRemote)" >&2; exit 1; }
+  git push "$remote" "$branch" || echo "WARN: push of $branch to $remote failed (deploy itself succeeded)" >&2
+  git push -f "$remote" "$ptr"
+  echo "pushed $branch + $ptr → $remote"
 fi

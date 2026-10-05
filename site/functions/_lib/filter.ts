@@ -52,7 +52,10 @@ export const looseThreshold = (thr: number, atten: number, rootDepths: number[])
 /** Each root's subtree as a (depth, path-range) rectangle: everything below
  * it. '0' sorts just past '/', so `[path/, path0)` is exactly the subtree. */
 export const rootRects = (roots: { path: string; depth: number }[]): Rect[] =>
-  roots.map(r => ({ dLo: r.depth + 1, dHi: 1e9, pLo: r.path + '/', pHi: r.path + '0' }))
+  // The store root (`''`) has no `/`-prefix: every path is under it.
+  roots.map(r => r.path === ''
+    ? { dLo: r.depth + 1, dHi: 1e9, pLo: '', pHi: '\uffff' }
+    : { dLo: r.depth + 1, dHi: 1e9, pLo: r.path + '/', pHi: r.path + '0' })
 
 /** The coarsest tier whose floor the threshold can't see below, else the
  * floor-free tier — the plain planner's rule, applied to the forest. */

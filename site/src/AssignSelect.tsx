@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useOwnerMutations } from './owners'
 import { Tooltip } from './Tooltip'
 import { UserChip, allUsers } from './UserChip'
@@ -24,6 +25,21 @@ export function AssignSelect({ prefix, assigned, compact, label }: {
   const { post } = useOwnerMutations()
   const prefixes = Array.isArray(prefix) ? prefix : [prefix]
   const users = [...new Map(allUsers().map(u => [u.name, u])).values()]
+  // A whole bucket is never a casual assignment: the newest action on an
+  // ancestor wins, so it also overrides every assignment beneath it. Ask once.
+  const buckets = prefixes.filter(isBucketPrefix)
+  const [pending, setPending] = useState<string | null | undefined>(undefined)
+  const save = (owner: string | null) => { post.mutate(prefixes.map(p => ({ pattern: p, owner }))); setPending(undefined) }
+  if (pending !== undefined) {
+    const name = pending === null ? 'nobody' : pending === '@me' ? 'you' : (users.find(u => u.id === pending)?.name ?? pending)
+    return (
+      <span className="assign-confirm">
+        {buckets.length === 1 ? <>whole bucket <code>{buckets[0]}</code></> : <>{buckets.length} whole buckets</>} → {name}? This overrides every assignment under it.
+        <button type="button" className="danger" onClick={() => save(pending)}>assign</button>
+        <button type="button" className="quiet" onClick={() => setPending(undefined)}>cancel</button>
+      </span>
+    )
+  }
   return (
     <Tooltip content={<>{ASSIGN_TIP}<div className="how">Choosing a name saves immediately.</div></>}>
       <select
@@ -32,7 +48,8 @@ export function AssignSelect({ prefix, assigned, compact, label }: {
           const v = e.target.value
           if (!v) return
           const owner = v === '@none' ? null : v
-          post.mutate(prefixes.map(p => ({ pattern: p, owner })))
+          if (buckets.length) setPending(owner)
+          else save(owner)
         }}
       >
         <option value="">{label ?? (assigned ? 'reassign…' : 'assign…')}</option>
@@ -43,6 +60,9 @@ export function AssignSelect({ prefix, assigned, compact, label }: {
     </Tooltip>
   )
 }
+
+/** `gs://bucket/` — a whole bucket, no path below it. */
+export const isBucketPrefix = (p: string): boolean => /^[a-z0-9]+:\/\/[^/]+\/$/.test(p)
 
 /** The assignee by name + when, for a row or the panel. */
 export function Assignee({ who, ts, size = 15 }: { who: string; ts?: number; size?: number }) {

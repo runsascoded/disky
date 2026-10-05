@@ -1,0 +1,109 @@
+# A `site/` deployment's Pages config, every key the build and the Functions
+# read. Copy to `wrangler.toml` on the deployment's branch and fill it in;
+# `cloud` itself carries only this example and r2's `wrangler.r2.toml`.
+#
+# Three kinds of setting:
+# - `[vars]` below: plain values, committed with the branch. The build reads a
+#   few (vite.config.ts); the Functions read the rest at request time.
+# - Secrets (the `# secret` lines): never committed. Set each with
+#     wrangler pages secret put <NAME> --project-name <project>
+# - Bindings (`[[d1_databases]]`, `[[kv_namespaces]]`): ids from the
+#   deployment's `infra/cf` stack (`CfnDashboard` exports them).
+#
+# Optional keys are commented out (`# KEY = …`): uncomment the ones you want.
+# Leave a key commented rather than setting it to "": the Functions treat an
+# empty string as a value, not as unset.
+#
+# The client side of the same choices is the `src/stores.ts` entry `STORE`
+# names. `functions/_lib/wranglerExample.test.ts` fails when the Functions read
+# a key this file doesn't mention, or this file sets one nothing reads.
+
+name = "my-deployment"                      # the Pages project
+pages_build_output_dir = "dist"
+compatibility_date = "2026-06-01"
+
+# The deployment's D1: the index footer (`index_schema`, `index_row_groups`), plus
+# auth, grants, plans and the ownership ledger where enabled. Created by
+# `CfnDashboard`; schema from `migrations_dir`:
+#   wrangler d1 migrations apply <database_name> --remote
+[[d1_databases]]
+binding = "DB"
+database_name = "my-deployment-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations/<deployment>"
+remote = true
+
+# Optional: a global second cache tier behind each colo's cache (`_lib/edgeCache.ts`).
+# [[kv_namespaces]]
+# binding = "CACHE_KV"
+# id = "00000000000000000000000000000000"
+
+[observability]
+enabled = true
+
+[vars]
+# --- Build time (vite.config.ts) ---
+STORE = "my-store"                          # required: the `src/stores.ts` registry key this build serves
+AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `public` (no sign-in wall)
+# STORES_EXTRA = "meta"                       # comma-separated secondary store keys, each under its own path (`/meta`)
+# PROD_HOST = "my.example.com"                # `g d` toggles between these two hosts (src/hosts.ts);
+# DEV_HOST = "dev.my.example.com"             #   either unset = no binding
+# REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
+
+# --- Who may see it (_lib/auth.ts) ---
+BASE_SCOPE = "my"                           # the scope every viewer needs
+# PUBLIC_READ = "1"                           # any value: grant the base scope anonymously (reads open, writes closed)
+# STAFF_DOMAIN = "example.com"              # this email domain is staff: every scope; unset = no staff domain
+# VIEWER_DOMAINS = "partner.example"          # comma-separated email domains admitted with no allowlist row
+# ADMIN_EMAILS = "1"                          # any value: `admin_emails` rows get admin (the table must exist)
+# GOOGLE_CLIENT_ID = "<id>.apps.googleusercontent.com"  # Google sign-in (with the secret below); unset = `/auth/google` 503s
+# MAIL_FROM = "disk-tree <noreply@example.com>"  # emailed sign-in codes (with RESEND_API_KEY)
+
+# --- The index store (_lib/index.ts): any S3-compatible endpoint ---
+# STORE_ENDPOINT = "https://<account>.r2.cloudflarestorage.com"  # unset = GCS (`storage.googleapis.com` + GCS_HMAC_*)
+STORE_BUCKET = "my-index-bucket"            # required: the bucket holding the index (no default)
+# STORE_REGION = "auto"
+# STORE_PREFIXES = "listing/,snapshots/"      # comma-separated key prefixes the proxies may read; unset = the default set
+# SNAPSHOTS_SUBDIR = "my"                     # this store's snapshots dir: `snapshots/<sub>/`; unset = `snapshots/`
+ROOT_LABEL = "my buckets"                   # the store root's crumb label
+# QUERY_SYNTAX = "simple"                     # the path filter's default syntax (`simple` | `regex`); unset = `simple`
+# OBJECT_BUCKETS = "my-bucket"                # comma-separated scanned buckets `/v1/objects` serves to members
+# STORES_JSON = '{"meta": {"scope": "meta"}}'  # secondary stores: `{"<key>": {"scope": …, "vars": {…}, "secrets": {…}}}`
+
+# --- Plans and deletion (_lib/plans.ts, _lib/dispatch.ts) ---
+# STORE_SCHEME = "s3://"                      # the URI scheme staged prefixes carry
+# STORE_BUCKETS = "my-bucket,my-other-bucket"  # comma-separated scanned buckets, first = primary
+# STAGING = "1"                               # any value: viewers stage deletions into a shared open plan
+# EXECUTOR = "plan-sweep"                     # `plan-sweep` (default) | `sweep`
+# JOB_SA = "<job>@<project>.iam.gserviceaccount.com"  # the service account dispatched Batch jobs run as (with GCP_SA_KEY)
+# GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
+# BATCH_REGION = "us-central1"                 # the default Batch region (the default)
+# BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
+# DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
+# SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# CF_ACCOUNT_ID = "<cf-account-id>"            # `sweep`: the Cloudflare account its runs are recorded to (D1)
+# D1_DB_ID = "<d1-database-id>"               # `sweep`: the D1 its runs are recorded to (dispatch requires it; = the `DB` binding's id)
+# D1_DB_NAME = "<d1-database-name>"           # `sweep`: that D1's name
+# SWEEP_S3_ENDPOINT = "https://s3.example.com"  # `plan-sweep`: the S3 endpoint its runs delete through
+# SLACK_ADMIN_CHANNEL = "C0123456789"          # channel id staged-plan threads post to (with SLACK_BOT_TOKEN); unset = no Slack
+
+# --- Link previews (specs/done/dogi.md) ---
+# OG_CARDS = "1"                              # any value: every page gets its own preview card; unset = the static `og.jpg`
+
+# Secrets — `wrangler pages secret put`, never in this file:
+# secret SESSION_SECRET                     required wherever anyone signs in: signs session cookies and card URLs
+# secret GOOGLE_CLIENT_SECRET               Google sign-in (with GOOGLE_CLIENT_ID)
+# secret RESEND_API_KEY                     emailed sign-in codes (with MAIL_FROM)
+# secret STORE_ACCESS_KEY_ID                the index store's key pair (read-only is enough)
+# secret STORE_SECRET_ACCESS_KEY
+# secret GCS_HMAC_KEY_ID                    GCS stores only (STORE_ENDPOINT unset): an HMAC key pair
+# secret GCS_HMAC_SECRET
+# secret GCP_SA_KEY                         a service-account key that submits Batch jobs and acts as JOB_SA
+# secret SLACK_BOT_TOKEN                    staged-plan threads (with SLACK_ADMIN_CHANNEL)
+# secret SLACK_SIGNING_SECRET               Slack's interactive buttons (`/slack/actions`)
+#
+# Not set here:
+# builtin ASSETS                            Pages' static assets binding
+# dev DEV_EMAIL                             local dev only (`.dev.vars`): the identity localhost acts as
+# overlay STORE_KEY                         set by STORES_JSON's per-store overlay, never directly
+# overlay STORE_SCOPE

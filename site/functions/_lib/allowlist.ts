@@ -2,7 +2,7 @@
  * The deployment's `allowed_emails` table (`email, note, who, ts, read_only`; edited at
  * /admin/db) as `@open-athena/auth`'s `AllowlistStore`, so `authRoutes` can
  * put a share link's recipient on it (`POST /api/auth/grants` with
- * `allowlist: true`, specs/mint-link-allowlist.md).
+ * `allowlist: true`, specs/done/mint-link-allowlist.md).
  *
  * The table has no scopes column, just `read_only`: a row admits its email at
  * the base scope, or the read-only tier when set (`scopesFor`). So a full row

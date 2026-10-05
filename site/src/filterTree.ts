@@ -96,3 +96,14 @@ export function collectFlagged(root: TreeNode): { path: string; b: number }[] {
   return out
 }
 
+/**
+ * Under a filter, a table row's numbers are its matched bytes, but an action on
+ * the row (assign, trash) takes its whole prefix. So only rows inside a match
+ * root act: the root itself or anything under it, whose contents all match.
+ * `undefined` roots = no filter (every row acts); roots not yet loaded = none.
+ */
+export function inMatchRoots(roots: string[] | undefined, filtered: boolean): ((path: string) => boolean) | undefined {
+  if (!filtered) return undefined
+  const rs = roots ?? []
+  return path => rs.some(r => path === r || path.startsWith(r + '/'))
+}

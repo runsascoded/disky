@@ -141,6 +141,10 @@ The non-index path misses matches: it found 0 for `tripdata` at the root and 0 o
 
 **Before** (`cloud` 89ba0fd, layout v1, r2.rbw.sh live, 2026-10-02): `q=2019`, root, `full=1`, 426 matches, took 8.9 / 12.3 s server time (9.5 / 13.1 s wall), `search;dur=7766/11437;desc="pos trigrams c369 n78 g60"`, `fetch` summed 2.5M / 3.5M ms. `json` (c1741 n29 g40): 8.0 s search, 14.6 s total. `parquet` (16,021 candidates): Cloudflare 1102 after 26.7 s. The 4× budget raise earlier that day had turned a 193 ms partial answer (185 of the 426) into this.
 
+**After** (`cloud` 5ebf942, layout v2 on 2026-10-02's generation, r2.rbw.sh live, first requests after the deploy, random `minArea`): `q=2019`, root, `full=1`: 426 matches, not partial, 2.0 / 1.9 s server time (3.2 / 2.2 s wall) cold, `search;dur=1411/112;desc="pos trigrams c369 r157"`; 154 ms with the isolate's results kept. `parquet` (16,036 candidates): a 200 in 3.2–5.0 s server time, `partial` ("more than 50,000 matching rows"; the row read also hit its 256-group budget), `search` only 0.3–0.9 s. The rest is `spans` + `rows` (~3 s): reading the `path` groups to draw 50K matches, not the index. `gbfs json` is similar (2.7–5.0 s, partial, `search` 0.6–1.7 s). `tripdata` (1 candidate): 0.4–0.45 s. The model's ~1.0 s for `2019` holds for `search` warm; cold, the first sidecar reads cost ~1.4 s.
+
+**The daily ingest's own sidecars** (2026-10-03, written by `path-index -S` in `daily-ingest.yml`, no backfill): `q=2019` cold 0.96–1.46 s server time (`search` 0.86–1.04 s, `r156`), all 427 matches. `parquet` is unchanged: `partial` at 2.1–5.4 s, `search` 0.6–0.9 s.
+
 **Why.** The reads were already 32 at a time (`GROUP_READS`); the cost was their number. hyparquet plans **one GET per column chunk** when a read names its columns, and a store read projects 14 (`V2_ROW_COLUMNS`): 60 `path` groups were 840 GETs, plus 78 names groups each a colo-cache `match` + GET + `put`. A Worker holds at most **6 simultaneous connections** (fetch, Cache API, R2 and KV calls alike), so ~900 subrequests queued 6 at a time — the summed `fetch` (2.5M ms over a 9 s request) is ~300 reads waiting at once. The decoded-group LRU (24 MB) can't hold the 60 groups, so every request paid it again.
 
 **Latency model.** `searchBench.test.ts` (opt-in: `SEARCH_BENCH_DIR`, a local copy of one generation) runs `buildView` over real files with every store GET and Cache API call taking one of 6 slots for 60 ms + bytes at 50 MB/s (cache calls 5 ms). On r2's 2026-10-02 generation it reproduces the live request: 10.5 s wall, `search` 10.1 s, `fetch` summed 2.8M ms, 840 `path` GETs, 78 names GETs. Rows below are its numbers for `q=2019` (root, `w=1408 h=896 minArea=19098`); "CPU-bound" is the same with zero latency (this laptop's CPU; a Worker's is likely somewhat slower).
@@ -247,5 +251,5 @@ Decisions for the user:
 - **v2 on gcs** (§3.2): the rows sidecar makes a `2019`-sized query ~1.5× faster end to end (model) and ~1.8× less CPU than merged reads on v1, for a second copy of the store's rows per scan. The reader serves either; the writer emits v2 only (a v1 option is a small revert if gcs should stay on v1).
 - **`-S` default**: off until measured; on for r2 first?
 
-[diff-and-search]: diff-and-search.md
+[diff-and-search]: done/diff-and-search.md
 [path-store]: path-store.md

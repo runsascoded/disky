@@ -40,7 +40,7 @@ function pref<T extends string>(key: string, ok: readonly T[], dflt: T) {
 
 const tiling = pref<Tiling>('tiling', ['shared', 'gaps'], 'shared')
 const renderer = pref<Renderer>('renderer', ['dom', 'canvas'], 'dom')
-// The help line (specs/edu-drawer.md): on until the reader turns it off.
+// The help line (specs/done/edu-drawer.md): on until the reader turns it off.
 const help = pref<'on' | 'off'>('help', ['on', 'off'], 'on')
 export const useHelpPref = help.use
 export const setHelpPref = help.set

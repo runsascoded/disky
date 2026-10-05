@@ -14,22 +14,23 @@ neither intrinsic to one store:
 - ``gcs`` (`digest_gcs`): a reply per scan, the headline as the sender name,
   $/mo by storage class in the body, a storage-class mosaic plot.
 - ``cw`` (`digest_cw`): a reply per UTC day in two variants (``sender``: the
-  headline as the sender name, posted once from the morning scan; ``body``:
-  bold in the body, edited as the day's scans land), multi-bucket `% of quota
+  headline as the sender name, posted once from the morning scan — optionally
+  preceded by a ``provisional`` reply the earlier scans edit; ``body``: bold
+  in the body, edited as the day's scans land), multi-bucket `% of quota
   (free)` clauses when quotas are configured, a quota sparkline + diff
   treemap plot.
 
-A template is a small object (`load`, `op_body`, `units`, `render_plot`);
-this module holds everything else: arrow math, formatters, scan ids and
-`?d=` link tokens, Discord emoji, snapshot listing, state IO, plot hosting
-(`wrangler pages deploy`), and the converge shells (`converge_slack`,
-`converge_discord`, `redo_replies`). Design: specs/digest-unification.md;
-history: specs/done/slack-digest-shape-c.md, specs/cw-slack-digest.md."""
+A template is a small object (`load`, `op_body`, `units`, `provisional`,
+`render_plot`); this module holds everything else: arrow math, formatters,
+scan ids and `?d=` link tokens, Discord emoji, snapshot listing, state IO,
+plot hosting (`wrangler pages deploy`), and the converge shells
+(`converge_slack`, `converge_slack_now`, `converge_discord`,
+`redo_replies`). Design: specs/digest-unification.md; history:
+specs/done/slack-digest-shape-c.md, specs/cw-slack-digest.md."""
 from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import re
 import secrets
 import sys
@@ -46,7 +47,6 @@ HOURS_PER_WEEK = 168.0
 # bump when the av_deg glyphs change: Slack caches avatars per-URL at post
 # time, so a stable URL serves MIXED generations after a redesign.
 AVATAR_REV = 4
-ICONS_BASE = "https://gcs-usage-icons.pages.dev"
 SCAN_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})(\d{2}))?$")
 
 
@@ -78,7 +78,7 @@ class DigestConfig:
     """Everything a deployment passes the digest; no code forks.
 
     ``root``/``state``/``discord_state`` are templates: ``{DATA_BUCKET}`` reads
-    the env (default `oa-gcs-usage-dvx`); ``state`` is the Slack state dir
+    the env (required); ``state`` is the Slack state dir
     under the data root (``{channel}``, ``{variant}`` interpolated),
     ``discord_state`` the Discord one (``{webhook}`` = the webhook id — a
     webhook can only edit its own messages), ``discord_webhook_env`` the env
@@ -87,7 +87,10 @@ class DigestConfig:
     repo checkout's); it lands on ``plot_project``'s ``plot_branch``, served at
     ``plot_base`` unless wrangler names its deployment URL. ``primary`` +
     ``buckets`` (cw template) pick the headline bucket and label/quota each;
-    ``prices`` (gcs template) are $/GiB-month by storage-class id."""
+    ``prices`` (gcs template) are $/GiB-month by storage-class id.
+    ``provisional`` (cw ``sender``): post a day's early scans as one
+    provisional reply, edited in place, replaced by the final reply when the
+    day's reply scan lands (see `digest_cw`)."""
 
     template: str
     title: str
@@ -96,16 +99,26 @@ class DigestConfig:
     state: str
     discord_state: str = "digest/discord/{webhook}"
     discord_webhook_env: str | None = None
-    icons_base: str = ICONS_BASE
+    icons_base: str = ""
     icons_dir: str = "job/icons"
-    plot_project: str = "gcs-usage-icons"
+    plot_project: str = ""
     plot_branch: str = "main"
-    plot_base: str = ICONS_BASE
+    plot_base: str = ""
     variant: str = "sender"
     reply_hour: int = 12
+    provisional: bool = False
     primary: str | None = None
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
+
+    def need(self, key: str) -> str:
+        """A deployment-resource field (``icons_base``, ``plot_base``,
+        ``plot_project``): its value, or an exit naming it when it's unset.
+        The presets carry no deployment's hosts; the ``-C`` file sets them."""
+        v = getattr(self, key)
+        if not v:
+            raise SystemExit(f"digest config `{key}` is unset: set it in the deployment's config file (-C)")
+        return v
 
     @property
     def primary_quota(self) -> Quota | None:
@@ -123,44 +136,30 @@ class DigestConfig:
         return re.sub(r"\s+", "-", self.title.strip().lower())
 
     def resolve_root(self) -> str:
-        return self.root.format(DATA_BUCKET=os.environ.get("DATA_BUCKET", "oa-gcs-usage-dvx"))
+        from .deploy import data_bucket
+        return self.root.format(DATA_BUCKET=data_bucket())
 
 
 PRESETS: dict[str, DigestConfig] = {
+    # Template shape only: a deployment's site, hosts, buckets and quotas come
+    # from its config file (``-C``); an empty ``site_url`` reads ``$SITE_URL``.
     "gcs": DigestConfig(
         template="gcs",
-        title="GCS usage",
-        site_url="https://gcs.oa.dev",
+        title="Storage usage",
+        site_url="",
         root="gs://{DATA_BUCKET}/snapshots",
         state="digest",
-        discord_webhook_env="DISCORD_GCS_USAGE_WEBHOOK",
         # US list $/GiB-mo by GCS storage class id (1 Standard / 2 Nearline / 3 Coldline / 4 Archive)
         prices={"1": 0.02, "2": 0.01, "3": 0.004, "4": 0.0012},
     ),
     "cw": DigestConfig(
         template="cw",
-        title="CoreWeave usage",
-        site_url="https://cw-s3.oa.dev",
-        root="gs://{DATA_BUCKET}/snapshots/cw",
-        # namespaced under cw/ (gcs's prod state is digest/<YYYY-MM>.json), keyed by
-        # channel so a staging converge never masquerades as prod, and by variant so
-        # both can be staged side by side
-        state="digest/cw/{channel}/{variant}",
-        icons_dir="job/icons-cw",
-        # cw's plots go to the icons project's `cw` preview branch, so a cw deploy
-        # never replaces what the production alias (the shared arrow avatars) serves
-        plot_branch="cw",
-        plot_base="https://cw.gcs-usage-icons.pages.dev",
-        primary=os.environ.get("CW_BUCKET", "marin-us-east-02a"),
-        # quotas authoritative from CoreWeave's own `cwobject_quota_info` metric
-        # (per zone; via finelog / Grafana `storage.usage`): 02a = exactly 910 TiB
-        # (≈ 1.0006 PB decimal, "1 PB"); hero-checkpoints = the US-EAST-08A ZONE
-        # quota, 100 TiB, shared with rhoarnet-us-east-08a (~3 TiB, unscanned) — so
-        # hero's "free" overstates true zone headroom by ~3 TiB
-        buckets={
-            "marin-us-east-02a": Bucket("02a", Quota(910 * TIB, "1 PB", "1P")),
-            "hero-checkpoints": Bucket("hero", Quota(100 * TIB, "100 TiB", "100Ti")),
-        },
+        title="Storage usage",
+        site_url="",
+        root="gs://{DATA_BUCKET}/snapshots",
+        # keyed by channel so a staging converge never masquerades as prod, and by
+        # variant so both can be staged side by side
+        state="digest/{channel}/{variant}",
     ),
 }
 
@@ -177,21 +176,67 @@ def parse_bytes(v: int | str) -> int:
     return round(float(m.group(1)) * _UNITS[(m.group(2) or "").upper()])
 
 
+TEMPLATES = ("gcs", "cw")
+# the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
+_SCALAR_TYPES: dict[str, tuple[type, ...]] = {
+    "template": (str,), "title": (str,), "site_url": (str,), "root": (str,), "state": (str,),
+    "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
+    "icons_dir": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
+    "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
+}
+
+
+def _mapping(where: str, d: Any) -> dict:
+    if not isinstance(d, dict):
+        raise ValueError(f"digest config {where}: expected a mapping, got {type(d).__name__}")
+    return d
+
+
+def _keys(where: str, d: Any, allowed: set[str], required: set[str] = frozenset()) -> dict:
+    """``d`` as a mapping with only ``allowed`` keys and every ``required`` one."""
+    if bad := set(_mapping(where or "file", d)) - allowed:
+        raise ValueError(f"unknown digest config keys{f' in {where}' if where else ''}: {sorted(bad)}")
+    if missing := required - set(d):
+        raise ValueError(f"digest config {where}: missing {sorted(missing)}")
+    return d
+
+
+def _bucket(name: str, b: dict | None) -> Bucket:
+    b = _keys(f"buckets.{name}", b or {}, {"label", "quota"})
+    if b.get("label") is not None and not isinstance(b["label"], str):
+        raise ValueError(f"digest config buckets.{name}.label: expected a string, got {b['label']!r}")
+    q = b.get("quota")
+    if q is None:
+        return Bucket(b.get("label"))
+    q = _keys(f"buckets.{name}.quota", q, {"bytes", "name", "short"}, {"bytes", "name"})
+    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])))
+
+
 def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     """A config from a parsed YAML/JSON mapping, overlaid on ``base`` (default:
     the preset its ``template`` names). ``buckets`` map names to ``{label,
-    quota: {bytes, name, short}}`` (``bytes`` may be `910 TiB`); unknown keys
-    are an error."""
-    d = dict(d)
+    quota: {bytes, name, short}}`` (``bytes`` may be `910 TiB`), ``prices``
+    storage-class ids to $/GiB-month. Validated: unknown keys (at any level),
+    a wrong-typed value, an unknown template or an out-of-range ``reply_hour``
+    raise ``ValueError``."""
+    d = dict(_keys("", d, {f.name for f in fields(DigestConfig)}))
+    for k, types in _SCALAR_TYPES.items():
+        # bool is an int subclass; `reply_hour: true` is a typo, not hour 1
+        if k in d and (not isinstance(d[k], types) or (isinstance(d[k], bool) and bool not in types)):
+            want = " or ".join("null" if t is type(None) else t.__name__ for t in types)
+            raise ValueError(f"digest config {k}: expected {want}, got {d[k]!r}")
+    if d.get("template", "gcs") not in TEMPLATES:
+        raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
+    if not 0 <= d.get("reply_hour", 0) <= 23:
+        raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
     base = base or PRESETS[d.get("template", "gcs")]
-    known = {f.name for f in fields(DigestConfig)}
-    if bad := set(d) - known:
-        raise ValueError(f"unknown digest config keys: {sorted(bad)}")
     if "buckets" in d:
-        d["buckets"] = {
-            name: Bucket(b.get("label"), Quota(parse_bytes(b["quota"]["bytes"]), b["quota"]["name"], b["quota"].get("short")) if b.get("quota") else None)
-            for name, b in (d["buckets"] or {}).items()
-        }
+        d["buckets"] = {str(name): _bucket(name, b) for name, b in _mapping("buckets", d["buckets"] or {}).items()}
+    if "prices" in d:
+        prices = _mapping("prices", d["prices"] or {})
+        if bad := {k: v for k, v in prices.items() if not isinstance(v, (int, float)) or isinstance(v, bool)}:
+            raise ValueError(f"digest config prices: expected numbers, got {bad}")
+        d["prices"] = {str(k): float(v) for k, v in prices.items()}
     return replace(base, **d)
 
 
@@ -201,8 +246,7 @@ def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
         return PRESETS[template]
     import yaml
 
-    d = yaml.safe_load(Path(path).read_text()) or {}
-    return config_from_dict(d, PRESETS[d.get("template", template)])
+    return config_from_dict({"template": template, **_mapping(str(path), yaml.safe_load(Path(path).read_text()) or {})})
 
 
 # ---- pure helpers ---------------------------------------------------------------
@@ -321,7 +365,8 @@ class Template(Protocol):
     ``variants`` are its reply styles (the first is the default);
     ``edited_variants`` re-edit a day's reply when a later scan of it lands;
     ``track_scan`` stores each posted reply as ``{ts, scan}`` (else the bare
-    ts — the gcs template's existing state format)."""
+    ts — the gcs template's existing state format). ``provisional`` is the
+    still-open unit's stand-in reply (``cfg.provisional``), or None."""
 
     cfg: DigestConfig
     variants: tuple[str, ...]
@@ -332,10 +377,15 @@ class Template(Protocol):
     def n_scans(self, data: Any) -> int: ...
     def op_body(self, data: Any, month: dt.date, plot_url: str | None) -> str: ...
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
+    def provisional(self, data: Any, variant: str) -> Unit | None: ...
     def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
 
 
 def template(cfg: DigestConfig) -> Template:
+    if not cfg.site_url:
+        from .deploy import site_url
+
+        cfg = replace(cfg, site_url=site_url())
     if cfg.template == "gcs":
         from .digest_gcs import Gcs
 
@@ -367,14 +417,14 @@ def list_scans(root: str) -> list[str]:
     )
 
 
-def load_window(root: str, month: dt.date) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]] | None:
+def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]] | None:
     """``(lead, in_month)`` ``(scan id, meta.json)`` pairs for ``month``: the
     month's scans, and ``lead`` = every scan of the last calendar day before it
     (the first delta's baseline; empty for the first month ever). None if the
-    month has no scans."""
+    month has no scans. ``scans``: ``list_scans(root)``, if already listed."""
     import fsspec
 
-    scans = list_scans(root)
+    scans = list_scans(root) if scans is None else scans
     pfx = f"{month:%Y-%m}-"
     in_month = [s for s in scans if s.startswith(pfx)]
     if not in_month:
@@ -439,6 +489,8 @@ def pages_deploy(icons_dir: Path, project: str, branch: str) -> str | None:
     import shutil
     import subprocess
 
+    if not project:
+        raise SystemExit("digest config `plot_project` is unset: set it in the deployment's config file (-C)")
     # The job image installs wrangler globally (`npm install -g`) but has
     # no `npx` shim, so prefer the binary; `npx` only serves a laptop run.
     wrangler = [shutil.which("wrangler")] if shutil.which("wrangler") else ["npx", "wrangler"] if shutil.which("npx") else None
@@ -464,7 +516,13 @@ def _ts(rec: str | dict) -> str:
 def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
-    edit it when a later scan has landed. Persist and return state.
+    edit it when a later scan has landed. Then the provisional reply
+    (``cfg.provisional``): delete every one whose unit is no longer open
+    (its final reply just posted, or a delete that failed last run), and
+    post the open unit's — or edit it when a later scan has landed. Persist
+    and return state; the provisional's ``{ts, scan}`` lives under
+    ``state["provisional"][<key>]`` (absent when there is none), so a re-run
+    edits rather than duplicates.
 
     ``icons_dir`` is where to write the PNG; ``deploy_plot(local, basename)``
     publishes it and returns the host serving it (None → ``cfg.plot_base``).
@@ -483,7 +541,7 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     state = load_state(path)
 
     plot_name = state.get("plot_name") or f"plot-{secrets.token_hex(16)}.png"
-    base = cfg.plot_base
+    base = cfg.need("plot_base")
     if icons_dir is not None:
         local = Path(icons_dir) / plot_name
         tpl.render_plot(data, month, local, root)
@@ -532,8 +590,50 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
             save_state(path, state)
             _err(f"digest: edited reply {u.key} -> {u.scan}")
 
+    open_ = tpl.provisional(data, variant) if cfg.provisional else None
+    provs = state.setdefault("provisional", {})
+    for key in [k for k in provs if open_ is None or k != open_.key]:
+        try:
+            client.delete(provs[key]["ts"], orphans_ok=True)
+        except Exception as e:  # noqa: BLE001 — the next run retries; a lingering provisional reads `so far`
+            _err(f"digest: WARN could not delete provisional reply {key}: {e}")
+            continue
+        del provs[key]
+        save_state(path, state)
+        _err(f"digest: deleted provisional reply {key}")
+    if open_ is not None:
+        have = provs.get(open_.key)
+        r = open_.reply
+        if have is None:
+            rm = client.post(r.body, thread_id=op_ts, username=r.username, icon_url=r.icon_url, icon_emoji=r.icon_emoji)
+            provs[open_.key] = {"ts": rm.id, "scan": open_.scan}
+            save_state(path, state)
+            _err(f"digest: provisional reply {open_.key} ({open_.scan}) -> {rm.id}")
+        elif have["scan"] != open_.scan:
+            client.edit(have["ts"], r.body)
+            have["scan"] = open_.scan
+            save_state(path, state)
+            _err(f"digest: edited provisional reply {open_.key} -> {open_.scan}")
+    if not provs:
+        state.pop("provisional")
+
     save_state(path, state)
     return state
+
+
+def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, **kw) -> dict:
+    """The scheduled run's converge: ``month``'s thread (the current one),
+    after first re-converging the PREVIOUS month's if its state still holds a
+    provisional reply. That happens when a month's last day never got its
+    reply scan: only a scan after the month (this month's first) lets the
+    stand-in rule give that day a final reply, and only then can the
+    provisional go. Idempotent like `converge_slack`; ``kw`` passes through."""
+    variant = variant or tpl.variants[0]
+    prev = (month - dt.timedelta(days=1)).replace(day=1)
+    if load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant))).get("provisional"):
+        _err(f"digest: {prev:%Y-%m} still has a provisional reply — closing it first")
+        converge_slack(tpl, root, prev, client, channel, variant, **kw)
+    return converge_slack(tpl, root, month, client, channel, variant, **kw)
 
 
 def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
@@ -607,7 +707,7 @@ def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, h
         hook.edit(op_id, body, files=[plot])
         _err(f"digest: edited OP {op_id} ({tpl.n_scans(data)} scans)")
     else:
-        op_id = hook.post(body, username=title, icon_url=f"{tpl.cfg.icons_base}/calendar.png?v=2", files=[plot]).id
+        op_id = hook.post(body, username=title, icon_url=f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", files=[plot]).id
         state["op_id"] = op_id
         state["thread_id"] = bot.create_thread(op_id, title)
         save(state)
@@ -663,7 +763,8 @@ def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, 
 
 def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None, plot_dir=None) -> str:
     """Render the plot (into ``plot_dir``, default the temp dir) and return the
-    OP + every reply as text; posts and hosts nothing."""
+    OP + every reply (+ the open day's provisional reply, last) as text;
+    posts and hosts nothing."""
     import tempfile
 
     variant = variant or tpl.variants[0]
@@ -674,7 +775,8 @@ def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None
     tpl.render_plot(data, month, out, root)
     _err(f"rendered plot → {out}")
     lines = [tpl.op_body(data, month, "<plot-url>"), "", f"--- replies ({variant}: username | body | icon) ---"]
-    for u in tpl.units(data, variant):
+    open_ = tpl.provisional(data, variant) if tpl.cfg.provisional else None
+    for u in tpl.units(data, variant) + ([open_] if open_ else []):
         r = u.reply
         lines.append(f"{r.username} | {r.body} | {(r.icon_url or r.icon_emoji or '').split('/')[-1]}")
     return "\n".join(lines)
