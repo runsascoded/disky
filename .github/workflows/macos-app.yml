@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   build:
+    if: startsWith(github.ref, 'refs/heads/') || github.event_name == 'pull_request'
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -60,16 +61,34 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/disky-v')
-    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
+      - name: Require verified app-branch builds for this tag's commit
+        id: verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          commit=$(git rev-parse HEAD)
+          for workflow in ci.yml macos-app.yml; do
+            run_id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$workflow" \
+              --branch tauri-native-app --event push --commit "$commit" \
+              --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            if [ -z "$run_id" ]; then
+              echo "Push this commit to tauri-native-app and wait for $workflow to pass before tagging." >&2
+              exit 1
+            fi
+          done
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: disky-apple-silicon
           path: tmp/release
+          run-id: ${{ steps.verified.outputs.run_id }}
+          github-token: ${{ github.token }}
       - name: Publish pilot prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -77,7 +96,9 @@ jobs:
         run: |
           version=$(node -p 'JSON.parse(require("fs").readFileSync("apps/tauri/src-tauri/tauri.conf.json")).version')
           test "$RELEASE_TAG" = "disky-v$version"
-          gh release create "$RELEASE_TAG" tmp/release/* --verify-tag --prerelease \
+          assets="tmp/release/disky-$version-arm64"
+          (cd "$assets" && sha256sum --check SHA256SUMS)
+          gh release create "$RELEASE_TAG" "$assets"/* --verify-tag --prerelease \
             --latest=false \
             --title "disky ${RELEASE_TAG#disky-v} — Apple Silicon pilot" \
             --notes-file apps/tauri/PILOT.md

@@ -27,7 +27,7 @@ node apps/tauri/scripts/smoke.mjs
 
 `check` first builds the walker and web resources, then runs Rust tests and the site's build/tests. Tauri's build script needs those generated resources even during `cargo test`, so use this command on a fresh checkout.
 
-The [macOS workflow][workflow] tests and packages on an Apple Silicon macOS 15 runner. Pushes to the app branch upload CI artifacts; tags `disky-v<version>` publish a pilot prerelease only after the build and extracted-bundle smoke check pass. The tag must identify the app branch, not the default `cloud` branch.
+The [macOS workflow][workflow] tests and packages on an Apple Silicon macOS 15 runner. Pushes to the app branch upload CI artifacts. After both CI workflows pass, tags `disky-v<version>` promote that commit's verified artifacts to a pilot prerelease, checking their SHA256SUMS first. A tag without successful app-branch builds fails publication; push the release commit to `tauri-native-app` and wait for its checks before tagging. The tag must identify the app branch, not the default `cloud` branch.
 
 ## Runtime
 
