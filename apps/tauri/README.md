@@ -16,7 +16,7 @@ Requirements: macOS, Rust, Xcode Command Line Tools, Node and pnpm. The pinned T
 # From the repository root.
 pnpm install --frozen-lockfile
 cargo install tauri-cli --version 2.11.4 --locked
-cargo test --manifest-path apps/tauri/Cargo.toml --workspace --release --locked -j 2
+apps/tauri/scripts/check
 apps/tauri/scripts/package
 node apps/tauri/scripts/smoke.mjs
 ```
@@ -24,6 +24,8 @@ node apps/tauri/scripts/smoke.mjs
 `package` builds the Rust walker, the local SPA and the app; produces a DMG, `.app.zip` and `SHA256SUMS` under `tmp/releases/disky-<version>-<arch>`; and verifies the app signature. It defaults to ad-hoc signing (`-`). Set `APPLE_SIGNING_IDENTITY` to use a certificate already installed in your Keychain. Tauri's Apple notarization environment variables apply when configured. Packaging does not install the app or alter registered agents.
 
 `smoke.mjs` exercises the bundle in a new scratch home with only system tools on PATH: defaults, a native fixture scan, local API and bundled SPA. Pass an extracted `.app` path to test a ZIP's contents. It creates fixtures under `tmp/app-smoke` and never changes your real settings or scans.
+
+`check` first builds the walker and web resources, then runs Rust tests and the site's build/tests. Tauri's build script needs those generated resources even during `cargo test`, so use this command on a fresh checkout.
 
 The [macOS workflow][workflow] tests and packages on an Apple Silicon macOS 15 runner. Pushes to the app branch upload CI artifacts; tags `disky-v<version>` publish a pilot prerelease only after the build and extracted-bundle smoke check pass. The tag must identify the app branch, not the default `cloud` branch.
 

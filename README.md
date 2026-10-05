@@ -2,6 +2,8 @@
 
 Disk and cloud storage analyzer: a scanning/indexing CLI for local filesystems and S3 / R2 / GCS buckets, and a Cloudflare-hosted treemap site (`site/`) over its indexes.
 
+[disky][macos-app] is the native macOS app: local scans, treemaps and diffs without Python, Homebrew or a cloud account. Apple Silicon pilots are available through [GitHub Releases][macos-releases]; read the [installation and test instructions][macos-pilot]. Pilot builds are ad-hoc signed and not notarized.
+
 [![disk-tree treemap of an R2 bucket](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
 
 <p align="center"><b><a href="https://r2.rbw.sh/r2/ctbk">▶ Live demo</a></b> — interactive treemap of a 916&nbsp;GB R2 bucket (drill in, filter, compare), from <a href="https://ctbk.dev">ctbk.dev</a></p>
@@ -103,3 +105,7 @@ pnpm install
 cd site
 pnpm dev
 ```
+
+[macos-app]: apps/tauri/README.md
+[macos-releases]: https://github.com/runsascoded/disky/releases
+[macos-pilot]: apps/tauri/PILOT.md

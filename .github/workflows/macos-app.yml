@@ -36,14 +36,13 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/tauri -> target'
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
-      - name: Rust tests
-        run: cargo test --manifest-path apps/tauri/Cargo.toml --workspace --release --locked
-      - name: Site build and tests
-        run: |
-          pnpm -C site build
-          pnpm -C site exec vitest run --testTimeout=20000
+      - name: App checks (prepare resources, Rust and site)
+        run: apps/tauri/scripts/check
       - name: Install pinned Tauri CLI
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Package Apple Silicon pilot

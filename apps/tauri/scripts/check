@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Check a fresh checkout, including the resources Tauri's build script embeds.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+cd "$root"
+export MACOSX_DEPLOYMENT_TARGET=13.0
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
+cargo build --manifest-path apps/tauri/Cargo.toml --release --locked -p dt-walker
+apps/tauri/scripts/build-web
+cargo test --manifest-path apps/tauri/Cargo.toml --workspace --release --locked
+pnpm -C site build
+pnpm -C site exec vitest run --testTimeout=20000

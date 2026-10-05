@@ -8,7 +8,7 @@ This is an **Apple Silicon prerelease**, configured for macOS 13 or later. The f
 
 1. Download the `arm64.dmg` asset, open it, and drag **disky** into Applications. Alternatively, extract the `arm64.app.zip` and move **disky.app** into Applications.
 2. Open disky. This pilot is **ad-hoc signed and not notarized**, so macOS may require **Open Anyway** in System Settings → Privacy & Security. Only approve the app you downloaded from this repository's release. A Developer ID signed and notarized release will follow.
-3. In disky's Settings, choose the whole Mac or your home folder. Grant **Full Disk Access** to disky in System Settings to include protected folders. You may need to quit and reopen disky after granting it.
+3. In disky's Settings, choose the whole Mac or your home folder and click **Save**. Grant **Full Disk Access** to disky in System Settings to include protected folders. You may need to quit and reopen disky after granting it.
 4. Click **Scan now**. The menu shows progress; open disky to browse the local result. Scheduling and Open at login are opt-in settings.
 
 The local view is the default. Selecting disk.rbw.sh only changes the viewer; uploading requires a separately configured destination. This pilot does not automatically upload your files or scan metadata.
