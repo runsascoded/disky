@@ -1,0 +1,84 @@
+name: macOS app
+
+on:
+  push:
+    branches: [tauri-native-app]
+    tags: ['disky-v*']
+    paths:
+      - 'apps/tauri/**'
+      - 'site/**'
+      - 'packages/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/macos-app.yml'
+  pull_request:
+    paths: ['apps/tauri/**', 'site/**', 'packages/**', '.github/workflows/macos-app.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '2'
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      PUPPETEER_SKIP_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Rust tests
+        run: cargo test --manifest-path apps/tauri/Cargo.toml --workspace --release --locked
+      - name: Site build and tests
+        run: |
+          pnpm -C site build
+          pnpm -C site exec vitest run --testTimeout=20000
+      - name: Install pinned Tauri CLI
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Package Apple Silicon pilot
+        run: apps/tauri/scripts/package
+      - name: Smoke the extracted downloadable ZIP
+        run: |
+          mkdir -p tmp/extracted
+          ditto -x -k tmp/releases/*/*.app.zip tmp/extracted
+          node apps/tauri/scripts/smoke.mjs tmp/extracted/disky.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: disky-apple-silicon
+          path: tmp/releases/*/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/disky-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: disky-apple-silicon
+          path: tmp/release
+      - name: Publish pilot prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(node -p 'JSON.parse(require("fs").readFileSync("apps/tauri/src-tauri/tauri.conf.json")).version')
+          test "$RELEASE_TAG" = "disky-v$version"
+          gh release create "$RELEASE_TAG" tmp/release/* --verify-tag --prerelease \
+            --latest=false \
+            --title "disky ${RELEASE_TAG#disky-v} — Apple Silicon pilot" \
+            --notes-file apps/tauri/PILOT.md

@@ -42,6 +42,27 @@ extern "C" fn forward(sig: libc::c_int) {
 /// `Some(exit code)` when `args` selects a headless mode, `None` for the GUI.
 pub fn dispatch(args: &[OsString]) -> Option<i32> {
     match args.get(1).and_then(|a| a.to_str()) {
+        Some("version") => Some({ println!("disky {}", env!("CARGO_PKG_VERSION")); 0 }),
+        Some("settings") if args.get(2).and_then(|a| a.to_str()) == Some("show") => Some({
+            println!("{}", serde_json::to_string_pretty(&crate::settings::load()).unwrap());
+            0
+        }),
+        Some("serve") => Some({
+            let addr = match &args[2..] {
+                [] => crate::settings::LOCAL_ADDR.to_string(),
+                [flag, addr] if flag == "--addr" => addr.to_string_lossy().into_owned(),
+                _ => { eprintln!("usage: disky serve [--addr 127.0.0.1:PORT]"); return Some(2); }
+            };
+            match addr.parse::<std::net::SocketAddr>() {
+                Ok(a) if a.ip().is_loopback() => {},
+                _ => { eprintln!("disky serve: need a loopback address"); return Some(2); }
+            }
+            let web = std::env::current_exe().unwrap().parent().unwrap().join("../Resources/web");
+            match dt_index::http::serve(crate::local_server_config(web), &addr, 4) {
+                Ok(()) => 0,
+                Err(e) => { eprintln!("disky serve: {e}"); 1 }
+            }
+        }),
         Some("agent") => Some(agent(&args[2..])),
         Some("probe") => Some(probe()),
         Some("job") => Some(match (args.get(2).and_then(|a| a.to_str()), args.get(3).and_then(|a| a.to_str())) {

@@ -224,6 +224,7 @@ struct UiState {
     site_url: String,
     fda: bool,
     agents: bool,
+    agents_status: String,
     login: bool,
     scan: String,
 }
@@ -235,6 +236,7 @@ fn ui_state() -> UiState {
         settings: s,
         fda: agent::has_full_disk_access(),
         agents: services::agents_enabled(),
+        agents_status: services::agents_status(),
         login: login_enabled(),
         scan: status::scan_line(),
     }
@@ -343,15 +345,17 @@ fn start_local_server(app: &AppHandle) {
     if !web.join("index.html").exists() {
         return jobs::note(&format!("disky: no local site build at {}", web.display()));
     }
-    // `~` and the title are this user's and this Mac's, at runtime (the
-    // bundled build is anyone's).
-    let home = std::env::var("HOME").ok().map(|h| h.trim_matches('/').to_string());
-    let cfg = dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())) };
+    let cfg = local_server_config(web);
     std::thread::spawn(move || {
         if let Err(e) = dt_index::http::serve(cfg, settings::LOCAL_ADDR, 4) {
             jobs::note(&format!("disky: local server on {}: {e}", settings::LOCAL_ADDR));
         }
     });
+}
+
+fn local_server_config(web: PathBuf) -> dt_index::http::Config {
+    let home = std::env::var("HOME").ok().map(|h| h.trim_matches('/').to_string());
+    dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())) }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -361,6 +365,9 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            if let Err(e) = services::migrate_agents() {
+                jobs::note(&format!("disky: agent migration: {e}"));
+            }
             start_local_server(app.handle());
 
             let site = settings::load().site;

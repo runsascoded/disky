@@ -75,7 +75,66 @@ pub fn open_login_items_settings() {
 }
 
 pub fn agents_enabled() -> bool {
-    AGENT_PLISTS.iter().all(|p| status(Service::Agent(p)) == "enabled")
+    AGENT_PLISTS.iter().all(|p| installed_plist(p).exists())
+}
+
+/// Enabled intent is the installed plain plist, not a successful launch. A
+/// failed agent must remain checked so saving other settings doesn't disable it.
+pub fn agents_status() -> String {
+    AGENT_PLISTS.iter().map(|p| format!("{}: {}", label(p).rsplit('.').next().unwrap(), status(Service::Agent(p)))).collect::<Vec<_>>().join(" · ")
+}
+
+trait AgentMigration {
+    fn enabled(&self) -> bool;
+    fn legacy(&self) -> bool;
+    fn current(&self) -> bool;
+    fn running(&self) -> bool;
+    fn clear_legacy(&mut self) -> Result<(), String>;
+    fn replace_plain(&mut self) -> Result<(), String>;
+}
+
+fn migrate(agent: &mut impl AgentMigration) -> Result<(), String> {
+    if !agent.enabled() { return Ok(()); }
+    let legacy = agent.legacy();
+    if (legacy || !agent.current()) && agent.running() {
+        return Err("agent upgrade deferred while its job is running; reopen disky after it finishes".into());
+    }
+    if legacy { agent.clear_legacy()?; }
+    if legacy || !agent.current() { agent.replace_plain()?; }
+    Ok(())
+}
+
+struct InstalledAgent<'a>(&'a str);
+
+impl AgentMigration for InstalledAgent<'_> {
+    fn enabled(&self) -> bool { installed_plist(self.0).exists() }
+    fn legacy(&self) -> bool {
+        let st = unsafe { service(Service::Agent(self.0)).status() };
+        st != SMAppServiceStatus::NotRegistered && st != SMAppServiceStatus::NotFound
+    }
+    fn current(&self) -> bool {
+        let out = std::process::Command::new("launchctl").args(["print", &domain_target(self.0)]).output();
+        let expected = std::env::current_exe().unwrap();
+        out.is_ok_and(|o| o.status.success() && field(&String::from_utf8_lossy(&o.stdout), "program") == Some(expected.to_string_lossy().as_ref()))
+    }
+    fn running(&self) -> bool { crate::status::job_state(label(self.0)).running }
+    fn clear_legacy(&mut self) -> Result<(), String> {
+        if self.legacy() {
+            unsafe { service(Service::Agent(self.0)).unregisterAndReturnError() }.map_err(|e| e.localizedDescription().to_string())?;
+        }
+        Ok(())
+    }
+    fn replace_plain(&mut self) -> Result<(), String> { agent_register(self.0) }
+}
+
+/// Run only at GUI startup, preserving disabled agents and the main-app login item.
+pub fn migrate_agents() -> Result<(), String> {
+    for p in AGENT_PLISTS { migrate(&mut InstalledAgent(p))?; }
+    Ok(())
+}
+
+fn field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| l.trim().split_once(" = ").filter(|(key, _)| *key == name).map(|(_, value)| value))
 }
 
 fn label(plist: &str) -> &str {
@@ -115,19 +174,28 @@ fn launchctl(args: &[&str]) -> bool {
 fn agent_status(plist: &str) -> &'static str {
     if !installed_plist(plist).exists() {
         "not registered"
-    } else if launchctl(&["print", &domain_target(plist)]) {
-        "enabled"
     } else {
-        "installed, not loaded"
+        let out = std::process::Command::new("launchctl").args(["print", &domain_target(plist)]).output();
+        match out {
+            Ok(o) if o.status.success() => loaded_status(&String::from_utf8_lossy(&o.stdout), &std::env::current_exe().unwrap().to_string_lossy()),
+            _ => "installed, not loaded",
+        }
     }
+}
+
+fn loaded_status(text: &str, expected: &str) -> &'static str {
+    if field(text, "program") != Some(expected) { return "upgrade needed"; }
+    if field(text, "state") != Some("running") && field(text, "last exit code").is_some_and(|v| v != "0") { return "last launch failed"; }
+    "enabled"
 }
 
 fn agent_register(plist: &str) -> Result<(), String> {
     let d = render_agent(plist)?;
+    InstalledAgent(plist).clear_legacy()?;
     let path = installed_plist(plist);
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     plist::Value::Dictionary(d).to_file_xml(&path).map_err(|e| e.to_string())?;
-    agent_bootout(plist);
+    agent_bootout(plist)?;
     let p = path.to_string_lossy();
     if !launchctl(&["bootstrap", &format!("gui/{}", crate::status::uid()), &p]) {
         return Err(format!("launchctl bootstrap {p} failed"));
@@ -137,22 +205,76 @@ fn agent_register(plist: &str) -> Result<(), String> {
 
 /// bootout, then wait until launchd has dropped the label (a KeepAlive job
 /// takes a moment; bootstrapping before that fails with exit 5).
-fn agent_bootout(plist: &str) {
+fn agent_bootout(plist: &str) -> Result<(), String> {
     let target = domain_target(plist);
     launchctl(&["bootout", &target]);
     for _ in 0..240 {
         if !launchctl(&["print", &target]) {
-            return;
+            return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+    Err(format!("launchctl bootout {target} timed out"))
 }
 
 fn agent_unregister(plist: &str) -> Result<(), String> {
-    agent_bootout(plist);
+    InstalledAgent(plist).clear_legacy()?;
+    agent_bootout(plist)?;
     match std::fs::remove_file(installed_plist(plist)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Fake { enabled: bool, legacy: bool, current: bool, running: bool, calls: Vec<&'static str> }
+    impl AgentMigration for Fake {
+        fn enabled(&self) -> bool { self.enabled }
+        fn legacy(&self) -> bool { self.legacy }
+        fn current(&self) -> bool { self.current }
+        fn running(&self) -> bool { self.running }
+        fn clear_legacy(&mut self) -> Result<(), String> { self.calls.push("unregister legacy"); self.legacy = false; Ok(()) }
+        fn replace_plain(&mut self) -> Result<(), String> { self.calls.push("replace plain"); self.current = true; Ok(()) }
+    }
+
+    #[test]
+    fn migration_preserves_intent_and_is_idempotent() {
+        for (enabled, legacy, current, expected) in [
+            (true, true, false, vec!["unregister legacy", "replace plain"]),
+            (true, true, true, vec!["unregister legacy", "replace plain"]),
+            (true, false, true, vec![]),
+            (true, false, false, vec!["replace plain"]),
+            (false, true, false, vec![]),
+            (false, false, false, vec![]),
+        ] {
+            let mut agent = Fake { enabled, legacy, current, ..Default::default() };
+            migrate(&mut agent).unwrap();
+            assert_eq!(agent.calls, expected);
+            agent.calls.clear();
+            migrate(&mut agent).unwrap();
+            assert_eq!(agent.calls, Vec::<&str>::new());
+        }
+    }
+
+    #[test]
+    fn upgrade_does_not_interrupt_an_active_job() {
+        let mut agent = Fake { enabled: true, legacy: true, running: true, ..Default::default() };
+        assert_eq!(migrate(&mut agent), Err("agent upgrade deferred while its job is running; reopen disky after it finishes".into()));
+        assert_eq!(agent.calls, Vec::<&str>::new());
+        assert_eq!(agent.legacy, true);
+    }
+
+    #[test]
+    fn loaded_health_does_not_hide_old_programs_or_failed_launches() {
+        let exe = "/Applications/disky.app/Contents/MacOS/disky";
+        assert_eq!(loaded_status("program = Contents/MacOS/disky\nlast exit code = 78\n", exe), "upgrade needed");
+        assert_eq!(loaded_status(&format!("program = {exe}\nstate = not running\nlast exit code = 78\n"), exe), "last launch failed");
+        assert_eq!(loaded_status(&format!("program = {exe}\nstate = running\nlast exit code = 78\n"), exe), "enabled");
+        assert_eq!(loaded_status(&format!("program = {exe}\nstate = not running\nlast exit code = 0\n"), exe), "enabled");
     }
 }
 

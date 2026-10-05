@@ -1,5 +1,7 @@
 # Spec: disk-tree Tauri v2 native macOS app
 
+**2026-10-05 current implementation:** the app now uses the in-process Rust walker, capture, reducer and HTTP reader; its local mode has no Python/Flask/PyInstaller runtime. The architecture sections below describe the original design history. See `apps/tauri/README.md` for the current build/runtime and `apps/tauri/PILOT.md` for the Apple Silicon release checklist. The extracted pilot has passed isolated native scan/API tests on both m3 and m1; real FDA, Gatekeeper, sleep/login and upgrade checks remain. Independent volumes/SSH/NAS scheduling is specified in `specs/app-source-schedules.md`.
+
 Status: **in progress** (2026-09-08; roadmap extended 2026-09-30) — greenfield Option C from
 `specs/macos-app.md`. This is the reviewable plan; it's kept in sync with the code and moves to
 `specs/done/` only when v2 is real (signed `.app`, native walker feeding scans end-to-end, the

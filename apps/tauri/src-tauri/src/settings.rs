@@ -1,7 +1,7 @@
 //! User settings, in `disky.json`'s `settings` object (beside `jobs`):
 //!
 //! ```json
-//! {"settings": {"site": "prod", "scope": "machine", "schedule": ["06:00", "18:00"]}, "jobs": {…}}
+//! {"settings": {"site": "local", "scope": "machine", "schedule": ["06:00", "18:00"]}, "jobs": {…}}
 //! ```
 //!
 //! - `site`: `prod` (https://disk.rbw.sh), `dev` (https://dev.disk.rbw.sh), `local`
@@ -33,7 +33,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { site: "prod".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()] }
+        Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()] }
     }
 }
 
@@ -108,6 +108,8 @@ pub fn save(s: &Settings) -> Result<(), String> {
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct ScanState {
+    /// The process doing the scan, including an on-demand run without an agent.
+    pub pid: Option<u32>,
     /// Epoch seconds of the last scan start (scheduled or forced).
     pub last_start: Option<i64>,
     /// "Scan now" was requested; the next agent wake runs regardless of schedule.
@@ -280,5 +282,17 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"site": "dev"}"#).unwrap();
         assert_eq!(s, Settings { site: "dev".into(), ..Settings::default() });
         assert_eq!(s.times(), [(6, 0), (18, 0)]);
+    }
+
+    #[test]
+    fn fresh_install_is_local_and_explicit_hosted_settings_survive() {
+        assert_eq!(
+            serde_json::from_str::<Settings>("{}").unwrap(),
+            Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()] },
+        );
+        assert_eq!(
+            serde_json::from_str::<Settings>(r#"{"site":"prod","scope":"home","schedule":["03:30"]}"#).unwrap(),
+            Settings { site: "prod".into(), scope: "home".into(), schedule: vec!["03:30".into()] },
+        );
     }
 }

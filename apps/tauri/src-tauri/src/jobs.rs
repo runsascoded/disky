@@ -154,7 +154,26 @@ pub fn run_scheduled_scan() -> i32 {
     run("scan")
 }
 
+fn scan_lock(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let file = OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(file)
+}
+
 pub fn run(name: &str) -> i32 {
+    let _lock = if name == "scan" {
+        let path = config_path().with_file_name("disky-scan.lock");
+        let lock = scan_lock(&path);
+        match lock {
+            Ok(file) => Some(file),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => { note("disky: a scan is already running"); return 0; },
+            Err(e) => { note(&format!("disky: can't lock the scan: {e}")); return 1; },
+        }
+    } else { None };
     let cfg = match load() {
         Ok(c) => c,
         Err(e) => {
@@ -199,6 +218,7 @@ pub fn run(name: &str) -> i32 {
     let root = settings::load().scan_root();
     let mut st = settings::load_state();
     st.last_start = Some(settings::now());
+    st.pid = Some(std::process::id());
     st.force = false;
     let _ = settings::save_state(&st);
     let code = match cmd {
@@ -212,6 +232,7 @@ pub fn run(name: &str) -> i32 {
     let mut st = settings::load_state();
     st.last_end = Some(settings::now());
     st.last_exit = Some(code);
+    st.pid = None;
     let _ = settings::save_state(&st);
     code
 }
@@ -364,6 +385,17 @@ fn write_local(r: dt_index::Reducer, dir: &std::path::Path, id: &str, asof: &str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_scans_are_locked_and_a_finished_scan_releases_it() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../../../tmp/test-scan-lock-{}", std::process::id()));
+        let first = scan_lock(&path).unwrap();
+        assert_eq!(scan_lock(&path).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        drop(first);
+        let second = scan_lock(&path).unwrap();
+        drop(second);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn parses_jobs_and_log_paths() {

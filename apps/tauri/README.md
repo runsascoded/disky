@@ -1,97 +1,65 @@
-# disk-tree — Tauri v2 native macOS app
+# disky — native macOS app
 
-The **v2 north star** from `specs/macos-app.md` (Option C): a tiny native window
-(system WKWebView, no bundled browser) around the existing Flask+React UI, with
-the `gfind` subprocess replaced by a native `getattrlistbulk` walker compiled
-into the signed app binary. See `specs/tauri-native-app.md` for the full plan and
-status.
+Disky is a Tauri v2 menu-bar app with an in-process Rust filesystem scanner and indexer. It serves the bundled React site over loopback and supports local treemaps, exact path filters, diffs and size history. No Python, Homebrew `gfind`, checkout or cloud account is needed to run local mode.
 
-## Layout
+The app branch (`tauri-native-app`, `wt/app`) merges `local`; `m3` is a sibling deployment branch that also merges `local`. Shared site/engine changes travel upstream to `local`; machine-specific upload destinations and deployment configuration stay on m3.
 
-```
-apps/tauri/
-  crates/dt-walker/   # native getattrlistbulk walker (Phase 1) — gfind-compatible stream
-  src-tauri/          # Tauri v2 host (Phase 2): spawns the Python backend, opens the window
-```
+## Download and pilot
 
-- **`dt-walker`** is a workspace dependency of `src-tauri`, so the walk runs
-  *inside* the signed app binary — TCC attributes to "disk-tree" with no child
-  process. See `crates/dt-walker/README.md`.
-- The host also points the spawned Python backend at the bundled `dt-walker`
-  binary via `DISK_TREE_WALKER`, so its scans use the native walker too.
+Download an Apple Silicon pilot from [GitHub Releases]. See [the pilot instructions][pilot] for installation and the M1 checklist. Pilot artifacts are ad-hoc signed, not notarized; Developer ID signing and notarization are still needed for smooth public installation.
 
-## Toolchain
+## Build
 
-- Rust + cargo (`rustup`).
-- `tauri-cli` v2: `cargo install tauri-cli --version "^2.0" --locked`.
-- Xcode **Command Line Tools** (`codesign`), Node + pnpm (UI build).
-
-## Build & run
+Requirements: macOS, Rust, Xcode Command Line Tools, Node and pnpm. The pinned Tauri CLI is `2.11.4`.
 
 ```bash
-# 1. Build the UI the host wraps (frontendDist = ../../../ui/dist).
-( cd ../../ui && pnpm install && pnpm build )
-
-# 2. Dev: opens the window, spawns `disk-tree-server` on a free loopback port.
-#    Needs `disk-tree-server` on PATH (the project venv provides it).
-cargo tauri dev            # from apps/tauri/
-
-# 3. Bundle + sign → src-tauri/target/release/bundle/macos/disky.app
-cargo tauri build --bundles app
+# From the repository root.
+pnpm install --frozen-lockfile
+cargo install tauri-cli --version 2.11.4 --locked
+cargo test --manifest-path apps/tauri/Cargo.toml --workspace --release --locked -j 2
+apps/tauri/scripts/package
+node apps/tauri/scripts/smoke.mjs
 ```
 
-Signing uses the stable self-signed identity **`disk-tree-selfsigned`**
-(`bundle.macOS.signingIdentity` in `tauri.conf.json`), so the Full Disk Access
-grant survives rebuilds and TCC shows "disk-tree" — same identity and bundle id
-(`com.runsascoded.disk-tree`) as the v1 PyInstaller app.
+`package` builds the Rust walker, the local SPA and the app; produces a DMG, `.app.zip` and `SHA256SUMS` under `tmp/releases/disky-<version>-<arch>`; and verifies the app signature. It defaults to ad-hoc signing (`-`). Set `APPLE_SIGNING_IDENTITY` to use a certificate already installed in your Keychain. Tauri's Apple notarization environment variables apply when configured. Packaging does not install the app or alter registered agents.
 
-### Environment seams
+`smoke.mjs` exercises the bundle in a new scratch home with only system tools on PATH: defaults, a native fixture scan, local API and bundled SPA. Pass an extracted `.app` path to test a ZIP's contents. It creates fixtures under `tmp/app-smoke` and never changes your real settings or scans.
 
-- `DISK_TREE_SERVER_CMD` — override the backend command (default `disk-tree-server`;
-  a packaged build points this at the PyInstaller sidecar).
-- `DISK_TREE_WALKER` — path to the `dt-walker` binary the backend should use
-  instead of `gfind` (the host sets this automatically when it finds the bundled
-  walker next to its executable).
+The [macOS workflow][workflow] tests and packages on an Apple Silicon macOS 15 runner. Pushes to the app branch upload CI artifacts; tags `disky-v<version>` publish a pilot prerelease only after the build and extracted-bundle smoke check pass. The tag must identify the app branch, not the default `cloud` branch.
 
-## Menu bar, agents, login item
+## Runtime
 
-`disky` is a menu-bar app (no Dock icon): scan status, Full Disk Access status, Scan now, a window on
-disk.rbw.sh (`DISKY_URL`), and toggles for **Scheduled scans** and **Open at login**.
+- `crates/dt-walker`: native `getattrlistbulk` filesystem walk, inside the app's signed identity.
+- `crates/dt-capture`: optional Parquet capture to a local directory or S3/R2 destination.
+- `crates/dt-index`: Rust index/reduce, row-group reads, filters, diffs and local HTTP API.
+- `src-tauri`: windows, tray, Full Disk Access onboarding, jobs and agents.
+- `settings`: the bundled Settings page; `web` is the generated local site bundle.
 
-Scheduled work runs as the app's bundled LaunchAgents
-(`Contents/Library/LaunchAgents/com.runsascoded.disky.{scan,drain}.plist`, registered with
-`SMAppService`, listed as "disky" in Login Items), so the app's Full Disk Access grant covers it.
-A bundled plist is static, so the per-user part (command, env, log name) lives in
-`~/.config/disk-tree/disky.json`:
-
-```json
-{"jobs": {"scan":  {"command": ["…/.venv/bin/python", "…/aws/laptop-scan"], "env": {"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}, "log": "index"},
-          "drain": {"command": ["…/.venv/bin/python", "…/aws/laptop-drain"], "log": "drain"}}}
-```
+Fresh installs default to local mode. Existing explicit prod/dev settings are preserved. Local scans live in `~/Library/Application Support/disky/scans`; settings/jobs in `~/.config/disk-tree/disky.json`; logs in `~/Library/Logs/disk-tree`. Scheduled scans use plain per-user LaunchAgents and one global daily schedule today. The SMAppService login item is separate. The [independent source design][sources] covers volumes, SSH and NAS scheduling.
 
 ```bash
-disky job scan                      # what the scan agent runs (06:00, 18:00); output → ~/Library/Logs/disk-tree/<log>.{out,err}.log
-disky agents register|unregister|status [scan|drain]
+# The installed app's executable; these modes don't initialize a GUI.
+disky version
+disky settings show
+disky job scan
+disky scan now
+disky serve --addr 127.0.0.1:7793
+disky probe
+disky agents register|unregister|status
 disky login-item on|off|status
-disky agent -- CMD ARGS…            # run any command as the app's child (its FDA grant covers it)
-disky probe                         # read TCC-protected dirs in-process; exit 3 if any denied
-scripts/agentctl install            # target/…/disky.app → ~/Applications (stable grant path)
-scripts/agentctl check              # the probe, as launchd jobs: is FDA granted to the app?
-scripts/agentctl adopt              # hand-written agents → disky.json + bundled agents (`unadopt` reverts)
-scripts/agentctl status
+disky agent -- COMMAND ARGS…
 ```
 
-## Status / what's left
+`disky serve` serves the bundled SPA and local scans on loopback for browser diagnostics. `DISK_TREE_ROOT` selects another configuration directory; `DISKY_URL` overrides the viewer. A configured scan job can index locally (`local: true`), upload (`to`), or do both in one walk. Selecting a viewer does not create an upload destination.
 
-- **Done**: native walker at gfind parity (Phase 1); host compiles, opens a window
-  on the backend, links the walker in, signs with `disk-tree-selfsigned` (Phase 2/4).
-- **Remaining**: bundle the Python backend as a PyInstaller **sidecar**
-  (`externalBin`) so the app is self-contained (today it spawns `disk-tree-server`
-  from PATH); ship the `dt-walker` binary as a bundle resource; wire the in-process
-  walker stream directly into aggregation (vs. the subprocess seam). See the spec.
+For the stable self-signed development identity and the existing m3 installation, `cargo tauri build --bundles app` retains `disk-tree-selfsigned` from `tauri.conf.json`. `scripts/agentctl install` installs into `~/Applications`, re-registers agents and refuses to interrupt a running scan unless forced. A pilot build is kept separate until tested.
 
-## Icons
+Design/status: [Rust engine][rust-engine], [native app][native-app], [app-link contract][app-link].
 
-`src-tauri/icons/` are generated from `src-tauri/app-icon.png` via
-`cargo tauri icon app-icon.png`. **The current icon is a placeholder** — replace
-`app-icon.png` and regenerate for real branding.
+[GitHub Releases]: https://github.com/runsascoded/disky/releases
+[pilot]: PILOT.md
+[workflow]: ../../.github/workflows/macos-app.yml
+[rust-engine]: ../../specs/rust-engine.md
+[native-app]: ../../specs/tauri-native-app.md
+[app-link]: ../../specs/app-link.md
+[sources]: ../../specs/app-source-schedules.md

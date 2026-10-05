@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Build the downloadable native macOS pilot. No app installation or agent changes.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+cd "$root/apps/tauri"
+export MACOSX_DEPLOYMENT_TARGET=13.0
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
+identity=${APPLE_SIGNING_IDENTITY:--}
+config=$(node -e 'process.stdout.write(JSON.stringify({bundle:{macOS:{signingIdentity:process.argv[1]}}}))' "$identity")
+cargo tauri build --ci --config "$config" --bundles app -- --locked
+version=$(node -p 'JSON.parse(require("fs").readFileSync("src-tauri/tauri.conf.json")).version')
+arch=$(uname -m)
+out="$root/tmp/releases/disky-$version-$arch"
+mkdir -p "$out"
+app="$PWD/target/release/bundle/macos/disky.app"
+codesign --verify --deep --strict "$app"
+ditto -c -k --sequesterRsrc --keepParent "$app" "$out/disky-$version-$arch.app.zip"
+stage=$(mktemp -d "$root/tmp/disky-dmg.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+ditto "$app" "$stage/disky.app"
+ln -s /Applications "$stage/Applications"
+hdiutil create -ov -volname disky -srcfolder "$stage" -format UDZO "$out/disky-$version-$arch.dmg"
+hdiutil verify "$out/disky-$version-$arch.dmg"
+cd "$out"
+shasum -a 256 ./*.zip ./*.dmg > SHA256SUMS
+echo "$out"

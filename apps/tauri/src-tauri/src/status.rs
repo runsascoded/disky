@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::settings;
 
-/// The bundled scan agent (`SMAppService`-registered; `services.rs`).
+/// The plain per-user scan LaunchAgent (`services.rs`).
 pub const SCAN_LABEL: &str = "com.runsascoded.disky.scan";
 
 pub fn agents_dir() -> std::path::PathBuf {
@@ -38,13 +38,32 @@ pub fn job_state(label: &str) -> JobState {
 /// regardless of schedule and clears the flag).
 pub fn scan_now() -> Result<(), String> {
     let mut st = settings::load_state();
+    let job = job_state(SCAN_LABEL);
+    if job.running || st.pid.is_some_and(process_alive) {
+        return Ok(());
+    }
     st.force = true;
     settings::save_state(&st)?;
-    Command::new("launchctl")
-        .args(["kickstart", &format!("gui/{}/{SCAN_LABEL}", uid())])
-        .status()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let started = if job.loaded {
+        Command::new("launchctl").args(["kickstart", &format!("gui/{}/{SCAN_LABEL}", uid())]).output()
+            .map_err(|e| e.to_string())
+            .and_then(|o| if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) })
+    } else {
+        std::env::current_exe().map_err(|e| e.to_string()).and_then(|exe| {
+            Command::new(exe).args(["job", "scan"])
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .spawn().map(|_| ()).map_err(|e| e.to_string())
+        })
+    };
+    if started.is_err() {
+        st.force = false;
+        settings::save_state(&st)?;
+    }
+    started
+}
+
+fn process_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
 /// "3h ago", "12m ago", "2d ago".
@@ -72,7 +91,7 @@ pub fn scan_line() -> String {
         " · scheduled scans off".to_string()
     };
     let in_flight = st.last_start.is_some_and(|start| st.last_end.is_none_or(|end| end < start));
-    if job.running && in_flight {
+    if (job.running || st.pid.is_some_and(process_alive)) && in_flight {
         return match settings::load_progress() {
             Some(p) => progress_line(&p, now),
             None => format!("Scanning…{next}"),
@@ -80,6 +99,10 @@ pub fn scan_line() -> String {
     }
     if st.force {
         return "Starting scan…".to_string();
+    }
+    let health = crate::services::status(crate::services::Service::Agent("com.runsascoded.disky.scan.plist"));
+    if health != "enabled" && health != "not registered" {
+        return format!("Scheduled scan: {health}");
     }
     let when = st.last_end.map(|t| ago(Duration::from_secs((now - t).max(0) as u64)));
     match (st.last_exit, when) {
@@ -120,6 +143,7 @@ pub fn progress_line(p: &settings::Progress, now: i64) -> String {
     let (files, size) = (count(p.files), bytes(p.bytes));
     match p.phase.as_str() {
         "then" => format!("Captured {files} files, {size} · finishing ({took})"),
+        "index" => format!("Indexing scan… ({took})"),
         _ => format!("Scanning: {files} files, {size} ({took})"),
     }
 }
@@ -132,6 +156,7 @@ mod tests {
     fn progress_lines() {
         let p = |phase: &str, files, bytes| settings::Progress { phase: phase.into(), files, bytes, since: 1000 };
         assert_eq!(progress_line(&p("capture", 0, 0), 1005), "Scanning: 0 files, 0 MiB (5s)");
+        assert_eq!(progress_line(&p("index", 0, 0), 1005), "Indexing scan… (5s)");
         assert_eq!(progress_line(&p("capture", 850_123, 3 << 29), 1130), "Scanning: 850K files, 2 GiB (2m)");
         assert_eq!(
             progress_line(&p("then", 7_733_883, 421 << 30), 1000 + 330),

@@ -107,14 +107,15 @@ def install(force: bool):
     # Re-register around the swap so the installed plists are re-rendered from
     # the new bundle's templates (plain LaunchAgents; see services.rs for why
     # not SMAppService, whose agents a rebuilt self-signed binary can't launch).
-    registered = EXE.exists() and 'enabled' in disky('agents', 'status')
-    if registered:
-        err(disky('agents', 'unregister'))
+    registered = [name for name in ('scan', 'drain') if (AGENTS / f'com.runsascoded.disky.{name}.plist').exists()]
+    if EXE.exists():
+        for name in registered:
+            err(disky('agents', 'unregister', name))
     if APP.exists():
         shutil.rmtree(APP)
     run('ditto', str(BUILT), str(APP))
-    if registered:
-        err(disky('agents', 'register'))
+    for name in registered:
+        err(disky('agents', 'register', name))
     dr = run('codesign', '-d', '-r-', str(APP)).stdout.strip().splitlines()[-1]
     err(f'installed {APP}')
     err(f'  {dr}')
