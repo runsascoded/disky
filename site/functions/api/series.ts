@@ -1,7 +1,7 @@
 /** Bytes under a path per scan — the size-over-time chart, scoped like the
  * map (specs/view-serving.md §1 "series.json" → this).
  *
- *   GET /api/series?path=<P>[&lens=user:<id>][&o=owned|unowned]
+ *   GET /api/series?path=<P>[&lens=user:<id>|user:me][&o=owned|unowned]
  *
  * One point per scan the index knows: P's own row in that scan's coarsest
  * tier that holds it (or the floor-free tier), scoped per row like a view's
@@ -25,6 +25,7 @@ import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
 import { metaRoots, rootPoints, type RootRow } from '../_lib/series.js'
 import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
+import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 
 // The default store's snapshot dirs (`snapshots/<date>/`; other stores live in
 // a named subdir that DATE_RE keeps out), and the scan-id shape they're named by.
@@ -88,8 +89,12 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
     if (env.STORE_KEY) return json({ error: LENS_PRIMARY_ONLY }, 400)
     const m = /^user:(.+)$/.exec(lensRaw)
     if (!m) return json({ error: 'bad lens (want user:<id>)' }, 400)
-    lens = { key: m[1] }
+    // `user:me` → the caller's id: the shared cache key and the body carry the id.
+    const resolved = await resolveLens(env, gated, { key: m[1] })
+    if (!resolved) return json({ error: ME_UNRESOLVED }, 400)
+    lens = resolved
   }
+  const lensTag = lensParam(lens)
   const owner = parseOwner(url.searchParams.get('o'))
   const classes = parseClasses(url.searchParams.get('cl'))
   // `split=roots` (specs/done/root-geneses.md §1): the unscoped store root only —
@@ -112,7 +117,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  const cacheKey = cacheKeyFor('series', `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensRaw ?? ''}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
@@ -157,7 +162,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
     } catch (e) {
       const msg = (e as Error).message
       if (tries > 1 && /internal error/i.test(msg)) return point(date, tries - 1)
-      console.log(`series ${path || '/'} ${lensRaw ?? owner ?? ''}: no point for ${date}: ${msg}`)
+      console.log(`series ${path || '/'} ${lensTag || owner || ''}: no point for ${date}: ${msg}`)
       return null
     }
   }
@@ -183,6 +188,6 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
     for (const g of got) if (g) points.push(g)
   }
   points.sort((a, b) => a.date.localeCompare(b.date))
-  const body = JSON.stringify({ path, ...(paths.length ? { paths } : {}), ...(lensRaw ? { lens: lensRaw } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}) })
+  const body = JSON.stringify({ path, ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}) })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
 }

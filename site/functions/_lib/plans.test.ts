@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketOf, canonicalPrefix, covers, planBucket, planDigest, PlanSpansBuckets, planStaging, prefixShape, realGate, relPrefix, type RunRow, uncovered } from './plans'
+import { auditRunControl, bucketOf, canonicalPrefix, covers, planBucket, planDigest, PlanSpansBuckets, planStaging, prefixShape, realGate, relPrefix, type RunRow, uncovered } from './plans'
 
 // An S3 deployment scanning two buckets, the first its primary.
 const P = 'primary-bucket'
@@ -147,5 +147,21 @@ describe('a `*` bucket list (a filesystem-root store)', () => {
   it('canonicalizes outside-home prefixes where they are, not under `Users`', () => {
     expect(canonicalPrefix('file:///Applications/Slack.app', shape)).toBe('file:///Applications/Slack.app/')
     expect(canonicalPrefix('file:///Users/ryan/c/x/', shape)).toBe('file:///Users/ryan/c/x/')
+  })
+})
+
+describe('auditRunControl — who stopped / undid / purged a run, in `admin_edits`', () => {
+  it('appends one row per control', async () => {
+    const { sqliteD1 } = await import('./testD1')
+    {
+      const { db, raw } = await sqliteD1('cw')
+      await auditRunControl(db, 'stop', 'gcs-sweep-real-20261005-024600z', 'admin@example.org', null)
+      await auditRunControl(db, 'undo', 'run-1', 'admin@example.org', 'gcs-undo-20261007-120000z')
+      const rows = raw.prepare("SELECT tbl, pk, action, who, old_json, new_json FROM admin_edits ORDER BY id").all()
+      expect(rows).toEqual([
+        { tbl: 'deletion_runs', pk: 'gcs-sweep-real-20261005-024600z', action: 'update', who: 'admin@example.org', old_json: null, new_json: '{"control":"stop","job_id":null}' },
+        { tbl: 'deletion_runs', pk: 'run-1', action: 'update', who: 'admin@example.org', old_json: null, new_json: '{"control":"undo","job_id":"gcs-undo-20261007-120000z"}' },
+      ])
+    }
   })
 })

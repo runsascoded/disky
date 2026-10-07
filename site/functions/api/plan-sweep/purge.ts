@@ -8,7 +8,7 @@ import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/au
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
 import { jobStamp, runMountPath, submitBatch, sweepBatchSpec } from "../../_lib/cwBatch.js"
 import { gcpToken } from "../../_lib/gcp.js"
-import { NO_SHAPE, prefixShape } from "../../_lib/plans.js"
+import { auditRunControl, NO_SHAPE, prefixShape } from "../../_lib/plans.js"
 
 type Env = AuthEnv & BatchEnv & { DB?: D1Database; STORE_SCHEME?: string; STORE_BUCKETS?: string }
 
@@ -55,5 +55,6 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
     console.error("purge submit failed", status, text.slice(0, 2000))
     return json({ error: `batch submit failed (${status})`, status }, 500)
   }
+  await auditRunControl(db, "purge", runId, gated.email ?? "admin", jobId)
   return json({ job_id: jobId, target: runId, by: gated.email })
 }

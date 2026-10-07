@@ -65,14 +65,18 @@ interface Assignment {
   objects: number
 }
 
+/** A ledger fold over bytes (`value`, the structure queries) with its twin over
+ * object counts (`o.value`), so a lens or pool node's objects are exact too. */
+export interface FoldedLens extends OwnerLens { o: OwnerLens }
+
 /** null when the ledger holds no assignments at all — the lens is then the
  * scan's attribution, untouched. */
-export function ownerLens(assignments: AssignmentRow[], user: string, reg: Registry = {}): OwnerLens | null {
+export function ownerLens(assignments: AssignmentRow[], user: string, reg: Registry = {}): FoldedLens | null {
   const u = canonId(user, reg)
-  return ledgerFold(assignments, who => who === u, us => {
-    let b = 0
-    for (const [k, v] of Object.entries(us)) if (canonId(k, reg) === u) b += v
-    return b
+  return folded(assignments, who => who === u, us => {
+    let n = 0
+    for (const [k, v] of Object.entries(us)) if (canonId(k, reg) === u) n += v
+    return n
   }, reg)
 }
 
@@ -82,29 +86,40 @@ export function ownerLens(assignments: AssignmentRow[], user: string, reg: Regis
  * else; unowned: never); a band under no assignment (or a release) keeps the
  * scan's attribution, whose in-pool slice is the view's `mine`. null = no
  * assignments: the scan's attribution is the answer. */
-export function poolLens(assignments: AssignmentRow[], pool: OwnerScope, reg: Registry = {}): OwnerLens | null {
+export function poolLens(assignments: AssignmentRow[], pool: OwnerScope, reg: Registry = {}): FoldedLens | null {
   if (pool === 'unowned') {
-    return ledgerFold(assignments, () => false, (us, bytes) => bytes - Object.values(us).reduce((n, b) => n + b, 0), reg)
+    return folded(assignments, () => false, (per, total) => total - Object.values(per).reduce((n, v) => n + v, 0), reg)
   }
   const not = new Set(pool === 'owned' ? [] : pool.not.map(k => canonId(k, reg)))
-  return ledgerFold(assignments, who => !not.has(who), us => {
-    let b = 0
-    for (const [k, v] of Object.entries(us)) if (!not.has(canonId(k, reg))) b += v
-    return b
+  return folded(assignments, who => !not.has(who), per => {
+    let n = 0
+    for (const [k, v] of Object.entries(per)) if (!not.has(canonId(k, reg))) n += v
+    return n
   }, reg)
 }
 
-/** The fold behind both: `inPool(assignee)` says whether an assigned band counts
- * whole, `share(us, bytes)` an assignment subtree's scan-attributed in-pool bytes. */
+/** `share(perUser, total)`: an assignment subtree's scan-attributed in-pool part,
+ * from its per-user split (`us` bytes / `uo` objects) and its total. */
+type Share = (perUser: Record<string, number>, total: number) => number
+
+function folded(assignments: AssignmentRow[], inPool: (who: string) => boolean, share: Share, reg: Registry): FoldedLens | null {
+  const b = ledgerFold(assignments, inPool, c => ({ all: c.bytes, mine: share(c.us, c.bytes) }), reg)
+  const o = ledgerFold(assignments, inPool, c => ({ all: c.objects, mine: share(c.uo, c.objects) }), reg)
+  return b && o ? { ...b, o } : null
+}
+
+/** The fold: `inPool(assignee)` says whether an assigned band counts whole,
+ * `weigh` an assignment subtree's total and scan-attributed in-pool part in the
+ * fold's unit (bytes or objects). */
 function ledgerFold(
   assignments: AssignmentRow[],
   inPool: (who: string) => boolean,
-  share: (us: Record<string, number>, bytes: number) => number,
+  weigh: (c: AssignmentRow) => { all: number; mine: number },
   reg: Registry,
 ): OwnerLens | null {
   if (!assignments.length) return null
   const all: Assignment[] = assignments
-    .map(c => ({ path: idxKey(c.prefix).path, ts: c.ts, action_id: c.action_id, who: c.owner == null ? null : canonId(c.owner, reg), all: c.bytes, mine: share(c.us, c.bytes), objects: c.objects }))
+    .map(c => ({ path: idxKey(c.prefix).path, ts: c.ts, action_id: c.action_id, who: c.owner == null ? null : canonId(c.owner, reg), ...weigh(c), objects: c.objects }))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const pooled = (who: string | null | undefined): boolean => who != null && inPool(who)
   const byPath = new Map(all.map(c => [c.path, c]))

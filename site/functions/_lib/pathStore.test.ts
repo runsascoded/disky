@@ -365,13 +365,16 @@ describe('buildView on a store generation', () => {
     const pools = async (env: Env) => {
       const v = await buildView(env, { ...base, date: V2_LENS, path: P, owner: 'unowned', threshold: 1 })
       return {
-        unowned: v.tree.b,
+        unowned: [v.tree.b, v.tree.o],
         kids: v.tree.c!.map(k => [k.n, k.b]),
-        agg: await Promise.all((['unowned', 'owned'] as const).map(async owner => (await readRootAgg(env, { date: V2_LENS, path: P, owner }))!.b)),
+        agg: await Promise.all((['unowned', 'owned'] as const).map(async owner => {
+          const a = (await readRootAgg(env, { date: V2_LENS, path: P, owner }))!
+          return [a.b, a.o]
+        })),
       }
     }
     // No ledger tables (cw's D1): the scan's attribution.
-    expect(await pools(await envWith(''))).toEqual({ unowned: 6000, kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [6000, 0] })
+    expect(await pools(await envWith(''))).toEqual({ unowned: [6000, 3], kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [[6000, 3], [0, 0]] })
     // A ledger assigning `small/s2` (3000 B, unowned in the scan) to carol.
     const assigned = [{ prefix: 'gs://bk/small/s2', owner: 'carol', ts: 1, action_id: 1, bytes: 3000, objects: 1, us: {} }]
     const env = await envWith(`
@@ -382,7 +385,7 @@ describe('buildView on a store generation', () => {
       INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/small/s2', 'carol', 1);
       INSERT INTO owner_totals (scan, head, body, claims) VALUES ('${V2_LENS}', 1, '{}', '${JSON.stringify(assigned)}');
     `)
-    expect(await pools(env)).toEqual({ unowned: 3000, kids: [['s1', 2000], ['s0', 1000]], agg: [3000, 3000] })
+    expect(await pools(env)).toEqual({ unowned: [3000, 2], kids: [['s1', 2000], ['s0', 1000]], agg: [[3000, 2], [3000, 1]] })
   })
 
   it('the same view from path (a small subtree by the default cutoff), the blob-served copy, and the secondary store', async () => {

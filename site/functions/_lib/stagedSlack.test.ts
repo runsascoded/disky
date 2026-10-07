@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PLAN_SENDER, fmtBytes, nameSlug, personSender, renderParent, runEvent, runUrl, stageEvent, stagedCardUrl, type RunRow } from './stagedSlack.js'
+import { PLAN_SENDER, queueWasEmpty, fmtBytes, nameSlug, personSender, renderParent, runEvent, runUrl, stageEvent, stagedCardUrl, type RunRow } from './stagedSlack.js'
 import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
@@ -32,6 +32,17 @@ describe('renderParent', () => {
     expect(txt([run({})])).toBe('Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — matches the current plan.')
     expect(txt([run({ plan_digest: 'OLD' })])).toBe('Latest dry-run would delete *2.0 TiB* / 1,234 objects (scan 2026-09-28T1201) — *stale*: the plan changed since.\n_Delete for real_ appears after a finished dry-run of the current set (the plan changed since the last dry-run; dry-run it again).')
     expect(txt([run({ plan_digest: '', deleted_bytes: 0, deleted_objects: 0 })])).toBe('Latest dry-run (`cw-sweep-dry-1`) ended without a result.\n_Delete for real_ appears after a finished dry-run of the current set (the plan changed since the last dry-run; dry-run it again).')
+  })
+
+  it('titles by what is still queued (deleted items drop out), the gate by the whole plan', () => {
+    const head = (v: Partial<Parameters<typeof renderParent>[0]>): string => (renderParent({ ...base, runs: [], ...v }).blocks[0] as { text: { text: string } }).text.text
+    expect([
+      head({}),
+      head({ queued: { items: 1, batches: 1, stagers: ['bo@coreweave.com'] } }),
+    ]).toEqual([
+      '*Staged for deletion* · plan #7 · 3 prefixes in 2 batches\nstaged by ann, bo',
+      '*Staged for deletion* · plan #7 · 1 prefix in 1 batch\nstaged by bo',
+    ])
   })
 
   it('puts the dry-run numbers and the recoverability in the real-delete confirm', () => {
@@ -122,5 +133,24 @@ describe('the plan card', () => {
       [{ token: 10, kind: 'staged', view: '', page: '/staged', minted_by: 'slack:staged', minted_ts: 1790000000, exp_day: 293 }],
     ])
     expect(on).toContain(`t=${rows[0].token}&`)
+  })
+})
+
+describe('queueWasEmpty: a stage into an emptied queue starts a new thread', () => {
+  const items = ['gs://b/a/', 'gs://b/c/', 'gs://b/new/']
+  const fresh = new Set(['gs://b/new/'])
+  it('every older item deleted by a real run, or empty (or absent) at the scan → empty', () => {
+    expect([
+      queueWasEmpty(items, fresh, new Set(['gs://b/a/', 'gs://b/c/']), null),
+      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), { 'gs://b/c/': 0 }),
+      queueWasEmpty(['gs://b/new/'], fresh, new Set(), null),
+      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), {}),
+    ]).toEqual([true, true, true, true])
+  })
+  it('any older item still holding bytes, or unsized and not deleted → not empty', () => {
+    expect([
+      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), { 'gs://b/c/': 5 }),
+      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), null),
+    ]).toEqual([false, false])
   })
 })

@@ -2,7 +2,7 @@
  * scans' index tiers at one shared byte floor (`_lib/view.ts` `buildDiff`).
  *
  *   GET /api/diff?from=<scan>&to=<scan>&path=<P>&w=<px>&h=<px>[&minArea=<px²>][&top=<n>]
- *                 [&lens=user:<id>][&o=owned|unowned][&q=<name filter>][&summary=1][&depth=<levels>]
+ *                 [&lens=user:<id>|user:me][&o=owned|unowned][&q=<name filter>][&summary=1][&depth=<levels>]
  *
  * `summary=1` answers with the totals only (both sides' scoped root reads,
  * no walk — `rows` empty): the section's headline, seconds before the rows.
@@ -19,6 +19,7 @@ import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_
 import { ATTEN_DEFAULT, buildDiff, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT } from '../_lib/view.js'
 import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
+import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 const SCAN_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/
 
 export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
@@ -73,9 +74,14 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
   // One guard over the D1 pre-step, the cache match and the build (see
   // subtree.ts): a D1 stall becomes a retryable 503, not a raw 500 page.
   try {
+    // `user:me` → the caller's id: the shared cache key and the body carry the id.
+    const resolved = await resolveLens(ctx.env, gated, lens)
+    if (resolved === null) return new Response(ME_UNRESOLVED, { status: 400 })
+    lens = resolved
+    const lensTag = lensParam(lens)
     const [head, g] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), pathGens(ctx.env, [from, to])]))
     const cacheKey = cacheKeyFor('diff',
-      `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensRaw ?? ''}` +
+      `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
         `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}`,
       storeKey(ctx.env),
     )
@@ -87,7 +93,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
       prev: from,
       curr: to,
       path,
-      ...(lensRaw ? { lens: lensRaw } : {}),
+      ...(lens ? { lens: lensTag } : {}),
       ...(owner ? { owner } : {}),
       ...(query ? { q: qRaw } : {}),
       ...diff,

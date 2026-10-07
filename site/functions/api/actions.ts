@@ -21,7 +21,7 @@
  */
 import { type Ctx, json, requireAssigner, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
-import { canonId, loadRegistry } from '../_lib/identity.js'
+import { ownerIdFor } from '../_lib/me.js'
 import { actionLog } from '../_lib/actionLog.js'
 import { NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
 
@@ -103,11 +103,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     const ts = Math.floor(Date.now() / 1000)
     const ok = parsed as Exclude<ReturnType<typeof validate>, { error: string }>[]
     if (ok.some(p => p.owner === '@me')) {
-      const row = await env.DB.prepare('SELECT user FROM user_emails WHERE email = ?')
-        .bind(id.email.toLowerCase()).first<{ user: string }>()
-      // No `user_emails` row → the deployment registry's canonical id for the email's
-      // handle, never the raw email (an email owner matches no user).
-      const me = row?.user ?? canonId(id.email, await loadRegistry(env))
+      const me = await ownerIdFor(env, id.email)
       for (const p of ok) if (p.owner === '@me') p.owner = me
     }
     const stmts = []

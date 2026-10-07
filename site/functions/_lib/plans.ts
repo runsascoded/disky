@@ -313,6 +313,17 @@ export async function audit(
     .run()
 }
 
+/** A run control (stop / undo / purge) into the audit log: who, when, and the
+ *  job it launched (null for a stop, which writes a flag file). The run's own
+ *  row keeps only state (`undo_state`, …), not who changed it. */
+export const auditRunControl = (
+  db: D1Database,
+  control: 'stop' | 'undo' | 'purge',
+  target: string,
+  who: string,
+  jobId: string | null,
+): Promise<void> => audit(db, 'deletion_runs', target, 'update', who, null, { control, job_id: jobId })
+
 /** Snapshot a plan into the executor's plan.json: the plan's one bucket
  * (`planBucket`; throws `PlanSpansBuckets`) and the relative sweep prefixes
  * (the plan's items — the whole intent; nothing carves out). Returns null if

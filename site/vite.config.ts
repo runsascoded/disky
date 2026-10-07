@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 
 // Ports: `devPort` in package.json (vite), `PORT` env overrides (a second dev
 // stack, or when another worktree already holds 3263); wrangler pages dev (the
@@ -32,6 +33,25 @@ const devSeriesIndex = {
       if (existsSync(p)) { res.setHeader('content-type', 'application/json'); res.end(readFileSync(p)) }
       else next()
     })
+  },
+}
+
+// The deployment's guide for agents — `API.md` at the repo root, on a branch
+// that carries one (gcs) — ships as `/llms.txt`: a static asset, outside the
+// sign-in gate (`public/_routes.json` keeps it off the Functions). No
+// `API.md` (cw-s3, the r2 demo) → no `/llms.txt`, and the SPA fallback answers.
+const LLMS_SRC = fileURLToPath(new URL('../API.md', import.meta.url))
+const llmsTxt: Plugin = {
+  name: 'llms-txt',
+  configureServer(server) {
+    server.middlewares.use('/llms.txt', (_req, res, next) => {
+      if (!existsSync(LLMS_SRC)) return next()
+      res.setHeader('content-type', 'text/plain; charset=utf-8')
+      res.end(readFileSync(LLMS_SRC))
+    })
+  },
+  generateBundle() {
+    if (existsSync(LLMS_SRC)) this.emitFile({ type: 'asset', fileName: 'llms.txt', source: readFileSync(LLMS_SRC, 'utf8') })
   },
 }
 
@@ -103,7 +123,7 @@ export default defineConfig({
     'import.meta.env.VITE_DEV_HOST': JSON.stringify(DEV_HOST),
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
   },
-  plugins: [react(), devSeriesIndex],
+  plugins: [react(), devSeriesIndex, llmsTxt],
   server: {
     port: PORT,
     host: true,

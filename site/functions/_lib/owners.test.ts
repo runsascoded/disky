@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest'
 import type { AssignmentRow } from './ownerBands.js'
 import { ownerLens, poolLens } from './owners.js'
 
-const assignment = (prefix: string, owner: string | null, ts: number, bytes: number, us: Record<string, number>): AssignmentRow =>
-  ({ prefix, owner, ts, action_id: ts, bytes, objects: 1, us })
+const assignment = (prefix: string, owner: string | null, ts: number, bytes: number, us: Record<string, number>, objects = 1, uo: Record<string, number> = {}): AssignmentRow =>
+  ({ prefix, owner, ts, action_id: ts, bytes, objects, us, uo })
 
 // U = 'u'. A (v's) holds B (u's, newer, nested); C (u's) holds D (v's, newer,
 // nested); R is a release; E (u's) holds G (w's, OLDER, so E repaints it).
@@ -116,5 +116,19 @@ describe('poolLens', () => {
     expect(pl.value('b', 1000, 250)).toBe(230)
     expect(pl.value('b', 1000, 250) + ownerLens(CLAIMS, 'u')!.value('b', 1000, 350)).toBe(660)
     expect(pl.value('b/a/x/y', 9, 0)).toBe(0) // u's B
+  })
+
+  it('objects fold exactly from the manifest’s per-user counts (`uo`), so owned + unowned objects are the total', () => {
+    // A (v's) holds 10 objects, 3 of them u's and 4 v's (3 unowned); B (u's, inside A) 2, 1 v's.
+    const rows = [
+      assignment('gs://b/a/', 'v', 10, 100, { u: 30, v: 50 }, 10, { u: 3, v: 4 }),
+      assignment('gs://b/a/x/', 'u', 20, 40, { u: 5, v: 35 }, 2, { v: 1 }),
+    ]
+    const [un, ow] = (['unowned', 'owned'] as const).map(p => poolLens(rows, p)!.o)
+    // root: 50 objects, 20 scan-unowned. A's 3 unowned leave; B's own unowned
+    // object went with A, nothing comes back (B is u's).
+    expect([un.value('b', 50, 20), ow.value('b', 50, 30)]).toEqual([17, 33])
+    // u's lens: residual u objects outside A (30 − 3 − 0 … A is v's, so its 3 u objects leave) + B whole
+    expect(ownerLens(rows, 'u')!.o.value('b', 50, 12)).toBe(12 - 3 + 2)
   })
 })

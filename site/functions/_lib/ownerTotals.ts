@@ -21,7 +21,7 @@ const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'cls2'
 const maxGroups = (asks: number) => Math.max(400, 2 * asks)
 
 /** Bump when the body's shape changes: cached bodies with another version are recomputed. */
-export const MANIFEST_VERSION = 2  // 2: `claims` → `assignments`
+export const MANIFEST_VERSION = 3  // 2: `claims` → `assignments`; 3: per-user objects (`uo`)
 
 export interface OwnerTotalsBody extends OwnerTotals {
   v: number
@@ -106,7 +106,9 @@ export async function ownerAssignments(env: Env, date: string): Promise<Assignme
   const key = `${date}:${head}`
   return shared(assignmentsMemo, key, async () => {
     const row = await env.DB!.prepare('SELECT claims FROM owner_totals WHERE scan = ? AND head = ?').bind(date, head).first<{ claims: string }>()
-    if (row) return JSON.parse(row.claims) as AssignmentRow[]
+    // Rows stored before `uo` (manifest v2) recompute with the body.
+    const rows = row ? JSON.parse(row.claims) as AssignmentRow[] : null
+    if (rows && rows.every(r => r.uo)) return rows
     return (await ownerTotals(env, date)).assignments
   }, MEMO_WAIT)
 }

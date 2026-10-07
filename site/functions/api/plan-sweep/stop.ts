@@ -6,11 +6,13 @@
 // follow-ups). Cancelling mid-run is safe: partial deletes are recorded in the
 // run's log part-files and are recoverable (delete markers), and a re-dispatch
 // re-lists and skips already-deleted keys.
+import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
 import { batchJobsUrl, gcpToken } from "../../_lib/gcp.js"
+import { auditRunControl } from "../../_lib/plans.js"
 
-type Env = AuthEnv & BatchEnv
+type Env = AuthEnv & BatchEnv & { DB?: D1Database }
 
 const JOB_RE = /^cw-sweep-(dry|real)-\d{8}-\d{6}z$/
 
@@ -32,5 +34,6 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
     body: JSON.stringify({ reason: `cancelled by ${gated.email}` }),
   })
   if (!r.ok) return json({ error: "cancel failed", status: r.status, detail: (await r.text()).slice(0, 300) }, 500)
+  if (ctx.env.DB) await auditRunControl(ctx.env.DB, "stop", jobId, gated.email ?? "admin", null)
   return json({ job_id: jobId, cancelled_by: gated.email })
 }

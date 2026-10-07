@@ -18,27 +18,31 @@
 export interface LedgerRow { prefix: string; ts: number; action_id: number }
 export interface OwnerRow extends LedgerRow { owner: string | null; who?: string }
 
-/** Per-path aggregate from the index: bytes, objects, per-user bytes, and
- * non-STANDARD class bytes ("2" NL, "3" CL, "4" AR; STANDARD = b − Σ). */
-export interface PathAgg { b: number; o: number; us: Record<string, number>; cb: Record<string, number> }
-export const newAgg = (): PathAgg => ({ b: 0, o: 0, us: {}, cb: {} })
+/** Per-path aggregate from the index: bytes, objects, per-user bytes and
+ * objects, and non-STANDARD class bytes ("2" NL, "3" CL, "4" AR; STANDARD = b − Σ). */
+export interface PathAgg { b: number; o: number; us: Record<string, number>; uo: Record<string, number>; cb: Record<string, number> }
+export const newAgg = (): PathAgg => ({ b: 0, o: 0, us: {}, uo: {}, cb: {} })
 export const addAgg = (a: PathAgg, r: { size: number; n_files: number; usr: string | null; cls2: number; cls3: number; cls4: number }): void => {
   a.b += r.size
   a.o += r.n_files
-  if (r.usr) a.us[r.usr] = (a.us[r.usr] ?? 0) + r.size
+  if (r.usr) {
+    a.us[r.usr] = (a.us[r.usr] ?? 0) + r.size
+    a.uo[r.usr] = (a.uo[r.usr] ?? 0) + r.n_files
+  }
   for (const [k, v] of [['2', r.cls2], ['3', r.cls3], ['4', r.cls4]] as [string, number][]) if (v) a.cb[k] = (a.cb[k] ?? 0) + v
 }
 const subAgg = (a: PathAgg, kids: PathAgg[]): PathAgg => {
-  const out: PathAgg = { b: a.b, o: a.o, us: { ...a.us }, cb: { ...a.cb } }
+  const out: PathAgg = { b: a.b, o: a.o, us: { ...a.us }, uo: { ...a.uo }, cb: { ...a.cb } }
   for (const k of kids) {
     out.b -= k.b
     out.o -= k.o
     for (const [u, b] of Object.entries(k.us)) out.us[u] = (out.us[u] ?? 0) - b
+    for (const [u, o] of Object.entries(k.uo)) out.uo[u] = (out.uo[u] ?? 0) - o
     for (const [c, b] of Object.entries(k.cb)) out.cb[c] = (out.cb[c] ?? 0) - b
   }
   out.b = Math.max(0, out.b)
   out.o = Math.max(0, out.o)
-  for (const m of [out.us, out.cb]) for (const k of Object.keys(m)) if (m[k] <= 0) delete m[k]
+  for (const m of [out.us, out.uo, out.cb]) for (const k of Object.keys(m)) if (m[k] <= 0) delete m[k]
   return out
 }
 /** Full class mix (STANDARD implied) scaled to `b` of the aggregate's bytes. */
@@ -91,6 +95,8 @@ export interface AssignmentRow {
   /** The subtree's bytes per scan-attributed user (what the assignment
    * repaints) — the owner lens subtracts and adds these per band. */
   us: Record<string, number>
+  /** …and its objects per scan-attributed user (the object-count fold's `us`). */
+  uo: Record<string, number>
   /** Set when a newer ancestor assignment overrides this one. */
   repainted_by?: string
 }
@@ -195,6 +201,7 @@ export function computeOwners(input: OwnersInput): OwnerTotals {
       bytes: n.agg.b,
       objects: n.agg.o,
       us: Object.fromEntries(Object.entries(n.agg.us).filter(([, b]) => b > 0)),
+      uo: Object.fromEntries(Object.entries(n.agg.uo).filter(([, o]) => o > 0)),
       ...(n.effOwner === n.owner ? {} : { repainted_by: n.effOwner!.prefix }),
     })
   }

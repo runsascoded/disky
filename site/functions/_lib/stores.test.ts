@@ -118,9 +118,9 @@ describe('withStore', () => {
 
 describe('cache keys', () => {
   it('the primary’s are unchanged; a secondary store’s get an `@<store>/` segment', () => {
-    expect(cacheKeyFor('series', 'a%2Fb?P=').url).toBe('https://series.cache/v2/a%2Fb?P=')
-    expect(cacheKeyFor('series', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v2/a%2Fb?P=')
-    expect(cacheKeyFor('series', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v2/@meta/a%2Fb?P=')
+    expect(cacheKeyFor('series', 'a%2Fb?P=').url).toBe('https://series.cache/v4/a%2Fb?P=')
+    expect(cacheKeyFor('series', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v4/a%2Fb?P=')
+    expect(cacheKeyFor('series', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v4/@meta/a%2Fb?P=')
   })
   it('over-time manifest datasets: `over-time` for the primary, `<store>:over-time` else', () => {
     expect([overTimeDataset(PRIMARY), overTimeDataset(storeEnv(PRIMARY, 'meta', META))]).toEqual(['over-time', 'meta:over-time'])
