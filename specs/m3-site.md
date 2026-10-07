@@ -1,6 +1,12 @@
 # m3 on `site/`: the laptop as a store
 
-**Status:** proposed (2026-09-28). Branch `m3`.
+**Status:** deployed since 2026-10-01; capture-trigger cutover verified 2026-10-02. Branch `m3`. The implementation notes below retain the original proposal and measurements.
+
+## Current deployment (2026-10-05)
+
+`site/` serves disk.rbw.sh and dev.disk.rbw.sh with in-app auth. disky.app captures the configured scope in-process to R2; `_SUCCESS.json` triggers the capture Worker, which submits the 1 vCPU / 8 GiB Batch ingest. The ingest publishes the path index and snapshot, then syncs D1 `disk-tree-m3-db`. The CLI reads the same index with `du -p`; there is no scheduled scan blob or Python capture wrapper. The drainer trashes real deletions and requests a refresh with `disky scan now`. Infrastructure lives in `infra/aws/` and `infra/cf/`; deployment uses `site/deploy-m3`.
+
+The ingest carries the capture's APFS container measurements into `meta.json.disk_space` using `disk-tree capture-meta`. The site shows free bytes, capacity, percentage used, and a meter above the map at every drill depth. These are physical container measurements at the scan, shared across its volumes; they are independent of the treemap's apparent sizes. The tooltip explains APFS sharing and system volumes. Snapshots without a measurement omit the indicator; no capacity is inferred from their tree totals. The display follows the site's SI/IEC unit preference.
 
 ## Why
 
@@ -97,7 +103,7 @@ Verdict: **go**. The ingest is trivially small for Batch, so the job definition 
 
 ### Phase 4: cut over and retire
 
-**Status (2026-10-01): cut over.** `site/` serves disk.rbw.sh (deploy `09cbce05`): prod got the `STORE_*` secrets, Google sign-in verified on prod, every data route 401s signed out, `/auth/app-link` live for disky. `ui/`'s `ACCESS_AUD` / `ACCESS_TEAM_DOMAIN` / `ALLOWED_EMAILS` secrets deleted; the drainer polls only `disk-tree-m3-db`. Ryan deleted the Access app `disk-tree` (`/auth/sso` now falls through to the SPA) and pointed the consent screen's privacy URL at `disk.rbw.sh/privacy` (no logo: uploading one would force Google brand verification). Left: deleting `ui/functions/`, `ui/cfn/`, `ui/wrangler.toml` on `cloud` (deleting them on `m3` alone would conflict on every merge). The scan keeps its `disk-tree index` step: the CLI cleanup loop (`du`, `overcount`) reads that blob.
+**Status (2026-10-01): cut over.** `site/` serves disk.rbw.sh (deploy `09cbce05`): prod got the `STORE_*` secrets, Google sign-in verified on prod, every data route 401s signed out, `/auth/app-link` live for disky. `ui/`'s `ACCESS_AUD` / `ACCESS_TEAM_DOMAIN` / `ALLOWED_EMAILS` secrets deleted; the drainer polls only `disk-tree-m3-db`. Ryan deleted the Access app `disk-tree` (`/auth/sso` now falls through to the SPA) and pointed the consent screen's privacy URL at `disk.rbw.sh/privacy` (no logo: uploading one would force Google brand verification). Left: deleting `ui/functions/`, `ui/cfn/`, `ui/wrangler.toml` on `cloud` (deleting them on `m3` alone would conflict on every merge). The scheduled scan now captures only; `du -p` reads the published path index. `overcount` measures local extents directly.
 
 - Deploy `site/` to Pages `disk-tree`.
 - Delete the Access app `disk-tree` and the `ACCESS_*` secrets.

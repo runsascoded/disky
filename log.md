@@ -2,6 +2,15 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Deployment maintenance (2026-10-05): restore scheduled scans and the drainer
+
+- Both agents were still loaded through stale SMAppService registrations, with launchd exit 78 / launch-constraint failures. Re-registered them using disky's plain LaunchAgent plists; the drainer's D1 heartbeat resumed. Persistence across reboot remains unverified; the app worktree has a spec for detecting and migrating legacy registrations.
+- Fresh whole-machine capture `captures/m3/root/2026-10-05T15-41-33Z`: 7,213,352 files, 37 shards, 286 inaccessible paths, 4m55s. `_SUCCESS.json` triggered Batch job `729919f9-161e-497e-95fb-f8970628ec64` six seconds later. The job succeeded, publishing R2 and D1 generation `202610051541` (8,140,733 index rows). `du -p` reads it back; `~/Library` is 121 GiB, including 72.9 GiB of Application Support and 9.83 GiB of Containers, so FDA coverage is present.
+- Boot-container free space at capture completion: **58.0 GiB**. No cleanup targets were deleted; measured bytes freed: **0**.
+- Retired `aws/laptop-scan`; the drainer's post-delete refresh now uses `disky scan now`, so scheduled and requested scans share the in-process capture and R2 trigger instead of submitting Batch twice.
+- Published the 34 existing commits through `ab8e3098` to `r/m3`; GitHub CI run `37336199262` passed. All 597 site tests passed (one skipped). Dev deployment `2b17a9e5` and production deployment `288e3c65` are live. RACx browser checks verified the signed-in map, today's scan, hidden root staging controls, admin `/staged`, and the dev phone layout. Live scratch dry-run verification remains pending explicit path-navigation approval; no staged items were added or deletion runs dispatched during these checks.
+- Added a physical disk-space bar above the map: **62.25 GB / 58.0 GiB free of 494.38 GB / 460.4 GiB, 87.4% used**, measured during this capture. The ingest now copies the capture's container metrics into `meta.json.disk_space` through `disk-tree capture-meta`. Updated the Batch image to digest `597342ff…`; re-ingest job `9457fa20-b1a2-498d-bf07-4d64e6e27e13` succeeded and published those measurements, with tree totals unchanged. The UI follows SI/IEC preference, labels the reading "at scan", and explains physical vs apparent size in a pinnable tooltip. Scan freshness follows the capture timestamp, so re-ingesting does not make an old measurement look fresh. Desktop/mobile CIC passed; 599 site tests and 10 capture/metadata tests passed.
+
 ## Pass 5 (2026-10-03): candidates from the scheduled capture's path index
 
 - Source: the 06:15 capture's path index (`listing/laptop/2026-10-03/index/202610031015`) via `disk-tree du -p`, then `overcount` on each candidate. The first pass driven by the scheduled scan rather than a hand-run one.

@@ -2,24 +2,26 @@
 """The laptop delete runner (LaunchAgent `com.runsascoded.disk-tree.drain`;
 specs/m3-site.md Phase 3): `disk-tree dispatch -s` over the deployments' D1s.
 
-A Python entry run as the venv's `python` for the same reason as
-`laptop-scan`: it renames deleted paths into `~/.Trash/disk-tree/`, and macOS
-TCC attributes that to the launchd root process, which needs Full Disk Access.
+A Python entry run as a child of disky.app: it renames deleted paths into
+`~/.Trash/disk-tree/`, and macOS TCC attributes that to the app's Full Disk
+Access grant.
 Secrets stay out of the plist: `CLOUDFLARE_API_TOKEN` is read from the
 worktree's `.envrc` through `direnv export json`.
 
 Polls the `site/` D1 (`disk-tree-m3-db`, the `laptop` executor's runs; `ui/`'s
 `disk-tree-auth` retired with the 2026-10-01 cut-over). Real runs trash (the
-7-day TTL empties them); after one, a fresh capture → Batch so the map
-reflects the freed bytes.
+7-day TTL empties them); after one, `disky scan now` wakes the scan agent.
+Its capture's R2 success marker triggers Batch so the map reflects the change.
 """
 import json
 import os
 import subprocess
 from pathlib import Path
+from shlex import quote
 
 M3 = Path(__file__).resolve().parent.parent
 BIN = M3 / '.venv' / 'bin'
+DISKY = Path.home() / 'Applications' / 'disky.app' / 'Contents' / 'MacOS' / 'disky'
 SITE_D1 = 'e5288564-a010-4177-9f3c-77e25fad9f72'   # disk-tree-m3-db (cf/)
 
 
@@ -32,7 +34,7 @@ def main() -> None:
         'DISK_TREE_R2_ENDPOINT_URL': 'https://0dcad5654e9744de6616f74b8df4af63.r2.cloudflarestorage.com',
         'DISK_TREE_SCAN_DIRS': 'r2://disk-tree/scans:/Users/ryan/.config/disk-tree/scans',
     }
-    after = f'{BIN}/python {M3}/aws/laptop-scan --capture-only'
+    after = f'{quote(str(DISKY))} scan now'
     os.execve(str(BIN / 'disk-tree'), [
         'disk-tree', 'dispatch', '-s', '--d1', SITE_D1, '--trash', '--ttl', '7d', '-a', after, '-H', 'm3',
     ], env)

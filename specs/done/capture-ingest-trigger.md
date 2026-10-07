@@ -39,7 +39,7 @@ Alternative, if a CF→AWS key is unwelcome: an EventBridge-scheduled Lambda (ev
                   "env": {"AWS_PROFILE": "r"}}}
 ```
 
-`aws/laptop-scan` is superseded by this config, and can go once the switch is verified.
+`aws/laptop-scan` was retired on 2026-10-05 after verifying the in-process capture and R2 trigger. The drainer's post-delete refresh now invokes `disky scan now`, using the same scan job and scope settings as scheduled scans.
 
 ## Status (m3): live since 2026-10-02
 
@@ -52,4 +52,4 @@ Apply order, for reference: `pulumi up` (aws, then cf) → `pnpm -C infra/cf/cap
 
 Cutover done 2026-10-02: `then` dropped from `disky.json`; a Scan now captured `captures/m3/root/2026-10-02T14-59-17Z` (`_SUCCESS.json` 15:05:24Z), the Worker submitted Batch job `7e6297c8…` at 15:05:30Z, and it succeeded at 11:08 EDT with index gen `listing/laptop/2026-10-02/index/202610021506` (R2 + D1 `index_schema`; `du -p` reads it).
 
-Follow-ups (not blocking): the `STORE` per `<host>` derivation in `ingest.sh` (only `m3` captures today), ingest idempotency per capture (the marker covers redelivery, not a manual `aws/submit` re-run), and retiring `aws/laptop-scan`.
+Follow-ups (not blocking): the `STORE` per `<host>` derivation in `ingest.sh` (only `m3` captures today), and ingest idempotency per capture (the marker covers redelivery, not a manual `aws/submit` re-run).
