@@ -138,7 +138,9 @@ function ExpiresCell({ grant, onSave, saving }: { grant: Grant; onSave: (expires
 }
 
 /** One `access_log` row for a link (`GET /api/auth/log?grant=`). `ua` /
- *  `ip_hash` / `referer` arrive once `@open-athena/auth` returns them. */
+ *  `ip_hash` / `referer` / `city` / `region` / `as_org` arrive once
+ *  `@open-athena/auth` returns them (its `specs/log-client-fields.md`); IPs
+ *  are only ever an HMAC. */
 interface LogEvent {
   id: number
   ts: number
@@ -150,7 +152,13 @@ interface LogEvent {
   ua?: string | null
   ip_hash?: string | null
   referer?: string | null
+  city?: string | null
+  region?: string | null
+  as_org?: string | null
 }
+
+/** "Brooklyn, NY, US": the most specific location the log has. */
+const where = (e: LogEvent): string => [e.city, e.region, e.country].filter(Boolean).join(', ') || '—'
 
 /** A link's lifecycle events (mint, redeem, deny, revoke…), newest first;
  *  page views only when the gate logs them. */
@@ -168,11 +176,13 @@ function GrantLog({ id }: { id: string }) {
   const events = q.data.events
   if (!events.length) return <p className="dim">no events logged</p>
   const hasClient = events.some(e => e.ua != null || e.ip_hash != null)
+  const hasNetwork = events.some(e => e.as_org != null)
   return (
     <table className="grant-log">
       <thead>
         <tr>
-          <th>when</th><th>event</th><th>country</th>
+          <th>when</th><th>event</th><th>where</th>
+          {hasNetwork && <th>network</th>}
           {hasClient && <><th>client</th><th>browser</th></>}
           <th>detail</th>
         </tr>
@@ -182,7 +192,8 @@ function GrantLog({ id }: { id: string }) {
           <tr key={e.id}>
             <td>{fmtTs(e.ts)}</td>
             <td>{e.event}</td>
-            <td>{e.country ?? '—'}</td>
+            <td>{where(e)}</td>
+            {hasNetwork && <td>{e.as_org ?? '—'}</td>}
             {hasClient && <><td><code>{e.ip_hash ? e.ip_hash.slice(0, 8) : '—'}</code></td><td className="ua">{e.ua ?? '—'}</td></>}
             <td>{e.reason ?? e.path ?? ''}</td>
           </tr>
