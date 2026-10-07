@@ -3,11 +3,11 @@
 // node's owner split (`us`) as the scan attributed it — the committed
 // state — and this overlays the live assignments (the WAL) on the drawn
 // tree, so cells, the rollup legend, tooltips and the table's owner bars say
-// what the table's owner column (`OwnerIndex.claimOf`) says, the moment an
+// what the table's owner column (`OwnerIndex.assignmentOf`) says, the moment an
 // assignment lands.
 //
 // Per drawn node: a node covered by an assignment (the newest live row on its
-// ancestor-or-self chain, `claimOf`) is the assignee's whole when it's a leaf
+// ancestor-or-self chain, `assignmentOf`) is the assignee's whole when it's a leaf
 // tile; a branch's split is its scan split plus its children's changes, plus
 // — under an assignment — the bytes no drawn child accounts for. A fold
 // (`(other)`) has no path: it takes its parent's assignee. What the overlay
@@ -68,7 +68,7 @@ export function applyLedger(root: TreeNode, idx: OwnerIndex, scheme: string, can
   const rec = (n: TreeNode, segs: string[] | null, inherited: string | null): TreeNode => {
     const isRoot = segs?.length === 0
     const uri = segs && !isRoot ? scheme + segs.join('/') : null
-    const who = uri ? idx.claimOf(uri)?.who : segs ? null : inherited
+    const who = uri ? idx.assignmentOf(uri)?.who : segs ? null : inherited
     const cov = who == null ? null : canon(who)
     if (cov == null && !isRoot && (!uri || !touched.has(uri + '/'))) return n
     const kids = n.c ?? []

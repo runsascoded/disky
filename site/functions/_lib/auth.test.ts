@@ -52,12 +52,12 @@ const cw = (rows: { allowed?: string[]; admin?: string[] }, extra: Partial<Env> 
 
 describe('scopesFor — the in-app policy that replaces the Access policy', () => {
   it('staff get every scope', async () => {
-    expect(await scopesFor(cw({}))('ryan@openathena.ai')).toEqual(['gcs', 'cw', 'admin', 'requests'])
+    expect(await scopesFor(cw({}))('ryan@openathena.ai')).toEqual(['gcs', 'cw', 'admin', 'requests', 'cw:assign'])
   })
 
   it("staff on a store other than gcs/cw also get that store's base scope", async () => {
     const env = cw({}, { BASE_SCOPE: 'laptop', STAFF_DOMAIN: 'runsascoded.com' })
-    expect(await scopesFor(env)('ryan@runsascoded.com')).toEqual(['gcs', 'cw', 'admin', 'requests', 'laptop'])
+    expect(await scopesFor(env)('ryan@runsascoded.com')).toEqual(['gcs', 'cw', 'admin', 'requests', 'laptop', 'laptop:assign'])
   })
 
   it('no STAFF_DOMAIN (unset or empty): nobody is staff by domain', async () => {
@@ -69,16 +69,16 @@ describe('scopesFor — the in-app policy that replaces the Access policy', () =
     }
   })
 
-  it('a viewer domain gets the base scope with no allowlist row', async () => {
-    expect(await scopesFor(cw({}))('someone@coreweave.com')).toEqual(['cw'])
+  it('a viewer domain gets the base scope + assign with no allowlist row', async () => {
+    expect(await scopesFor(cw({}))('someone@coreweave.com')).toEqual(['cw', 'cw:assign'])
   })
 
   it('a viewer-domain admin_emails row adds admin', async () => {
-    expect(await scopesFor(cw({ admin: ['ops@coreweave.com'] }))('ops@coreweave.com')).toEqual(['cw', 'admin'])
+    expect(await scopesFor(cw({ admin: ['ops@coreweave.com'] }))('ops@coreweave.com')).toEqual(['cw', 'cw:assign', 'admin'])
   })
 
   it('an allowed_emails row admits any other address, lower-cased', async () => {
-    expect(await scopesFor(cw({ allowed: ['guest@example.org'] }))('Guest@Example.org')).toEqual(['cw'])
+    expect(await scopesFor(cw({ allowed: ['guest@example.org'] }))('Guest@Example.org')).toEqual(['cw', 'cw:assign'])
   })
 
   it('an unlisted address from an unlisted domain is denied', async () => {
@@ -87,12 +87,12 @@ describe('scopesFor — the in-app policy that replaces the Access policy', () =
 
   it('without ADMIN_EMAILS the admin table is never consulted (gcs shape)', async () => {
     const env = cw({ allowed: ['guest@example.org'] }, { ADMIN_EMAILS: undefined, VIEWER_DOMAINS: undefined, BASE_SCOPE: 'gcs' })
-    expect(await scopesFor(env)('guest@example.org')).toEqual(['gcs'])
+    expect(await scopesFor(env)('guest@example.org')).toEqual(['gcs', 'gcs:assign'])
     expect(await scopesFor(env)('someone@coreweave.com')).toBeNull()
   })
 
-  it('no DB (local dev) admits non-staff to the base scope', async () => {
-    expect(await scopesFor({ BASE_SCOPE: 'cw' })('anyone@example.org')).toEqual(['cw'])
+  it('no DB (local dev) admits non-staff to the base scope + assign', async () => {
+    expect(await scopesFor({ BASE_SCOPE: 'cw' })('anyone@example.org')).toEqual(['cw', 'cw:assign'])
   })
 })
 
@@ -121,7 +121,15 @@ describe('allowedRow — a D1 without the `read_only` migration', () => {
     raw.exec("INSERT INTO allowed_emails (email, note, who, ts) VALUES ('guest@example.org', NULL, 'admin', 1)")
     expect([await allowedRow(db, 'guest@example.org'), await allowedRow(db, 'nobody@example.org')]).toEqual([{ read_only: 0 }, null])
     const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'openathena.ai' } as Env
-    expect(await scopesFor(env)('Guest@example.org')).toEqual(['cw'])
+    expect(await scopesFor(env)('Guest@example.org')).toEqual(['cw', 'cw:assign'])
+  })
+
+  it('a `read_only` row is the read-only tier alone — no assign', async () => {
+    const { sqliteD1 } = await import('./testD1')
+    const { db, raw } = await sqliteD1('cw')
+    raw.exec("INSERT INTO allowed_emails (email, note, who, ts, read_only) VALUES ('ro@example.org', NULL, 'admin', 1, 1)")
+    const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'openathena.ai' } as Env
+    expect(await scopesFor(env)('ro@example.org')).toEqual(['cw:read'])
   })
 })
 

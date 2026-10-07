@@ -16,13 +16,18 @@ import { parseAst, resolveSyntax } from './querySyntax.js'
  * three are exact per path. */
 export type OwnerScope = 'owned' | 'unowned' | { not: string[] }
 
-// `claimed` / `unclaimed` were the pools' names until 2026-09-07; old links
-// and cached clients still send them. `!a,b` = owned-except-{a,b}.
+// The pools' short forms are what page URLs carry: bare `o` (= `o=`) is
+// unowned ("owner: nobody"), `o=*` owned ("anyone"). The long names stay
+// accepted, as do `claimed` / `unclaimed` (the names until 2026-09-07) from old
+// links and cached clients. `!a,b` = owned-except-{a,b}.
 export const parseOwner = (raw: string | null): OwnerScope | undefined =>
-  raw === 'owned' || raw === 'claimed' ? 'owned'
-  : raw === 'unowned' || raw === 'unclaimed' ? 'unowned'
+  raw === 'owned' || raw === '*' || raw === 'claimed' ? 'owned'
+  : raw === 'unowned' || raw === '' || raw === 'unclaimed' ? 'unowned'
   : raw?.startsWith('!') ? { not: raw.slice(1).split(',').filter(Boolean) }
   : undefined
+
+/** An `OwnerScope` back as the API's `o=` value (long pool names). */
+export const ownerKey = (o: OwnerScope): string => typeof o === 'string' ? o : `!${o.not.join(',')}`
 
 export const ownerOk = (usr: string | null, o: OwnerScope | undefined): boolean => {
   if (!o) return true

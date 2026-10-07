@@ -1,7 +1,7 @@
 /** Bytes under a path per scan — the size-over-time chart, scoped like the
  * map (specs/view-serving.md §1 "series.json" → this).
  *
- *   GET /api/series?path=<P>[&lens=user:<id>][&o=claimed|unclaimed]
+ *   GET /api/series?path=<P>[&lens=user:<id>][&o=owned|unowned]
  *
  * One point per scan the index knows: P's own row in that scan's coarsest
  * tier that holds it (or the floor-free tier), scoped per row like a view's
@@ -101,7 +101,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // Every scan with a synced floor-free index, oldest first.
   const rows = await st.time('scans', pathScans(env, true))
   const dates = rows.results.map(r => r.date)
-  // A user lens applies the live claims, so its key carries the ledger head.
+  // A user lens applies the live assignments, so its key carries the ledger head.
   const head = lens ? await ledgerHead(env) : 0
   // Unscoped whole-bucket series only: scans without tiers still have a total in meta.json.
   const extra = path === '' && !paths.length && !lens && !owner && !classes ? await st.time('unindexed', unindexedScans(env, new Set(dates))) : []

@@ -3,7 +3,7 @@
  * §2.3), so every consumer (`/users`, `/user/:id`, `/api/assignments`, the
  * user lens of `/api/subtree`) reads one number.
  *
- * Cost model: one point lookup per live claim prefix plus the depth-1 roots,
+ * Cost model: one point lookup per live assignment prefix plus the depth-1 roots,
  * read once per (scan, ledger head) and cached in D1 (`owner_totals`, one
  * head at a time). A new assignment invalidates by changing the head; the
  * recompute happens on the next request. */
@@ -11,17 +11,17 @@ import type { Env } from './auth.js'
 import { columnsFor, openIndex, readAsks, type Ask, type Row } from './index.js'
 import { loadLedger } from './ledger.js'
 import { shared } from './shared.js'
-import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type ClaimRow, type OwnerRow, type OwnerTotals, type PathAgg } from './claims.js'
+import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type AssignmentRow, type OwnerRow, type OwnerTotals, type PathAgg } from './ownerBands.js'
 
 /** The `Row` fields a total needs; `columnsFor` names them per generation. */
 const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'cls2', 'cls3', 'cls4']
 /** Row groups a totals read may decode: each point lookup needs at most two
- * (its row on a group boundary), so the bound scales with the claim count —
+ * (its row on a group boundary), so the bound scales with the assignment count —
  * gcs's ~1,260 prefixes on 8k-row store groups need more than a flat 400. */
 const maxGroups = (asks: number) => Math.max(400, 2 * asks)
 
 /** Bump when the body's shape changes: cached bodies with another version are recomputed. */
-export const MANIFEST_VERSION = 1
+export const MANIFEST_VERSION = 2  // 2: `claims` → `assignments`
 
 export interface OwnerTotalsBody extends OwnerTotals {
   v: number
@@ -86,27 +86,27 @@ export async function ownerTotals(env: Env, date: string): Promise<OwnerTotalsBo
     // weight: drop them as this one lands.
     await env.DB!.batch([
       env.DB!.prepare('INSERT OR REPLACE INTO owner_totals (scan, head, body, claims, computed_ts, ms) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(date, head, JSON.stringify(body), JSON.stringify(body.claims), body.computed.at, body.computed.ms),
+        .bind(date, head, JSON.stringify(body), JSON.stringify(body.assignments), body.computed.at, body.computed.ms),
       env.DB!.prepare('DELETE FROM owner_totals WHERE head < ?').bind(head),
     ])
     return body
   }, MEMO_WAIT)
 }
 
-// Claims alone, per (scan, head): a fraction of the body.
-const claimsMemo = new Map<string, Promise<ClaimRow[]>>()
+// Assignments alone, per (scan, head): a fraction of the body.
+const assignmentsMemo = new Map<string, Promise<AssignmentRow[]>>()
 
-/** The live claims priced against `date` — what a user lens folds. A lens
+/** The live assignments priced against `date` — what a user lens folds. A lens
  * series reads one per scan, so they are stored beside the body
  * (`owner_totals.claims`) and fetched alone. */
-export async function ownerClaims(env: Env, date: string): Promise<ClaimRow[]> {
+export async function ownerAssignments(env: Env, date: string): Promise<AssignmentRow[]> {
   const { head } = await loadLedger(env)
   const full = memo.get(`${date}:${head}`)
-  if (full) return (await full).claims
+  if (full) return (await full).assignments
   const key = `${date}:${head}`
-  return shared(claimsMemo, key, async () => {
+  return shared(assignmentsMemo, key, async () => {
     const row = await env.DB!.prepare('SELECT claims FROM owner_totals WHERE scan = ? AND head = ?').bind(date, head).first<{ claims: string }>()
-    if (row) return JSON.parse(row.claims) as ClaimRow[]
-    return (await ownerTotals(env, date)).claims
+    if (row) return JSON.parse(row.claims) as AssignmentRow[]
+    return (await ownerTotals(env, date)).assignments
   }, MEMO_WAIT)
 }

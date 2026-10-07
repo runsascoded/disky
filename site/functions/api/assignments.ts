@@ -2,7 +2,7 @@
  * GET /api/assignments?date=<scan>
  *
  * The assigner × assignee matrix: every live owner assignment (the ledger's
- * `owner_prefixes`), folded to bytes at `date` by the same claims fold
+ * `owner_prefixes`), folded to bytes at `date` by the same assignments fold
  * `/users` uses, then grouped by `(who assigned it, to whom)`.
  * Feeds the `/assignments` heatmap and the homepage `?by=` lens.
  * Every assigner is a person today (`actions.actor`); inferred-attribution
@@ -36,8 +36,8 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
     for (const r of ue.results) emap.set(r.email.toLowerCase(), r.user)
     const t = await ownerTotals(env, date)
     const cells = new Map<string, Cell>()
-    for (const c of t.claims) {
-      // Live claims with an assignee only (a repainted claim's bytes belong to
+    for (const c of t.assignments) {
+      // Live assignments with an assignee only (a repainted assignment's bytes belong to
       // the newer covering assignment).
       if (c.repainted_by || !c.owner) continue
       const by = c.who ? (emap.get(c.who.toLowerCase()) ?? c.who) : 'unknown'

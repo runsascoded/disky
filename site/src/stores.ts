@@ -49,7 +49,7 @@ export interface Store {
   /** The path filter's default syntax (`functions/_lib/querySyntax.ts` ids;
    *  `?qs=` overrides). Mirrors the Functions' `QUERY_SYNTAX`. Unset = `simple`. */
   querySyntax?: string
-  /** Attribution + ownership: the owner axes (`?o=`), claims / assignments
+  /** Attribution + ownership: the owner axes (`?o=`), assignments / assignments
    *  (admins assign; `POST /api/actions`), the `/users`, `/user/:id`,
    *  `/assignments` pages and the email → user map. Only the actions-ledger
    *  store has these. */

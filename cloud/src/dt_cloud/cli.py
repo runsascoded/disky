@@ -206,13 +206,13 @@ def wandb_attr(
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, required=True, help=f"identities.yaml path or URL (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-n", "--top", default=30, help="Rows in the per-user table")
-@option("-u", "--user", "claim_user", default=None, help="Print this user's prefixes (inferred ownership, by bytes)")
+@option("-u", "--user", "owner_user", default=None, help="Print this user's prefixes (inferred ownership, by bytes)")
 def attr_report(
     attributions: tuple[str, ...],
     identities_path: str,
     listings: tuple[str, ...],
     top: int,
-    claim_user: str | None,
+    owner_user: str | None,
 ) -> None:
     """Join listing × attribution (deepest-prefix-wins) → per-user bytes + coverage.
 
@@ -237,7 +237,7 @@ def attr_report(
 
     per_user: dict[str | None, list] = defaultdict(lambda: [0, 0])
     per_source: dict[str, list] = defaultdict(lambda: [0, 0])
-    claim: dict[str, list] = defaultdict(lambda: [0, 0])  # attributed-ancestor prefix -> [bytes, objects] for --user
+    owned: dict[str, list] = defaultdict(lambda: [0, 0])  # attributed-ancestor prefix -> [bytes, objects] for --user
     cache: dict[str, tuple | None] = {}
     prefix_of: dict[str, str] = {}  # dir_key -> matched attribution prefix (only tracked when --user)
 
@@ -275,8 +275,8 @@ def attr_report(
         per_user[user][1] += int(objects)
         per_source[source][0] += int(nbytes)
         per_source[source][1] += int(objects)
-        if claim_user is not None and user == claim_user:
-            c = claim[prefix_of[dir_key]]
+        if owner_user is not None and user == owner_user:
+            c = owned[prefix_of[dir_key]]
             c[0] += int(nbytes)
             c[1] += int(objects)
 
@@ -289,9 +289,9 @@ def attr_report(
     for user, (nbytes, objects) in rows:
         print(f"{user or '-':>24}  {nbytes/1e12:10.3f} TB  {objects:>12,} objects")
 
-    if claim_user is not None:
-        print(f"\n== claim list: {claim_user} ({len(claim)} prefixes) ==")
-        for prefix, (nbytes, objects) in sorted(claim.items(), key=lambda kv: -kv[1][0]):
+    if owner_user is not None:
+        print(f"\n== owned prefixes: {owner_user} ({len(owned)} prefixes) ==")
+        for prefix, (nbytes, objects) in sorted(owned.items(), key=lambda kv: -kv[1][0]):
             print(f"{nbytes/1e9:12.2f} GB  {objects:>10,} objects  {prefix}")
 
 

@@ -2,7 +2,7 @@
  * (specs/view-serving.md; the folding lives in `_lib/view.ts`).
  *
  *   GET /api/subtree?date=<scan>&path=<P>&w=<px>&h=<px>[&minArea=<px²>]
- *                    [&lens=user:<id>][&o=claimed|unclaimed][&q=<name filter>]
+ *                    [&lens=user:<id>][&o=owned|unowned][&q=<name filter>]
  *
  * The page's scope axes (specs/view-serving.md §2) are applied server-side:
  * the owner axis (`lens` for a user, `o` for the pools), the name filter
@@ -85,7 +85,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
     if (gated instanceof Response) return gated
   }
 
-  // A user lens folds the live ledger (claims repaint attribution): its cache
+  // A user lens folds the live ledger (assignments repaint attribution): its cache
   // key carries the head.
   // Everything from here touches D1 or the store, so it all sits under one
   // guard: a D1 stall ("internal error") used to escape from the pre-steps

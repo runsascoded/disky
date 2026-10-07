@@ -116,6 +116,11 @@ export const baseScope = (env: Env): string => env.BASE_SCOPE ?? GCS_SCOPE
  *  admits it, no write does. What a share link mints by default
  *  (specs/share-link-hardening.md). */
 export const baseReadScope = (env: Env): string => `${baseScope(env)}:read`
+/** Ownership writes (`gcs:assign` / `cw:assign`): assigning any prefix to anyone
+ *  (or clearing it). Every signed-in full viewer gets it from the policy, and
+ *  their personal agent token carries it; a share link doesn't, unless an admin
+ *  mints one with it. */
+export const baseAssignScope = (env: Env): string => `${baseScope(env)}:assign`
 
 /** Staff by email domain (`STAFF_DOMAIN`). Unset or empty = nobody is staff by
  *  domain (an empty domain would otherwise match every address). */
@@ -138,8 +143,8 @@ async function adminRow(env: Env, email: string): Promise<boolean> {
 /**
  * Email → scopes: the in-app policy that the Access policy used to be. Staff
  * get everything; a viewer domain (`VIEWER_DOMAINS`) or a D1 `allowed_emails`
- * row (the app-owned allowlist — see /admin/db) gets the base scope (a
- * `read_only` row: the read-only tier), plus
+ * row (the app-owned allowlist — see /admin/db) gets the base scope + assign
+ * (a `read_only` row: the read-only tier alone), plus
  * `admin` for an `admin_emails` row. Email sessions re-derive scopes here on
  * every request, so removing a row de-authorizes existing sessions on their
  * next request. If the DB isn't bound (local dev), non-staff fall back to
@@ -163,13 +168,13 @@ export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | n
   const email = raw.toLowerCase()
   const base = baseScope(env)
   if (isStaff(env, email)) return allScopes(env)
-  if (!env.DB) return [base]
+  if (!env.DB) return [base, baseAssignScope(env)]
   const byDomain = viewerDomains(env).some(d => email.endsWith(`@${d}`))
   const row = byDomain ? null : await allowedRow(env.DB, email)
   if (!byDomain && !row) return null
-  if (await adminRow(env, email)) return [base, ADMIN_SCOPE]
+  if (await adminRow(env, email)) return [base, baseAssignScope(env), ADMIN_SCOPE]
   // A `read_only` row is the read-only viewer tier (what a read-only share link carries).
-  return row?.read_only ? [baseReadScope(env)] : [base]
+  return row?.read_only ? [baseReadScope(env)] : [base, baseAssignScope(env)]
 }
 
 export function gateFor(env: Env): Gate | null {
@@ -216,7 +221,7 @@ function authIdentity(auth: Auth): Identity {
  *  without a minted session): the deployment's base scope — which a store
  *  other than gcs/cw (e.g. `laptop`) names itself — plus the fixed ones. */
 const allScopes = (env: Env): string[] =>
-  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env)])]
+  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env), baseAssignScope(env)])]
 
 export async function identify(ctx: Ctx): Promise<Identity | null> {
   // Local dev has no minted session, so `wrangler pages
@@ -273,6 +278,9 @@ export async function requireViewer(ctx: Ctx): Promise<Identity | Response> {
 /** Staging (the opt-in trash proposal) and other non-admin writes: the full
  *  base scope — a read-only guest link can't. */
 export const requireStager = (ctx: Ctx): Promise<Identity | Response> => requireScope(ctx, baseScope(ctx.env))
+/** Ownership writes (`POST /api/actions`): the assign scope, or an admin. */
+export const requireAssigner = (ctx: Ctx): Promise<Identity | Response> =>
+  requireAnyScope(ctx, [baseAssignScope(ctx.env), ADMIN_SCOPE])
 /** An admin (plan writes + sweep dispatch). */
 export const requireAdmin = (ctx: Ctx): Promise<Identity | Response> => requireScope(ctx, ADMIN_SCOPE)
 

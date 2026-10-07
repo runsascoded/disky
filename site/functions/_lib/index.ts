@@ -2,7 +2,7 @@
  * A scan's index tiers (`<dir>/path-index[-coarse<E>][-by-user].parquet`) as
  * a row-group-pruned range reader — shared by `/api/subtree` (pixel-budget
  * drill), `/api/diff`, `/api/series` and the owner totals (exact bytes per
- * live claim, `_lib/ownerTotals.ts`).
+ * live assignment, `_lib/ownerTotals.ts`).
  *
  * Each file is sorted (depth, path) (or (usr, depth, path)): the descendants
  * of P at each depth are one contiguous run, so any prefix query is a few
@@ -958,7 +958,7 @@ export interface Rect { dLo: number; dHi: number; pLo: string; pHi: string }
 /** Rows in any of several (depth, path-range) rectangles — one read: the
  * candidate groups of all rects come from a few span queries (rects batched
  * per statement), each group is decoded once, and a row passes if some rect
- * holds it. What a lens's scattered claimed regions need. */
+ * holds it. What a lens's scattered assigned regions need. */
 export async function readRects(
   h: IndexHandle,
   rects: Rect[],
@@ -1263,7 +1263,7 @@ export async function readAsks(
 ): Promise<{ rows: Row[]; groups: number }> {
   // One rectangle per depth over its asks' [min, max] path, halved while it
   // selects more groups than its asks could need: sparse asks across a deep
-  // store (gcs's ~1,260 claim prefixes over 8k-row groups) would otherwise
+  // store (gcs's ~1,260 assignment prefixes over 8k-row groups) would otherwise
   // select every group between the first ask and the last, past any cap.
   // Exact: each ask stays in exactly one rectangle, a single ask over the cap
   // still throws, and `groupMayHold` + `keep` narrow what is read.

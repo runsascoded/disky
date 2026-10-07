@@ -177,7 +177,7 @@ export function StagedPage() {
   // What a row is found by: its prefix, its owners (the ledger's assignee, else
   // the scan's attribution — what the owner(s) column shows) and its stager.
   const filtered = useMemo(() => filterStaged(rows, q, r => {
-    const cl = ownerIdx.count ? ownerIdx.claimOf(r.prefix) : null
+    const cl = ownerIdx.count ? ownerIdx.assignmentOf(r.prefix) : null
     const owners = cl ? [cl.who] : r.stat ? ownerShares({ n: r.name, b: r.stat.b, o: r.stat.o, ...(r.stat.us ? { us: r.stat.us } : {}) }).map(([u]) => u) : []
     return { prefix: r.prefix, owners, stagedBy: r.added_by }
   }, searchName), [rows, q, ownerIdx])

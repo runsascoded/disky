@@ -2,7 +2,7 @@
  * scans' index tiers at one shared byte floor (`_lib/view.ts` `buildDiff`).
  *
  *   GET /api/diff?from=<scan>&to=<scan>&path=<P>&w=<px>&h=<px>[&minArea=<px²>][&top=<n>]
- *                 [&lens=user:<id>][&o=claimed|unclaimed][&q=<name filter>][&summary=1][&depth=<levels>]
+ *                 [&lens=user:<id>][&o=owned|unowned][&q=<name filter>][&summary=1][&depth=<levels>]
  *
  * `summary=1` answers with the totals only (both sides' scoped root reads,
  * no walk — `rows` empty): the section's headline, seconds before the rows.

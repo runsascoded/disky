@@ -10,7 +10,7 @@ import { migrations, sqliteD1 } from './testD1'
 // migration is added here deliberately (and must not touch the index tables
 // this file's specs pin).
 const CASES = [
-  { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0007_agents.sql', '0008_freed_bytes.sql', '0009_allowlist_read_only.sql', '0010_og_tokens.sql', '0011_run_progress.sql'] },
+  { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0007_agents.sql', '0008_freed_bytes.sql', '0009_allowlist_read_only.sql', '0010_og_tokens.sql', '0011_run_progress.sql', '0012_agent_tokens_assign.sql'] },
 ] as const
 
 const SCHEMA_COLS = 'store, date, variant, version, schema_json, floor_bytes, gen, dir'

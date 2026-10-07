@@ -45,9 +45,9 @@ export interface UserInfo {
 
 /** Bytes some person owns under a node (Σ of its user slices). */
 export const userBytes = (n: Pick<TreeNode, 'us'>): number => (n.us ?? []).reduce((s, [, b]) => s + b, 0)
-/** Bytes nobody owns under a node — the unclaimed pool. Ownership has one
+/** Bytes nobody owns under a node — the unowned pool. Ownership has one
  * axis (a person or nobody); there is no group facet. */
-export const unclaimedBytes = (n: Pick<TreeNode, 'b' | 'us'>): number => Math.max(0, n.b - userBytes(n))
+export const unownedBytes = (n: Pick<TreeNode, 'b' | 'us'>): number => Math.max(0, n.b - userBytes(n))
 
 export interface AgeRow {
   d: number   // created day, epoch days (site aggregates to day/week/month)

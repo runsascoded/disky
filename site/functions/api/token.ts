@@ -6,9 +6,9 @@
  *   POST   /api/token  → { token, created }          — mint/rotate; token ONCE
  *   DELETE /api/token  → { revoked }                 — revoke
  *
- * The token is a grant carrying the caller's email and the `gcs` scope only —
- * least privilege, so a leaked token can mark but (even for staff) cannot touch
- * admin/cw routes. It authenticates as a plain `Authorization: Bearer <token>`
+ * The token is a grant carrying the caller's email, the `gcs` scope and (when
+ * the session has it) `gcs:assign` — least privilege, so a leaked token can
+ * stage and assign but (even for staff) cannot touch admin/cw routes. It authenticates as a plain `Authorization: Bearer <token>`
  * on every request (the gate hashes and compares; only the hash is stored), so
  * there is no "reveal": the raw value is returned exactly once, at mint. Losing
  * it means rotating (POST again), which revokes the old one first.
@@ -16,7 +16,7 @@
  * Only a real SSO identity may manage its own token — a grant minting another
  * grant would be privilege escalation, so grant-authenticated callers are 403.
  */
-import { baseScope, type Ctx, gateFor, identify, json } from '../_lib/auth.js'
+import { baseAssignScope, baseScope, type Ctx, gateFor, identify, json } from '../_lib/auth.js'
 
 const TOKEN_NAME = 'CLI / agent token'
 
@@ -50,7 +50,8 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     if (prior?.grant_id) await gate.revoke(prior.grant_id)
     const { grant, token } = await gate.mint({
       email,
-      scopes: [baseScope(env)],   // this deployment's viewer scope (`gcs` | `cw`), nothing more
+      // The viewer scope (`gcs` | `cw`) + assign when the session has it — never admin.
+      scopes: [baseScope(env), ...(id.scopes.includes(baseAssignScope(env)) ? [baseAssignScope(env)] : [])],
       name: TOKEN_NAME,
       createdBy: email,
       expiresAt: null,   // non-expiring; ends on rotate or DELETE

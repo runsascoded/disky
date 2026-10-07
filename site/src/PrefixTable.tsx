@@ -100,7 +100,7 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
       <tbody>
         {rows.map((r, i) => {
           const s = r.stat
-          const cl = ownerIdx?.count ? ownerIdx.claimOf(r.name) : null
+          const cl = ownerIdx?.count ? ownerIdx.assignmentOf(r.name) : null
           const node: TreeNode | null = s ? { n: r.name, b: s.b, o: s.o, ...(s.us ? { us: s.us } : {}) } : null
           const shares = node ? ownerShares(node) : []
           const none = loading ? '…' : <span className="dim">{emptyLabel}</span>

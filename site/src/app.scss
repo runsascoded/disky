@@ -10,7 +10,7 @@
   --s1: #2a78d6; --s2: #008300; --s3: #e87ba4; --s4: #eda100;
   --s5: #1baf7a; --s6: #eb6834; --s7: #4a3aa7; --s8: #e34948;
   --other: #a6a49b; --shared: #8f9aa6;
-  --t-unattr: #c9c7be;  // the unclaimed pool (bytes no person owns)
+  --t-unattr: #c9c7be;  // the unowned pool (bytes no person owns)
   --grew: #1a8f3a; --shrank: #d7302f;
   --danger: #c4302a;  // destructive actions (a real delete, its arming) and error copy
   --never-read: #b0685e;  // read lens: no GET/HEAD/LIST since logging began
@@ -2055,7 +2055,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     font-size: 12px;
     padding: 1px 8px;
     cursor: pointer;
-    &.claim { --act: var(--s1); }
+    &.assign { --act: var(--s1); }
     &.go { --act: var(--s1); font-weight: 600; }
     &:disabled { opacity: 0.45; cursor: default; }
   }

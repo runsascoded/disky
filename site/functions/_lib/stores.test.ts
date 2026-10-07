@@ -207,6 +207,6 @@ describe('handlers', () => {
     expect([r.status, await r.text()]).toEqual([401, '{"error":"unauthenticated"}\n'])
     // Localhost dev holds every scope, `admin` included.
     const dev = await requireViewer({ request: new Request('http://localhost/api/subtree?store=meta'), env: storeEnv(PRIMARY, 'meta', META) })
-    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'requests'], admin: true, via: 'session', subject: null })
+    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'requests', 'cw:assign'], admin: true, via: 'session', subject: null })
   })
 })

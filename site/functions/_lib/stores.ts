@@ -158,7 +158,7 @@ export function withStore<C extends { request: Request; env: Env }>(ctx: C): C |
 }
 
 /** For the primary-only surfaces (the ownership ledger: owners, estate,
- * assignments, claims, actions): a 404 for any other store, null otherwise. */
+ * assignments, assignments, actions): a 404 for any other store, null otherwise. */
 export function primaryOnly(ctx: { request: Request }): Response | null {
   const key = requestedStore(ctx.request)
   return key === null ? null : jsonErr(`store '${key}' has no ownership ledger (primary store only)`, 404)

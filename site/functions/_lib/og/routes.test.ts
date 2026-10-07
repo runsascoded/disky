@@ -9,10 +9,14 @@ describe('pageView: page URL → card kind, view params, title', () => {
       pv('/'),
       pv('/marin-us-central2/checkpoints?d=261002&f=tomat&n=50&open=x'),
       pv('/marin-a/run%20one?o=unowned&c=age'),
+      pv('/marin-a?o&d=261002'),
+      pv('/marin-a?o=*'),
     ]).toEqual([
       { kind: 'map', params: {}, title: 'marin GCS' },
       { kind: 'map', params: { path: 'marin-us-central2/checkpoints', d: '261002', f: 'tomat' }, title: 'marin-us-central2/checkpoints · filter: tomat' },
       { kind: 'map', params: { path: 'marin-a/run one', o: 'unowned', c: 'age' }, title: 'marin-a/run one · owner: unowned' },
+      { kind: 'map', params: { path: 'marin-a', o: '', d: '261002' }, title: 'marin-a · owner: unowned' },
+      { kind: 'map', params: { path: 'marin-a', o: '*' }, title: 'marin-a · owner: owned' },
     ])
   })
   it('the other pages', () => {

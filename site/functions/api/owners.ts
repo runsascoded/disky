@@ -5,7 +5,7 @@
  * against the floor-free path index (`_lib/ownerTotals.ts`): what `/users`
  * ranks and prices. `{ scan, head, bytes, objects, users: { <id>: { b, mix } } }`
  * (`mix` = class id → bytes, so each user's estate prices like the scan's
- * attribution does); the per-claim rows stay on `/api/estate`.
+ * attribution does); the per-assignment rows stay on `/api/estate`.
  */
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
