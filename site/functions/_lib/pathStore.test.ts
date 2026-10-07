@@ -6,7 +6,7 @@ import { storeEnv } from './stores'
 import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, fixtureSize, FILES, GETS, readJson, seedGeneration } from './testStore'
 import { parseQuery } from './scope'
-import { buildDiff, buildView, type DiffRow, lensSort, SMALL_SUBTREE_ROWS, type ViewNode } from './view'
+import { buildDiff, buildView, type DiffRow, lensSort, readRootAgg, SMALL_SUBTREE_ROWS, type ViewNode } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -350,6 +350,39 @@ describe('buildView on a store generation', () => {
     const traced: [string, number][] = []
     expect(await planSizeRects(withTrace(pqs[2], (n, v) => { traced.push([n, v]) }), [root], () => 0, { key: 'zed' })).toEqual([])
     expect(traced.filter(([n]) => n === 'fgroups')).toEqual([['fgroups', 0]])
+  })
+
+  it('owner pools follow the live ledger: bytes assigned since the scan leave the unowned pool and join the owned one', async () => {
+    const v2Lens = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
+    const envWith = async (ledger: string): Promise<Env> => {
+      const { db, raw } = await sqliteD1('cw')
+      seedGeneration(raw, { date: V2_LENS, gen: 'g5', dir: `cw-l2/${V2_LENS}/index/g5`, variants: v2Lens, files: lensFiles(false) })
+      raw.exec(ledger)
+      return { DB: db, ROOT_LABEL: 'root', BASE_SCOPE: 'gcs', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+    }
+    // `small/` is unowned in the scan (the fixture labels only `nest/` and `flat/`, and leaves their ancestors unsplit).
+    const P = 'bk/small'
+    const pools = async (env: Env) => {
+      const v = await buildView(env, { ...base, date: V2_LENS, path: P, owner: 'unowned', threshold: 1 })
+      return {
+        unowned: v.tree.b,
+        kids: v.tree.c!.map(k => [k.n, k.b]),
+        agg: await Promise.all((['unowned', 'owned'] as const).map(async owner => (await readRootAgg(env, { date: V2_LENS, path: P, owner }))!.b)),
+      }
+    }
+    // No ledger tables (cw's D1): the scan's attribution.
+    expect(await pools(await envWith(''))).toEqual({ unowned: 6000, kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [6000, 0] })
+    // A ledger assigning `small/s2` (3000 B, unowned in the scan) to carol.
+    const assigned = [{ prefix: 'gs://bk/small/s2', owner: 'carol', ts: 1, action_id: 1, bytes: 3000, objects: 1, us: {} }]
+    const env = await envWith(`
+      CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT);
+      CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
+      CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (1, 'ann', 1, '${V2_LENS}', 'gs://bk/small/s2', 1, 'carol');
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/small/s2', 'carol', 1);
+      INSERT INTO owner_totals (scan, head, body, claims) VALUES ('${V2_LENS}', 1, '{}', '${JSON.stringify(assigned)}');
+    `)
+    expect(await pools(env)).toEqual({ unowned: 3000, kids: [['s1', 2000], ['s0', 1000]], agg: [3000, 3000] })
   })
 
   it('the same view from path (a small subtree by the default cutoff), the blob-served copy, and the secondary store', async () => {

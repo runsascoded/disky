@@ -16,8 +16,8 @@
 import { type Ctx, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix } from '../_lib/shared.js'
 import { type Lens, makeStore, pathGens, pathScans, storeReady } from '../_lib/index.js'
-import { ledgerHead } from '../_lib/ledger.js'
-import { classKey, parseClasses, parseOwner } from '../_lib/scope.js'
+import { hasLedger, ledgerHead } from '../_lib/ledger.js'
+import { classKey, ownerKey, parseClasses, parseOwner } from '../_lib/scope.js'
 import { readRootAgg, readRootRows } from '../_lib/view.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
@@ -101,8 +101,8 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // Every scan with a synced floor-free index, oldest first.
   const rows = await st.time('scans', pathScans(env, true))
   const dates = rows.results.map(r => r.date)
-  // A user lens applies the live assignments, so its key carries the ledger head.
-  const head = lens ? await ledgerHead(env) : 0
+  // A user lens or an owner pool applies the live assignments, so its key carries the ledger head.
+  const head = lens || owner && await hasLedger(env) ? await ledgerHead(env) : 0
   // Unscoped whole-bucket series only: scans without tiers still have a total in meta.json.
   const extra = path === '' && !paths.length && !lens && !owner && !classes ? await st.time('unindexed', unindexedScans(env, new Set(dates))) : []
   // Two-tier cache (colo + KV, `_lib/edgeCache.ts`), keyed by every input
@@ -112,7 +112,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  const cacheKey = cacheKeyFor('series', `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensRaw ?? ''}&o=${owner ?? ''}&cl=${classKey(classes)}&s=${split ?? ''}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensRaw ?? ''}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 

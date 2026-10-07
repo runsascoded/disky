@@ -32,6 +32,21 @@ async function loadRows(env: Env, head: number): Promise<Ledger> {
   return { ownerRows: ownerRows.results, head }
 }
 
+/** Does this deployment keep an ownership ledger? The gcs lineage does; cw's
+ * D1 has no ledger tables and a secondary store no ledger at all, so their
+ * owner pools stay the scan's attribution. Checked once per isolate and database. */
+const ledgerTables = new WeakMap<object, Promise<boolean>>()
+export function hasLedger(env: Env): Promise<boolean> {
+  if (!env.DB || env.STORE_KEY) return Promise.resolve(false)
+  let has = ledgerTables.get(env.DB)
+  if (!has) {
+    has = env.DB.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('actions', 'owner_prefixes')")
+      .first<{ n: number }>().then(r => r?.n === 2)
+    ledgerTables.set(env.DB, has)
+  }
+  return has
+}
+
 /** Just the head (one tiny query) — for cache keys before deciding whether a
  * full fold is needed. A new action raises `MAX(id)`; a retraction (an admin
  * tombstoning an `owner_prefixes` row) raises the tombstone count. Both only

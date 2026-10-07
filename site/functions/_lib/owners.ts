@@ -29,6 +29,7 @@ import { canonId } from './identity.js'
 import type { Registry } from '../../src/identityRegistry.js'
 import type { AssignmentRow } from './ownerBands.js'
 import { idxKey } from './ownerBands.js'
+import type { OwnerScope } from './scope.js'
 
 export interface Region { path: string; depth: number; all: number; objects: number }
 
@@ -67,16 +68,45 @@ interface Assignment {
 /** null when the ledger holds no assignments at all — the lens is then the
  * scan's attribution, untouched. */
 export function ownerLens(assignments: AssignmentRow[], user: string, reg: Registry = {}): OwnerLens | null {
-  if (!assignments.length) return null
   const u = canonId(user, reg)
-  const share = (us: Record<string, number>): number => {
+  return ledgerFold(assignments, who => who === u, us => {
     let b = 0
     for (const [k, v] of Object.entries(us)) if (canonId(k, reg) === u) b += v
     return b
+  }, reg)
+}
+
+/** An owner pool (`o=owned|unowned|!a,b`) with the ledger applied: the same
+ * fold as a user lens, U generalized to "anyone the pool admits". An assigned
+ * band is in the pool whole when its assignee is (owned: anyone; `!a,b`: anyone
+ * else; unowned: never); a band under no assignment (or a release) keeps the
+ * scan's attribution, whose in-pool slice is the view's `mine`. null = no
+ * assignments: the scan's attribution is the answer. */
+export function poolLens(assignments: AssignmentRow[], pool: OwnerScope, reg: Registry = {}): OwnerLens | null {
+  if (pool === 'unowned') {
+    return ledgerFold(assignments, () => false, (us, bytes) => bytes - Object.values(us).reduce((n, b) => n + b, 0), reg)
   }
+  const not = new Set(pool === 'owned' ? [] : pool.not.map(k => canonId(k, reg)))
+  return ledgerFold(assignments, who => !not.has(who), us => {
+    let b = 0
+    for (const [k, v] of Object.entries(us)) if (!not.has(canonId(k, reg))) b += v
+    return b
+  }, reg)
+}
+
+/** The fold behind both: `inPool(assignee)` says whether an assigned band counts
+ * whole, `share(us, bytes)` an assignment subtree's scan-attributed in-pool bytes. */
+function ledgerFold(
+  assignments: AssignmentRow[],
+  inPool: (who: string) => boolean,
+  share: (us: Record<string, number>, bytes: number) => number,
+  reg: Registry,
+): OwnerLens | null {
+  if (!assignments.length) return null
   const all: Assignment[] = assignments
-    .map(c => ({ path: idxKey(c.prefix).path, ts: c.ts, action_id: c.action_id, who: c.owner == null ? null : canonId(c.owner, reg), all: c.bytes, mine: share(c.us), objects: c.objects }))
+    .map(c => ({ path: idxKey(c.prefix).path, ts: c.ts, action_id: c.action_id, who: c.owner == null ? null : canonId(c.owner, reg), all: c.bytes, mine: share(c.us, c.bytes), objects: c.objects }))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  const pooled = (who: string | null | undefined): boolean => who != null && inPool(who)
   const byPath = new Map(all.map(c => [c.path, c]))
   const parentOf = (p: string): string => {
     const cut = p.lastIndexOf('/')
@@ -146,12 +176,12 @@ export function ownerLens(assignments: AssignmentRow[], user: string, reg: Regis
     isAssigned: path => byPath.has(path),
     needsTotal(path) {
       const c = cover(path)
-      return !!c && c.who === u && partial(c)
+      return !!c && pooled(c.who) && partial(c)
     },
     regions(path) {
       const out: Region[] = []
       for (const c of under(path)) { // sorted: an outer region precedes what it holds
-        if (eff.get(c.path) !== u || !partial(c)) continue
+        if (!pooled(eff.get(c.path)) || !partial(c)) continue
         const last = out[out.length - 1]
         if (last && c.path.startsWith(last.path + '/')) continue
         out.push({ path: c.path, depth: c.path.split('/').length, all: c.all, objects: c.objects })
@@ -163,7 +193,7 @@ export function ownerLens(assignments: AssignmentRow[], user: string, reg: Regis
       const cov = cv?.who ?? null
       const inside = under(path)
       let base = 0
-      if (cov === u) {
+      if (pooled(cov)) {
         if (allB == null) allB = !partial(cv!) ? mine : byPath.get(path)?.all ?? null
         if (allB == null) throw new Error(`owner lens: total bytes needed at ${path || '<root>'}`)
         base = allB
@@ -175,8 +205,8 @@ export function ownerLens(assignments: AssignmentRow[], user: string, reg: Regis
       let bands = 0
       for (const c of inside) {
         const e = eff.get(c.path)
-        if (e !== u && e != null) continue
-        const pick = (x: Assignment) => (e === u ? x.all : x.mine)
+        if (e != null && !pooled(e)) continue
+        const pick = (x: Assignment) => (e != null ? x.all : x.mine)
         let band = pick(c)
         for (const d of kids.get(c.path) ?? []) band -= pick(d)
         bands += Math.max(0, band)

@@ -12,7 +12,12 @@ const WRANGLER = `http://localhost:${PORT + 1}`
 // changes over real data, with no D1 seed or store creds on this machine.
 // Sign-in stays local (its callback origin must be this host).
 const API = process.env.API_ORIGIN ?? WRANGLER
-const apiProxy = API === WRANGLER ? API : { target: API, changeOrigin: true }
+// `API_TOKEN` (a site bearer token) authenticates that proxy, for a deployed
+// site behind sign-in; the localhost page itself stays signed out.
+const apiProxy = API === WRANGLER ? API : {
+  target: API, changeOrigin: true,
+  ...(process.env.API_TOKEN ? { headers: { Authorization: `Bearer ${process.env.API_TOKEN}` } } : {}),
+}
 
 // dev only: serve a locally-generated `tmp/series.json` (from `dt-cloud series
 // -r http://localhost:3254/data -o tmp/series.json`) at /data/series.json, so

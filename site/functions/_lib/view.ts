@@ -30,11 +30,12 @@
  */
 import type { Env } from './auth.js'
 import { type IndexHandle, isStore, type Lens, openIndex, planRects, planSizeRects, readAsks, readRects, readRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, type Trace, withTrace } from './index.js'
-import { ownerLens, type OwnerLens } from './owners.js'
+import { ownerLens, type OwnerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
 import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
 import { planNegative, planPositive } from './searchQuery.js'
+import { hasLedger } from './ledger.js'
 import { ownerAssignments } from './ownerTotals.js'
 import { shared } from './shared.js'
 import { storeKey } from './stores.js'
@@ -416,6 +417,13 @@ export async function readRootAgg(env: Env, o: { date: string; path: string; len
   if (rows == null || (!lens && rows.length === 0)) return null
   const mine = newAgg()
   for (const r of rows) if (ownerOk(r.usr, owner)) merge(mine, classRow(r, o.classes))
+  const pl = lens ? null : await poolLensFor(env, date, owner)
+  if (pl) {
+    const all = newAgg()
+    for (const r of rows) merge(all, classRow(r, o.classes))
+    const agg = poolAgg(pl, owner!, path, all, mine)
+    return { b: agg.b, o: agg.o }
+  }
   if (!ol) return { b: mine.b, o: mine.o }
   let all: Agg | null = null
   if (ol.needsTotal(path)) {
@@ -446,6 +454,28 @@ async function ownerLensFor(env: Env, date: string, lens: Lens, by?: string): Pr
     assignments = assignments.filter(c => c.who != null && (emap.get(c.who.toLowerCase()) ?? c.who) === by)
   }
   return ownerLens(assignments, lens.key, await loadRegistry(env))
+}
+
+/** An owner pool's ledger fold for a scan (null: no pool, or no assignments). */
+async function poolLensFor(env: Env, date: string, owner: OwnerScope | undefined): Promise<OwnerLens | null> {
+  if (!owner || !(await hasLedger(env))) return null
+  return poolLens(await ownerAssignments(env, date), owner, await loadRegistry(env))
+}
+
+/** A node in an owner pool once assignments apply: the pool's bytes there
+ * (`pl.value`), exactly its in-pool rows when no assignment moved any (the
+ * common case), else shaped like the in-pool rows (stretched by the bands
+ * assigned in) or, when none, like the subtree total. An unowned node has no
+ * owners to split. */
+function poolAgg(pl: OwnerLens, owner: OwnerScope, path: string, all: Agg | null, mine: Agg): Agg {
+  if (!all) return mine
+  const v = pl.value(path, all.b, mine.b)
+  if (Math.abs(v - mine.b) < 0.5) return mine
+  if (v <= 0) return newAgg()
+  const shape = mine.b > 0 ? mine : all
+  const out = scale(shape, v / shape.b)
+  if (owner === 'unowned') out.ub = {}
+  return out
 }
 
 /** A node under a user lens once assignments apply: U's bytes there (`ol.value`),
@@ -519,8 +549,11 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     : [...allRegions].sort((a, b) => b.all - a.all).slice(0, REGION_READS)
   // Owner pools filter rows (they are owner slices); a user lens folds the
   // assignments on top of U's rows (`lensAgg`).
+  // A pool folds the ledger the same way: assignments since the scan move bytes
+  // in or out of it (`poolAgg`); every slice is read, so `all` is known.
+  const pl = lens ? null : await poolLensFor(env, date, owner)
   const scoped = (p: string, all: Agg | null, mine: Agg | null): Agg =>
-    ol ? lensAgg(ol, lens!.key, p, all, mine) : mine!
+    ol ? lensAgg(ol, lens!.key, p, all, mine) : pl ? poolAgg(pl, owner!, p, all, mine!) : mine!
 
   // Root aggregate P.b (and P's own us for the response root) from the
   // coarsest tier that has P at all — the same numbers in every tier. The
@@ -912,7 +945,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // region can sit below the threshold; the by-path read would have held
     // any path whose total clears it. One it didn't is under the fold.
     if (ol && !all && ol.needsTotal(p) && !ol.isAssigned(p)) continue
-    aggs.set(p, ol ? scoped(p, ol.needsTotal(p) ? all : null, mine) : mine!)
+    aggs.set(p, ol ? scoped(p, ol.needsTotal(p) ? all : null, mine) : scoped(p, all, mine))
   }
   // Unread regions know their object counts from the manifest; an unread
   // ancestor's count is the sum of the regions under it (its own attributed

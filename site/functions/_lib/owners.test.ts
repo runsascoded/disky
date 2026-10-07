@@ -2,7 +2,7 @@
  * the newest covering assignment, U's slice elsewhere (owners.ts header). */
 import { describe, expect, it } from 'vitest'
 import type { AssignmentRow } from './ownerBands.js'
-import { ownerLens } from './owners.js'
+import { ownerLens, poolLens } from './owners.js'
 
 const assignment = (prefix: string, owner: string | null, ts: number, bytes: number, us: Record<string, number>): AssignmentRow =>
   ({ prefix, owner, ts, action_id: ts, bytes, objects: 1, us })
@@ -78,5 +78,43 @@ describe('ownerLens', () => {
     const o = ownerLens([assignment('gs://b/q/', 'U@example.com', 1, 50, { 'u@example.com': 12 })], 'u')!
     expect(o.value('b/q', 50, 12)).toBe(50)
     expect(o.value('b', 500, 100)).toBe(500 - 500 + 100 - 12 + 50) // = 138
+  })
+})
+
+describe('poolLens', () => {
+  // The same ledger. Effective assignees: A v, B u, C u, D v (newer than C), R
+  // released, E u, G u (E repaints it). Scan-unowned share per assignment
+  // (bytes − Σ us): A 20, B 0, C 0, D 40, R 6, E 40, G 21.
+
+  it('is null with no assignments (the pool is plain attribution)', () => {
+    expect(poolLens([], 'unowned')).toBeNull()
+  })
+
+  it('unowned: the scan’s unowned bytes outside every assignment, plus a release’s', () => {
+    const pl = poolLens(CLAIMS, 'unowned')!
+    // root: 400 scan-unowned − top A/C/R/E's (20 + 0 + 6 + 40) = 334, + R's 6
+    expect(pl.value('b', 1000, 400)).toBe(340)
+    expect(pl.value('b/c/d/z', 10, 5)).toBe(0) // under v's D: owned, whatever the scan said
+    expect(pl.value('b/r/q', 5, 3)).toBe(3) // under a release: the scan's attribution
+    expect(pl.value('b/z', 7, 7)).toBe(7) // untouched by the ledger
+    expect(['b', 'b/a', 'b/c/d'].map(p => pl.needsTotal(p))).toEqual([false, false, false])
+    expect(pl.regions('b')).toEqual([])
+  })
+
+  it('owned: every assigned band whole, the scan’s owned bytes elsewhere — the complement of unowned', () => {
+    const pl = poolLens(CLAIMS, 'owned')!
+    // root: 600 scan-owned − top A/C/R/E's (80 + 200 + 4 + 20) = 296, + bands
+    // A−B 60, B 40, C−D 150, D 50, E−G 30, G 30, R's owned slice 4
+    expect(pl.value('b', 1000, 600)).toBe(660)
+    expect(pl.value('b', 1000, 600) + poolLens(CLAIMS, 'unowned')!.value('b', 1000, 400)).toBe(1000)
+    expect(pl.value('b/c/d/z', 10, 5)).toBe(10)
+  })
+
+  it('owned except u: owned minus u’s lens', () => {
+    const pl = poolLens(CLAIMS, { not: ['u'] })!
+    // root: 250 scan-owned-by-others − top A/C's (50 + 80) = 120, + A−B 60, D 50
+    expect(pl.value('b', 1000, 250)).toBe(230)
+    expect(pl.value('b', 1000, 250) + ownerLens(CLAIMS, 'u')!.value('b', 1000, 350)).toBe(660)
+    expect(pl.value('b/a/x/y', 9, 0)).toBe(0) // u's B
   })
 })

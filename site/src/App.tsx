@@ -264,6 +264,15 @@ function AppContent() {
     (notUsers.length ? `&o=!${notUsers.map(encodeURIComponent).join(',')}` : '') +
     (classSet ? `&cl=${CLASS_AXES.filter(c => classSet.has(c)).join('')}` : '') +
     (fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : '')
+  // A user lens or an owner pool folds the live ledger server-side, so those
+  // views' queries carry its revision: an assignment (or its undo) refetches
+  // them; everything else ignores the ledger.
+  const ledgerRev = useMemo(() => {
+    let max = 0
+    for (const r of ownerIdx.owners.values()) max = Math.max(max, r.action_id)
+    return `${ownerIdx.count}.${max}`
+  }, [ownerIdx])
+  const scopeKey = scopeQs + (activeLens || /&o=/.test(scopeQs) ? `|ledger=${ledgerRev}` : '')
   // One-time legacy-param rewrite onto the two axes, so old links (Slack
   // digests, /user pages) work and re-share in the current form:
   //   ?l=todo → ?k=u · ?l=unclaimed|communal, ?t=unattributed|communal → bare ?o
@@ -364,7 +373,7 @@ function AppContent() {
   }, [graftPath])
   const subtreeQs = useQueries({
     queries: subtreePaths.map(p => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeQs],
+      queryKey: ['subtree', store.key, asof, p, canW, scopeKey],
       enabled: !!asof,
       staleTime: Infinity,
       // Retry transient failures, but not the deterministic ones (409: no
@@ -395,7 +404,7 @@ function AppContent() {
   // so a scope change never downgrades a held full tree to a coarse one.
   const coarseQs = useQueries({
     queries: subtreePaths.map((p, i) => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeQs, 'depth1'],
+      queryKey: ['subtree', store.key, asof, p, canW, scopeKey, 'depth1'],
       // Deepest path only — see `dataFor`; ancestors never use it.
       enabled: !!asof && i === subtreePaths.length - 1,
       staleTime: Infinity,
@@ -492,11 +501,16 @@ function AppContent() {
   if (tree) lastTree.current = tree
   // The live ownership ledger over the scan's attribution (`applyLedger`):
   // assignments recolor the map and its legend as soon as `/api/actions`
-  // refetches, with no subtree re-read. A user lens is already folded
-  // server-side (`ownerLens`), so it is left as served.
+  // refetches. A pool or user-lens view also re-reads (`ledgerRev` is in its
+  // key) and comes back with the ledger folded in; a user lens is left as served.
   const heldTree = tree ?? lastTree.current
   const mapTree = useMemo(
-    () => (heldTree && ownersMode && ownerMode !== 'user' ? applyLedger(heldTree, ownerIdx, store.scheme, canonId) : heldTree),
+    () => {
+      if (!heldTree || !ownersMode || ownerMode === 'user') return heldTree
+      // A pool is served with the ledger folded in (bytes assigned since the
+      // scan move in or out of it); this only recolors by assignee.
+      return applyLedger(heldTree, ownerIdx, store.scheme, canonId)
+    },
     [heldTree, ownersMode, ownerMode, ownerIdx, store.scheme],
   )
   // What the map shows vs. what the page asked for: a held previous tree
@@ -661,7 +675,7 @@ function AppContent() {
   // (`depth` only caps what's drawn), so without a search index the "first"
   // paint costs as much as the full walk (gcs 2026-10-02: 9.3 s vs 4.5 s).
   const diffQ1 = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs, 'l1'],
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'l1'],
     enabled: !!asof && !!diffPrev && !fq,
     staleTime: Infinity,
     retry: false,
@@ -684,7 +698,7 @@ function AppContent() {
   const diffSlotRef = useRef<HTMLDivElement>(null)
   const diffSlotH = useRef(0)
   const diffQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs],
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey],
     enabled: !!asof && !!diffPrev,
     // While the full walk aligns: the bucket-level diff of the SAME pair once
     // it lands, else the last pair's diff — drawn dimmed either way, so the
@@ -709,7 +723,7 @@ function AppContent() {
   // The headline first: the same pair's totals without the row walk land in
   // a second or two, so the +X / Δobjects line shows while the rows align.
   const diffSumQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs, 'summary'],
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'summary'],
     enabled: !!asof && !!diffPrev,
     staleTime: Infinity,
     retry: false,
@@ -1269,6 +1283,7 @@ function AppContent() {
         scans={scans} prefix={drillPath}
         user={ownerUser}
         pool={ownerMode === 'unowned' ? 'unowned' : ownerMode === 'owned' ? 'owned' : null}
+        ledgerRev={ledgerRev}
         onPickDate={setDP}
         onBrush={brushRange}
         window={diffWindow}

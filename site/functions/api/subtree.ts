@@ -13,7 +13,7 @@
  */
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { pathGens, storeReady, type Lens } from '../_lib/index.js'
-import { ledgerHead } from '../_lib/ledger.js'
+import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT } from '../_lib/view.js'
@@ -85,14 +85,14 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
     if (gated instanceof Response) return gated
   }
 
-  // A user lens folds the live ledger (assignments repaint attribution): its cache
-  // key carries the head.
+  // A user lens or an owner pool folds the live ledger (assignments repaint
+  // attribution, or move bytes in or out of a pool): its cache key carries the head.
   // Everything from here touches D1 or the store, so it all sits under one
   // guard: a D1 stall ("internal error") used to escape from the pre-steps
   // as Cloudflare's raw "Worker threw exception" page (2026-09-28); now it is
   // a 503 the client can retry, with the message the ledger head gave.
   try {
-    const [head, xtra, g] = await st.time('pre', Promise.all([lens && ctx.env.DB ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date])]))
+    const [head, xtra, g] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date])]))
     const cacheKey = cacheKeyFor('subtree',
       `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensRaw ?? ''}` +
         `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}`,
