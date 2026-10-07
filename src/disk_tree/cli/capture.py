@@ -150,3 +150,46 @@ def capture_cmd(
     tail = f', {errors.count} permission errors' if errors.count else ''
     err(f'{root}: {n_rows:,} files in {n_shards} shard(s) → {out}{tail}')
     print(out)
+
+
+def capture_space(manifest: dict) -> dict | None:
+    """The capture's physical capacity, independent of its listing's sizes.
+
+    Non-APFS captures and older manifests legitimately omit the container.
+    """
+    if manifest.get('format') != FORMAT or manifest.get('version') != VERSION:
+        raise ValueError('expected a version 1 disk-tree-capture manifest')
+    container = manifest.get('container')
+    if container is None:
+        return None
+    capacity, used, free = (container[k] for k in ('capacity', 'used', 'free'))
+    if any(type(n) is not int for n in (capacity, used, free)) or capacity <= 0 or min(used, free) < 0 or used + free != capacity:
+        raise ValueError('container capacity must be positive integer bytes equal to used + free')
+    return {
+        'capacity': capacity,
+        'used': used,
+        'free': free,
+        'device': container['device'],
+        'captured_at': manifest['time'],
+    }
+
+
+@cli.command('capture-meta')
+@argument('manifest')
+@argument('snapshot')
+def capture_meta_cmd(manifest: str, snapshot: str) -> None:
+    """Copy MANIFEST's physical disk space into a snapshot's meta.json.
+
+    Both paths may be local or fsspec URLs. Missing container measurements
+    remove a previous annotation rather than leave another scan's space.
+    """
+    from disk_tree import blobfs
+
+    space = capture_space(json.loads(blobfs.read_text(manifest)))
+    meta = json.loads(blobfs.read_text(snapshot))
+    if space is None:
+        meta.pop('disk_space', None)
+    else:
+        meta['disk_space'] = space
+    blobfs.write_text(snapshot, json.dumps(meta, indent=2) + '\n')
+    print(snapshot)
