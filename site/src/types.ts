@@ -72,6 +72,15 @@ export const MODE_LABELS: Record<ColorMode, string> = {
   tree: 'tree',
 }
 
+/** Physical container measurements from the capture, not summed path sizes. */
+export interface DiskSpace {
+  capacity: number
+  used: number
+  free: number
+  device: string
+  captured_at: string
+}
+
 export interface Meta {
   asof: string
   generated: string
@@ -81,6 +90,7 @@ export interface Meta {
   class_bytes: Record<string, number>
   users?: UserInfo[]
   user_class_bytes?: Record<string, Record<string, number>>
+  disk_space?: DiskSpace
   /** Access-log observation window (epoch days) — bounds the read-recency lens. */
   access?: { from: number; to: number }
 }

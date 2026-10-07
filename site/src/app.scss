@@ -67,6 +67,14 @@ main {
   gap: var(--main-gap);
 }
 header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+.disk-space {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  .disk-space-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; }
+  .disk-space-labels > span { white-space: nowrap; }
+  .disk-space-bar { height: 5px; overflow: hidden; border-radius: 3px; background: var(--line); }
+  .disk-space-bar > span { display: block; height: 100%; background: var(--s1); }
+}
 header .hrow {
   display: flex;
   align-items: baseline;
