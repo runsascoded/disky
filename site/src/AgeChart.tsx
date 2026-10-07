@@ -200,7 +200,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
               <button role="radio" aria-checked={showDiff} className={showDiff ? 'on' : ''} onClick={() => setDiffOn(true)}>diff</button>
             </span>
           )}
-          {onMode && !showDiff && (
+          {onMode && modes.length > 1 && !showDiff && (
             <span className="gran" role="radiogroup" aria-label="Color by">
               <span className="lbl">color by</span>
               {modes.map(m => (

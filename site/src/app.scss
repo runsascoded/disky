@@ -67,6 +67,14 @@ main {
   gap: var(--main-gap);
 }
 header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+.disk-space {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  .disk-space-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; }
+  .disk-space-labels > span { white-space: nowrap; }
+  .disk-space-bar { height: 5px; overflow: hidden; border-radius: 3px; background: var(--line); }
+  .disk-space-bar > span { display: block; height: 100%; background: var(--s1); }
+}
 header .hrow {
   display: flex;
   align-items: baseline;
@@ -2339,14 +2347,41 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .staged-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .pp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 16px; flex-wrap: wrap; h2 { margin: 18px 0 4px; } }
   .scan-pick { font-size: 13px; color: var(--ink-2); select { font: inherit; } }
+  .staged-no-map {
+    border-left: 3px solid var(--line); padding: 10px 14px; background: var(--panel);
+    h3 { margin: 0 0 4px; font-size: 15px; }
+    p { margin: 0; color: var(--ink-2); font-size: 13px; }
+    &.complete { border-color: var(--grew); h3 { color: var(--grew); } }
+  }
+  .staged-status {
+    display: inline-block; white-space: nowrap; font-size: 12px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
+    background: var(--panel); color: var(--ink-2);
+    &.deleted { color: var(--grew); background: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
+    &.restored, &.recorded { color: var(--ink); }
+    &.running { color: var(--s1); }
+  }
+  .prefix-table .staged-status { margin-right: 8px; }
+  .prefix-table tr.staged-deleted:not(.sel):not(.cur) td { background: color-mix(in srgb, var(--grew) 4%, var(--surface)); }
+  .stage-batch.completed .batch-head { padding: 7px 8px; border-left: 2px solid var(--grew); background: color-mix(in srgb, var(--grew) 4%, var(--surface)); }
   // The staged set as a map (and the selection's, beside it when there is one).
   .staged-maps {
     display: grid; grid-template-columns: 1fr; gap: 16px; margin: 10px 0 14px;
     &.two { grid-template-columns: 1fr 1fr; @media (max-width: 900px) { grid-template-columns: 1fr; } }
     h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
     .map-box { min-width: 0;
+      &.pending {
+        height: 514px; border-radius: 6px; background: var(--panel); animation: tm-pulse 1.4s ease-in-out infinite;
+        @media (max-width: 640px) { height: 434px; }
+        > p { padding: 12px; }
+      }
       .dt-treemap-map { flex-basis: 380px !important; height: 380px; @media (max-width: 640px) { flex-basis: 300px !important; height: 300px; } }
     }
+  }
+  .run-id { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .run-copy {
+    display: inline-flex; align-items: center; justify-content: center; padding: 1px; border: 0; background: none; color: var(--ink-3); cursor: pointer;
+    &:hover { color: var(--ink); }
+    svg { width: 11px; height: 11px; }
   }
   .fold-all { margin-left: auto; display: inline-flex; gap: 4px; }
   .batch-head {
@@ -2372,7 +2407,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .group-by { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   }
   .staged-actions { display: flex; align-items: center; gap: 12px; margin: 6px 0 10px; font-size: 13px; .sel-all { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; } }
-  .stage-batch { margin: 12px 0 18px; }
+  .stage-batch { margin: 12px 0 18px; scroll-margin-top: 70px; &:target { outline: 1px solid var(--ink-3); outline-offset: 6px; } }
+  .batch-permalink { color: var(--ink-3); font-size: 12px; }
   .batch-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); .memo { color: var(--ink); } }
   .staged-empty { color: var(--ink-3); margin: 18px 0; }
   // A wide table scrolls inside its own box; the page never scrolls sideways.
@@ -2432,12 +2468,18 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   table.runs {
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
     td.nb, td.num { white-space: nowrap; }
-    .tag.real { margin-left: 0; color: var(--danger); border-color: var(--danger); font-weight: 650; }
+    .tag.real { margin-left: 0; color: #d6b65a; border-color: #d6b65a; font-weight: 650; }
+    .tag.dry { margin-left: 0; color: var(--ink-3); border-color: var(--line); }
+    tr.cancelled > td { background: color-mix(in srgb, var(--ink-3) 6%, transparent); }
+    .run-sort { color: inherit; font: inherit; font-weight: inherit; padding: 0; border: 0; background: none; cursor: pointer; }
+    .run-outcome .prediction-label { display: block; color: var(--ink-2); font-size: .9em; font-weight: 600; }
     .fold { background: none; border: 0; padding: 0 2px; color: var(--ink-2); &:hover { color: var(--ink); } }
     .prog progress { width: 64px; height: 8px; vertical-align: middle; }
+    .prog-estimate { display: block; font-size: .9em; }
     td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
     tr.live td.rid { font-weight: 600; }
     tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
+    tr.run.linked > td { background: color-mix(in srgb, var(--accent, #4a9eff) 14%, transparent); }
   }
   .run-detail {
     font-size: 13px;
@@ -2449,10 +2491,49 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
       dd { margin: 0; overflow-wrap: anywhere; }
     }
     table.runs { margin-top: 2px; font-size: 12.5px; tr.total td { font-weight: 600; } }
-    .rd-checks { list-style: none; margin: 0; padding: 0;
-      li.ok { color: var(--ink-2); }
+    .rd-checks { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 5px;
+      li { display: flex; align-items: baseline; gap: 10px; }
+      .check-status { min-width: 90px; font-weight: 650; }
+      li.ok .check-status { color: #3cba87; }
+      li.pending .check-status { color: var(--ink-3); }
       li.off { color: var(--danger); }
     }
+  }
+  .run-sparkline { display: inline-flex; flex-direction: column; width: 140px; text-decoration: none; svg { width: 100%; height: 32px; } path { fill: none; stroke: var(--accent, #4a9eff); stroke-width: 1.5; } .spark-lifetime { font-size: 11px; white-space: nowrap; } }
+  .run-progress {
+    margin: 14px 0 20px; max-width: 960px; min-height: 90px;
+    .graph-controls { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; h3 { margin: 0 10px 0 0; } }
+    .graph-spacer { flex: 1; }
+    button { background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; &.on { color: var(--ink); border-color: var(--ink-2); } }
+    select { max-width: 100%; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px; }
+    > .tt-ref { display: block; }
+    .progress-chart { width: 100%; display: block; touch-action: none; user-select: none; path { fill: none; stroke: var(--accent, #4a9eff); stroke-width: 1.5; } line { stroke: var(--line); } text { font-size: 12px; fill: var(--ink-3); } .primary-label { fill: #4a9eff; } .secondary-label { fill: #ecb14f; } path.chart-secondary { stroke: #ecb14f; } path.chart-raw { opacity: .25; stroke-width: 1; } .chart-selection { fill: #4a9eff; opacity: .15; } .chart-cursor { stroke: var(--ink); stroke-dasharray: 3 3; } }
+    .graph-window { margin-top: 10px; form, label { display: inline-flex; align-items: center; gap: 5px; } input:not([type=datetime-local]) { width: 75px; } }
+    .graph-controls label { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); }
+    .graph-times { display: flex; justify-content: space-between; color: var(--ink-3); }
+    .graph-scale { margin-top: 12px; color: var(--ink-3); }
+  }
+  .run-artifacts { max-width: 100%; .artifact-path button, td button { background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; cursor: pointer; } }
+  .run-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 15px; label { display: inline-flex; align-items: center; gap: 5px; } input { max-width: 240px; } }
+  .run-buckets { margin: 24px 0; .graph-controls { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; h3 { margin: 0 10px 0 0; } button { background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; &.on { color: var(--ink); border-color: var(--ink-2); } } } }
+  .run-bucket-map { height: 420px; margin: 10px 0 20px; }
+  .run-buckets select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 3px; }
+  .run-band-table { overflow-x: auto; td { white-space: nowrap; } }
+  .progress-chart .chart-target { line { stroke: #4a9eff; stroke-dasharray: 6 4; opacity: .7; } text { fill: #4a9eff; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; } &.secondary-target { line { stroke: #ecb14f; } text { fill: #ecb14f; } } }
+  .run-plan { max-height: 260px; overflow: auto; code { white-space: nowrap; } }
+  .run-page h1 { margin-top: 20px; }
+  .run-task-logs {
+    margin: 28px 0;
+    .log-controls, .log-pagination { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    h3 { margin: 0; }
+    button { background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; &:disabled { opacity: .5; cursor: default; } }
+    .task-log-scroll { margin-top: 12px; max-height: 450px; overflow: auto; border: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    th { position: sticky; top: 0; background: var(--panel); z-index: 1; text-align: left; color: var(--ink-3); }
+    td, th { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .log-time, .log-severity { white-space: nowrap; }
+    .log-severity { color: var(--ink-3); }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 240px; }
   }
 }
 
@@ -2473,7 +2554,9 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   // prefix may break anywhere, but never below a readable width — past that
   // the table scrolls in its box instead of crushing it.
   th.col-lead, td.col-lead { width: 1.6em; padding-right: 0; input { margin: 0; vertical-align: middle; cursor: pointer; } }
-  td.pfx { overflow-wrap: anywhere; min-width: 16em; code { word-break: break-all; } }
+  td.pfx { min-width: 20em; white-space: nowrap; }
+  .prefix-name { display: flex; align-items: center; gap: 6px; }
+  .prefix-copy { background: none; border: 0; padding: 0 3px; cursor: pointer; color: var(--ink-3); &:hover { color: var(--ink); } }
   tbody tr { cursor: default; }
   tr.sel td { background: color-mix(in srgb, var(--accent, #58a6ff) 14%, transparent); }
   // The cursor is the keyboard row (j/k target) and the anchor a shift-click

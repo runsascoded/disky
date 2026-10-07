@@ -16,7 +16,9 @@ scheme's `start_offset` / `end_offset` cursor.
 
 Layer split (see `~/c/disk-tree/specs/gcs-backend-and-snapshot-diff.md`):
     - **This module produces layer-1** (raw per-object listing parquet with
-      canonical columns `bucket, name, size_bytes, created, storage_class_id`).
+      canonical columns `bucket, name, size_bytes, created, storage_class_id,
+      generation`). GCS generations make a scan's object identity usable by
+      deletion review; other backends write NULL.
     - Layer-2 aggregation (per-path scan parquet) is `disk-tree import`
       (`find/import_listing.py` + `find/aggregate_duckdb.py`), consuming this
       module's output.
@@ -74,6 +76,7 @@ class BlobRow:
     size: int
     created: Optional[str]  # ISO-8601 with 'Z' suffix if UTC
     storage_class: Optional[str]
+    generation: Optional[int] = None
 
 
 class BulkLister(Protocol):
@@ -275,10 +278,16 @@ def dedupe_prefixes(prefixes: list[str]) -> "tuple[list[str], list[tuple[str, st
 
 def entries_to_frame(
     bucket: str,
-    rows: "list[tuple[str, int, Optional[str], Optional[str]]]",
+    rows: "list[tuple]",
 ) -> pd.DataFrame:
-    """`(name, size, created, storage_class)` tuples → canonical listing columns."""
-    names, sizes, created, classes = zip(*rows) if rows else ((), (), (), ())
+    """Backend tuples → canonical listing columns.
+
+    Four-field rows are the historical/S3 shape; a fifth field is the GCS
+    generation. Accepting both keeps discovery plug-ins simple while every
+    written shard has one stable schema.
+    """
+    normalized = [(*row, None) if len(row) == 4 else row for row in rows]
+    names, sizes, created, classes, generations = zip(*normalized) if normalized else ((), (), (), (), ())
     return pd.DataFrame(
         {
             "bucket": bucket,
@@ -290,6 +299,7 @@ def entries_to_frame(
             # other, killing the worker mid-listing.
             "created": pd.to_datetime(list(created), utc=True, format='ISO8601'),
             "storage_class_id": [SII_CLASS_IDS.get(c or "", 0) for c in classes],
+            "generation": pd.array(generations, dtype="Int64"),
         }
     )
 
@@ -378,9 +388,9 @@ def _stream_prefixes_worker(
 
     def one(item: StreamItem) -> None:
         pfx, start, end = item if isinstance(item, tuple) else (item, None, None)
-        rows: "list[tuple[str, int, Optional[str], Optional[str]]]" = []
+        rows: "list[tuple]" = []
         for blob in lister.stream_prefix(bucket, pfx, start, end):
-            rows.append((blob.name, blob.size, blob.created, blob.storage_class))
+            rows.append((blob.name, blob.size, blob.created, blob.storage_class, blob.generation))
             if len(rows) >= BATCH_ROWS:
                 q.put(entries_to_frame(bucket, rows))
                 rows = []

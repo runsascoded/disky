@@ -11,6 +11,7 @@ import { signInUrl, useCanAssign, useIdent as useIdentity } from './auth'
 import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
+import { DiskSpace } from './DiskSpace'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
@@ -938,8 +939,12 @@ function AppContent() {
   }
 
   const segs = drillPath.split('/').filter(Boolean)
+  const recordedAt = meta?.disk_space?.captured_at ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
+      {meta.disk_space && (
+        <div>captured {new Date(meta.disk_space.captured_at).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+      )}
       {meta.published && (
         <div>published {new Date(meta.published).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
       )}
@@ -1038,9 +1043,9 @@ function AppContent() {
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
             its date); the tip carries the exact publish time + totals. */}
-        {meta?.published && (
+        {recordedAt && (
           <Tooltip content={scanTip}>
-            <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(meta.published) / 1000)} ago</span>
+            <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</span>
           </Tooltip>
         )}
         {bar.color.length > 1 && (
@@ -1134,6 +1139,8 @@ function AppContent() {
           {' '}<a href={signInUrl()}>Sign in</a> or reload once your session is active.
         </p>
       )}
+
+      <DiskSpace space={meta?.disk_space} />
 
       {mapTree ? (
         <>

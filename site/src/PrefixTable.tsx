@@ -7,6 +7,7 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Tooltip } from './Tooltip'
+import { elideMid, copyText } from './CopyName'
 import { OwnerFactChip } from './OwnerFactChip'
 import { OwnerBar, ownerShares } from './OwnerBar'
 import { useUnits } from './units'
@@ -47,7 +48,7 @@ export function TimeCell({ ts, ink, day }: { ts?: number; ink?: string; day?: bo
   )
 }
 
-export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, userIdx, ownerIdx, extra = [], lead, trail, rowProps, loading, emptyLabel = 'empty' }: {
+export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, userIdx, ownerIdx, extra = [], lead, trail, namePrefix, rowProps, loading, emptyLabel = 'empty' }: {
   rows: R[]
   sort: { k: PrefixSortKey; asc: boolean }
   onSort: (k: PrefixSortKey) => void
@@ -61,6 +62,8 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
   lead?: { header: ReactNode; cell: (r: R, i: number) => ReactNode }
   /** A trailing cell (row actions). */
   trail?: (r: R, i: number) => ReactNode
+  /** A visible status beside the path, before the table's off-screen columns. */
+  namePrefix?: (r: R) => ReactNode
   /** Per-row `<tr>` props (selection handlers, ref). */
   rowProps?: (r: R, i: number) => Record<string, unknown>
   /** Stats still loading: numeric cells show an ellipsis, not "empty". */
@@ -104,7 +107,12 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
           return (
             <tr key={r.name} {...rowProps?.(r, i)}>
               {lead && <td className="col-lead">{lead.cell(r, i)}</td>}
-              <td className="pfx">{r.to ? <Link to={r.to} title="open in the map"><code>{r.name}</code></Link> : <code>{r.name}</code>}</td>
+              <td className="pfx">{namePrefix?.(r)}<span className="prefix-name">
+                <Tooltip content={<code className="elide-full">{r.name}</code>}>
+                  {r.to ? <Link to={r.to}><code>{elideMid(r.name, 86, 28)}</code></Link> : <code>{elideMid(r.name, 86, 28)}</code>}
+                </Tooltip>
+                <Tooltip content="Copy full prefix"><button type="button" className="prefix-copy" aria-label={`Copy ${r.name}`} onClick={() => void copyText(r.name)}>⧉</button></Tooltip>
+              </span></td>
               <td className="num">{s ? fmtBytes(s.b) : none}</td>
               {shareOf != null && <td className="num">{s && shareOf > 0 ? `${((100 * s.b) / shareOf).toFixed(1)}%` : ''}</td>}
               <td className="num">{s ? fmtN(s.o) : ''}</td>

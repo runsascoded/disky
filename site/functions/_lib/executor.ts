@@ -14,7 +14,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, refuse } from './dispatch.js'
 import { planDigest, planRuns, realGate, type RunRow } from './plans.js'
-import { announceFinished, notifyPlan, runEvent } from './stagedSlack.js'
+import { announceFinished, notifyPlan } from './stagedSlack.js'
 import { laptop } from './laptopDispatch.js'
 import { planSweep } from './planDispatch.js'
 import { sweep } from './sweepDispatch.js'
@@ -80,6 +80,7 @@ export async function dispatchPlan(
   const digest = await planDigest(prep.prefixes)
 
   let date = req.date
+  let reviewed: RunRow | undefined
   if (req.mode === 'real') {
     await refreshRuns(env, db, req.siteUrl, ex)
     const gate = realGate(await planRuns(db, req.planId), digest, prep.prefixes.length)
@@ -88,10 +89,11 @@ export async function dispatchPlan(
       return refuse(409, `not deleting: a real run uses its dry-run's scan (${gate.dry.scan}, ${gate.dry.run_id}), not ${date}`)
     }
     date = gate.dry.scan
+    reviewed = gate.dry
   }
   if (date === undefined) throw new Error('unreachable: a dry run without a date was refused above')
 
-  const launched = await prep.launch(date, digest)
+  const launched = await prep.launch(date, digest, reviewed)
   if ('ok' in launched) return launched
   return { ok: true, job_id: launched.job_id, plan_id: req.planId, mode: req.mode, date, actor: req.actor, digest, extra: launched.extra }
 }
@@ -103,7 +105,7 @@ export async function notifyDispatched(env: ExecEnv, r: DispatchOk, via: string,
     run_id: r.job_id, mode: r.mode, scan: r.date, actor: r.actor, started_ts: 0, finished_ts: null,
     deleted_bytes: 0, deleted_objects: 0, skipped_gone: 0, skipped_overwritten: 0, plan_digest: r.digest,
   }
-  await notifyPlan(env, env.DB, r.plan_id, siteUrl, { text: runEvent(row, 'dispatched', via) })
+  await notifyPlan(env, env.DB, r.plan_id, siteUrl, { run: row, phase: 'dispatched', via })
 }
 
 /** An HTTP route's JSON for a dispatch result (the shape /staged reads). */

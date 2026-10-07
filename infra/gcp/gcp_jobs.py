@@ -21,6 +21,7 @@ component takes `existing=` (the resource is live, import it) and the stack's
 import base64
 import json
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 from pulumi import ComponentResource, ResourceOptions
+from pulumi_command import local
 
 SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
@@ -200,6 +202,101 @@ def grant_bucket(
         member=member,
         opts=adopt.opts(existing, f"b/{bucket} {role} serviceAccount:{member_email}", parent=parent),
     )
+
+
+class StorageBatchDelete(ComponentResource):
+    """Opt-in prerequisites for generation-pinned Storage Batch Operations.
+
+    Storage Intelligence is a paid fleet subscription (``TRIAL`` rolls into
+    ``STANDARD`` after 30 days), so callers must choose the edition
+    explicitly. The config is bucket-filtered and managed through ``gcloud``
+    because pulumi-gcp has no IntelligenceConfig resource yet.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        control_project: str,
+        fleet_project: str,
+        buckets: list[str],
+        manifest_bucket: str,
+        submitter: pulumi.Input[str],
+        edition: str,
+        opts: ResourceOptions | None = None,
+    ):
+        super().__init__("disky:gcp:StorageBatchDelete", name, None, opts)
+        edition = edition.upper()
+        if edition not in {"TRIAL", "STANDARD"}:
+            raise ValueError(f"Storage Intelligence edition must be TRIAL or STANDARD, got {edition!r}")
+        if not buckets:
+            raise ValueError("Storage Batch Operations requires at least one target bucket")
+
+        self.api = gcp.projects.Service(
+            f"{name}-api",
+            project=control_project,
+            service="storagebatchoperations.googleapis.com",
+            disable_on_destroy=False,
+            deletion_policy="ABANDON",
+            opts=ResourceOptions(parent=self),
+        )
+        self.agent = gcp.projects.ServiceIdentity(
+            f"{name}-agent",
+            project=control_project,
+            service="storagebatchoperations.googleapis.com",
+            opts=ResourceOptions(parent=self, depends_on=[self.api]),
+        )
+        gcp.projects.IAMMember(
+            f"{name}-submitter",
+            project=control_project,
+            role="roles/storagebatchoperations.admin",
+            member=submitter,
+            opts=ResourceOptions(parent=self, depends_on=[self.api]),
+        )
+        gcp.storage.BucketIAMMember(
+            f"{name}-manifest-reader",
+            bucket=manifest_bucket,
+            role="roles/storage.objectViewer",
+            member=self.agent.member,
+            opts=ResourceOptions(parent=self, depends_on=[self.agent]),
+        )
+        for bucket in buckets:
+            gcp.storage.BucketIAMMember(
+                f"{name}-{bucket}-object-user",
+                bucket=bucket,
+                role="roles/storage.objectUser",
+                member=self.agent.member,
+                opts=ResourceOptions(parent=self, depends_on=[self.agent]),
+            )
+
+        patterns = ",".join(f"^{re_escape(bucket)}$" for bucket in buckets)
+        base = ["gcloud", "storage", "intelligence-configs"]
+        scope = f"--project={fleet_project}"
+        filters = f"--include-bucket-id-regexes={patterns}"
+        edition_flag = ["--trial-edition"] if edition == "TRIAL" else []
+
+        def command(verb: str, args: list[str]) -> str:
+            return " ".join(map(shlex.quote, [*base, verb, scope, filters, *args, "--quiet"]))
+
+        # Protecting this resource makes ending a trial/subscription an
+        # explicit two-step operation. Once unprotected and removed, Pulumi
+        # disables the project-level config rather than leaving billing behind.
+        self.intelligence = local.Command(
+            f"{name}-intelligence",
+            create=command("enable", edition_flag),
+            update=command("update", edition_flag),
+            delete=" ".join(map(shlex.quote, [*base, "disable", scope, "--quiet"])),
+            triggers=[edition, fleet_project, patterns],
+            opts=ResourceOptions(parent=self, protect=True),
+        )
+        self.register_outputs({"service_agent": self.agent.email, "edition": edition})
+
+
+def re_escape(value: str) -> str:
+    """RE2-safe exact literal for a GCS bucket id."""
+    import re
+
+    return re.escape(value)
 
 
 def submitter_spec(submitter: Path) -> dict:
@@ -409,4 +506,3 @@ class RunJobCron(ComponentResource):
             depends_on=[self.job],
         )
         self.register_outputs({"job": self.job.name, "cron": self.cron.name})
-

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, type ExecJob, fmtDur, joinRuns, loggedOf, plannedOf, runControls,
-  runFilesRel, runJobId, sumProgress, verifyRun, viewBuckets, viewState,
+  commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, joinRuns, loggedOf, plannedOf, runControls,
+  progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, verifyRun, viewBuckets, viewState,
 } from './runs'
 
 const GCS_JOB = 'gcs-sweep-real-20260928-120000z'
@@ -24,27 +24,42 @@ describe('runJobId — the Batch job behind a run', () => {
   })
 })
 
-describe('joinRuns — one row per run (+ its job and ops), then the plan\'s unrecorded jobs', () => {
-  it('joins by job id, attaches undo ops, keeps only this plan\'s orphan jobs, newest first', () => {
+describe('joinRuns — one row per run (+ its job and ops), then every unrecorded run job', () => {
+  it('joins by job id, attaches undo ops, then the unrecorded run jobs (any plan, or none), newest first', () => {
     const older = run({ run_id: '2026-09-26-p3/20260926T000000Z', started_ts: 500, log_dir: 'gs://data/sweep/runs/gcs-sweep-dry-20260926-000000z', mode: 'dry' })
     const jobs = [
       job({ job_id: GCS_JOB, state: 'SUCCEEDED', plan_id: 3 }),
       job({ job_id: 'gcs-undo-20260929-000000z', op: 'undo', target: GCS_RUN, state: 'RUNNING' }),
       job({ job_id: 'gcs-sweep-dry-20260930-000000z', state: 'QUEUED', plan_id: 3, created: '2026-09-30T00:00:00Z' }),
       job({ job_id: 'gcs-sweep-dry-20260930-010000z', state: 'QUEUED', plan_id: 4, created: '2026-09-30T01:00:00Z' }),
-      job({ job_id: 'gcs-sweep-dry-20250101-000000z', state: 'SUCCEEDED', plan_id: null }),
+      job({ job_id: 'gcs-sweep-dry-20250101-000000z', state: 'SUCCEEDED', plan_id: null, created: '2025-01-01T00:00:00Z' }),
     ]
-    const views = joinRuns([older, run()], jobs, 3)
+    const views = joinRuns([older, run()], jobs)
     expect(views.map(v => [v.key, v.job?.job_id ?? null, v.ops.map(o => o.job_id)])).toEqual([
+      ['gcs-sweep-dry-20260930-010000z', 'gcs-sweep-dry-20260930-010000z', []],
       ['gcs-sweep-dry-20260930-000000z', 'gcs-sweep-dry-20260930-000000z', []],
+      ['gcs-sweep-dry-20250101-000000z', 'gcs-sweep-dry-20250101-000000z', []],
       [GCS_RUN, GCS_JOB, ['gcs-undo-20260929-000000z']],
       ['2026-09-26-p3/20260926T000000Z', null, []],
     ])
-    expect(views.map(viewState)).toEqual(['QUEUED', 'SUCCEEDED', 'DONE'])
+    expect(views.map(viewState)).toEqual(['QUEUED', 'QUEUED', 'SUCCEEDED', 'SUCCEEDED', 'DONE'])
   })
 })
 
 describe('elapsed / fmtDur / buckets / paths', () => {
+  it('elapsed tooltips distinguish recorded executor times from Batch running time', () => {
+    expect(elapsedDetails({ key: 'a', run: run(), job: job({ job_id: GCS_JOB, created: '1970-01-01T00:10:00Z', run_secs: 61 }), ops: [] })).toEqual([
+      'Dispatched: 1970-01-01 00:10:00 UTC',
+      'Executor started: 1970-01-01 00:16:40 UTC',
+      'Executor finished: 1970-01-01 01:23:20 UTC',
+      'Elapsed is Batch running time, excluding queueing; executor timestamps cover its recorded work.',
+    ])
+    expect(elapsedDetails({ key: 'a', run: run({ finished_ts: null }), job: job({ job_id: GCS_JOB, state: 'RUNNING', created: undefined }), ops: [] })).toEqual([
+      'Executor started: 1970-01-01 00:16:40 UTC',
+      'Executor still running',
+    ])
+    expect(elapsedDetails({ key: 'a', job: job({ job_id: GCS_JOB, created: undefined }), ops: [] })).toEqual(['Executor start/end not recorded'])
+  })
   it('elapsed: Batch\'s run time, else the recorded span, else (live) since start', () => {
     expect([
       elapsed({ key: 'a', run: run(), job: job({ job_id: GCS_JOB, run_secs: 61 }), ops: [] }, 9999),
@@ -55,6 +70,13 @@ describe('elapsed / fmtDur / buckets / paths', () => {
   })
   it('fmtDur', () => {
     expect([fmtDur(59), fmtDur(125), fmtDur(3 * 3600 + 5 * 60), fmtDur(50 * 3600)]).toEqual(['0m', '2m', '3h 05m', '2d 2h'])
+  })
+  it('runLabel: both run-id families at minute precision, else a readable fallback', () => {
+    expect([
+      runLabel('2026-10-03-p1/20261004T034042Z'),
+      runLabel('gcs-sweep-dry-20261004-020914z'),
+      runLabel('cw-sweep-real-custom'),
+    ]).toEqual(['2026-10-04 03:40Z', '2026-10-04 02:09Z', 'custom'])
   })
   it('viewBuckets: the recorded cut, else the job\'s', () => {
     expect([
@@ -74,9 +96,38 @@ describe('elapsed / fmtDur / buckets / paths', () => {
   it('runFilesRel: the run dir below its bucket, slash-terminated', () => {
     expect([runFilesRel(`gs://data/sweep/runs/${GCS_JOB}`), runFilesRel('gs://data/sweep/x/')]).toEqual([`sweep/runs/${GCS_JOB}/`, 'sweep/x/'])
   })
+  it('run artifact links use the files proxy, not the retired SPA route', () => {
+    expect([
+      runFileHref('sweep/runs/a b/plan.json'),
+      runDirHref('sweep/runs/a b/would-delete/'),
+    ]).toEqual([
+      '/v1/files/get?path=sweep%2Fruns%2Fa%20b%2Fplan.json',
+      '/v1/files/list?prefix=sweep%2Fruns%2Fa%20b%2Fwould-delete%2F',
+    ])
+  })
 })
 
 describe('run-dir files: planned, progress, logged', () => {
+  it('rough ETA counts decisions, excludes finished bucket rates and rejects stale/empty samples', () => {
+    const ps: ProgressFile[] = [
+      { roots: 2, roots_done: 2, decisions: { delete: 100, skipped_gone: 20 }, delete_bytes: 1000, started: '2026-09-28T12:00:00Z', updated: '2026-09-28T12:00:10Z', done: true },
+      { roots: 10, roots_done: 0, decisions: { delete: 40, skipped_overwritten: 10 }, delete_bytes: 500, started: '2026-09-28T12:01:00Z', updated: '2026-09-28T12:01:10Z', done: false },
+    ]
+    const now = Date.parse('2026-09-28T12:01:10Z') / 1000
+    expect([
+      progressEstimate(ps, 1000, now),
+      progressEstimate(ps, 1000, now + 91),
+      progressEstimate(ps, undefined, now),
+      progressEstimate([], 1000, now),
+      progressEstimate(ps, 100, now),
+    ]).toEqual([
+      { decided: 170, percent: 17, secondsLeft: 166, stale: false },
+      { decided: 170, percent: 17, secondsLeft: null, stale: true },
+      { decided: 170, percent: null, secondsLeft: null, stale: false },
+      { decided: 0, percent: 0, secondsLeft: null, stale: false },
+      { decided: 170, percent: 100, secondsLeft: null, stale: false },
+    ])
+  })
   it('plannedOf: the total, else the buckets\' sum', () => {
     expect([
       plannedOf({ buckets: {}, total: { eligible: { bytes: 10, objects: 2 } } }),

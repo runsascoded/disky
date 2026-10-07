@@ -222,7 +222,9 @@ export async function planDetail(db: D1Database, id: number, staging: boolean): 
   const batches = staging
     ? (await db.prepare('SELECT * FROM stage_batches WHERE plan_id = ? ORDER BY created_ts DESC').bind(id).all<StageBatchRow>()).results
     : []
-  const runs = await db.prepare('SELECT * FROM deletion_runs WHERE plan_id = ? ORDER BY started_ts DESC').bind(id).all<Record<string, unknown>>()
+  // Every run, not just this plan's: plans are bookkeeping, and /staged's runs
+  // table is the deployment's run history.
+  const runs = await db.prepare('SELECT * FROM deletion_runs ORDER BY started_ts DESC LIMIT 500').all<Record<string, unknown>>()
   const edits = staging
     ? (await db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()).results
     : []
@@ -351,6 +353,7 @@ export interface RunRow {
   skipped_overwritten: number
   plan_digest: string | null
   undo_deadline?: number | null
+  log_dir?: string | null
 }
 
 export type Gate =

@@ -177,7 +177,7 @@ describe('sweepJobView — a listed Batch job as /staged reads it', () => {
     taskGroups: [{ taskSpec: { environment: { variables: vars }, runnables: [{ container: { commands: ['-c', script] } }] } }],
   })
   it('a run: its plan, cut and region; an undo: its target', () => {
-    const logs = (uid: string) => `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${uid}"`)}?project=my-project`
+    const logs = (uid: string) => `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${uid}"\nlog_id("batch_task_logs")\ntimestamp >= "2026-09-28T12:00:00Z"`)}?project=my-project`
     expect([
       sweepJobView(cfg, job('gcs-sweep-real-20260928-120000z', { USER: 'ann', SWEEP_DATE: '2026-09-27', PLAN_ID: '1' }, `dt-cloud sweep execute -b ${B1} --for-real x`)),
       sweepJobView(cfg, job('gcs-undo-20260929-120000z', { USER: 'bob', OP: 'undo', TARGET_RUN: RUN }, 'dt-cloud sweep undo "$TARGET_RUN"')),

@@ -7,9 +7,10 @@ import json
 from dataclasses import dataclass, field
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
-from dt_cloud.sweep_exec import execute_plan
+from dt_cloud.sweep_exec import execute_plan, execution_progress_message
 
 T0 = dt.datetime(2026, 9, 1, tzinfo=dt.timezone.utc)
 T1 = dt.datetime(2026, 9, 2, tzinfo=dt.timezone.utc)
@@ -162,6 +163,18 @@ def test_log_lands_as_part_files_with_progress(tmp_path):
     assert s["buckets"]["b1"]["decisions"] == prog["decisions"]
 
 
+def test_execution_progress_message() -> None:
+    snap = {
+        "bucket": "b1", "mode": "deleted", "roots": 1_000, "roots_done": 20,
+        "decisions": {"delete": 2_000, "skipped_gone": 3, "skipped_overwritten": 4, "delete_failed": 5},
+        "delete_bytes": 2_000_000_000_000, "done": False,
+    }
+    assert execution_progress_message(snap) == (
+        "execute progress: b1 (deleted) · roots=20/1,000 · delete=2,000 (2.00 TB)"
+        " · gone=3 · overwritten=4 · unanswered=5 · done=false"
+    )
+
+
 def test_dry_run_decisions_and_drift_skip(tmp_path):
     plan = _plan_dir(tmp_path)
     client = _client()
@@ -176,6 +189,21 @@ def test_dry_run_decisions_and_drift_skip(tmp_path):
     assert b["decisions"] == {"delete": 1, "skipped_gone": 1, "skipped_overwritten": 1}
     assert b["delete_bytes"] == 10
     assert b["drift_dirs"] == [{"dir": "b", "new_objects": 1, "new_bytes": 5, "skipped_deletes": 1}]
+
+
+def test_dry_run_uses_scan_generation_when_available(tmp_path):
+    plan = _plan_dir(tmp_path)
+    manifest = plan / "manifest" / "b1.parquet"
+    table = pq.read_table(manifest).append_column("generation", pa.array([111, 222, 222, 444], type=pa.int64()))
+    pq.write_table(table, manifest)
+    client = _client()
+    client.blobs["b1"][1].time_created = T0
+    execute_plan(str(plan), client=client)
+    assert _decisions(plan, "would-delete") == [
+        ("a/x", "delete", 111),
+        ("a/y", "skipped_gone", 0),
+        ("a/z", "skipped_overwritten", 333),
+    ]
 
 
 def test_for_real_deletes_with_generation_match_and_drift_proceed(tmp_path):

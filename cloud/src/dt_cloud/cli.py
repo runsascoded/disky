@@ -1271,23 +1271,37 @@ def sweep() -> None:
     """The GCS executor's phases — manifest / execute / undo (specs/staged-delete.md)."""
 
 
+@sweep.command("sync-progress")
+@option("-i", "--interval", default=0, type=int, help="Repeat until the job ends (≥30 seconds); default backfills once")
+@option("-o", "--sql-output", default=None, help="Export INSERT SQL instead of writing D1 (for local browser verification)")
+@argument("job_name")
+def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) -> None:
+    """Backfill/tail a recorded Batch run's task-log progress into D1."""
+    from .sweep_progress import sync_progress
+
+    sync_progress(job_name, interval, sql_output)
+
+
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
+@option("-j", "--workers", default=0, type=int, help="Concurrent listing shards (default 2 × CPUs, ≤ 64)")
 @option("-o", "--out", default=None, help="Output dir (default gs://$DATA_BUCKET/sweep/<date>-p<plan_id>)")
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
-def sweep_manifest(only_buckets: tuple[str, ...], date: str, out: str | None, plan_path: str, root: str | None) -> None:
-    """Object-level manifest of a staged plan (specs/staged-delete.md): stream
-    the pinned listing and write per-bucket parquets of the ELIGIBLE keys —
-    every key under a staged prefix — plus a category summary. The plan is
-    the whole intent: nothing carves out. Pure read + artifact write —
-    deletes nothing."""
+def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: str | None, plan_path: str, root: str | None) -> None:
+    """Object-level manifest of a staged plan (specs/staged-delete.md): scan
+    the pinned listing (every shard in parallel, row groups outside the staged
+    prefixes pruned — `sweep_manifest.py`) and write per-bucket parquets of the
+    ELIGIBLE keys — every key under a staged prefix — plus a category summary.
+    The plan is the whole intent: nothing carves out. Pure read + artifact
+    write — deletes nothing."""
+    import time
+
     import fsspec
-    import pyarrow as pa
-    import pyarrow.parquet as pq
 
     from .staged_plan import CATEGORIES, load_plan
+    from .sweep_manifest import build_manifests
 
     sp = load_plan(plan_path)
     buckets = [b for b in sp.buckets if not only_buckets or b in only_buckets]
@@ -1306,64 +1320,9 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, out: str | None, pl
         "buckets": {},
     }
 
-    fs, rootpath = fsspec.core.url_to_fs(root)
-    schema = pa.schema([
-        ("name", pa.string()), ("size_bytes", pa.int64()),
-        ("storage_class_id", pa.int8()), ("created", pa.timestamp("us", tz="UTC")),
-        ("dir", pa.string()),
-    ])
-    for bucket in buckets:
-        shards = sorted(fs.glob(f"{rootpath}/listing/{date}/{bucket}/*.parquet"))
-        if not shards:
-            raise SystemExit(f"no listing shards for {bucket} under {root}/listing/{date}/")
-        cache: dict[str, str] = {}
-        cats = {c: [0, 0] for c in CATEGORIES}  # bytes, objects
-        bands = sp.sweep[bucket]
-        writer = None
-        out_path = f"{out}/manifest/{bucket}.parquet"
-        ofs, opath = fsspec.core.url_to_fs(out_path)
-        ofs.makedirs(opath.rsplit("/", 1)[0], exist_ok=True)
-        n = 0
-        for shard in shards:
-          # Open/close each shard deterministically: a gcsfs file left for the
-          # interpreter's exit to finalize calls into fsspec's event loop while
-          # it is tearing down and can hang the process forever (observed
-          # 2026-09-08: the manifest step's last line printed, then 0% CPU for
-          # an hour and `sweep execute` never started).
-          with fs.open(shard, "rb") as fh:
-            pf = pq.ParquetFile(fh)
-            for batch in pf.iter_batches(columns=["name", "size_bytes", "storage_class_id", "created"], batch_size=1 << 17):
-                df = batch.to_pandas()
-                n += len(df)
-                inb = df["name"].str.startswith(bands)
-                if not inb.all():
-                    cats["outside_bands"][0] += int(df["size_bytes"][~inb].sum())
-                    cats["outside_bands"][1] += int((~inb).sum())
-                    df = df[inb]
-                    if df.empty:
-                        continue
-                dirs = df["name"].str.rpartition("/")[0]
-                for dn in dirs.unique():
-                    if dn not in cache:
-                        cache[dn] = sp.classify(bucket, dn)
-                cat = dirs.map(lambda dn: cache[dn])
-                sizes = df["size_bytes"]
-                for c, g in sizes.groupby(cat):
-                    cats[c][0] += int(g.sum())
-                    cats[c][1] += len(g)
-                elig = cat == "eligible"
-                if elig.any():
-                    sel = df[elig].copy()
-                    sel["dir"] = dirs[elig]
-                    t = pa.Table.from_pandas(sel, preserve_index=False).select(schema.names).cast(schema)
-                    if writer is None:
-                        writer = pq.ParquetWriter(opath, schema, filesystem=ofs)
-                    writer.write_table(t)
-        if writer is not None:
-            writer.close()
-        summary["buckets"][bucket] = {"objects": n, "dirs": len(cache), **{c: {"bytes": b, "objects": o} for c, (b, o) in cats.items() if o}}
-        eb, eo = cats["eligible"]
-        err(f"  {bucket}: {n:,} keys, {len(cache):,} dirs — eligible {eb / 1e12:.2f} TB / {eo:,} objects")
+    t0 = time.monotonic()
+    summary["buckets"] = build_manifests(root, date, {b: sp.sweep[b] for b in buckets}, out, workers=workers or None)
+    err(f"manifest: {time.monotonic() - t0:.0f}s")
 
     tot = {c: [0, 0] for c in CATEGORIES}
     for b in summary["buckets"].values():
@@ -1382,15 +1341,38 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, out: str | None, pl
     _hard_exit()
 
 
+@sweep.command("reuse-manifest")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Exact reviewed bucket cut")
+@option("-d", "--date", required=True, help="Pinned scan date")
+@option("-o", "--out", required=True, help="New run directory; manifests must not exist")
+@option("-p", "--plan", "plan_path", required=True, help="The new dispatch's plan.json")
+@argument("source")
+def sweep_reuse_manifest(
+    only_buckets: tuple[str, ...],
+    date: str,
+    out: str,
+    plan_path: str,
+    source: str,
+) -> None:
+    """Reuse an identical completed DR's manifest; never delete anything."""
+    from .sweep_reuse import reuse_manifest
+
+    summary = reuse_manifest(source, plan_path, date, out, only_buckets)
+    err(f"reused reviewed manifest from {source} → {out} ({len(summary['buckets'])} buckets)")
+    print(json.dumps(summary, indent=2))
+    _hard_exit()
+
+
 @sweep.command("execute")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
 @option("-D", "--drift", type=Choice(["skip", "proceed"]), default="skip", help="Dirs that gained new keys since the scan: skip (default) or proceed (manifest keys only — new keys always survive)")
-@option("-w", "--workers", default=8, type=int, help="Concurrent directory re-lists")
-@option("-W", "--delete-workers", default=32, type=int, help="Concurrent delete batches (100 objects each), shared by every re-list; the bucket's ~1000 writes/s is the ceiling")
+@option("-m", "--max-root-objects", default=250_000, type=int, help="Split listing roots above this many manifest objects when safe")
+@option("-w", "--workers", default=0, type=int, help="Concurrent directory re-lists (default 2 × CPUs, ≤ 16)")
+@option("-W", "--delete-workers", default=32, type=int, help="Concurrent delete batches (100 objects each), shared by every re-list")
 @option("--for-real", is_flag=True, help="Actually delete (default: dry-run writes would-delete/)")
 @option("--no-record", is_flag=True, help="Skip the D1 deletion_runs/bands record (recorded by default)")
 @argument("plan_dir")
-def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
+def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: int, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
     """Execute (default: DRY-RUN) a `sweep manifest` plan: fresh re-list per
     eligible dir, generation-matched deletes of manifest∩live keys whose
     timeCreated is unchanged. The plan is the whole intent: nothing is
@@ -1407,12 +1389,14 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
 
     started = int(dt.datetime.now(dt.timezone.utc).timestamp())
     actor = os.environ.get("USER", "?")
+    progress_run_id = None
     if not no_record:
         # The run's D1 row goes in now (finished NULL) so /staged lists it while
         # the re-list runs — hours, on the big bands; completed at the end.
         from .sweep_exec import record_run_start
         try:
             run_id = record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets)
+            progress_run_id = run_id
             err(f"recorded deletion run {run_id} (in progress)")
         except Exception as e:  # recording must never block the run
             err(f"WARN: deletion-run start record failed: {e}")
@@ -1425,6 +1409,13 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     stop_file_watch(plan_dir, stop)
+
+    def progress(snapshot: dict) -> None:
+        from .sweep_progress import sample, write_samples
+
+        if progress_run_id is not None:
+            write_samples(progress_run_id, [sample(snapshot)])
+
     summary = execute_plan(
         plan_dir,
         for_real=for_real,
@@ -1432,7 +1423,9 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
         drift=drift,
         workers=workers,
         delete_workers=delete_workers,
+        max_root_objects=max_root_objects,
         stop=stop,
+        on_progress=progress if not no_record else None,
     )
     finished = int(dt.datetime.now(dt.timezone.utc).timestamp())
     total = sum(b.get("delete_bytes", 0) for b in summary["buckets"].values())
@@ -1465,6 +1458,230 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
     _hard_exit()
 
 
+@sweep.command("batch-manifest")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
+@argument("plan_dir")
+def sweep_batch_manifest(only_buckets: tuple[str, ...], plan_dir: str) -> None:
+    """Freeze a completed DR's delete decisions as generation-pinned CSVs."""
+    from .sweep_batch import build_batch_manifests
+
+    summary = build_batch_manifests(plan_dir, only_buckets=only_buckets)
+    print(json.dumps(summary, indent=2))
+
+
+@sweep.command("benchmark")
+@option("-b", "--bucket", required=True, help="One target bucket from the plan")
+@option("-j", "--workers", multiple=True, type=int, default=(8, 16, 32, 64), help="Listing concurrency to measure; repeatable")
+@option("-m", "--max-root-objects", default=250_000, type=int, help="Executor root-splitting threshold")
+@option("-n", "--roots", default=128, type=int, help="Representative listing roots to benchmark")
+@option("-o", "--out", default=None, help="Optional JSON result path or URL")
+@option("-r", "--max-results-per-root", default=50_000, type=int, help="Cap objects read from each root per trial")
+@argument("plan_dir")
+def sweep_benchmark(
+    bucket: str,
+    workers: tuple[int, ...],
+    max_root_objects: int,
+    roots: int,
+    out: str | None,
+    max_results_per_root: int,
+    plan_dir: str,
+) -> None:
+    """Read-only cloud benchmark of the executor's real listing roots."""
+    import fsspec
+
+    from .sweep_benchmark import benchmark_listings
+
+    result = benchmark_listings(
+        plan_dir,
+        bucket,
+        workers=workers,
+        roots=roots,
+        max_root_objects=max_root_objects,
+        max_results_per_root=max_results_per_root,
+    )
+    payload = json.dumps(result, indent=2)
+    if out:
+        with fsspec.open(out, "w") as fh:
+            fh.write(payload + "\n")
+        err(f"wrote {out}")
+    print(payload)
+
+
+@sweep.command("profile")
+@option("-b", "--bucket", required=True, help="One reviewed target bucket")
+@option("-g", "--groups", default=4, type=int, help="Spread manifest row groups to sample")
+@option("-j", "--workers", default=4, type=int, help="Executor listing workers")
+@option("-n", "--rows", default=10_000, type=int, help="Maximum manifest rows per sampled group")
+@option("-o", "--out", "artifact_out", default=None, help="Empty diagnostic artifact directory or gs:// URL (includes remote log I/O)")
+@option("-w", "--work-dir", required=True, help="Empty local directory for diagnostic artifacts and pstats")
+@argument("plan_dir")
+def sweep_profile(
+    bucket: str,
+    groups: int,
+    workers: int,
+    rows: int,
+    artifact_out: str | None,
+    work_dir: str,
+    plan_dir: str,
+) -> None:
+    """Bounded dry-only executor profile; no deletes, no D1 writes."""
+    from .sweep_profile import profile_executor
+
+    print(json.dumps(profile_executor(plan_dir, bucket, work_dir, groups, rows, workers, artifact_out=artifact_out), indent=2))
+    _hard_exit()
+
+
+@sweep.command("benchmark-manifest")
+@option("-b", "--bucket", required=True, help="One staged bucket")
+@option("-d", "--date", required=True, help="Pinned listing date")
+@option("-j", "--workers", default=4, type=int, help="Concurrent shards")
+@option("-n", "--shards", default=4, type=int, help="Largest input shards to sample")
+@option("-o", "--out", required=True, help="Empty diagnostic artifact directory or gs:// URL")
+@option("-p", "--plan", "plan_path", required=True, help="Reviewed plan.json")
+@option("-r", "--root", required=True, help="Listing store root")
+@option("-w", "--work-dir", required=True, help="Empty local directory for staged input shards")
+def sweep_benchmark_manifest(
+    bucket: str,
+    date: str,
+    workers: int,
+    shards: int,
+    out: str,
+    plan_path: str,
+    root: str,
+    work_dir: str,
+) -> None:
+    """Bounded manifest I/O benchmark, with exact row equality checks."""
+    from .sweep_manifest_benchmark import benchmark_manifest_io
+
+    result = benchmark_manifest_io(root, date, plan_path, bucket, out, work_dir, shards, workers)
+    print(json.dumps(result, indent=2))
+    _hard_exit()
+
+
+@sweep.command("benchmark-delete")
+@option("-j", "--workers", default=16, type=int, help="Scratch upload/delete workers (1..64)")
+@option("-m", "--method", "methods", multiple=True, type=Choice(["xml", "json", "gcloud", "reviewed", "reviewed-warm"]), help="Methods to compare; reviewed-warm benchmarks the journal pipeline at an 8k/s scratch ceiling")
+@option("-n", "--objects", default=10_000, type=int, help="New one-byte scratch objects per method (1..100000)")
+@option("-s", "--verified-soft-delete-days", default=None, type=int, help="Scratch-only retention already verified by an admin; for job identities lacking bucket metadata access")
+@argument("target")
+def sweep_benchmark_delete(workers: int, methods: tuple[str, ...], objects: int, verified_soft_delete_days: int | None, target: str) -> None:
+    """Create and delete bounded synthetic scratch data; never production data.
+
+    TARGET must be gs://<bucket>/sweep/smoke-tests/delete-<unique-id>, outside
+    `PROTECTED_BUCKETS` (comma-separated globs; required, '' for none).
+    It must be empty and the bucket must retain soft deletes for seven days.
+    """
+    from .sweep_delete_benchmark import benchmark_deletes
+
+    print(json.dumps(benchmark_deletes(target, objects, workers, methods or ("xml", "json", "gcloud"), verified_soft_delete_days=verified_soft_delete_days), indent=2))
+    _hard_exit()
+
+
+@sweep.command("execute-reviewed")
+@option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets (1..6), sharing the delete-worker pool")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Subset of reviewed DR buckets")
+@option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback pacing; guided retains the GCS 2x/20m envelope, adaptive probes 25%/healthy minute")
+@option("-e", "--backend", type=Choice(["xml", "json"]), default="xml", help="Generation-addressed delete backend")
+@option("-j", "--workers", default=16, type=int, help="Concurrent full batches (1..64)")
+@option("-o", "--out", required=True, help="New output run directory for progress and undo records")
+@option("-p", "--plan", "plan_path", required=True, help="Current staged plan.json; must exactly match DR intent")
+@option("-r", "--max-rate", default=8000, type=int, help="Per-bucket attempted-object/s ceiling, including retries; starts at ≤1000")
+@option("-w", "--work-dir", required=True, help="Empty local directory for pinned decision-log cache")
+@option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Subtract this drained run's reconciled settled identities; include its full resume chain")
+@option("--for-real", is_flag=True, help="Delete reviewed generations; default validates and writes a dry log")
+@option("--no-record", is_flag=True, help="Skip D1 run/band records (scratch only)")
+@argument("source")
+def sweep_execute_reviewed(
+    bucket_workers: int,
+    only_buckets: tuple[str, ...],
+    pacing: str,
+    backend: str,
+    workers: int,
+    out: str,
+    plan_path: str,
+    max_rate: int,
+    work_dir: str,
+    exclude_runs: tuple[str, ...],
+    for_real: bool,
+    no_record: bool,
+    source: str,
+) -> None:
+    """Stream a completed DR's exact generations; no fresh relist/drift audit.
+
+    Full pinned-log preflight, recoverable deletes, bounded batches, progress,
+    and per-object undo records. This is the normal real web-dispatch path.
+    """
+    import signal
+    import threading
+    from .sweep_exec import record_run, record_run_start, stop_file_watch
+    from .sweep_reviewed import execute_reviewed
+
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    stop_file_watch(out, stop)
+    started = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    actor = os.environ.get("USER", "?")
+
+    progress_run_id = None
+
+    def prepared(plan: dict) -> None:
+        nonlocal progress_run_id
+        if for_real and not no_record:
+            try:
+                progress_run_id = record_run_start(plan, out, actor, started, for_real, only_buckets)
+            except Exception as error:
+                err(f"WARN: deletion-run start record failed: {error}")
+
+    def progress(snapshot: dict) -> None:
+        from .sweep_progress import sample, write_samples
+
+        if progress_run_id is not None:
+            write_samples(progress_run_id, [sample(snapshot)])
+
+    summary = execute_reviewed(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing)
+    if for_real and not no_record:
+        windows = [int(entry["soft_delete_days"]) for entry in summary["buckets"].values()]
+        try:
+            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min(windows) if windows else 7)
+        except Exception as error:
+            err(f"WARN: deletion-run final record failed: {error}")
+    failed = any(entry.get("failed_dirs") or entry.get("error") for entry in summary["buckets"].values())
+    print(json.dumps({key: value for key, value in summary.items() if key != "_plan"}, indent=2))
+    if stop.is_set() or failed:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130 if stop.is_set() else 2)
+    _hard_exit()
+
+
+@sweep.command("batch-submit")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
+@option("--for-real", is_flag=True, help="Actually delete; default submits a managed dry run")
+@option("-p", "--project", default=None, help="Job project (default $GCP_PROJECT / ADC project)")
+@argument("plan_dir")
+def sweep_batch_submit(only_buckets: tuple[str, ...], for_real: bool, project: str | None, plan_dir: str) -> None:
+    """Submit generation-pinned Storage Batch Operations jobs, dry by default."""
+    from .sweep_batch import submit_batch_jobs
+
+    result = submit_batch_jobs(plan_dir, dry_run=not for_real, only_buckets=only_buckets, project=project)
+    print(json.dumps(result, indent=2))
+
+
+@sweep.command("wait-drained")
+@option("-t", "--timeout", default=7200, type=int, help="Maximum seconds to wait; timeout never starts deletion")
+@argument("run")
+def sweep_wait_drained(timeout: int, run: str) -> None:
+    """Handoff barrier: require STOP, wait for the old delete pool's final summary."""
+    from .sweep_job import wait_drained
+
+    summary = wait_drained(run, timeout)
+    counts = Counter()
+    for bucket in summary["buckets"].values():
+        counts.update(bucket.get("decisions", {}))
+    print(json.dumps({"drained": run, "decisions": dict(counts)}))
+    _hard_exit()
+
+
 @sweep.command("stop")
 @argument("plan_dir")
 def sweep_stop(plan_dir: str) -> None:
@@ -1478,6 +1695,16 @@ def sweep_stop(plan_dir: str) -> None:
     _hard_exit()
 
 
+@sweep.command("recovery-check")
+@option("-l", "--limit", default=1, type=int, help="Soft-deleted samples per prefix (1–100; not a full inventory)")
+@argument("prefixes", nargs=-1, required=True)
+def sweep_recovery_check(limit: int, prefixes: tuple[str, ...]) -> None:
+    """Read-only, bounded inspection of recoverable generations and their expiry."""
+    from .sweep_recovery import recovery_sample
+    for prefix in prefixes:
+        print(json.dumps(recovery_sample(prefix, limit)))
+
+
 @sweep.command("undo")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
 @option("-n", "--dry-run", is_flag=True, help="List what would be restored; call nothing")
@@ -1488,7 +1715,8 @@ def sweep_stop(plan_dir: str) -> None:
 def sweep_undo(only_buckets: tuple[str, ...], dry_run: bool, prefixes: tuple[str, ...], workers: int, no_record: bool, run: str) -> None:
     """Restore what a real run deleted, from its `deleted/` logs — the
     soft-delete restore of exactly the logged generations, valid until the
-    run's `undo_deadline` (finish + the buckets' 7-day window). RUN is the D1
+    run's recorded `undo_deadline`. Actual retention starts per object at
+    deletion, so that record is not an object-level guarantee. RUN is the D1
     run id (`<scan>-p<plan_id>/<utc stamp>`, as /staged lists it) or the run's
     gs:// log dir. Re-runnable: names already live again are left alone."""
     from .index_footer import _creds, _d1_query, _q
@@ -1675,7 +1903,8 @@ def job_logs(asc: bool, grep: str | None, key_markers: bool, limit: int, name: s
     if key_markers:
         grep = r"\[rss\]|stage |WARN|SNAPSHOT-JOB-DONE|Deployment complete|reusing|objects listed|Error|Killed|Traceback"
     for e in log_entries(task_log_filter(j["uid"], grep), limit=limit, asc=asc):
-        print(f"{e.get('timestamp', '')[:19]} {e.get('textPayload', '').rstrip()}")
+        message = e.get("textPayload") or e.get("jsonPayload", {}).get("message", "")
+        print(f"{e.get('timestamp', '')[:19]} {message.rstrip()}")
 
 
 @job.command("watch")
@@ -1746,6 +1975,58 @@ def job_submit_listing(
         states = wait_jobs(jobs, log=err)
         if bad := {n: s for n, s in states.items() if s != "SUCCEEDED"}:
             raise SystemExit(f"listing job(s) failed: {bad}")
+
+
+@job.command("submit-reviewed")
+@option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets, sharing the XML-worker pool")
+@option("-a", "--after-run", default=None, help="Wait for this stopped executor to drain before starting XML")
+@option("-b", "--bucket", "buckets", multiple=True, help="Subset of reviewed buckets")
+@option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback policy (adaptive is the faster opt-in probe)")
+@option("-i", "--image", required=True, help="Executor image pinned by @sha256 digest")
+@option("-j", "--workers", default=32, type=int, help="Concurrent XML batches")
+@option("-n", "--name", required=True, help="New Batch job ID")
+@option("-o", "--out", required=True, help="New run output directory")
+@option("-p", "--plan", required=True, help="Snapshot of current staged plan")
+@option("-r", "--max-rate", default=8000, type=int, help="Per-bucket object/s ceiling")
+@option("-t", "--template", required=True, type=Path, help="Described prior Batch job JSON; reuse deployment settings")
+@option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Exclude reconciled settled identities from a drained run")
+@option("--for-real", is_flag=True, help="Actually delete reviewed generations (default validates only)")
+@option("--submit", is_flag=True, help="Submit to Batch; default prints the spec for review")
+@argument("source")
+def job_submit_reviewed(
+    bucket_workers: int,
+    after_run: str | None,
+    buckets: tuple[str, ...],
+    pacing: str,
+    image: str,
+    workers: int,
+    name: str,
+    out: str,
+    plan: str,
+    max_rate: int,
+    template: Path,
+    exclude_runs: tuple[str, ...],
+    for_real: bool,
+    submit: bool,
+    source: str,
+) -> None:
+    """Explicit XML dispatch; callers must stop any overlapping old executor."""
+    from .batch import submit_job
+    from .sweep_job import reviewed_job_spec
+
+    spec = reviewed_job_spec(json.loads(template.read_text()), source, plan, out, image, workers, max_rate, for_real, buckets, after_run, bucket_workers=bucket_workers, exclude_runs=exclude_runs, pacing=pacing)
+    if not re.fullmatch(r"gcs-sweep-(real|dry)-\d{8}-\d{6}z", name):
+        raise UsageError("job name must use the site's gcs-sweep-(real|dry)-YYYYMMDD-HHMMSSz format")
+    expected = f"gs://{spec['taskGroups'][0]['taskSpec']['environment']['variables']['DATA_BUCKET']}/sweep/runs/{name}"
+    if out != expected:
+        raise UsageError(f"output must match the job's canonical run directory: {expected}")
+    if ("-real-" in name) != for_real:
+        raise UsageError("job name mode must match --for-real")
+    if submit:
+        region = spec["allocationPolicy"]["location"]["allowedLocations"][0].removeprefix("regions/")
+        print(submit_job(spec, name, region))
+    else:
+        print(json.dumps(spec, indent=2))
 
 
 @job.command("metrics")

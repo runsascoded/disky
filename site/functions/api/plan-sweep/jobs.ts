@@ -9,7 +9,7 @@ import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireViewer } from "../../_lib/auth.js"
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
 import { runGsPath } from "../../_lib/cwBatch.js"
-import { gcpToken } from "../../_lib/gcp.js"
+import { batchLogsUrl, gcpToken } from "../../_lib/gcp.js"
 import { NO_SHAPE, prefixShape } from "../../_lib/plans.js"
 import { jobIdOf, listBatchJobs, reflectRuns, sweepJobs } from "../../_lib/runReflect.js"
 import { announceFinished, type NotifyEnv } from "../../_lib/stagedSlack.js"
@@ -63,7 +63,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
       date: vars.SWEEP_DATE ?? null,
       run: runGsPath(cfg, jobId),
       last_event: ev.length ? ev[ev.length - 1].description ?? null : null,
-      logs: `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${j.uid}"`)}?project=${cfg.project}`,
+      logs: batchLogsUrl(cfg.project, j.uid, j.createTime),
     }
   })
   return json({ jobs: out, configured: true, region: cfg.region }, 200, { "cache-control": "private, max-age=10" })

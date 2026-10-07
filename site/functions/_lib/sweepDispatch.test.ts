@@ -47,12 +47,23 @@ describe('sweepScript — the Batch container\'s bash', () => {
     ].join('\n'))
   })
   it('real, the cut is the plan\'s buckets', () => {
-    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId) })).toBe([
+    const reviewed = 'gs://my-data/sweep/runs/gcs-sweep-dry-20261004-020914z'
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [W4, E1], plan: planJsonPath(CFG, jobId), reviewed })).toBe([
       'set -euo pipefail',
       trap,
-      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "gs://my-data/sweep/runs/${jobId}/plan.json" -b ${W4} -b ${E1} -o "gs://my-data/sweep/runs/${jobId}"`,
-      `dt-cloud sweep execute -b ${W4} -b ${E1} --for-real "gs://my-data/sweep/runs/${jobId}"`,
+      `dt-cloud sweep execute-reviewed -e xml -j 64 -B 2 -c guided -r 8000 -b ${W4} -b ${E1} -p "gs://my-data/sweep/runs/${jobId}/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
     ].join('\n'))
+  })
+  it('uses one controller per selected bucket and supports an explicit adaptive deployment', () => {
+    const reviewed = 'gs://my-data/sweep/runs/gcs-sweep-dry-20261004-020914z'
+    expect(sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: 'gs://my-data/plan.json', reviewed, pacing: 'adaptive' }).split('\n')).toEqual([
+      'set -euo pipefail', trap,
+      `dt-cloud sweep execute-reviewed -e xml -j 64 -B 1 -c adaptive -r 8000 -b ${E1} -p "gs://my-data/plan.json" -o "gs://my-data/sweep/runs/${jobId}" -w /work/reviewed --for-real "${reviewed}"`,
+    ])
+  })
+  it('refuses real without a reviewed manifest, rather than silently regenerating it', () => {
+    expect(() => sweepScript({ cfg: CFG, mode: 'real', jobId, buckets: [E1], plan: planJsonPath(CFG, jobId) }))
+      .toThrow('real dispatch requires its reviewed DR manifest')
   })
   it('undo: `sweep undo` of the job\'s TARGET_RUN, behind the same exit trap', () => {
     expect(undoScript()).toBe([

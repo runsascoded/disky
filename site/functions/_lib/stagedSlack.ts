@@ -147,12 +147,19 @@ export function stageEvent(e: { planId: number; batchId: number; by: string; pre
   }
 }
 
-export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', via: string | null = null): string {
+/** A run's page on the site: `/staged?run=<id>` opens and scrolls to its row
+ *  (the run id, or its Batch job's id before the executor records it). */
+export const runUrl = (siteUrl: string, runId: string): string => `${siteUrl}/staged?run=${encodeURIComponent(runId)}`
+
+/** A run's thread reply: the actor named by Slack mention where known, the run
+ *  id linking to its row on `/staged`. */
+export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; mentions?: Record<string, string>; siteUrl?: string } = {}): string {
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
-  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor)}${via ? ` via ${via}` : ''} on scan ${r.scan} (\`${r.run_id}\`)`
-  if (phase === 'failed') return `:x: ${kind} \`${r.run_id}\` ended without a result (its Batch job stopped before the run summary); check its logs in www.`
-  if (r.mode === 'dry') return `:test_tube: Dry-run finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).`
-  return `:white_check_mark: Real deletion finished: deleted *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
+  const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
+  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.mentions)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
+  if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
+  if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).`
+  return `:white_check_mark: Real deletion ${id} finished: deleted *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
 }
 
 // ── I/O ────────────────────────────────────────────────────────────────────
@@ -178,6 +185,9 @@ export async function stagedCardUrl(env: NotifyEnv & { OG_CARDS?: string; SESSIO
 
 /** A stage batch's reply, rendered here so it can carry mentions and sizes. */
 export interface StageArgs { stage: Omit<Parameters<typeof stageEvent>[0], 'mentions' | 'size'> }
+/** A run's reply, rendered here so it can carry its actor's mention (and, for
+ *  a dispatch, post as them). */
+export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null }
 
 /** A workspace member, as `users.lookupByEmail` returns them. */
 export interface SlackPerson { mention: string; name: string | null; image: string | null }
@@ -314,7 +324,7 @@ async function loadView(db: D1Database, planId: number, siteUrl: string, actions
 
 /** Re-render the plan's parent message (posting it first if the plan has
  * none) and, with `event`, reply in its thread. Best-effort; never throws. */
-export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs): Promise<void> {
+export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs): Promise<void> {
   if (!slackReady(env)) return
   try {
     const v = await loadView(db, planId, siteUrl, !!env.GCP_SA_KEY)
@@ -322,16 +332,20 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const full = env as NotifyEnv & Env
     const items = (await db.prepare('SELECT prefix FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string }>()).results.map(i => i.prefix)
     const stage = ev && 'stage' in ev ? ev.stage : null
+    const runEv = ev && 'run' in ev ? ev : null
     const [mentions, size, stageSize] = await Promise.all([
-      slackMentions(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(stage ? [stage.by] : [])]),
+      slackMentions(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(stage ? [stage.by] : []), ...(runEv ? [runEv.run.actor] : [])]),
       sizeStaged(full, db, items).catch(() => null),
       stage ? sizeStaged(full, db, stage.prefixes).catch(() => null) : Promise.resolve(null),
     ])
     const parent = renderParent({ ...v, mentions, size: size ?? undefined, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
-    const people = stage ? await slackPeople(env, [stage.by]) : {}
+    const by = stage?.by ?? (runEv?.phase === 'dispatched' ? runEv.run.actor : null)
+    const people = by ? await slackPeople(env, [by]) : {}
     const event: Event | undefined = stage
       ? { ...stageEvent({ ...stage, mentions, size: stageSize ?? undefined }), sender: personSender(stage.by, people[stage.by.toLowerCase()], 'staged') }
-      : (ev as Event | undefined)
+      : runEv
+        ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, mentions, siteUrl }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+        : (ev as Event | undefined)
     let channel = v.slack_channel ?? env.SLACK_ADMIN_CHANNEL!
     let ts = v.slack_ts
     if (!ts) {
@@ -386,7 +400,7 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
 export async function announceFinished(env: NotifyEnv, db: D1Database, runs: readonly FinishedRun[], siteUrl: string): Promise<void> {
   for (const { run_id, ok } of runs) {
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
-    if (r?.plan_id != null) await notifyPlan(env, db, r.plan_id, siteUrl, { text: runEvent(r, ok ? 'finished' : 'failed') })
+    if (r?.plan_id != null) await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed' })
   }
 }
 

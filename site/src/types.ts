@@ -72,6 +72,15 @@ export const MODE_LABELS: Record<ColorMode, string> = {
   tree: 'tree',
 }
 
+/** Physical container measurements from the capture, not summed path sizes. */
+export interface DiskSpace {
+  capacity: number
+  used: number
+  free: number
+  device: string
+  captured_at: string
+}
+
 export interface Meta {
   asof: string
   generated: string
@@ -81,6 +90,7 @@ export interface Meta {
   class_bytes: Record<string, number>
   users?: UserInfo[]
   user_class_bytes?: Record<string, Record<string, number>>
+  disk_space?: DiskSpace
   /** Access-log observation window (epoch days) — bounds the read-recency lens. */
   access?: { from: number; to: number }
 }
@@ -150,6 +160,15 @@ const Ki = 1024, Mi = Ki ** 2, Gi = Ki ** 3, Ti = Ki ** 4
 type Scale = [div: number, name: string]
 const iecScale = (b: number): Scale => (b >= Ti ? [Ti, 'Ti'] : b >= Gi ? [Gi, 'Gi'] : b >= Mi ? [Mi, 'Mi'] : [Ki, 'Ki'])
 const siScale = (b: number): Scale => (b >= 1e12 ? [1e12, 'T'] : b >= 1e9 ? [1e9, 'G'] : b >= 1e6 ? [1e6, 'M'] : [1e3, 'K'])
+/** Run totals retain three significant figures so live byte progress is visible. */
+export const fmtBytesPrecise = (b: number, units: Units, suffixB = false): string => {
+  if (b === 0) return '0'
+  if (b < (units === 'iec' ? Ki : 1e3)) return `${Math.round(b)} B`
+  const [div, name] = (units === 'iec' ? iecScale : siScale)(b)
+  const rounded = Number((b / div).toPrecision(3))
+  const decimals = Math.max(0, 2 - Math.floor(Math.log10(rounded)))
+  return `${rounded.toFixed(decimals)} ${name}${suffixB ? 'B' : ''}`
+}
 export const fmtBytesLike = (b: number, ref: number, units: Units, suffixB = false): string => {
   if (b === 0) return '0'
   const [div, name] = (units === 'iec' ? iecScale : siScale)(ref)

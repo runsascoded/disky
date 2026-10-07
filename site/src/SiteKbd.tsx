@@ -123,7 +123,7 @@ export function SiteKbd({ extra = [], placeholder }: {
     'units:suffix': {
       label: `Unit suffix: ${suffixB ? 'TiB/TB → Ti/T (drop B)' : 'Ti/T → TiB/TB (show B)'}`,
       group: 'View',
-      defaultBindings: ['B'],
+      defaultBindings: pathname.startsWith('/runs/') || pathname === '/staged' ? [] : ['B'],
       handler: toggleSuffixB,
     },
   })

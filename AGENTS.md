@@ -18,6 +18,12 @@ Key goals:
 
 ### Python Backend (`src/disk_tree/`)
 
+**Listing** (`find/bulk*.py`): `bulk-list` shards a bucket's object listing (`gcs://`, `s3://`,
+`r2://` via its S3 endpoint) across worker processes into layer-1 listing parquet shards. The
+canonical columns are `bucket, name, size_bytes, created, storage_class_id, generation`; generation
+is the exact GCS object identity (nullable for S3/R2 and old listings), retained so a reviewed
+deletion manifest can never resolve to a replacement object at the same path.
+
 **Indexing** (`find/index.py`):
 - Local: `gfind -printf '%y %b %T@ %p\0'` → null-terminated, 512-byte block sizes (handles sparse files)
 - S3: `aws s3 ls --recursive` → parses listing format

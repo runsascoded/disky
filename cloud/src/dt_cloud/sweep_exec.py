@@ -1,10 +1,10 @@
 """Sweep executor — dry-run by default (specs/sweep-executor.md phase 3).
 
-Consumes a `sweep manifest` plan dir. Per eligible directory: fresh re-list
-(captures generations — the pinned listing has none), intersect with the
-manifest, verify `timeCreated` matches (an overwrite since the scan keeps the
-object), detect drift (new keys under a swept dir → skip the dir by default),
-and — only with ``--for-real`` — issue generation-matched batch deletes.
+Consumes a `sweep manifest` plan dir. Per eligible directory: fresh re-list,
+intersect with the manifest, verify the scan generation matches (falling back
+to ``timeCreated`` for legacy scans), detect drift (new keys under a swept dir
+→ skip the dir by default), and — only with ``--for-real`` — issue
+generation-matched batch deletes.
 
 Every decision lands in a per-bucket log parquet under the plan dir
 (``would-delete/`` or ``deleted/``): name, size, generation, decision.
@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import random
 import sys
 import threading
 import time
+from bisect import bisect_right
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
@@ -38,11 +41,32 @@ BATCH = 100  # GCS JSON batch limit per request
 #: run's first batch) rides out a minute of unavailability.
 DELETE_ATTEMPTS = 8
 DELETE_BACKOFF_CAP = 60.0
-#: How often a running bucket writes `progress/<bucket>.json` (the console's
-#: progress bar; also the only live signal a job gives).
+#: How often a running bucket writes `progress/<bucket>.json` and logs counts.
 PROGRESS_EVERY = 30.0
 TRANSIENT_CODES = frozenset({408, 429, 500, 502, 503, 504})
 _sleep = time.sleep  # patched in tests
+
+
+def execution_progress_message(snap: dict) -> str:
+    """The same decision counts in task logs and the console's progress file."""
+    decisions = snap["decisions"]
+    return (
+        f"execute progress: {snap['bucket']} ({snap['mode']})"
+        f" · roots={snap['roots_done']:,}/{snap['roots']:,}"
+        f" · delete={decisions.get('delete', 0):,} ({snap['delete_bytes'] / 1e12:.2f} TB)"
+        f" · gone={decisions.get('skipped_gone', 0):,}"
+        f" · overwritten={decisions.get('skipped_overwritten', 0):,}"
+        f" · unanswered={decisions.get('delete_failed', 0):,}"
+        f" · done={str(snap['done']).lower()}"
+    )
+
+
+def log_execution_progress(snap: dict) -> None:
+    """Structured severity prevents normal stderr progress looking like errors."""
+    print(json.dumps({
+        "severity": "ERROR" if snap["decisions"].get("delete_failed", 0) else "INFO",
+        "event": "sweep_progress", "message": execution_progress_message(snap), "progress": snap,
+    }), file=sys.stderr, flush=True)
 
 
 def _status_code(resp) -> int | None:
@@ -146,17 +170,59 @@ def list_roots(dirs: set[str], approved: tuple[str, ...], bucket: str) -> list[s
     return pruned
 
 
+def split_listing_roots(
+    roots: list[str],
+    dirs: set[str],
+    root_count,
+    max_root_objects: int,
+) -> list[str]:
+    """Split oversized roots at child-directory boundaries, then order them
+    largest first. This is the executor's unit of listing parallelism; the
+    benchmark calls the same helper so it measures the production schedule."""
+    for _ in range(6):
+        big = [root for root in roots if root_count(root) > max_root_objects]
+        if not big:
+            break
+        sorted_roots = sorted(roots)
+        children: dict[str, set[str]] = {root: set() for root in big}
+        direct: set[str] = set()
+        for dn in dirs:
+            i = bisect_right(sorted_roots, dn)
+            root = sorted_roots[i - 1] if i else None
+            if root is None or not (dn == root or (dn.startswith(root + "/") if root else True)):
+                continue
+            if root not in children:
+                continue
+            if dn == root:
+                direct.add(root)
+            else:
+                rel = dn[len(root) + 1:] if root else dn
+                children[root].add(rel.split("/", 1)[0])
+        out: list[str] = []
+        for root in roots:
+            if root in children and root not in direct and len(children[root]) > 1:
+                out.extend(f"{root}/{child}" if root else child for child in sorted(children[root]))
+            else:
+                out.append(root)
+        if len(out) == len(roots):
+            break
+        roots = out
+    return sorted(roots, key=root_count, reverse=True)
+
+
 def execute_plan(
     plan_dir: str,
     for_real: bool = False,
     only_buckets: tuple[str, ...] = (),
     drift: str = "skip",  # skip | proceed — dirs that gained NEW keys since the scan
-    workers: int = 8,
+    workers: int = 0,
     delete_workers: int = 32,
     max_root_objects: int = 250_000,  # a listing root bigger than this splits into its children (one listing thread per root)
     min_soft_delete_days: int = 7,
     client=None,
     stop: threading.Event | None = None,  # set → roots not yet started are skipped; the log and summary still land (`interrupted`)
+    profile_dir: str | None = None,
+    on_progress: Callable[[dict], None] | None = None,
 ) -> dict:
     import fsspec
     import pyarrow as pa
@@ -164,9 +230,15 @@ def execute_plan(
     import pyarrow.parquet as pq
     from google.cloud import storage
 
+    if profile_dir and for_real:
+        raise ValueError("executor profiling is dry-only")
+
+    workers = workers or min(16, 2 * (os.cpu_count() or 4))
     fs, ppath = fsspec.core.url_to_fs(plan_dir)
     with fs.open(f"{ppath}/plan-summary.json") as fh:
         plan = json.load(fh)
+    if for_real and plan.get("diagnostic"):
+        raise ValueError("diagnostic manifests cannot be used for real deletion")
     client = client or storage.Client()
     approved = tuple(plan.get("approved") or ())
 
@@ -183,7 +255,8 @@ def execute_plan(
     # Deletes run on their own pool, fed by every listing root: a batch of 100
     # is ~1–2 s of sequential server work, so a lopsided root (east5's
     # largest held 31% of the objects) no longer serializes a third of the run
-    # on one thread — the bucket's ~1000 writes/s is the ceiling instead.
+    # on one thread. GCS starts a bucket near 1000 writes/s and autos-scales
+    # with gradual traffic ramp-up; that starting rate is not a hard ceiling.
     dpool = ThreadPoolExecutor(max_workers=delete_workers) if for_real else None
     log_schema = pa.schema([
         ("name", pa.string()), ("size_bytes", pa.int64()), ("generation", pa.int64()),
@@ -195,6 +268,7 @@ def execute_plan(
             continue
         if "eligible" not in binfo:
             continue
+        err(f"{bucket}: checking permissions and soft-delete retention ({mode})", flush=True)
         mpath = f"{ppath}/manifest/{bucket}.parquet"
         if not fs.exists(mpath):
             raise SystemExit(f"plan says {bucket} has eligible keys but {mpath} is missing")
@@ -221,19 +295,29 @@ def execute_plan(
         # bucket, ~500k distinct): keep it dictionary-encoded. `name` gets
         # 64-bit offsets — `take` over 35M ~150-byte names concatenates past
         # `string`'s 2 GB limit ("offset overflow", the 2026-09-10 dry run).
+        load_started = time.monotonic()
+        err(f"{bucket}: reading manifest {mpath}", flush=True)
         with fs.open(mpath, "rb") as fh:  # deterministic close: see `sweep manifest`
-            mt = pq.read_table(fh, columns=["name", "size_bytes", "created", "dir"], read_dictionary=["dir"]).unify_dictionaries()
+            parquet = pq.ParquetFile(fh, read_dictionary=["dir"])
+            columns = ["name", "size_bytes", "created", "dir"]
+            if "generation" in parquet.schema.names:
+                columns.append("generation")
+            mt = parquet.read(columns=columns).unify_dictionaries()
+        if "generation" not in mt.column_names:
+            mt = mt.append_column("generation", pa.nulls(len(mt), type=pa.int64()))
         mt = mt.set_column(mt.schema.get_field_index("name"), "name", pc.cast(mt["name"], pa.large_string()))
         # One chunk per column (a `take` over a 438-chunk column concatenates
         # it on every call — seconds per root), then sort an index (8
         # bytes/row), not the table: the bisection reads names through it and
         # only each root's slice is ever materialized, so the 35M-key bucket
         # peaks near the ~8 GB read instead of twice that.
+        err(f"{bucket}: normalizing/sorting {len(mt):,} manifest keys", flush=True)
         mt = mt.combine_chunks()
         names = mt["name"]
         order = pc.sort_indices(mt, sort_keys=[("name", "ascending")])
         dirs_all = set(pc.unique(mt["dir"]).to_pylist())
-        err(f"{bucket}: {len(mt):,} manifest keys in {len(dirs_all):,} dirs ({mode})")
+        manifest_seconds = time.monotonic() - load_started
+        err(f"{bucket}: {len(mt):,} manifest keys in {len(dirs_all):,} dirs ({mode}); loaded/sorted in {manifest_seconds:.1f}s")
         bkt = client.bucket(bucket)
         counts: Counter = Counter()
         drift_dirs: list[dict] = []
@@ -260,14 +344,14 @@ def execute_plan(
 
         def root_rows(root: str):
             """The manifest rows under `root/` (every row for the bucket root)
-            in name order, as `(name, size, created, dir)` tuples — materialized
-            256k rows at a time, so a root holding most of the bucket never
-            becomes one frame."""
+            in name order, as `(name, size, created, dir, generation)` tuples
+            — materialized 256k rows at a time, so a root holding most of the
+            bucket never becomes one frame."""
             lo, hi = _bisect(root + "/") if root else (0, len(order))
             sl = order.slice(lo, hi - lo)
             for start in range(0, len(sl), BATCH_ROWS):
                 t = mt.take(sl.slice(start, BATCH_ROWS))
-                yield from zip(*(t[c].to_pylist() for c in ("name", "size_bytes", "created", "dir")))
+                yield from zip(*(t[c].to_pylist() for c in ("name", "size_bytes", "created", "dir", "generation")))
 
         # One recursive listing per *root* (a band's child directory, or the
         # band itself when it is directly eligible) instead of one per
@@ -292,36 +376,8 @@ def execute_plan(
         # tail is small roots filling in, not one big listing everyone waits
         # on (central2 on 2026-09-11: 1,750 → 400 deletes/s over its last
         # two hours, alphabetical order, one huge root left).
-        from bisect import bisect_right
-        for _ in range(6):
-            big = [r for r in roots if root_count(r) > max_root_objects]
-            if not big:
-                break
-            srt = sorted(roots)
-            kids: dict[str, set[str]] = {r: set() for r in big}
-            direct: set[str] = set()
-            for dn in dirs_all:
-                i = bisect_right(srt, dn)
-                r = srt[i - 1] if i else None
-                if r is None or not (dn == r or (dn.startswith(r + "/") if r else True)):
-                    continue
-                if r not in kids:
-                    continue
-                if dn == r:
-                    direct.add(r)
-                else:
-                    rel = dn[len(r) + 1:] if r else dn
-                    kids[r].add(rel.split("/", 1)[0])
-            out: list[str] = []
-            for r in roots:
-                if r in kids and r not in direct and len(kids[r]) > 1:
-                    out.extend(f"{r}/{k}" if r else k for k in sorted(kids[r]))
-                else:
-                    out.append(r)
-            if len(out) == len(roots):
-                break
-            roots = out
-        roots = sorted(roots, key=root_count, reverse=True)
+        roots = split_listing_roots(roots, dirs_all, root_count, max_root_objects)
+        err(f"{bucket}: starting {len(roots):,} listing roots with {workers} readers and {delete_workers if for_real else 0} delete workers", flush=True)
 
         def do_root(root: str):
             if stop is not None and stop.is_set():
@@ -376,7 +432,7 @@ def execute_plan(
                 return pend[dn]
 
             def gone(row) -> None:
-                name, size, _created, dn = row
+                name, size, _created, dn, _generation = row
                 settle(name)
                 ensure(dn)["out"].append((name, int(size), 0, "skipped_gone", dn))
 
@@ -389,8 +445,14 @@ def execute_plan(
                 dn = n.rpartition("/")[0]
                 if w is not None and w[0] == n:
                     p = ensure(w[3])
+                    scan_generation = w[4]
                     created = blob.time_created.replace(tzinfo=dt.timezone.utc) if blob.time_created.tzinfo is None else blob.time_created
-                    if abs((created - w[2]).total_seconds()) > 1:
+                    overwritten = (
+                        int(blob.generation) != int(scan_generation)
+                        if scan_generation is not None and int(scan_generation) > 0
+                        else abs((created - w[2]).total_seconds()) > 1
+                    )
+                    if overwritten:
                         p["out"].append((n, int(w[1]), int(blob.generation), "skipped_overwritten", w[3]))
                     else:
                         p["todo"].append(blob)
@@ -443,13 +505,19 @@ def execute_plan(
 
         def write_progress(final: bool = False) -> None:
             with log_lock:
-                snap = {**prog, "decisions": dict(prog["decisions"]), "updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "done": final}
+                snap = {**prog, "decisions": dict(prog["decisions"]), "bands": {prefix: dict(count) for prefix, count in bands.items()}, "updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "done": final}
+            log_execution_progress(snap)
             try:
                 fs.makedirs(f"{ppath}/progress", exist_ok=True)
                 with fs.open(f"{ppath}/progress/{bucket}.json", "w") as fh:
                     json.dump(snap, fh)
             except Exception as e:  # progress is advisory; never the run's problem
                 err(f"WARN: progress write failed: {e}")
+            if on_progress is not None:
+                try:
+                    on_progress(snap)
+                except Exception as e:
+                    err(f"WARN: progress history write failed: {e}")
 
         prog_stop = threading.Event()
 
@@ -457,7 +525,8 @@ def execute_plan(
             while not prog_stop.wait(PROGRESS_EVERY):
                 write_progress()
 
-        threading.Thread(target=progress_loop, name="progress", daemon=True).start()
+        progress_thread = threading.Thread(target=progress_loop, name="progress", daemon=True)
+        progress_thread.start()
 
         def emit(rows: list[tuple]) -> None:
             with log_lock:
@@ -468,9 +537,33 @@ def execute_plan(
                     if decision == "delete":
                         prog["delete_bytes"] += size
 
+        listing_started = time.monotonic()
+        profile_slot = threading.Lock()
+
+        def profiled_root(root: str) -> list[tuple] | None:
+            # Native profilers share a process-wide monitoring slot on recent
+            # Python versions. Profile one reader at a time; other readers
+            # still run concurrently, without waiting for the profiler.
+            if not profile_dir or not profile_slot.acquire(blocking=False):
+                return do_root(root)
+            import cProfile
+            from hashlib import sha256
+            from pathlib import Path
+
+            directory = Path(profile_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            profile = cProfile.Profile()
+            try:
+                return profile.runcall(do_root, root)
+            finally:
+                try:
+                    profile.dump_stats(str(directory / f"{bucket}-{sha256(root.encode()).hexdigest()[:16]}.pstats"))
+                finally:
+                    profile_slot.release()
+
         try:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                for done in pool.map(do_root, roots):
+                for done in pool.map(profiled_root, roots):
                     with log_lock:
                         prog["roots_done"] += 1
                     if done is None:
@@ -499,7 +592,9 @@ def execute_plan(
             with log_lock:
                 flush_log(final=True)
             prog_stop.set()
+            progress_thread.join()
             write_progress(final=True)
+        listing_seconds = time.monotonic() - listing_started
         summary["buckets"][bucket] = {
             "missing_perms": missing_perms,
             "soft_delete_days": soft_delete_days,
@@ -507,6 +602,13 @@ def execute_plan(
             "delete_bytes": total_deleted_b,
             "drift_dirs": drift_dirs,
             "failed_dirs": failed_dirs,
+            "performance": {
+                "manifest_seconds": round(manifest_seconds, 3),
+                "listing_seconds": round(listing_seconds, 3),
+                "listing_workers": workers,
+                "listing_roots": len(roots),
+                "manifest_objects_per_second": round(len(mt) / listing_seconds, 1) if listing_seconds else None,
+            },
             "bands": {b: dict(c) for b, c in bands.items()},
             **({"interrupted": {"roots_skipped": roots_skipped, "roots": len(roots)}} if roots_skipped else {}),
         }
@@ -516,6 +618,7 @@ def execute_plan(
             f"{len(drift_dirs):,} drifted dir(s){' (skipped)' if drift == 'skip' else ''}"
             + (f", {counts['delete_failed']:,} deletes UNANSWERED in {len(failed_dirs):,} dir(s)" if failed_dirs else "")
             + (f" — STOPPED with {roots_skipped:,} of {len(roots):,} roots not started" if roots_skipped else "")
+            + f" in {listing_seconds:.1f}s ({len(mt) / listing_seconds:,.0f} manifest objects/s, {workers} listing workers)"
         )
 
     if dpool is not None:

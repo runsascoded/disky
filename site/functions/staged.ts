@@ -27,7 +27,7 @@ export const onRequest = async (ctx: { request: Request; env: Env }): Promise<Re
     }
   }
   return unfurlShell(ctx, {
-    title: n ? `Staged for deletion (${n.toLocaleString('en-US')})` : 'Staged for deletion',
+    title: 'Staged for deletion',
     desc: stagedDesc(plan, n),
     image: await assetImage(ctx, '/og-staged.jpg') ?? `${origin}/og.jpg`,
     page: `${origin}/staged`,

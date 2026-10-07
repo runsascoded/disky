@@ -7,6 +7,12 @@ import type { BatchConfig } from './batchConfig.js'
 import { shared } from './shared.js'
 
 export const batchJobsUrl = (cfg: BatchConfig, region: string): string => `https://batch.googleapis.com/v1/projects/${cfg.project}/locations/${region}/jobs`
+/** Logs Explorer for one Batch job, with an explicit lower time bound so an
+ * old run does not inherit the console's "last 5 minutes" default. */
+export const batchLogsUrl = (project: string, uid: string, created: string): string => {
+  const query = `labels.job_uid="${uid}"\nlog_id("batch_task_logs")\ntimestamp >= "${created}"`
+  return `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(query)}?project=${encodeURIComponent(project)}`
+}
 /** Where a sweep job runs: the one region its bucket cut lives in
  * (`BUCKET_REGIONS`), else the default (an uncut run touches several regions;
  * nowhere is right for all). A sweep executor runs beside its bucket: every
