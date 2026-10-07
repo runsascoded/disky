@@ -1455,6 +1455,21 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     // Who minted the link, under its created timestamp.
     .by { font-size: 11px; color: var(--ink-2); }
     tr.revoked td { opacity: 0.5; }
+    .expired { color: var(--del, #c33); font-size: 12px; }
+    .expires-edit { display: flex; flex-direction: column; gap: 6px; input { font: inherit; } }
+    // The redeem count opens the link's activity log in a row beneath it.
+    .log-toggle {
+      background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer;
+      .caret { color: var(--ink-2); font-size: 11px; }
+      &:hover .caret { color: var(--ink); }
+    }
+    tr.grant-log-row > td { padding: 4px 8px 10px 24px; }
+    .grant-log {
+      border-collapse: collapse; font-size: 12px;
+      th, td { padding: 2px 10px 2px 0; border-bottom: 0; }
+      th { position: static; color: var(--ink-2); font-weight: normal; }
+      .ua { max-width: 36em; overflow-wrap: anywhere; color: var(--ink-2); }
+    }
     .revoked-label { font-size: 12px; }
     // Rotate / revoke: side-by-side icon buttons, muted until hovered.
     .row-actions { display: inline-flex; align-items: center; gap: 10px; }
