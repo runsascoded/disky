@@ -39,10 +39,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
 }
 
 // The wall: Google-first (one button, no typing), with an emailed-code fallback
-// for the non-Google tail. The Google button is Google's own in-page one
-// (`oneTap`): personalized to the account the browser is signed into, it signs
-// in with one click and no round-trip through the account chooser; where
-// Google's script can't load it degrades to the redirect flow (`/auth/google`).
+// for the non-Google tail. A first visit gets Google's own in-page button
+// (`oneTap`); with several Google accounts in the browser it can still open
+// Google's account chooser. A returning visitor (the `oa_google_hint` cookie a
+// Google sign-in leaves, surviving sign-out) gets "Continue as <them>" instead:
+// the redirect flow (`/auth/google`) with `login_hint`, which skips the chooser,
+// plus a "Not <them>?" link to it. Google's prompt with auto-select signs a
+// returning visitor in with no click at all, once their account has granted
+// this client through the button or prompt. Where Google's script can't load,
+// the button degrades to the plain redirect.
 // The request-access form + how-to prose fold behind a disclosure — they're the
 // tail for people the policy doesn't yet admit (not staff, not a viewer
 // domain, no `allowed_emails` row), not the wall itself — and unfold on a
@@ -103,6 +108,7 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
               nonceEndpoint: '/auth/google/onetap/nonce',
               verifyEndpoint: '/auth/google/onetap',
               onDenied,
+              prompt: { autoSelect: true },
               className: 'signin-onetap',
               // GSI takes a fixed pixel width (≤ 400): fill the card's inner
               // width (440 max − 2×32 padding), less on a narrow phone.
@@ -110,7 +116,7 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
             } : undefined}
             emailAuth={{ startEndpoint: '/auth/email/start', verifyEndpoint: '/auth/email/code' }}
             onSignedIn={() => { forget(); if (next) navigate(next, { replace: true }) }}
-            classNames={{ root: 'signin-panel', googleButton: 'signin', divider: 'signin-or' }}
+            classNames={{ root: 'signin-panel', googleButton: 'signin', switchAccount: 'signin-switch', divider: 'signin-or' }}
           />
         )}
         <details className="signin-more" open={Boolean(denied)}>

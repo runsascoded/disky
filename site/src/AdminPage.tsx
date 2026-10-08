@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { AvatarField } from '@open-athena/auth/react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
@@ -85,6 +85,123 @@ function MemoCell({ grant, onSave, saving }: { grant: Grant; onSave: (note: stri
   )
 }
 
+/** `<input type="date">`'s value for a unix time, in local time. */
+const dateValue = (ts: number): string => {
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+/** The end of a local calendar day (`YYYY-MM-DD`), as a unix time: a link set
+ *  to expire "on the 12th" works through the 12th. */
+const endOfDay = (value: string): number => {
+  const [y, m, d] = value.split('-').map(Number)
+  return Math.floor(new Date(y, m - 1, d, 23, 59, 59).getTime() / 1000)
+}
+
+/** A link's expiry, editable in place (`PATCH … { expiresAt }`): pick a day to
+ *  shorten or extend it, or "Never". An expiry in the past stops the link at
+ *  once and ends the sessions it minted; moving it forward revives it. */
+function ExpiresCell({ grant, onSave, saving }: { grant: Grant; onSave: (expiresAt: number | null) => void; saving: boolean }) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const expired = grant.expiresAt != null && grant.expiresAt * 1000 < Date.now()
+  const label = grant.expiresAt == null ? <em>never</em> : <>{fmtTs(grant.expiresAt)}{expired && <span className="expired"> expired</span>}</>
+  if (grant.revokedAt) return label
+  if (draft == null) {
+    const initial = grant.expiresAt ?? Math.floor(Date.now() / 1000) + 30 * 86400
+    return (
+      <button type="button" className="memo-edit" aria-label="Edit expiry" onClick={() => setDraft(dateValue(initial))} disabled={saving}>
+        {label}
+      </button>
+    )
+  }
+  const save = (expiresAt: number | null) => {
+    setDraft(null)
+    if (expiresAt !== grant.expiresAt) onSave(expiresAt)
+  }
+  return (
+    <form
+      className="expires-edit"
+      onSubmit={e => {
+        e.preventDefault()
+        if (draft) save(endOfDay(draft))
+      }}
+      onKeyDown={e => { if (e.key === 'Escape') setDraft(null) }}
+    >
+      <input type="date" autoFocus value={draft} onChange={e => setDraft(e.target.value)} aria-label="Expires on" />
+      <div className="row-actions">
+        <button type="submit" disabled={!draft}>Save</button>
+        <button type="button" onClick={() => save(null)}>Never</button>
+        <button type="button" onClick={() => setDraft(null)}>Cancel</button>
+      </div>
+    </form>
+  )
+}
+
+/** One `access_log` row for a link (`GET /api/auth/log?grant=`). `ipHash` is
+ *  an HMAC of the address; raw IPs are never stored. `city`/`region`/`asOrg`
+ *  (Cloudflare's `request.cf`) are null on rows logged before auth `e14287a`. */
+interface LogEvent {
+  id: number
+  ts: number
+  event: string
+  sessionSub: string | null
+  path: string | null
+  reason: string | null
+  country: string | null
+  ua: string | null
+  ipHash: string | null
+  referer: string | null
+  city: string | null
+  region: string | null
+  asOrg: string | null
+}
+
+/** "Brooklyn, NY, US": the most specific location the log has. */
+const where = (e: LogEvent): string => [e.city, e.region, e.country].filter(Boolean).join(', ') || '—'
+
+/** A link's lifecycle events (mint, redeem, deny, revoke…), newest first;
+ *  page views only when the gate logs them. */
+function GrantLog({ id }: { id: string }) {
+  const q = useQuery<{ events: LogEvent[] }, Error>({
+    queryKey: ['auth', 'log', id],
+    queryFn: async () => {
+      const r = await fetch(`/api/auth/log?grant=${encodeURIComponent(id)}&limit=200`, { credentials: 'include' })
+      if (!r.ok) throw new Error(`log: ${r.status}`)
+      return r.json()
+    },
+  })
+  if (q.error) return <p className="err">{q.error.message}</p>
+  if (!q.data) return <p className="dim">loading…</p>
+  const events = q.data.events
+  if (!events.length) return <p className="dim">no events logged</p>
+  const hasNetwork = events.some(e => e.asOrg != null)
+  return (
+    <table className="grant-log">
+      <thead>
+        <tr>
+          <th>when</th><th>event</th><th>where</th>
+          {hasNetwork && <th>network</th>}
+          <th>client</th><th>browser</th>
+          <th>detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        {events.map(e => (
+          <tr key={e.id}>
+            <td>{fmtTs(e.ts)}</td>
+            <td>{e.event}</td>
+            <td>{where(e)}</td>
+            {hasNetwork && <td>{e.asOrg ?? '—'}</td>}
+            <td><code>{e.ipHash ? e.ipHash.slice(0, 8) : '—'}</code></td>
+            <td className="ua">{e.ua ?? '—'}</td>
+            <td>{e.reason ?? e.path ?? ''}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 const linkFor = (token: string): string => `${window.location.origin}/?key=${token}`
 
 /** `POST /api/auth/grants`' allowlist outcome for a link minted with `allowlist: true`. */
@@ -103,7 +220,7 @@ const holderName = (g: Grant): string | null => g.subject?.name || g.subject?.em
 /** A body for `PATCH /api/auth/grants/:id`: the memo, or the holder's name and
  *  face (`avatar` absent = keep it, null = clear, a `data:` URI = replace;
  *  copied server-side, as at mint). */
-type GrantEdit = { note?: string | null; subjectName?: string | null; avatar?: string | null }
+type GrantEdit = { note?: string | null; subjectName?: string | null; avatar?: string | null; expiresAt?: number | null }
 
 /** Who a link is for, editable in place: click to rename the holder or change
  *  their face (`<AvatarField>`, the mint form's picker), Save or Cancel. */
@@ -200,6 +317,7 @@ export function AdminPage() {
   const [access, setAccess] = useState<Access>(draft.access ?? (draft.readOnly === false ? 'view' : 'read'))
   // Admin is an account's, so it needs an email; without one it reads as Viewer.
   const effAccess: Access = access === 'admin' && !email.trim() ? 'view' : access
+  const [openLog, setOpenLog] = useState<string | null>(null)
   const [minted, setMinted] = useState<{ label: string; url: string; allowed: Allowed | null; admin: AdminResult | null } | null>(null)
 
   useEffect(() => {
@@ -446,7 +564,8 @@ export function AdminPage() {
         </thead>
         <tbody>
           {shown.map(g => (
-            <tr key={g.id} className={g.revokedAt ? 'revoked' : ''}>
+            <Fragment key={g.id}>
+            <tr className={g.revokedAt ? 'revoked' : ''}>
               <td className="memo"><MemoCell grant={g} onSave={note => editGrant.mutate({ id: g.id, edit: { note } })} saving={editGrant.isPending} /></td>
               <td>
                 <HolderCell
@@ -457,9 +576,13 @@ export function AdminPage() {
                 />
               </td>
               <td>{g.scopes.join(' ')}</td>
-              <td>{g.redeems}{g.maxRedeems != null ? `/${g.maxRedeems}` : ''}</td>
+              <td>
+                <button type="button" className="log-toggle" aria-expanded={openLog === g.id} aria-label="Show this link's activity" onClick={() => setOpenLog(openLog === g.id ? null : g.id)}>
+                  {g.redeems}{g.maxRedeems != null ? `/${g.maxRedeems}` : ''} <span className="caret">{openLog === g.id ? '▾' : '▸'}</span>
+                </button>
+              </td>
               <td>{fmtTs(g.lastUsedAt)}</td>
-              <td>{fmtTs(g.expiresAt)}</td>
+              <td><ExpiresCell grant={g} onSave={expiresAt => editGrant.mutate({ id: g.id, edit: { expiresAt } })} saving={editGrant.isPending && editGrant.variables?.id === g.id} /></td>
               <td>{fmtTs(g.createdAt)}<div className="by">{g.createdBy}</div></td>
               <td>
                 {g.revokedAt
@@ -472,6 +595,10 @@ export function AdminPage() {
                   )}
               </td>
             </tr>
+            {openLog === g.id && (
+              <tr className="grant-log-row"><td colSpan={8}><GrantLog id={g.id} /></td></tr>
+            )}
+            </Fragment>
           ))}
           {!shown.length && !grantsQ.isPending && (
             <tr><td colSpan={8}><em>{grants.length ? 'no active links (all revoked)' : 'no links created yet'}</em></td></tr>

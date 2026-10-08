@@ -102,6 +102,27 @@ def test_qlabel_and_bucket_clause():
     )
 
 
+def test_tail_zone_shared_quota():
+    # `hot-data` and `side-data` share zone `z8`'s 100 TiB: one clause, the zone's free;
+    # `more-data` (no config) and the primary keep their own clauses, in meta order
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8"),
+        "side-data": E.Bucket("side", z8, "z8"),
+    })
+    day = D.DayRow(
+        date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0,
+        since=None, extra={"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0},
+    )
+    u = lambda b: f"{SITE}/{b}?d=260923-1201#over-time"
+    assert D._tail(day, cfg) == (
+        f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
+        f" · [hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+        f" · [more-data]({u('more-data')}): 2 Ti"
+    )
+
+
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
     """A multi-bucket scan's meta.json (specs/done/cw-multi-bucket.md §2)."""
     return {
@@ -253,6 +274,11 @@ buckets:
     ({"buckets": {"b": {"quota": {"bytes": "1 PB", "name": "1 PB", "shrt": "1P"}}}}, "unknown digest config keys in buckets.b.quota: ['shrt']"),
     ({"buckets": {"b": {"quota": {"bytes": "1 PB"}}}}, "digest config buckets.b.quota: missing ['name']"),
     ({"buckets": {"b": {"label": 2}}}, "digest config buckets.b.label: expected a string, got 2"),
+    ({"buckets": {"b": {"zone": 8}}}, "digest config buckets.b.zone: expected a string, got 8"),
+    (
+        {"buckets": {"a": {"zone": "z", "quota": {"bytes": "1 PB", "name": "1 PB"}}, "b": {"zone": "z"}}},
+        "digest config buckets.b: zone 'z' quota differs from buckets.a's",
+    ),
     ({"buckets": ["b"]}, "digest config buckets: expected a mapping, got list"),
     ({"buckets": {"b": {"quota": {"bytes": "lots", "name": "x"}}}}, "not a size: 'lots'"),
     ({"prices": {"1": "cheap"}}, "digest config prices: expected numbers, got {'1': 'cheap'}"),

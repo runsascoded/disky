@@ -11,6 +11,7 @@
  */
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
+import { hasLedger } from '../_lib/ledger.js'
 import { ownerTotals } from '../_lib/ownerTotals.js'
 import { storeReady } from '../_lib/index.js'
 
@@ -22,6 +23,8 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   if (notHere) return notHere
   const { env, request } = ctx
   if (!env.DB) return json({ error: 'ledger backend not configured (DB)' }, 503)
+  // cw's D1 (and any lineage without the ledger tables) has no ownership to read.
+  if (!(await hasLedger(env))) return json({ error: 'no ownership ledger on this deployment' }, 404)
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated

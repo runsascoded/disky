@@ -23,6 +23,7 @@ import { type Ctx, json, requireAssigner, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
 import { ownerIdFor } from '../_lib/me.js'
 import { actionLog } from '../_lib/actionLog.js'
+import { hasLedger } from '../_lib/ledger.js'
 import { NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
 
 const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -68,6 +69,8 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   if (notHere) return notHere
   const { request, env } = ctx
   if (!env.DB) return json({ error: 'actions backend not configured (DB)' }, 503)
+  // cw's D1 (and any lineage without the ledger tables) has no ownership to read or write.
+  if (!(await hasLedger(env))) return json({ error: 'no ownership ledger on this deployment' }, 404)
 
   if (request.method === 'GET') {
     const gated = await requireViewer(ctx)
