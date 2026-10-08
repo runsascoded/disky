@@ -137,24 +137,23 @@ function ExpiresCell({ grant, onSave, saving }: { grant: Grant; onSave: (expires
   )
 }
 
-/** One `access_log` row for a link (`GET /api/auth/log?grant=`). `ua` /
- *  `ip_hash` / `referer` / `city` / `region` / `as_org` arrive once
- *  `@open-athena/auth` returns them (its `specs/log-client-fields.md`); IPs
- *  are only ever an HMAC. */
+/** One `access_log` row for a link (`GET /api/auth/log?grant=`). `ipHash` is
+ *  an HMAC of the address; raw IPs are never stored. `city`/`region`/`asOrg`
+ *  (Cloudflare's `request.cf`) are null on rows logged before auth `e14287a`. */
 interface LogEvent {
   id: number
   ts: number
   event: string
-  session_sub: string | null
+  sessionSub: string | null
   path: string | null
   reason: string | null
   country: string | null
-  ua?: string | null
-  ip_hash?: string | null
-  referer?: string | null
-  city?: string | null
-  region?: string | null
-  as_org?: string | null
+  ua: string | null
+  ipHash: string | null
+  referer: string | null
+  city: string | null
+  region: string | null
+  asOrg: string | null
 }
 
 /** "Brooklyn, NY, US": the most specific location the log has. */
@@ -175,15 +174,14 @@ function GrantLog({ id }: { id: string }) {
   if (!q.data) return <p className="dim">loading…</p>
   const events = q.data.events
   if (!events.length) return <p className="dim">no events logged</p>
-  const hasClient = events.some(e => e.ua != null || e.ip_hash != null)
-  const hasNetwork = events.some(e => e.as_org != null)
+  const hasNetwork = events.some(e => e.asOrg != null)
   return (
     <table className="grant-log">
       <thead>
         <tr>
           <th>when</th><th>event</th><th>where</th>
           {hasNetwork && <th>network</th>}
-          {hasClient && <><th>client</th><th>browser</th></>}
+          <th>client</th><th>browser</th>
           <th>detail</th>
         </tr>
       </thead>
@@ -193,8 +191,9 @@ function GrantLog({ id }: { id: string }) {
             <td>{fmtTs(e.ts)}</td>
             <td>{e.event}</td>
             <td>{where(e)}</td>
-            {hasNetwork && <td>{e.as_org ?? '—'}</td>}
-            {hasClient && <><td><code>{e.ip_hash ? e.ip_hash.slice(0, 8) : '—'}</code></td><td className="ua">{e.ua ?? '—'}</td></>}
+            {hasNetwork && <td>{e.asOrg ?? '—'}</td>}
+            <td><code>{e.ipHash ? e.ipHash.slice(0, 8) : '—'}</code></td>
+            <td className="ua">{e.ua ?? '—'}</td>
             <td>{e.reason ?? e.path ?? ''}</td>
           </tr>
         ))}
