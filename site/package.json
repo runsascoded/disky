@@ -20,7 +20,7 @@
   "dependencies": {
     "@disk-tree/react": "workspace:*",
     "@floating-ui/react": "^0.27.20",
-    "@open-athena/auth": "github:Open-Athena/auth#ffa8070fd545a3e2ba5a436a0e94da81e9a9ec0a",
+    "@open-athena/auth": "github:Open-Athena/auth#996f05da822081604a2ffc4cbb750d0add9c198a",
     "@rdub/file-tree": "https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b",
     "@rdub/treemap": "workspace:*",
     "@resvg/resvg-wasm": "^2.6.2",

@@ -35,3 +35,10 @@ With several Google accounts in one browser (e.g. an OA and a personal account),
 - Click "Continue as". You should land signed in with no Google page.
 - Click "Not you?". Google's chooser should appear.
 - Sign in as an account the policy refuses. On the next visit, the wall shows Google's button again, with no hint.
+
+## As built (m3, 2026-10-08)
+
+- Items 1–5 as written: auth pinned at `996f05d` (auth `b418767`; m3 had already applied `0002` as `migrations/cw/0013_access_log_location.sql`), the nonce handler passes the request, `classNames.switchAccount: 'signin-switch'` (small muted, centered), `prompt: { autoSelect: true }`, and the `LoginWall` comment rewritten.
+- Item 6: no change. In the macOS app `oneTap` is undefined, so the wall keeps its "Continue with Google in your browser" hand-off. The browser-side `/auth/google` it reaches is hinted server-side.
+- Verified on dev.disk.rbw.sh with an `oa_google_hint` cookie: the nonce returns `loginHint`, `/auth/google` redirects with `login_hint`, `?account=choose` with `prompt=select_account` and no hint, and `/signin` shows "Continue as <address>" (`/auth/google?next=%2F`) and "Not <address>? Use another Google account" (`…&account=choose`).
+- Not verified: the Google click-through itself (a real sign-in), and the auto-select prompt.

@@ -131,8 +131,8 @@ importers:
         specifier: ^0.27.20
         version: 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@open-athena/auth':
-        specifier: github:Open-Athena/auth#ffa8070fd545a3e2ba5a436a0e94da81e9a9ec0a
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/ffa8070fd545a3e2ba5a436a0e94da81e9a9ec0a(@cloudflare/workers-types@5.20260906.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)
+        specifier: github:Open-Athena/auth#996f05da822081604a2ffc4cbb750d0add9c198a
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a(@cloudflare/workers-types@5.20260906.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)
       '@rdub/file-tree':
         specifier: https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b
         version: https://codeload.github.com/runsascoded/file-tree/tar.gz/9d9bd749469aa4ae76b860ea9a403c3ab18df80b(@rdub/treemap@packages+treemap)(highlight.js@11.12.0)(hyparquet@1.30.0)(jq-web@0.6.2)(react-dom@19.2.8(react@19.2.8))(react-markdown@10.1.0(@types/react@19.2.18)(react@19.2.8))(react-router-dom@6.30.6(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(remark-gfm@4.0.1)(use-prms@0.5.0(react@19.2.8))(wa-sqlite@1.0.0)(yaml@2.9.1)
@@ -881,9 +881,9 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/ffa8070fd545a3e2ba5a436a0e94da81e9a9ec0a':
-    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/ffa8070fd545a3e2ba5a436a0e94da81e9a9ec0a}
-    version: 0.1.0-dist.e14287a
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a':
+    resolution: {tarball: https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a}
+    version: 0.1.0-dist.b418767
     peerDependencies:
       '@cloudflare/workers-types': '*'
       '@tanstack/react-query': ^5.0.0
@@ -3143,7 +3143,7 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/ffa8070fd545a3e2ba5a436a0e94da81e9a9ec0a(@cloudflare/workers-types@5.20260906.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)':
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a(@cloudflare/workers-types@5.20260906.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)':
     optionalDependencies:
       '@cloudflare/workers-types': 5.20260906.1
       '@tanstack/react-query': 5.101.4(react@19.2.8)

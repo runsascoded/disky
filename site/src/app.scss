@@ -784,6 +784,12 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
       // Google's own rendered button (`oneTap`): GSI sizes it to its content,
       // so centre it; the box reserves the button's height while GSI loads.
       .signin-onetap { display: flex; justify-content: center; min-height: 40px; }
+      // "Not <you>? Use another Google account", under "Continue as <you>".
+      .signin-switch {
+        display: block; margin-top: 8px; text-align: center;
+        font-size: 13px; color: var(--ink-3);
+        &:hover { color: var(--ink); }
+      }
       // The panel emits an empty <div class="signin-or">; draw the rule with a
       // gradient and the "or" label as ::before, masked by the card background.
       .signin-or {
