@@ -1252,6 +1252,90 @@ export async function readSizeRects(
   return decodeSpans(h, kept, r => r.size >= thrAt(r.depth) && inRect(r) && lensOk(r))
 }
 
+/** One page of the size sort's candidate groups for a path range, in sort
+ * (`rg`) order, after group `after` — `selectSizeSpans`'s predicate with no
+ * byte floor, paged instead of capped. */
+async function pageSizeSpans(h: IndexHandle, range: { pLo: string; pHi: string }, after: number, limit: number): Promise<Span[]> {
+  if (h.mode !== 'd1') {
+    const pass = (g: Parameters<typeof groupMatchesSize>[0]) => groupMatchesSize(g, [range])
+    const all = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
+    return all.filter(g => g.rg > after).sort((a, b) => a.rg - b.rg).slice(0, limit)
+  }
+  const sql = 'SELECT rg, d_min, d_max, p_min, p_max, b_max, row_start, row_end FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? AND p_max >= ? AND p_min < ? AND rg > ? ORDER BY rg LIMIT ?'
+  const res = await h.env.DB!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, range.pLo, range.pHi, after, limit).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
+  return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
+}
+
+/** `⌊log2 b⌋`, the size sort's bucket (size 0: −1, below every bucket). */
+const bucketOf = (b: number): number => (b > 0 ? Math.floor(Math.log2(b)) : -1)
+
+/** Candidate groups fetched per span query, and decoded per round at most
+ * (rounds start at one group and double: most answers need one or two). */
+const LARGEST_PAGE = 32
+const LARGEST_BATCH = 8
+/** Groups a largest-files read decodes at most (a subtree whose top buckets hold mostly other paths' rows). */
+export const LARGEST_MAX_GROUPS = 64
+
+/** What `readLargest` answers: the files, size-descending (ties by path),
+ * the size-sort groups it decoded, and whether files beyond them exist or
+ * may (more matched than `n`, or candidate groups were left unread). */
+export interface Largest { rows: Row[]; groups: number[]; decoded: number; more: boolean; capped: boolean }
+
+/** The `n` largest objects (never dirs) under `path` (`''` = the store root),
+ * from a store generation's `bysize` sort: its groups in sort order — largest
+ * size bucket first — restricted by the span query to those whose path range
+ * meets `[P/, P0)`, decoding each round's groups and keeping object rows
+ * under P. A group whose `b_max` is below the current n-th size is skipped
+ * undecoded, and the read stops once a group's top bucket is below the n-th
+ * size's: buckets only fall along the sort, so no later group can hold a row
+ * that big (within a bucket rows are path-sorted, so a same-bucket group may
+ * still beat the n-th, and is read). At most `LARGEST_MAX_GROUPS` groups. */
+export async function readLargest(h: IndexHandle, path: string, n: number, maxGroups = LARGEST_MAX_GROUPS): Promise<Largest> {
+  const range = path === '' ? { pLo: '', pHi: '￿' } : { pLo: path + '/', pHi: path + '0' }
+  const under = (p: string) => p >= range.pLo && p < range.pHi
+  const order = (a: Row, b: Row) => b.size - a.size || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  let top: Row[] = []
+  let matched = 0
+  const groups: number[] = []
+  let decoded = 0
+  let after = -1
+  let pending: Span[] = []
+  let exhausted = false
+  let width = 1
+  const nth = () => (top.length >= n ? top[n - 1].size : -1)
+  for (;;) {
+    if (!pending.length && !exhausted) {
+      const t0 = now()
+      pending = await pageSizeSpans(h, range, after, LARGEST_PAGE)
+      h.trace?.('spans', now() - t0)
+      if (pending.length < LARGEST_PAGE) exhausted = true
+      if (pending.length) after = pending[pending.length - 1].rg
+    }
+    if (!pending.length) return { rows: top, groups, decoded, more: matched > n, capped: false }
+    // This round: the next groups that could still place a row, up to the batch.
+    const batch: Span[] = []
+    const room = Math.min(width, maxGroups - groups.length)
+    while (pending.length && batch.length < Math.max(1, room)) {
+      const g = pending[0]
+      const t = nth()
+      // A group whose top bucket is below the n-th size's: it and every later group are out.
+      if (t >= 0 && bucketOf(g.bMax) < bucketOf(t)) return { rows: top, groups, decoded, more: true, capped: false }
+      pending.shift()
+      if (t >= 0 && g.bMax < t) continue
+      batch.push(g)
+    }
+    if (!batch.length) continue
+    // Out of budget with a group still able to place a row.
+    if (room <= 0) return { rows: top, groups, decoded, more: true, capped: true }
+    const rows = await decodeSpans(h, batch, r => r.kind === 'file' && under(r.path))
+    groups.push(...batch.map(g => g.rg))
+    decoded += batch.reduce((s, g) => s + (g.rowEnd - g.rowStart), 0)
+    matched += rows.length
+    width = Math.min(LARGEST_BATCH, 2 * width)
+    top = [...top, ...rows].sort(order).slice(0, n)
+  }
+}
+
 /** A point lookup `(depth, path)` or a one-level range under a prefix. */
 export type Ask = { depth: number; path: string } | { depth: number; under: string }
 
