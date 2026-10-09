@@ -104,7 +104,7 @@ def log_entries(
 def task_log_filter(uid: str, grep: str | None = None) -> str:
     f = f'labels.job_uid="{uid}" log_id("batch_task_logs")'
     if grep:
-        f += f' textPayload=~"{grep}"'
+        f += f' (textPayload=~"{grep}" OR jsonPayload.message=~"{grep}")'
     return f
 
 

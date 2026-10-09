@@ -50,7 +50,11 @@ def config_file(cfg: E.DigestConfig, path: Path) -> Path:
                   "icons_dir", "plot_project", "plot_branch", "plot_base", "variant", "reply_hour", "provisional", "primary")
     }
     d["buckets"] = {
-        name: {"label": b.label, **({"quota": {"bytes": b.quota.bytes, "name": b.quota.name, "short": b.quota.short}} if b.quota else {})}
+        name: {
+            "label": b.label,
+            **({"quota": {"bytes": b.quota.bytes, "name": b.quota.name, "short": b.quota.short}} if b.quota else {}),
+            **({"zone": b.zone} if b.zone else {}),
+        }
         for name, b in cfg.buckets.items()
     }
     d["prices"] = dict(cfg.prices)

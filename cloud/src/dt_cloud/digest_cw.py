@@ -9,7 +9,8 @@ TiB (Δ)` per other bucket), per-ISO-week bullets, and a quota sparkline + diff
 treemap (`digest_plot.render_quota`). ONE REPLY PER UTC DAY, Δ over the prior
 day's reply scan, the arrow normalised to the real interval; its tail is a
 linked `[<label>](<over-time>): NN.N% of <quota> (<free> Ti free)` clause per
-bucket (`cfg.buckets`; a bucket without a quota shows raw TiB).
+bucket (`cfg.buckets`; a bucket without a quota shows raw TiB; buckets sharing
+a `zone` collapse into one clause against the zone's quota).
 
 Two reply VARIANTS because Slack fixes a message's username + icon at post
 time (`chat.update` can't change them):
@@ -80,26 +81,47 @@ def _diff_url(scan: str, since: dt.datetime | None, site_url: str, bucket: str =
     return f"{site_url}/{bucket}?d={_dlink(scan)}{span}#over-time"
 
 
+def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestConfig) -> str:
+    """`[<label>](<over-time url>)` for one bucket."""
+    b = cfg.buckets.get(bucket)
+    return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, bucket)})"
+
+
+def _quota_clause(tb: float, q: Quota) -> str:
+    qt = q.bytes / TIB
+    return f"{tb / qt * 100:.1f}% of {q.short or _qlabel(q.bytes)} ({qt - tb:,.1f} Ti free)"
+
+
 def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None, cfg: DigestConfig) -> str:
     """`[<label>](<over-time url>): NN.N% of <quota> (<free> Ti free)` for one
     bucket; a bucket with no known quota renders its raw TiB."""
     b = cfg.buckets.get(bucket)
-    label = (b.label if b else None) or bucket
-    url = _diff_url(scan, since, cfg.site_url, bucket)
     q = b.quota if b else None
-    if q is None:
-        return f"[{label}]({url}): {tb:,.0f} Ti"
-    qt = q.bytes / TIB
-    return f"[{label}]({url}): {tb / qt * 100:.1f}% of {q.short or _qlabel(q.bytes)} ({qt - tb:,.1f} Ti free)"
+    link = _bucket_link(bucket, scan, since, cfg)
+    return f"{link}: {tb:,.0f} Ti" if q is None else f"{link}: {_quota_clause(tb, q)}"
+
+
+def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime | None, cfg: DigestConfig) -> str:
+    """Buckets sharing a zone quota as one clause: `[<a>](…) 82 + [<b>](…) 3 Ti:
+    NN.N% of <quota> (<free> Ti free)` — the free figure is the zone's."""
+    q = cfg.buckets[members[0][0]].quota
+    parts = " + ".join(f"{_bucket_link(b, scan, since, cfg)} {tb:,.0f}" for b, tb in members)
+    total = sum(tb for _, tb in members)
+    return f"{parts} Ti" + (f": {_quota_clause(total, q)}" if q else "")
 
 
 def _tail(day: DayRow, cfg: DigestConfig) -> str:
     """The daily reply's per-bucket tail: the primary then each extra bucket as
-    a linked `% of quota (free)` clause, ` · `-joined."""
-    clauses = [_bucket_clause(cfg.primary, day.tb, day.scan, day.since, cfg)]
-    for b, tb in day.extra.items():
-        clauses.append(_bucket_clause(b, tb, day.scan, day.since, cfg))
-    return " · ".join(clauses)
+    a linked `% of quota (free)` clause, ` · `-joined. Buckets sharing a
+    ``zone`` collapse into one clause at the first one's position."""
+    groups: dict[str, list[tuple[str, float]]] = {}
+    for b, tb in [(cfg.primary, day.tb), *day.extra.items()]:
+        z = cfg.buckets[b].zone if b in cfg.buckets else None
+        groups.setdefault(f"zone:{z}" if z else f"bucket:{b}", []).append((b, tb))
+    return " · ".join(
+        _bucket_clause(*g[0], day.scan, day.since, cfg) if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg)
+        for g in groups.values()
+    )
 
 
 @dataclass(frozen=True)

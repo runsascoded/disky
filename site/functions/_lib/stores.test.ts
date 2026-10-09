@@ -118,9 +118,9 @@ describe('withStore', () => {
 
 describe('cache keys', () => {
   it('the primary’s are unchanged; a secondary store’s get an `@<store>/` segment', () => {
-    expect(cacheKeyFor('series', 'a%2Fb?P=').url).toBe('https://series.cache/v2/a%2Fb?P=')
-    expect(cacheKeyFor('series', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v2/a%2Fb?P=')
-    expect(cacheKeyFor('series', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v2/@meta/a%2Fb?P=')
+    expect(cacheKeyFor('series', 'a%2Fb?P=').url).toBe('https://series.cache/v4/a%2Fb?P=')
+    expect(cacheKeyFor('series', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v4/a%2Fb?P=')
+    expect(cacheKeyFor('series', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v4/@meta/a%2Fb?P=')
   })
   it('over-time manifest datasets: `over-time` for the primary, `<store>:over-time` else', () => {
     expect([overTimeDataset(PRIMARY), overTimeDataset(storeEnv(PRIMARY, 'meta', META))]).toEqual(['over-time', 'meta:over-time'])
@@ -207,6 +207,6 @@ describe('handlers', () => {
     expect([r.status, await r.text()]).toEqual([401, '{"error":"unauthenticated"}\n'])
     // Localhost dev holds every scope, `admin` included.
     const dev = await requireViewer({ request: new Request('http://localhost/api/subtree?store=meta'), env: storeEnv(PRIMARY, 'meta', META) })
-    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'requests'], admin: true, via: 'session', subject: null })
+    expect(dev).toEqual({ email: 'dev@example.test', name: null, scopes: ['gcs', 'cw', 'admin', 'requests', 'cw:assign'], admin: true, via: 'session', subject: null })
   })
 })

@@ -12,15 +12,18 @@
  *                                `owner: null` clears; `'@me'` resolves to the
  *                                actor's canonical user id. Prefix patterns
  *                                only for now (regex expansion is the next
- *                                arc). Admin scope — guests are read-only.
+ *                                arc). The assign scope (every signed-in
+ *                                viewer, and their agent token) or admin;
+ *                                share links are read-only here.
  *
  * Anyone with the base scope can read; the ledger keeps the full
  * who-did-what trail.
  */
-import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
+import { type Ctx, json, requireAssigner, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
-import { canonId, loadRegistry } from '../_lib/identity.js'
+import { ownerIdFor } from '../_lib/me.js'
 import { actionLog } from '../_lib/actionLog.js'
+import { hasLedger } from '../_lib/ledger.js'
 import { NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
 
 const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -52,7 +55,7 @@ function validate(b: ActionBody, shape: PrefixShape): { error: string } | {
   // Touching the axis = the key is present (null = clear); `set_owner` may
   // also be passed explicitly.
   if (!(b.set_owner ?? 'owner' in b)) return bad('action must set an owner (null to clear)')
-  // '@me' = resolve the actor's canonical user id server-side (claims).
+  // '@me' = resolve the actor's canonical user id server-side (assignments).
   const owner = b.owner ?? null
   if (owner !== null && (typeof owner !== 'string' || owner.length > 128)) return bad('owner must be a user id')
   const memo = b.memo?.slice(0, 1024) ?? null
@@ -66,6 +69,8 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   if (notHere) return notHere
   const { request, env } = ctx
   if (!env.DB) return json({ error: 'actions backend not configured (DB)' }, 503)
+  // cw's D1 (and any lineage without the ledger tables) has no ownership to read or write.
+  if (!(await hasLedger(env))) return json({ error: 'no ownership ledger on this deployment' }, 404)
 
   if (request.method === 'GET') {
     const gated = await requireViewer(ctx)
@@ -85,11 +90,11 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
   }
 
   if (request.method === 'POST') {
-    // Assigning is admin-only: non-admins propose deletions by staging, not by
-    // writing the ledger directly (specs/share-link-hardening.md).
-    const id = await requireAdmin(ctx)
+    // Any signed-in viewer may assign any prefix to anyone (the ledger keeps
+    // who did it); a share link may not, unless minted with the assign scope.
+    const id = await requireAssigner(ctx)
     if (id instanceof Response) return id
-    if (!id.email) return json({ error: 'admin identity has no email' }, 403)
+    if (!id.email) return json({ error: 'assigning needs an identity with an email' }, 403)
     const raw = (await request.json()) as ActionBody | ActionBody[]
     const items = Array.isArray(raw) ? raw : [raw]
     if (!items.length || items.length > 500) return json({ error: 'expected 1–500 actions' }, 400)
@@ -101,11 +106,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     const ts = Math.floor(Date.now() / 1000)
     const ok = parsed as Exclude<ReturnType<typeof validate>, { error: string }>[]
     if (ok.some(p => p.owner === '@me')) {
-      const row = await env.DB.prepare('SELECT user FROM user_emails WHERE email = ?')
-        .bind(id.email.toLowerCase()).first<{ user: string }>()
-      // No `user_emails` row → the deployment registry's canonical id for the email's
-      // handle, never the raw email (an email owner matches no user).
-      const me = row?.user ?? canonId(id.email, await loadRegistry(env))
+      const me = await ownerIdFor(env, id.email)
       for (const p of ok) if (p.owner === '@me') p.owner = me
     }
     const stmts = []

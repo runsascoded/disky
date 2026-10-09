@@ -68,7 +68,7 @@ describe('POST /api/app-link — mint', () => {
     })
     expect(APP_LINK_TTL_S).toBe(60)
     expect(await grants(s.db)).toEqual([
-      { name: APP_LINK_NAME, email: VIEWER, scopes: 'cw', max_redeems: 1, redeems: 0, expires_at: nowS + 60, created_by: VIEWER, revoked: 0 },
+      { name: APP_LINK_NAME, email: VIEWER, scopes: 'cw cw:assign', max_redeems: 1, redeems: 0, expires_at: nowS + 60, created_by: VIEWER, revoked: 0 },
     ])
   })
 
@@ -79,9 +79,9 @@ describe('POST /api/app-link — mint', () => {
     }
     const rows = (await grants(s.db)) as { email: string; scopes: string }[]
     expect(rows.map(r => [r.email, r.scopes]).sort()).toEqual([
-      [OPS, 'cw admin'],
-      [STAFF, 'gcs cw admin requests'],
-      [VIEWER, 'cw'],
+      [OPS, 'cw cw:assign admin'],
+      [STAFF, 'gcs cw admin requests cw:assign'],
+      [VIEWER, 'cw cw:assign'],
     ])
   })
 
@@ -155,7 +155,7 @@ describe('GET /auth/app-link — redeem', () => {
     expect(redeemed(res)).toEqual({ status: 303, location: '/c/data', cookie: ['oa_auth'] })
     const cookie = res.headers.getSetCookie()[0].split(';')[0]
     const id = await identify({ request: new Request(`${ORIGIN}/`, { headers: { cookie } }), env: s.env })
-    expect(id).toEqual({ email: OPS, name: null, scopes: ['cw', 'admin'], admin: true, via: 'session', subject: null })
+    expect(id).toEqual({ email: OPS, name: null, scopes: ['cw', 'cw:assign', 'admin'], admin: true, via: 'session', subject: null })
   })
 
   it('twice → the second is refused; the spent token no longer works as a Bearer either', async () => {

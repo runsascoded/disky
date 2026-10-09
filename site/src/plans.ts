@@ -118,6 +118,16 @@ export function useClosePlan() {
 
 export interface RunBand { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new_objects: number; undone_objects: number }
 
+export function usePrefixHistory(planId: number | null, live: boolean) {
+  return useQuery<{ bands: import('./prefixExecution').PrefixBandRecord[] }, Error>({
+    queryKey: ['prefix-history', planId],
+    queryFn: () => call(`/api/plans/prefix-history?id=${planId}`),
+    enabled: planId != null && CAPS.runFiles,
+    refetchInterval: live ? 30_000 : false,
+    staleTime: 20_000,
+  })
+}
+
 /** One run's D1 record and its per-band rows (GET /api/plans/run?id=). */
 export function useRunDetail(runId: string, enabled: boolean, live = false) {
   return useQuery<{ run: DeletionRun; bands: RunBand[] }, Error>({

@@ -15,7 +15,7 @@ export interface OwnerRow {
 /** The resolved (effective) owner of a prefix, with provenance. */
 export interface Owner {
   prefix: string
-  /** Canonical user id (or email, for pre-mapping claims). */
+  /** Canonical user id (or email, for pre-mapping assignments). */
   who: string
   ts: number
   /** The assigner (`actions.actor`) and their memo — provenance. */
@@ -24,7 +24,7 @@ export interface Owner {
 }
 
 export interface OwnerIndex {
-  claimOf: (uri: string) => Owner | null
+  assignmentOf: (uri: string) => Owner | null
   /** Latest live row per prefix (normalized, trailing `/`). */
   owners: Map<string, OwnerRow>
   count: number
@@ -45,7 +45,7 @@ export function foldLatest<R extends { prefix: string; ts: number; action_id: nu
 
 /**
  * Lookups are O(depth): a prefix's owner is decided by the newest live row on
- * one of its ancestors-or-self, so `claimOf` walks the ~6 ancestor prefixes
+ * one of its ancestors-or-self, so `assignmentOf` walks the ~6 ancestor prefixes
  * and probes a Map — not a scan over every assignment.
  */
 export function ownerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIndex {
@@ -61,7 +61,7 @@ export function ownerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIndex
     }
     return out
   }
-  const claimOf = (uri: string): Owner | null => {
+  const assignmentOf = (uri: string): Owner | null => {
     const p = norm(uri)
     let win: OwnerRow | null = null
     for (const a of ancestors(p)) {
@@ -72,5 +72,5 @@ export function ownerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIndex
   }
   let count = 0
   for (const r of owners.values()) if (r.owner != null) count++
-  return { claimOf, owners, count }
+  return { assignmentOf, owners, count }
 }

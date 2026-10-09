@@ -77,10 +77,12 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # EXECUTOR = "plan-sweep"                     # `plan-sweep` (default) | `sweep`
 # JOB_SA = "<job>@<project>.iam.gserviceaccount.com"  # the service account dispatched Batch jobs run as (with GCP_SA_KEY)
 # GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
+# GCP_LOG_VIEW = "projects/my-project/locations/global/buckets/_Default/views/sweep-task-logs"  # IaC-managed task-log-only view; grant the site view-scoped logging.viewAccessor
 # BATCH_REGION = "us-central1"                 # the default Batch region (the default)
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
 # CF_ACCOUNT_ID = "<cf-account-id>"            # `sweep`: the Cloudflare account its runs are recorded to (D1)
 # D1_DB_ID = "<d1-database-id>"               # `sweep`: the D1 its runs are recorded to (dispatch requires it; = the `DB` binding's id)
 # D1_DB_NAME = "<d1-database-name>"           # `sweep`: that D1's name

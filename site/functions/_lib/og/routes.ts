@@ -22,7 +22,8 @@ const MAP_KEYS = ['d', 'f', 'qs', 'o', 'by', 'c', 'cl'] as const
 
 const pick = (sp: URLSearchParams, keys: readonly string[]): Record<string, string> => {
   const out: Record<string, string> = {}
-  for (const k of keys) { const v = sp.get(k); if (v) out[k] = v }
+  // A bare `o` is a value (the unowned pool); other keys need one.
+  for (const k of keys) { const v = sp.get(k); if (v || (v === '' && k === 'o')) out[k] = v }
   return out
 }
 
@@ -45,6 +46,6 @@ export function pageView(url: URL, site: string): PageView | null {
   const path = segs.join('/')
   const params: Record<string, string> = { ...(path ? { path } : {}), ...pick(sp, MAP_KEYS) }
   const where = path || site
-  const extras = [params.f ? `filter: ${params.f}` : null, params.o ? `owner: ${params.o}` : null].filter(Boolean)
+  const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
   return { kind: 'map', params, title: [where, ...extras].join(' · ') }
 }

@@ -2,7 +2,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { describe, expect, it } from 'vitest'
 import type { DispatchReq, ExecEnv, Executor } from './dispatch'
 import { dispatchPlan, EXECUTORS, executorOf, type ExecutorKind, planFirstKind } from './executor'
-import type { FinishedRun } from './plans'
+import type { FinishedRun, RunRow } from './plans'
 import { sqliteD1 } from './testD1'
 
 const A = 's3://primary-bucket/a/'
@@ -15,19 +15,22 @@ const DIGEST_ABC = 'aecc92b130948c2f'
 /** A GCP-free executor over the real schema: `prepare` reads the plan's items,
  * `launch` records the run as plan-sweep does, `refresh` closes the runs
  * queued in `finish` (true = with a result, false = died without one). */
-function fake(kind: ExecutorKind, db: D1Database, calls: string[]): Executor & { finish: Map<string, boolean> } {
+function fake(kind: ExecutorKind, db: D1Database, calls: string[]): Executor & { finish: Map<string, boolean>; reviewed: (RunRow | undefined)[] } {
   let n = 0
   const finish = new Map<string, boolean>()
+  const reviewed: (RunRow | undefined)[] = []
   return {
     dateRe: EXECUTORS[kind].dateRe,
     dateHint: EXECUTORS[kind].dateHint,
     finish,
+    reviewed,
     async prepare(_env: ExecEnv, _db: D1Database, req: DispatchReq) {
       calls.push(`${kind}:prepare:${req.mode}`)
       const prefixes = (await db.prepare('SELECT prefix FROM plan_items WHERE plan_id = ?').bind(req.planId).all<{ prefix: string }>()).results.map(r => r.prefix)
       return {
         prefixes,
-        async launch(date: string, digest: string) {
+        async launch(date: string, digest: string, dry?: RunRow) {
+          reviewed.push(dry)
           const jobId = `${kind}-${req.mode}-${++n}`
           calls.push(`${kind}:launch:${jobId}:${date}:${digest}`)
           await db.prepare(`
@@ -155,6 +158,9 @@ describe('dispatchPlan — the real gate (a finished dry-run of exactly the curr
       ok: true, job_id: 'sweep-real-3', plan_id: 1, mode: 'real', date: '2026-09-29', actor: 'bo@openathena.ai',
       digest: DIGEST_ABC, extra: { run: 'gs://runs/sweep-real-3' },
     })
+    expect(ex.reviewed.map(r => r ? { run_id: r.run_id, scan: r.scan, log_dir: r.log_dir, plan_digest: r.plan_digest } : null)).toEqual([
+      null, null, { run_id: 'sweep-dry-2', scan: '2026-09-29', log_dir: 'l', plan_digest: DIGEST_ABC },
+    ])
     const runs = (await s.db.prepare('SELECT run_id, mode, scan, finished_ts, plan_digest FROM deletion_runs ORDER BY started_ts').all()).results
     expect(runs).toEqual([
       { run_id: 'sweep-dry-1', mode: 'dry', scan: '2026-09-28', finished_ts: 2000, plan_digest: DIGEST_AB },

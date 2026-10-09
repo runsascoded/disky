@@ -47,7 +47,7 @@ export function BulkBar({ matches, scheme, query }: {
   return (
     <span className="bulkbar">
       <span className="bb-scope">{matches.length.toLocaleString()} prefixes:</span>
-      <button type="button" className="act claim" disabled={over || progress != null}
+      <button type="button" className="act assign" disabled={over || progress != null}
         onClick={() => {
           const v = assign.trim()
           const owner = v ? (allUsers().find(u => u.name.toLowerCase() === v.toLowerCase())?.id ?? v) : '@me'

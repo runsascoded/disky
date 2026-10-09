@@ -49,7 +49,7 @@ export interface Store {
   /** The path filter's default syntax (`functions/_lib/querySyntax.ts` ids;
    *  `?qs=` overrides). Mirrors the Functions' `QUERY_SYNTAX`. Unset = `simple`. */
   querySyntax?: string
-  /** Attribution + ownership: the owner axes (`?o=`), claims / assignments
+  /** Attribution + ownership: the owner axes (`?o=`), assignments / assignments
    *  (admins assign; `POST /api/actions`), the `/users`, `/user/:id`,
    *  `/assignments` pages and the email → user map. Only the actions-ledger
    *  store has these. */
@@ -131,7 +131,26 @@ export function resolveStores(primary: string | undefined, extra: string | undef
   return out
 }
 
-export const STORES: Store[] = resolveStores(import.meta.env.VITE_STORE, import.meta.env.VITE_STORES_EXTRA)
+/** What a served page knows that its build can't: the macOS app's local
+ *  server injects `window.__DISKY__ = {home, title, staging}` into
+ *  `index.html` (this user's home dir under the root, `Users/ryan`; this
+ *  Mac's name; `staging: false`, a read-only server with no plans API). */
+export interface PageConfig { home?: string; title?: string; staging?: boolean }
+
+/** The primary store with a page's `PageConfig` applied. */
+export function withPageConfig(s: Store, c: PageConfig | undefined): Store {
+  if (!c) return s
+  return {
+    ...s,
+    ...(c.home != null ? { home: c.home.split('/').filter(Boolean) } : {}),
+    ...(c.title ? { title: c.title } : {}),
+    ...(c.staging != null ? { staging: c.staging } : {}),
+  }
+}
+
+export const STORES: Store[] = (([first, ...rest]) => [withPageConfig(first, (globalThis as { __DISKY__?: PageConfig }).__DISKY__), ...rest])(
+  resolveStores(import.meta.env.VITE_STORE, import.meta.env.VITE_STORES_EXTRA),
+)
 
 /** The primary store: `/`, and every request as it was before stores existed. */
 export const DEFAULT_STORE = STORES[0]

@@ -16,7 +16,7 @@ import { OwnerControls } from './OwnerControls'
 import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
-import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unclaimedBytes } from './types'
+import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
 import { SettingsMenu, useRenderer, useTiling } from './prefs'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
@@ -153,8 +153,8 @@ export type ShadeMode = 'none' | 'class'
 
 export interface Highlight {
   user?: string
-  /** The unclaimed pool (bytes no person owns). */
-  unclaimed?: boolean
+  /** The unowned pool (bytes no person owns). */
+  unowned?: boolean
 }
 
 // Domain wrapper over @disk-tree/react's generic <Treemap>: all layout,
@@ -169,7 +169,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnclaimed, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -183,7 +183,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
    *  fade, map dims to it), click = pin (sticky `hl`; click again, any empty
    *  spot, or `x` clears). Absent → rows are inert. */
   onPickUser?: (u: string) => void
-  onPickUnclaimed?: () => void
+  onPickUnowned?: () => void
   onClearHl?: () => void
   pricing?: Pricing | null
   lens?: boolean
@@ -326,7 +326,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       } else {
         // user: a wholly-owned (~100%) cell takes its user's color; a mixed
         // cell renders its top users as proportional stripes (with a gray
-        // remainder for unclaimed bytes) instead of one blob.
+        // remainder for unowned bytes) instead of one blob.
         const [u, ub] = kid.us?.[0] ?? [null, 0]
         if (ub >= 0.98 * kid.b) {
           const base = userColor(u, userIdx)
@@ -361,11 +361,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         ? `repeating-linear-gradient(135deg, rgb(120 170 255 / ${(0.18 + 0.5 * coldFrac).toFixed(2)}) 0 4px, transparent 4px 9px)`
         : undefined
       // highlight mode: leaf cells not majority-owned by the selected user
-      // (or, for the unclaimed pin, not majority-unclaimed) fade back
+      // (or, for the unowned pin, not majority-unowned) fade back
       let dim = false
       if (effHl && !ctx.hasKids) {
         if (effHl.user) dim = (kid.us?.find(([u]) => u === effHl.user)?.[1] ?? 0) < 0.5 * kid.b
-        else if (effHl.unclaimed) dim = unclaimedBytes(kid) < 0.5 * kid.b
+        else if (effHl.unowned) dim = unownedBytes(kid) < 0.5 * kid.b
       }
       // Shared-edge stroke, per cell: each neighbor paints its own half of a
       // boundary, so the line can adapt to the face it borders. Top-level
@@ -387,7 +387,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
 
   // owner roll-up for the current view (user coloring only): everyone ≥1% of
   // the node, at least 5, at most 12; the rest roll into "(other users)";
-  // what no person owns is the unclaimed pool. $ figures use class-aware
+  // what no person owns is the unowned pool. $ figures use class-aware
   // per-user rates when the snapshot carries them.
   const rollupFor = (node: TreeNode) => {
     if (mode !== 'user' || !node.us) return []
@@ -400,7 +400,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     return [
       ...shown.map(([u, b]) => ({ k: u, b, col: userColor(u, userIdx), rate: userRate(u), mix: pricing?.userMix?.[u], hl: { user: u } as Highlight | undefined })),
       ...(otherUsers > 0 ? [{ k: `(other users ×${us.length - shown.length})`, b: otherUsers, col: 'var(--other)', rate: pricing?.blended, mix: undefined, hl: undefined }] : []),
-      ...(unattr > 0 ? [{ k: 'unowned', b: unattr, col: 'var(--t-unattr)', rate: pricing?.blended, mix: undefined, hl: { unclaimed: true } as Highlight | undefined }] : []),
+      ...(unattr > 0 ? [{ k: 'unowned', b: unattr, col: 'var(--t-unattr)', rate: pricing?.blended, mix: undefined, hl: { unowned: true } as Highlight | undefined }] : []),
     ].sort((a, b) => b.b - a.b)
   }
 
@@ -455,8 +455,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           // Real per-user rows (not "(other users)"/"unowned") get a GitHub
           // avatar next to the color swatch.
           const isUser = mode === 'user' && !r.k.startsWith('(') && r.k !== 'unowned'
-          const pickable = !!r.hl && !!(r.hl.user ? onPickUser : onPickUnclaimed)
-          const same = (a: Highlight | null | undefined, b: Highlight | undefined) => !!a && !!b && a.user === b.user && !!a.unclaimed === !!b.unclaimed
+          const pickable = !!r.hl && !!(r.hl.user ? onPickUser : onPickUnowned)
+          const same = (a: Highlight | null | undefined, b: Highlight | undefined) => !!a && !!b && a.user === b.user && !!a.unowned === !!b.unowned
           const pinned = same(hl, r.hl)
           // Hover-solo fades the other rows; a pin (the map is scoped to the
           // pinned row's bytes) hides them.
@@ -466,7 +466,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             if (!r.hl) return
             if (pinned) onClearHl?.()
             else if (r.hl.user) onPickUser?.(r.hl.user)
-            else if (r.hl.unclaimed) onPickUnclaimed?.()
+            else if (r.hl.unowned) onPickUnowned?.()
           }
           return (
           <span

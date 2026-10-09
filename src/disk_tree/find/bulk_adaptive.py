@@ -279,7 +279,7 @@ def _range_loop(
                     if end is not None:
                         page = [r for r in page if r.name < end]
                     if page:
-                        buf.extend((r.name, r.size, r.created, r.storage_class) for r in page)
+                        buf.extend((r.name, r.size, r.created, r.storage_class, r.generation) for r in page)
                         if len(buf) >= BATCH_ROWS:
                             flush_rows()
                         if first is None:

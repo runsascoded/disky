@@ -35,8 +35,11 @@ export interface CacheEnv { CACHE_KV?: KVNamespace }
 // Bumped whenever a cached endpoint's answer for the same inputs changes
 // (a reader rule, a diff walk rule): a stale entry lives a day in the colo
 // cache and a month in KV, and neither knows a deploy happened. 2026-09-17:
-// one-sided diff nodes expand.
-export const CACHE_V = '2'
+// one-sided diff nodes expand. 3 (2026-10-07): owner pools fold the live
+// ledger, objects included (a preview of the bytes-only fold wrote pool
+// answers with unconserved object counts into KV). 4: pool and user-lens
+// object counts exact from the manifest's per-user objects (`uo`).
+export const CACHE_V = '4'
 
 /** The cache key for `parts` under namespace `ns`. A secondary store's keys
  * gain an `@<store>/` segment (specs/multi-store.md), so the same path in two

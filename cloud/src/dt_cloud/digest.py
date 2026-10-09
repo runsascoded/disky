@@ -67,10 +67,14 @@ class Quota:
 @dataclass(frozen=True)
 class Bucket:
     """Per-bucket display config: the reply tail's short ``label`` (default:
-    the bucket name) and its ``quota`` (None: the tail shows raw TiB)."""
+    the bucket name) and its ``quota`` (None: the tail shows raw TiB). Buckets
+    naming the same ``zone`` share one quota (a CoreWeave zone quota covers
+    every bucket in the zone): they must carry equal quotas, and the tail
+    renders them as one clause against it."""
 
     label: str | None = None
     quota: Quota | None = None
+    zone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,20 +206,32 @@ def _keys(where: str, d: Any, allowed: set[str], required: set[str] = frozenset(
 
 
 def _bucket(name: str, b: dict | None) -> Bucket:
-    b = _keys(f"buckets.{name}", b or {}, {"label", "quota"})
-    if b.get("label") is not None and not isinstance(b["label"], str):
-        raise ValueError(f"digest config buckets.{name}.label: expected a string, got {b['label']!r}")
+    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone"})
+    for k in ("label", "zone"):
+        if b.get(k) is not None and not isinstance(b[k], str):
+            raise ValueError(f"digest config buckets.{name}.{k}: expected a string, got {b[k]!r}")
     q = b.get("quota")
     if q is None:
-        return Bucket(b.get("label"))
+        return Bucket(b.get("label"), zone=b.get("zone"))
     q = _keys(f"buckets.{name}.quota", q, {"bytes", "name", "short"}, {"bytes", "name"})
-    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])))
+    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])), b.get("zone"))
+
+
+def _check_zones(buckets: dict[str, Bucket]) -> None:
+    """Buckets sharing a ``zone`` share its quota, so they must state the same one."""
+    seen: dict[str, tuple[str, Quota | None]] = {}
+    for name, b in buckets.items():
+        if b.zone is None:
+            continue
+        first, q = seen.setdefault(b.zone, (name, b.quota))
+        if q != b.quota:
+            raise ValueError(f"digest config buckets.{name}: zone {b.zone!r} quota differs from buckets.{first}'s")
 
 
 def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     """A config from a parsed YAML/JSON mapping, overlaid on ``base`` (default:
     the preset its ``template`` names). ``buckets`` map names to ``{label,
-    quota: {bytes, name, short}}`` (``bytes`` may be `910 TiB`), ``prices``
+    quota: {bytes, name, short}, zone}`` (``bytes`` may be `910 TiB`), ``prices``
     storage-class ids to $/GiB-month. Validated: unknown keys (at any level),
     a wrong-typed value, an unknown template or an out-of-range ``reply_hour``
     raise ``ValueError``."""
@@ -232,6 +248,7 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     base = base or PRESETS[d.get("template", "gcs")]
     if "buckets" in d:
         d["buckets"] = {str(name): _bucket(name, b) for name, b in _mapping("buckets", d["buckets"] or {}).items()}
+        _check_zones(d["buckets"])
     if "prices" in d:
         prices = _mapping("prices", d["prices"] or {})
         if bad := {k: v for k, v in prices.items() if not isinstance(v, (int, float)) or isinstance(v, bool)}:

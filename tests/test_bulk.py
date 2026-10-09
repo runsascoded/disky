@@ -82,8 +82,8 @@ def test_dedupe_prefixes_all_nested():
 def test_entries_to_frame_maps_storage_class_id():
     ts = "2026-08-05T12:00:00Z"
     rows = [
-        ('a.txt', 100, ts, 'STANDARD'),
-        ('b.txt', 200, ts, 'NEARLINE'),
+        ('a.txt', 100, ts, 'STANDARD', 101),
+        ('b.txt', 200, ts, 'NEARLINE', 102),
         ('c.txt', 300, ts, 'COLDLINE'),
         ('d.txt', 400, ts, 'ARCHIVE'),
         ('e.txt', 500, ts, None),          # unknown → 0
@@ -94,11 +94,12 @@ def test_entries_to_frame_maps_storage_class_id():
     assert df['name'].tolist() == ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt', 'f.txt']
     assert df['size_bytes'].tolist() == [100, 200, 300, 400, 500, 600]
     assert df['storage_class_id'].tolist() == [1, 2, 3, 4, 0, 0]
+    assert [None if pd.isna(value) else int(value) for value in df['generation']] == [101, 102, None, None, None, None]
 
 
 def test_entries_to_frame_empty():
     df = bulk.entries_to_frame('b1', [])
-    assert list(df.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id']
+    assert list(df.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation']
     assert len(df) == 0
 
 

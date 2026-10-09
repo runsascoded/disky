@@ -49,6 +49,9 @@ export interface ParentView {
   size?: Sized
   /** The plan's share card (a signed, full-tier `/og/staged.png` URL). */
   image?: string
+  /** What is still queued: the items no real run has deleted (the title and
+   *  "staged by"; the gate and the confirm stay on the whole plan). */
+  queued?: { items: number; batches: number; stagers: string[] }
 }
 
 /** A staged set at one scan: totals and its largest owners (labels are
@@ -73,10 +76,11 @@ export function sizeLine(z: Sized): string {
 
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
+  const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
   const title = v.closed
     ? `*Staged plan #${v.planId}* (closed)`
-    : `*Staged for deletion* · plan #${v.planId} · ${fmtN(v.items)} ${v.items === 1 ? 'prefix' : 'prefixes'} in ${v.batches} ${v.batches === 1 ? 'batch' : 'batches'}`
-  const by = (v.stagers.length ? `staged by ${v.stagers.map(e => who(e, v.mentions)).join(', ')}` : 'nothing staged')
+    : `*Staged for deletion* · plan #${v.planId} · ${fmtN(q.items)} ${q.items === 1 ? 'prefix' : 'prefixes'} in ${q.batches} ${q.batches === 1 ? 'batch' : 'batches'}`
+  const by = (q.stagers.length ? `staged by ${q.stagers.map(e => who(e, v.mentions)).join(', ')}` : 'nothing staged')
     + (v.size ? `\n${sizeLine(v.size)}` : '')
   const gate = realGate(v.runs, v.digest, v.items)
   const latestDry = [...v.runs].filter(r => r.mode === 'dry').sort((a, b) => b.started_ts - a.started_ts)[0]
@@ -147,12 +151,19 @@ export function stageEvent(e: { planId: number; batchId: number; by: string; pre
   }
 }
 
-export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', via: string | null = null): string {
+/** A run's page on the site: `/staged?run=<id>` opens and scrolls to its row
+ *  (the run id, or its Batch job's id before the executor records it). */
+export const runUrl = (siteUrl: string, runId: string): string => `${siteUrl}/staged?run=${encodeURIComponent(runId)}`
+
+/** A run's thread reply: the actor named by Slack mention where known, the run
+ *  id linking to its row on `/staged`. */
+export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; mentions?: Record<string, string>; siteUrl?: string } = {}): string {
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
-  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor)}${via ? ` via ${via}` : ''} on scan ${r.scan} (\`${r.run_id}\`)`
-  if (phase === 'failed') return `:x: ${kind} \`${r.run_id}\` ended without a result (its Batch job stopped before the run summary); check its logs in www.`
-  if (r.mode === 'dry') return `:test_tube: Dry-run finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).`
-  return `:white_check_mark: Real deletion finished: deleted *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
+  const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
+  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.mentions)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
+  if (phase === 'failed') return `:x: ${kind} ${id} ended without a result (its Batch job stopped before the run summary); check its logs in www.`
+  if (r.mode === 'dry') return `:test_tube: Dry-run ${id} finished: would delete *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects (gone since scan: ${fmtN(r.skipped_gone)}, overwritten: ${fmtN(r.skipped_overwritten)}).`
+  return `:white_check_mark: Real deletion ${id} finished: deleted *${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects${r.undo_deadline ? `; undoable until ${utc(r.undo_deadline)} (www)` : ''}.`
 }
 
 // ── I/O ────────────────────────────────────────────────────────────────────
@@ -178,6 +189,9 @@ export async function stagedCardUrl(env: NotifyEnv & { OG_CARDS?: string; SESSIO
 
 /** A stage batch's reply, rendered here so it can carry mentions and sizes. */
 export interface StageArgs { stage: Omit<Parameters<typeof stageEvent>[0], 'mentions' | 'size'> }
+/** A run's reply, rendered here so it can carry its actor's mention (and, for
+ *  a dispatch, post as them). */
+export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null }
 
 /** A workspace member, as `users.lookupByEmail` returns them. */
 export interface SlackPerson { mention: string; name: string | null; image: string | null }
@@ -293,14 +307,22 @@ export async function sizeStaged(env: Env & SlackEnv, db: D1Database, prefixes: 
   return { scan, b, o, empty, owners }
 }
 
-async function loadView(db: D1Database, planId: number, siteUrl: string, actions: boolean): Promise<(ParentView & { slack_ts: string | null; slack_channel: string | null }) | null> {
+async function loadView(db: D1Database, planId: number, siteUrl: string, actions: boolean): Promise<(ParentView & { slack_ts: string | null; slack_channel: string | null; deleted: Set<string> }) | null> {
   const plan = await db.prepare('SELECT id, state, slack_ts, slack_channel FROM plans WHERE id = ?').bind(planId)
     .first<{ id: number; state: string; slack_ts: string | null; slack_channel: string | null }>()
   if (!plan) return null
-  const items = (await db.prepare('SELECT prefix, added_by FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string }>()).results
+  const items = (await db.prepare('SELECT prefix, added_by, batch_id FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string; batch_id: number | null }>()).results
   const batches = await db.prepare('SELECT count(DISTINCT batch_id) AS n FROM plan_items WHERE plan_id = ? AND batch_id IS NOT NULL').bind(planId).first<{ n: number }>()
   const runs = await planRuns(db, planId)
+  const deleted = await deletedItems(db, planId)
+  const live = items.filter(i => !deleted.has(i.prefix))
   return {
+    queued: {
+      items: live.length,
+      batches: new Set(live.map(i => i.batch_id).filter(b => b != null)).size,
+      stagers: [...new Set(live.map(i => i.added_by))].sort(),
+    },
+    deleted,
     planId, siteUrl, actions, runs,
     items: items.length,
     batches: batches?.n ?? 0,
@@ -312,28 +334,79 @@ async function loadView(db: D1Database, planId: number, siteUrl: string, actions
   }
 }
 
+/** Was the queue empty before this stage? Every item other than the ones just
+ *  staged (`fresh`) is either deleted by a real run (`deleted`) or holds no
+ *  bytes at the latest scan (`stats`: bytes by prefix, absent = none; null =
+ *  sizes unknown, so only recorded deletions count). Then the plan's Slack
+ *  thread has run its course and the stage starts a new one. */
+export function queueWasEmpty(items: readonly string[], fresh: ReadonlySet<string>, deleted: ReadonlySet<string>, stats: Record<string, number> | null): boolean {
+  return items.every(p => fresh.has(p) || deleted.has(p) || (stats !== null && !stats[p]))
+}
+
+/** Items a real run of the plan deleted since they were staged (not undone). */
+async function deletedItems(db: D1Database, planId: number): Promise<Set<string>> {
+  const { results } = await db.prepare(`
+    SELECT DISTINCT i.prefix FROM plan_items i JOIN deletion_bands b ON b.prefix = i.prefix
+    JOIN deletion_runs r ON r.run_id = b.run_id
+    WHERE i.plan_id = ? AND r.plan_id = i.plan_id AND r.mode = 'real' AND r.finished_ts IS NOT NULL
+      AND r.started_ts >= i.added_ts AND COALESCE(b.undone_objects, 0) = 0
+  `).bind(planId).all<{ prefix: string }>()
+  return new Set(results.map(r => r.prefix))
+}
+
 /** Re-render the plan's parent message (posting it first if the plan has
  * none) and, with `event`, reply in its thread. Best-effort; never throws. */
-export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs): Promise<void> {
+export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs): Promise<void> {
   if (!slackReady(env)) return
   try {
     const v = await loadView(db, planId, siteUrl, !!env.GCP_SA_KEY)
     if (!v) return
     const full = env as NotifyEnv & Env
     const items = (await db.prepare('SELECT prefix FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string }>()).results.map(i => i.prefix)
+    const queued = items.filter(p => !v.deleted.has(p))
     const stage = ev && 'stage' in ev ? ev.stage : null
+    const runEv = ev && 'run' in ev ? ev : null
     const [mentions, size, stageSize] = await Promise.all([
-      slackMentions(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(stage ? [stage.by] : [])]),
-      sizeStaged(full, db, items).catch(() => null),
+      slackMentions(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(stage ? [stage.by] : []), ...(runEv ? [runEv.run.actor] : [])]),
+      sizeStaged(full, db, queued).catch(() => null),
       stage ? sizeStaged(full, db, stage.prefixes).catch(() => null) : Promise.resolve(null),
     ])
     const parent = renderParent({ ...v, mentions, size: size ?? undefined, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
-    const people = stage ? await slackPeople(env, [stage.by]) : {}
+    const by = stage?.by ?? (runEv?.phase === 'dispatched' ? runEv.run.actor : null)
+    const people = by ? await slackPeople(env, [by]) : {}
     const event: Event | undefined = stage
       ? { ...stageEvent({ ...stage, mentions, size: stageSize ?? undefined }), sender: personSender(stage.by, people[stage.by.toLowerCase()], 'staged') }
-      : (ev as Event | undefined)
+      : runEv
+        ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, mentions, siteUrl }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+        : (ev as Event | undefined)
     let channel = v.slack_channel ?? env.SLACK_ADMIN_CHANNEL!
     let ts = v.slack_ts
+    // A stage into an emptied queue (everything before it deleted, or empty at
+    // the scan) starts a new thread; the old one ends with a pointer.
+    if (ts && stage) {
+      const fresh = new Set(stage.prefixes)
+      const deleted = v.deleted
+      const older = items.filter(p => !fresh.has(p) && !deleted.has(p))
+      const stats = older.length
+        ? await (async () => {
+          const scans = (await pathScans(full, true)).results
+          const scan = scans[scans.length - 1]?.date
+          if (!scan || !storeReady(full)) return null
+          const st = (await prefixesAt(full, scan, older.slice(0, 1000))).stats
+          return Object.fromEntries(Object.entries(st).map(([p, s]) => [p, s?.b ?? 0]))
+        })().catch(() => null)
+        : {}
+      if (queueWasEmpty(items, fresh, deleted, stats)) {
+        const cut = await db.prepare('UPDATE plans SET slack_ts = NULL WHERE id = ? AND slack_ts = ?').bind(planId, ts).run()
+        if (cut.meta.changes) {
+          await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: ':checkered_flag: Queue emptied: everything staged here is deleted (or was already empty). New stages start a new thread.', ...PLAN_SENDER, unfurl_links: false })
+          ts = null
+        } else {
+          const row = await db.prepare('SELECT slack_channel, slack_ts FROM plans WHERE id = ?').bind(planId).first<{ slack_channel: string | null; slack_ts: string | null }>()
+          ts = row?.slack_ts ?? null; channel = row?.slack_channel ?? channel
+        }
+      }
+    }
     if (!ts) {
       const p = await slackApi(env, 'chat.postMessage', { channel, ...parent, ...PLAN_SENDER, unfurl_links: false })
       if (!p.ok || !p.ts) return
@@ -386,7 +459,7 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
 export async function announceFinished(env: NotifyEnv, db: D1Database, runs: readonly FinishedRun[], siteUrl: string): Promise<void> {
   for (const { run_id, ok } of runs) {
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
-    if (r?.plan_id != null) await notifyPlan(env, db, r.plan_id, siteUrl, { text: runEvent(r, ok ? 'finished' : 'failed') })
+    if (r?.plan_id != null) await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed' })
   }
 }
 

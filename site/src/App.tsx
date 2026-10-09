@@ -5,6 +5,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { MdLayers } from 'react-icons/md'
 import { useActions } from 'use-kbd'
 import { stringParam, useUrlState } from 'use-prms'
+import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useIdent as useIdentity } from './auth'
@@ -104,8 +105,8 @@ const CLASS_OF: Record<ClassAxis, string> = { s: '1', n: '2', c: '3', a: '4' }
 // Diff-section span presets (days back from the "after" scan).
 const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14], ['30d', 30]]
 
-// The owner axis: `?o=` is `owned`, `unowned`, `me`, or a user key
-// (`?o=rw`); absent = everything. Owned = a person owns it (inferred from
+// The owner axis: `?o` is the unowned pool, `?o=*` the owned one, `?o=me`
+// or a user key (`?o=rw`) a person (`ownerParam`); absent = everything. Owned = a person owns it (inferred from
 // paths/runs, or assigned); unowned
 // = the nobody-owns-it pool. A user narrows "owned" to that person.
 type OwnerMode = 'all' | 'owned' | 'unowned' | 'user' | 'others'
@@ -206,9 +207,9 @@ function AppContent() {
   }, [fqDraft, setFq])
   // Lens changes push history (they change WHAT you're looking at, like a
   // drill); cosmetics (`?c=`, `?s=`, `?n=`) replace.
-  const [oP, setOP] = useUrlState('o', stringParam(), true)
+  const [oP, setOP] = useUrlState('o', ownerParam, true)
   // `?by=<assigner>` — the /assignments heatmap cell lens: with a user owner
-  // lens, fold only the claims that assigner made. Only meaningful alongside a
+  // lens, fold only the assignments that assigner made. Only meaningful alongside a
   // person in `?o=`.
   const [byP] = useUrlState('by', stringParam())
   // `?s=` — the secondary "shade by" axis, a perturbation within each cell's
@@ -250,7 +251,7 @@ function AppContent() {
   }
   const viewUser = ownerUser
   // Every scope axis is applied server-side by /api/subtree (specs/
-  // view-serving.md §2): a user (`lens=user:`, the live claims folded in), a
+  // view-serving.md §2): a user (`lens=user:`, the live assignments folded in), a
   // pool (`o=`), the classes (`cl=`), the name filter (`q=`). The client
   // receives exactly the current view and only draws it.
   const lensUser = viewUser
@@ -263,29 +264,40 @@ function AppContent() {
     (notUsers.length ? `&o=!${notUsers.map(encodeURIComponent).join(',')}` : '') +
     (classSet ? `&cl=${CLASS_AXES.filter(c => classSet.has(c)).join('')}` : '') +
     (fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : '')
+  // A user lens or an owner pool folds the live ledger server-side, so those
+  // views' queries carry its revision: an assignment (or its undo) refetches
+  // them; everything else ignores the ledger.
+  const ledgerRev = useMemo(() => {
+    let max = 0
+    for (const r of ownerIdx.owners.values()) max = Math.max(max, r.action_id)
+    return `${ownerIdx.count}.${max}`
+  }, [ownerIdx])
+  const scopeKey = scopeQs + (activeLens || /&o=/.test(scopeQs) ? `|ledger=${ledgerRev}` : '')
   // One-time legacy-param rewrite onto the two axes, so old links (Slack
   // digests, /user pages) work and re-share in the current form:
-  //   ?l=todo → ?k=u · ?l=unclaimed|communal, ?t=unattributed|communal → ?o=unclaimed
+  //   ?l=todo → ?k=u · ?l=unclaimed|communal, ?t=unattributed|communal → bare ?o
+  //   ?o=unowned|unclaimed → bare ?o · ?o=owned|claimed → ?o=*
   //   ?l=user[&lu=x] (and older ?mt=mine[&mu=x]) → ?o=x|me · ?u=x (legend pin) → ?o=x
   //   any other ?t= (the retired group pin) → dropped
   useEffect(() => {
     const sp = new URLSearchParams(search)
     const legacy = ['l', 'lu', 'u', 'mt', 'mu', 't']
     const t = sp.get('t')
-    // The owner pools were `claimed` / `unclaimed` until 2026-09-07.
-    const oldPool = sp.get('o') === 'claimed' ? 'owned' : sp.get('o') === 'unclaimed' ? 'unowned' : null
-    if (!legacy.some(k => sp.has(k)) && !oldPool) return
-    if (oldPool) sp.set('o', oldPool)
+    // A pool spelled long (`unowned` / `owned`) or retired (`unclaimed` /
+    // `claimed`, until 2026-09-07) → its short form (bare `o` / `o=*`).
+    const oldPool = legacyOwner(sp.get('o'))
+    if (!legacy.some(k => sp.has(k)) && oldPool === null) return
+    if (oldPool !== null) sp.set('o', oldPool)
     const l = sp.get('l') ?? sp.get('mt')
     const lu = sp.get('lu') ?? sp.get('mu')
     const u = sp.get('u')
     for (const k of legacy) sp.delete(k)
-    if (t === 'unattributed' || t === 'communal') sp.set('o', 'unowned')
+    if (t === 'unattributed' || t === 'communal') sp.set('o', '')
     if (l === 'todo') sp.set('k', 'u')
-    else if (l === 'unclaimed' || l === 'communal') sp.set('o', 'unowned')
+    else if (l === 'unclaimed' || l === 'communal') sp.set('o', '')
     else if (l === 'user' || l === 'mine') sp.set('o', lu ? shortUserKey(canonId(lu)) : 'me')
     if (u && !sp.has('o')) sp.set('o', shortUserKey(canonId(u)))
-    navigate({ pathname, search: `?${sp.toString()}`, hash }, { replace: true })
+    navigate({ pathname, search: `?${bareEmpty(sp.toString(), 'o')}`, hash }, { replace: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search])
   const metaQ = useQuery(scanQuery<Meta>('meta'))
@@ -330,7 +342,7 @@ function AppContent() {
   const endIsLatest = !!asof && asof === scans[0]
   const endPinned = dP !== undefined
   // Presets past the history's reach — nearest scan more than a quarter of
-  // the span off, or already claimed by a shorter preset — are dropped
+  // the span off, or already assigned by a shorter preset — are dropped
   // rather than mislabeled.
   const spanPicks = useMemo(() => {
     if (!asof) return []
@@ -361,7 +373,7 @@ function AppContent() {
   }, [graftPath])
   const subtreeQs = useQueries({
     queries: subtreePaths.map(p => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeQs],
+      queryKey: ['subtree', store.key, asof, p, canW, scopeKey],
       enabled: !!asof,
       staleTime: Infinity,
       // Retry transient failures, but not the deterministic ones (409: no
@@ -392,7 +404,7 @@ function AppContent() {
   // so a scope change never downgrades a held full tree to a coarse one.
   const coarseQs = useQueries({
     queries: subtreePaths.map((p, i) => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeQs, 'depth1'],
+      queryKey: ['subtree', store.key, asof, p, canW, scopeKey, 'depth1'],
       // Deepest path only — see `dataFor`; ancestors never use it.
       enabled: !!asof && i === subtreePaths.length - 1,
       staleTime: Infinity,
@@ -489,11 +501,16 @@ function AppContent() {
   if (tree) lastTree.current = tree
   // The live ownership ledger over the scan's attribution (`applyLedger`):
   // assignments recolor the map and its legend as soon as `/api/actions`
-  // refetches, with no subtree re-read. A user lens is already folded
-  // server-side (`ownerLens`), so it is left as served.
+  // refetches. A pool or user-lens view also re-reads (`ledgerRev` is in its
+  // key) and comes back with the ledger folded in; a user lens is left as served.
   const heldTree = tree ?? lastTree.current
   const mapTree = useMemo(
-    () => (heldTree && ownersMode && ownerMode !== 'user' ? applyLedger(heldTree, ownerIdx, store.scheme, canonId) : heldTree),
+    () => {
+      if (!heldTree || !ownersMode || ownerMode === 'user') return heldTree
+      // A pool is served with the ledger folded in (bytes assigned since the
+      // scan move in or out of it); this only recolors by assignee.
+      return applyLedger(heldTree, ownerIdx, store.scheme, canonId)
+    },
     [heldTree, ownersMode, ownerMode, ownerIdx, store.scheme],
   )
   // What the map shows vs. what the page asked for: a held previous tree
@@ -658,7 +675,7 @@ function AppContent() {
   // (`depth` only caps what's drawn), so without a search index the "first"
   // paint costs as much as the full walk (gcs 2026-10-02: 9.3 s vs 4.5 s).
   const diffQ1 = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs, 'l1'],
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'l1'],
     enabled: !!asof && !!diffPrev && !fq,
     staleTime: Infinity,
     retry: false,
@@ -681,7 +698,7 @@ function AppContent() {
   const diffSlotRef = useRef<HTMLDivElement>(null)
   const diffSlotH = useRef(0)
   const diffQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs],
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey],
     enabled: !!asof && !!diffPrev,
     // While the full walk aligns: the bucket-level diff of the SAME pair once
     // it lands, else the last pair's diff — drawn dimmed either way, so the
@@ -706,7 +723,7 @@ function AppContent() {
   // The headline first: the same pair's totals without the row walk land in
   // a second or two, so the +X / Δobjects line shows while the rows align.
   const diffSumQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs, 'summary'],
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'summary'],
     enabled: !!asof && !!diffPrev,
     staleTime: Infinity,
     retry: false,
@@ -797,7 +814,7 @@ function AppContent() {
     [meta],
   )
 
-  // Legend-row pins land on the owner axis (a user, or the unclaimed pool).
+  // Legend-row pins land on the owner axis (a user, or the unowned pool).
   // `switchMode`: a ⌘K pick from any coloring jumps to an axis where the pick
   // is visible; a legend-row click is already on such an axis and must not
   // move it.
@@ -805,7 +822,7 @@ function AppContent() {
     setOwnerUser(u)
     if (switchMode && mode !== 'user') setMode('user')
   }
-  const pickUnclaimed = () => setOP('unowned')
+  const pickUnowned = () => setOP('unowned')
   const clearHl = () => setOP(undefined)
 
   useActions({
@@ -837,8 +854,8 @@ function AppContent() {
       handler: () => { const s = drillPath.split('/').filter(Boolean); if (s.length) drillTo(s.slice(0, -1)) },
     },
     'owner:me': { label: 'Owner: my files', group: 'Scope', handler: () => setOP('me') },
-    'owner:claimed': { label: 'Owner: owned only', group: 'Scope', handler: () => setOP('owned') },
-    'owner:unclaimed': { label: 'Owner: unowned only', group: 'Scope', handler: () => setOP('unowned') },
+    'owner:owned': { label: 'Owner: owned only', group: 'Scope', handler: () => setOP('owned') },
+    'owner:unowned': { label: 'Owner: unowned only', group: 'Scope', handler: () => setOP('unowned') },
     'lens:classes': {
       label: 'Storage-class lens (hatch colder-class bytes)',
       group: 'View',
@@ -1111,7 +1128,7 @@ function AppContent() {
             </FilterNote>
           </span>
         )}
-        {fq && fMatches.length > 0 && (
+        {fq && fMatches.length > 0 && ownersMode && canAssign && (
           <BulkBar matches={fMatches} scheme={store.scheme} query={fq} />
         )}
       </SiteNav>
@@ -1171,7 +1188,7 @@ function AppContent() {
             readRange={readRange}
             hl={effHl}
             onPickUser={u => pickUser(u, false)}
-            onPickUnclaimed={pickUnclaimed}
+            onPickUnowned={pickUnowned}
             onClearHl={clearHl}
             pricing={pricing}
             lens={lens}
@@ -1266,6 +1283,7 @@ function AppContent() {
         scans={scans} prefix={drillPath}
         user={ownerUser}
         pool={ownerMode === 'unowned' ? 'unowned' : ownerMode === 'owned' ? 'owned' : null}
+        ledgerRev={ledgerRev}
         onPickDate={setDP}
         onBrush={brushRange}
         window={diffWindow}

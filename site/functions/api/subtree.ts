@@ -2,7 +2,7 @@
  * (specs/view-serving.md; the folding lives in `_lib/view.ts`).
  *
  *   GET /api/subtree?date=<scan>&path=<P>&w=<px>&h=<px>[&minArea=<px²>]
- *                    [&lens=user:<id>][&o=claimed|unclaimed][&q=<name filter>]
+ *                    [&lens=user:<id>|user:me][&o=owned|unowned][&q=<name filter>]
  *
  * The page's scope axes (specs/view-serving.md §2) are applied server-side:
  * the owner axis (`lens` for a user, `o` for the pools), the name filter
@@ -11,14 +11,15 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
-import { type Env, requireViewer } from '../_lib/auth.js'
+import { type Env, type Identity, requireViewer } from '../_lib/auth.js'
 import { pathGens, storeReady, type Lens } from '../_lib/index.js'
-import { ledgerHead } from '../_lib/ledger.js'
+import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT } from '../_lib/view.js'
 import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
+import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 
 
 type SubtreeCtx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -50,7 +51,8 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
   if (path.includes('..') || path.startsWith('/')) return new Response('bad path', { status: 400 })
 
   // Optional lens: `lens=user:<id>` — a treemap of that user's bytes, read
-  // from the by-user sort.
+  // from the by-user sort. `user:me` resolves to the caller below, once the
+  // gate has identified them.
   const lensRaw = url.searchParams.get('lens')
   let lens: Lens | undefined
   if (lensRaw) {
@@ -80,21 +82,29 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
   const query = qp.query
 
   // Data is gated (store-specific scope), like /data/*.
+  let id: Identity | null = null
   if (gate) {
     const gated = await st.time('auth', requireViewer(ctx as never))
     if (gated instanceof Response) return gated
+    id = gated
   }
 
-  // A user lens folds the live ledger (claims repaint attribution): its cache
-  // key carries the head.
+  // A user lens or an owner pool folds the live ledger (assignments repaint
+  // attribution, or move bytes in or out of a pool): its cache key carries the head.
   // Everything from here touches D1 or the store, so it all sits under one
   // guard: a D1 stall ("internal error") used to escape from the pre-steps
   // as Cloudflare's raw "Worker threw exception" page (2026-09-28); now it is
   // a 503 the client can retry, with the message the ledger head gave.
   try {
-    const [head, xtra, g] = await st.time('pre', Promise.all([lens && ctx.env.DB ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date])]))
+    // `me` → the caller's id, so the cache key (shared across viewers) and the
+    // body carry the id, never the literal `me`.
+    const resolved = await resolveLens(ctx.env, id, lens)
+    if (resolved === null) return new Response(ME_UNRESOLVED, { status: 400 })
+    lens = resolved
+    const lensTag = lensParam(lens)
+    const [head, xtra, g] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date])]))
     const cacheKey = cacheKeyFor('subtree',
-      `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensRaw ?? ''}` +
+      `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensTag}` +
         `&o=${rawOwner ?? ''}&b=${by ?? ''}&D=${depth ?? ''}&cl=${classKey(classes)}&x=${xtra ? 1 : 0}&F=${query && !full ? 0 : 1}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&g=${g}`,
       storeKey(ctx.env),
     )
@@ -111,7 +121,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
       atten,
       tier: view.tier,
       index: view.index,
-      ...(lensRaw ? { lens: lensRaw } : {}),
+      ...(lens ? { lens: lensTag } : {}),
       threshold: Math.round(view.threshold),
       nodes: view.nodes,
       truncated: view.truncated,

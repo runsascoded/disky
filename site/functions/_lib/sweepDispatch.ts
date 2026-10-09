@@ -5,11 +5,11 @@
 //
 // The plan's items are the delete set: they are snapshotted into `plan.json`
 // in the run dir (a gcs plan MAY span buckets), and the submitted job runs the
-// daily-snapshot image with the entrypoint overridden to `sweep manifest
-// --plan` followed by `sweep execute` — which re-lists, generation-matches,
-// records to D1 (`deletion_runs`/`deletion_bands`; `plan_id` comes from the
-// plan.json — no row is inserted here), and for `real` requires ≥7d soft
-// delete on every bucket before deleting anything. The `-b` cut is the plan's
+// executor image with its entrypoint overridden. Dry runs use `manifest`
+// then `execute`; real runs use parallel XML `execute-reviewed`, deleting
+// only the matching DR's exact generations after complete log preflight and
+// ≥7d soft-delete/permission checks. Both record D1 runs and bands; `plan_id`
+// comes from plan.json, with no row inserted here. The `-b` cut is the plan's
 // buckets (∩ `buckets`, when given). The run's item digest rides in the job
 // env (`PLAN_DIGEST`); `_lib/sweepReflect.ts` copies it onto the run's row once
 // the executor has recorded it finished. `PLAN_ID` rides along too, so the
@@ -47,20 +47,29 @@ export interface SweepScript {
   buckets: readonly string[]
   /** The run's plan.json — the staged set the manifest reads. */
   plan: string
+  /** A finished, matching DR selected by the dispatch gate. */
+  reviewed?: string
+  pacing?: 'guided' | 'adaptive'
 }
 
-/** The Batch container's bash: manifest then execute, both against the run
- * dir. On exit (success or failure) it pings the site's `/api/sweep/jobs`
+/** The Batch container's bash: DR manifest/execute or parallel reviewed XML.
+ * On exit (success or failure) it pings the site's `/api/sweep/jobs`
  * with the job's read grant, so the finished run is reflected — and its
  * result posted to the plan's Slack thread — without anyone polling. */
-export const sweepScript = ({ cfg, mode, jobId, buckets, plan }: SweepScript): string => {
+export const sweepScript = ({ cfg, mode, jobId, buckets, plan, reviewed, pacing = 'guided' }: SweepScript): string => {
+  if (mode === 'real' && !reviewed) throw new Error('real dispatch requires its reviewed DR manifest')
+  if (pacing !== 'guided' && pacing !== 'adaptive') throw new Error('invalid sweep pacing mode')
   const run = runDir(cfg, jobId)
   const bflags = buckets.map(b => `-b ${b}`).join(' ')
   return [
     'set -euo pipefail',
     EXIT_TRAP,
-    `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -o "${run}"`,
-    `dt-cloud sweep execute ${bflags} ${mode === 'real' ? '--for-real ' : ''}"${run}"`,
+    ...(mode === 'real' ? [
+      `dt-cloud sweep execute-reviewed -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w /work/reviewed --for-real "${reviewed}"`,
+    ] : [
+      `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -o "${run}"`,
+      `dt-cloud sweep execute ${bflags} "${run}"`,
+    ]),
   ].join('\n')
 }
 
@@ -163,6 +172,8 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (!env.GCP_SA_KEY) return refuse(503, 'dispatch not configured (GCP_SA_KEY secret missing)')
   if (!env.JOB_SA) return refuse(503, 'dispatch not configured (JOB_SA var missing)')
   const jobSa = env.JOB_SA
+  const pacing = env.SWEEP_PACING ?? 'guided'
+  if (pacing !== 'guided' && pacing !== 'adaptive') return refuse(503, 'dispatch not configured (SWEEP_PACING must be guided or adaptive)')
   const cfg = batchConfig(env, ['GCP_PROJECT', 'DATA_BUCKET', 'SWEEP_IMAGE', 'CF_ACCOUNT_ID', 'D1_DB_ID'])
   if ('missing' in cfg) return refuse(503, notConfigured('dispatch', cfg.missing))
   const shape = prefixShape(env)
@@ -178,11 +189,15 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   // The run acts on the items in its cut: that set is what the digest names.
   const prefixes = snapshot.sweep.filter(p => buckets.includes(bucketOf(p, shape.buckets)))
 
-  const launch: Prepared['launch'] = async (date, digest) => {
+  const launch: Prepared['launch'] = async (date, digest, reviewed) => {
+    const reviewedPrefix = `gs://${cfg.dataBucket}/sweep/runs/`
+    if (req.mode === 'real' && (!reviewed?.log_dir || !reviewed.log_dir.startsWith(reviewedPrefix) || !/^gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/.test(reviewed.log_dir.slice(reviewedPrefix.length)))) {
+      return refuse(409, 'not deleting: matching dry-run has no reusable manifest directory')
+    }
     const region = batchRegionFor(cfg, buckets)
     const jobId = `gcs-sweep-${req.mode}-${jobStampOf(new Date())}z`
     const plan = runDir(cfg, jobId)
-    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId) })
+    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), reviewed: reviewed?.log_dir ?? undefined, pacing })
     const spec = sweepJobSpec({
       cfg, jobSa, region, script, actor: req.actor, siteUrl: req.siteUrl, machine: req.machine,
       env: {

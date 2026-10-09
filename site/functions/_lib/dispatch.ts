@@ -6,7 +6,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import type { BatchEnv } from './batchConfig.js'
-import type { FinishedRun } from './plans.js'
+import type { FinishedRun, RunRow } from './plans.js'
 import type { NotifyEnv } from './stagedSlack.js'
 
 export type ExecEnv = NotifyEnv & BatchEnv & {
@@ -44,7 +44,7 @@ export interface Launched { job_id: string; extra: Record<string, unknown> }
 export interface Prepared {
   /** The canonical prefixes the run acts on (the digest's input). */
   prefixes: string[]
-  launch(date: string, digest: string): Promise<Launched | DispatchErr>
+  launch(date: string, digest: string, reviewed?: RunRow): Promise<Launched | DispatchErr>
 }
 
 export interface Executor {

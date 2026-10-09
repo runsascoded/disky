@@ -3,7 +3,7 @@
  * from point lookups on the floor-free index (the same `readAsks` path owner
  * totals take), never one subtree read per prefix. */
 import type { Env } from './auth.js'
-import { idxKey } from './claims.js'
+import { idxKey } from './ownerBands.js'
 import { type Ask, columnsFor, openIndex, readAsks, type Row } from './index.js'
 
 /** One prefix's numbers, in the wire's names (`TreeNode`): bytes, objects,

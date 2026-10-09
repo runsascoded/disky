@@ -10,6 +10,8 @@ export interface BatchEnv {
    *  `project_id` of `GCP_SA_KEY`. */
   GCP_PROJECT?: string
   GCP_SA_KEY?: string
+  /** Full resource name of an IaC-managed, task-log-only Logging view. */
+  GCP_LOG_VIEW?: string
   /** The default Batch region (a job whose buckets span regions runs here). */
   BATCH_REGION?: string
   /** `{bucket: region}` as JSON: a one-region bucket cut runs its job there,
@@ -22,6 +24,8 @@ export interface BatchEnv {
   D1_DB_NAME?: string
   /** The executor's container image. */
   SWEEP_IMAGE?: string
+  /** Guided cold-ramp envelope by default; adaptive probes faster after validation. */
+  SWEEP_PACING?: string
   /** The Cloudflare account the executor records runs to (its D1). */
   CF_ACCOUNT_ID?: string
   /** The S3 endpoint a plan-sweep run deletes through. */

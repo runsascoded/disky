@@ -63,7 +63,7 @@ export async function assignmentsCard(env: Env, site: Site, title: string, param
   ])
   const emap = new Map(ue.map(r => [r.email.toLowerCase(), r.user]))
   const cells = new Map<string, number>()
-  for (const c of t.claims) {
+  for (const c of t.assignments) {
     if (c.repainted_by || !c.owner) continue
     const by = c.who ? (emap.get(c.who.toLowerCase()) ?? c.who) : 'unknown'
     const k = `${by}\u0000${c.owner}`
@@ -121,8 +121,8 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
   const idx = ownerIndex({ owners: ledger.ownerRows.map(r => ({ ...r, who: r.who ?? '', memo: null })) })
   let items: Item[] = rows.map(r => {
     const stat = stats[r.prefix]
-    const claim = idx.claimOf(r.prefix)
-    return { prefix: r.prefix, addedBy: r.added_by, stat, owner: claim ? canonId(claim.who, reg) : stat?.us?.[0]?.[0] ?? null }
+    const assignment = idx.assignmentOf(r.prefix)
+    return { prefix: r.prefix, addedBy: r.added_by, stat, owner: assignment ? canonId(assignment.who, reg) : stat?.us?.[0]?.[0] ?? null }
   })
   const name = (who: string) => reg[canonId(who, reg)]?.name ?? who.replace(/@.*$/, '')
   if (params.q) {

@@ -114,12 +114,19 @@ export const publicUrl = (base: string, key: string): string =>
  * bucket shows the same key as `<store path>/<bucket>/<key>` — a directory
  * (a `/`-terminated splat, or the empty one) as that drill, an object opened
  * under its directory. No store scans the bucket (or the proxy is unknown):
- * the store root. The old link's query (file-tree's paging) doesn't carry over. */
-export function filesRedirect(splat: string, proxy: ProxyInfo | null, stores: Pick<Store, 'path' | 'buckets'>[], fallback: Pick<Store, 'path'>): { pathname: string; search: string } {
+ * no redirect, so the route can show a 404. The old link's query (file-tree's
+ * paging) doesn't carry over. */
+export function filesRedirect(splat: string, proxy: ProxyInfo | null, stores: Pick<Store, 'path' | 'buckets'>[]): { pathname: string; search: string } | null {
   const bucket = proxy ? proxyBucket(proxy.uri) : null
   const target = bucket ? stores.find(s => s.buckets.includes(bucket)) : undefined
-  if (!target || !bucket) return { pathname: fallback.path, search: '' }
-  const segs = [bucket, ...decodeURIComponent(splat).split('/').filter(Boolean)]
+  if (!target || !bucket) return null
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(splat)
+  } catch {
+    return null
+  }
+  const segs = [bucket, ...decoded.split('/').filter(Boolean)]
   const isDir = splat === '' || splat.endsWith('/')
   if (isDir) {
     const base = target.path === '/' ? '' : target.path

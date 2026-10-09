@@ -4,11 +4,13 @@
 // executor polls that file every 10 s (`dt-cloud sweep stop`): roots already
 // listing finish and log, the rest are left for a re-run, the job ends red.
 // Admin-only, like dispatch.
+import type { D1Database } from '@cloudflare/workers-types'
 import { ADMIN_SCOPE, type Env as AuthEnv, json, requireScope } from '../../_lib/auth.js'
 import { batchConfig, type BatchEnv, notConfigured } from '../../_lib/batchConfig.js'
 import { gcpToken } from '../../_lib/gcp.js'
+import { auditRunControl } from '../../_lib/plans.js'
 
-type Env = AuthEnv & BatchEnv
+type Env = AuthEnv & BatchEnv & { DB?: D1Database }
 
 export const onRequestPost = async (ctx: { request: Request; env: Env }): Promise<Response> => {
   const gated = await requireScope(ctx, ADMIN_SCOPE)
@@ -27,5 +29,6 @@ export const onRequestPost = async (ctx: { request: Request; env: Env }): Promis
     body: `${new Date().toISOString()} by ${gated.email ?? 'sweep-console'}\n`,
   })
   if (!r.ok) return json({ error: 'STOP write failed', status: r.status, detail: (await r.text()).slice(0, 300) }, 500)
+  if (ctx.env.DB) await auditRunControl(ctx.env.DB, 'stop', jobId, gated.email ?? 'sweep-console', null)
   return json({ job_id: jobId, stopped_by: gated.email, note: 'the executor polls STOP every 10 s; roots already listing finish first' })
 }

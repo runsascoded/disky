@@ -31,7 +31,7 @@ import {
 // on the client (specs/view-serving.md §2).
 
 type ClassMix = Record<string, number>
-/** One person's owned bytes (claims applied) + the class mix behind them. */
+/** One person's owned bytes (assignments applied) + the class mix behind them. */
 interface Owned { b: number; mix: ClassMix }
 
 // `gs://marin-<bucket>/<path>/` → the treemap's URL path.
@@ -55,7 +55,7 @@ function useScanFile<T>(name: string, asof: string | null) {
   })
 }
 
-/** Per-user owned bytes (claims applied) from `/api/owners`, keyed by
+/** Per-user owned bytes (assignments applied) from `/api/owners`, keyed by
  * canonical id. */
 function useOwned(asof: string | null): { data: Map<string, Owned> | null; error: Error | null } {
   const q = useQuery<{ users: Record<string, Owned> }, Error>({
@@ -120,17 +120,17 @@ function DollarCell({ b, mix }: { b: number; mix?: Record<string, number> }) {
 interface OwnerCell {
   n: string
   b: number
-  pool?: boolean   // the unclaimed pool (no user)
+  pool?: boolean   // the unowned pool (no user)
   id?: string      // canonical user id → /user/:id
   c?: OwnerCell[]
 }
 
-// The pool tile: the unclaimed gray pulled toward dark, so the user tiles'
+// The pool tile: the unowned gray pulled toward dark, so the user tiles'
 // palette colours read as people, not more of the pool.
 const POOL_TILE_BG = 'color-mix(in oklab, var(--t-unattr) 48%, #131311)'
 
-/** The owner tiles (users + the unclaimed pool) — ONE derivation shared by
- * the map and its legend. Live owned bytes (claims applied) win over scan
+/** The owner tiles (users + the unowned pool) — ONE derivation shared by
+ * the map and its legend. Live owned bytes (assignments applied) win over scan
  * meta when loaded. */
 function ownerCells(meta: Meta, owned: Map<string, Owned> | null): OwnerCell[] {
   const metaUsers: UserInfo[] = meta.users ?? []
@@ -196,14 +196,14 @@ function UsersMap({ meta, owned, redact = false }: {
         // still route through the SPA below.
         cellHref={n =>
           n.id ? `/user/${n.id}`
-          : n.pool ? '/?o=unowned'
+          : n.pool ? '/?o'
           : undefined}
         onCellClick={(n) => {
           if (redact) return true
           // Every tile goes somewhere sane: users to their page, the
           // unattributed pool to the matching home lens.
           if (n.id) navigate(`/user/${n.id}`)
-          else if (n.pool) navigate('/?o=unowned')
+          else if (n.pool) navigate('/?o')
           return true
         }}
       />
@@ -218,7 +218,7 @@ interface Estate {
   bytes: number
   objects: number
   mix: ClassMix
-  claims: { prefix: string; ts: number; bytes: number; objects: number; repainted_by?: string }[]
+  assignments: { prefix: string; ts: number; bytes: number; objects: number; repainted_by?: string }[]
 }
 
 /** `/users/og` — fixed 1200×630 unfurl render of the owner map: names only
@@ -256,7 +256,7 @@ export function UsersPage() {
   const metaQ = useScanFile<Meta>('meta', asof)
   const mixes = metaQ.data?.user_class_bytes
   // Per-user owned bytes from /api/owners — the ledger folded server-side
-  // against the floor-free index (claims applied), so the table, the tiles
+  // against the floor-free index (assignments applied), so the table, the tiles
   // and the map's root rollup agree, and no tree.json. Scan meta is only the
   // pre-load fallback.
   const { data: owned, error: ownedErr } = useOwned(asof)
@@ -269,7 +269,7 @@ export function UsersPage() {
       .sort((a, b) => b.b - a.b)
   }, [metaQ.data, owned])
   const mixOf = (u: string): ClassMix | undefined => owned?.get(u)?.mix ?? mixes?.[u]
-  // Footer totals over exactly the rows shown (same claims-applied basis);
+  // Footer totals over exactly the rows shown (same assignments-applied basis);
   // $ only sums users whose class mix is known, so it's a floor, flagged as such.
   const totals = useMemo(() => {
     const t = { b: 0, usd: 0, priced: 0 }
@@ -346,14 +346,14 @@ export function UsersPage() {
 
 const PAGE = 25
 
-function ClaimsTable({ rows }: { rows: Estate['claims'] }) {
+function AssignmentsTable({ rows }: { rows: Estate['assignments'] }) {
   const [page, setPage] = useState(0)
   const pages = Math.ceil(rows.length / PAGE)
   const p = Math.min(page, pages - 1)
   const slice = rows.slice(p * PAGE, p * PAGE + PAGE)
   return (
     <>
-      <table className="worklist claims">
+      <table className="worklist assignments">
         <thead>
           <tr><th>Prefix</th><th className="num">bytes</th><th className="num">objects</th><th>Assigned</th></tr>
         </thead>
@@ -430,8 +430,8 @@ export function UserPage() {
   const scan = useScan(store)
   const asof = scan.asof
   const metaQ = useScanFile<Meta>('meta', asof)
-  // The estate, folded server-side: owned bytes (claims applied) and the
-  // claims themselves.
+  // The estate, folded server-side: owned bytes (assignments applied) and the
+  // assignments themselves.
   const estateQ = useQuery<Estate>({
     queryKey: ['estate', asof, id],
     enabled: !!asof && !!id,
@@ -462,7 +462,7 @@ export function UserPage() {
   const scopedTree = mapQ.data?.tree && mapQ.data.tree.b > 0 ? mapQ.data.tree : null
   const owned = estate?.bytes ?? 0
   const mix = estate?.mix && Object.keys(estate.mix).length ? estate.mix : metaQ.data?.user_class_bytes?.[id]
-  const claims = useMemo(() => [...(estate?.claims ?? [])].sort((a, b) => b.bytes - a.bytes), [estate])
+  const assignments = useMemo(() => [...(estate?.assignments ?? [])].sort((a, b) => b.bytes - a.bytes), [estate])
   // Resolve `?p=` against the scoped tree each render; a vanished segment
   // truncates to its deepest surviving ancestor.
   const mapPath = useMemo((): TreeNode[] | undefined => {
@@ -496,7 +496,7 @@ export function UserPage() {
         <p className="sub">
           {fmtBytesIec(owned, true)} owned ({asof ?? '…'} scan + live assignments)
           {mix != null && owned > 0 && <> · est. {fmtUsd(ratePerByte(mix) * owned)}/mo</>}
-          {claims.length > 0 && <> · {fmtN(claims.length)} prefix{claims.length === 1 ? '' : 'es'} assigned to {shortName(id)}</>}.
+          {assignments.length > 0 && <> · {fmtN(assignments.length)} prefix{assignments.length === 1 ? '' : 'es'} assigned to {shortName(id)}</>}.
         </p>
       </header>
 
@@ -525,11 +525,11 @@ export function UserPage() {
         </>
       )}
 
-      {claims.length > 0 && (
+      {assignments.length > 0 && (
         <>
           <h2>Assigned</h2>
           <p className="tab-note">Prefixes assigned to {shortName(id)} in the ledger — counted in the total above immediately; the scan pipeline formalizes the ownership on its next run.</p>
-          <ClaimsTable rows={claims} />
+          <AssignmentsTable rows={assignments} />
         </>
       )}
       <SiteKbd />

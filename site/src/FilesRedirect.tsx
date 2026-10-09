@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { Navigate, useLocation } from 'react-router-dom'
+import { Link, Navigate, useLocation } from 'react-router-dom'
 import { filesRedirect, type ProxyInfo } from './objects'
+import { SiteNav } from './SiteNav'
 import { useStore, useStoreFetch } from './store'
 import { STORES } from './stores'
 
@@ -24,5 +25,14 @@ export function FilesRedirect() {
     retry: false,
   })
   if (q.isPending) return null
-  return <Navigate to={filesRedirect(splat, q.data ?? null, STORES, store)} replace />
+  const to = filesRedirect(splat, q.data ?? null, STORES)
+  if (to) return <Navigate to={to} replace />
+  return (
+    <main>
+      <SiteNav />
+      <p className="err">
+        404 — <code>{pathname}</code> is not available here. <Link to={store.path}>home</Link>
+      </p>
+    </main>
+  )
 }

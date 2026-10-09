@@ -6,7 +6,7 @@ import type { ColorMode } from './types'
 // range, owner attribution), the class axis needs class bytes, the owner
 // filter attribution, and the path filter nothing at all.
 export interface BarFacts {
-  /** Attribution + claims (`Store.owners`) — the owner color and filter. */
+  /** Attribution + assignments (`Store.owners`) — the owner color and filter. */
   owners: boolean
   /** The scan carries attribution (`meta.users`). */
   hasAttr: boolean

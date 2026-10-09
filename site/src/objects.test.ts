@@ -155,10 +155,10 @@ describe('filesRedirect', () => {
   const proxy = { uri: 'gs://my-data', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
   it('a store that scans the proxy’s bucket shows the key: a directory drills there, an object opens under its directory', () => {
     expect([
-      filesRedirect('', proxy, stores, gcs),
-      filesRedirect('listing/2026-09-30/', proxy, stores, gcs),
-      filesRedirect('listing/2026-09-30/bucket-1/part-0.parquet', proxy, stores, gcs),
-      filesRedirect('sweep/runs/a%20b.json', proxy, stores, gcs),
+      filesRedirect('', proxy, stores),
+      filesRedirect('listing/2026-09-30/', proxy, stores),
+      filesRedirect('listing/2026-09-30/bucket-1/part-0.parquet', proxy, stores),
+      filesRedirect('sweep/runs/a%20b.json', proxy, stores),
     ]).toEqual([
       { pathname: '/meta/my-data', search: '' },
       { pathname: '/meta/my-data/listing/2026-09-30', search: '' },
@@ -166,16 +166,18 @@ describe('filesRedirect', () => {
       { pathname: '/meta/my-data/sweep/runs', search: '?open=a+b.json' },
     ])
   })
-  it('no configured store scans the proxy’s bucket (r2.rbw.sh), or the proxy is unknown: the store root', () => {
+  it('does not redirect an unavailable or malformed legacy path', () => {
     const [r2] = resolveStores('r2', '', TEST_REGISTRY)
     expect([
-      filesRedirect('listing/2026-09-30/', { uri: 'r2://disk-tree-demo', prefixes: ['listing/'] }, [r2], r2),
-      filesRedirect('listing/x.parquet', null, stores, gcs),
-      filesRedirect('listing/x.parquet', proxy, [gcs], gcs),
+      filesRedirect('listing/2026-09-30/', { uri: 'r2://disk-tree-demo', prefixes: ['listing/'] }, [r2]),
+      filesRedirect('listing/x.parquet', null, stores),
+      filesRedirect('listing/x.parquet', proxy, [gcs]),
+      filesRedirect('listing/%E0%A4%A', proxy, stores),
     ]).toEqual([
-      { pathname: '/', search: '' },
-      { pathname: '/', search: '' },
-      { pathname: '/', search: '' },
+      null,
+      null,
+      null,
+      null,
     ])
   })
 })

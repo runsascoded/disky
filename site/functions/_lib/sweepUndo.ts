@@ -11,6 +11,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { batchConfig, notConfigured } from './batchConfig.js'
 import { type DispatchErr, type ExecEnv, refuse } from './dispatch.js'
 import { batchRegionFor, gcpToken } from './gcp.js'
+import { auditRunControl } from './plans.js'
 import { jobStampOf, RUN_ID_RE, submitSweepJob, sweepJobSpec, undoScript } from './sweepDispatch.js'
 
 /** The `deletion_runs` columns the undo gate reads. */
@@ -74,5 +75,6 @@ export async function undoSweepRun(
   const failed = await submitSweepJob(cfg, token, region, jobId, spec)
   if (failed) return failed
   await db.prepare("UPDATE deletion_runs SET undo_state = 'partial' WHERE run_id = ? AND undo_state != 'full'").bind(runId).run()
+  await auditRunControl(db, 'undo', runId, actor, jobId)
   return { ok: true, job_id: jobId, target: runId, region }
 }

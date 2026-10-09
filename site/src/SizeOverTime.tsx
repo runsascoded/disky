@@ -140,7 +140,7 @@ const fmtPct = (y: number) => {
   return a === 0 ? '0%' : signed(y, `${a >= 10 ? a.toFixed(0) : a.toFixed(1)}%`)
 }
 
-export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, window: win, scopeLabel = 'all buckets', paths, filterLabel }: {
+export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate, onBrush, window: win, scopeLabel = 'all buckets', paths, filterLabel }: {
   /** The store's root scope word for the unscoped subtitle (`all buckets`, `the whole bucket`). */
   scopeLabel?: string
   /** The page filter's match roots: the series is their sum per scan. */
@@ -151,6 +151,9 @@ export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, w
   prefix: string
   /** The owner axis's user: their bytes under `prefix`, per scan. */
   user?: string | null
+  /** The ownership ledger's revision: a user or pool series folds the live
+   * assignments server-side, so an assignment refetches it. */
+  ledgerRev?: string
   /** The owner axis's pool — `unowned` = bytes no person owns, `owned`
    * = bytes some person owns — under `prefix`, per scan. `user` wins. */
   pool?: 'unowned' | 'owned' | null
@@ -201,7 +204,7 @@ export function SizeOverTime({ scans, prefix, user, pool, onPickDate, onBrush, w
   const store = useStore()
   const sfetch = useStoreFetch()
   const seriesQ = useQuery<Series>({
-    queryKey: ['series', store.key, prefix, scope, scans.length],
+    queryKey: ['series', store.key, prefix, scope, scans.length, user || pool ? ledgerRev : null],
     // Under a filter, wait for its match roots: the whole-store series is not
     // what the page asked for.
     enabled: scans.length > 1 && !(filterLabel && !paths?.length) && !tooMany,

@@ -146,7 +146,7 @@ def write_v2(here: str) -> None:
 
 def write_v2_lens(here: str) -> None:
     """`v2-lens/`: the v2 generation with an owner label (`usr`) — `nest`'s
-    subtree is `alice`'s, `flat`'s `bob`'s, the rest unclaimed — so a lens view
+    subtree is `alice`'s, `flat`'s `bob`'s, the rest unowned — so a lens view
     on a store generation (which writes no `user` sort; `path-index -U`) has
     rows to filter. `path` + `bysize` + the one user-first copy, `bysize-user`,
     as gcs writes them (`path-index -u bysize`), each one group at the

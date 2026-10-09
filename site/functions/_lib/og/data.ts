@@ -18,7 +18,7 @@ import type { TreeNode, UserInfo } from '../../../src/types.js'
 import { type CardData, type CardTile, type LegendItem, fmtB } from './card.js'
 import type { OgTier } from './sign.js'
 
-/** The unclaimed pool's colour (the dark theme's `--t-unattr`). */
+/** The unowned pool's colour (the dark theme's `--t-unattr`). */
 export const UNOWNED_COLOR = '#4a4943'
 const FOLD_COLOR = '#2b2e35'
 

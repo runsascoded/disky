@@ -222,7 +222,9 @@ export async function planDetail(db: D1Database, id: number, staging: boolean): 
   const batches = staging
     ? (await db.prepare('SELECT * FROM stage_batches WHERE plan_id = ? ORDER BY created_ts DESC').bind(id).all<StageBatchRow>()).results
     : []
-  const runs = await db.prepare('SELECT * FROM deletion_runs WHERE plan_id = ? ORDER BY started_ts DESC').bind(id).all<Record<string, unknown>>()
+  // Every run, not just this plan's: plans are bookkeeping, and /staged's runs
+  // table is the deployment's run history.
+  const runs = await db.prepare('SELECT * FROM deletion_runs ORDER BY started_ts DESC LIMIT 500').all<Record<string, unknown>>()
   const edits = staging
     ? (await db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()).results
     : []
@@ -311,6 +313,17 @@ export async function audit(
     .run()
 }
 
+/** A run control (stop / undo / purge) into the audit log: who, when, and the
+ *  job it launched (null for a stop, which writes a flag file). The run's own
+ *  row keeps only state (`undo_state`, …), not who changed it. */
+export const auditRunControl = (
+  db: D1Database,
+  control: 'stop' | 'undo' | 'purge',
+  target: string,
+  who: string,
+  jobId: string | null,
+): Promise<void> => audit(db, 'deletion_runs', target, 'update', who, null, { control, job_id: jobId })
+
 /** Snapshot a plan into the executor's plan.json: the plan's one bucket
  * (`planBucket`; throws `PlanSpansBuckets`) and the relative sweep prefixes
  * (the plan's items — the whole intent; nothing carves out). Returns null if
@@ -351,6 +364,7 @@ export interface RunRow {
   skipped_overwritten: number
   plan_digest: string | null
   undo_deadline?: number | null
+  log_dir?: string | null
 }
 
 export type Gate =
