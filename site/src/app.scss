@@ -299,6 +299,9 @@ header .hrow {
     &.sel { font-weight: 700; }
     &.sel::after { content: ' ✓'; color: var(--accent, #7aa2f7); }
     &.active { background: color-mix(in oklab, var(--accent, #7aa2f7) 22%, transparent); }
+    // A day's only scan: one row, the day then its time (dimmed).
+    &.solo { padding-left: 7px; }
+    .sp-time { margin-left: 8px; color: var(--ink-3); font-weight: 400; }
   }
   .sp-empty { padding: 6px 9px; color: var(--ink-3); font-size: 12px; }
 }

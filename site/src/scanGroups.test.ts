@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fmtScan, scanGroups } from './scan'
+import { clock, fmtScan, scanGroups } from './scan'
 
 // Sub-daily ids display in the viewer's local time, so which day a 00:01Z
 // scan lands on depends on the machine running the test; the spec is the
@@ -23,6 +23,13 @@ describe('scanGroups', () => {
       else expect([g.day, s.label, g.scans.length]).toEqual([fmtScan(s.id, now), fmtScan(s.id, now), 1])
     }
     expect(groups.slice(-2)).toEqual([{ day: '9/10', scans: [{ id: '2026-09-10', label: '9/10' }] }, { day: '9/9', scans: [{ id: '2026-09-09', label: '9/9' }] }])
+  })
+  it('a date-only scan with a known run time is labelled by that time (local clock)', () => {
+    const at = '2026-09-10T22:02Z'
+    expect(scanGroups(['2026-09-10', '2026-09-09'], now, { '2026-09-10': at })).toEqual([
+      { day: '9/10', scans: [{ id: '2026-09-10', label: clock(new Date(Date.parse(at))) }] },
+      { day: '9/9', scans: [{ id: '2026-09-09', label: '9/9' }] },
+    ])
   })
   it('empty in, empty out', () => {
     expect(scanGroups([])).toEqual([])

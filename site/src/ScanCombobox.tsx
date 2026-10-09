@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { fmtScan, scanGroups } from './scan'
+import { fmtScan, scanGroups, type ScanTimes } from './scan'
 
 /**
  * A scan chooser as an ARIA combobox (a filterable listbox), replacing the
@@ -9,10 +9,14 @@ import { fmtScan, scanGroups } from './scan'
  * reveals a filter input (`role="combobox"`, `aria-activedescendant`) over a
  * `role="listbox"` grouped by day. Arrow keys move the active option, Enter
  * selects, Esc closes, typing filters against the rendered label ("8/19 6:08a").
+ * A day with one scan is one row (its day, then its time when known), not a
+ * header over a single row.
  */
-export function ScanCombobox({ value, scans, onChange, label, className }: {
+export function ScanCombobox({ value, scans, times, onChange, label, className }: {
   value: string
   scans: string[]
+  /** Date-only ids' run times (`useScanTimes`), shown beside the day. */
+  times?: ScanTimes
   onChange: (id: string) => void
   label: string
   className?: string
@@ -30,11 +34,15 @@ export function ScanCombobox({ value, scans, onChange, label, className }: {
 
   // Filter over the human label (what the reader sees), so typing "6:08" or
   // "8/19" narrows the list; empty query shows everything.
-  const filtered = useMemo(() => {
+  const all = useMemo(() => scanGroups(scans, undefined, times), [scans, times])
+  const groups = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return q ? scans.filter(id => fmtScan(id).toLowerCase().includes(q)) : scans
-  }, [scans, query])
-  const groups = useMemo(() => scanGroups(filtered), [filtered])
+    if (!q) return all
+    return all
+      .map(g => ({ ...g, scans: g.scans.filter(s => `${g.day} ${s.label}`.toLowerCase().includes(q)) }))
+      .filter(g => g.scans.length)
+  }, [all, query])
+  const filtered = useMemo(() => groups.flatMap(g => g.scans.map(s => s.id)), [groups])
 
   const close = useCallback((focusBtn = true) => {
     setOpen(false)
@@ -132,28 +140,33 @@ export function ScanCombobox({ value, scans, onChange, label, className }: {
           />
           <ul ref={listRef} className="sp-list" role="listbox" id={listId} aria-label={label}>
             {groups.length === 0 && <li className="sp-empty" role="presentation">no scans match</li>}
-            {groups.map(g => (
-              <li key={g.day} role="presentation" className="sp-group">
-                <div className="sp-day" role="presentation">{g.day}</div>
-                <ul role="presentation">
-                  {g.scans.map(s => (
-                    <li
-                      key={s.id}
-                      id={optId(s.id)}
-                      role="option"
-                      aria-selected={s.id === value}
-                      className={'sp-opt' + (s.id === activeId ? ' active' : '') + (s.id === value ? ' sel' : '')}
-                      // pointer-down (not click) so the outside-close handler
-                      // doesn't fire first and swallow the selection.
-                      onMouseDown={e => { e.preventDefault(); commit(s.id) }}
-                      onMouseEnter={() => setActiveId(s.id)}
-                    >
-                      {s.label}
-                    </li>
-                  ))}
-                </ul>
-              </li>
-            ))}
+            {groups.map(g => {
+              const opt = (s: { id: string; label: string }, solo: boolean) => (
+                <li
+                  key={s.id}
+                  id={optId(s.id)}
+                  role="option"
+                  aria-selected={s.id === value}
+                  className={'sp-opt' + (solo ? ' solo' : '') + (s.id === activeId ? ' active' : '') + (s.id === value ? ' sel' : '')}
+                  // pointer-down (not click) so the outside-close handler
+                  // doesn't fire first and swallow the selection.
+                  onMouseDown={e => { e.preventDefault(); commit(s.id) }}
+                  onMouseEnter={() => setActiveId(s.id)}
+                >
+                  {solo
+                    ? <>{g.day}{s.label !== g.day && <span className="sp-time">{s.label}</span>}</>
+                    : s.label}
+                </li>
+              )
+              return g.scans.length === 1
+                ? opt(g.scans[0], true)
+                : (
+                  <li key={g.day} role="presentation" className="sp-group">
+                    <div className="sp-day" role="presentation">{g.day}</div>
+                    <ul role="presentation">{g.scans.map(s => opt(s, false))}</ul>
+                  </li>
+                )
+            })}
           </ul>
         </div>
       )}

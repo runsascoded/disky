@@ -15,7 +15,7 @@ import { S3Store } from '@rdub/file-tree/stores/s3'
 import { withStore } from '../_lib/stores.js'
 import { snapshotsPrefix } from '../_lib/shared.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { pathScans, storeCreds, storeReady, storeTarget } from '../_lib/index.js'
+import { genInstant, pathScanGens, pathScans, storeCreds, storeReady, storeTarget } from '../_lib/index.js'
 
 // Scan ids are `YYYY-MM-DD`, optionally sub-daily as `YYYY-MM-DDTHHMM` (no
 // colon: it keeps the id safe as an object-key path segment). GCS publishes one
@@ -78,6 +78,21 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
       }
       dates.sort().reverse()
       return new Response(JSON.stringify(dates), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
+      })
+    }
+    // `<store>/scan-times.json` → `{ <scan id>: <instant> }` for the date-only
+    // ids whose index generation is a capture stamp: when in that day the scan
+    // ran, for the picker. Ids without one are left out.
+    if (/^(?:[a-z0-9-]+\/)?scan-times\.json$/.test(rel)) {
+      const times: Record<string, string> = {}
+      if (ctx.env.DB) {
+        for (const r of (await pathScanGens(ctx.env)).results) {
+          const at = genInstant(r.gen)
+          if (at && !r.date.includes('T')) times[r.date] = at
+        }
+      }
+      return new Response(JSON.stringify(times), {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
       })
     }

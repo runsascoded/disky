@@ -39,7 +39,7 @@ import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, encodeScan, fmtScan, nearestScan, noScansYet, scanTime, useScan } from './scan'
+import { DAY, encodeScan, fmtScan, nearestScan, noScansYet, scanTime, useScan, useScanTimes } from './scan'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
 import { perf } from './perf'
@@ -168,6 +168,7 @@ function AppContent() {
   // and /user/:id via useScan (specs/done/scan-param-all-pages.md). Absent `?d` is
   // a first-class "latest", so a parked tab follows new scans.
   const { asof, scans, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, scansQ } = useScan(store)
+  const scanTimes = useScanTimes(store)
   const rulesQ = useRules()
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
@@ -1055,7 +1056,7 @@ function AppContent() {
       <SiteNav menu={menu} crumbs={crumbs}>
         {asof && scans.length > 1 && (
           <span className="tb-scan">
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" />
+            <ScanCombobox times={scanTimes} value={asof} scans={scans} onChange={setDP} label="Scan date" />
           </span>
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
@@ -1312,7 +1313,7 @@ function AppContent() {
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
             <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              <ScanCombobox value={diffPrev} scans={earlier} onChange={startPinned ? setFrom : pickBefore} label="Diff from scan" />
+              <ScanCombobox times={scanTimes} value={diffPrev} scans={earlier} onChange={startPinned ? setFrom : pickBefore} label="Diff from scan" />
             </Explain>
             <Explain text={startPinned
               ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>
@@ -1325,7 +1326,7 @@ function AppContent() {
               </button>
             </Explain>
             <span className="arrow"> → </span>
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" />
+            <ScanCombobox times={scanTimes} value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" />
             {endIsLatest && (
               <Explain text={endPinned
                 ? <>End is <b>pinned</b> to this scan. Click to follow the latest scan as new ones arrive.</>

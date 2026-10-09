@@ -12,6 +12,12 @@ export const DAY = 24 * HOUR
 // Scan labels: drop the redundant year for the current one, so a list of
 // same-year scans reads as `8/17` rather than `2026-08-17`. Scan ids are
 // `YYYY-MM-DD`, optionally sub-daily as `YYYY-MM-DDTHHMM`.
+/** A local wall-clock time, 12-hour with a bare a/p ("6:08a"). */
+export function clock(dt: Date): string {
+  const h = dt.getHours()
+  return `${h % 12 || 12}:${String(dt.getMinutes()).padStart(2, '0')}${h < 12 ? 'a' : 'p'}`
+}
+
 export function fmtScan(s: string, now = new Date()): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):?(\d{2}))?/.exec(s)
   if (!m) return s
@@ -25,8 +31,7 @@ export function fmtScan(s: string, now = new Date()): string {
   // 12-hour with a bare a/p ("8/19 6:08a"). The `?d=` token stays UTC (see
   // decodeScan) — display converts, the URL doesn't.
   const dt = new Date(Date.UTC(+y, +mo - 1, +d, +hh, +(mm ?? '0')))
-  const h = dt.getHours()
-  const time = `${h % 12 || 12}:${String(dt.getMinutes()).padStart(2, '0')}${h < 12 ? 'a' : 'p'}`
+  const time = clock(dt)
   const md = `${dt.getMonth() + 1}/${dt.getDate()}`
   return dt.getFullYear() === now.getFullYear()
     ? `${md} ${time}`
@@ -184,6 +189,26 @@ export interface Scan {
  * The list polls so an unpinned tab discovers new scans on its own; the
  * per-scan payloads are immutable once published, so they never refetch.
  * Store-scoped key, so switching stores swaps the whole payload set. */
+/** Date-only scan id → the instant it ran (`scan-times.json`; ids whose
+ * generation isn't a capture stamp are absent). */
+export type ScanTimes = Record<string, string>
+
+export function useScanTimes(store: Store): ScanTimes {
+  const q = useQuery<ScanTimes>({
+    queryKey: ['scan-times', store.key],
+    // Decoration only: until it loads (or if it keeps failing), dates alone.
+    // A failure throws so react-query retries, not caches `{}` for a poll.
+    queryFn: async () => {
+      const r = await fetch(storeUrl(`${store.base}/scan-times.json`, store))
+      if (!r.ok) throw new Error(`scan-times: ${r.status}`)
+      return r.json()
+    },
+    refetchInterval: SCANS_POLL_MS,
+  })
+  return q.data ?? EMPTY_TIMES
+}
+const EMPTY_TIMES: ScanTimes = {}
+
 export function useScans(store: Store): UseQueryResult<string[]> {
   return useQuery<string[]>({
     queryKey: ['scans', store.key],
@@ -239,13 +264,15 @@ export function useScan(store: Store): Scan {
  * first, each option labelled by its time alone (`8:01a`) — a date-only scan
  * is its day's single, unlabelled-time entry. A list of sixty `9/16 8:01p`
  * rows read as noise; grouped, the day is said once. */
-export function scanGroups(scans: string[], now = new Date()): { day: string; scans: { id: string; label: string }[] }[] {
+export function scanGroups(scans: string[], now = new Date(), times: ScanTimes = {}): { day: string; scans: { id: string; label: string }[] }[] {
   const out: { day: string; scans: { id: string; label: string }[] }[] = []
   for (const id of scans) {
     const f = fmtScan(id, now)
     const sp = f.indexOf(' ')
     const day = sp < 0 ? f : f.slice(0, sp)
-    const label = sp < 0 ? f : f.slice(sp + 1)
+    // A date-only id is labelled by its run time when the store knows it.
+    const at = sp < 0 && times[id] ? Date.parse(times[id]) : NaN
+    const label = sp < 0 ? (isNaN(at) ? f : clock(new Date(at))) : f.slice(sp + 1)
     const last = out[out.length - 1]
     if (last && last.day === day) last.scans.push({ id, label })
     else out.push({ day, scans: [{ id, label }] })
