@@ -532,7 +532,7 @@ export function AdminPage() {
         <div className="field">
           <label htmlFor="mint-hide">Hide</label>
           <textarea id="mint-hide" className="hide-paths" rows={2} value={hide} onChange={e => setHide(e.target.value)} placeholder={`~/Downloads/2025 tax returns${STORES.length > 1 ? `\n${STORES[1].key}:…` : ''}`} />
-          <span className="hint">dirs the link sees only as one total, nothing inside (one per line{STORES.length > 1 ? `; \`${STORES.slice(1).map(s => s.key).join('`/`')}:…\` for that store` : ''}){hidden.length ? ' — the link won’t add the email to the allowlist or be admin' : ''}</span>
+          <span className="hint">dirs the link sees only as one total, nothing inside (one per line{STORES.length > 1 && <>; {STORES.slice(1).map((s, i) => <Fragment key={s.key}>{i ? '/' : ''}<code>{s.key}:…</code></Fragment>)} for that store</>}){hidden.length ? ' — the link won’t add the email to the allowlist or be admin' : ''}</span>
         </div>
         <div className="field submit">
           <button type="submit" disabled={mint.isPending || !canMint}>Create link</button>
