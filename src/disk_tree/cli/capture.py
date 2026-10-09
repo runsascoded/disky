@@ -57,6 +57,7 @@ def _frame(root: str, names: list[str], sizes: list[int], mtimes: list[int]):
 
 
 @cli.command('capture')
+@option('-h', '--host', 'ssh_host', help="Walk PATH on this ssh host (its GNU `find`, over `ssh`; nothing installed there) instead of locally; it is also the capture's host segment")
 @option('-n', '--batch-rows', default=200_000, help='Rows per shard — bounds memory: one batch is buffered at a time')
 @option('-o', '--one-fs', is_flag=True, help="Don't descend into filesystems mounted below PATH. With PATH `/` on macOS: the System volume + the Data volume (via its firmlinks), once — the whole machine")
 @option('-q', '--no-progress', is_flag=True, help='Suppress the tqdm progress bar')
@@ -64,6 +65,7 @@ def _frame(root: str, names: list[str], sizes: list[int], mtimes: list[int]):
 @option('-t', '--to', required=True, help='Where the capture goes: a local dir or an fsspec URL (`r2://bucket/prefix`)')
 @argument('path', required=False)
 def capture_cmd(
+    ssh_host: str | None,
     batch_rows: int,
     one_fs: bool,
     no_progress: bool,
@@ -79,6 +81,8 @@ def capture_cmd(
     from disk_tree.backends import backend_for, ErrorCollector
     from disk_tree.find.bulk import _ROW_GROUP_ROWS
 
+    if ssh_host and not path:
+        raise SystemExit('--host needs PATH (an absolute path on that host)')
     root = (path or getcwd()).rstrip('/') or '/'
     if root.startswith(_CLOUD):
         raise SystemExit('capture is for local paths; bucket listings come from `bulk-list`')
@@ -87,12 +91,17 @@ def capture_cmd(
     now = datetime.now(timezone.utc)
     # `DISK_TREE_HOST` pins the capture dir's host segment: the same machine
     # reports `Mac` to a shell and `mac.lan` to a launchd job.
-    host = os.environ.get('DISK_TREE_HOST') or socket.gethostname()
+    # `--host` wins: a remote walk is that machine's capture, whatever this one is called.
+    host = ssh_host or os.environ.get('DISK_TREE_HOST') or socket.gethostname()
     out = capture_dir(to, root, host, now.strftime('%Y-%m-%dT%H-%M-%SZ'))
     if not blobfs.is_url(out):
         os.makedirs(out, exist_ok=True)
     errors = ErrorCollector()
-    backend = backend_for(root)
+    if ssh_host:
+        from disk_tree.backends.ssh import SshBackend
+        backend = SshBackend(ssh_host)
+    else:
+        backend = backend_for(root)
 
     names: list[str] = []
     sizes: list[int] = []
@@ -134,7 +143,7 @@ def capture_cmd(
         'error_count': errors.count,
         'error_paths': errors.paths,
     }
-    if sys.platform == 'darwin':
+    if sys.platform == 'darwin' and not ssh_host:
         # The APFS container the walk sits on (volumes, snapshots, free): what
         # the walk can't attribute, so a UI can draw the whole disk. A root on a
         # non-APFS volume (ExFAT external) legitimately has none; and the field
