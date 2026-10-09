@@ -37,5 +37,9 @@ STAGING = "1"                     # the opt-in trash: viewers stage (`/api/plans
 STORE_SCHEME = "file:///"
 STORE_BUCKETS = "*"               # every top-level dir is a root (a `capture /`: Applications, Users, …)
 HOME = "Users/ryan"               # paths under it read as `~/…` (site/src/pathCrumbs.ts)
+# The NAS (specs/multi-store.md): a secondary store at `/nas` (`src/stores/nas.ts`),
+# same bucket and keys as the primary, its own `snapshots/nas/` + D1 rows (store `nas`).
+STORES_EXTRA = "nas"
+STORES_JSON = '{"nas": {"vars": {"ROOT_LABEL": "nas", "SNAPSHOTS_SUBDIR": "nas", "STORE_SCHEME": "file:///", "STORE_BUCKETS": "*", "STORE_BUCKET": "disk-tree", "STORE_REGION": "auto"}, "secrets": {"STORE_ENDPOINT": "STORE_ENDPOINT", "STORE_ACCESS_KEY_ID": "STORE_ACCESS_KEY_ID", "STORE_SECRET_ACCESS_KEY": "STORE_SECRET_ACCESS_KEY"}}}'
 # Secrets (Pages secrets at deploy; `.dev.vars` locally): STORE_ENDPOINT,
 # STORE_ACCESS_KEY_ID, STORE_SECRET_ACCESS_KEY, SESSION_SECRET.
