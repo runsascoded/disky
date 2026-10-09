@@ -17,6 +17,7 @@ import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
+import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlSegs, pathCopy, pathDisplay, pathText, toUrlSegs } from './pathCrumbs'
@@ -1249,6 +1250,19 @@ function AppContent() {
               onOpen={openPath}
               onOpenObject={openObject}
               actionable={tblActionable}
+            /></div>
+          )}
+          {/* …and its flat twin: the largest files anywhere below it. The whole directory's, so not
+              shown under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
+          {mapPath && objects && (
+            <div id="ltbl"><LargestFiles
+              segs={tblSegs}
+              scheme={store.scheme}
+              scan={asof}
+              total={mapPath[mapPath.length - 1].b}
+              enabled={!scopeQs}
+              onOpen={openPath}
+              onOpenObject={openObject}
             /></div>
           )}
         </>
