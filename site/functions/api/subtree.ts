@@ -11,6 +11,7 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
+import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
 import { type Env, type Identity, requireViewer } from '../_lib/auth.js'
 import { pathGens, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -88,6 +89,12 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
     if (gated instanceof Response) return gated
     id = gated
   }
+  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  // and every body (cached or fresh) is filtered on the way out.
+  const restriction = restrictionFor(id, ctx.env)
+  if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  const out = (res: Response | Promise<Response>) =>
+    restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, restriction))) : res
 
   // A user lens or an owner pool folds the live ledger (assignments repaint
   // attribution, or move bytes in or out of a pool): its cache key carries the head.
@@ -109,7 +116,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
       storeKey(ctx.env),
     )
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
-    if (hit) return hit
+    if (hit) return out(hit)
 
     const view = await buildView(ctx.env, { date, path, w, h, minArea, atten, lens, owner, by, maxDepth: depth, query, classes, firstPaint: !!query && !full, trace: st.trace })
     const body = JSON.stringify({
@@ -129,7 +136,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
       ...(query ? { q: qRaw, matches: view.matches, matched: view.matched ?? [], ...(view.excluded ? { excluded: view.excluded } : {}), ...(view.firstPaint ? { firstPaint: true } : {}), partial: view.partial, partialReason: view.partialReason, approximate: view.approximate, approximateReason: view.approximateReason } : {}),
       tree: view.tree,
     })
-    return await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
+    return await out(cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx)))
   } catch (e) {
     if (e instanceof NotFound) return new Response('path not found', { status: 404 })
     // 409 (not 500): a lens index missing for this scan is deterministic —

@@ -11,6 +11,7 @@
  * the full range (the planner then picks the coarsest tier that fits), so the
  * FE should pass the chart's actual time domain to get useful granularity.
  */
+import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { withStore } from '../_lib/stores.js'
 import { num, openIndex, readPoint, storeReady } from '../_lib/index.js'
@@ -36,6 +37,8 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promis
 
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
+  const restriction = restrictionFor(gated, ctx.env)
+  if (restriction && isHidden(path, restriction)) return hiddenNotFound()
 
   const depth = path === '' ? 0 : path.split('/').length
   const fine = AGE_TIERS[0].bin // finest produced tier ('1d')

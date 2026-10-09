@@ -12,6 +12,7 @@
  * immutable per (from, to, path, budget, scope) plus the ledger head under a
  * user lens, and edge-cached accordingly.
  */
+import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { pathGens, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -70,6 +71,12 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
 
   const gated = await st.time('auth', requireViewer(ctx as never))
   if (gated instanceof Response) return gated
+  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  // and every body (cached or fresh) is filtered on the way out.
+  const restriction = restrictionFor(gated, ctx.env)
+  if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  const out = (res: Response | Promise<Response>) =>
+    restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictDiff>[0]) => restrictDiff(b, restriction))) : res
 
   // One guard over the D1 pre-step, the cache match and the build (see
   // subtree.ts): a D1 stall becomes a retryable 503, not a raw 500 page.
@@ -86,7 +93,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
       storeKey(ctx.env),
     )
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
-    if (hit) return hit
+    if (hit) return out(hit)
 
     const diff = await buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: st.trace })
     const body = JSON.stringify({
@@ -99,7 +106,7 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
       ...diff,
       threshold: Math.round(diff.threshold),
     })
-    return await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
+    return await out(cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx)))
   } catch (e) {
     if (e instanceof NotFound) return new Response('path not found in either scan', { status: 404 })
     if (e instanceof LensUnavailable) return new Response('lens index not available for a scan', { status: 409 })

@@ -4,6 +4,7 @@
  * canonical params), unexpired and unrevoked. Each mint is a new token, so
  * each can be revoked alone. A deployment without the table mints nothing and
  * honours no token (every card stays anonymous). */
+import { isPathScope } from '../restrict.js'
 import type { D1Database } from '@cloudflare/workers-types'
 import { canRedeem, hashToken } from '@open-athena/auth'
 import { d1GrantStore } from '@open-athena/auth/d1'
@@ -98,6 +99,9 @@ export const shareKeyLive = async (db: D1Database | undefined, key: string | nul
 type GrantLike = { revokedAt: number | null; disabledAt: number | null; expiresAt: number | null; scopes: string[] } & Parameters<typeof canRedeem>[0]
 const grantOk = (g: GrantLike, scopes: readonly string[], now: number): boolean =>
   canRedeem(g, now) && g.scopes.some((sc: string) => sc === '*' || scopes.includes(sc))
+  // A path-restricted link (specs/path-scopes.md) never earns a full card:
+  // its tiles would name what the link hides.
+  && !g.scopes.some(isPathScope)
 
 /** The share-link grant `id` is still live (same rule as `shareKeyGrant`):
  * what a `key=` page's full card image re-checks on every fetch, so
