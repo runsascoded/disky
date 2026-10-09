@@ -10,6 +10,7 @@ import { onRequestGet as subtree } from '../api/subtree'
 import { onRequestGet as diff } from '../api/diff'
 import { onRequestGet as series } from '../api/series'
 import { onRequestPost as prefixes } from '../api/prefixes'
+import { onRequestGet as largest } from '../api/largest'
 
 const ENV = { BASE_SCOPE: 'laptop', SESSION_SECRET: 'test-secret', STORE_BUCKET: 'disk-tree', STORE_ENDPOINT: 'https://r2.example.test', STORE_ACCESS_KEY_ID: 'k', STORE_SECRET_ACCESS_KEY: 's' } as Env
 const HIDE = 'Users/ryan/Downloads/2025 tax returns'
@@ -97,7 +98,7 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
   it('filterJson re-emits an OK body through the filter, keeps status/headers, passes errors through', async () => {
     const ok = new Response(JSON.stringify({ path: 'Users/ryan/Downloads', tree: TREE }), { headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300' } })
     const out = await filterJson(ok, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, r))
-    expect([out.status, out.headers.get('cache-control'), (await out.json()).tree.c[0]]).toEqual([200, 'private, max-age=300', { n: '2025 tax returns', k: 'dir', b: 100, o: 3 }])
+    expect([out.status, out.headers.get('cache-control'), ((await out.json()) as { tree: ViewNode }).tree.c![0]]).toEqual([200, 'private, max-age=300', { n: '2025 tax returns', k: 'dir', b: 100, o: 3 }])
     const bad = new Response('nope', { status: 503 })
     expect(await filterJson(bad, () => { throw new Error('not called') })).toBe(bad)
   })
@@ -125,15 +126,16 @@ const bearer = (url: string, key: string, init?: RequestInit) =>
 
 describe('routes, as a restricted link', () => {
   const scopes = ['laptop', hideScope('laptop', HIDE)]
-  it('a hidden path is absent from subtree, diff and series (before any store read)', async () => {
+  it('a hidden path is absent from subtree, diff, series and largest (before any store read)', async () => {
     const { env, key } = await linkEnv(scopes)
     const p = encodeURIComponent(`${HIDE}/W2.pdf`)
     const got = await Promise.all([
       subtree({ request: bearer(`/api/subtree?date=2026-10-09&path=${p}`, key), env } as never),
       diff({ request: bearer(`/api/diff?from=2026-10-08&to=2026-10-09&path=${p}`, key), env } as never),
       series({ request: bearer(`/api/series?paths=Users/ryan/Documents&paths=${p}`, key), env } as never),
+      largest({ request: bearer(`/api/largest?date=2026-10-09&path=${p}`, key), env } as never),
     ].map(async r => { const res = await r; return [res.status, await res.text()] }))
-    expect(got).toEqual([[404, 'path not found'], [404, 'path not found'], [404, 'path not found']])
+    expect(got).toEqual([[404, 'path not found'], [404, 'path not found'], [404, 'path not found'], [404, 'path not found']])
   })
   it('prefixes (caller-supplied probes) and the unfilterable routes are 403', async () => {
     const { env, key } = await linkEnv(scopes)
