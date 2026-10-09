@@ -1507,6 +1507,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     input { margin: 0; }
   }
 
+  // The "Hide" paths (specs/path-scopes.md): one per line, monospace like paths elsewhere.
+  textarea.hide-paths {
+    font: 12.5px var(--mono, ui-monospace, monospace); padding: 4px 7px; min-width: 22em;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; resize: vertical;
+  }
+
   // Phone: the 3-column label / input / hint grid squeezes the hint to one word
   // per line — stack each field instead, hint at full width under its input.
   @media (max-width: 640px) {
@@ -1515,7 +1521,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       .field { display: block; margin: 0 0 14px; }
       .field.submit { display: flex; margin-top: 4px; }
       label { display: block; margin-bottom: 4px; }
-      & > .field > input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; }
+      & > .field > input:not([type="checkbox"]), & > .field > textarea { width: 100%; min-width: 0; box-sizing: border-box; }
       input.days { width: 6em; }
       .hint { display: block; margin-top: 4px; }
     }
