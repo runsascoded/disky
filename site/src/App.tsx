@@ -1258,6 +1258,7 @@ function AppContent() {
             <div id="ltbl"><LargestFiles
               segs={tblSegs}
               scheme={store.scheme}
+              home={store.home}
               scan={asof}
               total={mapPath[mapPath.length - 1].b}
               enabled={!scopeQs}

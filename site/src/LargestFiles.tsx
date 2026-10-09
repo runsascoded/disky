@@ -48,10 +48,12 @@ export function relParts(segs: string[], path: string): { dirSegs: string[]; rel
   return { dirSegs: all.slice(0, -1), rel: rel.slice(0, -1), base: all[all.length - 1] }
 }
 
-export function LargestFiles({ segs, scheme, scan, total, enabled = true, onOpen, onOpenObject }: {
+export function LargestFiles({ segs, scheme, home, scan, total, enabled = true, onOpen, onOpenObject }: {
   /** Path segments from the store root to the drilled dir. */
   segs: string[]
   scheme: string
+  /** The store home, read as `~` in tooltips (`Store.home`). */
+  home?: string[]
   scan: string | null | undefined
   /** The drilled dir's bytes (the share column's denominator). */
   total: number
@@ -85,7 +87,7 @@ export function LargestFiles({ segs, scheme, scan, total, enabled = true, onOpen
       <h3>
         Largest files
         <Tooltip content={<>
-          The biggest files anywhere under <code>{pathText(scheme, segs, true)}</code>, however deep — files only, never folders.
+          The biggest files anywhere under <code>{pathText(scheme, segs, home, true)}</code>, however deep — files only, never folders.
           Sizes are per-path: a cloned or hard-linked file is charged in full here, so deleting it can free less.
         </>}><span className="info" tabIndex={0} aria-label="about largest files"> ⓘ</span></Tooltip>
         <select className="psize" value={n} onChange={e => setNP(+e.target.value)} aria-label="files to list">
@@ -113,7 +115,7 @@ export function LargestFiles({ segs, scheme, scan, total, enabled = true, onOpen
                 return (
                   <tr key={f.path}>
                     <td className="prefix">
-                      <Tooltip content={<code className="elide-full">{pathText(scheme, fileSegs)}</code>}>
+                      <Tooltip content={<code className="elide-full">{pathText(scheme, fileSegs, home)}</code>}>
                         <span>
                           {relDir && (
                             <a role="link" tabIndex={0} className="dir"

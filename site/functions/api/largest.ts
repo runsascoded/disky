@@ -2,7 +2,7 @@
  * list (objects only, never dirs), size-descending, from the store
  * generation's `bysize` sort (`readLargest` in `_lib/index.ts`).
  *
- *   GET /api/largest?date=<scan>|d=<slug>&path=<P>[&n=<1..500>][&store=<key>]
+ *   GET /api/largest?date=<scan>&path=<P>[&n=<1..500>][&store=<key>]
  *
  * → `{ date, path, n, files: [{ path, size, mtime }], more, groups, rows, capped? }`:
  * `path` is the full store path (no scheme), `mtime` epoch seconds (null where
@@ -19,8 +19,6 @@ import { type Env, requireViewer } from '../_lib/auth.js'
 import { openIndex, pathGens, readLargest, sizeVariant, storeReady } from '../_lib/index.js'
 import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { storeKey, withStore } from '../_lib/stores.js'
-import { scanArg } from '../_lib/scanArg.js'
-import { isScanId } from '../../src/scanSlug.js'
 
 export const LARGEST_DEFAULT = 100
 export const LARGEST_MAX = 500
@@ -37,7 +35,8 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   }
   const url = new URL(ctx.request.url)
   const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
-  if (!isScanId(url.searchParams.get('date')) && !url.searchParams.has('d')) return new Response('bad date', { status: 400 })
+  const date = url.searchParams.get('date') ?? ''
+  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/.test(date)) return new Response('bad date', { status: 400 })
   if (path.includes('..') || path.startsWith('/')) return new Response('bad path', { status: 400 })
   const nRaw = url.searchParams.get('n')
   const n = nRaw == null ? LARGEST_DEFAULT : Number(nRaw)
@@ -47,10 +46,6 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   if (gated instanceof Response) return gated
 
   try {
-    // An unindexed id, or a `d=` slug matching no scan: a 404, never another scan.
-    const scan = await scanArg(ctx.env, url.searchParams)
-    if (scan instanceof Response) return scan
-    const date = scan
     const g = await st.time('pre', pathGens(ctx.env, [date]))
     const cacheKey = cacheKeyFor('largest', `${date}/${encodeURIComponent(path)}?n=${n}&g=${g}`, storeKey(ctx.env))
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))

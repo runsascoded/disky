@@ -140,7 +140,7 @@ describe('GET /api/largest', () => {
       { status: 400, body: 'bad path' },
       { status: 400, body: 'bad path' },
       { status: 400, body: 'bad date' },
-      { status: 404, body: { error: 'no scan matches date=2026-01-01' } },
+      { status: 409, body: 'no size sort for this scan (objects not indexed)' },
     ])
   })
 })
