@@ -126,3 +126,49 @@ def test_capture_to_a_url_target(tree: Path, tmp_path: Path):
     assert cap.startswith(f'{to}/{HOST}/')
     assert blobfs.list_parquets(cap) == ['shard-00000.parquet']
     assert blobfs.exists(blobfs.join(cap, MARKER)) is True
+
+
+def _fake_ssh(tmp_path: Path, log: Path) -> str:
+    """A stand-in `ssh`: logs its argv, then runs the remote command (the last
+    arg) here, with `find` resolving to GNU find (`gfind` on macOS)."""
+    bin_dir = tmp_path / 'fake-bin'
+    bin_dir.mkdir()
+    gnu = subprocess.run(['sh', '-c', 'command -v gfind || command -v find'], capture_output=True, text=True, check=True).stdout.strip()
+    (bin_dir / 'find').symlink_to(gnu)
+    ssh = tmp_path / 'fake-ssh'
+    ssh.write_text(
+        '#!/bin/sh\n'
+        f'printf "%s\\n" "$@" > {log}\n'
+        'for last; do :; done\n'
+        f'PATH={bin_dir}:$PATH exec sh -c "$last"\n'
+    )
+    ssh.chmod(0o755)
+    return str(ssh)
+
+
+def test_capture_over_ssh_runs_find_remotely_and_names_the_remote_host(tree: Path, tmp_path: Path):
+    root, to, log = tmp_path / 'root', tmp_path / 'cap', tmp_path / 'ssh-argv'
+    # `DISK_TREE_HOST` (pinned by the laptop's agent) must not rename a remote walk.
+    r = _ok(_run(['capture', '-q', '-h', 'nas', '-t', str(to), str(tree)], root, DISK_TREE_SSH=_fake_ssh(tmp_path, log), DISK_TREE_HOST='laptop'))
+    cap = _only_capture(to)
+    assert r.stdout.rstrip('\n') == str(cap)
+    assert cap.parent.parent.name == 'nas'
+    assert log.read_text().split('\n')[:-1] == ['-o', 'BatchMode=yes', 'nas', f"find {tree} -printf '%y %b %T@ %p\\0'"]
+    assert_frame_equal(_listing(cap), _expected_listing(tree))
+    m = json.loads((cap / MARKER).read_text())
+    assert m == {
+        'format': 'disk-tree-capture', 'version': 1, 'scheme': 'file',
+        'root': str(tree), 'host': 'nas', 'time': m['time'],
+        'n_rows': 3, 'n_shards': 1, 'error_count': 0, 'error_paths': [],
+    }
+
+
+def test_capture_over_ssh_fails_without_a_marker_when_ssh_cannot_connect(tree: Path, tmp_path: Path):
+    root, to = tmp_path / 'root', tmp_path / 'cap'
+    ssh = tmp_path / 'down-ssh'
+    ssh.write_text('#!/bin/sh\necho "ssh: connect to host nas port 22: Connection refused" >&2\nexit 255\n')
+    ssh.chmod(0o755)
+    r = _run(['capture', '-q', '-h', 'nas', '-t', str(to), str(tree)], root, DISK_TREE_SSH=str(ssh))
+    assert r.returncode == 1
+    assert r.stderr.rstrip('\n').split('\n')[-1] == f'RuntimeError: {ssh} exited 255: no listing of {tree}'
+    assert list(to.glob(f'**/{MARKER}')) == []
