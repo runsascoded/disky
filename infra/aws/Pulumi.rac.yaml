@@ -26,6 +26,8 @@ config:
     D1_DB_ID: e5288564-a010-4177-9f3c-77e25fad9f72
     D1_DB_NAME: disk-tree-m3-db
     INDEX_VARIANTS: path
+    # Capture host → secondary store (ingest.sh); other hosts are the primary (`laptop`).
+    HOST_STORES: nas=nas
   # Created empty; values set out of band by `aws/put-secrets` (never in state).
   disk-tree-m3:secrets:
     AWS_ACCESS_KEY_ID: disk-tree-m3/r2-access-key-id

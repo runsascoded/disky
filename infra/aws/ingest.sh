@@ -30,11 +30,20 @@ else
   date=${DATE:-$(date -u +%F)}
   gen=${GEN:-$(date -u +%Y%m%d%H%M)}
 fi
+# The store comes from the capture's host: `HOST_STORES` (`host=store,…`, the job
+# env) names the secondary stores (`STORES_JSON` keys on the site), which publish
+# under `snapshots/<store>/` and sync D1 as that store. Any other host is the
+# deployment's primary store: `snapshots/$STORE/` (default `laptop`), D1 `primary`.
+host=${key#captures/}; host=${host%%/*}
 store=${STORE:-laptop}
+d1_store=primary
+for pair in ${HOST_STORES//,/ }; do
+  if [[ ${pair%%=*} == "$host" ]]; then store=${pair#*=}; d1_store=$store; fi
+done
 work=${WORK:-/work}
 s3() { aws s3 "$@" --endpoint-url "$R2_ENDPOINT_URL" --only-show-errors; }
 
-echo "[ingest] capture=$key date=$date gen=$gen store=$store vcpu=$(nproc) mem=$(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
+echo "[ingest] capture=$key date=$date gen=$gen host=$host store=$store d1=$d1_store vcpu=$(nproc) mem=$(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
 mkdir -p "$work/listing" "$work/index" "$work/snap"
 
 t0=$(date +%s)
@@ -57,5 +66,5 @@ echo "[ingest] uploaded to s3://$bucket/{listing/$store/$date/index/$gen,snapsho
 t0=$(date +%s)
 : "${D1_DB_ID:?}" "${CLOUDFLARE_API_TOKEN:?}" "${CLOUDFLARE_ACCOUNT_ID:?}"
 ( cd /app/cloud && /app/.venv/bin/dt-cloud index-sync "$date" -g "$gen" -b "$bucket" -k "listing/$store/$date/index/$gen" \
-    -d "$work/index" -v path -v bysize )
+    -s "$d1_store" -d "$work/index" -v path -v bysize )
 echo "[ingest] footers → D1 $D1_DB_NAME in $(( $(date +%s) - t0 ))s"
