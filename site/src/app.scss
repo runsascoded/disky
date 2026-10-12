@@ -82,6 +82,18 @@ header .hrow {
   gap: 12px;
   flex-wrap: wrap;
 }
+.disk-space-diff {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  h3 { margin: 0 0 6px; font-size: 13px; }
+  table { width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 3px 6px; }
+  th:first-child { text-align: left; }
+  p { margin: 6px 0 0; }
+}
 // ---- The top bar (SiteNav): ☰ nav menu · page scope/controls · avatar menu.
 // Sticky, full-bleed across the page container (negative margins undo its
 // padding), the same chrome parked at the top and stuck mid-scroll.

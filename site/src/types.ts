@@ -79,6 +79,8 @@ export interface DiskSpace {
   free: number
   device: string
   captured_at: string
+  /** APFS VM volume allocation, including swap and filesystem overhead. */
+  vm_used?: number
 }
 
 export interface Meta {

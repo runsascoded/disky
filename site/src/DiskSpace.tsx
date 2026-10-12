@@ -12,6 +12,7 @@ export function DiskSpace({ space }: { space?: Space }) {
     <section className="disk-space" aria-label="Physical disk space at scan">
       <div className="disk-space-labels">
         <span><b>{free}</b> <span className="dim">of {fmtBytes(space.capacity)}</span></span>
+        {space.vm_used != null && <span>VM (swap volume): <b>{fmtBytes(space.vm_used)}</b></span>}
         <span>{used} <Tooltip pinnable content={<>
           <div>Physical APFS container ({space.device}), shared by all its volumes.</div>
           <div>{fmtBytes(space.used)} used · {free} · {fmtBytes(space.capacity)} total</div>
