@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fromUrlSegs, isFold, pathCopy, pathCrumbs, pathDisplay, pathText, pathUri, toUrlSegs } from './pathCrumbs'
+import { fromUrlPath, fromUrlSegs, isFold, pathCopy, pathCrumbs, pathDisplay, pathText, pathUri, toUrlPath, toUrlSegs } from './pathCrumbs'
 import type { Crumb } from './pathCrumbs'
 
 describe('pathCrumbs', () => {
@@ -73,5 +73,15 @@ describe('toUrlSegs / fromUrlSegs', () => {
     expect(toUrlSegs(['b', 'x'])).toEqual(['b', 'x'])
     expect(fromUrlSegs(['~', 'x'])).toEqual(['~', 'x'])
     expect(fromUrlSegs(['Users', 'ryan', 'c'], home)).toEqual(['Users', 'ryan', 'c'])
+  })
+})
+
+describe('browser path encoding', () => {
+  const home = ['Users', 'ryan']
+  it('reloads a folder with spaces, URL delimiters, Unicode and a literal escape', () => {
+    const segs = ['Users', 'ryan', 'Downloads', '2025 tax returns', '100% #1? café', '%20']
+    expect(toUrlPath(segs, home)).toBe('~/Downloads/2025%20tax%20returns/100%25%20%231%3F%20caf%C3%A9/%2520')
+    expect(fromUrlPath('~/Downloads/2025%20tax%20returns/100%25%20%231%3F%20caf%C3%A9/%2520', home)).toEqual(segs)
+    expect(fromUrlPath('/bucket/100%/')).toEqual(['bucket', '100%'])
   })
 })

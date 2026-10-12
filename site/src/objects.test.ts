@@ -80,6 +80,11 @@ describe('rowTarget', () => {
 })
 
 describe('openHref', () => {
+  it('encodes the directory and leaves consumed access/preview tokens out of navigation', () => {
+    expect(openHref('/', ['~', '2025 tax returns', 'a #1?.pdf'], '?key=private&og=preview&d=261011')).toEqual({
+      pathname: '/~/2025%20tax%20returns', search: '?d=261011&open=a+%231%3F.pdf',
+    })
+  })
   it('the object’s directory is the drill path, its basename `open`; the page’s other params stay', () => {
     expect(openHref('/', ['ctbk', 'gbfs', 'a b.parquet'], '?d=260930&c=w')).toEqual({ pathname: '/ctbk/gbfs', search: '?d=260930&c=w&open=a+b.parquet' })
     expect(openHref('/', ['jc-taxes', 'x.json'], '?open=y.json')).toEqual({ pathname: '/jc-taxes', search: '?open=x.json' })

@@ -20,7 +20,7 @@ import { ChildrenTable } from './ChildrenTable'
 import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
-import { fromUrlSegs, pathCopy, pathDisplay, pathText, toUrlSegs } from './pathCrumbs'
+import { fromUrlPath, pathCopy, pathDisplay, pathText, toUrlPath, toUrlSegs } from './pathCrumbs'
 import { listsObjects, openHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
@@ -364,7 +364,7 @@ function AppContent() {
   // in depth order — interactive drills hit each level's cache as they go,
   // and a cold deep link fans the whole chain out in parallel.
   // The URL's `~` (a store home) expanded: `/~/c` → `Users/ryan/c`.
-  const graftPath = fromUrlSegs(pathname.slice((store.path === '/' ? '' : store.path).length).split('/').filter(Boolean), store.home).join('/')
+  const graftPath = fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length), store.home).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
@@ -556,8 +556,8 @@ function AppContent() {
   // expanded one (`Users/ryan/c`), and a home URL spelled out is replaced by
   // its `~` form below.
   const urlPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
-  const drillPath = fromUrlSegs(urlPath.split('/').filter(Boolean), store.home).join('/')
-  const urlOf = (segs: string[]) => toUrlSegs(segs, store.home).join('/')
+  const drillPath = fromUrlPath(urlPath, store.home).join('/')
+  const urlOf = (segs: string[]) => toUrlPath(segs, store.home)
   const canonUrlPath = urlOf(drillPath.split('/').filter(Boolean))
   useEffect(() => {
     if (urlPath.replace(/\/+$/, '') !== canonUrlPath) navigate({ pathname: `${storeBase}/${canonUrlPath}`, search, hash }, { replace: true })
@@ -958,7 +958,7 @@ function AppContent() {
   }
 
   const segs = drillPath.split('/').filter(Boolean)
-  const recordedAt = meta?.disk_space?.captured_at ?? meta?.published
+  const recordedAt = meta?.captured_at ?? meta?.disk_space?.captured_at ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
       {meta.disk_space && (

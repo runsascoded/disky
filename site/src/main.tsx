@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
+import { exchangeKeyParam } from '@open-athena/auth/react'
 import Root from './Root'
 import { UnitsProvider } from './units'
 import { withoutOg } from './sharePreview'
@@ -28,14 +29,20 @@ if (import.meta.env.DEV || location.search.includes('spy=1')) (window as unknown
 const clean = withoutOg(location.href)
 if (clean != null) history.replaceState(history.state, '', clean)
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <UnitsProvider>
-          <Root />
-        </UnitsProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  </StrictMode>,
-)
+async function start() {
+  // Redeem and remove the key before BrowserRouter snapshots the URL. Otherwise
+  // its stale search restores the credential on the next SPA navigation.
+  await exchangeKeyParam()
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <UnitsProvider>
+            <Root />
+          </UnitsProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </StrictMode>,
+  )
+}
+void start()
