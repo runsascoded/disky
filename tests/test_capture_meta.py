@@ -43,12 +43,30 @@ def test_publish_and_clear_annotation(tmp_path: Path) -> None:
     result = runner.invoke(cli, ['capture-meta', str(manifest), str(snapshot)])
     assert result.exit_code == 0, result.exception
     assert result.output == f'{snapshot}\n'
-    assert json.loads(snapshot.read_text()) == {**original, 'disk_space': SPACE}
+    assert json.loads(snapshot.read_text()) == {**original, 'captured_at': MANIFEST['time'], 'disk_space': SPACE}
     manifest.write_text(json.dumps({k: v for k, v in MANIFEST.items() if k != 'container'}))
     result = runner.invoke(cli, ['capture-meta', str(manifest), str(snapshot)])
     assert result.exit_code == 0, result.exception
     assert result.output == f'{snapshot}\n'
-    assert json.loads(snapshot.read_text()) == original
+    assert json.loads(snapshot.read_text()) == {**original, 'captured_at': MANIFEST['time']}
+
+
+def test_same_capture_can_be_reingested_but_a_different_capture_cannot_replace_it(tmp_path: Path) -> None:
+    manifest = tmp_path / '_SUCCESS.json'
+    snapshot = tmp_path / 'meta.json'
+    existing = tmp_path / 'published.json'
+    manifest.write_text(json.dumps(MANIFEST))
+    snapshot.write_text('{"total_bytes": 1500}\n')
+    runner = CliRunner()
+    args = ['capture-meta', '-c', str(existing), str(manifest), str(snapshot)]
+    assert runner.invoke(cli, args).exit_code == 0
+    existing.write_text(snapshot.read_text())
+    assert runner.invoke(cli, args).exit_code == 0
+    before = snapshot.read_text()
+    manifest.write_text(json.dumps({**MANIFEST, 'time': '2026-10-05T15:41:59Z'}))
+    result = runner.invoke(cli, args)
+    assert (result.exit_code, str(result.exception)) == (1, 'scan slot already belongs to a different capture; refusing to replace it')
+    assert snapshot.read_text() == before
 
 
 def test_invalid_manifest_does_not_modify_snapshot(tmp_path: Path) -> None:

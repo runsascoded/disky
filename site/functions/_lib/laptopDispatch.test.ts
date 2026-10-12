@@ -31,8 +31,19 @@ const runs = async (db: D1Database) =>
   (await db.prepare('SELECT run_id, plan_id, manifest, scan, actor, mode, started_ts, finished_ts, log_dir, plan_digest FROM deletion_runs ORDER BY started_ts').all()).results
 
 describe('the laptop executor', () => {
-  it('accepts snapshot dates only', () => {
-    expect(['2026-09-29', '2026-09-29T1201', '20260929'].map(d => DATE_RE.test(d))).toEqual([true, false, false])
+  it('accepts daily and sub-daily snapshot ids', () => {
+    expect(['2026-09-29', '2026-09-29T1201', '20260929', '2026-09-29T12', '2026-09-29T120100'].map(d => DATE_RE.test(d))).toEqual([true, true, false, false, false])
+  })
+
+  it('keeps the exact sub-daily scan on the recorded run', async () => {
+    const s = await setup()
+    await seen(s.db, Math.floor(NOW / 1000))
+    const digest = await planDigest([A, B])
+    expect(await dispatchPlan(s.env, req({ date: '2026-09-29T1201' }), 'laptop', s.executors)).toEqual({
+      ok: true, job_id: 'laptop-dry-20260929t221530z', plan_id: 1, mode: 'dry', date: '2026-09-29T1201', actor: ACTOR, digest,
+      extra: { agent_seen: Math.floor(NOW / 1000) },
+    })
+    expect((await runs(s.db)).map(r => r.scan)).toEqual(['2026-09-29T1201'])
   })
 
   it('refuses while the drainer has never checked in, or not lately — nothing is recorded', async () => {
