@@ -14,21 +14,21 @@ set -euo pipefail
 capture=${1:?usage: ingest.sh r2://<bucket>/<capture dir>}
 : "${R2_ENDPOINT_URL:?}"
 export AWS_DEFAULT_REGION=auto
+export DISK_TREE_R2_ENDPOINT_URL="$R2_ENDPOINT_URL"
 bucket=${capture#r2://}; bucket=${bucket%%/*}
 key=${capture#r2://$bucket/}
 # The scan's date and generation come from the capture's own stamp
 # (`disk-tree capture`: `<host>/<root>/%Y-%m-%dT%H-%M-%SZ`), so a re-ingest
-# lands where the first did; the run time only stands in for a stamp that
-# doesn't parse. DATE / GEN override both.
+# lands where the first did. Keep the time in the scan id: morning and evening
+# captures must not replace each other's snapshots. DATE / GEN override both.
 stamp=${key%/}; stamp=${stamp##*/}
 if [[ $stamp =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2})-([0-9]{2})-[0-9]{2}Z$ ]]; then
   m=("${BASH_REMATCH[@]}")
-  date=${DATE:-${m[1]}-${m[2]}-${m[3]}}
+  date=${DATE:-${m[1]}-${m[2]}-${m[3]}T${m[4]}${m[5]}}
   gen=${GEN:-${m[1]}${m[2]}${m[3]}${m[4]}${m[5]}}
 else
-  echo "[ingest] capture stamp '$stamp' isn't %Y-%m-%dT%H-%M-%SZ; dating by run time" >&2
-  date=${DATE:-$(date -u +%F)}
-  gen=${GEN:-$(date -u +%Y%m%d%H%M)}
+  echo "[ingest] invalid capture stamp: expected %Y-%m-%dT%H-%M-%SZ" >&2
+  exit 2
 fi
 # The store comes from the capture's host: `HOST_STORES` (`host=store,…`, the job
 # env) names the secondary stores (`STORES_JSON` keys on the site), which publish
@@ -41,6 +41,8 @@ for pair in ${HOST_STORES//,/ }; do
   if [[ ${pair%%=*} == "$host" ]]; then store=${pair#*=}; d1_store=$store; fi
 done
 work=${WORK:-/work}
+app=${INGEST_APP_ROOT:-/app}
+time_bin=${INGEST_TIME:-/usr/bin/time}
 s3() { aws s3 "$@" --endpoint-url "$R2_ENDPOINT_URL" --only-show-errors; }
 
 echo "[ingest] capture=$key date=$date gen=$gen host=$host store=$store d1=$d1_store vcpu=$(nproc) mem=$(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
@@ -52,9 +54,9 @@ s3 cp "s3://$bucket/$key/_SUCCESS.json" "$work/capture.json"
 echo "[ingest] fetched $(find "$work/listing" -name '*.parquet' | wc -l) shards, $(du -sh "$work/listing" | cut -f1) in $(( $(date +%s) - t0 ))s"
 
 t0=$(date +%s)
-( cd /app/cloud && /usr/bin/time -v -o "$work/time.txt" /app/.venv/bin/dt-cloud path-index -g -d "$date" \
+( cd "$app/cloud" && "$time_bin" -v -o "$work/time.txt" "$app/.venv/bin/dt-cloud" path-index -g -d "$date" \
     -l "$work/listing/*.parquet" -P "$work/index/path-index.parquet" -o "$work/snap" )
-/app/.venv/bin/disk-tree capture-meta "$work/capture.json" "$work/snap/meta.json"
+"$app/.venv/bin/disk-tree" capture-meta -c "r2://$bucket/snapshots/$store/$date/meta.json" "$work/capture.json" "$work/snap/meta.json"
 echo "[ingest] path-index: $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/time.txt")"
 echo "[ingest] outputs: index $(du -sh "$work/index" | cut -f1), snap $(du -sh "$work/snap" | cut -f1)"
 
@@ -65,6 +67,6 @@ echo "[ingest] uploaded to s3://$bucket/{listing/$store/$date/index/$gen,snapsho
 
 t0=$(date +%s)
 : "${D1_DB_ID:?}" "${CLOUDFLARE_API_TOKEN:?}" "${CLOUDFLARE_ACCOUNT_ID:?}"
-( cd /app/cloud && /app/.venv/bin/dt-cloud index-sync "$date" -g "$gen" -b "$bucket" -k "listing/$store/$date/index/$gen" \
+( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" index-sync "$date" -g "$gen" -b "$bucket" -k "listing/$store/$date/index/$gen" \
     -s "$d1_store" -d "$work/index" -v path -v bysize )
 echo "[ingest] footers → D1 $D1_DB_NAME in $(( $(date +%s) - t0 ))s"

@@ -14,4 +14,8 @@ NAS discovery: the existing `nas` Tailscale SSH alias connects noninteractively 
 
 The product source/scheduler design is in `wt/app/specs/app-source-schedules.md`. Implement that in the app before deploying a separate NAS source from m3; do not bolt a second global scan job onto the app's existing single-source history. Recommend weekly NAS scans initially, independently of this Mac's twice-daily scans. Ryan still needs to choose included shares and whether NAS metadata stays local or uploads.
 
+Update 2026-10-11: Ryan selected the NAS array (`/mnt/user`) and its existing private R2 destination. Manual SSH capture, Batch ingest routing to the independent `nas` store, and the hosted tree/largest-files view are implemented and verified. Scheduled NAS capture still requires the source model above. The concrete app handoff is [m3 NAS deployment]; the proposed initial frequency is weekly Sunday 06:00, pending Ryan's cadence preference. The m3 capture-history changes are in [sub-daily captures].
+
 [release]: https://github.com/runsascoded/disky/releases/tag/disky-v0.2.0-alpha.1
+[m3 NAS deployment]: /Users/ryan/c/disky/wt/app/specs/m3-nas-deployment.md
+[sub-daily captures]: subdaily-captures.md

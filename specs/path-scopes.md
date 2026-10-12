@@ -40,3 +40,7 @@ The share-link console (`AdminPage.tsx`) gains a "hide paths" field (one prefix 
 
 1. `hide` — `restrict.ts`, the route table above, tests per route (a restricted grant identity against fixture stores: exact responses), console field. Demo: `laptop:hide:Users/ryan/Downloads/2025 tax returns`.
 2. `root` — same table with "outside the root" in place of "below a hide prefix", plus ancestors.
+
+Verification 2026-10-11: a temporary read-only grant hiding the demo directory passed live API checks on production and dev. Its hidden-root subtree was aggregate-only; Largest files returned no hidden files; search excluded them; direct descendant requests returned 404; raw-index/admin path-list routes returned 403. Chrome on the dev fix also verified the hidden-folder view, parent navigation without the guest key and reload of the space-containing path. Both test grants were revoked and rejected subsequent authentication. The test found two viewer URL bugs (encoded path segments and a redeemed key returning on SPA navigation); fixes are on dev, with production rollout described in [sub-daily captures]. Phase 2 remains unimplemented.
+
+[sub-daily captures]: subdaily-captures.md
