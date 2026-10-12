@@ -2,6 +2,12 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Scan timestamp display (2026-10-12)
+
+- The picker already converts sub-daily UTC scan IDs to the viewer's local timezone: `2026-10-12T1039` displays as **10/12 6:39a** in Eastern time. URL IDs remain UTC so links identify the same scan for every viewer.
+- Changed capture/publication hover details from explicit UTC to the browser's timezone, with an abbreviation (EDT/EST/etc.). The disk-capacity tooltip uses the same formatter, and NAS captures without APFS metadata now also show their capture instant in the scan tooltip.
+- Production deployment `70f6f5fb` verified in RACx Chrome: **captured Oct 12, 2026, 6:39 AM EDT** and **published Oct 12, 2026, 11:17 AM EDT**. Preview deployment `41da71f9`; 31 scan-formatting/selection/grouping tests and the SPA/Functions build passed. Browser IDs had changed (RACx is currently 1, extension `1664fc9b-8a66-4fb6-a3a9-129ed600653c`); match the profile/extension identity again instead of trusting an old numeric browser ID. No disk cleanup performed.
+
 ## Reboot verification and VM display (2026-10-12)
 
 - Ryan rebooted at 06:26:59 EDT. The scheduled 06:08 capture and requested 06:39 capture bracket it: VM allocation **32.0 GiB → 24 KiB**, physical free space **19.59 → 57.84 GiB** (increase **38.25 GiB**). Indexed file allocations fell by 7.4 GiB; those path-based counts exclude the separate VM volume and are not an additive physical-space accounting. The post-reboot `sysctl` swap counter was zero.

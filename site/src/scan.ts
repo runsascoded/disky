@@ -18,6 +18,13 @@ export function clock(dt: Date): string {
   return `${h % 12 || 12}:${String(dt.getMinutes()).padStart(2, '0')}${h < 12 ? 'a' : 'p'}`
 }
 
+/** Capture/publication details use the viewer's timezone, labelled explicitly. */
+export function fmtTimestamp(at: string, timeZone?: string): string {
+  return new Date(at).toLocaleString('en-US', {
+    year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short', timeZone,
+  })
+}
+
 export function fmtScan(s: string, now = new Date()): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):?(\d{2}))?/.exec(s)
   if (!m) return s

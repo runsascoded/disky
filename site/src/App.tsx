@@ -41,7 +41,7 @@ import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, encodeScan, fmtScan, nearestScan, noScansYet, scanTime, useScan, useScanTimes } from './scan'
+import { DAY, encodeScan, fmtScan, fmtTimestamp, nearestScan, noScansYet, scanTime, useScan, useScanTimes } from './scan'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
 import { perf } from './perf'
@@ -963,14 +963,15 @@ function AppContent() {
   }
 
   const segs = drillPath.split('/').filter(Boolean)
-  const recordedAt = meta?.captured_at ?? meta?.disk_space?.captured_at ?? meta?.published
+  const capturedAt = meta?.captured_at ?? meta?.disk_space?.captured_at
+  const recordedAt = capturedAt ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
-      {meta.disk_space && (
-        <div>captured {new Date(meta.disk_space.captured_at).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+      {capturedAt && (
+        <div>captured {fmtTimestamp(capturedAt)}</div>
       )}
       {meta.published && (
-        <div>published {new Date(meta.published).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+        <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
       {estCost && (

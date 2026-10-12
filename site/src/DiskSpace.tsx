@@ -1,6 +1,7 @@
 import type { DiskSpace as Space } from './types'
 import { Tooltip } from './Tooltip'
 import { useUnits } from './units'
+import { fmtTimestamp } from './scan'
 
 export function DiskSpace({ space }: { space?: Space }) {
   const { fmtBytes } = useUnits()
@@ -16,7 +17,7 @@ export function DiskSpace({ space }: { space?: Space }) {
         <span>{used} <Tooltip pinnable content={<>
           <div>Physical APFS container ({space.device}), shared by all its volumes.</div>
           <div>{fmtBytes(space.used)} used · {free} · {fmtBytes(space.capacity)} total</div>
-          <div>Recorded during the scan started {new Date(space.captured_at).toLocaleString()}.</div>
+          <div>Recorded during the scan started {fmtTimestamp(space.captured_at)}.</div>
           <div>The map sums per-path sizes; APFS clones can share blocks. Disk usage counts those blocks once and includes system volumes and snapshots.</div>
         </>}><span className="dim">at scan ⓘ</span></Tooltip></span>
       </div>
