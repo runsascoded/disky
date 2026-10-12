@@ -2,6 +2,14 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Reboot verification and VM display (2026-10-12)
+
+- Ryan rebooted at 06:26:59 EDT. The scheduled 06:08 capture and requested 06:39 capture bracket it: VM allocation **32.0 GiB → 24 KiB**, physical free space **19.59 → 57.84 GiB** (increase **38.25 GiB**). Indexed file allocations fell by 7.4 GiB; those path-based counts exclude the separate VM volume and are not an additive physical-space accounting. The post-reboot `sysctl` swap counter was zero.
+- Scheduled captures already record APFS volume allocations. Preserved VM allocation in `capture-meta`; annotated the two existing snapshots from their retained raw manifests. The capacity bar now labels “VM (swap volume)”, and Diff has a separate whole-disk physical comparison table. Older snapshots without a VM reading omit that row. The file-size history chart remains path-based.
+- Rebuilt the ingest: Batch revision **15**, source archive `4f0be3df3c1503fd`, image `sha256:d49ab908c7546301450d85c3c7378c16f8140314090cd34ad43cce2a95b88a9c`. Re-ingest job `84108d80-8b72-4c5a-8cc2-a6c815f0a8b8` succeeded for the retained 06:39 capture; future scheduled captures publish VM allocation automatically. No scheduler or filesystem-walk change was needed.
+- Dev Pages deployment `315d9b96` and production `584e8ba8` verified in RACx Chrome at `?d=261012-1039#diff`: physical free space +38 GiB, VM −32 GiB, separate from the file diff. Proof image: `tmp/vm-production-summary.jpg`. Checks passed: 22 capture/metadata/ingest tests, 736 site tests (one skipped), typechecks/build and whitespace checks.
+- No cleanup targets were deleted by the agent; the before/after measurements reflect Ryan's reboot and other filesystem changes during that interval.
+
 ## Deployment maintenance (2026-10-11): preserve both daily captures
 
 - Rebuilt the ingest image and activated Batch revision 14; production Pages deployment `14e9e8a3` includes the guest-key/path URL fixes. Captures now publish to UTC minute slots rather than replacing that day's snapshot. A different capture in an occupied slot is refused.

@@ -127,10 +127,11 @@ disk-tree capture PATH -t URL  # The split pipeline for a ~full disk (spec `clou
                           # memory, zero local disk. Files only (dirs implied; APFS dirs hold 0 blocks).
                           # Prints the capture dir `<to>/<host>/<root>/<stamp>` (+ `_SUCCESS.json`);
                           # m3's AWS Batch ingest (`dt-cloud path-index`) aggregates it
-disk-tree capture-meta MANIFEST META  # Copy the capture's physical APFS capacity/used/free bytes into
+disk-tree capture-meta MANIFEST META  # Copy the capture's physical APFS capacity/used/free + VM volume bytes into
                           # the snapshot's meta.json (`disk_space`); local paths or fsspec URLs.
                           # The site's capacity bar reports these at-scan measurements, separately
-                          # from the treemap's per-path apparent sizes. Missing measurements omit it
+                          # from the treemap's per-path apparent sizes; Diff compares physical readings.
+                          # VM allocation includes swap + filesystem overhead. Missing measurements omit it
 disk-tree scans register SRC  # Import `*.scan.json` manifests (one file, or a dir/URL of them) into
                           # this DB. `index --to <url>` writes one beside each remote blob (the Scan
                           # row, portable). Idempotent; put the blobs' dir on `DISK_TREE_SCAN_DIRS`
