@@ -18,4 +18,4 @@ Update 2026-10-11: Ryan selected the NAS array (`/mnt/user`) and its existing pr
 
 [release]: https://github.com/runsascoded/disky/releases/tag/disky-v0.2.0-alpha.1
 [m3 NAS deployment]: /Users/ryan/c/disky/wt/app/specs/m3-nas-deployment.md
-[sub-daily captures]: subdaily-captures.md
+[sub-daily captures]: done/subdaily-captures.md

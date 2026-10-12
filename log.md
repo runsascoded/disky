@@ -2,6 +2,13 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Deployment maintenance (2026-10-11): preserve both daily captures
+
+- Rebuilt the ingest image and activated Batch revision 14; production Pages deployment `14e9e8a3` includes the guest-key/path URL fixes. Captures now publish to UTC minute slots rather than replacing that day's snapshot. A different capture in an occupied slot is refused.
+- Re-ingested the existing 06:11 and 18:01 local captures into `2026-10-11T1011` and `2026-10-11T2201`; both jobs succeeded. R2 metadata, D1 index rows and Chrome's production picker verified independent snapshots; the old daily snapshot remains readable. Physical free space at those captures was **29.54 GiB** and **24.41 GiB**, respectively; re-ingesting does not change these measurements.
+- Fresh NAS array metadata capture (`/mnt/user`, 77,360 files) automatically triggered the new image and published separate NAS scan `2026-10-12T0232`. Recurring NAS scheduling remains the native app's independent-source implementation, with a concrete handoff in `wt/app/specs/m3-nas-deployment.md`.
+- The hide-path guest check passed; both temporary test credentials were revoked and rejected subsequent authentication. No cleanup targets were deleted; measured bytes freed: **0**.
+
 ## Deployment maintenance (2026-10-05): restore scheduled scans and the drainer
 
 - Both agents were still loaded through stale SMAppService registrations, with launchd exit 78 / launch-constraint failures. Re-registered them using disky's plain LaunchAgent plists; the drainer's D1 heartbeat resumed. Persistence across reboot remains unverified; the app worktree has a spec for detecting and migrating legacy registrations.
