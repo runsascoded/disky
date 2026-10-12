@@ -12,7 +12,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { type DispatchReq, type ExecEnv, type Executor, type Prepared, refuse } from './dispatch.js'
 import type { FinishedRun } from './plans.js'
 
-export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+export const DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/
 export const AGENT = 'drainer'
 /** Seconds since the drainer's last check-in beyond which a dispatch is refused. */
 export const STALE_S = 180
@@ -28,7 +28,7 @@ const stamp = (now: number): string => new Date(now).toISOString().replace(/[-:]
 export function laptopExecutor(now: () => number = Date.now): Executor {
   return {
     dateRe: DATE_RE,
-    dateHint: 'YYYY-MM-DD',
+    dateHint: 'YYYY-MM-DD[THHMM]',
     async prepare(_env: ExecEnv, db: D1Database, req: DispatchReq): Promise<Prepared | ReturnType<typeof refuse>> {
       const plan = await db.prepare('SELECT id FROM plans WHERE id = ?').bind(req.planId).first<{ id: number }>()
       if (!plan) return refuse(404, 'no such plan')

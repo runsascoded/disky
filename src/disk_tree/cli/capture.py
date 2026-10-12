@@ -184,9 +184,14 @@ def capture_space(manifest: dict) -> dict | None:
 
 
 @cli.command('capture-meta')
+@option('-c', '--check', help="Existing snapshot meta.json (local path or URL): refuse to replace a different capture in the same scan slot")
 @argument('manifest')
 @argument('snapshot')
-def capture_meta_cmd(manifest: str, snapshot: str) -> None:
+def capture_meta_cmd(
+    check: str | None,
+    manifest: str,
+    snapshot: str,
+) -> None:
     """Copy MANIFEST's physical disk space into a snapshot's meta.json.
 
     Both paths may be local or fsspec URLs. Missing container measurements
@@ -194,8 +199,14 @@ def capture_meta_cmd(manifest: str, snapshot: str) -> None:
     """
     from disk_tree import blobfs
 
-    space = capture_space(json.loads(blobfs.read_text(manifest)))
+    capture = json.loads(blobfs.read_text(manifest))
+    space = capture_space(capture)
+    if check and blobfs.exists(check):
+        existing = json.loads(blobfs.read_text(check))
+        if existing.get('captured_at') != capture['time']:
+            raise ValueError('scan slot already belongs to a different capture; refusing to replace it')
     meta = json.loads(blobfs.read_text(snapshot))
+    meta['captured_at'] = capture['time']
     if space is None:
         meta.pop('disk_space', None)
     else:
