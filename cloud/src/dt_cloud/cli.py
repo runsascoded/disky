@@ -404,7 +404,7 @@ def wandb_mine(
 @main.command("path-index")
 @option("-a", "--attribution", "attributions", multiple=True, help="Attribution parquet(s); adds per-node user overlays")
 @option("-c", "--dir-cache", "dir_cache", type=Path, default=None, help="Layer-2 cache dir (dir-stats/age-days parquet): attribution-independent rollups reused by re-attribution runs — see gcs:specs/dir-agg-cache.md")
-@option("-d", "--asof", required=True, help="Scan date the listing came from (YYYY-MM-DD)")
+@option("-d", "--asof", required=True, help="Scan ID the listing came from (YYYY-MM-DD or YYYY-MM-DDTHHMM)")
 @option("-g", "--age-strata", is_flag=True, help="Add bytes-by-age columns (`age_b0`…`age_b6`, specs/done/row-age-strata.md) to every store row; off by default, so a store keeps its schema until it opts in")
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, default=None, help=f"identities.yaml path or URL, needed with -a (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
@@ -453,7 +453,7 @@ def build_path_index(
         (
             p.name
             for p in data_root.iterdir()
-            if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name) and (p / "meta.json").exists()
+            if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T\d{4})?", p.name) and (p / "meta.json").exists()
         ),
         reverse=True,
     )
