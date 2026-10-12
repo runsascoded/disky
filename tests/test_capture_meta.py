@@ -22,6 +22,30 @@ def test_physical_space() -> None:
     assert capture_space(MANIFEST) == SPACE
 
 
+def test_vm_volume_allocation_survives_publication(tmp_path: Path) -> None:
+    manifest = tmp_path / '_SUCCESS.json'
+    snapshot = tmp_path / 'meta.json'
+    container = {**MANIFEST['container'], 'volumes': [
+        {'roles': ['Data'], 'used': 800},
+        {'roles': ['VM'], 'used': 70},
+        {'roles': ['VM'], 'used': 5},
+    ]}
+    manifest.write_text(json.dumps({**MANIFEST, 'container': container}))
+    snapshot.write_text('{"total_bytes": 1500}\n')
+    result = CliRunner().invoke(cli, ['capture-meta', str(manifest), str(snapshot)])
+    assert (result.exit_code, result.output) == (0, f'{snapshot}\n')
+    assert json.loads(snapshot.read_text()) == {'total_bytes': 1500, 'captured_at': MANIFEST['time'], 'disk_space': {**SPACE, 'vm_used': 75}}
+    container['volumes'] = [{'roles': ['VM'], 'used': 0}]
+    assert capture_space({**MANIFEST, 'container': container}) == {**SPACE, 'vm_used': 0}
+
+
+@pytest.mark.parametrize('used', [-1, 1.5, '70', True])
+def test_invalid_vm_allocation(used: object) -> None:
+    container = {**MANIFEST['container'], 'volumes': [{'roles': ['VM'], 'used': used}]}
+    with pytest.raises(ValueError, match=r'^VM volume usage must be nonnegative integer bytes$'):
+        capture_space({**MANIFEST, 'container': container})
+
+
 @pytest.mark.parametrize('container', [
     {'device': 'disk3', 'capacity': 0, 'used': 0, 'free': 0},
     {'device': 'disk3', 'capacity': 1000, 'used': 875, 'free': 200},
