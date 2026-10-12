@@ -174,13 +174,19 @@ def capture_space(manifest: dict) -> dict | None:
     capacity, used, free = (container[k] for k in ('capacity', 'used', 'free'))
     if any(type(n) is not int for n in (capacity, used, free)) or capacity <= 0 or min(used, free) < 0 or used + free != capacity:
         raise ValueError('container capacity must be positive integer bytes equal to used + free')
-    return {
+    space = {
         'capacity': capacity,
         'used': used,
         'free': free,
         'device': container['device'],
         'captured_at': manifest['time'],
     }
+    vm = [v['used'] for v in container.get('volumes', []) if 'VM' in v.get('roles', [])]
+    if vm:
+        if any(type(n) is not int or n < 0 for n in vm):
+            raise ValueError('VM volume usage must be nonnegative integer bytes')
+        space['vm_used'] = sum(vm)
+    return space
 
 
 @cli.command('capture-meta')
