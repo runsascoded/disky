@@ -1,6 +1,6 @@
 # Bidirectional branch synchronization — 2026-10-13
 
-Status: parent integration complete; deployment verification and root-owner cherry-pick handoff in progress. Ryan requested regular audits in both directions after discovering that m3 lacks the upstream `/scans` route.
+Status: parent integration and deployment complete; remote CI being watched, shared upstream cherry-picks handed to the root owner for review. Ryan requested regular audits in both directions after discovering that m3 lacks the upstream `/scans` route.
 
 The integration path is `cloud` → `local` → `m3`. Deployment branches merge their immediate parent; they never merge `cloud` directly into `m3`, and they do not rebase published commits. Shared changes authored here move up as reviewed `-x` cherry-picks: `[cloud]` to the root owner, `[local]` to `local`. m3 configuration, operational records, NAS configuration, and deployment state stay here.
 
@@ -38,3 +38,9 @@ Deployment-only: NAS module/config, host routes, AWS snapshot publishing glue, I
 Validation: parent engine 510 passed/1 skipped, cloud 1280 passed/2 skipped, site 1975 passed/1 skipped, widgets 200 passed; m3 site 2025 passed/1 skipped before the palette regression, focused palette/guest/scan checks 41 passed, and both workspace builds passed. Capture picks: 18 Python and 6 laptop-dispatch tests passed. Post-merge m3/local engine and cloud surfaces are at parity; remaining UI differences are the classified shared fixes and m3 configuration. Logs are under `tmp/local-sync-*`, `tmp/m3-sync-*`, and `tmp/branch-audit-*`.
 
 The `/scans` route now exists, with the shared run-history UI. Its AWS recording/backfill adapter is still separate work: the upstream recorder/backfill targets GCP Batch, and m3 has not previously recorded its AWS ingest jobs into `scan_runs`. Showing that page does not fabricate a history for existing laptop scans.
+
+Deployment verification: production `03d593cd` and dev `0812ea74` serve code through `0bd9841c`. Applied additive D1 migrations `0014`–`0018`; private laptop auth/store settings remain intact. RACx Chrome confirms that searching `scans` ranks `Scans — job runs · /scans` first, ahead of snapshot actions, and the route loads without console errors. Its empty run history is the AWS recording limitation above. The existing map still shows physical free space and VM allocation. Proof: `tmp/parent-merge-palette-prod.png`.
+
+Follow-up shared pick `642a7eec` makes the imported scan-run and health timestamp/day displays viewer-local; it depends on the timestamp formatter in `2b8a325b`. The guest-filter pick must include the newly denied unfilterable routes from merge `86a5d59b`. The generic `scripts/branch-audit` correction lives in local merge `4615459c`: upstream should take that file separately, without the laptop merge. The full review queue is delivered to `codex-disky-01a10725@users-ryan-c-disky`; those picks are not represented as landed on cloud.
+
+`site/deploy-m3` now runs the m3/local audit before building and uses pinned workspace Wrangler tooling. `AGENTS.md` requires bidirectional audits on resume, before deployment and before/after merges. GitHub CI for the pushed deployment is watched with `ghws`; its durable result is available in `tmp/m3-parent-ci-watch.txt` (and the final record watch after this documentation checkpoint).

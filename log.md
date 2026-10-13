@@ -2,6 +2,14 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Parent synchronization and palette routes (2026-10-13)
+
+- Integrated committed cloud checkpoint `c56a1525` into local, retaining laptop support; advanced local to `7c2da9ba`, including the SSH capture, occupied-slot/timestamp and VM metadata picks. Merged that local checkpoint into m3 in `86a5d59b`, preserving guest path filtering, disk/VM diffs, capture labels and private deployment configuration.
+- Published shared palette fix `51ff1c25` and viewer-local scan-run/health timestamps `642a7eec`. Searching `scans` now puts the page above individual snapshots, and page results expose their URL paths. Production `03d593cd` and dev `0812ea74` verified in RACx Chrome; `/scans` loads without console errors, with a local-time column. It has no AWS run records yet: recording/backfill remains a separate adapter task.
+- Applied additive D1 migrations `0014`–`0018`. Broad parent engine/cloud/site/widget suites, m3 site regression tests, focused guest/palette/timestamp checks and workspace builds passed; logs and browser proof are under `tmp/`. GitHub CI for the pushed branch is being watched with `ghws`.
+- Audits now understand cloud→local→deployment ancestry and report both incoming and outgoing candidates. Deployments run the parent audit automatically; instructions require it on resume and before/after merges. The root owner received the reviewed shared-pick queue and exact checkpoints in Agent Mail; cloud picks remain pending that owner's review.
+- No new capture, cleanup, backfill or deletion was performed. The preserved 06:39 Oct 12 snapshot still reports **62 G free of 494 G**, **87.4% used**, and **25 K VM allocation** in SI display; those are at-scan measurements, not a current free-space check. Measured bytes freed by this maintenance: **0**.
+
 ## Scan timestamp display (2026-10-12)
 
 - The picker already converts sub-daily UTC scan IDs to the viewer's local timezone: `2026-10-12T1039` displays as **10/12 6:39a** in Eastern time. URL IDs remain UTC so links identify the same scan for every viewer.
