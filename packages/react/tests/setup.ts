@@ -1,4 +1,12 @@
-import '@testing-library/jest-dom/vitest'
+import { expect } from 'vitest'
+import * as matchers from '@testing-library/jest-dom/matchers'
+
+declare module 'vitest' {
+  interface Assertion<T = any> extends matchers.TestingLibraryMatchers<any, T> {}
+  interface AsymmetricMatchersContaining extends matchers.TestingLibraryMatchers<any, any> {}
+}
+
+expect.extend(matchers)
 
 // jsdom doesn't ship a ResizeObserver; the Treemap uses one to track its
 // container size. Stub it out so component tests don't crash.

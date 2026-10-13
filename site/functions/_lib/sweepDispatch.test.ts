@@ -71,6 +71,11 @@ describe('sweepScript — the Batch container\'s bash', () => {
       trap,
       'dt-cloud sweep undo "$TARGET_RUN"',
     ].join('\n'))
+    expect(undoScript({ bulk: true })).toBe([
+      'set -euo pipefail',
+      trap,
+      'dt-cloud sweep undo -B "$TARGET_RUN"',
+    ].join('\n'))
   })
   it('run dir + plan.json paths agree (gs:// for the executor, the object name for the upload)', () => {
     expect(runDir(CFG, jobId)).toBe(`gs://my-data/sweep/runs/${jobId}`)

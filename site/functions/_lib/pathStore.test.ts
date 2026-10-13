@@ -3,7 +3,7 @@ import type { Env } from './auth'
 import { serverTiming } from './edgeCache'
 import { blobKey, chunkSpan, columnsFor, footerKey, groupMatchesSize, indexKey, type IndexHandle, lensSorted, openIndex, pathGens, planRects, planSizeRects, readAsks, readRects, readSizeRects, type Rect, reviveRowGroup, type Row, rowColumns, sizeVariant, withTrace } from './index'
 import { storeEnv } from './stores'
-import { sqliteD1 } from './testD1'
+import { LEDGER_KIND, sqliteD1 } from './testD1'
 import { type D1Variant, fixture, fixtureSize, FILES, GETS, readJson, seedGeneration } from './testStore'
 import { parseQuery } from './scope'
 import { buildDiff, buildView, type DiffRow, lensSort, readRootAgg, SMALL_SUBTREE_ROWS, type ViewNode } from './view'
@@ -76,6 +76,15 @@ const file = (path: string, size: number): Row =>
   ({ path, depth: path.split('/').length, usr: null, kind: 'file', size, n_files: 1, n_children: 0, n_desc: 1, mtime: 1788220800, mtime_mean: 1788220800, mtime_w: size, last_read: null, cls2: 0, cls3: 0, cls4: 0, ages: null })
 const byPath = (rows: Row[]): Row[] => [...rows].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
 /** `flat/`'s objects at bucket `2^e`: `f<i>` for `i ≡ e (mod 16)`. */
+/** A footer group's `[offset, length]` reads: its bounds columns (every chunk before `rg_json`), and `rg_json`'s chunk. */
+type FG = { byteStart: number; byteEnd: number; meta: { columns: { meta_data?: { path_in_schema: string[]; data_page_offset: bigint | number; dictionary_page_offset?: bigint | number } }[] } }
+const jsonStart = (g: FG): number => {
+  const m = g.meta.columns.find(c => c.meta_data!.path_in_schema[0] === 'rg_json')!.meta_data!
+  const data = Number(m.data_page_offset), dict = m.dictionary_page_offset == null ? data : Number(m.dictionary_page_offset)
+  return dict > 0 ? Math.min(dict, data) : data
+}
+const bounds = (g: FG): [number, number] => [g.byteStart, jsonStart(g) - g.byteStart]
+const json = (g: FG): [number, number] => [jsonStart(g), g.byteEnd - jsonStart(g)]
 const flatAt = (e: number): string[] => Array.from({ length: 500 }, (_, i) => `bk/flat/f${String(16 * i + e).padStart(5, '0')}`)
 
 describe('variant keys', () => {
@@ -210,6 +219,20 @@ describe('reads', () => {
     expect(GETS.filter(g => g.key === key).map(g => [g.offset, g.length])).toEqual([[spans[0][0], spans[3][1] - spans[0][0]]])
   })
 
+  it('a stopped read fetches and decodes nothing more (a filter view past its time budget)', async () => {
+    const { db, raw } = await sqliteD1('cw')
+    const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
+    const dir = 'cw-l2/io3/index/g'
+    seedGeneration(raw, { date: 'io3', gen: 'g', dir, variants: v2, files: v2Files })
+    const h = await openIndex({ DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env, 'io3')
+    const rect: Rect = { dLo: 1, dHi: 1e9, pLo: '', pHi: '￿' }
+    GETS.length = 0
+    const stopped = await readRects(h, [rect], undefined, undefined, undefined, () => true)
+    expect([stopped, GETS.filter(g => g.key === `${dir}/path-index.parquet`)]).toEqual([[], []])
+    const all = await readRects(h, [rect], undefined, undefined, undefined, () => false)
+    expect(all.length).toBe(v2.path.rows.reduce((n, r) => n + r.row_end - r.row_start, 0))
+  })
+
   it('point lookups read path: an object row and a dir row, from the groups that may hold them', async () => {
     const h = await openIndex(env, V2)
     const want = new Set(['bk/flat', 'bk/small/s1'])
@@ -232,6 +255,49 @@ describe('reads', () => {
       const got = await readAsks(h, asks, keep, { spanCap: 3 })
       expect([date, byPath(got.rows).map(r => r.path), byPath(got.rows)]).toEqual([date, paths, byPath(truth)])
     }
+  })
+})
+
+describe('readAsks: the group budget, before the span queries', () => {
+  // The span queries (`index_row_groups` selects) one lookup sends, through a counting D1.
+  const counted = () => {
+    const sqls: string[] = []
+    const db = new Proxy(env.DB!, { get(t, k) { const v = Reflect.get(t, k) as unknown; return k === 'prepare' ? (sql: string) => { sqls.push(sql); return t.prepare(sql) } : typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v } })
+    const e = { ...env, DB: db } as Env
+    // The isolate's handle (`openIndex` holds one per scan), its queries sent through `e`.
+    return { h: async () => ({ ...await openIndex(env, V2), env: e }) as IndexHandle, spans: () => sqls.filter(q => q.startsWith('SELECT rg, d_min')).length }
+  }
+  // Eight asks over all 4 `path` groups at depth 3: a span cap of 3 halves the one rect, round by round.
+  const paths = ['bk/flat/f00100', 'bk/flat/f01000', 'bk/flat/f02000', 'bk/flat/f03000', 'bk/flat/f04000', 'bk/flat/f05000', 'bk/flat/f07900', 'bk/small/s1']
+  const asks = paths.map(path => ({ depth: 3, path }))
+  const keep = (r: Row) => paths.includes(r.path)
+  const outcome = async (p: Promise<unknown>) => p.then(() => 'ok', e => String((e as Error).message))
+
+  it('in budget: every round\'s span queries, the rows; over it: no round after the one that passed the budget', async () => {
+    const ok = counted()
+    const got = await readAsks(await ok.h(), asks, keep, { spanCap: 3 })
+    const over = counted()
+    const cut = await outcome(readAsks(await over.h(), asks, keep, { spanCap: 3, maxGroups: 1 }))
+    expect([byPath(got.rows).map(r => r.path), got.groups, ok.spans(), cut, over.spans()]).toEqual([
+      paths, 4, 7,
+      'lookup too wide: ≥3 row groups (cap 1)', 3,
+    ])
+  })
+
+  it('`rememberWide`: a repeat of a too-wide lookup sends no span query; without it, it plans again', async () => {
+    const c = counted()
+    const h = await c.h()
+    const run = (rememberWide: boolean) => outcome(readAsks(h, asks, keep, { spanCap: 3, maxGroups: 1, rememberWide }))
+    const n = [c.spans()]
+    const plain = [await run(false), await run(false)]
+    n.push(c.spans())
+    const remembered = [await run(true), await run(true)]
+    n.push(c.spans())
+    expect([plain, remembered, n]).toEqual([
+      ['lookup too wide: ≥3 row groups (cap 1)', 'lookup too wide: ≥3 row groups (cap 1)'],
+      ['lookup too wide: ≥3 row groups (cap 1)', 'lookup too wide: ≥3 row groups (cap 1, remembered)'],
+      [0, 6, 9],
+    ])
   })
 })
 
@@ -260,11 +326,13 @@ describe('the cold footer tier (`.groups.parquet`)', () => {
     const st = withTrace(size, (n, v) => { traced.push([n, v]) })
     expect((await planSizeRects(st, [flat], () => 32 * KiB)).map(s => s.rg)).toEqual([0])
     const g0 = size.footer.groups[0]
-    expect(reads(sk)).toEqual([[g0.byteStart, g0.byteEnd - g0.byteStart]])
+    // A footer group's bounds are read without its `rg_json` (the last column), which only the selected
+    // groups' read fetches.
+    expect(reads(sk)).toEqual([bounds(g0)])
     expect(traced.filter(([n]) => n === 'fgroups')).toEqual([['fgroups', 1]])
-    // The rows: the same 500 objects D1 and the blob serve; the rg_json comes from the cached footer group (no read).
+    // The rows: the same 500 objects D1 and the blob serve; then the selected footer group's `rg_json`.
     expect(await readSizeRects(size, [flat], () => 32 * KiB)).toEqual(flatAt(15).map(p => file(p, 32 * KiB)))
-    expect(reads(sk)).toEqual([])
+    expect(reads(sk)).toEqual([json(g0)])
 
     // `bk/small` at 1 B on `path`: tier groups 0 (depths 1–3) and 3 (3–5) may
     // hold it; 1 and 2 are depth-3 `flat/` ranges, pruned by `p_min/p_max`: 2 of 4 decoded.
@@ -275,16 +343,16 @@ describe('the cold footer tier (`.groups.parquet`)', () => {
     const small: Rect = { dLo: 3, dHi: 1e9, pLo: 'bk/small/', pHi: 'bk/small0' }
     expect((await planRects(path, [small], () => 1)).map(s => s.rg)).toEqual([0, 3])
     const [p0, , , p3] = path.footer.groups
-    expect(reads(pk)).toEqual([[p0.byteStart, p0.byteEnd - p0.byteStart], [p3.byteStart, p3.byteEnd - p3.byteStart]])
+    expect(reads(pk)).toEqual([bounds(p0), bounds(p3)])
     expect(await readRects(path, [small], () => 1)).toEqual([file('bk/small/s0', 1000), file('bk/small/s1', 2000), file('bk/small/s2', 3000)])
-    expect(reads(pk)).toEqual([])
+    expect(reads(pk)).toEqual([json(p0), json(p3)])
     // A point lookup in a pruned footer group decodes just that one more.
     const ask = [{ depth: 3, path: 'bk/flat/f03000' }]
     const keep = (r: Row) => r.path === 'bk/flat/f03000'
     expect(await readAsks(path, ask, keep)).toEqual(await readAsks(await openIndex(env, V2), ask, keep))
     expect((await readAsks(path, ask, keep)).rows).toEqual([file('bk/flat/f03000', 256)])
     const p1 = path.footer.groups[1]
-    expect(reads(pk)).toEqual([[p1.byteStart, p1.byteEnd - p1.byteStart]])
+    expect(reads(pk)).toEqual([bounds(p1), json(p1)])
   })
 })
 
@@ -380,6 +448,7 @@ describe('buildView on a store generation', () => {
     const env = await envWith(`
       CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT);
       CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
+      ${LEDGER_KIND}
       CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
       INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (1, 'ann', 1, '${V2_LENS}', 'gs://bk/small/s2', 1, 'carol');
       INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/small/s2', 'carol', 1);
@@ -547,6 +616,7 @@ it('fixtures are registered', () => {
     ...['path-index-bysize-by-user', 'path-index-bysize', 'path-index'].flatMap(s => ['groups.json', 'groups.parquet', 'parquet'].map(x => `cw-l2/${V2_LENS_PQ}/index/g8/${s}.${x}`)),
     ...['path-index-bysize', 'path-index'].flatMap(s => ['groups.json', 'groups.parquet', 'parquet'].map(x => `cw-l2/io/index/g7/${s}.${x}`)),
     ...['path-index-bysize', 'path-index'].flatMap(s => ['groups.json', 'parquet'].map(x => `cw-l2/io2/index/g/${s}.${x}`)),
+    ...['path-index-bysize', 'path-index'].flatMap(s => ['groups.json', 'parquet'].map(x => `cw-l2/io3/index/g/${s}.${x}`)),
     `listing/${V1}/index/g1/path-index.groups.json`, `listing/${V1}/index/g1/path-index.parquet`,
     `listing/${V2_STALE}/index/g0/path-index-coarse20.groups.json`, `listing/${V2_STALE}/index/g0/path-index-coarse20.parquet`,
     `listing/${V2_LENS}/index/g0/path-index-by-user.groups.json`, `listing/${V2_LENS}/index/g0/path-index-by-user.parquet`,
@@ -568,5 +638,16 @@ describe('pathGens', () => {
     raw.exec("UPDATE index_schema SET gen = 'g2' WHERE date = 'd1' AND variant = 'path'")
     expect(await pathGens(e, ['d1', 'd2'])).not.toBe(both)
     expect(await pathGens({ ROOT_LABEL: 'root' } as Env, ['d1'])).toBe('')
+  })
+  it('a `bysize` repoint alone is a new key too (2026-10-09: re-cut `bysize` gens served stale cached views)', async () => {
+    const { db, raw } = await sqliteD1('cw')
+    const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
+    const files = { path: { parquet: 'v2/path-index.parquet', groups: 'v2/path-index.groups.json' }, bysize: { parquet: 'v2/path-index-bysize.parquet', groups: 'v2/path-index-bysize.groups.json' } }
+    seedGeneration(raw, { date: 'd1', gen: 'g1', dir: 'x/d1/g1', variants: v2, files })
+    const e = { DB: db, ROOT_LABEL: 'root' } as Env
+    const before = await pathGens(e, ['d1'])
+    raw.exec("UPDATE index_schema SET gen = 'recut' WHERE date = 'd1' AND variant = 'bysize'")
+    const after = await pathGens(e, ['d1'])
+    expect([before === after, after === await pathGens(e, ['d1'])]).toEqual([false, true])
   })
 })

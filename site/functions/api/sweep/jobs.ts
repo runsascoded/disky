@@ -16,6 +16,7 @@ import type { ExecEnv } from '../../_lib/dispatch.js'
 import { type BatchConfig, batchConfig, notConfigured } from '../../_lib/batchConfig.js'
 import { batchLogsUrl, gcpToken } from '../../_lib/gcp.js'
 import { runDir } from '../../_lib/sweepDispatch.js'
+import { settleOpenPlan } from '../../_lib/plans.js'
 import { announceFinished } from '../../_lib/stagedSlack.js'
 import { isSweepJob, isUndoJob, jobIdOf, listSweepJobs, reflectSweepRuns, type SweepBatchJob } from '../../_lib/sweepReflect.js'
 import { S3Store } from '@rdub/file-tree/stores/s3'
@@ -98,6 +99,7 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
   const db = ctx.env.DB
   if (db) {
     const finished = await reflectSweepRuns(cfg, db, jobs)
+    await settleOpenPlan(db)
     if (finished.length) {
       const p = announceFinished(ctx.env, db, finished, new URL(ctx.request.url).origin)
       if (ctx.waitUntil) ctx.waitUntil(p)

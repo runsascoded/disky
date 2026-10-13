@@ -10,7 +10,7 @@ import { type Ctx, type Env as AuthEnv, json, requireViewer } from "../../_lib/a
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
 import { runGsPath } from "../../_lib/cwBatch.js"
 import { batchLogsUrl, gcpToken } from "../../_lib/gcp.js"
-import { NO_SHAPE, prefixShape } from "../../_lib/plans.js"
+import { NO_SHAPE, prefixShape, settleOpenPlan } from "../../_lib/plans.js"
 import { jobIdOf, listBatchJobs, reflectRuns, sweepJobs } from "../../_lib/runReflect.js"
 import { announceFinished, type NotifyEnv } from "../../_lib/stagedSlack.js"
 
@@ -34,6 +34,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
   const db = ctx.env.DB
   if (db) {
     const finished = await reflectRuns(cfg, db, token, jobs, shape.buckets[0])
+    await settleOpenPlan(db)
     if (finished.length) {
       const p = announceFinished(ctx.env, db, finished, new URL(ctx.request.url).origin)
       if (ctx.waitUntil) ctx.waitUntil(p)

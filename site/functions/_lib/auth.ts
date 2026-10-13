@@ -18,7 +18,7 @@
  */
 import { type Auth, createGate, type Gate, hasScope, type Subject } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
-import type { D1Database } from '@cloudflare/workers-types'
+import type { D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 
 export interface Env {
   DB?: D1Database
@@ -70,10 +70,47 @@ export interface Env {
   /** The path filter's default syntax (`q=` without `qs=`; `querySyntax.ts`
    *  ids). Mirrors the client's `Store.querySyntax`. Unset = `simple`. */
   QUERY_SYNTAX?: string
+  /** `1`: a single-literal `q=` is answered from the static name index on `INDEX_R2`
+   *  (`_lib/staticFilter.ts`) on every scan of its generation. */
+  FILTER_STATIC?: string
+  /** `1`: the map's filter accepts only what the static name index answers exactly — one literal substring
+   *  of a name, unscoped, on a scan the index covers (`_lib/indexedOnly.ts`); anything else is a 400 with a
+   *  reason code, never a path-store scan. */
+  FILTER_INDEXED_ONLY?: string
+  /** With `FILTER_STATIC`: how long (ms) a filtered view waits past its phase-2 read for the static
+   *  roots' own rows (kind, ages, classes) before answering without them; unset = until they land. */
+  FILTER_DETAILS_MS?: string
+  /** A filter view's phase-2 time budget, ms (`view.ts` `FILTER_PHASE2_MS`). */
+  FILTER_PHASE2_MS?: string
+  /** Worker-served indexes (the static name index's suffix shards and catalog). */
+  INDEX_R2?: R2Bucket
+  /** `1`: the small served files — snapshot JSONs (`snapshots/…`: `meta.json`, `lifecycle.json`,
+   *  `age.json`, `rules.json`) and the extras sidecars (`<gen dir>/attr.tsv{,.idx.json}`) — are read
+   *  from `INDEX_R2` under their store keys (`index.ts` `servedStore`; the job's `dt-cloud publish-r2 -S`
+   *  copies them there); unset = through the store seam (`STORE_*`). */
+  SERVED_R2?: string
+  /** `1`: the scans' generations carry the filter's search sidecars (`path-index -S`): a filter the
+   *  static index doesn't answer reads them (`_lib/search.ts`). Unset = none are built, never probed. */
+  SEARCH_SIDECARS?: string
+  /** `intervals`: the dates `INTERVAL_STORE_GEN` holds read their path store from the change-interval
+   *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
+   *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */
+  PATH_STORE?: string
+  /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`). */
+  INTERVAL_STORE_GEN?: string
+  /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
+  INTERVAL_STORE_REV?: string
+  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`); required with `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
+  STATIC_GEN?: string
   STORE_ACCESS_KEY_ID?: string
   STORE_SECRET_ACCESS_KEY?: string
   /** Global second cache tier behind the colo cache (`_lib/edgeCache.ts`). */
   CACHE_KV?: KVNamespace
+  /** The response cache's deployment environment (`_lib/edgeCache.ts` `cacheEnvTag`): set, it is the tag
+   *  (`""` = prod's keys); unset, the request host, except `PROD_HOST` itself (prod's keys). */
+  CACHE_NS?: string
+  /** This deployment's production host (also build-time: `vite.config.ts` → `src/hosts.ts`). */
+  PROD_HOST?: string
   /** The scope every viewer of this deployment needs (`gcs` | `cw`). */
   BASE_SCOPE?: string
   /** Public/no-gate deploys (r2.rbw.sh, per-project embeds): grant the base
@@ -83,6 +120,8 @@ export interface Env {
   PUBLIC_READ?: string
   /** The store root's crumb label (e.g. `my GCS`); unset = `all buckets`. */
   ROOT_LABEL?: string
+  /** The root crumb's tooltip: what the store root covers (e.g. which buckets), in words. */
+  ROOT_TITLE?: string
   /** Snapshot dir of this store inside the data bucket (`snapshots/<sub>/`); unset = the bare `snapshots/`. */
   SNAPSHOTS_SUBDIR?: string
   /** Dedicated SA key (Batch submit + actAs the job SA) for the sweep dispatch bridge. */

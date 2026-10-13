@@ -1,3 +1,6 @@
 # SPA fallback: deep client routes (e.g. /ctbk/gbfs/…) serve the app shell.
 # CF Pages Functions (/v1/files/*) and real static assets take precedence.
+# A miss under /assets/ also lands here; the middleware turns that one into a
+# no-store 404 (Pages ignores a 404 status in this file, and a redirect rule
+# for /assets/* would shadow the real assets too).
 /*  /index.html  200

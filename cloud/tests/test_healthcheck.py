@@ -146,3 +146,57 @@ def test_run_checks_subdir_scopes_the_data_routes():
         "/api/subtree?date=2026-08-31&w=128&h=128",
         "/data/cw/2026-08-31/meta.json",
     ]
+
+
+def _subdaily_site():
+    """Two scans on 8/31 (06:01, 18:02) and one on 8/30: every route keyed by scan id."""
+    scans = ["2026-08-31T1802", "2026-08-31T0601", "2026-08-30T0600"]
+    routes = {"/data/scans.json": (200, json.dumps(scans).encode())}
+    for s in scans:
+        routes[f"/api/subtree?date={s}&w=128&h=128"] = (200, b"{}")
+        routes[f"/data/{s}/meta.json"] = (200, b"{}")
+    return lambda url, rng: routes.get(url.replace("https://gcs.oa.dev", ""), (404, b""))
+
+
+def test_run_checks_sub_daily_ids():
+    get = _subdaily_site()
+    green = [
+        Check("freshness", True, "latest scan 2026-08-31T1802 (0d old, limit 2d)"),
+        Check("subtree", True, "HTTP 200 (want 200)"),
+        Check("data/meta.json", True, "HTTP 200 (want 200)"),
+    ]
+    # No --date: the newest scan.
+    assert run_checks("https://gcs.oa.dev", "tok", None, today=TODAY, get=get) == ("2026-08-31T1802", green)
+    # An exact sub-daily id: that scan, not the day's latest.
+    assert run_checks("https://gcs.oa.dev", "tok", "2026-08-31T0601", today=TODAY, get=get) == ("2026-08-31T0601", green)
+    # A day (or an hour) is a prefix: the latest scan it matches.
+    assert run_checks("https://gcs.oa.dev", "tok", "2026-08-31", today=TODAY, get=get) == ("2026-08-31T1802", green)
+    assert run_checks("https://gcs.oa.dev", "tok", "2026-08-30", today=TODAY, get=get) == ("2026-08-30T0600", green)
+    assert run_checks("https://gcs.oa.dev", "tok", "2026-08-31T06", today=TODAY, get=get) == ("2026-08-31T0601", green)
+    # dashless compact slugs, as the site writes them
+    assert run_checks("https://gcs.oa.dev", "tok", "260831", today=TODAY, get=get) == ("2026-08-31T1802", green)
+    assert run_checks("https://gcs.oa.dev", "tok", "26083106", today=TODAY, get=get) == ("2026-08-31T0601", green)
+    assert run_checks("https://gcs.oa.dev", "tok", "2608311802", today=TODAY, get=get) == ("2026-08-31T1802", green)
+
+
+def test_run_checks_slug_miss_fails():
+    # a slug naming no scan is a failed check, never the nearest or latest scan
+    get = _subdaily_site()
+    fresh = Check("freshness", True, "latest scan 2026-08-31T1802 (0d old, limit 2d)")
+    assert [run_checks("https://gcs.oa.dev", "tok", d, today=TODAY, get=get) for d in ["26083103", "260901", "junk"]] == [
+        (None, [fresh, Check("resolve-scan", False, f"no scan matches {d}")]) for d in ["26083103", "260901", "junk"]
+    ]
+
+
+def test_run_checks_date_only_scan_by_its_start():
+    # 8/31: a date-only scan that started 04:30Z (`meta.started`) and 18:02Z — its start minute and hour pick it, the
+    # midnight alias too, the day the latest.
+    scans = ["2026-08-31T1802", "2026-08-31"]
+    routes = {"/data/scans.json": (200, json.dumps(scans).encode())}
+    for s in scans:
+        routes[f"/api/subtree?date={s}&w=128&h=128"] = (200, b"{}")
+        routes[f"/data/{s}/meta.json"] = (200, json.dumps({"started": "2026-08-31T04:30:12.345Z"} if len(s) == 10 else {}).encode())
+    get = lambda url, rng: routes.get(url.replace("https://gcs.oa.dev", ""), (404, b""))  # noqa: E731
+    assert [run_checks("https://gcs.oa.dev", "tok", d, today=TODAY, get=get)[0] for d in ["2608310430", "26083104", "2608310000", "260831", "26083105"]] == [
+        "2026-08-31", "2026-08-31", "2026-08-31", "2026-08-31T1802", None,
+    ]

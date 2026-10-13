@@ -1,0 +1,9 @@
+# dOGI fractional colors and public map labels
+
+The October 13 tree-color rollout preserved CSS color strings but the vendored resvg SVG parser renders fractional HSL components as black. The earlier renderer tests asserted PNG dimensions, not pixels; the two-child synthetic fan had only integral hues and did not catch it. A seven-shade regression reproduced four solid-black fills. SVG fills now normalize HSL through the existing core CSS parser to integer RGB at the card boundary. `parseColor` is extracted unchanged to a DOM-free package subpath so edge Functions do not import the React/browser entrypoint. Exact real-WASM RGBA assertions cover the whole seven-shade fan, not just successful PNG generation.
+
+The public R2 dashboard also inherited the private anonymous shape-only label rule. Maps now set `publicLabels` only from the server's explicit `PUBLIC_READ` base-scope setting. Public bucket and child labels and legends render where they fit; the image remains unsigned/anonymous. URL parameters cannot enable labels. Private generic/shape policies, grant checks, and non-map cards are unchanged. Public metadata uses a product description rather than a diff-preview implementation warning. Renderer revision `r=4` prevents reusing the defective `r=3` palette cache entries. Old unfurls may require the consumer to refresh cached page metadata.
+
+Local validation: all 81 shared OG tests and all 692 public-release site tests pass; client/Functions typechecks and both builds pass. Core's focused color suite passes all 16 cases. The broader core run reported seven `toBeInTheDocument` matcher-registration failures in unchanged component tests under the local mixed Vitest 2/4 dependency setup; no component implementation was changed by this extraction. Deployment and live Chrome verification are recorded in [color-mode rollout].
+
+[color-mode rollout]: dogi-color-modes.md

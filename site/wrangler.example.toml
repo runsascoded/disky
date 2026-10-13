@@ -48,6 +48,8 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # STORES_EXTRA = "meta"                       # comma-separated secondary store keys, each under its own path (`/meta`)
 # PROD_HOST = "my.example.com"                # `g d` toggles between these two hosts (src/hosts.ts);
 # DEV_HOST = "dev.my.example.com"             #   either unset = no binding
+# CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
+#                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
 
 # --- Who may see it (_lib/auth.ts) ---
@@ -64,11 +66,16 @@ BASE_SCOPE = "my"                           # the scope every viewer needs
 STORE_BUCKET = "my-index-bucket"            # required: the bucket holding the index (no default)
 # STORE_REGION = "auto"
 # STORE_PREFIXES = "listing/,snapshots/"      # comma-separated key prefixes the proxies may read; unset = the default set
+# SEARCH_SIDECARS = "1"                       # the generations carry the filter's search sidecars (`path-index -S`; `_lib/search.ts`); unset = none built, never probed
 # SNAPSHOTS_SUBDIR = "my"                     # this store's snapshots dir: `snapshots/<sub>/`; unset = `snapshots/`
 ROOT_LABEL = "my buckets"                   # the store root's crumb label
+# ROOT_TITLE = "the buckets this deployment scans"   # optional: the root crumb's tooltip (default: the store's scope word)
 # QUERY_SYNTAX = "simple"                     # the path filter's default syntax (`simple` | `regex`); unset = `simple`
 # OBJECT_BUCKETS = "my-bucket"                # comma-separated scanned buckets `/v1/objects` serves to members
 # STORES_JSON = '{"meta": {"scope": "meta"}}'  # secondary stores: `{"<key>": {"scope": …, "vars": {…}, "secrets": {…}}}`
+
+# --- Session log (specs/session-log.md; tables: migrations/<lineage>/…_session_log.sql; on/off: the switch at /admin) ---
+# SESSION_LOG_RETAIN_DAYS = "30"             # days a session's log is kept (default 30)
 
 # --- Plans and deletion (_lib/plans.ts, _lib/dispatch.ts) ---
 # STORE_SCHEME = "s3://"                      # the URI scheme staged prefixes carry
@@ -77,6 +84,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # EXECUTOR = "plan-sweep"                     # `plan-sweep` (default) | `sweep`
 # JOB_SA = "<job>@<project>.iam.gserviceaccount.com"  # the service account dispatched Batch jobs run as (with GCP_SA_KEY)
 # GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
+# META_TREE_URL = "https://other.example/meta"  # /scans links each scan output to its dir in the `/meta` store tree (the deployments' own data bucket); unset = no tree links
 # GCP_LOG_VIEW = "projects/my-project/locations/global/buckets/_Default/views/sweep-task-logs"  # IaC-managed task-log-only view; grant the site view-scoped logging.viewAccessor
 # BATCH_REGION = "us-central1"                 # the default Batch region (the default)
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
@@ -87,10 +95,33 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # D1_DB_ID = "<d1-database-id>"               # `sweep`: the D1 its runs are recorded to (dispatch requires it; = the `DB` binding's id)
 # D1_DB_NAME = "<d1-database-name>"           # `sweep`: that D1's name
 # SWEEP_S3_ENDPOINT = "https://s3.example.com"  # `plan-sweep`: the S3 endpoint its runs delete through
+# DISKY_LABELS = "app=disky,deployment=<name>"  # cost-attribution labels on the executor jobs' VMs + disks (each adds `component`); unset = none
 # SLACK_ADMIN_CHANNEL = "C0123456789"          # channel id staged-plan threads post to (with SLACK_BOT_TOKEN); unset = no Slack
 
 # --- Link previews (specs/done/dogi.md) ---
-# OG_CARDS = "1"                              # any value: every page gets its own preview card; unset = the static `og.jpg`
+# --- Name search: the static name index on INDEX_R2; private viewer gate ---
+# NAME_SUMMARY_STATIC = "1"                 # `/names` (`/api/name-summary`, `/api/name-summary-registry`) from the static name index in INDEX_R2 (`_lib/nameSummaryStatic.ts`); unset = 404
+# STATIC_GEN = "<gen>"                      # required with FILTER_STATIC / NAME_SUMMARY_STATIC: the static name index generation in INDEX_R2 (`static-names/<gen>/`)
+# STATIC_MAX_ROWS = "400000"                # the static reader's ceiling on suffix rows per query (default 400K; the catalog threshold bounds it lower)
+# FILTER_STATIC = "1"                       # the map's filter (`q=`): a single literal's match roots on any scan of the static name index's generation, from INDEX_R2 (`_lib/staticFilter.ts`)
+# FILTER_STATIC_HEAVY = "1"                 # with FILTER_STATIC: heavy literals (catalog members, and every 1–2 character one) from the drilldown under `drill/` (`_lib/staticDrill.ts`): match roots, or a heavy directory's per-child rollup; base-generation scans only
+# FILTER_STATIC_ANCHORS = "0"               # with FILTER_STATIC: turns off anchored terms (`^q`, `q$`, `^q$`) from the name index and the `q$` / `^q$` rollups under `names/`, `anchors/` (`_lib/staticAnchors.ts`; on by default, a generation without `anchors/meta.json` declines them)
+# FILTER_INDEXED_ONLY = "1"                # with FILTER_STATIC: the map's filter takes only one literal substring of a name, unscoped, on a scan the static index covers; every other form is a 400 `{ error, code }` (`_lib/indexedOnly.ts`), never a path-store scan
+# FILTER_DETAILS_MS = "300"                # with FILTER_STATIC: ms a filtered view waits past phase 2 for its roots' kind/ages/classes (unset: until they land)
+# FILTER_PHASE2_MS = "1500"                # ms a filtered view's phase 2 (its match roots' insides) may take; reads still running then are dropped and those roots drawn whole (`interiors` in the response; default 1500)
+# PATH_STORE = "intervals"                 # read the dates INTERVAL_STORE_GEN holds from the change-interval path store on INDEX_R2 (`_lib/index.ts` `openInterval`, specs/interval-store.md); lenses and owner pools still read per-scan stores. `opt-in`: only requests with `ps=iv`
+# INTERVAL_STORE_GEN = "2026-10-09"         # with PATH_STORE: the generation, `interval-store/<gen>/` on INDEX_R2
+# INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
+# STATIC_BENCH = "1"                        # dev: `/api/static-bench`, R2 read timings over INDEX_R2
+# SERVED_R2 = "1"                           # the snapshot JSONs (`snapshots/…`) and extras sidecars (`attr.tsv{,.idx.json}`) from INDEX_R2, under their store keys (`_lib/index.ts` `servedStore`; the job's `dt-cloud publish-r2 -S`); unset = through STORE_*
+# [[r2_buckets]]                            # Worker-served indexes (the static name-search shards)
+# binding = "INDEX_R2"
+# bucket_name = "<index bucket>"
+# OG_CARDS = "1"                             # detailed/shape metadata stamping; does not disable direct image routes
+# OG_DEFAULT_COLOR = "w"                     # match Store.defaultColor if set: t=tree, w=written, r=read, u=owner
+# OG_ANONYMOUS = "generic"                   # private default: no data reads/totals/names on plain links; explicit shares may be detailed
+#                                           # "shape" explicitly permits anonymous geometry + totals (GCS's approved policy)
+#                                           # public AUTH_MODE defaults to shape; unknown values fail closed to generic
 
 # Secrets — `wrangler pages secret put`, never in this file:
 # secret SESSION_SECRET                     required wherever anyone signs in: signs session cookies and card URLs

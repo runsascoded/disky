@@ -42,7 +42,8 @@ export interface Launched { job_id: string; extra: Record<string, unknown> }
 
 /** A dispatch an executor has validated against the plan, ready to launch. */
 export interface Prepared {
-  /** The canonical prefixes the run acts on (the digest's input). */
+  /** The items the run acts on, as `digestLines` (canonical prefixes; an
+   * exact object as `=<key>`): the digest's input. */
   prefixes: string[]
   launch(date: string, digest: string, reviewed?: RunRow): Promise<Launched | DispatchErr>
 }

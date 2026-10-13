@@ -201,8 +201,13 @@ def test_sort_variants_over_label_slices(tmp_path: Path):
     assert {t: _kv(f'{stem}.{t}.parquet')['sort'] for t in ('path', 'path-by-usr', 'bysize', 'bysize-by-usr')} == {
         'path': 'depth,path,usr',
         'path-by-usr': 'usr,depth,path',
-        'bysize': 'size_bucket desc,path,usr',
+        'bysize': 'tot_bucket desc,path,usr',
         'bysize-by-usr': 'usr,size_bucket desc,path',
+    }
+    # The labeled `bysize` buckets each slice on its path's total (`tot`); the lens copy stays per slice.
+    assert {t: _kv(f'{stem}.{t}.parquet')['bucket'] for t in ('bysize', 'bysize-by-usr')} == {'bysize': 'log2(tot)', 'bysize-by-usr': 'log2'}
+    assert {t: list(pq.read_schema(f'{stem}.{t}.parquet').names[-1:]) for t in ('path', 'path-by-usr', 'bysize', 'bysize-by-usr')} == {
+        'path': ['depth'], 'path-by-usr': ['depth'], 'bysize': ['tot'], 'bysize-by-usr': ['depth'],
     }
     path = pd.read_parquet(f'{stem}.path.parquet')
     assert list(path.columns[:3]) == ['path', 'usr', 'size']
@@ -224,20 +229,22 @@ def test_sort_variants_over_label_slices(tmp_path: Path):
         ('b', '.'), ('b', 'd3'),
         ('c', '.'), ('c', 'd0'),
     ]
-    # `bysize`: bucket desc, then path, then the slice — the root's `a` slice
-    # (120 MiB) sorts beside the unlabeled root row, its `c` slice (15 MiB)
-    # three buckets down, beside `d0`.
+    # `bysize`: the bucket of the path's total desc, then path, then the slice —
+    # every slice of the root (315 MiB in all; its `c` slice is 15 MiB) sorts
+    # together at the top, each carrying the total.
     bysize = pd.read_parquet(f'{stem}.bysize.parquet')
-    assert [(size_bucket(s), u, p) for u, p, s in _rows(bysize, ['usr', 'path', 'size'])][:8] == [
-        (26, None, '.'), (26, 'a', '.'), (26, None, 'd4'), (26, 'a', 'd5'),
-        (25, 'b', '.'), (25, None, 'd2'), (25, 'b', 'd3'),
-        (24, 'a', 'd1'),
+    assert [(size_bucket(t), u, p, s // _UNIT) for u, p, s, t in _rows(bysize, ['usr', 'path', 'size', 'tot'])][:8] == [
+        (28, None, '.', 120), (28, 'a', '.', 120), (28, 'b', '.', 60), (28, 'c', '.', 15),
+        (26, None, 'd4', 75), (26, 'a', 'd5', 90),
+        (25, None, 'd2', 45), (25, 'b', 'd3', 60),
     ]
     pd.testing.assert_frame_equal(
         bysize,
-        pd.read_parquet(layer2).assign(_b=lambda d: d['size'].map(size_bucket).fillna(-1).astype(int))
+        pd.read_parquet(layer2).assign(tot=lambda d: d.groupby(['depth', 'path'])['size'].transform('sum'))
+        .assign(_b=lambda d: d['tot'].map(size_bucket).fillna(-1).astype(int))
         .sort_values(['_b', 'path', 'usr'], ascending=[False, True, True], na_position='first')
         .drop(columns='_b').reset_index(drop=True),
+        check_dtype=False,
     )
     bysize_by_usr = pd.read_parquet(f'{stem}.bysize-by-usr.parquet')
     assert [(u, size_bucket(s), p) for u, p, s in _rows(bysize_by_usr[bysize_by_usr.kind == 'dir'], ['usr', 'path', 'size'])] == [

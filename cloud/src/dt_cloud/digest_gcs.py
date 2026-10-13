@@ -5,25 +5,22 @@ $/mo (priced from the scan's storage-class bytes, ``cfg.prices``) + a linked
 arrow to the day's diff, its avatar the colour-coded trend arrow
 (`av_deg{N}.png?v=REV`). The OP: month-to-date headline, per-ISO-week bullets
 (TB + $/mo), and a storage-class mosaic plot (`digest_plot.render_tiers`).
-Scan ids are dates (one scan a day); meta.json carries `total_bytes` +
-`class_bytes`. Design + rationale: specs/done/slack-digest-shape-c.md; the
+Scan ids are `YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM` (UTC): a day may hold
+several scans, each its own reply, delta and link (specs/scan-ids-not-dates.md);
+meta.json carries `total_bytes` + `class_bytes`. Design + rationale: specs/done/slack-digest-shape-c.md; the
 engine: `digest`."""
 from __future__ import annotations
 
 import datetime as dt
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .digest import AVATAR_REV, GIB, MINUS, TIB, DigestConfig, Reply, Unit, _pct, _pct_val, _tb, deg, load_window
+from .digest import AVATAR_REV, GIB, MINUS, TIB, DigestConfig, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
 
 
 def _usd(v: float) -> str:
     return ("+$" if v >= 0 else f"{MINUS}$") + f"{abs(v):,}"
-
-
-def _yy(date: str) -> str:
-    return date[2:].replace("-", "")
 
 
 @dataclass(frozen=True)
@@ -31,7 +28,7 @@ class Scan:
     """One scan's row: TiB total + per-class TiB + $/mo, with deltas vs. the
     previous scan (``dtb``/``dcost`` are ``None`` only if no prior scan)."""
 
-    date: str
+    date: str  # the scan id (`YYYY-MM-DD[THHMM]`), not necessarily a bare date
     tb: float
     cost: int
     dtb: float | None
@@ -40,19 +37,29 @@ class Scan:
     near: float
     cold: float
     arch: float
+    # the previous scan's id (the delta's baseline); None only if no prior scan
+    prev: str | None = None
+    # its canonical `?d=` slug (`scan_slugs`); None: its minute
+    slug: str | None = field(default=None, compare=False)
+
+    @property
+    def day(self) -> dt.date:
+        return dt.date.fromisoformat(self.date[:10])
 
 
 def _cost(class_bytes: dict, prices: dict[str, float]) -> float:
     return sum(class_bytes.get(c, 0) / GIB * prices[c] for c in prices)
 
 
-def rows_from_meta(dated_meta: list[tuple[str, dict]], prices: dict[str, float]) -> list[Scan]:
-    """Build ``Scan`` rows from ``(date, meta.json)`` pairs in date order.
+def rows_from_meta(dated_meta: list[tuple[str, dict]], prices: dict[str, float], now: dt.datetime | None = None) -> list[Scan]:
+    """Build ``Scan`` rows from ``(date, meta.json)`` pairs in date order, each with its canonical slug
+    (`scan_slugs`, as of ``now``).
 
     The first pair seeds the delta for the second; callers pass one scan of
     lead-in before the window they want, then slice it off."""
     out: list[Scan] = []
-    ptb = pcost = None
+    ptb = pcost = prev = None
+    slugs = scan_slugs(dated_meta, now)
     for date, m in dated_meta:
         tb = m["total_bytes"] / TIB
         cb = m["class_bytes"]
@@ -68,9 +75,11 @@ def rows_from_meta(dated_meta: list[tuple[str, dict]], prices: dict[str, float])
                 near=round(cb.get("2", 0) / TIB, 1),
                 cold=round(cb.get("3", 0) / TIB, 1),
                 arch=round(cb.get("4", 0) / TIB, 1),
+                prev=prev,
+                slug=slugs[date],
             )
         )
-        ptb, pcost = tb, cost
+        ptb, pcost, prev = tb, cost, date
     return out
 
 
@@ -92,34 +101,41 @@ def op_body(rows: list[Scan], month: dt.date, plot_url: str | None, cfg: DigestC
     ]
     weeks: OrderedDict[dt.date, list[Scan]] = OrderedDict()
     for r in rows:
-        d = dt.date.fromisoformat(r.date)
-        mon = d - dt.timedelta(days=d.weekday())
+        mon = r.day - dt.timedelta(days=r.day.weekday())
         weeks.setdefault(mon, []).append(r)
     prev_end: Scan | None = None
     last_mon = list(weeks)[-1]
-    # the lead-in scan (sliced off `rows`) is the first week's baseline; the
-    # daily cadence puts it one day before the first row
-    base_date = dt.date.fromisoformat(rows[0].date) - dt.timedelta(days=1)
+    # the lead-in scan (sliced off `rows`, named by the first row's `prev`) is
+    # the first week's baseline; absent one, a day before the first row
+    base = scan_ts(rows[0].prev) if rows[0].prev else scan_ts(rows[0].date) - dt.timedelta(days=1)
     for mon, ws in weeks.items():
         end = ws[-1]
         b_tb, b_cost = (prev_end.tb, prev_end.cost) if prev_end is not None else (base_tb, base_cost)
-        b_date = dt.date.fromisoformat(prev_end.date) if prev_end is not None else base_date
+        b_at = scan_ts(prev_end.date) if prev_end is not None else base
         wdtb = end.tb - b_tb
         wpct = wdtb / b_tb * 100 if b_tb else 0
-        partial = " _(partial)_" if len(ws) < 7 and mon == last_mon else ""
+        partial = " _(partial)_" if len({w.day for w in ws}) < 7 and mon == last_mon else ""
         # the link selects exactly this bullet's span on the site (`?d=<end>-<N>d`:
         # the end scan, N days back to the baseline) and lands on the
         # size-over-time chart, where the week shows as the highlighted window
         # with the Diff section right below it
-        span = (dt.date.fromisoformat(end.date) - b_date).days
         lines.append(
-            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({site_url}/?d={_yy(end.date)}-{span}d#over-time){partial} — "
+            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({site_url}/?d={_dlink(end.date, end.slug)}-{_span(b_at, scan_ts(end.date))}#over-time){partial} — "
             f"**{end.tb:,.0f} TB** ({_tb(wdtb)}, {_pct(wdtb, end.tb)}%) · ${end.cost:,}/mo ({_usd(end.cost - b_cost)})"
         )
         prev_end = end
     if plot_url is not None:
         lines += ["", f"![{cfg.title} — {month:%B %Y}]({plot_url})"]
     return "\n".join(lines)
+
+
+def plot_rows(rows: list[Scan]) -> list[dict]:
+    """The mosaic's per-day points (`digest_plot.render_tiers` plots days):
+    each day's latest scan, keyed by its date."""
+    by_day: dict[str, Scan] = {}
+    for r in rows:
+        by_day[r.date[:10]] = r
+    return [{"date": d, "std": r.std, "near": r.near, "cold": r.cold, "arch": r.arch} for d, r in by_day.items()]
 
 
 def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
@@ -133,17 +149,22 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     (picked from a dozen candidates on 2026-09-15).
     The avatar is the day's colour-coded trend arrow (URL carries AVATAR_REV --
     Slack caches avatars per-URL, so glyph redesigns must bust it)."""
-    d = dt.date.fromisoformat(r.date)
+    d = r.day
     dtb = r.dtb or 0
     dcost = r.dcost or 0
-    sender = f"{d.month}/{d.day} — {r.tb:,.0f} TB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
+    # A sub-daily scan names its UTC time: a day's scans are distinct replies.
+    when = f"{d.month}/{d.day}" + (f" {r.date[11:13]}:{r.date[13:15]}Z" if "T" in r.date else "")
+    sender = f"{when} — {r.tb:,.0f} TB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
     # ↗︎ = NE arrow + text-presentation selector: renders as a font
     # glyph in link colour (bare ↗ gets emoji-ized by Slack into the
     # cartoonish :arrow_upper_right:)
-    url = f"{cfg.site_url}/?d={_yy(r.date)}#diff"
+    url = f"{cfg.site_url}/?d={_dlink(r.date, r.slug)}#diff"
     link = f"· [view →]({url})" if platform == "discord" else f"[↗︎]({url})"
     body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
-    avatar = f"{cfg.need('icons_base')}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 7)}.png?v={AVATAR_REV}"
+    # project the scan's Δ% over its real interval to a weekly rate (a day: ×7)
+    # (a daily scan keeps the fixed ×7 even across a missed day)
+    hours = (scan_ts(r.date) - scan_ts(r.prev)).total_seconds() / 3600 if r.prev and "T" in r.date + r.prev else 24
+    avatar = f"{cfg.need('icons_base')}/arrows/av_deg{deg(_pct_val(dtb, r.tb), 168 / hours if hours > 0 else 7)}.png?v={AVATAR_REV}"
     return Reply(sender, body, icon_url=avatar)
 
 
@@ -188,5 +209,5 @@ class Gcs:
         """The storage-class mosaic (needs the `[plot]` extra — matplotlib)."""
         from .digest_plot import render_tiers
 
-        tiers = [{"date": r.date, "std": r.std, "near": r.near, "cold": r.cold, "arch": r.arch} for r in rows]
+        tiers = plot_rows(rows)
         render_tiers(tiers, Path(out), f"{self.cfg.title} — {month:%B %Y}", self.cfg.host)

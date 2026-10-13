@@ -1,3 +1,4 @@
+import { execSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
@@ -112,6 +113,13 @@ const DEV_HOST = process.env.VITE_DEV_HOST ?? VARS.DEV_HOST ?? ''
 // The source link (src/SiteKbd.tsx); unset = this repo.
 const REPO_URL = process.env.VITE_REPO_URL ?? VARS.REPO_URL ?? ''
 
+// The build's commit (the session log stamps it on every batch, specs/session-log.md): `VITE_BUILD_SHA`, else
+// the checkout's HEAD, else none.
+function buildSha(): string {
+  if (process.env.VITE_BUILD_SHA) return process.env.VITE_BUILD_SHA
+  try { return execSync('git rev-parse --short=10 HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() } catch { return '' }
+}
+
 export default defineConfig({
   define: {
     'import.meta.env.VITE_STORE': JSON.stringify(STORE),
@@ -122,6 +130,7 @@ export default defineConfig({
     'import.meta.env.VITE_PROD_HOST': JSON.stringify(PROD_HOST),
     'import.meta.env.VITE_DEV_HOST': JSON.stringify(DEV_HOST),
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
+    'import.meta.env.VITE_BUILD_SHA': JSON.stringify(buildSha()),
   },
   plugins: [react(), devSeriesIndex, llmsTxt],
   server: {

@@ -2,11 +2,10 @@
  * (`src/UserChip.tsx`): sanitize an actor string (email or raw id) to a
  * handle, then follow the deployment's registry (built from its published
  * `snapshots/rules.json`, as the client does) to the canonical id. */
-import { S3Store } from '@rdub/file-tree/stores/s3'
 import { type Registry, buildRegistry, canonIn } from '../../src/identityRegistry.js'
 import type { Rules } from '../../src/types.js'
 import type { Env } from './auth.js'
-import { storeCreds, storeReady, storeTarget } from './index.js'
+import { servedStore, storeReady } from './index.js'
 import { shared } from './shared.js'
 
 export { whoToHandle } from '../../src/identityRegistry.js'
@@ -20,11 +19,11 @@ const memo = new Map<string, Promise<Registry>>()
 /** The deployment's registry, or `{}` when its store publishes no rules (the
  * public demo, a plan-first store): ids then stand as they are. */
 export async function loadRegistry(env: Env): Promise<Registry> {
-  if (!storeReady(env)) return {}
+  if (!env.SERVED_R2 && !storeReady(env)) return {}
   const key = `rules:${Math.floor(Date.now() / TTL_MS)}`
   for (const k of memo.keys()) if (k !== key) memo.delete(k)
   return shared(memo, key, async () => {
-    const store = S3Store({ ...storeTarget(env), prefixes: ['snapshots/'], ...storeCreds(env) })
+    const store = servedStore(env, ['snapshots/'])
     try {
       const { bytes } = await store.get('snapshots/rules.json')
       const rules = JSON.parse(new TextDecoder().decode(bytes)) as Rules

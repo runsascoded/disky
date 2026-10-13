@@ -13,6 +13,7 @@ import json
 import time
 from typing import Mapping, Sequence
 
+from .cost_labels import label_batch_spec
 from .deploy import data_bucket as env_data_bucket, env, require, words
 from .gcp import REGION, batch_job, gcp_project, session
 
@@ -93,7 +94,7 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
     # ("machine_type cannot satisfy compute_resource"). Leave 2 vCPU for the
     # agent; listing is CPU-bound so memory can be generous-but-modest.
     vcpus = int(machine.rsplit("-", 1)[-1])
-    return {
+    return label_batch_spec({
         "taskGroups": [
             {
                 "taskCount": len(buckets),
@@ -129,7 +130,7 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
             "location": {"allowedLocations": [f"regions/{region}"]},
         },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
-    }
+    }, "listing")
 
 
 def submit_job(spec: dict, job_id: str | None = None, region: str = REGION) -> str:

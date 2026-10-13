@@ -20,6 +20,45 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Boot watchdog: if a hashed bundle file fails to load (a 404 right after a
+      // deploy, or HTML a browser cached for it before the middleware's `assetMiss`
+      // guard), or `#root` is still empty 5 s after `load`, re-fetch the bundle
+      // past the HTTP cache (`cache: 'reload'` overwrites a poisoned entry) and
+      // reload, once: a sessionStorage stamp stops a loop, and without storage
+      // there is no retry. Built pages only (the dev server's entry is `/src/`).
+      // In <body> (identical on every deployment branch) is early enough: a
+      // parser-inserted module script's load error fires only after parsing.
+      (function () {
+        var KEY = 'boot-retry', fired = false
+        function assets() {
+          return [].slice.call(document.querySelectorAll('script[src^="/assets/"], link[href^="/assets/"]'))
+            .map(function (e) { return e.getAttribute('src') || e.getAttribute('href') })
+        }
+        function retry() {
+          if (fired) return
+          fired = true
+          try {
+            var last = Number(sessionStorage.getItem(KEY))
+            if (last && Date.now() - last < 60000) return
+            sessionStorage.setItem(KEY, String(Date.now()))
+          } catch (e) { return }
+          Promise.all(assets().map(function (u) { return fetch(u, { cache: 'reload' }).catch(function () {}) }))
+            .then(function () { location.reload() })
+        }
+        addEventListener('error', function (e) {
+          var t = e.target, u = t && (t.getAttribute && (t.getAttribute('src') || t.getAttribute('href')))
+          if ((t.tagName === 'SCRIPT' || t.tagName === 'LINK') && u && u.indexOf('/assets/') === 0) retry()
+        }, true)
+        addEventListener('load', function () {
+          setTimeout(function () {
+            var root = document.getElementById('root')
+            if (root && root.firstChild) { try { sessionStorage.removeItem(KEY) } catch (e) {} }
+            else if (assets().length) retry()
+          }, 5000)
+        })
+      })()
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

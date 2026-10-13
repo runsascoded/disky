@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./squarify": "./src/squarify.ts",
+    "./parseColor": "./src/parseColor.ts",
     "./styles.css": "./src/styles.css",
     "./voronoi": "./src/voronoi/index.ts"
   },

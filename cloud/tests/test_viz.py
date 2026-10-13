@@ -262,16 +262,19 @@ def test_store_sorts(tmp_path: Path, listing: str, attribution: str):
     assert mm[("b1", None)] == E["d0702"]
     assert mm[("b1/users/rw/ckpt", RW)] == pytest.approx((100 * E["d0701"] + 50 * E["d0703"]) / 150)
 
+    # `bysize` over owner slices: each slice carries its path's total (`tot`) and
+    # sorts on that total's bucket (spec `bysize-path-total.md`): `b1`'s three
+    # slices (380 GB → 2^38) together at the top, its 30 GB unowned one too.
     bysize = pd.read_parquet(pidx.with_name("path-index-bysize.parquet"))
-    assert list(bysize.columns) == STORE_COLS
-    assert _kv(pidx.with_name("path-index-bysize.parquet")) == {"tier": "bysize", "sort": "size_bucket desc,path,usr", "bucket": "log2"}
-    assert _rows(bysize, ["path", "usr", "size"]) == [
-        ("b1", DT, 200 * GB), ("b1", RW, 150 * GB),
-        ("b1/datasets", DT, 200 * GB), ("b1/datasets/raw", DT, 200 * GB), ("b1/datasets/raw/part0", DT, 200 * GB),
-        ("b1/users", RW, 150 * GB), ("b1/users/rw", RW, 150 * GB), ("b1/users/rw/ckpt", RW, 150 * GB),
-        ("b1/users/rw/ckpt/model.bin", RW, 100 * GB),
-        ("b1/users/rw/ckpt/opt.bin", RW, 50 * GB),
-        ("b1", None, 30 * GB), ("b1/top.bin", None, 30 * GB),
+    assert list(bysize.columns) == [*STORE_COLS, "tot"]
+    assert _kv(pidx.with_name("path-index-bysize.parquet")) == {"tier": "bysize", "sort": "tot_bucket desc,path,usr", "bucket": "log2(tot)"}
+    assert _rows(bysize, ["path", "usr", "size", "tot"]) == [
+        ("b1", None, 30 * GB, 380 * GB), ("b1", DT, 200 * GB, 380 * GB), ("b1", RW, 150 * GB, 380 * GB),
+        ("b1/datasets", DT, 200 * GB, 200 * GB), ("b1/datasets/raw", DT, 200 * GB, 200 * GB), ("b1/datasets/raw/part0", DT, 200 * GB, 200 * GB),
+        ("b1/users", RW, 150 * GB, 150 * GB), ("b1/users/rw", RW, 150 * GB, 150 * GB), ("b1/users/rw/ckpt", RW, 150 * GB, 150 * GB),
+        ("b1/users/rw/ckpt/model.bin", RW, 100 * GB, 100 * GB),
+        ("b1/users/rw/ckpt/opt.bin", RW, 50 * GB, 50 * GB),
+        ("b1/top.bin", None, 30 * GB, 30 * GB),
     ]
 
     by_user = pd.read_parquet(pidx.with_name("path-index-by-user.parquet"))
@@ -288,12 +291,16 @@ def test_store_sorts(tmp_path: Path, listing: str, attribution: str):
         (DT, "b1"), (DT, "b1/datasets"), (DT, "b1/datasets/raw"), (DT, "b1/datasets/raw/part0"),
         (RW, "b1"), (RW, "b1/users"), (RW, "b1/users/rw"), (RW, "b1/users/rw/ckpt"), (RW, "b1/users/rw/ckpt/model.bin"), (RW, "b1/users/rw/ckpt/opt.bin"),
     ]
-    # A footer sidecar beside each sort: one group of 12 rows, sizes 30..200 GB.
-    for name in ("path-index", "path-index-by-user", "path-index-bysize", "path-index-bysize-by-user"):
+    # A footer sidecar beside each sort: one group of 12 rows, sizes 30..200 GB
+    # (`bysize`'s stats are on `tot`: 30..380 GB).
+    for name, cols, b_max in (
+        ("path-index", STORE_COLS, 200 * GB), ("path-index-by-user", STORE_COLS, 200 * GB),
+        ("path-index-bysize", [*STORE_COLS, "tot"], 380 * GB), ("path-index-bysize-by-user", STORE_COLS, 200 * GB),
+    ):
         doc = json.loads(pidx.with_name(f"{name}.groups.json").read_text())
-        assert [e["name"] for e in doc["schema"][1:]] == STORE_COLS
+        assert [e["name"] for e in doc["schema"][1:]] == cols
         (g,) = doc["groups"]
-        assert (g[0], g[5], g[8], g[9], g[11]) == (0, 200 * GB, 0, 12, 30 * GB)
+        assert (g[0], g[5], g[8], g[9], g[11]) == (0, b_max, 0, 12, 30 * GB)
     assert not pidx.with_name(".store.parquet").exists()
     assert sorted(p.name for p in tmp_path.glob("path-index*")) == [
         "path-index-by-user.groups.json", "path-index-by-user.groups.parquet", "path-index-by-user.parquet",

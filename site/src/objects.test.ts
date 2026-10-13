@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { actionPrefix, cellAction, filesRedirect, listsObjects, objectSource, openHref, publicUrl, rowTarget, type CellNode } from './objects'
+import { actionItem, cellAction, filesRedirect, listsObjects, objectSource, openHref, publicUrl, rowTarget, type CellNode } from './objects'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -182,9 +182,9 @@ describe('filesRedirect', () => {
   })
 })
 
-describe('actionPrefix', () => {
-  it('an object stages / assigns by its key, a directory by its `/`-terminated prefix', () => {
-    expect([actionPrefix('r2://ctbk/a.parquet', 'file'), actionPrefix('r2://ctbk/gbfs', 'dir'), actionPrefix('r2://ctbk/gbfs', undefined)])
-      .toEqual(['r2://ctbk/a.parquet', 'r2://ctbk/gbfs/', 'r2://ctbk/gbfs/'])
+describe('actionItem', () => {
+  it('an object stages / assigns as that exact object (kind carried, not a `key/` prefix), a directory by its `/`-terminated prefix', () => {
+    expect([actionItem('r2://ctbk/a.parquet', 'file'), actionItem('r2://ctbk/gbfs', 'dir'), actionItem('r2://ctbk/gbfs', undefined)])
+      .toEqual([{ key: 'r2://ctbk/a.parquet', kind: 'object' }, { key: 'r2://ctbk/gbfs/', kind: 'prefix' }, { key: 'r2://ctbk/gbfs/', kind: 'prefix' }])
   })
 })

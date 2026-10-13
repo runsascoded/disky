@@ -21,6 +21,7 @@ import { canonId, loadRegistry } from '../_lib/identity.js'
 import { ownerTotals } from '../_lib/ownerTotals.js'
 import { storeReady } from '../_lib/index.js'
 import { ME_UNRESOLVED, resolveUser } from '../_lib/me.js'
+import { scanArg } from '../_lib/scanArg.js'
 
 export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   // The ownership ledger is the primary store's: `store=<other>` is a 404.
@@ -34,9 +35,10 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
   const url = new URL(request.url)
-  const date = url.searchParams.get('date') ?? ''
+  const scan = await scanArg(env, url.searchParams)
+  if (scan instanceof Response) return scan
+  const date = scan
   const userRaw = url.searchParams.get('user') ?? ''
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: 'date=YYYY-MM-DD required' }, 400)
   if (!/^[a-z0-9_-]+$/.test(userRaw)) return json({ error: 'user=<canonical id> or user=me required' }, 400)
 
   try {

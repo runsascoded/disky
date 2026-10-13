@@ -29,7 +29,7 @@ export function PrivacyPage() {
         </p>
         <h2>What is not collected</h2>
         <p>
-          No analytics, advertising or tracking scripts. No data is sold or shared with third parties. Google is used only to
+          No third-party analytics, advertising or tracking scripts. No data is sold or shared with third parties. Google is used only to
           confirm who you are at sign-in; the site requests the basic <code>openid email profile</code> scopes and nothing else.
         </p>
         <h2>Removal</h2>

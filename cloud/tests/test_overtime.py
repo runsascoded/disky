@@ -230,11 +230,11 @@ def test_over_time_groups_cli_dry_run_lists_unsealed_groups(monkeypatch, tmp_pat
     asked: list[tuple[str, str]] = []
     monkeypatch.setattr(IF, "synced_variants", lambda store: asked.append(("variants", store)) or [(d, "path") for d in dates])
     monkeypatch.setattr(OT, "synced_groups", lambda store: asked.append(("groups", store)) or {dates[7]})  # first group already sealed
-    r = CliRunner().invoke(main, ["over-time-groups", "-g", "G", "-K", "8", "-n", "-o", str(tmp_path)])
+    r = CliRunner().invoke(main, ["over-time-groups", "-g", "G", "-K", "8", "-l", "l2/{scan}/", "-n", "-o", str(tmp_path)])
     assert r.exit_code == 0, r.output + r.stderr
     assert json.loads(r.output) == {"groups": [dates[15]], "dry_run": True}
     # `-s` scopes both reads to that store; the default is the primary.
-    r = CliRunner().invoke(main, ["over-time-groups", "-g", "G", "-K", "8", "-n", "-s", "meta", "-o", str(tmp_path)])
+    r = CliRunner().invoke(main, ["over-time-groups", "-g", "G", "-K", "8", "-l", "l2/{scan}/", "-n", "-s", "meta", "-o", str(tmp_path)])
     assert r.exit_code == 0, r.output + r.stderr
     assert asked == [("variants", "primary"), ("groups", "primary"), ("variants", "meta"), ("groups", "meta")]
     # (the plan lines go to the real stderr via `err`, outside CliRunner's capture)

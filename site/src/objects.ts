@@ -3,6 +3,7 @@
 // old `/files/…` link lands. Pure, so every rule is specced in
 // `objects.test.ts`; the components (`Treemap`, `ChildrenTable`,
 // `DiffTreemap`, `DiffTable`, `ObjectPanel`, `FilesRedirect`) only call them.
+import type { PlanItem } from './batches'
 import { isFold } from './pathCrumbs'
 import type { Store } from './stores'
 
@@ -135,6 +136,9 @@ export function filesRedirect(splat: string, proxy: ProxyInfo | null, stores: Pi
   return openHref(target.path, segs, '')
 }
 
-/** The staging / assignment prefix for a row: an object is its own key, a
- * directory its `/`-terminated prefix (so `a/b/` never matches `a/bc`). */
-export const actionPrefix = (uri: string, k: 'file' | 'dir' | undefined): string => (k === 'file' ? uri : `${uri}/`)
+/** What a row's trash / assign acts on: an object row is that one exact key
+ * (`kind: 'object'` — it never matches `key.bak`), a directory its
+ * `/`-terminated prefix (so `a/b/` never matches `a/bc`). The kind travels
+ * with the item (specs/file-assign.md); the server never reads it off the slash. */
+export const actionItem = (uri: string, k: 'file' | 'dir' | undefined): PlanItem =>
+  (k === 'file' ? { key: uri, kind: 'object' } : { key: `${uri}/`, kind: 'prefix' })

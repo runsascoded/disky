@@ -31,7 +31,9 @@ import type { AssignmentRow } from './ownerBands.js'
 import { idxKey } from './ownerBands.js'
 import type { OwnerScope } from './scope.js'
 
-export interface Region { path: string; depth: number; all: number; objects: number }
+/** An outermost U-assigned subtree a view reads, with its manifest totals; `object`: the assignment
+ *  names an object, not a folder. */
+export interface Region { path: string; depth: number; all: number; objects: number; object?: true }
 
 export interface OwnerLens {
   /** Is `path` inside a U assignment whose subtree the scan attributes partly to
@@ -63,6 +65,8 @@ interface Assignment {
   all: number
   mine: number
   objects: number
+  /** The assignment names an object (`AssignmentRow.kind`). */
+  object: boolean
 }
 
 /** A ledger fold over bytes (`value`, the structure queries) with its twin over
@@ -119,7 +123,7 @@ function ledgerFold(
 ): OwnerLens | null {
   if (!assignments.length) return null
   const all: Assignment[] = assignments
-    .map(c => ({ path: idxKey(c.prefix).path, ts: c.ts, action_id: c.action_id, who: c.owner == null ? null : canonId(c.owner, reg), ...weigh(c), objects: c.objects }))
+    .map(c => ({ path: idxKey(c.prefix).path, ts: c.ts, action_id: c.action_id, who: c.owner == null ? null : canonId(c.owner, reg), ...weigh(c), objects: c.objects, object: c.kind === 'object' }))
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
   const pooled = (who: string | null | undefined): boolean => who != null && inPool(who)
   const byPath = new Map(all.map(c => [c.path, c]))
@@ -199,7 +203,7 @@ function ledgerFold(
         if (!pooled(eff.get(c.path)) || !partial(c)) continue
         const last = out[out.length - 1]
         if (last && c.path.startsWith(last.path + '/')) continue
-        out.push({ path: c.path, depth: c.path.split('/').length, all: c.all, objects: c.objects })
+        out.push({ path: c.path, depth: c.path.split('/').length, all: c.all, objects: c.objects, ...(c.object ? { object: true as const } : {}) })
       }
       return out
     },

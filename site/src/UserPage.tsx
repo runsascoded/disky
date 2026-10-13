@@ -2,7 +2,7 @@ import { Treemap, type CellStyle } from '@disk-tree/react'
 import { useQuery } from '@tanstack/react-query'
 import { stringParam, useUrlState } from 'use-prms'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Avatar } from './Avatar'
 import { buildUserIndex, userColor } from './colors'
 import { fmtDate } from './OwnerFactChip'
@@ -11,6 +11,8 @@ import { Treemap as UserTreemap } from './Treemap'
 import { ScanPicker } from './ScanPicker'
 import { SiteNav } from './SiteNav'
 import { useScan, useScans } from './scan'
+import { hrefWithScan, NoScanMatch } from './NoScanMatch'
+import { selOf } from './scanSlug'
 import { Skeleton } from './Busy'
 import { SiteKbd } from './SiteKbd'
 import { useDocTitle, SITE } from './title'
@@ -253,6 +255,7 @@ export function UsersPage() {
   useDocTitle('Users')
   const scan = useScan(store)
   const asof = scan.asof
+  const location = useLocation()
   const metaQ = useScanFile<Meta>('meta', asof)
   const mixes = metaQ.data?.user_class_bytes
   // Per-user owned bytes from /api/owners — the ledger folded server-side
@@ -289,6 +292,7 @@ export function UsersPage() {
         </div>
         <p className="sub">Everyone who owns storage{asof && <> in the {asof} scan</>}, largest first — the scan’s attribution with live assignments applied. Click a user (row or tile) for their breakdown.</p>
       </header>
+      {scan.miss && <NoScanMatch miss={scan.miss} fmt={scan.label} hrefFor={s => hrefWithScan(location.pathname, location.search, selOf(new URLSearchParams(location.search)), s, true, scan.times, scan.scans)} />}
       {ownedErr && <p className="tab-note" style={{ color: 'var(--s3)' }}>Couldn’t load the owner totals: {ownedErr.message}</p>}
       {metaQ.isLoading && <Skeleton height={300} label="loading users…" />}
       {metaQ.data && (
@@ -429,6 +433,7 @@ export function UserPage() {
   useDocTitle(shortName(id))
   const scan = useScan(store)
   const asof = scan.asof
+  const location = useLocation()
   const metaQ = useScanFile<Meta>('meta', asof)
   // The estate, folded server-side: owned bytes (assignments applied) and the
   // assignments themselves.

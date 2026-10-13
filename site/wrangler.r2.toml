@@ -35,11 +35,14 @@ enabled = true
 [vars]
 STORE = "r2"                     # build-time: the `src/stores.ts` registry key (vite.config.ts)
 AUTH_MODE = "public"             # build-time: no sign-in wall (src/auth.ts)
-ROOT_LABEL = "public R2"
+ROOT_LABEL = "Public R2 Treemap Demo"
+OG_CARDS = "1"
+STORE_SCHEME = "r2://"
 BASE_SCOPE = "r2"
 PUBLIC_READ = "1"                # anonymous viewer scope; reads open (_lib/auth.ts)
 SNAPSHOTS_SUBDIR = "r2"          # this store's snapshots: snapshots/r2/ (_lib/shared.ts)
-INDEX_VARIANTS = "path"          # no ownership → no by-user tiers (index_footer.py mirror)
+SEARCH_SIDECARS = "1"            # the daily ingest builds them (`path-index -S`): filters the static index lacks read them (_lib/search.ts)
+CACHE_NS = ""                    # response-cache keys as prod's (no host tag; `_lib/edgeCache.ts` `cacheEnvTag`): no PROD_HOST here
 # The index reader (makeStore, _lib/index.ts) points at R2. STORE_BUCKET is the
 # bucket the daily ingestion writes the tiers into (the existing demo bucket).
 STORE_BUCKET = "disk-tree-demo"

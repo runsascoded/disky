@@ -82,8 +82,10 @@ FOOTER_STAT_COLS = ('d_min', 'd_max', 'p_min', 'p_max', 'b_min', 'b_max', 'u_min
 #: Field order of each ``groups`` array entry — mgu's ``index_row_groups`` column
 #: order, then the appended ``b_min``.
 GROUP_FIELDS = ('rg', 'd_min', 'd_max', 'p_min', 'p_max', 'b_max', 'u_min', 'u_max', 'row_start', 'row_end', 'rg_json', 'b_min')
-#: Size column candidates, first present wins: DT layer-2 / tiers, then mgu's path index.
-SIZE_COLS = ('size', 'b')
+#: Size column candidates, first present wins: a labeled `bysize`'s path total
+#: (its sort key, so `b_max` is `MAX(tot)`: spec `bysize-path-total.md`), DT
+#: layer-2 / tiers, then mgu's path index.
+SIZE_COLS = ('tot', 'size', 'b')
 #: The user-slice column (item B's ``--label`` default), when the tier has one.
 USER_COL = 'usr'
 #: Key-value metadata keys a coarse tier's floor may be under (DT, then mgu).

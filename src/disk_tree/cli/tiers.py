@@ -64,9 +64,11 @@ def cut_cmd(
 
     `path` is every row (objects and directories) sorted `(depth, path, …labels)`;
     `bysize` is the same rows sorted `(⌊log2 size⌋ desc, path, …labels)`, size
-    0 last. Each file carries `tier` / `sort` (+ `bucket: log2`) in its
-    parquet metadata and inherits the source's listing format. Prints each
-    tier's rows, row groups, bytes and metadata.
+    0 last — over label slices, each row carries its path's total `tot` and the
+    sort is `(⌊log2 tot⌋ desc, path, …labels)` (`bucket: log2(tot)`), so a
+    threshold applies to the path. Each file carries `tier` / `sort` (+
+    `bucket: log2`) in its parquet metadata and inherits the source's listing
+    format. Prints each tier's rows, row groups, bytes and metadata.
     """
     from disk_tree.find.tiers import cut_tiers, parse_tiers
     reports = cut_tiers(

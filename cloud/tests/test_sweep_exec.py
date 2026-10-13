@@ -543,3 +543,200 @@ def test_undo_refuses_dry_runs_and_closed_windows(tmp_path):
     d = _real_run_dir(tmp_path / "real")
     with pytest.raises(SystemExit, match="undo window closed"):
         undo_run(str(d), client=_UndoClient(_UndoHandle()), deadline=1_700_000_000, now=1_800_000_000)
+
+
+# ---- bulk undo: `bulkRestore` per logged dir, gated by an exactness precheck ----
+
+W0, W1 = 1_799_000_000, 1_799_000_600  # the run's recorded deletion window
+NOW = 1_800_000_000
+AFTER, BEFORE = "2027-01-03T18:11:20Z", "2027-01-03T18:25:20Z"  # W0 - 120 s, W1 + 120 s
+
+
+def _at(ts):
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc)
+
+
+class _BulkConnection:
+    """`client._connection.api_request` for `bulkRestore` + its operation:
+    the POST applies the filter to the client's soft-deleted store (restores
+    what matches, skips names live again), the first GET answers running,
+    the second done with the counts."""
+
+    def __init__(self, client):
+        self.client = client
+        self.requests: list[tuple] = []
+        self.polls: dict[str, int] = {}
+        self.results: dict[str, dict] = {}
+
+    def api_request(self, method, path, data=None):
+        import fnmatch
+        self.requests.append((method, path, data))
+        if method == "POST":
+            op = f"projects/_/buckets/b1/operations/op{len(self.results) + 1}"
+            lo, hi = (dt.datetime.fromisoformat(data[k].replace("Z", "+00:00")).timestamp() for k in ("softDeletedAfterTime", "softDeletedBeforeTime"))
+            counts = {"succeededCount": 0, "skippedCount": 0, "failedCount": 0}
+            for name, gen, ts in self.client.soft_deleted:
+                if not (lo < ts < hi) or not any(fnmatch.fnmatchcase(name, g.replace("**", "*")) for g in data["matchGlobs"]):
+                    continue
+                if name in self.client.live:
+                    counts["skippedCount"] += 1
+                else:
+                    self.client.live[name] = gen + 2000
+                    counts["succeededCount"] += 1
+            self.results[op] = {k: str(v) for k, v in counts.items()}
+            return {"name": op, "done": False}
+        op = f"projects/_/buckets/b1/operations/{path.rsplit('/', 1)[-1]}"
+        self.polls[op] = self.polls.get(op, 0) + 1
+        if self.polls[op] < 2:
+            return {"name": op, "done": False}
+        return {"name": op, "done": True, "metadata": self.results[op]}
+
+
+class _BulkClient:
+    """Soft-deleted store `(name, generation, softDeleteTime)`, live names →
+    generation, per-object restores via `_UndoHandle`."""
+
+    def __init__(self, handle, soft_deleted, live):
+        self.handle, self.soft_deleted, self.live = handle, soft_deleted, dict(live)
+        self._connection = _BulkConnection(self)
+        self.listings: list[tuple] = []
+
+    def bucket(self, name):
+        return self.handle
+
+    def list_blobs(self, bucket, prefix="", soft_deleted=False, fields=None):
+        self.listings.append((bucket, prefix, soft_deleted))
+        if soft_deleted:
+            return [FakeBlob(name=n, size=0, generation=g, time_created=T0, soft_delete_time=_at(ts)) for n, g, ts in self.soft_deleted if n.startswith(prefix)]
+        return [FakeBlob(name=n, size=0, generation=g, time_created=T0) for n, g in sorted(self.live.items()) if n.startswith(prefix)]
+
+
+def _bulk_fixture():
+    """Logged: a/x a/y a/z (dir a), b/w (dir b). In the window: a/x, a/y and
+    b/w soft-deleted by the run, plus b/u — NOT in the log (someone else's
+    deletion) — so dir b fails the precheck. a/old was soft-deleted long
+    before the window (ignored); a/z's copy has expired; a/y is live again."""
+    h = _UndoHandle(expired={"a/z"})
+    soft = [
+        ("a/x", 11, W0 + 10), ("a/y", 12, W0 + 11), ("a/old", 5, W0 - 5000),
+        ("b/w", 14, W0 + 12), ("b/u", 99, W0 + 13),
+    ]
+    return h, _BulkClient(h, soft, live={"a/y": 500})
+
+
+def test_undo_bulk_restores_clean_dirs_and_falls_back_on_unlogged(tmp_path, monkeypatch):
+    """Dir a passes the precheck → one `bulkRestore` with exactly its glob,
+    the padded window and `allowOverwrite: false`; dir b holds an unlogged
+    soft-deleted object in the window → per-object. After the op: a/x is
+    live (bulk_restored), a/y was live before (already_live), a/z is still
+    not live → per-object (unrestorable)."""
+    import dt_cloud.sweep_exec as se
+    monkeypatch.setattr(se, "_sleep", lambda _s: None)
+    d = _real_run_dir(tmp_path)
+    h, c = _bulk_fixture()
+    s = se.undo_run(str(d), client=c, workers=2, now=NOW, bulk=True, window=(W0, W1))
+    body = {"matchGlobs": ["a/**"], "softDeletedAfterTime": AFTER, "softDeletedBeforeTime": BEFORE, "allowOverwrite": False}
+    assert c._connection.requests == [
+        ("POST", "/b/b1/o/bulkRestore", body),
+        ("GET", "/b/b1/operations/op1", None),
+        ("GET", "/b/b1/operations/op1", None),
+    ]
+    assert sorted(h.calls) == [("a/z", 13, 0), ("b/w", 14, 0)]
+    assert _restored_rows(d) == [
+        ("a/x", 11, 2011, "bulk_restored", None),
+        ("a/y", 12, 0, "already_live", None),
+        ("a/z", 13, 0, "unrestorable", None),
+        ("b/w", 14, 1014, "restored", None),
+    ]
+    assert s["buckets"]["b1"] == {
+        "decisions": {"bulk_restored": 1, "already_live": 1, "unrestorable": 1, "restored": 1},
+        "restored_bytes": 50,
+        "bands": {
+            "gs://b1/a/": {"bulk_restored": 1, "already_live": 1, "unrestorable": 1, "bytes": 10},
+            "gs://b1/b/": {"restored": 1, "bytes": 40},
+        },
+        "bulk": {
+            "window": [AFTER, BEFORE],
+            "dirs": 1,
+            "objects": 3,
+            "operations": 1,
+            "fallback": {"dirs": 1, "objects": 1, "unlogged": 1, "unglobbable": 0, "sample": [{"dir": "b", "unlogged": 1, "example": "b/u"}]},
+            "ops_outcome": {"succeeded": 1, "skipped": 1, "failed": 0},
+            "ops_errors": 0,
+            "residual": 1,
+        },
+    }
+    stamp = s["stamp"]
+    assert json.loads((d / "restored" / f"b1-{stamp}-bulk.json").read_text()) == [{
+        "request": body, "operation": "projects/_/buckets/b1/operations/op1", "globs": 1,
+        "succeeded": 1, "skipped": 1, "failed": 0, "error": None,
+    }]
+    assert json.loads((d / f"undo-{stamp}-summary.json").read_text())["buckets"] == s["buckets"]
+
+
+def test_undo_bulk_dry_run_prechecks_and_issues_nothing(tmp_path):
+    """A bulk dry run lists (precheck) but issues no bulk op and no restore;
+    rows say which path each object would take. The window comes from the
+    log dir's final `progress/b1.json` when none is passed."""
+    from dt_cloud.sweep_exec import undo_run
+    d = _real_run_dir(tmp_path)
+    (d / "progress").mkdir()
+    (d / "progress" / "b1.json").write_text(json.dumps({
+        "bucket": "b1", "mode": "deleted", "done": True,
+        "started": _at(W0).isoformat(timespec="seconds"), "updated": _at(W1 - 1).isoformat(timespec="seconds"),
+    }))
+    h, c = _bulk_fixture()
+    s = undo_run(str(d), client=c, now=NOW, bulk=True, dry_run=True)
+    assert c._connection.requests == []
+    assert h.calls == []
+    assert c.listings == [("b1", "a/", True), ("b1", "b/", True)]
+    assert _restored_rows(d) == [
+        ("a/x", 11, 0, "would_bulk_restore", None),
+        ("a/y", 12, 0, "would_bulk_restore", None),
+        ("a/z", 13, 0, "would_bulk_restore", None),
+        ("b/w", 14, 0, "would_restore", None),
+    ]
+    assert s["buckets"]["b1"]["bulk"] == {
+        "window": [AFTER, BEFORE],
+        "dirs": 1,
+        "objects": 3,
+        "operations": 1,
+        "fallback": {"dirs": 1, "objects": 1, "unlogged": 1, "unglobbable": 0, "sample": [{"dir": "b", "unlogged": 1, "example": "b/u"}]},
+    }
+    assert json.loads((d / "restored" / f"b1-{s['stamp']}-bulk.json").read_text()) == [{"request": {
+        "matchGlobs": ["a/**"], "softDeletedAfterTime": AFTER, "softDeletedBeforeTime": BEFORE, "allowOverwrite": False,
+    }}]
+
+
+def test_undo_bulk_refuses_without_a_past_window(tmp_path):
+    """No window (none passed, no progress file) → refused; a window ending
+    under `BULK_CLOCK_MARGIN` before now → refused (the precheck's argument
+    needs it entirely in the past)."""
+    import pytest
+    from dt_cloud.sweep_exec import undo_run
+    d = _real_run_dir(tmp_path)
+    h, c = _bulk_fixture()
+    with pytest.raises(SystemExit, match="^b1: bulk undo needs the run's deletion window"):
+        undo_run(str(d), client=c, now=NOW, bulk=True)
+    with pytest.raises(SystemExit, match=f"^b1: deletion window ends {BEFORE}"):
+        undo_run(str(d), client=c, now=W1 + 120 + 299, bulk=True, window=(W0, W1))
+    assert (c._connection.requests, h.calls, c.listings) == ([], [], [])
+
+
+def test_cover_dirs_and_failed_bulk_op():
+    """Nested logged dirs ride their outermost logged ancestor's glob; an op
+    whose issue fails reports the error (its dirs then go per-object)."""
+    import dt_cloud.sweep_exec as se
+    assert se.cover_dirs({"a", "a/b", "a/b/c", "ab", "x/y", "x/y/z", ""}) == {
+        "a": "a", "a/b": "a", "a/b/c": "a", "ab": "ab", "x/y": "x/y", "x/y/z": "x/y",
+    }
+
+    class Boom:
+        def api_request(self, **kw):
+            raise RuntimeError("403 bulkRestore denied")
+
+    client = type("C", (), {"_connection": Boom()})()
+    body = se.bulk_restore_body(["a/**"], W0, W1)
+    assert se.run_bulk_op(client, "b1", body) == {
+        "operation": None, "globs": 1, "succeeded": 0, "skipped": 0, "failed": 0, "error": "RuntimeError: 403 bulkRestore denied",
+    }

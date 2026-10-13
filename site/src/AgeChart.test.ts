@@ -34,6 +34,15 @@ const granularity = {
 }
 
 describe('age chart color override', () => {
+  it.each(['gs://', 'r2://', 's3://'])('names the actual listing timestamp for %s', scheme => {
+    const html = renderToStaticMarkup(createElement(AgeChart, {
+      rows: [{ d: 20_000, b: 1024, o: 1 }],
+      catOrder: [], mode: 'date', userIdx: new Map(), scheme,
+    }))
+    expect([...html.matchAll(/<svg[^>]*role="img" aria-label="([^"]+)"/g)].map(([, label]) => label)).toEqual([
+      scheme === 'gs://' ? 'Bytes by created day' : 'Bytes by modified day',
+    ])
+  })
   it.each<{ modes: ColorMode[] }>([{ modes: [] }, { modes: ['date'] }])('hides the picker without multiple available axes: $modes', ({ modes }) => {
     expect(controls(render(modes, () => {}))).toEqual([granularity])
   })

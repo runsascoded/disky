@@ -26,7 +26,7 @@ export async function loadLedger(env: Env): Promise<Ledger> {
 
 async function loadRows(env: Env, head: number): Promise<Ledger> {
   const ownerRows = await env.DB!.prepare(
-    'SELECT o.prefix, o.owner, o.ts, a.actor AS who, a.id AS action_id ' +
+    "SELECT o.prefix, COALESCE(o.kind, 'prefix') AS kind, o.owner, o.ts, a.actor AS who, a.id AS action_id " +
     'FROM owner_prefixes o JOIN actions a ON a.id = o.action_id WHERE o.tombstoned IS NULL',
   ).all<OwnerRow>()
   return { ownerRows: ownerRows.results, head }

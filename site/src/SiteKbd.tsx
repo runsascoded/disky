@@ -56,6 +56,8 @@ export function SiteKbd({ extra = [], placeholder }: {
     [store.path, 'Map (home)'],
     ...(canAssign && store.owners ? [['/users', 'Users — storage by owner'], ['/assignments', 'Assignments']] as [string, string][] : []),
     ...(store.staging ? [['/staged', 'Staged deletions']] as [string, string][] : []),
+    ['/scans', 'Scan runs'],
+    ['/health', 'Health — the stores\' state'],
   ]
   const { share, status: shareStatus } = useShare()
   useActions({

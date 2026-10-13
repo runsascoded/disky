@@ -12,6 +12,11 @@ Two rules hold everywhere:
 - **Additive IAM only** (`IAMMember`, never `IAMPolicy` / `IAMBinding`), so a
   deployment's grants can't clobber anyone else's on a shared project or bucket.
 
+Cost labels: `cost_labels()` reads `$DISKY_LABELS` (`k=v,…`, e.g.
+`app=disky,deployment=gcs`; spec specs/cost-labels.md) into the provider's
+`default_labels`, so every resource type that takes labels carries them; a
+component passes its own `component` label where it bills on its own.
+
 Adoption: the resources predate this code, so a stack first imports them. Each
 component takes `existing=` (the resource is live, import it) and the stack's
 `adopting` config gates every import id at once (`Adopt`). After the adopting
@@ -21,6 +26,7 @@ component takes `existing=` (the resource is live, import it) and the stack's
 import base64
 import json
 import os
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -32,6 +38,50 @@ from pulumi import ComponentResource, ResourceOptions
 from pulumi_command import local
 
 SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+LABELS_ENV = "DISKY_LABELS"
+_KEY_RE = re.compile(r"[a-z][a-z0-9_-]{0,62}")
+_VALUE_RE = re.compile(r"[a-z0-9_-]{0,63}")
+
+
+def parse_labels(text: str) -> dict[str, str]:
+    """`"k=v,k2=v2"` → `{"k": "v", "k2": "v2"}`; raises on anything GCP would refuse.
+
+    The twin of `dt_cloud.cost_labels.parse_labels` (infra is its own uv project)."""
+    out: dict[str, str] = {}
+    for item in (i.strip() for i in text.split(",")):
+        if not item:
+            continue
+        k, eq, v = (s.strip() for s in item.partition("="))
+        if not eq or not _KEY_RE.fullmatch(k) or not _VALUE_RE.fullmatch(v) or k in out:
+            raise ValueError(f"{LABELS_ENV}: bad or duplicate label {item!r}")
+        out[k] = v
+    return out
+
+
+def cost_labels(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The deployment's cost labels, from `$DISKY_LABELS`.
+
+    Required to be *set* (empty = deliberately none): run from a shell without it,
+    an `up` would strip the labels off every live resource."""
+    env = os.environ if environ is None else environ
+    if LABELS_ENV not in env:
+        raise ValueError(f"${LABELS_ENV} is unset: set it (e.g. app=disky,deployment=<stack>), or to '' to manage no labels")
+    return parse_labels(env[LABELS_ENV])
+
+
+def labeled_provider(name: str, *, project: str, region: str, labels: dict[str, str]) -> gcp.Provider:
+    """The stack's GCP provider with `labels` as its `default_labels`, made the provider of every
+    `gcp:` resource in the program (a stack transform), so no component needs threading."""
+    provider = gcp.Provider(name, project=project, region=region, default_labels=labels or None)
+
+    def transform(args: pulumi.ResourceTransformArgs) -> pulumi.ResourceTransformResult | None:
+        if not args.type_.startswith("gcp:") or args.custom is False or args.opts.provider is not None:
+            return None
+        return pulumi.ResourceTransformResult(args.props, ResourceOptions.merge(args.opts, ResourceOptions(provider=provider)))
+
+    pulumi.runtime.register_resource_transform(transform)
+    return provider
 
 
 @dataclass(frozen=True)
@@ -304,9 +354,13 @@ def submitter_spec(submitter: Path) -> dict:
 
     `PIN=1` makes the submitter ignore every ambient override, and the process
     runs under a scrubbed env, so the spec is a function of the submitter alone:
-    the cron body can't drift from the tracked script.
+    the cron body can't drift from the tracked script. The one exception is
+    `$DISKY_LABELS`, the stack's own cost labels, so the cron's jobs carry the
+    same labels as the stack's resources.
     """
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PIN": "1", "DRY": "1"}
+    if LABELS_ENV in os.environ:
+        env[LABELS_ENV] = os.environ[LABELS_ENV]
     out = subprocess.run(
         ["bash", str(submitter)],
         cwd=submitter.parent.parent,
@@ -417,9 +471,10 @@ class BatchCron(ComponentResource):
 class RunJobCron(ComponentResource):
     """A Cloud Run job and the Cloud Scheduler cron that runs it, both as `sa`.
 
-    Pulumi owns the job's shell (account, limits, the secret env it reads); the
-    image and plain env are a deploy's (`gcloud run jobs update`), so they are
-    `ignore_changes`, as `wrangler` owns a Pages deploy's contents under `cf/`.
+    Pulumi owns the job's shell (account, limits, the secret env it reads, its
+    `labels` on top of the provider's defaults); the image and plain env are a
+    deploy's (`gcloud run jobs update`), so they are `ignore_changes`, as
+    `wrangler` owns a Pages deploy's contents under `cf/`.
     """
 
     def __init__(
@@ -439,6 +494,7 @@ class RunJobCron(ComponentResource):
         max_retries: int = 1,
         time_zone: str = "Etc/UTC",
         trigger: str | None = None,
+        labels: dict[str, str] | None = None,
         adopt: Adopt,
         existing: bool = False,
         opts: ResourceOptions | None = None,
@@ -451,6 +507,7 @@ class RunJobCron(ComponentResource):
             location=region,
             name=job,
             deletion_protection=True,
+            labels=labels,
             template=gcp.cloudrunv2.JobTemplateArgs(
                 template=gcp.cloudrunv2.JobTemplateTemplateArgs(
                     service_account=sa_email,
@@ -477,7 +534,7 @@ class RunJobCron(ComponentResource):
                 existing,
                 job_path,
                 parent=self,
-                ignore_changes=["template.template.containers[0].image", "template.template.containers[0].envs", "client", "clientVersion", "labels", "annotations", "launchStage"],
+                ignore_changes=["template.template.containers[0].image", "template.template.containers[0].envs", "client", "clientVersion", "annotations", "launchStage"],
             ),
         )
         invoker = "roles/run.invoker"

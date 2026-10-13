@@ -19,14 +19,14 @@ describe('batchConfig', () => {
     expect(batchConfig({
       GCP_SA_KEY: JSON.stringify({ project_id: 'key-project' }), DATA_BUCKET: 'my-data', SWEEP_IMAGE: 'img:1',
       CF_ACCOUNT_ID: 'acct', SWEEP_S3_ENDPOINT: 'https://s3.example.com', BUCKET_REGIONS: '{"b1":"us-east1","b2":"europe-west4"}',
-      D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db',
+      D1_DB_ID: 'd1-id', D1_DB_NAME: 'my-db', DISKY_LABELS: 'app=disky,deployment=d',
     }, ['GCP_PROJECT', 'DATA_BUCKET'])).toEqual({
       project: 'key-project', region: 'us-central1', bucketRegions: { b1: 'us-east1', b2: 'europe-west4' },
       dataBucket: 'my-data', image: 'img:1', cfAccountId: 'acct', s3Endpoint: 'https://s3.example.com',
-      d1DbId: 'd1-id', d1DbName: 'my-db',
+      d1DbId: 'd1-id', d1DbName: 'my-db', labels: { app: 'disky', deployment: 'd' },
     })
     expect(batchConfig({ GCP_PROJECT: 'p', BATCH_REGION: 'us-east5' }, []))
-      .toEqual({ project: 'p', region: 'us-east5', bucketRegions: {}, dataBucket: '', image: '', cfAccountId: '', s3Endpoint: '', d1DbId: '', d1DbName: '' })
+      .toEqual({ project: 'p', region: 'us-east5', bucketRegions: {}, dataBucket: '', image: '', cfAccountId: '', s3Endpoint: '', d1DbId: '', d1DbName: '', labels: {} })
   })
   it('names the first needed key that is unset', () => {
     expect(batchConfig({}, ['GCP_PROJECT'])).toEqual({ missing: 'GCP_PROJECT' })

@@ -1,6 +1,7 @@
 /** Which card a page URL gets (specs/done/dogi.md): its kind, the canonical view
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
+import { canonicalSel } from '../../../src/scanSlug.js'
 
 export type OgKind = 'map' | 'staged' | 'users' | 'user' | 'assignments'
 
@@ -22,8 +23,14 @@ const MAP_KEYS = ['d', 'f', 'qs', 'o', 'by', 'c', 'cl'] as const
 
 const pick = (sp: URLSearchParams, keys: readonly string[]): Record<string, string> => {
   const out: Record<string, string> = {}
-  // A bare `o` is a value (the unowned pool); other keys need one.
-  for (const k of keys) { const v = sp.get(k); if (v || (v === '' && k === 'o')) out[k] = v }
+  // A bare `o` is a value (the unowned pool); other keys need one. The scan
+  // (`d`) is canonicalized — legacy `?date=`/`?from=` and ISO spellings fold
+  // into the page's compact `?d=` (`scanSlug.ts`), so a card keys by the
+  // same view whichever spelling the shared link used.
+  for (const k of keys) {
+    const v = k === 'd' ? canonicalSel(sp) : sp.get(k)
+    if (v || (v === '' && k === 'o')) out[k] = v
+  }
   return out
 }
 

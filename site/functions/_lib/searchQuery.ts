@@ -99,11 +99,17 @@ export function termBranch(m: Matcher): Branch | null {
   const tail = anchored ? [t.pieces[k].slice(t.pieces[k].lastIndexOf('/') + 1), ...t.pieces.slice(k + 1)] : t.pieces
   if (anchored && tail.length === 1 && !tail[0]) return null
   const formula = and(tail.map(stringFormula))
+  // The root's name starts with the tail when a `/` or a `^` anchors it, and ends with it under `$`.
+  const start = anchored || (m.kind !== 'regex' && !!m.start), end = m.kind !== 'regex' && !!m.end
   if (tail.length === 1) {
     const u = tail[0]
-    return { formula, test: anchored ? n => n.toLowerCase().startsWith(u) : n => n.toLowerCase().includes(u) }
+    const test = start && end ? (n: string) => n.toLowerCase() === u
+      : start ? (n: string) => n.toLowerCase().startsWith(u)
+        : end ? (n: string) => n.toLowerCase().endsWith(u)
+          : (n: string) => n.toLowerCase().includes(u)
+    return { formula, test }
   }
-  const re = new RegExp((anchored ? '^' : '') + tail.map(esc).join('[^/]*'))
+  const re = new RegExp((start ? '^' : '') + tail.map(esc).join('[^/]*') + (end ? '$' : ''))
   return { formula, test: n => re.test(n.toLowerCase()) }
 }
 

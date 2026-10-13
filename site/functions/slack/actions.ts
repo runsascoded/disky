@@ -1,14 +1,16 @@
 /**
  * POST /slack/actions — Slack interactivity for the staged-deletion thread
  * (specs/done/staged-slack.md). Buttons on the plan's parent message: Dry-run,
- * Delete for real; on each batch reply: Reject batch. ("Open in www" is a URL
+ * Delete for real; on each stage reply: Reject (every batch the reply covers —
+ * a coalesced reply covers a stager's recent batches; per-batch rejection is
+ * www's). ("Open in www" is a URL
  * button; Slack still calls here, and it's acked.)
  *
  * Authority is the site's, not Slack's: the request is verified with the
  * app's signing secret, the clicking user is mapped to their email
  * (`users.info`), and the same rules as www apply — dispatch needs `admin`
- * (staff domain or an `admin_emails` row); rejecting a batch needs admin or
- * being the one who staged it. Dispatch goes through the deployment's
+ * (staff domain or an `admin_emails` row); rejecting needs admin or being the one
+ * who staged the batches. Dispatch goes through the deployment's
  * executor (`EXECUTOR`, `_lib/executor.ts`) — the same code path as /staged,
  * so a real deletion needs a finished dry-run of exactly the current item
  * set and runs against that dry-run's scan. Slack wants an answer within 3 s,
@@ -21,7 +23,7 @@ import { type Env as AuthEnv, isAdmin } from '../_lib/auth.js'
 import { dispatchPlan, type ExecEnv, executorOf, notifyDispatched } from '../_lib/executor.js'
 import { audit } from '../_lib/plans.js'
 import { slackUserEmail, verifySlackSignature } from '../_lib/slack.js'
-import { notifyPlan, planGate } from '../_lib/stagedSlack.js'
+import { notifyPlan, planGate, slackNames, updateReplies } from '../_lib/stagedSlack.js'
 
 type Env = AuthEnv & ExecEnv
 interface PagesCtx { request: Request; env: Env; waitUntil: (p: Promise<unknown>) => void }
@@ -52,18 +54,35 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
   const admin = await isAdmin(env, email)
 
   if (a.action_id === 'staged_reject') {
-    const [planId, batchId] = (a.value ?? '').split(':').map(Number)
-    if (!Number.isInteger(planId) || !Number.isInteger(batchId)) return tell(p.response_url, 'Bad button value.')
-    const batch = await db.prepare('SELECT created_by FROM stage_batches WHERE id = ? AND plan_id = ?').bind(batchId, planId).first<{ created_by: string }>()
-    if (!batch) return tell(p.response_url, `Batch #${batchId} no longer exists.`)
-    if (!admin && batch.created_by.toLowerCase() !== email) return tell(p.response_url, 'Only an admin or the person who staged this batch can reject it.')
+    // `<plan>:r<reply>` rejects every batch a coalesced stage reply covers;
+    // `<plan>:<batch>` (replies posted before coalescing) one batch.
+    const [planS, ref = ''] = (a.value ?? '').split(':')
+    const planId = Number(planS)
+    const replyId = ref.startsWith('r') ? Number(ref.slice(1)) : null
+    const batchId = replyId == null ? Number(ref) : null
+    if (!Number.isInteger(planId) || !Number.isInteger(replyId ?? batchId) || !ref) return tell(p.response_url, 'Bad button value.')
+    const batches = (replyId != null
+      ? await db.prepare('SELECT id, created_by, reply_id FROM stage_batches WHERE reply_id = ? AND plan_id = ? ORDER BY id').bind(replyId, planId).all<{ id: number; created_by: string; reply_id: number | null }>()
+      : await db.prepare('SELECT id, created_by, reply_id FROM stage_batches WHERE id = ? AND plan_id = ?').bind(batchId, planId).all<{ id: number; created_by: string; reply_id: number | null }>()).results
+    const what = replyId != null ? 'These batches' : `Batch #${batchId}`
+    if (!batches.length) return tell(p.response_url, `${what} no longer ${replyId != null ? 'exist' : 'exists'}.`)
+    if (!admin && batches.some(b => b.created_by.toLowerCase() !== email)) return tell(p.response_url, 'Only an admin or the person who staged a batch can reject it.')
     const plan = await db.prepare('SELECT state FROM plans WHERE id = ?').bind(planId).first<{ state: string }>()
     if (plan?.state !== 'open') return tell(p.response_url, 'That plan is closed.')
-    const items = (await db.prepare('SELECT prefix FROM plan_items WHERE plan_id = ? AND batch_id = ?').bind(planId, batchId).all<{ prefix: string }>()).results
-    if (!items.length) return tell(p.response_url, `Batch #${batchId} has nothing left staged.`)
-    await db.prepare('DELETE FROM plan_items WHERE plan_id = ? AND batch_id = ?').bind(planId, batchId).run()
-    await audit(db, 'plan_items', String(planId), 'delete', email, { batch_id: batchId, prefixes: items.map(i => i.prefix), via: 'slack' }, null)
-    return notifyPlan(env, db, planId, siteUrl, { text: `:no_entry_sign: ${email.replace(/@.*$/, '')} rejected batch #${batchId} (${items.length} ${items.length === 1 ? 'prefix' : 'prefixes'} unstaged)` })
+    let n = 0, k = 0
+    for (const b of batches) {
+      const items = (await db.prepare('SELECT prefix FROM plan_items WHERE plan_id = ? AND batch_id = ?').bind(planId, b.id).all<{ prefix: string }>()).results
+      if (!items.length) continue
+      await db.prepare('DELETE FROM plan_items WHERE plan_id = ? AND batch_id = ?').bind(planId, b.id).run()
+      await audit(db, 'plan_items', String(planId), 'delete', email, { batch_id: b.id, prefixes: items.map(i => i.prefix), via: 'slack' }, null)
+      n += items.length; k++
+    }
+    if (!n) return tell(p.response_url, `${what} ${replyId != null ? 'have' : 'has'} nothing left staged.`)
+    const name = (await slackNames(env, [email]))[email] ?? email.replace(/@.*$/, '')
+    await notifyPlan(env, db, planId, siteUrl, { text: `:no_entry_sign: ${name} rejected ${k} ${k === 1 ? 'batch' : 'batches'} (${n.toLocaleString('en-US')} ${n === 1 ? 'path' : 'paths'} unstaged)` })
+    const rid = replyId ?? batches[0].reply_id
+    if (rid != null) await updateReplies(env, db, planId, siteUrl, { replyIds: [rid] })
+    return
   }
 
   if (a.action_id !== 'staged_dry' && a.action_id !== 'staged_real') return

@@ -90,6 +90,13 @@ export function useCanAssign(): boolean {
   return scopes !== null && [`${DEFAULT_STORE.key}:assign`, 'admin', '*'].some(s => scopes.includes(s))
 }
 
+/** An admin (the `admin` scope): the /admin console's audience; the server
+ *  gates /admin's APIs the same way (`requireAdmin`). */
+export function useIsAdmin(): boolean {
+  const scopes = useScopes()
+  return scopes !== null && ['admin', '*'].some(s => scopes.includes(s))
+}
+
 /**
  * Staging (the opt-in trash proposal) needs the full base scope; a read-only
  * guest link cannot. The server enforces the same via `requireStager`.

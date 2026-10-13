@@ -20,6 +20,7 @@ import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from '
 import { SettingsMenu, useRenderer, useTiling } from './prefs'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
+import { listingTime } from './listingTime'
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -169,7 +170,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -212,8 +213,13 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   objects?: boolean
   /** An object cell was clicked: its path from the root (the leaf viewer opens it). */
   onOpen?: (p: TreeNode[]) => void
+  /** Brushing with the children table: the view's child (by name) to ring, and
+   *  the child under the pointer (any depth inside it), `null` on leave. */
+  brush?: string | null
+  onBrush?: (name: string | null) => void
 }) {
   usePerfCommit('treemap')
+  const time = listingTime(scheme)
   const { fmtBytes, fmtBytesLike } = useUnits()
   const [liP, setLiP] = useUrlState('li', stringParam('s'))
   const liMetrics = useMemo(() => new Set([...(liP ?? 's')].filter((m): m is LiMetric => m === 's' || m === 'p' || m === 'c')), [liP])
@@ -520,8 +526,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <>
           {mode === 'read' && readRange ? (
             <>
-              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}) — activity before that predates the logs, so "never read" really means "not read in the observed window".`}>
-                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />never read*</span>
+              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}). Logs may omit events; this is not proof of no access.`}>
+                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
               </Tooltip>
               <span className="li gradli">
                 {epochDaysToDate(readRange.min)}
@@ -531,9 +537,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             </>
           ) : dateRange ? (
             <span className="li gradli">
-              {epochDaysToMonth(dateRange.min)}
+              {epochDaysToDate(dateRange.min)}
               <span className="gradbar" style={{ background: dateGradientCss() }} />
-              {epochDaysToMonth(dateRange.max)}
+              {epochDaysToDate(dateRange.max)}
             </span>
           ) : null}
         </>
@@ -598,10 +604,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <PathBar path={path} scheme={scheme} home={home} onDrill={onPathChange} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
-          {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+          {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
-            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no reads since {epochDaysToDate(readRange.min)}</span></>}
+            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>}
         </div>
         {classes}
         {users}
@@ -621,6 +627,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       initialPath={initialPath}
       path={path}
       onPathChange={onPathChange}
+      onCellHover={onBrush ? (n, p) => onBrush(n && p.length > (path?.length ?? 1) ? p[path?.length ?? 1].n : null) : undefined}
+      lens={brush ? (kid, _p, depth, _ctx, style) => (depth === 0 && kid.n === brush ? { ...style, ring: { color: 'var(--ink)', width: 2 } } : undefined) : undefined}
       // `k` decides (`cellAction`): an object opens in the leaf viewer; a
       // directory drills even when it arrived without `c` (its children fell
       // below this view's pixel budget — the drill's own fetch brings them),
@@ -675,7 +683,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           <div className="vc-scope">{p.length > 1 ? pathText(scheme, p.slice(1).map(x => x.n), home) : n.n}</div>
           <div className="nums">
             {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
-            {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+            {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>

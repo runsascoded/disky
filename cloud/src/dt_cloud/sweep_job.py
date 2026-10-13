@@ -5,6 +5,8 @@ from __future__ import annotations
 from copy import deepcopy
 from shlex import join
 
+from .cost_labels import label_batch_spec
+
 
 def reviewed_job_spec(
     template: dict,
@@ -49,7 +51,7 @@ def reviewed_job_spec(
         script_lines.append(join(["dt-cloud", "sweep", "wait-drained", after_run]))
     script = "\n".join([*script_lines, join(command)])
     allocation = template["allocationPolicy"]
-    return {
+    return label_batch_spec({
         "taskGroups": [{"taskCount": 1, "taskSpec": {
             "runnables": [{"container": {"imageUri": image, "entrypoint": "/bin/bash", "commands": ["-c", script]}}],
             "computeResource": deepcopy(task["computeResource"]),
@@ -63,7 +65,7 @@ def reviewed_job_spec(
             "location": {"allowedLocations": [loc for loc in allocation["location"]["allowedLocations"] if loc.startswith("regions/")]},
         },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
-    }
+    }, "sweep")
 
 
 def wait_drained(run: str, timeout: int = 7200, interval: float = 30) -> dict:

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { fmtScan, scanGroups } from './scan'
+import { fmtScan, scanGroups, type ScanLabel } from './scan'
+import { slog } from './sessionLogBoot'
 
 /**
  * A scan chooser as an ARIA combobox (a filterable listbox), replacing the
@@ -10,12 +11,16 @@ import { fmtScan, scanGroups } from './scan'
  * `role="listbox"` grouped by day. Arrow keys move the active option, Enter
  * selects, Esc closes, typing filters against the rendered label ("8/19 6:08a").
  */
-export function ScanCombobox({ value, scans, onChange, label, className }: {
+export function ScanCombobox({ value, scans, onChange, label, className, fmt = fmtScan }: {
   value: string
+  /** In display order (newest first). */
   scans: string[]
   onChange: (id: string) => void
   label: string
   className?: string
+  /** A scan's label (the page's `scanLabeler`, which knows each date-only
+   *  scan's start); default `fmtScan`. */
+  fmt?: ScanLabel
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -32,9 +37,9 @@ export function ScanCombobox({ value, scans, onChange, label, className }: {
   // "8/19" narrows the list; empty query shows everything.
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return q ? scans.filter(id => fmtScan(id).toLowerCase().includes(q)) : scans
-  }, [scans, query])
-  const groups = useMemo(() => scanGroups(filtered), [filtered])
+    return q ? scans.filter(id => fmt(id).toLowerCase().includes(q)) : scans
+  }, [scans, query, fmt])
+  const groups = useMemo(() => scanGroups(filtered, undefined, fmt), [filtered, fmt])
 
   const close = useCallback((focusBtn = true) => {
     setOpen(false)
@@ -43,9 +48,10 @@ export function ScanCombobox({ value, scans, onChange, label, className }: {
   }, [])
 
   const commit = useCallback((id: string) => {
+    slog('pick', { n: `scan:${label}`, v: id })
     onChange(id)
     close()
-  }, [onChange, close])
+  }, [onChange, close, label])
 
   // Open: seed the active option with the current value (or the first row) and
   // focus the filter input.
@@ -111,7 +117,7 @@ export function ScanCombobox({ value, scans, onChange, label, className }: {
           if (!open && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setOpen(true) }
         }}
       >
-        <span className="sp-value">{fmtScan(value)}</span>
+        <span className="sp-value">{fmt(value)}</span>
         <span className="sp-caret" aria-hidden>▾</span>
       </button>
       {open && (

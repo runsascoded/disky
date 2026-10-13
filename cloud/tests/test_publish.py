@@ -113,3 +113,33 @@ def test_publish_dry_run_copies_only_pointed_generations(monkeypatch, capsys):
         f"publish-r2 {SCAN}: left out unpointed generation {L2}index/g1/ (2 objects, 13 B)",
         f"publish-r2 {SCAN}: would copy 3 (51 B), skipped 0 up to date",
     ]
+
+
+def test_served_small_is_the_snapshot_jsons_and_extras_sidecars():
+    l2 = "listing/2026-10-10/index/"
+    src = [
+        P.Obj(key="snapshots/2026-10-10/age.json", size=1, md5=None),
+        P.Obj(key="snapshots/2026-10-10/meta.json", size=1, md5=None),
+        P.Obj(key="snapshots/rules.json", size=1, md5=None),
+        P.Obj(key=f"{l2}g1/attr.tsv", size=5, md5=None),
+        P.Obj(key=f"{l2}g1/attr.tsv.idx.json", size=2, md5=None),
+        P.Obj(key=f"{l2}g1/path-index.parquet", size=100, md5=None),
+        P.Obj(key=f"{l2}g1/path-index.groups.parquet", size=10, md5=None),
+        P.Obj(key=f"{l2}g2/attr.tsv", size=6, md5=None),
+        P.Obj(key=f"{l2}g2/path-index-bysize.parquet", size=90, md5=None),
+    ]
+    objs, dropped = P.served(src, l2, small=True, pointed={f"{l2}g1"})
+    assert ([o.key for o in objs], dropped) == (
+        [
+            "snapshots/2026-10-10/age.json",
+            "snapshots/2026-10-10/meta.json",
+            "snapshots/rules.json",
+            f"{l2}g1/attr.tsv",
+            f"{l2}g1/attr.tsv.idx.json",
+        ],
+        {f"{l2}g2": (1, 6)},
+    )
+    # cw's layout: the canonical listings and rollups beside the generations stay behind too
+    cw = f"cw-l2/{SCAN}/"
+    objs, _ = P.served([*SRC, P.Obj(key=f"{cw}index/g2/attr.tsv", size=4, md5=None), P.Obj(key=f"{cw}rollup.parquet", size=9, md5=None)], cw, small=True)
+    assert [o.key for o in objs] == [f"snapshots/cw/{SCAN}/tree.json", f"{cw}index/g2/attr.tsv"]

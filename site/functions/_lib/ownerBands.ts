@@ -13,9 +13,17 @@
  * release repaints them back to the scan's attribution). A band under no
  * assignee is split by the scan's per-user slices. Bands partition the
  * estate, so a user's total is exact.
+ *
+ * An exact-object assignment (`kind: 'object'`, specs/file-assign.md) is a leaf
+ * of the trie: every `/`-cut of its key is a strict ancestor, its band is the
+ * object itself, and it is nobody's ancestor (not `key.bak`'s, not `key/…`'s).
+ * Recency decides between it and the folders above, as between folders. It is
+ * sized by the index's row at its key; a key that is also a folder's path (an
+ * object `a/b` beside objects under `a/b/`) shares that path's row — a GCS
+ * corner the index itself doesn't separate.
  */
 
-export interface LedgerRow { prefix: string; ts: number; action_id: number }
+export interface LedgerRow { prefix: string; kind?: 'prefix' | 'object'; ts: number; action_id: number }
 export interface OwnerRow extends LedgerRow { owner: string | null; who?: string }
 
 /** Per-path aggregate from the index: bytes, objects, per-user bytes and
@@ -59,11 +67,13 @@ const mixOf = (a: PathAgg, b: number): Record<string, number> => {
 export const newer = (a: LedgerRow, b: LedgerRow): boolean => a.ts > b.ts || (a.ts === b.ts && a.action_id > b.action_id)
 export const norm = (p: string): string => (p.endsWith('/') ? p : p + '/')
 
-/** Latest live row per (normalized) prefix — the API returns history rows. */
+/** Latest live row per (normalized) prefix — the API returns history rows. A
+ * folder row is keyed by its `/`-terminated prefix, an object row by its exact
+ * key (which never ends in `/`), so the two kinds never share a key. */
 export function foldLatest<R extends LedgerRow>(rows: R[]): Map<string, R> {
   const m = new Map<string, R>()
   for (const raw of rows) {
-    const r = raw.prefix.endsWith('/') ? raw : { ...raw, prefix: raw.prefix + '/' }
+    const r = raw.kind === 'object' || raw.prefix.endsWith('/') ? raw : { ...raw, prefix: raw.prefix + '/' }
     const cur = m.get(r.prefix)
     if (!cur || newer(r, cur)) m.set(r.prefix, r)
   }
@@ -85,6 +95,8 @@ export interface UserOwned { b: number; mix: Record<string, number> }
 /** A live owner assignment, sized from the index (bytes under its prefix). */
 export interface AssignmentRow {
   prefix: string
+  /** What `prefix` names (absent = a folder). */
+  kind?: 'prefix' | 'object'
   owner: string | null
   /** The assigner (`actions.actor`) — always a person today. */
   who?: string
@@ -136,17 +148,19 @@ export function computeOwners(input: OwnersInput): OwnerTotals {
     const { path, depth } = idxKey(prefix)
     nodes.set(prefix, { prefix, path, depth, parent: null, kids: [], owner: r, effOwner: null, agg: aggs.get(path) ?? newAgg(), band: newAgg() })
   }
-  // Parent = nearest strict ancestor in the trie.
-  const ancestors = (p: string): string[] => {
+  // Parent = nearest strict ancestor folder in the trie. A folder's last cut is
+  // itself; every cut of an object's key is strict (only folders are parents).
+  const ancestors = (p: string, kind: LedgerRow['kind']): string[] => {
     const out: string[] = []
     let i = p.indexOf('/', 'gs://'.length)
     while (i !== -1) { out.push(p.slice(0, i + 1)); i = p.indexOf('/', i + 1) }
-    return out.slice(0, -1) // strict
+    return kind === 'object' ? out : out.slice(0, -1) // strict
   }
   const ordered = [...nodes.values()].sort((a, b) => a.depth - b.depth || (a.prefix < b.prefix ? -1 : 1))
   for (const n of ordered) {
-    for (const a of ancestors(n.prefix).reverse()) {
+    for (const a of ancestors(n.prefix, n.owner.kind).reverse()) {
       const par = nodes.get(a)
+      if (par?.owner.kind === 'object') continue
       if (par) { n.parent = par; par.kids.push(n); break }
     }
     const inh = n.parent?.effOwner ?? null
@@ -194,6 +208,7 @@ export function computeOwners(input: OwnersInput): OwnerTotals {
   for (const n of nodes.values()) {
     assignments.push({
       prefix: n.prefix,
+      ...(n.owner.kind === 'object' ? { kind: 'object' as const } : {}),
       owner: n.owner.owner,
       who: n.owner.who,
       ts: n.owner.ts,

@@ -88,13 +88,27 @@ def _prepare_reviewed(
 
     original = read_json("plan-summary.json")
     dry = read_json("would-delete-summary.json")
-    approved = sorted(prefix for bucket in plan.buckets for prefix in plan.bands(bucket))
+    # Prefix bands and exact items (`approved_objects`, specs/file-assign.md)
+    # both name the reviewed set; the kind is which list an item is in.
+    approved = sorted(item for bucket in plan.buckets for item in (*plan.bands(bucket), *(f"={o}" for o in plan.exact(bucket))))
     if any(bucket not in plan.buckets for bucket in only_buckets):
         raise ValueError("requested bucket is outside the staged plan")
-    cut_approved = sorted(prefix for bucket in plan.buckets if not only_buckets or bucket in only_buckets for prefix in plan.bands(bucket))
-    reviewed_approved = sorted(original.get("approved", []))
+    cut_approved = sorted(item for bucket in plan.buckets if not only_buckets or bucket in only_buckets for item in (*plan.bands(bucket), *(f"={o}" for o in plan.exact(bucket))))
+    reviewed_approved = sorted([*original.get("approved", []), *(f"={o}" for o in original.get("approved_objects", []))])
+    reviewed_items = {*original.get("approved", []), *original.get("approved_objects", [])}
     if original.get("plan_id") != plan.plan_id or reviewed_approved not in (approved, cut_approved):
         raise ValueError("reviewed DR does not match the current staged plan")
+    # The DR's manifest honored the items' `as_of` scans as they were then; a
+    # DR from before an item carried one (or with another) never held back
+    # what changed after it.
+    held = {
+        f"gs://{bucket}/{rel}": scan
+        for bucket, scans in plan.as_of.items()
+        for rel, scan in scans.items()
+        if scan != original.get("date") and f"gs://{bucket}/{rel}" in reviewed_items
+    }
+    if original.get("as_of", {}) != held:
+        raise ValueError("reviewed DR predates the staged items' as_of scans; dry-run the plan again")
     expected_buckets = sorted(bucket for bucket, entry in original["buckets"].items() if entry.get("eligible", {}).get("objects", 0))
     if original.get("diagnostic") or dry.get("diagnostic") or dry.get("for_real") is not False or sorted(dry.get("buckets", {})) != expected_buckets:
         raise ValueError("reviewed execution requires a completed, non-diagnostic DR")
@@ -117,8 +131,9 @@ def _prepare_reviewed(
         files[bucket] = []
         artifacts[bucket] = []
         count = size = all_rows = 0
-        prefixes = plan.sweep[bucket]
-        pattern = "^(?:" + "|".join(re.escape(prefix) for prefix in prefixes) + ")"
+        # a staged prefix covers what starts with it; an exact item only its own key
+        alternatives = [re.escape(prefix) for prefix in plan.sweep.get(bucket, ())] + [re.escape(key) + "$" for key in plan.objects.get(bucket, ())]
+        pattern = "^(?:" + "|".join(alternatives) + ")"
         with progress.lock:
             progress.total += len(parts)
 
@@ -239,6 +254,7 @@ def execute_reviewed(
         **plan,
         "buckets": selected,
         "approved": [prefix for prefix in plan["approved"] if prefix.split("/", 3)[2] in selected],
+        **({"approved_objects": objs} if (objs := [key for key in plan.get("approved_objects", []) if key.split("/", 3)[2] in selected]) else {}),
         "total": {"eligible": {key: sum(entry["eligible"][key] for entry in selected.values()) for key in ("objects", "bytes")}},
     }
     client = client or storage.Client()
@@ -283,10 +299,17 @@ def execute_reviewed(
         delete = deleter or (XmlDeleter(credentials=client._credentials, before_attempt=lambda count: pacer.wait(count), on_attempt=pacer.observe) if instrumented else delete_batch)
         progress = {"bucket": bucket, "mode": mode, "roots": math.ceil(expected / batch_size), "roots_done": 0, "unit": "batches", "decisions": {}, "delete_bytes": 0, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "updated": None, "done": False}
         prefixes = sorted((p for p in plan["approved"] if p.startswith(f"gs://{bucket}/")), key=len, reverse=True)
+        exact = {k for k in plan.get("approved_objects", []) if k.startswith(f"gs://{bucket}/")}
+
         @lru_cache(maxsize=8192)
-        def band_of(directory: str) -> str:
+        def dir_band(directory: str) -> str:
             uri = f"gs://{bucket}/{directory}/"
             return next(prefix for prefix in prefixes if uri.startswith(prefix))
+
+        def band_of(name: str) -> str:
+            # an exact item is its own band; anything else its covering prefix
+            uri = f"gs://{bucket}/{name}"
+            return uri if uri in exact else dir_band(name.rpartition("/")[0])
 
         lock = threading.Lock()
         reporter_stop = threading.Event()
@@ -324,7 +347,7 @@ def execute_reviewed(
                 for blob, decision in result:
                     rows.append((blob.name, blob.size, blob.generation, decision, blob.directory))
                     counts[decision] += 1
-                    prefix = band_of(blob.name.rpartition("/")[0])
+                    prefix = band_of(blob.name)
                     band = bands.setdefault(prefix, Counter())
                     if decision == "delete":
                         deleted_bytes += blob.size

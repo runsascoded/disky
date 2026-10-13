@@ -8,11 +8,14 @@
  *                                provenance; the client folds them
  *                                (most-recent-wins) over the tree.
  *   POST /api/actions          → append one action (or an array of them):
- *                                { pattern, owner, set_owner?, memo?, scan? }.
+ *                                { pattern, owner, kind?, set_owner?, memo?, scan? }.
  *                                `owner: null` clears; `'@me'` resolves to the
- *                                actor's canonical user id. Prefix patterns
- *                                only for now (regex expansion is the next
- *                                arc). The assign scope (every signed-in
+ *                                actor's canonical user id. `kind` says what
+ *                                `pattern` names (specs/file-assign.md):
+ *                                `'prefix'` (default) a folder `…/`, `'object'`
+ *                                one exact key (no trailing slash) — owning
+ *                                that key and nothing else. No regex patterns
+ *                                yet. The assign scope (every signed-in
  *                                viewer, and their agent token) or admin;
  *                                share links are read-only here.
  *
@@ -24,7 +27,8 @@ import { primaryOnly } from '../_lib/stores.js'
 import { ownerIdFor } from '../_lib/me.js'
 import { actionLog } from '../_lib/actionLog.js'
 import { hasLedger } from '../_lib/ledger.js'
-import { NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
+import { canonicalObject, type ItemKind, NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
+import { isScanId } from '../../src/scanSlug.js'
 
 const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** `<scheme><bucket>/<path>/` over the scanned buckets (`STORE_SCHEME` /
@@ -34,6 +38,7 @@ const prefixRe = (shape: PrefixShape): RegExp =>
 
 interface ActionBody {
   pattern?: string
+  kind?: ItemKind
   set_owner?: boolean
   owner?: string | null
   memo?: string
@@ -42,15 +47,28 @@ interface ActionBody {
 
 const bad = (error: string) => ({ error })
 
+/** `<scheme><bucket>/<key>` over the scanned buckets, the key exact (no
+ * trailing slash): the stored form must already be canonical. */
+const isObjectPattern = (pattern: string, shape: PrefixShape): boolean => {
+  const bucket = shape.buckets.find(b => pattern.startsWith(`${shape.scheme}${b}/`))
+  return !!bucket && canonicalObject(pattern, shape, bucket) === pattern
+}
+
 function validate(b: ActionBody, shape: PrefixShape): { error: string } | {
   pattern: string
+  kind: ItemKind
   owner: string | null
   memo: string | null
   scan: string
 } {
   const pattern = b.pattern ?? ''
-  if (!prefixRe(shape).test(pattern) || pattern.length > 512) {
+  const kind = b.kind ?? 'prefix'
+  if (kind !== 'prefix' && kind !== 'object') return bad(`kind must be 'prefix' or 'object'`)
+  if (kind === 'prefix' && (!prefixRe(shape).test(pattern) || pattern.length > 512)) {
     return bad(`pattern must be ${shape.scheme}<bucket>/<path>/ over a scanned bucket (trailing slash; regex patterns not accepted yet)`)
+  }
+  if (kind === 'object' && (!isObjectPattern(pattern, shape) || pattern.length > 1024)) {
+    return bad(`an object pattern must be ${shape.scheme}<bucket>/<key> over a scanned bucket (the exact key, no trailing slash)`)
   }
   // Touching the axis = the key is present (null = clear); `set_owner` may
   // also be passed explicitly.
@@ -59,8 +77,8 @@ function validate(b: ActionBody, shape: PrefixShape): { error: string } | {
   const owner = b.owner ?? null
   if (owner !== null && (typeof owner !== 'string' || owner.length > 128)) return bad('owner must be a user id')
   const memo = b.memo?.slice(0, 1024) ?? null
-  const scan = typeof b.scan === 'string' && /^[\d-]{8,16}(T\d{4})?$/.test(b.scan) ? b.scan : 'unknown'
-  return { pattern, owner, memo, scan }
+  const scan = isScanId(b.scan) ? b.scan : 'unknown'
+  return { pattern, kind, owner, memo, scan }
 }
 
 export const onRequest = async (ctx: Ctx): Promise<Response> => {
@@ -82,7 +100,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       return json(await actionLog(env, Number(u.searchParams.get('limit') ?? 50), Number(u.searchParams.get('offset') ?? 0)))
     }
     const owners = await env.DB.prepare(
-      'SELECT o.prefix, o.owner, o.ts, a.actor AS who, a.memo, a.id AS action_id ' +
+      "SELECT o.prefix, COALESCE(o.kind, 'prefix') AS kind, o.owner, o.ts, a.actor AS who, a.memo, a.id AS action_id " +
       'FROM owner_prefixes o JOIN actions a ON a.id = o.action_id ' +
       'WHERE o.tombstoned IS NULL ORDER BY o.prefix, o.ts',
     ).all()
@@ -111,17 +129,19 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     }
     const stmts = []
     for (const p of ok) {
+      // `kind`: NULL = prefix (every pre-`kind` row), 'object' = the exact key.
+      const kind = p.kind === 'object' ? 'object' : null
       stmts.push(
         env.DB.prepare(
-          'INSERT INTO actions (actor, ts, scan, pattern, set_owner, owner, memo) VALUES (?, ?, ?, ?, 1, ?, ?)',
-        ).bind(id.email, ts, p.scan, p.pattern, p.owner, p.memo),
+          'INSERT INTO actions (actor, ts, scan, pattern, kind, set_owner, owner, memo) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+        ).bind(id.email, ts, p.scan, p.pattern, kind, p.owner, p.memo),
       )
-      // Prefix patterns expand 1:1. The batch runs sequentially inside one
+      // Patterns expand 1:1. The batch runs sequentially inside one
       // transaction, so "newest actions row" is the INSERT just above.
       stmts.push(
         env.DB.prepare(
-          'INSERT INTO owner_prefixes (action_id, prefix, owner, ts) SELECT id, ?, ?, ? FROM actions ORDER BY id DESC LIMIT 1',
-        ).bind(p.pattern, p.owner, ts),
+          'INSERT INTO owner_prefixes (action_id, prefix, kind, owner, ts) SELECT id, ?, ?, ?, ? FROM actions ORDER BY id DESC LIMIT 1',
+        ).bind(p.pattern, kind, p.owner, ts),
       )
     }
     await env.DB.batch(stmts)

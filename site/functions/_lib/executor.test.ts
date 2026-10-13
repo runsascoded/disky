@@ -97,7 +97,7 @@ describe('dispatchPlan — executor selection', () => {
     // the key check is each GCP executor's own (`prepare`), not the seam's
     const real = { ...s.executors, sweep: EXECUTORS.sweep, 'plan-sweep': EXECUTORS['plan-sweep'] }
     expect([
-      await dispatchPlan(s.env, req({ date: '2026-09-28T1201' }), 'sweep', s.executors),
+      await dispatchPlan(s.env, req({ date: '2026-09-28T12' }), 'sweep', s.executors),
       await dispatchPlan(s.env, req({}), 'plan-sweep', s.executors),
       await dispatchPlan({ ...s.env, GCP_SA_KEY: undefined }, req({ date: '2026-09-28' }), 'sweep', real),
       await dispatchPlan({ ...s.env, GCP_SA_KEY: undefined }, req({ date: '2026-09-28' }), 'plan-sweep', real),
@@ -105,7 +105,7 @@ describe('dispatchPlan — executor selection', () => {
       await dispatchPlan({ ...s.env, JOB_SA: undefined }, req({ date: '2026-09-28' }), 'plan-sweep', real),
       await dispatchPlan({ ...s.env, DB: undefined }, req({ date: '2026-09-28' }), 'sweep', s.executors),
     ]).toEqual([
-      { ok: false, status: 400, error: 'date must be a scan id (YYYY-MM-DD)' },
+      { ok: false, status: 400, error: 'date must be a scan id (YYYY-MM-DD[THHMM])' },
       { ok: false, status: 400, error: 'date required for a dry run (YYYY-MM-DD[THHMM])' },
       { ok: false, status: 503, error: 'dispatch not configured (GCP_SA_KEY secret missing)' },
       { ok: false, status: 503, error: 'dispatch not configured (GCP_SA_KEY secret missing)' },

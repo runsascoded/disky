@@ -1,0 +1,43 @@
+{
+ "R": 3,
+ "K": 2,
+ "rg": 4,
+ "idx_rg": 3,
+ "dispatch_rows": 11,
+ "long_roots": {
+  "files": 1,
+  "row_groups": 28,
+  "rows": 110,
+  "bytes": 34996,
+  "index_bytes": 23704,
+  "index_row_groups": 10,
+  "top_bytes": 4118
+ },
+ "long_rollups": {
+  "files": 1,
+  "row_groups": 41,
+  "rows": 164,
+  "bytes": 48034,
+  "index_bytes": 30872,
+  "index_row_groups": 14,
+  "top_bytes": 4160
+ },
+ "short_roots": {
+  "files": 1,
+  "row_groups": 227,
+  "rows": 905,
+  "bytes": 277388,
+  "index_bytes": 175115,
+  "index_row_groups": 76,
+  "top_bytes": 11808
+ },
+ "short_rollups": {
+  "files": 1,
+  "row_groups": 312,
+  "rows": 1248,
+  "bytes": 359842,
+  "index_bytes": 223865,
+  "index_row_groups": 104,
+  "top_bytes": 14193
+ }
+}

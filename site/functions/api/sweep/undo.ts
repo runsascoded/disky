@@ -1,6 +1,8 @@
 // POST /api/sweep/undo — undo a real gcs run on Batch (specs/staged-runs.md).
 //
-// Body: { run_id } (`<scan>-p<plan>/<stamp>`, as /staged lists it). Admin only.
+// Body: { run_id, bulk? } (`<scan>-p<plan>/<stamp>`, as /staged lists it). Admin only.
+// `bulk: true` opts into `sweep undo -B` (GCS bulk restore per logged dir,
+// each behind the executor's exactness precheck; the rest per object).
 // Allowed only for a finished real run inside its undo window, not already
 // undone; the job (`gcs-undo-<stamp>z`) runs `dt-cloud sweep undo` on the
 // dispatch's spec and records the outcome on the run row itself
@@ -14,9 +16,10 @@ type Env = AuthEnv & ExecEnv
 export const onRequestPost = async (ctx: { request: Request; env: Env }): Promise<Response> => {
   const gated = await requireScope(ctx, ADMIN_SCOPE)
   if (gated instanceof Response) return gated
-  const body = (await ctx.request.json().catch(() => null)) as { run_id?: unknown } | null
+  const body = (await ctx.request.json().catch(() => null)) as { run_id?: unknown; bulk?: unknown } | null
   const runId = typeof body?.run_id === 'string' ? body.run_id : ''
-  const r = await undoSweepRun(ctx.env, runId, gated.email ?? 'sweep-console', new URL(ctx.request.url).origin)
+  const bulk = body?.bulk === true
+  const r = await undoSweepRun(ctx.env, runId, gated.email ?? 'sweep-console', new URL(ctx.request.url).origin, new Date(), { bulk })
   if (!r.ok) return json({ error: r.error, ...r.extra }, r.status)
-  return json({ job_id: r.job_id, target: r.target, region: r.region, by: gated.email })
+  return json({ job_id: r.job_id, target: r.target, region: r.region, bulk, by: gated.email })
 }

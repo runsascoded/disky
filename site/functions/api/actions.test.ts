@@ -27,12 +27,12 @@ describe('/api/actions without a ledger', () => {
 
   it('serves the live owners where the ledger tables exist', async () => {
     const { db } = await sqliteD1('cw')
-    await db.prepare('CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT, memo TEXT)').run()
-    await db.prepare('CREATE TABLE owner_prefixes (prefix TEXT, owner TEXT, ts REAL, action_id INTEGER, tombstoned REAL)').run()
+    await db.prepare('CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT, memo TEXT, kind TEXT)').run()
+    await db.prepare('CREATE TABLE owner_prefixes (prefix TEXT, owner TEXT, ts REAL, action_id INTEGER, tombstoned REAL, kind TEXT)').run()
     await db.prepare("INSERT INTO actions (id, actor, memo) VALUES (1, 'ann', 'mine')").run()
     await db.prepare("INSERT INTO owner_prefixes (prefix, owner, ts, action_id) VALUES ('s3://b/tmp/', 'ann', 5, 1)").run()
     expect(await onRequest({ request: get, env: { DB: db } } as never).then(answer)).toEqual([200, {
-      owners: [{ prefix: 's3://b/tmp/', owner: 'ann', ts: 5, who: 'ann', memo: 'mine', action_id: 1 }],
+      owners: [{ prefix: 's3://b/tmp/', kind: 'prefix', owner: 'ann', ts: 5, who: 'ann', memo: 'mine', action_id: 1 }],
     }])
   })
 })

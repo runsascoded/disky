@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render } from '@testing-library/react'
-import { BytesOverTime, TimeSeries } from '../src/TimeSeries'
+import { BytesOverTime, gapStretches, splitAtGaps, TimeSeries } from '../src/TimeSeries'
 
 // jsdom has no `PointerEvent`: without one, `fireEvent.pointer*` builds a bare
 // `Event` that drops `clientX`/`button`/`isPrimary`.
@@ -282,6 +282,62 @@ describe('<TimeSeries>', () => {
     expect([onBrush.mock.calls, onPickX.mock.calls]).toEqual([[], []])
   })
 
+  it('onBrush: a drag starting inside the window brushes a new range; only its grip (the top 12px) slides it', () => {
+    const onBrush = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} window={[0, 1]} onBrush={onBrush} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    const grip = () => container.querySelector('.dt-ts-grip')
+    expect([grip()?.getAttribute('x'), grip()?.getAttribute('width'), grip()?.getAttribute('height')]).toEqual(['56', '164', '12'])
+    // Hovering inside the window below the grip: crosshair (a press there brushes); on the grip: grab.
+    fireEvent.pointerMove(svg, { clientX: 60, clientY: 100 })
+    expect(svg.style.cursor).toBe('crosshair')
+    fireEvent.pointerMove(svg, { clientX: 60, clientY: 18 })
+    expect(svg.style.cursor).toBe('grab')
+    // Inside the window, below the grip: a fresh brush from t=0 to t=2.
+    fireEvent.pointerDown(svg, { clientX: 56, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
+    expect(svg.style.cursor).toBe('col-resize')
+    expect(grip()).toBeNull()
+    fireEvent.pointerUp(window, { clientX: 384, pointerId: 1 })
+    // On the grip: the window [0, 1] slides one point right, keeping its span.
+    fireEvent.pointerDown(svg, { clientX: 56, clientY: 18, button: 0, isPrimary: true, pointerId: 2 })
+    fireEvent.pointerMove(svg, { clientX: 220, clientY: 18 })
+    expect(svg.style.cursor).toBe('grabbing')
+    expect(bandOf(container)).toEqual({
+      x: 220,
+      width: 164,
+      fill: 'var(--dt-ts-brush, rgba(255,255,255,0.14))',
+      edges: [[220, null], [384, null]],
+    })
+    fireEvent.pointerUp(window, { clientX: 220, pointerId: 2 })
+    expect(onBrush.mock.calls).toEqual([[0, 2], [1, 2]])
+  })
+
+  it('the tooltip keeps clear of the trace (far side of the crosshair, the half the points miss) and hides while dragging', () => {
+    const { container } = withSize(() =>
+      render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} onBrush={() => {}} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    const tip = () => {
+      const el = container.querySelector<HTMLElement>('.dt-ts-tip')
+      return el && { left: el.style.left, right: el.style.right, top: el.style.top, bottom: el.style.bottom }
+    }
+    // t=0 (left half, low point): right of the crosshair, at the top.
+    fireEvent.pointerMove(svg, { clientX: 56, clientY: 100 })
+    expect(tip()).toEqual({ left: '64px', right: '', top: '16px', bottom: '' })
+    // t=2 (right half, the series' top): left of the crosshair, at the bottom.
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
+    expect(tip()).toEqual({ left: '', right: '24px', top: '', bottom: '28px' })
+    fireEvent.pointerDown(svg, { clientX: 384, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 220, clientY: 100 })
+    expect(tip()).toBeNull()
+    fireEvent.pointerUp(window, { clientX: 220, pointerId: 1 })
+    // Back after the release, at t=1 (the plot's middle: still right of the crosshair).
+    expect(tip()).toEqual({ left: '228px', right: '', top: '', bottom: '28px' })
+  })
+
   it('window renders a dashed band between the two x’s', () => {
     const { container } = withSize(() =>
       render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} window={[0, 1]} />),
@@ -463,7 +519,7 @@ describe('<TimeSeries> series flags + band callouts', () => {
     expect(yLabelsOf(container)).toEqual(['10', '12', '14', '16', '18', '20'])
   })
 
-  it('a band callout (y0) sits centred inside the band, and a band too thin to hold it gets none', () => {
+  it('a band callout (y0) hugs the upper trace inside the band, and a band too thin to hold it gets none', () => {
     const pts = [{ t: 0, top: 80, bot: 30 }, { t: 1, top: 31, bot: 30 }]
     const { container } = withSize(() =>
       render(
@@ -482,9 +538,28 @@ describe('<TimeSeries> series flags + band callouts', () => {
     const anno = [...container.querySelectorAll('svg text[paint-order="stroke"]')]
     expect(anno.map(t => t.textContent)).toEqual(['tall'])
     const { yToPx } = geom(400, 200, 0, 1, 0, 80 * 1.05)
-    expect(Number(anno[0].getAttribute('y'))).toBeCloseTo((yToPx(80) + yToPx(30)) / 2, 6)
+    expect(Number(anno[0].getAttribute('y'))).toBeCloseTo(yToPx(80) + 2 + 10.5 * 1.15 / 2, 6)
     expect(anno[0].getAttribute('dominant-baseline')).toBe('middle')
     expect(anno[0].getAttribute('clip-path')).toMatch(/^url\(#dt-ts-clip-\w+\)$/)
+  })
+
+  it('a fitted axis does not detach an off-screen band label onto the viewport edge', () => {
+    const { container } = withSize(() => render(
+      <TimeSeries
+        series={[{ key: 'top', points: [{ t: 0, y: 80 }, { t: 1, y: 100 }], fit: true }]}
+        getX={p => p.t}
+        getY={p => p.y}
+        yFrom="data"
+        annotations={[
+          { x: 0, y: 120, y0: 0, label: 'off screen' },
+          { x: 1, y: 100, y0: 0, label: 'visible edge' },
+        ]}
+      />,
+    ))
+    const anno = [...container.querySelectorAll('svg text[paint-order="stroke"]')]
+    expect(anno.map(t => t.textContent)).toEqual(['visible edge'])
+    const { yToPx } = geom(400, 200, 0, 1, 79, 101)
+    expect(Number(anno[0].getAttribute('y'))).toBeCloseTo(yToPx(100) + 2 + 10.5 * 1.15 / 2, 6)
   })
 
   it('a series that goes negative extends a zero-anchored axis below 0, with the 0 grid line emphasised', () => {
@@ -501,5 +576,39 @@ describe('<TimeSeries> series flags + band callouts', () => {
     expect(yLabelsOf(container)).toEqual(['-100', '-50', '0', '50'])
     const gridAt0 = [...container.querySelectorAll('svg g line')].find(l => l.nextElementSibling?.textContent === '0')!
     expect(gridAt0.getAttribute('stroke')).toBe('var(--dt-ts-axis, rgba(255,255,255,0.2))')
+  })
+})
+
+describe('gaps (x\'s without data)', () => {
+  it('splitAtGaps cuts a series wherever a gap falls strictly between two points; gapStretches merges adjacent gaps', () => {
+    expect([
+      splitAtGaps([3, 4, 6], [1, 2, 5]),
+      splitAtGaps([3, 4, 6], []),
+      splitAtGaps([3, 4, 6], [7]),
+      splitAtGaps([], [1]),
+      gapStretches([5, 1, 2], [3, 4, 6]),
+      gapStretches([1, 3], [2]),
+    ]).toEqual([
+      [[0, 1], [2, 2]],
+      [[0, 2]],
+      [[0, 2]],
+      [],
+      [[1, 2], [5, 5]],
+      [[1, 1], [3, 3]],
+    ])
+  })
+
+  it('draws one line per run and shades each stretch of gaps; the x-range spans the gaps', () => {
+    const series = [{ key: 'a', points: [{ t: 3, y: 10 }, { t: 4, y: 20 }, { t: 6, y: 30 }, { t: 7, y: 30 }] }]
+    const draw = (gaps?: number[]) => withSize(() => render(<TimeSeries series={series} getX={p => p.t} getY={p => p.y} area={false} gaps={gaps} />)).container
+    const shape = (c: HTMLElement) => [
+      [...c.querySelectorAll('.dt-ts-line')].map(p => p.getAttribute('d')!.split(' ').filter(t => t === 'M' || t === 'L').join('')),
+      [...c.querySelectorAll('.dt-ts-gap')].map(r => [+(+r.getAttribute('x')!).toFixed(1), +(+r.getAttribute('width')!).toFixed(1)]),
+    ]
+    // 400 px wide, PAD left 56 / right 16: x 1..7 → 56..384 px, 54.67 px per unit.
+    expect([shape(draw([1, 2, 5])), shape(draw())]).toEqual([
+      [['ML', 'ML'], [[56, 54.7], [273.7, 2]]],
+      [['MLLL'], []],
+    ])
   })
 })

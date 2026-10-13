@@ -6,6 +6,7 @@ import { BrowserRouter } from 'react-router-dom'
 import Root from './Root'
 import { UnitsProvider } from './units'
 import { withoutOg } from './sharePreview'
+import { bootSessionLog } from './sessionLogBoot'
 import 'use-kbd/styles.css'
 import './app.scss'
 
@@ -27,6 +28,9 @@ if (import.meta.env.DEV || location.search.includes('spy=1')) (window as unknown
 // A preview link's `og=` is for unfurlers only: drop it before the router reads the URL.
 const clean = withoutOg(location.href)
 if (clean != null) history.replaceState(history.state, '', clean)
+
+// The session log (specs/session-log.md): off unless the deployment's window is open; never awaited.
+void bootSessionLog()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

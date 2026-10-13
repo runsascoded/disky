@@ -23,6 +23,11 @@ dependencies = [
     # jobs read and write through (`gs://` via gcsfs, `r2://`/CAIOS via s3fs +
     # boto3), so an image built from this package alone has them.
     "disk-tree[gcs,s3]",
+    # `pyrmts.intervals` (core pyrmts + its `duckdb` extra; no engine, no polars):
+    # the static-names interval kernel (`dt_cloud.static_names`). A GitHub tarball
+    # (not git+…) for the git-less job image; bump the SHA to update, and move
+    # `overtime`'s engine pin with it (both must name the same archive).
+    "pyrmts[duckdb] @ https://github.com/runsascoded/pyrmts/archive/541bc8e2759d42510b29047a5965c94267d5817e.tar.gz#subdirectory=python/pyrmts",
 ]
 
 [project.optional-dependencies]
@@ -30,11 +35,11 @@ dependencies = [
 # generic multiscan kernel. Optional — kept out of the base deps so the daily
 # scan image (git-less python:slim, tarball deps) is unaffected; installed only
 # where the over-time build runs (`pip install ./cloud[overtime]`). Bump the SHA
-# to update. `pyrmts.overtime` imports are lazy (inside the CLI command), so the
-# base CLI works without this extra.
+# to update (with the base `pyrmts` pin, the same archive). `pyrmts.overtime`
+# imports are lazy (inside the CLI command), so the base CLI works without this
+# extra.
 overtime = [
-    "pyrmts @ git+https://github.com/runsascoded/pyrmts@71cbfd5#subdirectory=python/pyrmts",
-    "pyrmts-engine[duckdb] @ git+https://github.com/runsascoded/pyrmts@71cbfd5#subdirectory=python/pyrmts_engine",
+    "pyrmts-engine[duckdb] @ https://github.com/runsascoded/pyrmts/archive/541bc8e2759d42510b29047a5965c94267d5817e.tar.gz#subdirectory=python/pyrmts_engine",
 ]
 wandb = ["wandb>=0.19"]
 s3 = ["boto3>=1.34"]  # CoreWeave S3 (CAIOS) mark & sweep executor; `publish-r2` (R2 S3 API)

@@ -50,11 +50,13 @@ async function db(): Promise<D1Database> {
   const { db, raw } = await sqliteD1('cw')
   raw.exec('CREATE TABLE user_emails (email TEXT PRIMARY KEY, user TEXT NOT NULL, who TEXT NOT NULL, ts INTEGER NOT NULL)')
   await db.prepare('INSERT INTO user_emails (email, user, who, ts) VALUES (?, ?, ?, ?)').bind('alan@example.test', 'alan-turing', 'admin', 0).run()
+  // the scans the requests name are indexed (an unindexed one is a 404: `scanArg`)
+  for (const date of ['2026-09-01', '2026-10-01']) await db.prepare("INSERT INTO index_schema (date, variant, version, schema_json) VALUES (?, 'path', 2, '[]')").bind(date).run()
   return db
 }
 const STORE = { GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'my-data' }
 /** A localhost request: `identify` is the dev identity, signed in as `DEV_EMAIL`. */
-const envAs = async (email: string): Promise<Env> => ({ ...STORE, DB: await db(), DEV_EMAIL: email }) as Env
+const envAs = async (email: string): Promise<Env> => ({ ...STORE, DB: await db(), DEV_EMAIL: email, PROD_HOST: 'localhost' }) as Env
 const at = (env: Env, path: string) => ({ request: new Request(`http://localhost${path}`), env })
 
 describe('ownerIdFor: the `@me` / `me` rule', () => {
@@ -117,21 +119,21 @@ describe('`lens=user:me` keys the cache on the resolved id', () => {
     await subtree(at(alan, `${S}&lens=user:me`))
     await subtree(at(alan, `${S}&lens=user:alan-turing`))
     await subtree(at(await envAs('grace@example.test'), `${S}&lens=user:me`))
-    const key = (l: string) => `https://subtree.cache/v${CACHE_V}/2026-10-01/marin-a?w=1280&h=768&a=12&t=2&l=${l}&o=&b=&D=&cl=&x=0&F=1&qs=&q=&head=7&g=g1`
+    const key = (l: string) => `https://subtree.cache/v${CACHE_V}/2026-10-01/marin-a?w=1280&h=768&a=12&t=2&l=${l}&o=&b=&D=&cl=&x=0&F=1&qs=&q=&head=7&g=g1&st=`
     expect(keys).toEqual([key('user:alan-turing'), key('user:alan-turing'), key('user:grace')])
   })
   it('/api/diff', async () => {
     const alan = await envAs('alan@example.test')
     await diff(at(alan, `${D}&lens=user:me`))
     await diff(at(alan, `${D}&lens=user:alan-turing`))
-    const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=7&s=0&D=&g=g1`
+    const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=7&s=0&D=&g=g1&st=`
     expect(keys).toEqual([key, key])
   })
   it('/api/series', async () => {
     const alan = await envAs('alan@example.test')
     await series(at(alan, `${T}&lens=user:me`))
     await series(at(alan, `${T}&lens=user:alan-turing`))
-    const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&d=2026-10-01&x=&head=7&g=g1`
+    const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&qs=&q=&st=&d=2026-10-01&x=&head=7&g=g1`
     expect(keys).toEqual([key, key])
   })
   it('`me` with nobody to resolve (an identity-less cache warm) is a 400, never a cache read', async () => {

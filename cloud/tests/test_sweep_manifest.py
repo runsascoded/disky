@@ -184,9 +184,9 @@ def test_progress_reports_while_io_blocked(
     original_scan = sweep_manifest.scan_shard
     original_write = pq.ParquetWriter.write_table
 
-    def wait_scan(*args) -> object:
+    def wait_scan(*args, **kwargs) -> object:
         assert release.wait(5)
-        return original_scan(*args)
+        return original_scan(*args, **kwargs)
 
     def wait_write(self, *args, **kwargs) -> None:
         assert release.wait(5)
@@ -374,12 +374,147 @@ def test_cli_writes_summary(listing: Path, tmp_path: Path, monkeypatch: pytest.M
             "objects": sum(value[category]["objects"] for value in old.values() if category in value),
         }
         for category in CATEGORIES
+        if any(category in value for value in old.values())
     }
     assert json.loads((out / "plan-summary.json").read_text()) == {
         "date": DATE,
         "plan_id": 7,
         "plan_name": "Staged",
         "approved": [approved for bucket in plan.buckets for approved in plan.bands(bucket)],
+        "as_of": {},
         "buckets": old,
         "total": totals,
+    }
+
+
+# ── `as_of`: an item staged against an earlier scan holds back what changed since ──
+
+AS_OF, NOW = "2026-10-06", "2026-10-07"
+T0 = dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc)
+
+
+def _shard(path: Path, rows: list[tuple[str, int, int | None, float]], generation: bool = True) -> None:
+    """One listing shard of ``(name, size, generation, created offset s)`` rows
+    (``generation=False``: an old listing without the column)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = sorted(rows)
+    cols = {
+        "bucket": pa.array([B1] * len(rows), pa.large_string()),
+        "name": pa.array([r[0] for r in rows], pa.large_string()),
+        "size_bytes": pa.array([r[1] for r in rows], pa.int64()),
+        "created": pa.array([T0 + dt.timedelta(seconds=r[3]) for r in rows], pa.timestamp("us", tz="UTC")),
+        "storage_class_id": pa.array([1] * len(rows), pa.int64()),
+    }
+    if generation:
+        cols["generation"] = pa.array([r[2] for r in rows], pa.int64())
+    pq.write_table(pa.table(cols), path, row_group_size=2)
+
+
+# The dispatch scan: `ckpt/a/` was staged as of AS_OF, `ckpt/b/` as of NOW,
+# `tmp/` before `as_of` existed (none).
+NOW_ROWS = [
+    ("ckpt/a/kept", 1, 11, 0),         # same generation in AS_OF → deleted
+    ("ckpt/a/rewritten", 2, 99, 50),   # AS_OF had generation 12 → held back
+    ("ckpt/a/new", 4, 31, 60),         # not in AS_OF → held back
+    ("ckpt/a/sub/kept", 8, 14, 0),     # same generation → deleted
+    ("ckpt/b/new", 16, 41, 60),        # `ckpt/b/` is as of NOW → deleted
+    ("ckpt/bb/x", 32, 42, 0),          # outside every band
+    ("tmp/new", 64, 51, 60),           # no `as_of` → deleted
+]
+AS_OF_ROWS = [
+    ("ckpt/a/kept", 1, 11, 0),
+    ("ckpt/a/rewritten", 2, 12, 0),
+    ("ckpt/a/gone", 128, 13, 0),       # deleted since: not in NOW, so not in the manifest
+    ("ckpt/a/sub/kept", 8, 14, 0),
+    ("ckpt/b/old", 256, 21, 0),
+]
+AS_OF_PLAN = {
+    "plan_id": 9,
+    "name": "Staged",
+    "sweep": [f"gs://{B1}/ckpt/a/", f"gs://{B1}/ckpt/b/", f"gs://{B1}/tmp/"],
+    "as_of": {f"gs://{B1}/ckpt/a/": AS_OF, f"gs://{B1}/ckpt/b/": NOW},
+}
+
+
+def _as_of_root(tmp_path: Path, as_of_rows: list, generation: bool = True) -> Path:
+    root = tmp_path / "root"
+    _shard(root / "listing" / NOW / B1 / "shard-00.parquet", NOW_ROWS[:4])
+    _shard(root / "listing" / NOW / B1 / "shard-01.parquet", NOW_ROWS[4:])
+    _shard(root / "listing" / AS_OF / B1 / "shard-00.parquet", as_of_rows, generation=generation)
+    return root
+
+
+def _built(root: Path, out: Path, plan: dict = AS_OF_PLAN) -> tuple[dict, list[tuple[str, int | None]]]:
+    sp = parse_plan(plan)
+    summary = build_manifests(str(root), NOW, dict(sp.sweep), str(out), workers=2, window=2, as_of=sp.as_of)
+    table = pq.read_table(out / "manifest" / f"{B1}.parquet")
+    assert table.schema == MANIFEST_SCHEMA
+    return summary, [(r["name"], r["generation"]) for r in table.to_pylist()]
+
+
+def test_as_of_holds_back_what_changed_after_the_staging_scan(tmp_path: Path) -> None:
+    summary, rows = _built(_as_of_root(tmp_path, AS_OF_ROWS), tmp_path / "out")
+    assert rows == [("ckpt/a/kept", 11), ("ckpt/a/sub/kept", 14), ("ckpt/b/new", 41), ("tmp/new", 51)]
+    assert summary == {B1: {
+        "objects": 7,
+        "dirs": 4,
+        "eligible": {"bytes": 1 + 8 + 16 + 64, "objects": 4},
+        "outside_bands": {"bytes": 32, "objects": 1},
+        "skipped_after_as_of": {"bytes": 2 + 4, "objects": 2},
+    }}
+
+
+def test_as_of_without_generations_falls_back_to_created(tmp_path: Path) -> None:
+    # An old `as_of` listing: no generation column, so identity is `created`
+    # within 1 s (`ckpt/a/rewritten` was created 50 s later in NOW).
+    as_of_rows = [("ckpt/a/kept", 1, None, 0.5), ("ckpt/a/rewritten", 2, None, 0), ("ckpt/a/sub/kept", 8, None, 1.5)]
+    summary, rows = _built(_as_of_root(tmp_path, as_of_rows, generation=False), tmp_path / "out")
+    assert rows == [("ckpt/a/kept", 11), ("ckpt/b/new", 41), ("tmp/new", 51)]
+    assert summary[B1]["skipped_after_as_of"] == {"bytes": 2 + 4 + 8, "objects": 3}
+
+
+def test_as_of_the_dispatch_scan_reads_no_other_listing(tmp_path: Path) -> None:
+    # Every item as of NOW (or none): no AS_OF listing exists, and none is needed.
+    root = _as_of_root(tmp_path, AS_OF_ROWS)
+    for shard in (root / "listing" / AS_OF / B1).iterdir():
+        shard.unlink()
+    plan = {**AS_OF_PLAN, "as_of": {f"gs://{B1}/ckpt/a/": NOW}}
+    summary, rows = _built(root, tmp_path / "out", plan)
+    assert rows == [("ckpt/a/kept", 11), ("ckpt/a/new", 31), ("ckpt/a/rewritten", 99), ("ckpt/a/sub/kept", 14), ("ckpt/b/new", 41), ("tmp/new", 51)]
+    assert sorted(summary[B1]) == ["dirs", "eligible", "objects", "outside_bands"]
+
+
+def test_as_of_listing_missing_is_an_error(tmp_path: Path) -> None:
+    root = _as_of_root(tmp_path, AS_OF_ROWS)
+    plan = {**AS_OF_PLAN, "as_of": {f"gs://{B1}/ckpt/a/": "2026-10-01"}}
+    with pytest.raises(SystemExit, match=rf"^no listing shards for {B1} under {root}/listing/2026-10-01/$"):
+        _built(root, tmp_path / "out", plan)
+
+
+def test_as_of_nested_items_are_a_union(tmp_path: Path) -> None:
+    # `ckpt/` as of NOW covers `ckpt/a/` (as of AS_OF): everything under it stays.
+    plan = {**AS_OF_PLAN, "sweep": [*AS_OF_PLAN["sweep"], f"gs://{B1}/ckpt/"], "as_of": {**AS_OF_PLAN["as_of"], f"gs://{B1}/ckpt/": NOW}}
+    summary, rows = _built(_as_of_root(tmp_path, AS_OF_ROWS), tmp_path / "out", plan)
+    assert [name for name, _ in rows] == ["ckpt/a/kept", "ckpt/a/new", "ckpt/a/rewritten", "ckpt/a/sub/kept", "ckpt/b/new", "ckpt/bb/x", "tmp/new"]
+    assert sorted(summary[B1]) == ["dirs", "eligible", "objects"]
+
+
+def test_cli_summary_names_held_items(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dt_cloud import cli
+
+    monkeypatch.setattr(cli, "_hard_exit", lambda: None)
+    root = _as_of_root(tmp_path, AS_OF_ROWS)
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(json.dumps(AS_OF_PLAN))
+    out = tmp_path / "out"
+    result = CliRunner().invoke(cli.main, ["sweep", "manifest", "-d", NOW, "--plan", str(plan_path), "-o", str(out), "-r", str(root), "-j", "2"])
+    assert (result.exit_code, result.exception) == (0, None)
+    summary = json.loads((out / "plan-summary.json").read_text())
+    assert {k: summary[k] for k in ("as_of", "total")} == {
+        "as_of": {f"gs://{B1}/ckpt/a/": AS_OF},
+        "total": {
+            "eligible": {"bytes": 89, "objects": 4},
+            "outside_bands": {"bytes": 32, "objects": 1},
+            "skipped_after_as_of": {"bytes": 6, "objects": 2},
+        },
     }

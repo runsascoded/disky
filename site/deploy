@@ -13,6 +13,18 @@ PROJECT=$(sed -n 's/^name = "\(.*\)"$/\1/p' wrangler.toml)
 if [ -f deploy.env ]; then set -a; . ./deploy.env; set +a; fi
 : "${CLOUDFLARE_ACCOUNT_ID:?deploy: set CLOUDFLARE_ACCOUNT_ID (the Pages project account) in site/deploy.env}"
 
+# One source for the live static name index generation: the deployment's
+# static-names profile file (`STATIC_NAMES_FILE` in deploy.env, repo-relative,
+# e.g. `job/static-names.json` — what its jobs load as `STATIC_NAMES_PROFILE`).
+# Pages takes vars only from wrangler.toml, so every `STATIC_GEN` there must
+# equal the file's `gen`; a mismatch refuses the deploy.
+if [ -n "${STATIC_NAMES_FILE:-}" ]; then
+  gen=$(python3 -c 'import json, sys; g = json.load(open(sys.argv[1])).get("gen"); print(g or ""); sys.exit(0 if g else 1)' "../$STATIC_NAMES_FILE") \
+    || { echo "deploy: $STATIC_NAMES_FILE has no gen" >&2; exit 1; }
+  bad=$(sed -n 's/^STATIC_GEN = "\([^"]*\)".*/\1/p' wrangler.toml | grep -vxF "$gen" | sort -u | tr '\n' ' ' || true)
+  [ -z "$bad" ] || { echo "deploy: wrangler.toml STATIC_GEN ${bad% } ≠ $STATIC_NAMES_FILE gen $gen: set them equal, then deploy" >&2; exit 1; }
+fi
+
 # `--status`: report whether HEAD is deployed (no build/deploy). Delegates to the
 # standalone `cf-status` (queries the CF Pages deployments API, compares to HEAD).
 if [ "${1:-}" = "--status" ]; then exec ./cf-status; fi
@@ -44,6 +56,25 @@ if [ "$mode" = dev ]; then push=false; fi
 branch=main; [ "$mode" = dev ] && branch=dev
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
 npx wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch"
+
+# Entry-asset check: the new `index.html` names hashed bundles; an edge still on
+# the previous deployment answers those paths with the SPA fallback (index.html,
+# 200), and a browser that caches that HTML under the bundle's name shows a blank
+# page for hours (2026-10-09). Fetch each entry asset fresh until it comes back
+# as its real type; warn (don't fail the deploy) if it never does.
+host=$(sed -n "s/^${mode^^}_HOST = \"\([^\"]*\)\".*/\1/p" wrangler.toml | head -1)
+[ -n "$host" ] || host="$PROJECT.pages.dev"
+for asset in $(grep -o '/assets/[^"]*\.\(js\|css\)' dist/index.html | sort -u); do
+  ok=false
+  for i in $(seq 1 12); do
+    r=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "https://$host$asset?deploy-check=$(date +%s)$i")
+    code=${r%% *}; ct=${r#* }
+    # A 200 of the asset's own type; the SPA fallback (text/html) and the
+    # middleware's no-store miss (404 text/plain) both mean "not here yet".
+    case "$code $ct" in "200 text/html"*|"200 text/plain"*|"200 ") sleep 5 ;; 200\ *) ok=true; break ;; *) sleep 5 ;; esac
+  done
+  if $ok; then echo "asset ok: $asset ($ct)"; else echo "WARN: https://$host$asset still not served as its type after 60s (got '$code $ct') — browsers loading now may cache the SPA fallback; re-check, and tell viewers ⌘⇧R" >&2; fi
+done
 
 # On a successful deploy, advance the local `<short>-prod` (or, for `--dev`,
 # `<short>-dev`) pointer to exactly what we shipped (HEAD). Kept in sync by deploy itself, so

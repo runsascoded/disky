@@ -80,11 +80,11 @@ def test_scan_ts():
 def test_formatters_and_links():
     assert [E._tb(v) for v in (3.0, 0.0, -1.25)] == ["+3.0", "+0.0", "−1.2"]
     assert [E._pct(3.0, 903.0), E._pct(-1.0, 902.0), E._pct(5.0, 5.0)] == ["0.3", "0.1", "0.0"]
-    assert [E._dlink(s) for s in ("2026-09-07T1201", "2026-09-07")] == ["260907-1201", "260907"]
+    assert [E._dlink(s) for s in ("2026-09-07T1201", "2026-09-07")] == ["2609071201", "2609070000"]
     t0 = E.scan_ts("2026-09-06T1200")
     assert [E._span(t0, E.scan_ts(s)) for s in ("2026-09-08T0000", "2026-09-13T1200", "2026-09-07T0000", "2026-09-06T1200", "2026-09-07T1159")] == ["1d12h", "7d", "12h", "0h", "1d"]
-    assert D._diff_url("2026-09-02T1200", E.scan_ts("2026-08-31T1200"), SITE) == f"{SITE}/?d=260902-1200-2d#over-time"
-    assert D._diff_url("2026-09-02T1200", None, SITE) == f"{SITE}/?d=260902-1200#over-time"
+    assert D._diff_url("2026-09-02T1200", E.scan_ts("2026-08-31T1200"), SITE) == f"{SITE}/?d=2609021200-2d#over-time"
+    assert D._diff_url("2026-09-02T1200", None, SITE) == f"{SITE}/?d=2609021200#over-time"
 
 
 def test_qlabel_and_bucket_clause():
@@ -92,13 +92,13 @@ def test_qlabel_and_bucket_clause():
     since = E.scan_ts("2026-09-22T1201")
     # a known-quota bucket → linked `% of quota (free)`; unknown quota → raw TiB
     assert D._bucket_clause("main-data", 825.9, "2026-09-23T1201", since, CFG) == (
-        f"[main]({SITE}/main-data?d=260923-1201-1d#over-time): 90.8% of 1P (84.1 Ti free)"
+        f"[main]({SITE}/main-data?d=2609231201-1d#over-time): 90.8% of 1P (84.1 Ti free)"
     )
     assert D._bucket_clause("hot-data", 82.0, "2026-09-23T1201", since, CFG) == (
-        f"[hot]({SITE}/hot-data?d=260923-1201-1d#over-time): 82.0% of 100Ti (18.0 Ti free)"
+        f"[hot]({SITE}/hot-data?d=2609231201-1d#over-time): 82.0% of 100Ti (18.0 Ti free)"
     )
     assert D._bucket_clause("more-data", 1.9, "2026-09-23T1201", None, CFG) == (
-        f"[more-data]({SITE}/more-data?d=260923-1201#over-time): 2 Ti"
+        f"[more-data]({SITE}/more-data?d=2609231201#over-time): 2 Ti"
     )
 
 
@@ -115,7 +115,7 @@ def test_tail_zone_shared_quota():
         date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0,
         since=None, extra={"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0},
     )
-    u = lambda b: f"{SITE}/{b}?d=260923-1201#over-time"
+    u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"
     assert D._tail(day, cfg) == (
         f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
         f" · [hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
@@ -152,19 +152,22 @@ def test_rows_from_meta_buckets_switch():
     assert (d1.extra, d1.dextra) == ({"hot-data": 89.2}, {"hot-data": None})
     assert (d2.extra, d2.dextra) == ({"hot-data": 90.8}, {"hot-data": 1.6})
     assert D.reply(d1, "body", CFG).body == (
-        f":arrow_deg0: [9/1]({SITE}/?d=260901-1200#over-time) — **713 TiB (+0.0, 0.0%)** · "
-        f"[main]({SITE}/main-data?d=260901-1200#over-time): 78.4% of 1P (197.0 Ti free) · "
-        f"[hot]({SITE}/hot-data?d=260901-1200#over-time): 89.2% of 100Ti (10.8 Ti free)"
+        f":arrow_deg0: [9/1]({SITE}/?d=26090112#over-time) — **713 TiB (+0.0, 0.0%)** · "
+        f"[main]({SITE}/main-data?d=26090112#over-time): 78.4% of 1P (197.0 Ti free) · "
+        f"[hot]({SITE}/hot-data?d=26090112#over-time): 89.2% of 100Ti (10.8 Ti free)"
     )
     assert D.reply(d2, "sender", CFG) == E.Reply(
         "9/2 — 712 TiB (−1.0, 0.1%)",
-        f"[main]({SITE}/main-data?d=260902-0000-12h#over-time): 78.2% of 1P (198.0 Ti free) · "
-        f"[hot]({SITE}/hot-data?d=260902-0000-12h#over-time): 90.8% of 100Ti (9.2 Ti free)",
+        f"[main]({SITE}/main-data?d=260902-12h#over-time): 78.2% of 1P (198.0 Ti free) · "
+        f"[hot]({SITE}/hot-data?d=260902-12h#over-time): 90.8% of 100Ti (9.2 Ti free)",
         icon_url=f"{AV}-30.png?v=4",
     )
-    # the OP headline carries the clause too, Δ vs the month's base scan
+    # the OP headline carries the clause too, Δ vs the month's base scan; each
+    # bucket, the primary's total included, linked (as in the replies) over the
+    # same month-to-date span
     assert D.op_body(month, SEP, None, CFG).split("\n")[0] == (
-        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-0000-1d#over-time) · 712 TiB · 78.2% of 1 PB · hot-data 91 TiB · [dashboard]({SITE}/)"
+        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-1d#over-time) · [main]({SITE}/main-data?d=260902-1d#over-time) 712 TiB · 78.2% of 1 PB · "
+        f"[hot]({SITE}/hot-data?d=260902-1d#over-time) 91 TiB · [dashboard]({SITE}/)"
     )
 
 
@@ -233,8 +236,8 @@ def test_provisional_reply():
     # a fixed neutral sender + icon (both outlive edits); the numbers so far + their scan's time in the body
     assert D.Cw(CFG).provisional(half, "sender") == E.Unit("2026-09-02", "2026-09-02T0000", E.Reply(
         "9/2 · so far",
-        f":arrow_deg-30: **712 TiB (−1.0, 0.1%)** · [as of 00:00Z]({SITE}/?d=260902-0000-12h#over-time) · "
-        f"[main]({SITE}/main-data?d=260902-0000-12h#over-time): 78.2% of 1P (198.0 Ti free)",
+        f":arrow_deg-30: **712 TiB (−1.0, 0.1%)** · [as of 00:00Z]({SITE}/?d=26090200-12h#over-time) · "
+        f"[main]({SITE}/main-data?d=26090200-12h#over-time): 78.2% of 1P (198.0 Ti free)",
         icon_emoji=":hourglass_flowing_sand:",
     ))
     assert (D.Cw(CFG).provisional(MONTH, "sender"), D.Cw(CFG).provisional(half, "body")) == (None, None)
@@ -314,24 +317,24 @@ def test_no_quota():
 
     cfg = replace(CFG, buckets={})
     assert D.op_body(MONTH, SEP, None, cfg).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=260902-1200-2d#over-time) · 715 TiB · [dashboard]({SITE}/)",
+        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · 715 TiB · [dashboard]({SITE}/)",
         "_as of 9/2 12:00Z_",
         "",
         "*Weekly summaries*",
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=260902-1200-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB",
+        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB",
     ]
-    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"[main-data]({SITE}/main-data?d=260901-1200-1d#over-time): 713 Ti"
+    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"[main-data]({SITE}/main-data?d=26090112-1d#over-time): 713 Ti"
 
 
 def test_op_body():
     # month-to-date +10.0 on 705 over 2 days → 1.42%·3.5 = 5.0%/wk → deg40;
     # the (partial) week +10.0 → 1.4% → deg20, linked over 8/31 12:00 → 9/2 12:00 = 2d
     assert D.op_body(MONTH, SEP, "https://x/p.png", CFG).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=260902-1200-2d#over-time) · 715 TiB · 78.6% of 1 PB · [dashboard]({SITE}/)",
+        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · 715 TiB · 78.6% of 1 PB · [dashboard]({SITE}/)",
         "_as of 9/2 12:00Z_",
         "",
         "*Weekly summaries*",
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=260902-1200-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB · 78.6% of 1 PB",
+        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB · 78.6% of 1 PB",
         "",
         "![S3 usage — September 2026](https://x/p.png)",
     ]
@@ -345,8 +348,8 @@ def test_op_body_two_weeks():
     month = D.Month(lead=rows[:2], rows=rows[2:])
     bullets = D.op_body(month, SEP, None, CFG).split("\n")[4:]
     assert bullets == [
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=260906-1200-6d#over-time): **+7.0 TiB** → 712 TiB · 78.2% of 1 PB",
-        f":arrow_deg0: [wk of 9/7]({SITE}/?d=260907-1200-1d#over-time) _(partial)_: **+2.0 TiB** → 714 TiB · 78.5% of 1 PB",
+        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090612-6d#over-time): **+7.0 TiB** → 712 TiB · 78.2% of 1 PB",
+        f":arrow_deg0: [wk of 9/7]({SITE}/?d=26090712-1d#over-time) _(partial)_: **+2.0 TiB** → 714 TiB · 78.5% of 1 PB",
     ]
 
 
@@ -355,12 +358,12 @@ def test_reply_sender_variant():
     # +8.0 on 705 in 24 h → 1.13%·7 = 7.9%/wk → deg50; +2.0 on 713 → 0.28%·7 = 2.0% → deg30
     assert D.reply(d1, "sender", CFG) == E.Reply(
         "9/1 — 713 TiB (+8.0, 1.1%)",
-        f"[main]({SITE}/main-data?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+        f"[main]({SITE}/main-data?d=26090112-1d#over-time): 78.4% of 1P (197.0 Ti free)",
         icon_url=f"{AV}50.png?v=4",
     )
     assert D.reply(d2, "sender", CFG) == E.Reply(
         "9/2 — 715 TiB (+2.0, 0.3%)",
-        f"[main]({SITE}/main-data?d=260902-1200-1d#over-time): 78.6% of 1P (195.0 Ti free)",
+        f"[main]({SITE}/main-data?d=26090212-1d#over-time): 78.6% of 1P (195.0 Ti free)",
         icon_url=f"{AV}30.png?v=4",
     )
 
@@ -370,14 +373,14 @@ def test_reply_body_variant():
     # +8.0 on 705 in 24 h → 1.13%·7 = 7.9%/wk → deg50; +2.0 on 713 → deg30
     assert D.reply(d1, "body", CFG) == E.Reply(
         "S3 usage",
-        f":arrow_deg50: [9/1]({SITE}/?d=260901-1200-1d#over-time) — **713 TiB (+8.0, 1.1%)** · "
-        f"[main]({SITE}/main-data?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+        f":arrow_deg50: [9/1]({SITE}/?d=26090112-1d#over-time) — **713 TiB (+8.0, 1.1%)** · "
+        f"[main]({SITE}/main-data?d=26090112-1d#over-time): 78.4% of 1P (197.0 Ti free)",
         icon_emoji=":calendar:",
     )
     assert D.reply(d2, "body", CFG) == E.Reply(
         "S3 usage",
-        f":arrow_deg30: [9/2]({SITE}/?d=260902-1200-1d#over-time) — **715 TiB (+2.0, 0.3%)** · "
-        f"[main]({SITE}/main-data?d=260902-1200-1d#over-time): 78.6% of 1P (195.0 Ti free)",
+        f":arrow_deg30: [9/2]({SITE}/?d=26090212-1d#over-time) — **715 TiB (+2.0, 0.3%)** · "
+        f"[main]({SITE}/main-data?d=26090212-1d#over-time): 78.6% of 1P (195.0 Ti free)",
         icon_emoji=":calendar:",
     )
 
@@ -385,7 +388,7 @@ def test_reply_body_variant():
 def test_reply_first_day_ever():
     # no prior scan: zero delta, flat arrow, link without a look-back
     day = D.day_rows(D.Month(lead=[], rows=MONTH.rows[:2]), "sender", 12)[0]
-    assert D.reply(day, "sender", CFG) == E.Reply("9/1 — 713 TiB (+0.0, 0.0%)", f"[main]({SITE}/main-data?d=260901-1200#over-time): 78.4% of 1P (197.0 Ti free)", icon_url=f"{AV}0.png?v=4")
+    assert D.reply(day, "sender", CFG) == E.Reply("9/1 — 713 TiB (+0.0, 0.0%)", f"[main]({SITE}/main-data?d=26090112#over-time): 78.4% of 1P (197.0 Ti free)", icon_url=f"{AV}0.png?v=4")
 
 
 def test_state_path():
@@ -497,14 +500,14 @@ def test_post_digest_body_variant(tmp_path: Path):
         ("post", None, "S3 usage — September 2026", None, ":calendar:"),
         ("post", "m1", "S3 usage", None, ":calendar:"),
     ]
-    assert fake.calls[1][1] == f":arrow_deg50: [9/1]({SITE}/?d=260901-0000-12h#over-time) — **710 TiB (+5.0, 0.7%)** · [main]({SITE}/main-data?d=260901-0000-12h#over-time): 78.0% of 1P (200.0 Ti free)"
+    assert fake.calls[1][1] == f":arrow_deg50: [9/1]({SITE}/?d=260901-12h#over-time) — **710 TiB (+5.0, 0.7%)** · [main]({SITE}/main-data?d=260901-12h#over-time): 78.0% of 1P (200.0 Ti free)"
 
     # 9/1 12:00 lands: the OP AND the day's reply are edited to the latest scan (now a 24 h Δ)
     _publish(root, SEPT[1:2])
     fake.calls.clear()
     state = post_digest(str(root), SEP, "xoxb", "C1", "body", client=fake)
     assert fake.calls[0][:2] == ("edit", "m1")
-    assert fake.calls[1] == ("edit", "m2", f":arrow_deg50: [9/1]({SITE}/?d=260901-1200-1d#over-time) — **713 TiB (+8.0, 1.1%)** · [main]({SITE}/main-data?d=260901-1200-1d#over-time): 78.4% of 1P (197.0 Ti free)")
+    assert fake.calls[1] == ("edit", "m2", f":arrow_deg50: [9/1]({SITE}/?d=26090112-1d#over-time) — **713 TiB (+8.0, 1.1%)** · [main]({SITE}/main-data?d=26090112-1d#over-time): 78.4% of 1P (197.0 Ti free)")
     assert state["posted"] == {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T1200"}}
 
     # same scans again: nothing but the OP refresh (the reply already reflects the latest scan)

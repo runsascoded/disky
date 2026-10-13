@@ -23,10 +23,33 @@ function regexError(source: string): ParseResult | null {
  * shorter term could only be answered by a scan. Exclusions are exempt. */
 export const MIN_TERM = 3
 
+/** A term's anchors: `^` before it (a segment starts there), `$` after it (one ends there). */
+export interface Anchors { start?: boolean; end?: boolean }
+
 /** Literal pieces (lowercase) → a matcher: one piece is a substring, more are
- * joined by in-segment wildcards. */
-const piecesMatcher = (pieces: string[]): Matcher =>
-  pieces.length === 1 ? { kind: 'sub', text: pieces[0] } : { kind: 'glob', pieces }
+ * joined by in-segment wildcards; anchored as `a` says. */
+const piecesMatcher = (pieces: string[], a: Anchors = {}): Matcher => {
+  const anchors = { ...(a.start ? { start: true as const } : {}), ...(a.end ? { end: true as const } : {}) }
+  return pieces.length === 1 ? { kind: 'sub', text: pieces[0], ...anchors } : { kind: 'glob', pieces, ...anchors }
+}
+
+/** The help's one line on literal `^`/`$` (the filter box's and the indexed-only deployment's). */
+export const ESCAPE_NOTE = '^/$ anchor a name; write \\^ or \\$ (or quote it) to search them literally.'
+
+/** The characters a `\` escapes in a `simple` term: `\^` and `\$` are literal (never anchors), `\\` one `\`. */
+const ESCAPABLE = '^$\\'
+
+/** A literal as written in a term: a `^` first or a `$` last escaped (else they'd read as anchors), and a `\`
+ *  escaped where it would otherwise escape what follows it (an escapable character, or the term's end, where an
+ *  anchor `$` may follow). */
+export const escapeLiteral = (text: string): string => [...text].map((c, i, cs) =>
+  (c === '^' && i === 0) || (c === '$' && i === cs.length - 1) ? `\\${c}`
+    : c === '\\' && (i === cs.length - 1 || ESCAPABLE.includes(cs[i + 1])) ? '\\\\' : c).join('')
+
+/** How a matcher reads back in the box (`^…$` around its literal, `*` between pieces; `escapeLiteral`). */
+export const matcherText = (m: Matcher): string => m.kind === 'regex'
+  ? `/${m.source}/`
+  : `${m.start ? '^' : ''}${escapeLiteral(m.kind === 'sub' ? m.text : m.pieces.join('*'))}${m.end ? '$' : ''}`
 
 /** `simple` (the default): GitHub-search-like terms over the full path.
  *
@@ -35,13 +58,20 @@ const piecesMatcher = (pieces: string[]): Matcher =>
  * - `a|b` — OR, binding looser than AND (`a b|c` = (a AND b) OR c);
  * - `-x` — NOT, of the whole query; only negatives = "everything except";
  * - `*` — any characters within one segment, also in a term with `/`;
- * - `"a b"` — a quoted term is literal (spaces, a leading `-`, `*`, `|`); an
- *   unterminated quote runs to the end;
+ * - `^q` / `q$` / `^q$` — anchored: some name (path segment) starts with,
+ *   ends with, or is `q` (an unquoted `^` first, `$` last);
+ * - `"a b"` — a quoted term is literal (spaces, a leading `-`, `*`, `|`, `^`,
+ *   `$`, `\`); an unterminated quote runs to the end;
+ * - `\^` / `\$` — the character itself, anywhere in a term (never an anchor);
+ *   `\\` is one `\`; any other `\` is itself;
  * - `/…/` — the whole query a full-path regex: an unadvertised fallback (the
  *   `regex` syntax is the advertised way), never served by the search index.
  *
  * Every positive term needs `MIN_TERM` (3) literal characters in a row (a
- * `*` term: its longest piece); exclusions are exempt. Blank, `|`-only and
+ * `*` term: its longest piece); exclusions are exempt, and so is a query that
+ * is one literal alone (`ab`, `.`): the static name index's drilldown answers
+ * any single literal exactly, and elsewhere the search reads it as a bounded
+ * names scan (flagged when it is cut). Blank, `|`-only and
  * `""`-only queries are "nothing to filter by"; the errors are a short term
  * and an invalid `/…/` regex. */
 export const simple: QuerySyntax = makeSimple()
@@ -61,6 +91,8 @@ export function makeSimple({ minTerm = MIN_TERM }: { minTerm?: number } = {}): Q
       const s = raw.toLowerCase()
       const alts: { terms: Matcher[]; any: boolean }[] = [{ terms: [], any: false }]
       const neg: Matcher[] = []
+      /** The first positive term under `minTerm`, an error unless it is the whole query. */
+      let short: string | null = null
       const sep = (c: string) => c === '|' || /\s/.test(c)
       let i = 0
       while (i < s.length) {
@@ -69,25 +101,40 @@ export function makeSimple({ minTerm = MIN_TERM }: { minTerm?: number } = {}): Q
         if (c === '|') { alts.push({ terms: [], any: false }); i++; continue }
         let isNeg = false
         if (c === '-' && i + 1 < s.length && !sep(s[i + 1])) { isNeg = true; i++ }
-        const pieces = ['']
+        let pieces = ['']
         let quoted = false
+        // An unquoted `^` opening the term, and an unquoted `$` closing it, are anchors.
+        const start = s[i] === '^'
+        if (start) i++
+        let end = false
         while (i < s.length && (quoted || !sep(s[i]))) {
           const ch = s[i++]
-          if (ch === '"') quoted = !quoted
+          end = ch === '$' && !quoted
+          // Unquoted `\^`, `\$`, `\\`: the character itself (never an anchor); any other `\` is literal.
+          if (ch === '\\' && !quoted && i < s.length && ESCAPABLE.includes(s[i])) pieces[pieces.length - 1] += s[i++]
+          else if (ch === '"') quoted = !quoted
           else if (ch === '*' && !quoted) pieces.push('')
           else pieces[pieces.length - 1] += ch
         }
+        if (end) pieces[pieces.length - 1] = pieces[pieces.length - 1].slice(0, -1)
+        // Anchors around nothing (`^`, `$`, `^$`) are the characters themselves.
+        const bare = pieces.every(p => !p)
+        if (bare && (start || end)) pieces = [`${start ? '^' : ''}${end ? '$' : ''}`]
+        const anchors = bare ? {} : { start, end }
         const alt = alts[alts.length - 1]
         alt.any = true
         if (pieces.length === 1 && !pieces[0]) continue // `""`
-        if (isNeg) neg.push(piecesMatcher(pieces))
-        else if (Math.max(...pieces.map(p => p.length)) < minTerm) {
-          return { error: `type at least ${minTerm} characters (“${pieces.join('*')}”)`, code: 'short-term' }
-        } else alt.terms.push(piecesMatcher(pieces))
+        if (isNeg) neg.push(piecesMatcher(pieces, anchors))
+        else {
+          if (short == null && Math.max(...pieces.map(p => p.length)) < minTerm) short = matcherText(piecesMatcher(pieces, anchors))
+          alt.terms.push(piecesMatcher(pieces, anchors))
+        }
       }
       // A blank alternative (`a|`, `||`) adds nothing; one that held only
       // negatives is "everything" (the negatives are the query's).
       const kept = alts.filter(a => a.any).map(a => a.terms)
+      const lone = kept.length === 1 && kept[0].length === 1 && kept[0][0].kind === 'sub' && !neg.length
+      if (short != null && !lone) return { error: `type at least ${minTerm} characters (“${short}”)`, code: 'short-term' }
       if (!kept.some(a => a.length) && !neg.length) return { ast: null }
       return { ast: { alts: kept.length ? kept : [[]], neg } }
     },
@@ -101,12 +148,16 @@ export function makeSimple({ minTerm = MIN_TERM }: { minTerm?: number } = {}): Q
         { form: 'a|b', meaning: 'either (OR; looser than AND)', example: 'ttl=7d|tmp' },
         { form: '-x', meaning: 'exclude, like GitHub search: drops what contains x and subtracts its bytes', example: 'ckpt -tmp' },
         { form: '*', meaning: 'any characters within one name', example: '*.safetensors' },
-        { form: '"…"', meaning: 'literal: spaces, a leading -, |, *', example: '"a b"' },
+        { form: '^x', meaning: 'a file or folder name starting with x', example: '^ckpt' },
+        { form: 'x$', meaning: 'a file or folder name ending with x', example: '.safetensors$' },
+        { form: '^x$', meaning: 'a file or folder named exactly x', example: '^config.json$' },
+        { form: '"…"', meaning: 'literal: spaces, a leading -, |, *, ^, $', example: '"a b"' },
         { form: 'a/b', meaning: 'a term with / spans segments', example: 'run-a/ckpt' },
       ],
       notes: [
-        `Each term needs at least ${minTerm} characters in a row (a * term: its longest part); exclusions are exempt.`,
+        `Each term needs at least ${minTerm} characters in a row (a * term: its longest part); exclusions, and a query of one word alone, are exempt.`,
         'Exclusions apply to the whole query (every | alternative); only exclusions = everything except them.',
+        ESCAPE_NOTE,
       ],
     }),
   }
@@ -128,7 +179,7 @@ export const regex: QuerySyntax = {
     placeholder: 'filter paths by regex',
     forms: [
       { form: 're', meaning: 'matches anywhere in the path', example: 'ckpt.*final' },
-      { form: '^…', meaning: 'anchored at the bucket', example: '^my-bucket/tmp/' },
+      { form: '^…', meaning: 'anchored at the bucket (the full path’s start, not a name’s)', example: '^my-bucket/tmp/' },
       { form: '…$', meaning: 'anchored at the name’s end', example: '\\.safetensors$' },
       { form: '[^/]*', meaning: 'stay within one name', example: 'ckpt[^/]*final' },
     ],
