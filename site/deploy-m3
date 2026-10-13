@@ -18,10 +18,12 @@ config=wrangler.toml
 for a in "$@"; do case "$a" in -d|--dev) config=wrangler.dev.toml ;; *) echo "deploy-m3: unknown arg $a" >&2; exit 2 ;; esac; done
 project=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$config")
 
+../scripts/branch-audit m3 local
+
 restore() { [ -f tmp/wrangler.toml.deploy-bak ] && mv tmp/wrangler.toml.deploy-bak wrangler.toml; }
 if [ "$config" != wrangler.toml ]; then
   mkdir -p tmp; cp wrangler.toml tmp/wrangler.toml.deploy-bak; trap restore EXIT
   cp "$config" wrangler.toml
 fi
 pnpm build
-npx wrangler pages deploy dist --project-name "$project" --branch main --commit-dirty=true
+pnpm exec wrangler pages deploy dist --project-name "$project" --branch main --commit-dirty=true

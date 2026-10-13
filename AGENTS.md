@@ -8,6 +8,10 @@ This worktree (`~/c/disky/wt/m3`, branch `m3`) is **this Mac as a deployment**: 
 
 The global `~/.claude/CLAUDE.md` conventions still apply (git usage, `tmp/` scratch, commit style, etc.).
 
+### Bidirectional synchronization cadence
+
+Audit incoming parent changes and outgoing shared fixes when resuming work, before each deployment, and before/after every parent merge. Run `scripts/branch-audit m3 local` and `scripts/branch-audit local cloud`; record the pinned checkpoints and classify the remaining differences by intent and cherry-pick trailers. `site/deploy-m3` runs the m3/local audit automatically. Do not mistake repeated merges, adapted picks or deployment-only records for a queue of missing fixes. Keep `[local]` features on `local`; hand `[cloud]` picks to the active root owner with their dependencies and tests. Synchronize by `cloud` → `local` → `m3`, preserving the laptop executor, captures, VM metadata, guest restrictions and deployment configuration. Never merge `cloud` directly here or rebase published deployment history. The current audit record is `specs/branch-sync-2026-10-13.md`.
+
 ## The tool
 
 `disk-tree` is this worktree's own build: `direnv` activates `.venv` here (`uv sync --all-packages --all-extras --all-groups` after a merge from `local` — a bare `uv sync` drops the `r2` extra's `s3fs`, and the agents' R2 writes fail), so `disk-tree` is on `PATH` in this dir; from elsewhere it's `~/c/disky/wt/m3/.venv/bin/disk-tree`. Its index is **global and cwd-independent** — DB + parquet blobs + duckdb under `~/.config/disk-tree/`, plus any external-volume search-path entry. So a scan run here lands in the same always-ready index every disk-tree session reads. Full command reference: the rest of this file.
