@@ -10,7 +10,8 @@ import { useStore } from './store'
 import { STORES } from './stores'
 import { useTheme } from './theme'
 import { useUnits } from './units'
-import { useCanAssign, useCanStage, useIdent, useSignOut } from './auth'
+import { AUTH_MODE, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut } from './auth'
+import { pageAction } from './pageAction'
 import { openDialog } from './dialogs'
 import { useShare } from './sharePreview'
 
@@ -50,14 +51,18 @@ export function SiteKbd({ extra = [], placeholder }: {
   const canShare = useCanStage()
   const canAssign = useCanAssign()
   const ident = useIdent()
+  const isAdmin = useIsAdmin()
   const signOut = useSignOut()
   // The ☰ menu's pages, gated as it gates them.
   const PAGES: [string, string][] = [
     [store.path, 'Map (home)'],
     ...(canAssign && store.owners ? [['/users', 'Users — storage by owner'], ['/assignments', 'Assignments']] as [string, string][] : []),
     ...(store.staging ? [['/staged', 'Staged deletions']] as [string, string][] : []),
-    ['/scans', 'Scan runs'],
+    ['/scans', 'Scans — job runs'],
     ['/health', 'Health — the stores\' state'],
+    ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs']] as [string, string][] : []),
+    ['/privacy', 'Privacy policy'],
+    ...(!ident && AUTH_MODE !== 'public' ? [['/signin', 'Sign in']] as [string, string][] : []),
   ]
   const { share, status: shareStatus } = useShare()
   useActions({
@@ -81,9 +86,9 @@ export function SiteKbd({ extra = [], placeholder }: {
       handler: toggleHelp,
     },
     ...Object.fromEntries(
-      PAGES.filter(([to]) => to !== pathname).map(([to, label]) => [
+      PAGES.map(([to, label]) => [
         `page:${to}`,
-        { label, group: 'Pages', handler: () => navigate(to) },
+        { ...pageAction(to, label), handler: () => navigate(to) },
       ]),
     ),
     ...Object.fromEntries(
