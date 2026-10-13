@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import type { PhaseSpan, RunSummary, ScanRun } from './scanRunsModel'
+import { fmtTimestamp } from './scan'
 
 export interface Links { project: string | null; meta: string | null }
 export type ListResponse = Links & { configured: boolean; runs: RunSummary[] }
@@ -22,7 +23,11 @@ export const useScanRuns = () => useQuery<ListResponse, Error>({ queryKey: ['sca
 /** `fmtDur`, with seconds under a minute (a 3 s publish isn't `0m`). */
 export const fmtDur = (s: number): string => (s < 60 ? `${Math.round(s)}s` : fmtDurM(s))
 
-export const utc = (ts: number | null): string => (ts == null ? '—' : new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' '))
+export const fmtRunTime = (ts: number | null, timeZone?: string): string =>
+  ts == null ? '—' : fmtTimestamp(new Date(ts * 1000).toISOString(), timeZone)
+
+export const runDay = (ts: number, timeZone?: string): string =>
+  new Date(ts * 1000).toLocaleDateString('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone })
 const PALETTE = ['--s1', '--s2', '--s4', '--s7', '--s5', '--s6', '--s3', '--s8']
 /** A stable color per phase name: its position in the usual phase order. */
 export const colorer = (order: string[]) => (phase: string) => `var(${PALETTE[Math.max(0, order.indexOf(phase)) % PALETTE.length]})`

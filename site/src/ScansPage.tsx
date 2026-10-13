@@ -18,7 +18,7 @@ import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase,
 } from './scanRunsModel'
-import { colorer, fmtDur, getJson, type Links, PhaseBar, Status, useScanRuns, utc } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -92,14 +92,14 @@ function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p:
   const x = (t: number) => L + ((t - t0) / span) * (W - L - R)
   const y = (h: number) => H - B - (h / top) * (H - T - B)
   const bw = Math.max(1.5, Math.min(14, ((W - L - R) / pts.length) * 0.7))
-  const days = [...new Set(pts.map(p => new Date(p.run.started_ts! * 1000).toISOString().slice(0, 10)))]
+  const days = [...new Set(pts.map(p => runDay(p.run.started_ts!)))]
   const labelEvery = Math.max(1, Math.ceil(days.length / Math.max(2, Math.floor(W / 90))))
   return (
     <div className="sr-svgwrap" ref={ref}>
       <svg className="sr-strip" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase">
         {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
         {days.filter((_, i) => i % labelEvery === 0).map(d => {
-          const t = Date.parse(`${d}T00:00:00Z`) / 1000
+          const t = Date.parse(`${d}T00:00:00`) / 1000
           return <text key={d} className="tick" x={Math.min(W - R - 16, Math.max(L + 16, x(t)))} y={H - 6} textAnchor="middle">{d.slice(5)}</text>
         })}
         {pts.map(p => {
@@ -171,7 +171,7 @@ export function ScansPage() {
         <div className="runs-wrap">
           <table className="runs sr-runs">
             <thead><tr>
-              <th>scan</th><th>status</th><th className="hide-sm">started (UTC)</th>
+              <th>scan</th><th>status</th><th className="hide-sm">started (local time)</th>
               <th className="num">duration</th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Bytes of the run's top-level outputs (listing, index, snapshot, …).">wrote</Tooltip></th>
               <th className="num"><Tooltip content="Against the previous scan's same structures. Green grew, red shrank.">Δ prev</Tooltip></th>
@@ -187,7 +187,7 @@ export function ScansPage() {
                     <td className="nb"><Link to={scanHref(r.run_id)}><code>{r.scan}</code></Link>
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && r.kind}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
                     <td><Status run={r} failedAt={s.failed_at} /></td>
-                    <td className="nb hide-sm">{utc(r.started_ts)}</td>
+                    <td className="nb hide-sm">{fmtRunTime(r.started_ts)}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
                     <td className="hide-md"><PhaseBar spans={s.spans} secs={s.secs} color={color} width={130} /></td>
                     <td className="num nb">{bytes(s.out_bytes)}</td>
@@ -288,11 +288,11 @@ function RunList({ runs, links, title }: { runs: ScanRun[]; links: Links; title:
     <h3>{title}</h3>
     <div className="runs-wrap">
       <table className="runs">
-        <thead><tr><th>run</th><th>kind</th><th>status</th><th>started (UTC)</th><th className="num">duration</th><th>machine</th><th className="num">cost</th><th>links</th></tr></thead>
+        <thead><tr><th>run</th><th>kind</th><th>status</th><th>started (local time)</th><th className="num">duration</th><th>machine</th><th className="num">cost</th><th>links</th></tr></thead>
         <tbody>{runs.map(r => (
           <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
             <td className="nb">{r.parent ? <code>{r.job_name ?? r.run_id}</code> : <Link to={scanHref(r.run_id)}><code>{r.job_name ?? r.run_id}</code></Link>}</td>
-            <td>{r.kind}</td><td><Status run={r} /></td><td className="nb">{utc(r.started_ts)}</td>
+            <td>{r.kind}</td><td><Status run={r} /></td><td className="nb">{fmtRunTime(r.started_ts)}</td>
             <td className="num nb">{r.started_ts != null && r.finished_ts != null ? fmtDur(r.finished_ts - r.started_ts) : '—'}</td>
             <td className="nb">{r.machine ?? '—'}{r.tasks && r.tasks > 1 ? ` × ${r.tasks}` : ''}{r.spot ? ' (spot)' : ''}</td>
             <td className="num nb">{r.cost_usd == null ? '—' : usd(r.cost_usd)}</td>
@@ -325,7 +325,7 @@ export function ScanRunPage() {
       {q.isLoading ? <p>Loading run…</p> : q.error ? <p className="err">{q.error.message}</p> : d && r && <>
         <h1><code>{r.scan}</code>{kinds.size > 1 && <> <span className="dim">{r.kind}</span></>}</h1>
         <p className="sub">
-          <Status run={r} failedAt={d.failed_at} /> · {utc(r.started_ts)} → {r.finished_ts ? utc(r.finished_ts).slice(11) : '…'} UTC
+          <Status run={r} failedAt={d.failed_at} /> · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
           {d.secs != null && <> · {fmtDur(d.secs)}</>}
           {r.machine && <> · {r.machine}{r.spot ? ' (spot)' : ''}</>}
           {r.cost_usd != null && <> · ~{usd(r.cost_usd)}</>}

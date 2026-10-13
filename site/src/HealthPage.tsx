@@ -16,7 +16,7 @@ import {
 } from './healthModel'
 import { phaseOrder } from './scanRunsModel'
 import { scanTime } from './scanSlug'
-import { colorer, fmtDur, getJson, PhaseBar, Status, useScanRuns, utc } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
 import './health.scss'
 
@@ -50,7 +50,7 @@ function DayAxis({ genesis, now }: { genesis: number; now: number }) {
   const x = (t: number) => 42 + ((t - genesis) / span) * 1000
   return (
     <svg className="hl-days" viewBox="0 0 1042 12" aria-hidden>
-      {ticks.map(t => <text key={t} x={x(t)} y={9} textAnchor="middle">{new Date(t).toISOString().slice(5, 10)}</text>)}
+      {ticks.map(t => <text key={t} x={x(t)} y={9} textAnchor="middle">{runDay(t / 1000).slice(5)}</text>)}
     </svg>
   )
 }
@@ -165,7 +165,7 @@ function LastRun() {
     <span className="hl-lastrun">
       <Link to={`/scans/${encodeURIComponent(last.run.run_id)}`}><code>{last.run.scan}</code></Link>
       <Status run={last.run} failedAt={last.failed_at} />
-      <span className="dim">{last.run.started_ts == null ? 'start not recorded' : `${utc(last.run.started_ts)} UTC`}</span>
+      <span className="dim">{last.run.started_ts == null ? 'start not recorded' : fmtRunTime(last.run.started_ts)}</span>
       <span>{last.secs == null ? '—' : fmtDur(last.secs)}</span>
       <PhaseBar spans={last.spans} secs={last.secs} color={colorer(order)} width={140} />
     </span>
