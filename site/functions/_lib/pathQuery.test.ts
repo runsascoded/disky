@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { matchRoots } from './filter'
 import { parseQuery } from './pathQuery'
 import { regex } from './querySyntax'
+import { planPositive } from './searchQuery'
 
 const PATHS = [
   'bk/tmp/ttl=14d/run-a/ckpt',
@@ -45,6 +47,18 @@ describe('parseQuery: the predicate on the full path', () => {
     ['"-draft"', ['bk/notes/-draft']],
     ['"a|b"', ['bk/notes/a|b']],
     ['notes -"a b"', ['bk/notes/-draft', 'bk/notes/a|b']],
+    // anchored: a segment starts with, ends with, or is the term (never a match inside a segment)
+    ['^ckpt', ['bk/tmp/ttl=14d/run-a/ckpt', 'bk/x/ckpt/run/final', 'bk/x/ckpt-final', 'bk/x/ckpt-run-b-final', 'bk/x/ckpt/final.pt']],
+    ['^final', ['bk/x/ckpt/run/final', 'bk/x/ckpt/final.pt']],
+    ['final$', ['bk/x/ckpt/run/final', 'bk/x/ckpt-final', 'bk/x/ckpt-run-b-final']],
+    ['^ckpt$', ['bk/tmp/ttl=14d/run-a/ckpt', 'bk/x/ckpt/run/final', 'bk/x/ckpt/final.pt']],
+    ['.safetensors$', ['bk/models/Llama/model-1.safetensors', 'bk/models/tiny.safetensors']],
+    ['^llama$', ['bk/models/Llama/model-1.safetensors']],
+    ['^bk', PATHS],
+    ['^model*.safetensors$', ['bk/models/Llama/model-1.safetensors']],
+    ['^tmp/ttl', ['bk/tmp/ttl=14d/run-a/ckpt', 'bk/tmp/ttl=7d']],
+    ['ckpt -^run', ['bk/x/ckpt-final', 'bk/x/ckpt-run-b-final', 'bk/x/ckpt/final.pt']],
+    ['"^ckpt"', []],
     // the regex fallback: full-path semantics, spanning segments
     ['/ckpt.*final/', ['bk/x/ckpt/run/final', 'bk/x/ckpt-final', 'bk/x/ckpt-run-b-final', 'bk/x/ckpt/final.pt']],
   ])('%s', (q, want) => {
@@ -56,6 +70,28 @@ describe('parseQuery: the predicate on the full path', () => {
       { alts: [[{ kind: 'sub', text: 'ckpt' }]], neg: [{ kind: 'sub', text: 'run' }] }, true, true, false, true,
     ])
     expect(parseQuery('ckpt')!.neg).toBeNull()
+  })
+})
+
+describe('escaped `^`/`$` end to end: a name with a literal `$` or `^`', () => {
+  // A listing whose names hold the characters themselves, beside names the anchors would match.
+  const ROWS = ['fx', 'fx/usd', 'fx/usd$', 'fx/usd$/q1', 'fx/usd$x', 'fx/^tmp', 'fx/^tmp/a', 'fx/tmp', 'fx/eur/usd']
+  /** The outermost matches under the store root, and which names the search index's plan accepts as a match root. */
+  const map = (q: string) => {
+    const pred = parseQuery(q)!
+    const plan = planPositive(pred.ast!)!
+    return { roots: matchRoots(ROWS, pred, ''), names: ['usd', 'usd$', 'usd$x', '^tmp', 'tmp'].filter(n => plan.branches.some(b => b.test(n))) }
+  }
+  it.each([
+    ['usd\\$', { roots: ['fx/usd$', 'fx/usd$x'], names: ['usd$', 'usd$x'] }],
+    ['"usd$"', { roots: ['fx/usd$', 'fx/usd$x'], names: ['usd$', 'usd$x'] }],
+    ['usd$', { roots: ['fx/eur/usd', 'fx/usd'], names: ['usd'] }],
+    ['^usd\\$$', { roots: ['fx/usd$'], names: ['usd$'] }],
+    ['\\^tmp', { roots: ['fx/^tmp'], names: ['^tmp'] }],
+    ['^tmp', { roots: ['fx/tmp'], names: ['tmp'] }],
+    ['^\\^tmp', { roots: ['fx/^tmp'], names: ['^tmp'] }],
+  ])('%s', (q, want) => {
+    expect(map(q)).toEqual(want)
   })
 })
 

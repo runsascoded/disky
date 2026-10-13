@@ -38,6 +38,10 @@ export interface DiffData {
    * (`FilterNote.tsx`). */
   partialReason?: string
   approximateReason?: string
+  /** With `q=`: both scans list folders only (`FilterNote.tsx` `DIRS_ONLY`). */
+  dirsOnly?: true
+  /** With `q=`: the static index's hex-run rule applied to the literal (`FilterNote.tsx` `HexRunsInfo`). */
+  hexRuns?: { min: number; tail: number }
 }
 
 export type AreaMode = 'max' | 'delta'

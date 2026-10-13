@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { onRequest as plansRoute } from '../api/plans/[[path]]'
 import { sweepJobView } from '../api/sweep/jobs'
 import { onRequestPost as undoRoute } from '../api/sweep/undo'
-import { emptiedBatches, stageItems, prefixShape } from './plans'
+import { emptiedBatches, stageItems, prefixShape, snapshotPlanBuckets, unstageDeleted } from './plans'
 import type { SweepBatchJob } from './sweepReflect'
 import { runBuckets, undoGate, type UndoRunRow } from './sweepUndo'
 import { sqliteD1 } from './testD1'
@@ -119,7 +119,7 @@ describe('POST /api/sweep/undo', () => {
     }))
     const { db } = await gcsDb()
     expect(await undoRoute({ request: post({ run_id: RUN }), env: await env(db) } as never).then(answer)).toEqual([200, {
-      job_id: 'gcs-undo-19700112-134640z', target: RUN, region: 'us-east1', by: 'dev@example.test',
+      bulk: false, job_id: 'gcs-undo-19700112-134640z', target: RUN, region: 'us-east1', by: 'dev@example.test',
     }])
     expect(calls).toEqual([{
       url: 'https://batch.googleapis.com/v1/projects/my-project/locations/us-east1/jobs?job_id=gcs-undo-19700112-134640z',
@@ -177,7 +177,7 @@ describe('sweepJobView — a listed Batch job as /staged reads it', () => {
     taskGroups: [{ taskSpec: { environment: { variables: vars }, runnables: [{ container: { commands: ['-c', script] } }] } }],
   })
   it('a run: its plan, cut and region; an undo: its target', () => {
-    const logs = (uid: string) => `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${uid}"\nlog_id("batch_task_logs")\ntimestamp >= "2026-09-28T12:00:00Z"`)}?project=my-project`
+    const logs = (uid: string) => `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${uid}"\nlog_id("batch_task_logs")\ntimestamp >= "2026-09-28T12:00:00Z"`).replace('(', '%28').replace(')', '%29')}?project=my-project`
     expect([
       sweepJobView(cfg, job('gcs-sweep-real-20260928-120000z', { USER: 'ann', SWEEP_DATE: '2026-09-27', PLAN_ID: '1' }, `dt-cloud sweep execute -b ${B1} --for-real x`)),
       sweepJobView(cfg, job('gcs-undo-20260929-120000z', { USER: 'bob', OP: 'undo', TARGET_RUN: RUN }, 'dt-cloud sweep undo "$TARGET_RUN"')),
@@ -212,7 +212,7 @@ describe('emptied stage batches — replayed from the plan_items audit trail', (
   const ins = (batch_id: number, staged: string[], absorbed: string[] = [], covered: string[] = []) =>
     ({ action: 'insert', old_json: absorbed.length ? JSON.stringify({ absorbed }) : null, new_json: JSON.stringify({ staged, covered, batch_id, note: null }) })
   const del = (prefixes: string[]) => ({ action: 'delete', old_json: JSON.stringify({ prefixes, own: false }), new_json: null })
-  const item = (prefix: string, batch_id: number) => ({ prefix, note: null, added_by: 'ann', added_ts: 1, batch_id })
+  const item = (prefix: string, batch_id: number) => ({ prefix, kind: 'prefix' as const, note: null, added_by: 'ann', added_ts: 1, batch_id, as_of: null })
 
   it('absorbed into later batches, unstaged, covered from the start; batches with items left are not emptied', () => {
     const a = 'gs://b/x/a/'; const b = 'gs://b/x/b/'; const c = 'gs://b/y/c/'; const x = 'gs://b/x/'; const y = 'gs://b/y/'
@@ -228,25 +228,93 @@ describe('emptied stage batches — replayed from the plan_items audit trail', (
         ins(5, [y]),
       ],
     )).toEqual([
-      { ...batch(1, 10), staged: 2, covered: 0, absorbed: [{ into: 3, n: 2 }], unstaged: 0 },
-      { ...batch(2, 20), staged: 1, covered: 0, absorbed: [], unstaged: 1 },
-      { ...batch(4, 40), staged: 0, covered: 1, absorbed: [], unstaged: 0 },
+      { ...batch(1, 10), staged: 2, covered: 0, absorbed: [{ into: 3, n: 2 }], unstaged: 0, deleted: 0 },
+      { ...batch(2, 20), staged: 1, covered: 0, absorbed: [], unstaged: 1, deleted: 0 },
+      { ...batch(4, 40), staged: 0, covered: 1, absorbed: [], unstaged: 0, deleted: 0 },
     ])
   })
 
   it('end to end: two gestures, the second stages the first\'s ancestor; /api/plans/staged carries it', async () => {
     const { db } = await sqliteD1('cw')
-    const s1 = await stageItems(db, [`gs://${B1}/runs/a/`, `gs://${B1}/runs/b/`], 'ann', 'old runs', SHAPE)
-    const s2 = await stageItems(db, [`gs://${B1}/runs/`], 'bob', 'all of runs', SHAPE)
+    const s1 = await stageItems(db, [`gs://${B1}/runs/a/`, `gs://${B1}/runs/b/`], 'ann', 'old runs', SHAPE, '2026-09-27')
+    const s2 = await stageItems(db, [`gs://${B1}/runs/`], 'bob', 'all of runs', SHAPE, '2026-09-28')
     expect([s1, s2]).toEqual([
-      { plan_id: 1, batch_id: 1, staged: [`gs://${B1}/runs/a/`, `gs://${B1}/runs/b/`], covered: [], absorbed: [] },
-      { plan_id: 1, batch_id: 2, staged: [`gs://${B1}/runs/`], covered: [], absorbed: [`gs://${B1}/runs/a/`, `gs://${B1}/runs/b/`] },
+      { plan_id: 1, batch_id: 1, staged: [`gs://${B1}/runs/a/`, `gs://${B1}/runs/b/`], covered: [], absorbed: [], as_of: '2026-09-27' },
+      { plan_id: 1, batch_id: 2, staged: [`gs://${B1}/runs/`], covered: [], absorbed: [`gs://${B1}/runs/a/`, `gs://${B1}/runs/b/`], as_of: '2026-09-28' },
     ])
     const r = await plansRoute({ request: new Request('http://localhost/api/plans/staged'), env: { DB: db, STAGING: '1' } } as never)
-    const body = (await r.json()) as { items: { prefix: string; batch_id: number }[]; emptied: { id: number; created_by: string; note: string; staged: number; absorbed: unknown[] }[] }
-    expect([body.items.map(i => [i.prefix, i.batch_id]), body.emptied.map(e => [e.id, e.created_by, e.note, e.staged, e.absorbed])]).toEqual([
-      [[`gs://${B1}/runs/`, 2]],
+    const body = (await r.json()) as { items: { prefix: string; batch_id: number; as_of: string }[]; emptied: { id: number; created_by: string; note: string; staged: number; absorbed: unknown[] }[] }
+    expect([body.items.map(i => [i.prefix, i.batch_id, i.as_of]), body.emptied.map(e => [e.id, e.created_by, e.note, e.staged, e.absorbed])]).toEqual([
+      [[`gs://${B1}/runs/`, 2, '2026-09-28']],
       [[1, 'ann', 'old runs', 2, [{ into: 2, n: 2 }]]],
     ])
+  })
+
+  it('POST /api/plans/stage: `as_of` defaults to the latest scan, must name a scan, and a re-stage keeps the first; the snapshot carries it', async () => {
+    const { db, raw } = await sqliteD1('cw')
+    raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES
+      ('2026-10-06', 'path', 2, '[]'), ('2026-10-07', 'path', 2, '[]'), ('2026-10-07', 'bysize', 2, '[]')`)
+    const env = { DB: db, STAGING: '1', STORE_SCHEME: 'gs://', STORE_BUCKETS: `${B1},${B2}`, DEV_EMAIL: 'ann@example.test' }
+    const stage = async (body: object) => {
+      const r = await plansRoute({ request: new Request('http://localhost/api/plans/stage', { method: 'POST', body: JSON.stringify(body) }), env } as never)
+      return [r.status, await r.json()]
+    }
+    const a = `gs://${B1}/a/`, b = `gs://${B1}/b/`, c = `gs://${B2}/c/`
+    expect([
+      await stage({ prefixes: [a] }),
+      await stage({ prefixes: [a, b], as_of: '2026-10-06' }),
+      await stage({ prefixes: [c], as_of: '2026-10-05' }),
+      await stage({ prefixes: [c], as_of: 20261007 }),
+    ]).toEqual([
+      [201, { plan_id: 1, batch_id: 1, staged: [a], covered: [], absorbed: [], as_of: '2026-10-07' }],
+      [201, { plan_id: 1, batch_id: 2, staged: [a, b], covered: [], absorbed: [], as_of: '2026-10-06' }],
+      [400, { error: 'as_of must be a scan date (latest 2026-10-07)', as_of: '2026-10-05' }],
+      [400, { error: 'as_of must be a scan date (latest 2026-10-07)', as_of: 20261007 }],
+    ])
+    const r = await plansRoute({ request: new Request('http://localhost/api/plans/staged'), env } as never)
+    const body = (await r.json()) as { items: { prefix: string; batch_id: number; as_of: string }[] }
+    expect([
+      body.items.map(i => [i.prefix, i.batch_id, i.as_of]).sort(),
+      await snapshotPlanBuckets(db, 1, prefixShape(env)!),
+      raw.prepare("SELECT new_json FROM admin_edits WHERE tbl = 'plan_items' ORDER BY id").all().map(e => JSON.parse((e as { new_json: string }).new_json)),
+    ]).toEqual([
+      [[a, 1, '2026-10-07'], [b, 2, '2026-10-06']],
+      { plan_id: 1, name: 'Staged', sweep: [a, b], buckets: [B1], as_of: { [a]: '2026-10-07', [b]: '2026-10-06' } },
+      [
+        { staged: [a], covered: [], batch_id: 1, note: null, as_of: '2026-10-07' },
+        { staged: [a, b], covered: [], batch_id: 2, note: null, as_of: '2026-10-06' },
+      ],
+    ])
+  })
+})
+
+describe('unstageDeleted — a finished real run takes what it deleted out of the queue', () => {
+  it('removes items fully deleted since staged; keeps drifted / overwritten / unrun / later-staged ones; audits per run; idempotent', async () => {
+    const { db, raw } = await gcsDb()
+    const done = `gs://${B1}/ckpt/b/`, drift = `gs://${B2}/tmp/a/`, ovw = `gs://${B1}/ow/`, unrun = `gs://${B1}/other/`, late = `gs://${B1}/late/`
+    raw.exec(`INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES ('${RUN}', '${ovw}', 5, 1, 0, 1, 0, 0), ('${RUN}', '${late}', 5, 1, 0, 0, 0, 0)`)
+    raw.exec(`UPDATE deletion_bands SET drift_new_objects = 2 WHERE prefix = '${drift}'`)
+    for (const [p, ts] of [[done, 50], [drift, 50], [ovw, 50], [unrun, 50], [late, 150]] as const) {
+      raw.exec(`INSERT INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts) VALUES (1, '${p}', NULL, 'ann', ${ts})`)
+    }
+    const first = await unstageDeleted(db, 1)
+    const second = await unstageDeleted(db, 1)
+    const items = raw.prepare('SELECT prefix FROM plan_items WHERE plan_id = 1 ORDER BY prefix').all().map(r => (r as { prefix: string }).prefix)
+    const edits = raw.prepare("SELECT action, who, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' ORDER BY id").all()
+    expect([first, second, items, edits]).toEqual([
+      [done],
+      [],
+      [late, ovw, unrun, drift].sort(),
+      [{ action: 'delete', who: `run:${RUN}`, old_json: JSON.stringify({ prefixes: [done], deleted_by: RUN }), new_json: null }],
+    ])
+  })
+
+  it('a deleted item counts as `deleted` (not `unstaged`) in its emptied batch', () => {
+    const b = { id: 1, plan_id: 1, note: null, created_by: 'ann', created_ts: 10 }
+    expect(emptiedBatches([b], [], [
+      { action: 'insert', old_json: null, new_json: JSON.stringify({ staged: ['gs://b/a/', 'gs://b/c/'], covered: [], batch_id: 1, note: null }) },
+      { action: 'delete', old_json: JSON.stringify({ prefixes: ['gs://b/a/'], deleted_by: 'r1' }), new_json: null },
+      { action: 'delete', old_json: JSON.stringify({ prefixes: ['gs://b/c/'], own: true }), new_json: null },
+    ])).toEqual([{ ...b, staged: 2, covered: 0, absorbed: [], unstaged: 1, deleted: 1 }])
   })
 })

@@ -11,6 +11,7 @@ import { useMemo } from 'react'
 export { foldLatest, newer, ownerIndex } from './ownerIndex'
 export type { Owner, OwnerIndex, OwnerRow } from './ownerIndex'
 import { ownerIndex, type OwnerIndex, type OwnerRow } from './ownerIndex'
+import { HttpError, type ItemKind, type OwnerPost } from './batches'
 
 // 30s poll: several people assign concurrently, and the map should reflect
 // their assignments without a reload.
@@ -27,20 +28,15 @@ export function useOwners(enabled: boolean) {
   })
 }
 
-/** One POSTable assignment; `owner: null` clears, `'@me'` = the server
- * resolves the actor's canonical user id. */
-export interface OwnerPost {
-  pattern: string
-  owner: string | null
-  memo?: string
-  scan?: string
-}
+export { type OwnerPost, ownerPost } from './batches'
 
 // The scan id the viewer is looking at, stamped onto posted actions. Set by
 // App (module-level: mutations fire from deep components that don't
 // otherwise care which scan is showing).
 let currentScan: string | undefined
 export const setCurrentScan = (s?: string) => { currentScan = s }
+/** The scan the viewer is looking at (a staging gesture is "as of" it). */
+export const getCurrentScan = (): string | undefined => currentScan
 
 export function useOwnerMutations() {
   const qc = useQueryClient()
@@ -53,7 +49,12 @@ export function useOwnerMutations() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(items.length === 1 ? items[0] : items),
       })
-      if (!r.ok) throw new Error(((await r.json()) as { error?: string }).error ?? `${r.status}`)
+      if (!r.ok) {
+        const text = await r.text()
+        let msg = `${r.status}`
+        try { msg = (JSON.parse(text) as { error?: string }).error ?? msg } catch { msg = `${r.status} ${text.slice(0, 200)}` }
+        throw new HttpError(msg, r.status)
+      }
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['actions'] })
@@ -63,8 +64,8 @@ export function useOwnerMutations() {
   // `owner` omitted → assign to the actor (`'@me'`); a canonical user id →
   // assign it to that user; `release: true` → clear ownership.
   const assign = {
-    mutate: (v: { prefix: string; owner?: string | null; release?: boolean }) =>
-      post.mutate({ pattern: v.prefix, owner: v.release ? null : (v.owner ?? '@me') }),
+    mutate: (v: { prefix: string; kind?: ItemKind; owner?: string | null; release?: boolean }) =>
+      post.mutate({ pattern: v.prefix, ...(v.kind === 'object' ? { kind: v.kind } : {}), owner: v.release ? null : (v.owner ?? '@me') }),
     error: post.error,
   }
   return { post, assign }
@@ -76,7 +77,11 @@ export function useOwnerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIn
 
 /** D1 `user_emails` as an email → canonical-user map (signed-in readers only). */
 export function useUserEmails(enabled: boolean): Record<string, string> | undefined {
-  const { data } = useQuery<Record<string, string>, Error>({
+  return useUserEmailsQ(enabled).data
+}
+
+function useUserEmailsQ(enabled: boolean) {
+  return useQuery<Record<string, string>, Error>({
     queryKey: ['user-emails'],
     enabled,
     staleTime: 10 * 60_000,
@@ -88,11 +93,17 @@ export function useUserEmails(enabled: boolean): Record<string, string> | undefi
       return Object.fromEntries(rows.map(x => [x.email, x.user]))
     },
   })
-  return data
 }
 
 /** The viewer's canonical attribution user id, from D1 `user_emails`. */
 export function useMyUser(email: string | undefined, enabled: boolean): string | null {
-  const data = useUserEmails(enabled && !!email)
-  return (email && data?.[email.toLowerCase()]) || null
+  return useMyUserState(email, enabled).user
+}
+
+/** `useMyUser`, and whether it's final (`ready`: the map loaded or failed, or there's none to load) —
+ *  until then a null `user` means "not known yet", not "unmapped". */
+export function useMyUserState(email: string | undefined, enabled: boolean): { user: string | null; ready: boolean } {
+  const on = enabled && !!email
+  const q = useUserEmailsQ(on)
+  return { user: (email && q.data?.[email.toLowerCase()]) || null, ready: !on || !q.isPending }
 }

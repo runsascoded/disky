@@ -6,8 +6,10 @@
  * Tiers: an `anon` card draws shapes and colours only. No tile is labelled
  * and the legend carries no names, so nothing on it names a child path or a
  * person (a scraper can't walk the tree card by card). A `full` card labels
- * tiles and names the legend's owners. */
+ * tiles and names the legend's owners. An explicitly public map may also
+ * label its paths without changing its unsigned authentication tier. */
 import { squarify } from '@rdub/treemap/squarify'
+import { parseColor } from '@rdub/treemap/parseColor'
 
 export const CARD_W = 1200
 export const CARD_H = 630
@@ -24,6 +26,9 @@ export interface LegendItem { label: string; color: string; b: number }
 
 export interface CardData {
   tier: 'anon' | 'full'
+  /** Set by the server only for maps whose base read scope is public. Does
+   * not confer a signed/full tier or disclose private grids/owner pages. */
+  publicLabels?: boolean
   site: string
   title: string
   /** e.g. `scan 2026-10-02 · filter “tomat”`. */
@@ -73,12 +78,21 @@ export function clip(s: string, px: number, size: number): string {
 }
 
 /** Black or white text for a hex fill. */
-function inkOn(hex: string): string {
-  const m = /^#([0-9a-f]{6})$/i.exec(hex)
-  if (!m) return INK
-  const v = parseInt(m[1], 16)
-  const [r, g, b] = [(v >> 16) & 255, (v >> 8) & 255, v & 255]
+function inkOn(color: string): string {
+  const rgb = parseColor(color)
+  if (!rgb) return INK
+  const [r, g, b] = rgb
   return 0.299 * r + 0.587 * g + 0.114 * b > 150 ? '#111' : '#fff'
+}
+
+/** resvg's SVG color parser rejects fractional HSL components even though
+ * browsers accept them. Use the core's CSS parser at this rendering boundary. */
+export function svgColor(color: string): string {
+  if (!/^hsla?\(/.test(color)) return color
+  const rgba = parseColor(color)
+  if (!rgba) throw new Error(`invalid card color: ${color}`)
+  const [r, g, b, a] = rgba
+  return a === 1 ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${a})`
 }
 
 const r1 = (n: number) => Math.round(n * 10) / 10
@@ -114,14 +128,15 @@ function gridSvg(g: Grid, full: boolean, x: number, y: number, w: number, h: num
 /** The card. Tiles are laid out by bytes; children inside each tile get a
  * 4px inset. Labels only on a `full` card, and only where they fit. */
 export function cardSvg(d: CardData): string {
-  const full = d.tier === 'full'
+  const full = d.tier === 'full' || d.publicLabels === true
   const out: string[] = []
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_W}" height="${CARD_H}" viewBox="0 0 ${CARD_W} ${CARD_H}">`)
   out.push(`<rect width="${CARD_W}" height="${CARD_H}" fill="${BG}"/>`)
-  out.push(text(40, 52, clip(d.site, 400, 22), 22, { fill: MUTED, weight: 600 }))
-  out.push(text(40, 92, clip(d.title, 1120, 32), 32, { weight: 600 }))
-  out.push(text(40, 124, clip(d.subtitle, 1120, 20), 20, { fill: MUTED }))
-  const [mx, my, mw, mh] = [40, 144, 1120, 410]
+  const rootTitle = d.site === d.title
+  if (!rootTitle) out.push(text(40, 52, clip(d.site, 1120, 22), 22, { fill: MUTED, weight: 600 }))
+  out.push(text(40, rootTitle ? 60 : 92, clip(d.title, 1120, 32), 32, { weight: 600 }))
+  out.push(text(40, rootTitle ? 92 : 124, clip(d.subtitle, 1120, 20), 20, { fill: MUTED }))
+  const [mx, my, mw, mh] = [40, rootTitle ? 112 : 144, 1120, rootTitle ? 442 : 410]
   const tiles = d.tiles.filter(t => t.b > 0)
   if (d.grid?.cells.length) {
     out.push(gridSvg(d.grid, full, mx, my, mw, mh))
@@ -131,13 +146,17 @@ export function cardSvg(d: CardData): string {
   } else {
     for (const r of squarify(tiles, mx, my, mw, mh, t => t.b)) {
       const t = r.it
-      out.push(`<rect class="tile" x="${r1(r.x)}" y="${r1(r.y)}" width="${r1(r.w)}" height="${r1(r.h)}" fill="${t.color}" stroke="${BG}" stroke-width="2"/>`)
+      out.push(`<rect class="tile" x="${r1(r.x)}" y="${r1(r.y)}" width="${r1(r.w)}" height="${r1(r.h)}" fill="${svgColor(t.color)}" stroke="${BG}" stroke-width="2"/>`)
       const inset = 4
       const kids = (t.kids ?? []).filter(k => k.b > 0)
       if (kids.length && r.w > 24 && r.h > 24) {
         const top = full && r.h > 40 ? 22 : inset
         for (const k of squarify(kids, r.x + inset, r.y + top, r.w - 2 * inset, r.h - top - inset, k => k.b)) {
-          out.push(`<rect class="kid" x="${r1(k.x)}" y="${r1(k.y)}" width="${r1(k.w)}" height="${r1(k.h)}" fill="${k.it.color}" fill-opacity="0.85" stroke="${BG}" stroke-opacity="0.6" stroke-width="1"/>`)
+          out.push(`<rect class="kid" x="${r1(k.x)}" y="${r1(k.y)}" width="${r1(k.w)}" height="${r1(k.h)}" fill="${svgColor(k.it.color)}" fill-opacity="0.85" stroke="${BG}" stroke-opacity="0.6" stroke-width="1"/>`)
+          if (d.publicLabels && k.w > 70 && k.h > 30) {
+            const label = clip(`${k.it.name} ${fmtB(k.it.b)}`, k.w - 10, 13)
+            if (label) out.push(text(k.x + 6, k.y + 17, label, 13, { fill: inkOn(k.it.color), weight: 600 }))
+          }
         }
       }
       if (full && r.w > 70 && r.h > 24) {
@@ -160,7 +179,7 @@ export function cardSvg(d: CardData): string {
     }
     let x = CARD_W - 40 - width + 18
     for (const { l, label, w } of fit) {
-      out.push(`<rect x="${r1(x)}" y="583" width="14" height="14" rx="3" fill="${l.color}"/>`, text(x + 20, 596, label, 16, { fill: MUTED }))
+      out.push(`<rect x="${r1(x)}" y="583" width="14" height="14" rx="3" fill="${svgColor(l.color)}"/>`, text(x + 20, 596, label, 16, { fill: MUTED }))
       x += w
     }
   }

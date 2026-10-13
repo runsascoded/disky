@@ -38,9 +38,14 @@ def reuse_manifest(
     with source_fs.open(f"{source_path}/would-delete-summary.json") as fh:
         dry = json.load(fh)
     approved = sorted(a for b in buckets for a in plan.bands(b))
+    approved_objects = sorted(a for b in buckets for a in plan.exact(b))
     if original.get("date") != date or original.get("plan_id") != plan.plan_id:
         raise SystemExit("reviewed manifest scan/plan does not match the new dispatch")
-    if sorted(original.get("approved", [])) != approved or sorted(original.get("buckets", {})) != buckets:
+    if (
+        sorted(original.get("approved", [])) != approved
+        or sorted(original.get("approved_objects", [])) != approved_objects
+        or sorted(original.get("buckets", {})) != buckets
+    ):
         raise SystemExit("reviewed manifest prefix/bucket set does not match the new dispatch")
     eligible_buckets = [b for b in buckets if original["buckets"][b].get("eligible", {}).get("objects", 0)]
     if original.get("diagnostic") or dry.get("for_real") is not False or sorted(dry.get("buckets", {})) != eligible_buckets:

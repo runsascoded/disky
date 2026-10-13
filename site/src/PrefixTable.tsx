@@ -16,6 +16,8 @@ import { dateColor } from './colors'
 import type { OwnerIndex } from './owners'
 import type { UserIndexEntry } from './colors'
 import { type PrefixSortKey, type PrefixStat, relAgo } from './prefixes'
+import { useStore } from './store'
+import { listingTime } from './listingTime'
 
 export interface PrefixRow {
   /** The prefix itself (`gs://bucket/path/`) — the row's key and name. */
@@ -72,6 +74,7 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
   emptyLabel?: string
 }) {
   const { fmtBytes } = useUnits()
+  const time = listingTime(useStore().scheme)
   // Created ink across the listed rows' range, as the map's table does.
   const ds = rows.map(r => r.stat?.d).filter((d): d is number => d != null)
   const [dMin, dMax] = ds.length ? [Math.min(...ds), Math.max(...ds)] : [0, 0]
@@ -91,7 +94,7 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
           {shareOf != null && <th className="num">share</th>}
           {th('o', 'objects')}
           <th>owner(s)</th>
-          {th('d', 'created')}
+          {th('d', time.label)}
           {th('a', 'read')}
           {extra.map(c => c.sort ? th(c.key, c.label, false) : <th key={c.key}>{c.label}</th>)}
           {trail && <th />}

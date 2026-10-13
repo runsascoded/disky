@@ -1,5 +1,6 @@
 import { DEFAULT_STORE } from './stores'
 import { AssignSelect } from './AssignSelect'
+import { actionItem } from './objects'
 import { OwnerFactChip, fmtDate } from './OwnerFactChip'
 import { useCanAssign } from './auth'
 import type { OwnerIndex } from './owners'
@@ -28,8 +29,9 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser }: {
     // store root ("gs://…" with no bucket path) — nothing assignable
     return null
   }
-  const prefix = uri.endsWith('/') ? uri : uri + '/'
-  const cl = idx.assignmentOf(uri)
+  // A file's panel assigns that exact object; a folder's, its `/` prefix (specs/file-assign.md).
+  const item = actionItem(uri.replace(/\/$/, ''), node?.k === 'file' ? 'file' : 'dir')
+  const cl = idx.assignmentOf(item.key, item.kind)
   // Ownership: the assignment if there is one; otherwise the scan's
   // attribution — one person by name, a mix as a bar (OwnerBar).
   const shares = ownerShares(node ?? { n: '', b: 0, o: 0 } as TreeNode)
@@ -48,7 +50,7 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser }: {
               // The lens keeps only one person's bytes: with none here, the
               // attributed owners are people the lens hides — not "none".
               : <span className="none" title={lensed ? 'the owner filter hides other people\'s bytes here' : undefined}>—</span>}
-        {canAssign && <AssignSelect prefix={prefix} assigned={cl?.who ?? null} />}
+        {canAssign && <AssignSelect items={item} assigned={cl?.who ?? null} />}
         {node && node.cb && Object.values(node.cb).some(b => b > 0) && (
           <span className="classes">
             <span className="lbl">class</span>

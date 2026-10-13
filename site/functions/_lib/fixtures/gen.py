@@ -28,11 +28,21 @@
   postings groups and `SEARCH_DIR_ROWS` rows per directory group — beside
   layout v1's `path-index.{names,search}.parquet`, kept as committed (the
   writer no longer emits them; their postings are v2's).
+- `v2-slices/`: a store generation over owner slices (`usr` labels, one row per
+  `(path, usr)` as gcs writes them) whose multi-owner dirs have slices under a
+  view's threshold while their totals clear it (`m/big` drawn short of a slice,
+  `m/split` and `m/deep{,/x}` not drawn at all, `m/twin` an object and a dir),
+  single-owner `s/`, 2500 unowned objects directly under `m/`, and `w/`'s
+  1100 two-owner dirs (300 KiB slices, 600 KiB totals) filling whole `bysize`
+  groups — `path` + `bysize` in 2048-row groups, `bysize` keyed on each path's
+  total (`tot`, specs/bysize-path-total.md), so a group's `b_max` must be
+  `MAX(tot)` for a 512 KiB read to keep it (`sliceComplete.test.ts`); its
+  `plans.json` is `disk-tree tiers plan -j` (with `matched`) over `SLICE_PLANS`.
 - `v2/plans.json`: `disk-tree tiers plan -j -C` over each v2 sidecar for a
   set of reads — the engine planner's group selection, which the reader's
   span queries must reproduce exactly (`pathStore.test.ts`).
 
-Regenerate: `.venv/bin/python site/functions/_lib/fixtures/gen.py` from the repo root.
+Regenerate: `.venv/bin/python site/functions/_lib/fixtures/gen.py [NAME…]` from the repo root (no names: all).
 """
 import json
 import shutil
@@ -133,10 +143,16 @@ def write_v2(here: str) -> None:
         write_text(join(out_dir, f'{stem}.groups.json'), groups_blob(d1[variant]['schema'], d1[variant]['rows']))
         write_groups_parquet(files[variant], d1[variant]['schema'], d1[variant]['rows'], row_group_rows=FOOTER_ROWS)
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
+    write_plans(out_dir, PLANS)
+
+
+def write_plans(out_dir: str, reads: list[tuple[str, int, float, int | None]], count: bool = False) -> None:
+    """`plans.json`: `disk-tree tiers plan -j` over each sort's sidecar for each
+    read (`count`: with the parquet's `matched` rows, else `-C`)."""
     plans = []
-    for path, thr, atten, max_depth in PLANS:
+    for path, thr, atten, max_depth in reads:
         for variant, stem in SORTS.items():
-            cmd = ['disk-tree', 'tiers', 'plan', '-j', '-C', '-t', variant, '-a', str(atten)]
+            cmd = ['disk-tree', 'tiers', 'plan', '-j', *(() if count else ('-C',)), '-t', variant, '-a', str(atten)]
             if max_depth is not None:
                 cmd += ['-d', str(max_depth)]
             cmd += [join(out_dir, f'{stem}.groups.json'), path, str(thr)]
@@ -190,6 +206,66 @@ def write_v2_lens(here: str) -> None:
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
 
 
+KiB = 1 << 10
+#: `v2-slices`' `w/d*` dirs: two 300 KiB owner slices each (600 KiB total), enough
+#: of them that some 2048-row `bysize` groups hold only such slices — a group whose
+#: biggest slice is under a 512 KiB threshold while its paths' totals clear it.
+N_WIDE = 1100
+#: `v2-slices`' objects (key, size) and owner prefixes (deepest wins; the rest unowned).
+SLICE_ROWS = [
+    ('m/big/a/f0', 2 * MiB), ('m/big/b/f0', 100 * KiB),
+    ('m/split/a/f0', 300 * KiB), ('m/split/b/f0', 300 * KiB), ('m/split/u0', 300 * KiB),
+    ('m/deep/x/a/f0', 300 * KiB), ('m/deep/x/b/f0', 300 * KiB),
+    ('m/twin', 50 * KiB), ('m/twin/f0', 600 * KiB),
+    *[(f's/f{i}', 200 * KiB) for i in range(4)],
+    *[(f'm/f{i:04d}', KiB) for i in range(2500)],
+    *[(f'w/d{i:04d}/{u}/f0', 300 * KiB) for i in range(N_WIDE) for u in 'ab'],
+]
+SLICE_OWNERS = {'m/big/a': 'alice', 'm/big/b': 'bob', 'm/split/a': 'alice', 'm/split/b': 'bob',
+                'm/deep/x/a': 'alice', 'm/deep/x/b': 'bob', 'm/twin': 'alice', 's': 'carol',
+                **{f'w/d{i:04d}/{u}': o for i in range(N_WIDE) for u, o in (('a', 'alice'), ('b', 'bob'))}}
+
+
+#: `v2-slices`' reads cross-checked against the reader (path, thr, atten, max_depth).
+SLICE_PLANS = [
+    ('', 512 * KiB, 1, None),
+    ('bk/w', 512 * KiB, 1, None),
+    ('bk/m', 512 * KiB, 1, None),
+    ('bk/m', 301 * KiB, 2, 1),
+]
+
+
+def write_v2_slices(here: str) -> None:
+    out_dir = join(here, 'v2-slices')
+    shutil.rmtree(out_dir, ignore_errors=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        listing = join(tmp, 'listing.parquet')
+        pd.DataFrame({
+            'bucket': ['bk'] * len(SLICE_ROWS),
+            'name': [n for n, _ in SLICE_ROWS],
+            'size_bytes': [s for _, s in SLICE_ROWS],
+            'created': [TS] * len(SLICE_ROWS),
+            'storage_class_id': [1] * len(SLICE_ROWS),
+        }).to_parquet(listing)
+        labels = join(tmp, 'labels.parquet')
+        pd.DataFrame({'prefix': list(SLICE_OWNERS), 'usr': list(SLICE_OWNERS.values())}).to_parquet(labels)
+        con = duckdb.connect()
+        l2 = join(tmp, 'l2.parquet')
+        aggregate_listing_to_parquet(prepare_listing(con, (listing,)), bucket='bk', scheme='s3', out_parquet=l2, con=con, mean_mtime=True, label=labels, label_cols=('usr',))
+        ix.write_index([('bk', l2)], join(tmp, 'out'), mem='1GB', threads=1, row_group_rows=2048)
+        shutil.os.makedirs(out_dir)
+        files = {}
+        for variant, stem in SORTS.items():
+            dst = join(out_dir, f'{stem}.parquet')
+            shutil.copy(join(tmp, 'out', f'{stem}.parquet'), dst)
+            files[variant] = dst
+    d1 = d1_json(files)
+    for variant, stem in SORTS.items():
+        write_text(join(out_dir, f'{stem}.groups.json'), groups_blob(d1[variant]['schema'], d1[variant]['rows']))
+    write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
+    write_plans(out_dir, SLICE_PLANS, count=True)
+
+
 def search_rows() -> dict[str, list[tuple[str, int]]]:
     """`v2-search`'s objects per bucket (key, size)."""
     bk = [(f'fill/f{i:05d}', 1 << (i % 12)) for i in range(6000)]
@@ -203,17 +279,17 @@ def search_rows() -> dict[str, list[tuple[str, int]]]:
     return {'bk': bk, 'zz': zz}
 
 
-def write_v2_search(here: str) -> None:
-    out_dir = join(here, 'v2-search')
+def write_v2_search(here: str, name: str = 'v2-search', objects=search_rows) -> None:
+    out_dir = join(here, name)
     v1 = {}
-    for side in SEARCH_V1_FILES:
+    for side in SEARCH_V1_FILES if name == 'v2-search' else ():
         with open(join(out_dir, f'path-index.{side}.parquet'), 'rb') as f:
             v1[side] = f.read()
     shutil.rmtree(out_dir, ignore_errors=True)
     with tempfile.TemporaryDirectory() as tmp:
         con = duckdb.connect()
         sources = []
-        for bucket, rows in search_rows().items():
+        for bucket, rows in objects().items():
             listing = join(tmp, f'{bucket}.listing.parquet')
             pd.DataFrame({
                 'bucket': [bucket] * len(rows),
@@ -252,12 +328,20 @@ def write_v1(here: str) -> None:
     write_text(join(here, 'path-index-zstd.d1.json'), json.dumps(d1_json({'path': parquet}), separators=(',', ':')))
 
 
+WRITERS = {
+    'v1': write_v1,
+    'v2': write_v2,
+    'v2-lens': write_v2_lens,
+    'v2-slices': write_v2_slices,
+    'v2-search': write_v2_search,
+}
+
+
 def main() -> None:
+    """Every fixture, or the ones named (`gen.py v2-search`)."""
     here = dirname(__file__)
-    write_v1(here)
-    write_v2(here)
-    write_v2_lens(here)
-    write_v2_search(here)
+    for name in sys.argv[1:] or WRITERS:
+        WRITERS[name](here)
 
 
 if __name__ == '__main__':

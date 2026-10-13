@@ -27,6 +27,18 @@ exact for any int64), never stored: a reader recovers a group's bucket range
 from its ``b_min``/``b_max`` stats (:mod:`disk_tree.find.groups`). The
 parquet key-value metadata says ``bucket = log2`` beside ``tier`` and ``sort``.
 
+**Owner slices** (a labeled layer-2: one row per ``(path, …labels)``): a
+threshold applies to a *path*, not a slice, so the ``bysize`` sort carries
+:data:`TOT_COL` — the path's total over ``(depth, path)``, equal on
+every slice of a path — and is keyed on ``⌊log2 tot⌋`` instead (spec
+``bysize-path-total.md``): a path's slices sit together in one bucket run, the
+groups' ``b_max`` is ``MAX(tot)`` (:mod:`disk_tree.find.groups` prefers the
+column), and a thresholded read that tests ``tot`` returns every slice of
+every path over the threshold. The metadata says ``bucket = log2(tot)``. The
+sort variants (``bysize`` by ``usr``, a lens's copy) stay per slice — a lens
+reads one owner's bytes — and an unlabeled store has ``tot = size``, so
+neither carries the column.
+
 Tiers are cut from the finished layer-2 parquet (one sorted COPY each,
 spillable), so they are engine-agnostic: anything that leaves a layer-2 blob
 on disk can call :func:`write_tiers`; :func:`cut_tiers` fronts it for the
@@ -58,6 +70,12 @@ ROW_GROUP_STEP = 2048
 BUCKET_KEY = 'size_bucket desc'
 #: `⌊log2 size⌋` for `size > 0`, else NULL — exact (a bit length, not a float log).
 BUCKET_SQL = 'CASE WHEN size > 0 THEN length(bin(size)) - 1 END'
+#: The path's total over its label slices: a labeled `bysize`'s extra column.
+TOT_COL = 'tot'
+#: The labeled `bysize` sort's leading key: the bucket of the path's total.
+TOT_BUCKET_KEY = 'tot_bucket desc'
+#: `⌊log2 tot⌋`, as :data:`BUCKET_SQL`.
+TOT_BUCKET_SQL = BUCKET_SQL.replace('size', TOT_COL)
 #: The `sort` metadata of each tier, before labels / variants.
 TIER_SORTS: dict[str, tuple[str, ...]] = {
     'path': ('depth', 'path'),
@@ -95,6 +113,8 @@ def tier_path(stem: str, tier: str, variant: tuple[str, ...] = ()) -> str:
 def _order_sql(key: str) -> str:
     if key == BUCKET_KEY:
         return f'({BUCKET_SQL}) DESC NULLS LAST'
+    if key == TOT_BUCKET_KEY:
+        return f'({TOT_BUCKET_SQL}) DESC NULLS LAST'
     return f'{key} NULLS FIRST'
 
 
@@ -161,6 +181,8 @@ def write_tiers(
     if cols[0] != _HEAD or _AFTER_LABELS not in cols:
         raise ValueError(f"{layer2}: not a layer-2 parquet (columns {cols})")
     labels = tuple(cols[1:cols.index(_AFTER_LABELS)])
+    if TOT_COL in cols:
+        raise ValueError(f"{layer2}: already has a `{TOT_COL}` column (a labeled `bysize` sort, not a layer-2)")
     for variant in sort_variants:
         missing = [c for c in variant if c not in cols]
         if missing:
@@ -186,20 +208,41 @@ def write_tiers(
 
     def copy(tier: str, sort: tuple[str, ...], variant: tuple[str, ...]) -> None:
         out = tier_path(stem, tier, variant)
+        # A labeled store's `bysize` (not a variant: those are per slice) is keyed on the path's total.
+        by_tot = tier == 'bysize' and bool(labels) and not variant
+        if by_tot:
+            sort = tuple(TOT_BUCKET_KEY if c == BUCKET_KEY else c for c in sort)
         kv = {'tier': tier, 'sort': ','.join(sort)}
         if tier == 'bysize':
-            kv['bucket'] = 'log2'
+            kv['bucket'] = f'log2({TOT_COL})' if by_tot else 'log2'
         kv.update(src_kv)
         kv_sql = ', '.join("'{}': '{}'".format(k, str(v).replace("'", "''")) for k, v in kv.items())
         order_by = ', '.join(_order_sql(c) for c in sort)
+        src = f"read_parquet('{layer2}')"
+        if by_tot:
+            # The path's total beside each slice. Not a window (`SUM OVER (PARTITION BY
+            # depth, path)`): DuckDB's window doesn't spill — it held 89 GiB and failed on a
+            # 777M-row gcs store. The multi-slice paths' sums are a spillable aggregate, and
+            # small (a path's owners are a subset of its parent's: most paths have one);
+            # every other path's total is its one row's `size`.
+            con.execute(f"""
+                CREATE OR REPLACE TEMP TABLE _multi_tot AS
+                SELECT depth, path, SUM(size) AS tot FROM {src} GROUP BY depth, path HAVING COUNT(*) > 1
+            """)
+            src = f"""(
+                SELECT s.*, CAST(COALESCE(m.tot, s.size) AS BIGINT) AS {TOT_COL}
+                FROM {src} s LEFT JOIN _multi_tot m ON s.depth = m.depth AND s.path = m.path
+            )"""
         tmp = out + '.tmp'
         con.execute(f"""
             COPY (
-                SELECT * FROM read_parquet('{layer2}')
+                SELECT * FROM {src}
                 ORDER BY {order_by}
             ) TO '{tmp}' (FORMAT PARQUET, {lf.duckdb_codec()},
                 ROW_GROUP_SIZE {row_group_rows}, KV_METADATA {{{kv_sql}}})
         """)
+        if by_tot:
+            con.execute("DROP TABLE _multi_tot")
         os.replace(tmp, out)
         written[out] = int(con.execute(f"SELECT COUNT(*) FROM read_parquet('{out}')").fetchone()[0])
         if groups:

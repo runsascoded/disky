@@ -22,7 +22,7 @@ const store: Store = {
   // size and dates until that rule lists this site.
   objectBases: { ctbk: 'https://data.ctbk.dev', crashes: 'https://crashes-data.hccs.dev' },
   rootLabel: 'all buckets',
-  objectsNote: 'Public R2 buckets scanned daily by disk-tree; created is each object’s upload time.',
+  objectsNote: 'Public R2 buckets scanned daily by disk-tree; modified is the object’s LastModified timestamp, not its original creation time.',
   // A public deploy never shows the wall (`AUTH_MODE === 'public'`); copy
   // kept for the type, and for a gated build of the same store.
   wall: { restrict: 'This store is public.', signIn: 'Sign in' },

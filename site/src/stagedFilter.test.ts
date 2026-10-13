@@ -44,14 +44,14 @@ describe('filterStaged: the map syntax over prefix, owners and stager', () => {
     ])
   })
 
-  it('a term never spans two fields; a too-short term is an error, not a silent empty set', () => {
+  it('a term never spans two fields; a too-short term beside another is an error, not a silent empty set', () => {
     expect(stagedHaystack(ROWS[4], name).split('\n')).toEqual([
       'gs://marin-us-central1/grug/tied_experts/d512/',
       'owner:barbara.liskov@example.org Barbara',
       'staged-by:barbara.liskov@example.org Barbara',
     ])
     expect([kept('"d512/ owner"'), kept('"d512/"')]).toEqual([[], ['us-central1/grug/tied_experts/d512/']])
-    expect(kept('ab')).toEqual({ error: expect.stringMatching(/3/) })
+    expect(kept('ab grug')).toEqual({ error: expect.stringMatching(/3/) })
   })
 })
 

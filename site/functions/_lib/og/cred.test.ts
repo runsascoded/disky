@@ -11,6 +11,7 @@ describe('image params ⇄ view + version + credential', () => {
       splitImageParams({ path: 'marin-a', d: '261002', t: 'TokAAAAAAA' }),
       splitImageParams({ v: 'abcdef01', g: 'grant123' }),
       splitImageParams({ path: 'marin-a' }),
+      splitImageParams({ path: 'marin-a', s: '2026-10-12T1201', r: '2', policy: 'generic', t: 'TokAAAAAAA' }),
     ]).toEqual([
       { path: 'marin-a', d: '261002', t: 'TokAAAAAAA' },
       { v: 'abcdef01', g: 'grant123' },
@@ -18,6 +19,7 @@ describe('image params ⇄ view + version + credential', () => {
       { view: { path: 'marin-a', d: '261002' }, cred: { t: 'TokAAAAAAA' } },
       { view: {}, v: 'abcdef01', cred: { g: 'grant123' } },
       { view: { path: 'marin-a' }, cred: null },
+      { view: { path: 'marin-a' }, scan: '2026-10-12T1201', cred: { t: 'TokAAAAAAA' } },
     ])
   })
 })

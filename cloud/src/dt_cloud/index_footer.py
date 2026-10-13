@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -61,8 +62,9 @@ def _site_dir() -> Path:
 INDEX_VERSION_LEGACY = 1
 INDEX_VERSION_STORE = 2
 #: Size column candidates, first present wins (the engine's `groups.SIZE_COLS`):
-#: a store sort's `size`, a legacy index's `b`.
-SIZE_COLS = ("size", "b")
+#: a labeled `bysize`'s path total `tot` (its sort key), a store sort's `size`,
+#: a legacy index's `b`.
+SIZE_COLS = ("tot", "size", "b")
 
 
 def _schema_json(md: "pq.FileMetaData") -> dict:
@@ -137,7 +139,16 @@ def _group_rows(md: "pq.FileMetaData") -> list[dict]:
 
 
 def _remote(parquet_path: str) -> bool:
-    return parquet_path.startswith(("gs://", "oa-"))
+    return parquet_path.startswith("gs://")
+
+
+def bucket_base(base: str) -> str:
+    """A tier location's root as given (`-b`, `$DATA_BUCKET`): an fsspec URL or a
+    local/mounted path (absolute, or `.`-relative) as is; a bare name is a GCS
+    bucket (`gs://<name>`)."""
+    if "://" in base or base.startswith(("/", ".")):
+        return base
+    return f"gs://{base}"
 
 
 def exists(parquet_path: str) -> bool:
@@ -156,6 +167,11 @@ def exists(parquet_path: str) -> bool:
 def extract(parquet_path: str) -> tuple[dict, list[dict]]:
     """Return (schema_meta, group_rows) from a local or fsspec-readable parquet."""
     import gcsfs
+
+    # `blobfs` opts the process out of gcsfs's adaptive prefetcher, whose handle hangs the
+    # interpreter at exit once pyarrow has read through it (an `index-sync` from a laptop
+    # synced, then never exited).
+    from disk_tree import blobfs  # noqa: F401
 
     opener = gcsfs.GCSFileSystem().open if _remote(parquet_path) else open
     with opener(parquet_path, "rb") as f:
@@ -199,8 +215,8 @@ def groups_blob(schema: dict, rows: list[dict]) -> str:
 
 
 def _write(out: str, data: bytes) -> None:
-    """Bytes to a local/mounted path, a bucket-relative `oa-…` / `gs://` path
-    (gcsfs), or another fsspec URL (`blobfs`: `r2://`, `s3://`)."""
+    """Bytes to a local/mounted path, a `gs://` URL (gcsfs), or another fsspec
+    URL (`blobfs`: `r2://`, `s3://`)."""
     if _remote(out):
         import gcsfs
 
@@ -380,6 +396,67 @@ def d1_variant(variant: str, store: str = PRIMARY_STORE) -> str:
     return variant if check_store(store) == PRIMARY_STORE else f"{store}:{variant}"
 
 
+class IncompleteGeneration(RuntimeError):
+    """A pointer-only flip refused: the generation's rows in D1 don't match
+    its footer (a rows phase that never ran, died part-way, or whose rows a
+    gc swept before the flip)."""
+
+
+@dataclass
+class Flip:
+    """One variant's pointer flip, checked and ready: what `flip_d1` writes.
+    ``pointed``: the pointer already names (``gen``, ``key``) — the flip is a
+    no-op."""
+    date: str
+    variant: str  # as the store names it (no `<store>:` prefix)
+    gen: str
+    key: str
+    store: str
+    schema: dict
+    n: int  # row groups in the footer (= rows the generation holds in D1)
+    pointed: bool
+
+
+def _scope(store: str) -> tuple[str, str, str]:
+    """(WHERE prefix, INSERT column, INSERT value) naming a secondary store;
+    all empty for the primary, whose SQL is the pre-stores SQL."""
+    if check_store(store) == PRIMARY_STORE:
+        return "", "", ""
+    return f"store='{_sql_escape(store)}' AND ", "store, ", f"'{_sql_escape(store)}', "
+
+
+def _pointer_sql(date: str, variant: str, gen: str, key: str, schema: dict, store: str) -> list[str]:
+    """The flip — the ``index_schema`` row, one ``INSERT OR REPLACE`` — then
+    the store-generation retirements that follow it (``variant`` unprefixed)."""
+    st, sc, sv = _scope(store)
+    d1v = d1_variant(variant, store)
+    floor = schema.get("floor_bytes")
+    schema_sql = (
+        f"INSERT OR REPLACE INTO index_schema ({sc}date, variant, version, schema_json, floor_bytes, gen, dir) VALUES "
+        f"({sv}'{date}', '{d1v}', {schema['version']}, '{_sql_escape(json.dumps(schema['schema'], separators=(',', ':')))}', "
+        f"{'NULL' if floor is None else int(floor)}, '{_sql_escape(gen)}', '{_sql_escape(key)}');"
+    )
+    # A store generation's `path` sort replaces the dir-only index outright: the
+    # coarse tiers an earlier generation of the same date synced are stale (and
+    # a reader that found them would answer from them). Retire them after the
+    # flip — rows first (the `user` rows are found through its pointer), then
+    # the pointers; the reader ignores both on a store date meanwhile.
+    retire_sql: list[str] = []
+    if schema["version"] >= 2 and variant == "path":
+        like = _sql_escape(d1_variant("coarse", store)) + "%"
+        # …and a version-1 `user` sort (a store generation serves lenses from
+        # its own sorts; a v2 `user` sort, where a deployment writes one, stays)
+        user = _sql_escape(d1_variant("user", store))
+        v1_user = f"SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2"
+        retire_sql = [
+            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant LIKE '{like}';",
+            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{user}' AND gen IN ({v1_user});",
+            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant LIKE '{like}';",
+            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2;",
+        ]
+    return [schema_sql, *retire_sql]
+
+
 def sync_d1(
     date: str,
     parquet_path: str,
@@ -392,6 +469,7 @@ def sync_d1(
     insert_bytes: int = INSERT_BYTES,
     blob: bool = True,
     store: str = PRIMARY_STORE,
+    rows_only: bool = False,
 ) -> int:
     """Extract the footer of ``parquet_path`` (one tier/sort ``variant`` of
     scan ``date``, generation ``gen``, living under the bucket-relative dir
@@ -407,6 +485,12 @@ def sync_d1(
     the pointer untouched (still serving the previous generation) and orphan
     rows the next sync/gc sweeps. Nothing is deleted before the flip.
 
+    ``rows_only`` stops before the flip: the generation's rows are staged,
+    invisible (every reader query names the pointer's gen), until
+    `check_flip` + `flip_d1` point at them — so the slow part (the row
+    INSERTs) can run before the scan is ready to list. Re-running it is
+    clean: the rows are ``INSERT OR REPLACE`` on (date, variant, gen, rg).
+
     The same rows also land beside the parquet first, twice: the cold footer
     tier (``write_groups_parquet``, `.groups.parquet`) — the durable copy the
     site range-reads once retention retires this tier's rows from D1 — and
@@ -416,49 +500,23 @@ def sync_d1(
     ``store`` (default the primary, whose SQL is unchanged) files the rows
     under a secondary store: variant ``<store>:<variant>`` and the ``store``
     column set (which needs the store migration)."""
-    variant = d1_variant(variant, store)
-    sec = store != PRIMARY_STORE
-    st = f"store='{_sql_escape(store)}' AND " if sec else ""
-    sc = "store, " if sec else ""  # the column, in the INSERTs
-    sv = f"'{_sql_escape(store)}', " if sec else ""  # its value
+    st, sc, sv = _scope(store)
+    d1v = d1_variant(variant, store)
     schema, rows = extract(parquet_path)
     if blob:
         write_groups_parquet(parquet_path, schema, rows)
         write_groups_blob(parquet_path, schema, rows)
-    floor = schema.get("floor_bytes")
     # Leftovers from earlier flips (any gen that is neither the current pointer's
     # nor this one) go first — they are unreachable by construction.
     gc_sql = (
-        f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{variant}' AND gen <> '{_sql_escape(gen)}' "
-        f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{variant}'), '');"
+        f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{d1v}' AND gen <> '{_sql_escape(gen)}' "
+        f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '');"
     )
-    schema_sql = (
-        f"INSERT OR REPLACE INTO index_schema ({sc}date, variant, version, schema_json, floor_bytes, gen, dir) VALUES "
-        f"({sv}'{date}', '{variant}', {schema['version']}, '{_sql_escape(json.dumps(schema['schema'], separators=(',', ':')))}', "
-        f"{'NULL' if floor is None else int(floor)}, '{_sql_escape(gen)}', '{_sql_escape(key)}');"
-    )
-    # A store generation's `path` sort replaces the dir-only index outright: the
-    # coarse tiers an earlier generation of the same date synced are stale (and
-    # a reader that found them would answer from them). Retire them after the
-    # flip — rows first (the `user` rows are found through its pointer), then
-    # the pointers; the reader ignores both on a store date meanwhile.
-    retire_sql: list[str] = []
-    if schema["version"] >= 2 and variant == d1_variant("path", store):
-        like = _sql_escape(d1_variant("coarse", store)) + "%"
-        # …and a version-1 `user` sort (a store generation serves lenses from
-        # its own sorts; a v2 `user` sort, where a deployment writes one, stays)
-        user = _sql_escape(d1_variant("user", store))
-        v1_user = f"SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2"
-        retire_sql = [
-            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant LIKE '{like}';",
-            f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{user}' AND gen IN ({v1_user});",
-            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant LIKE '{like}';",
-            f"DELETE FROM index_schema WHERE {st}date='{date}' AND variant='{user}' AND version < 2;",
-        ]
+    pointer_sql = [] if rows_only else _pointer_sql(date, variant, gen, key, schema, store)
 
     def group_values(r: dict) -> str:
         return (
-            f"({sv}'{date}', '{variant}', '{_sql_escape(gen)}', {r['rg']}, {r['d_min']}, {r['d_max']}, "
+            f"({sv}'{date}', '{d1v}', '{_sql_escape(gen)}', {r['rg']}, {r['d_min']}, {r['d_max']}, "
             f"'{_sql_escape(r['p_min'])}', '{_sql_escape(r['p_max'])}', {r['b_max']}, "
             f"{_q(r['u_min'])}, {_q(r['u_max'])}, "
             f"{r['row_start']}, {r['row_end']}, '{_sql_escape(r['rg_json'])}')"
@@ -469,7 +527,7 @@ def sync_d1(
     # re-sending it must be a no-op, not a PK collision (date, variant, gen, rg).
     head = f"INSERT OR REPLACE INTO index_row_groups {cols} VALUES "
     if not remote:  # dev: local wrangler D1
-        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in rows] + [schema_sql] + retire_sql
+        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in rows] + pointer_sql
         site = _site_dir()
         for i in range(0, len(stmts), 300):
             with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as tf:
@@ -482,10 +540,62 @@ def sync_d1(
     _d1_query(gc_sql, acct, tok, db_id)
     for chunk in _pack(head, [group_values(r) for r in rows], insert_bytes):
         _d1_query(chunk, acct, tok, db_id)
-    _d1_query(schema_sql, acct, tok, db_id)  # the pointer flip: schema row last
-    for sql in retire_sql:  # rows, then pointers
+    # The pointer flip (schema row last), then the retirements: rows, then pointers.
+    for sql in pointer_sql:
         _d1_query(sql, acct, tok, db_id)
     return len(rows)
+
+
+def check_flip(
+    date: str,
+    parquet_path: str,
+    *,
+    variant: str = "path",
+    gen: str,
+    key: str,
+    db_id: str = D1_DB_ID,
+    store: str = PRIMARY_STORE,
+) -> Flip:
+    """The pointer phase's gate: read ``parquet_path``'s footer and check D1
+    holds exactly its row groups under ``gen`` — ``rg`` 0..n-1, one row each
+    (the PK makes them distinct) — before anything points at them. Raises
+    `IncompleteGeneration` otherwise. A pointer already naming (``gen``,
+    ``key``) passes unchecked (``pointed``; retention may since have retired
+    its rows to the cold tier)."""
+    st, _, _ = _scope(store)
+    d1v = d1_variant(variant, store)
+    schema, rows = extract(parquet_path)
+    tok, acct = _creds()
+    where = f"{st}date='{_sql_escape(date)}' AND variant='{_sql_escape(d1v)}'"
+    cur = _d1_query(f"SELECT gen, dir FROM index_schema WHERE {where};", acct, tok, db_id)
+    flip = Flip(date=date, variant=variant, gen=gen, key=key, store=store, schema=schema, n=len(rows), pointed=False)
+    if cur and cur[0]["gen"] == gen and cur[0]["dir"] == key:
+        flip.pointed = True
+        return flip
+    (got,) = _d1_query(
+        f"SELECT COUNT(*) AS n, MIN(rg) AS lo, MAX(rg) AS hi FROM index_row_groups WHERE {where} AND gen='{_sql_escape(gen)}';",
+        acct, tok, db_id,
+    )
+    n, lo, hi = int(got["n"]), got["lo"], got["hi"]
+    want_hi = len(rows) - 1 if rows else None
+    if n != len(rows) or (rows and (lo != 0 or hi != want_hi)):
+        raise IncompleteGeneration(
+            f"{date} [{d1v}] gen {gen}: D1 holds {n} row groups (rg {lo}..{hi}), the footer {len(rows)} — "
+            f"not flipping; re-run the rows phase (`index-sync -r`)"
+        )
+    return flip
+
+
+def flip_d1(flip: Flip, db_id: str = D1_DB_ID) -> bool:
+    """Point (date, variant) at ``flip``'s generation — the schema row, then
+    the retirements `sync_d1` runs after it. False (nothing written) when the
+    pointer already names it."""
+    if flip.pointed:
+        return False
+    tok, acct = _creds()
+    for sql in _pointer_sql(flip.date, flip.variant, flip.gen, flip.key, flip.schema, flip.store):
+        _d1_query(sql, acct, tok, db_id)
+    return True
 
 
 def gc_d1(date: str, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE, dry_run: bool = False) -> int:
@@ -524,22 +634,21 @@ def pointers(db_id: str = D1_DB_ID) -> list[tuple[str, str, str]]:
 # generation dir: `path` = every row sorted `(depth, path)`, `bysize` = the same
 # rows sorted `(⌊log2 size⌋ desc, path)`. Both are cut by the engine's
 # `write_tiers` (`index-write` / `path-index`); the by-user copies are the same
-# two sorts led by `usr`, where the deployment attributes (`INDEX_VARIANTS`
-# names `user`; gcs). No coarse tiers: every byte floor is a prefix of `bysize`.
+# two sorts led by `usr`, written only where the scan attributes ownership (a
+# layer 2 with a `usr` column). No coarse tiers: every byte floor is a prefix of
+# `bysize`. Which variants a deployment has is a property of its generations,
+# not config: `index-sync` / `index-blob` skip an absent file, and `index-gc -r`
+# retires only the rows D1 holds.
 STORE_SORTS: dict[str, str] = {"path": "path-index.parquet", "bysize": "path-index-bysize.parquet"}
 USER_SORTS: dict[str, str] = {"user": "path-index-by-user.parquet", "bysize-user": "path-index-bysize-by-user.parquet"}
-# `$INDEX_VARIANTS` (the deployment's `wrangler.toml` / job env): `path`, or
-# `path,user` for a deployment that writes the by-user sorts.
-_ENV_VARIANTS = tuple(v for v in os.environ.get("INDEX_VARIANTS", "path,user").split(",") if v)
-HAS_USER_SORTS = "user" in _ENV_VARIANTS
-# The store sorts this deployment syncs — what `index-gc -r` retires for scans
-# past the retention window (their pointers stay; the reader range-reads the
-# `.groups.parquet` cold tier beside the parquet instead).
-SORT_VARIANTS = tuple(STORE_SORTS) + (tuple(USER_SORTS) if HAS_USER_SORTS else ())
+# Every store sort — what `index-gc -r` retires for scans past the retention
+# window (their pointers stay; the reader range-reads the `.groups.parquet`
+# cold tier beside the parquet instead).
+SORT_VARIANTS = (*STORE_SORTS, *USER_SORTS)
 
 # Index variants the site reads (functions/_lib/index.ts `indexKey` mirrors
-# this). D1 keys (date, variant).
-INDEX_VARIANTS: dict[str, str] = {**STORE_SORTS, **(USER_SORTS if HAS_USER_SORTS else {})}
+# this), by served file name. D1 keys (date, variant).
+INDEX_VARIANTS: dict[str, str] = {**STORE_SORTS, **USER_SORTS}
 # The age chart's backend: multi-scale path-major pyramid tiers, one per bin
 # (specs/done/age-index.md, Phase B — supersedes the single-bin `age-index.parquet`).
 # Standalone indexes, own base names; the footer's (depth, path, b) stats prune
@@ -556,9 +665,9 @@ INDEX_VARIANTS["over-time"] = "over-time.parquet"
 
 def cold_path(base: str, gdir: str, variant: str) -> str:
     """Where (date, variant)'s cold footer tier lives: the pointer's dir
-    ``gdir`` under ``base`` (a bucket name — `oa-…` → gcsfs —, a mounted dir, or an
-    fsspec URL like `r2://bucket`)."""
-    return groups_parquet_path(f"{base.rstrip('/')}/{gdir}/{INDEX_VARIANTS[variant]}")
+    ``gdir`` under ``base`` (a bucket name — a GCS bucket, `bucket_base` —, a
+    mounted dir, or an fsspec URL like `r2://bucket`)."""
+    return groups_parquet_path(f"{bucket_base(base).rstrip('/')}/{gdir}/{INDEX_VARIANTS[variant]}")
 
 
 def retire_d1(

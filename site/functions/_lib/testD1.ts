@@ -82,3 +82,20 @@ export async function sqliteD1(lineage: typeof LINEAGES[number], { before }: { b
   for (const m of await migrations(lineage)) if (before === undefined || m.name < before) raw.exec(m.sql)
   return { db: d1Of(raw), raw }
 }
+
+/** The gcs lineage's `kind` migration, ledger half (specs/file-assign.md): what
+ * `migrations/gcs/` adds beside cw's `0017_plan_items_kind.sql` (whose
+ * `plan_items` statement it repeats). `cloud` carries no gcs migrations, so
+ * tests that build the gcs ledger tables ad hoc append this to them. */
+export const LEDGER_KIND = `
+  ALTER TABLE actions ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'object');
+  ALTER TABLE owner_prefixes ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'object');
+`
+
+/** The gcs ledger tables as `migrations/gcs/0001_init.sql` has them (keep
+ * columns dropped by 0028), with `LEDGER_KIND` applied. */
+export const GCS_LEDGER = `
+  CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, memo TEXT);
+  CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
+  ${LEDGER_KIND}
+`

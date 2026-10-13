@@ -1,0 +1,109 @@
+{
+ "first": "2026-08-04T1800",
+ "last": "2026-08-04T1800",
+ "level": 0,
+ "scans": [
+  "2026-08-04T1800"
+ ],
+ "R": 3,
+ "K": 2,
+ "rg": 2,
+ "idx_rg": 3,
+ "dispatch_rows": 7,
+ "D": 1785866400,
+ "floor": 2,
+ "classes": {
+  "members": 256,
+  "classes_before": 79,
+  "classes": 79,
+  "members_new": 2,
+  "rows": 93,
+  "rows_new_members": 6
+ },
+ "new_members_list": [
+  "runs",
+  "uns"
+ ],
+ "long_day": {
+  "heavy_touched": 65,
+  "probes": 3,
+  "probes_existed": 0,
+  "candidates": 0,
+  "affected": 10,
+  "restated": 3,
+  "base_counted": 59,
+  "heavy_new": 63,
+  "rollup_rows": 446,
+  "dcount_rows": 41,
+  "reads": {
+   "any": 3,
+   "any_decoded": 4,
+   "rows": 122,
+   "index_reads": 35,
+   "index_bytes": 48011,
+   "groups_read": 77,
+   "group_bytes": 47980
+  }
+ },
+ "long_roots": {
+  "files": 1,
+  "row_groups": 47,
+  "rows": 93,
+  "bytes": 57121,
+  "index_bytes": 38087,
+  "index_row_groups": 16,
+  "top_bytes": 4693
+ },
+ "long_rollups": {
+  "files": 1,
+  "row_groups": 223,
+  "rows": 446,
+  "bytes": 254051,
+  "index_bytes": 163483,
+  "index_row_groups": 75,
+  "top_bytes": 10931
+ },
+ "short_delta": {
+  "rows": 426
+ },
+ "short_day": {
+  "heavy_touched": 312,
+  "probes": 19,
+  "probes_existed": 2,
+  "candidates": 0,
+  "affected": 30,
+  "restated": 17,
+  "base_counted": 27,
+  "heavy_new": 41,
+  "rollup_rows": 1036,
+  "dcount_rows": 74,
+  "reads": {
+   "any": 19,
+   "any_decoded": 22,
+   "any_index": 2,
+   "rows": 68,
+   "index_reads": 118,
+   "index_bytes": 156799,
+   "groups_read": 203,
+   "group_bytes": 125879
+  }
+ },
+ "short_roots": {
+  "files": 1,
+  "row_groups": 213,
+  "rows": 426,
+  "bytes": 251043,
+  "index_bytes": 162298,
+  "index_row_groups": 71,
+  "top_bytes": 10700
+ },
+ "short_rollups": {
+  "files": 1,
+  "row_groups": 518,
+  "rows": 1036,
+  "bytes": 581481,
+  "index_bytes": 371500,
+  "index_row_groups": 173,
+  "top_bytes": 21080
+ }
+}

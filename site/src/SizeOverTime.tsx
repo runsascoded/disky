@@ -9,13 +9,16 @@ import { boolParam, useUrlState } from 'use-prms'
 import { shortName } from './UserChip'
 import { useStore, useStoreFetch } from './store'
 import { useUnits } from './units'
-import { Skeleton } from './Busy'
-import { bandCallouts, pickAnnotations, relativeSeries, stackSeries, unitTicks, youngestGenesis } from './series'
-import { DAY, fmtScan } from './scan'
+import { fmtBytesStep } from './types'
+import { bandCallouts, pickAnnotations, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
+import { DAY, fmtScan, scanInstant, type ScanLabel, type ScanTimes } from './scan'
 import type { Band } from './series'
 import { stringParam } from 'use-prms'
 import { perf, usePerfCommit } from './perf'
 import { SERIES_MAX_PATHS } from '../functions/_lib/seriesLimits'
+import { ApiError, apiError } from './filterCaps'
+import { LoadFailure } from './LoadFailure'
+import { SeriesEmpty } from './SeriesEmpty'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -23,7 +26,7 @@ import { SERIES_MAX_PATHS } from '../functions/_lib/seriesLimits'
 // precomputed per prefix and nothing is floored.
 
 interface Pt { x: number; y: number; y0?: number }
-interface Series { path: string; points: { date: string; b: number; o: number }[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
+interface Series { path: string; points: { date: string; b: number; o: number }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
 
 // Default prominence-suppression radius for the local-extrema callouts, in days
 // (≈6 scans at the 12-hourly cadence): peaks/dips within this of a more
@@ -121,17 +124,13 @@ export const dateOfX = (x: number) => {
   return iso.slice(11, 16) === '00:00' ? iso.slice(0, 10) : `${iso.slice(0, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}`
 }
 const fmtX = (x: number) => new Date(x).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
-// The tooltip's x: the scan's canonical label (`fmtScan`) — a sub-daily scan
-// shows its local 12-hour time with a bare a/p (`9/23 8:01a`), exactly like the
-// scan dropdown/header; a date-only scan stays a bare date. Distinguishes the
-// two scans of a day, which `fmtX`'s date-only axis label can't.
-const fmtXTip = (x: number) => fmtScan(dateOfX(x))
-// A scan's instant: `YYYY-MM-DD` = UTC midnight, `YYYY-MM-DDTHHMM` = that
-// UTC time. Two scans a day must not share an x (the bands key by x, and a
-// shared x drew the total as a vertical step against the band).
-export const xOfScan = (d: string) => {
-  const m = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2})(\d{2}))?$/.exec(d)
-  return m ? new Date(`${m[1]}T${m[2] ?? '00'}:${m[3] ?? '00'}:00Z`).getTime() : new Date(d.slice(0, 10)).getTime()
+// A scan's instant: `YYYY-MM-DDTHHMM` = that UTC time, `YYYY-MM-DD` = its
+// start when known (`times`), else UTC midnight. Two scans a day must not share
+// an x (the bands key by x, and a shared x drew the total as a vertical step
+// against the band).
+export const xOfScan = (d: string, times?: ScanTimes) => {
+  const t = scanInstant(d, times)
+  return Number.isNaN(t) ? new Date(d.slice(0, 10)).getTime() : t
 }
 // Signed formats for the relative modes: `+1.2 Ti` / `−340 Gi` / `0`, `+3.1%`.
 const signed = (y: number, mag: string) => (y < 0 ? `−${mag}` : y > 0 ? `+${mag}` : mag)
@@ -140,20 +139,38 @@ const fmtPct = (y: number) => {
   return a === 0 ? '0%' : signed(y, `${a >= 10 ? a.toFixed(0) : a.toFixed(1)}%`)
 }
 
-export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate, onBrush, window: win, scopeLabel = 'all buckets', paths, filterLabel }: {
+export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, ledgerRev, scopeReady = true, onPickDate, onBrush, window: win, scopeLabel = 'all buckets', refused, paths, pathsTotal, queryOnly, filterLabel, filterQs }: {
   /** The store's root scope word for the unscoped subtitle (`all buckets`, `the whole bucket`). */
   scopeLabel?: string
+  /** The page view's filter refusal (`term-too-common`, …): no match roots to sum, so the series is never asked
+   *  for, and the chart's slot states the refusal instead. */
+  refused?: unknown
   /** The page filter's match roots: the series is their sum per scan. */
   paths?: string[]
+  /** The match roots' exact count (`matchCount.n`): more than `SERIES_MAX_PATHS` asks with the query alone. */
+  pathsTotal?: number
+  /** The filter's view was a rollup (a heavy literal): `paths` lists only some match roots, so the series
+   * is asked for the query alone (the server sums the rollup per scan). */
+  queryOnly?: boolean
   /** The filter text, for the subtitle. */
   filterLabel?: string
+  /** The filter as query params (`&q=…&qs=…`): a static-index literal is summed per scan server-side
+   *  from that scan's own match roots, whatever their number; `paths` is the fallback. */
+  filterQs?: string
   scans: string[]
+  /** The date-only scans' known starts (`useScan`): each sits at its start. */
+  times?: ScanTimes
+  /** A scan's label (the page's `scanLabeler`) — the tooltip's x. */
+  fmt?: ScanLabel
   prefix: string
   /** The owner axis's user: their bytes under `prefix`, per scan. */
   user?: string | null
   /** The ownership ledger's revision: a user or pool series folds the live
    * assignments server-side, so an assignment refetches it. */
   ledgerRev?: string
+  /** The owner axis is final (`ownerScopeReady`): until then `user` / `pool` may not be what the page
+   *  asked for, and the series waits rather than fetch a scope it will drop. */
+  scopeReady?: boolean
   /** The owner axis's pool — `unowned` = bytes no person owns, `owned`
    * = bytes some person owns — under `prefix`, per scan. `user` wins. */
   pool?: 'unowned' | 'owned' | null
@@ -164,7 +181,7 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
   /** The page's current diff window (scan ids), shaded on the chart. */
   window?: [string, string]
 }) {
-  const { fmtBytes, units } = useUnits()
+  const { fmtBytes, units, suffixB } = useUnits()
   const [fitP, setFitP] = useUrlState('fit', boolParam)
   const yFrom: YFrom = fitP ? 'data' : 'zero'
   const setYFrom = (y: YFrom) => setFitP(y === 'data')
@@ -195,10 +212,11 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
 
   // The store root, unscoped: one trace per root (specs/done/root-geneses.md §2).
   const split = !prefix && !user && !pool && !paths?.length && !filterLabel
-  const scope = (user ? `&lens=user:${encodeURIComponent(user)}` : pool ? `&o=${pool}` : '') + (paths?.length ? `&paths=${encodeURIComponent(paths.join(','))}` : '') + (split ? '&split=roots' : '')
-  // A filter with more match roots than one series request charts: say so,
-  // rather than send a request the server refuses (or the URL can't carry).
-  const tooMany = (paths?.length ?? 0) > SERIES_MAX_PATHS
+  // A filter with more match roots than one series request charts sends only the query: the server
+  // answers it from the static name index, or refuses (400) and the chart says why.
+  const nPaths = pathsTotal ?? paths?.length ?? 0
+  const overMax = nPaths > SERIES_MAX_PATHS
+  const scope = (user ? `&lens=user:${encodeURIComponent(user)}` : pool ? `&o=${pool}` : '') + (paths?.length && !overMax && !queryOnly ? `&paths=${encodeURIComponent(paths.join(','))}` : '') + (filterLabel && filterQs ? filterQs : '') + (split ? '&split=roots' : '')
   // The subtree's store: its key in the query key (two mounted stores may
   // share a prefix spelling), its `store=` on the request.
   const store = useStore()
@@ -207,29 +225,39 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
     queryKey: ['series', store.key, prefix, scope, scans.length, user || pool ? ledgerRev : null],
     // Under a filter, wait for its match roots: the whole-store series is not
     // what the page asked for.
-    enabled: scans.length > 1 && !(filterLabel && !paths?.length) && !tooMany,
+    enabled: scopeReady && scans.length > 1 && !(filterLabel && !paths?.length && !((queryOnly || overMax) && filterQs)) && !(overMax && !filterQs),
     staleTime: 5 * 60_000,
     queryFn: async () => {
       const pf = perf.start('series', `${prefix || '/'}${scope}|n${scans.length}`)
       const r = await pf.track(sfetch(`/api/series?path=${encodeURIComponent(prefix)}${scope}`, { credentials: 'include' }))
-      if (!r.ok) { pf.fail(); throw new Error(`series: ${r.status}`) }
+      if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
       const j = await r.json() as Series
       pf.decoded()
       return j
     },
   })
   usePerfCommit('series')
+  // Too many match roots for `paths=`, and the server couldn't sum the query itself.
+  const tooMany = overMax && (!filterQs || (seriesQ.error instanceof ApiError && seriesQ.error.status === 400))
 
   const label = user ? shortName(user) : pool ?? (prefix || 'total')
   // The x-range cut: points on or after (latest − N days). Applied to every
   // trace, so the stack, the total and the callouts agree.
   const xFrom = useMemo(() => {
     const days = X_RANGES.find(([r]) => r === xRange)![1]
-    const last = seriesQ.data?.points.reduce((m, p) => Math.max(m, xOfScan(p.date)), 0) ?? 0
+    const last = seriesQ.data?.points.reduce((m, p) => Math.max(m, xOfScan(p.date, times)), 0) ?? 0
     return days ? last - days * 86_400_000 : -Infinity
-  }, [seriesQ.data, xRange])
-  const toPts = (points: { date: string; b: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date), y: p.b })).filter(p => p.x >= xFrom).sort((a, b) => a.x - b.x)
-  const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xFrom])
+  }, [seriesQ.data, xRange, times])
+  const toPts = (points: { date: string; b: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: p.b })).filter(p => p.x >= xFrom).sort((a, b) => a.x - b.x)
+  const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xFrom, times])
+  // Scans the answer doesn't cover (a filter's static index): gaps in the line, with a muted note — never zeros.
+  const gaps = useMemo(() => seriesGaps(seriesQ.data?.unindexed, total.map(p => p.x), d => xOfScan(d, times), xFrom, fmtX), [seriesQ.data, total, times, xFrom])
+  // x → the scan id it plots (a pick or brush names that exact scan, and the
+  // tooltip labels it); an x no point sits on falls back to its UTC minute.
+  const idOfX = useMemo(() => {
+    const m = new Map((seriesQ.data?.points ?? []).map(p => [xOfScan(p.date, times), p.date]))
+    return (x: number) => m.get(x) ?? dateOfX(x)
+  }, [seriesQ.data, times])
   // The roots' traces (split mode), keyed by bucket, coloured by slot (largest
   // at the latest scan = slot 0, as the map colours the root's children).
   const roots = useMemo(() => {
@@ -239,7 +267,7 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
     const bySize = [...rs].sort((a, b) => latest(b) - latest(a))
     const slot = new Map(bySize.map((r, i) => [r.path, i]))
     return rs.map(r => ({ key: r.path, color: DEFAULT_PALETTE[slot.get(r.path)! % DEFAULT_PALETTE.length], points: toPts(r.points) }))
-  }, [seriesQ.data, xFrom])
+  }, [seriesQ.data, xFrom, times])
   // The x before which the total lacks a root — the total is dashed there.
   const genesis = useMemo(() => youngestGenesis(roots), [roots])
   // The relative modes' traces: each root, and the total, against its own
@@ -275,9 +303,23 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
   // annotate the total (stacked: each band's own height too, inside the band;
   // lines in bytes: nothing — the total isn't drawn and six lines' worth of
   // labels would be noise). Picking is a pure helper (`pickAnnotations`, tested).
-  const fmtY = values === 'pct' ? fmtPct : relative ? (y: number) => signed(y, fmtBytes(Math.abs(y))) : fmtBytes
+  const yTickValues = useMemo(() => {
+    if (values === 'pct') return undefined // the chart's own nice ticks, formatted as %
+    const ys = series.filter(s => s.plot !== false).flatMap(s => s.points.map(p => p.y))
+    if (!ys.length) return undefined
+    const max = Math.max(0, ...ys)
+    const min = relative ? Math.min(0, ...ys) : yFrom === 'data' ? Math.min(...ys) : 0
+    // Fit mode pads 5% each side (TimeSeries), so tick that slightly wider range.
+    const pad = yFrom === 'data' ? (max - min) * 0.05 : 0
+    return unitTicks(relative ? min - pad : Math.max(0, min - pad), max + pad, units === 'iec' ? 1024 : 1000)
+  }, [series, units, yFrom, values, relative])
+  // A fitted axis can span a sliver of a large total: its labels (ticks,
+  // tooltip, callouts) carry enough decimals to tell the ticks apart.
+  const tickStep = yTickValues && yTickValues.length > 1 ? yTickValues[1] - yTickValues[0] : 0
+  const fmtFit = (y: number) => fmtBytesStep(y, tickStep, units, suffixB)
+  const fmtY = values === 'pct' ? fmtPct : relative ? (y: number) => signed(y, fmtBytes(Math.abs(y))) : yFrom === 'data' ? fmtFit : fmtBytes
   const annotations = useMemo((): Annotation[] => {
-    const winX = win ? [xOfScan(win[0]), xOfScan(win[1])] as [number, number] : undefined
+    const winX = win ? [xOfScan(win[0], times), xOfScan(win[1], times)] as [number, number] : undefined
     const radius = extrema ? radiusDays * DAY : undefined
     const floor = floorPct / 100
     if (roots.length && !stacked && !relative) return []
@@ -300,16 +342,6 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
     return out
   }, [series, relTotal, roots, stacked, relative, win, extrema, radiusDays, floorPct, fmtY, fmtBytes])
 
-  const yTickValues = useMemo(() => {
-    if (values === 'pct') return undefined // the chart's own nice ticks, formatted as %
-    const ys = series.filter(s => s.plot !== false).flatMap(s => s.points.map(p => p.y))
-    if (!ys.length) return undefined
-    const max = Math.max(0, ...ys)
-    const min = relative ? Math.min(0, ...ys) : yFrom === 'data' ? Math.min(...ys) : 0
-    // Fit mode pads 5% each side (TimeSeries), so tick that slightly wider range.
-    const pad = yFrom === 'data' ? (max - min) * 0.05 : 0
-    return unitTicks(relative ? min - pad : Math.max(0, min - pad), max + pad, units === 'iec' ? 1024 : 1000)
-  }, [series, units, yFrom, values, relative])
 
   const firstX = total[0]?.x
   if (scans.length < 2) return null
@@ -375,9 +407,10 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
           </label>
         </div>
       )}
-      {seriesQ.isError && <p className="sub"><i>series unavailable</i></p>}
+      {/* A refetch's failure over a chart still drawn; with no chart, the slot below states it. */}
+      {seriesQ.isError && !tooMany && (allZero || series.length > 0) && <LoadFailure err={seriesQ.error} what="series" className="sub" onRetry={() => void seriesQ.refetch()} />}
       {tooMany ? (
-        <p className="loading">size over time charts up to {SERIES_MAX_PATHS} matches; this filter has {paths!.length.toLocaleString()}. Narrow it to chart.</p>
+        <p className="loading">size over time charts up to {SERIES_MAX_PATHS} matches; this filter has {nPaths.toLocaleString()}. Narrow it to chart.</p>
       ) : allZero ? (
         <p className="loading">
           {user ? <><b>{shortName(user)}</b> owns nothing{prefix ? <> under <code>{prefix}</code></> : ''} in any scan</>
@@ -392,19 +425,21 @@ export function SizeOverTime({ scans, prefix, user, pool, ledgerRev, onPickDate,
           getY0={stacked ? p => p.y0 ?? 0 : undefined}
           formatY={fmtY}
           formatX={fmtX}
-          formatTipX={fmtXTip}
+          formatTipX={x => fmt(idOfX(x))}
           yTickValues={yTickValues}
           yFrom={relative ? 'zero' : yFrom}
           yLabel={values === 'pct' ? 'growth' : relative ? 'bytes since start' : 'stored bytes'}
           height={220}
           annotations={annotations}
-          onPickX={onPickDate && (x => onPickDate(dateOfX(x)))}
-          onBrush={onBrush && ((x0, x1) => onBrush(dateOfX(x0), dateOfX(x1)))}
-          window={win && [xOfScan(win[0]), xOfScan(win[1])]}
+          onPickX={onPickDate && (x => onPickDate(idOfX(x)))}
+          onBrush={onBrush && ((x0, x1) => onBrush(idOfX(x0), idOfX(x1)))}
+          window={win && [xOfScan(win[0], times), xOfScan(win[1], times)]}
+          gaps={gaps.xs}
         />
       ) : (
-        seriesQ.isLoading ? <Skeleton height={220} label="loading series…" /> : <p className="loading">fewer than two scans hold this path</p>
+        <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />
       )}
+      {gaps.note && !tooMany && <p className="gap-note">{gaps.note}</p>}
       {roots.length > 0 && (
         <div className="legend roots-legend">
           {roots.map(r => (

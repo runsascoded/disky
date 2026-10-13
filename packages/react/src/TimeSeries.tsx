@@ -45,21 +45,20 @@ export interface Series<T> {
 export interface Annotation {
   x: number
   y: number
-  /** A band callout: the label sits centred between `y0` and `y` (inside the
-   *  band) instead of beside the point, and is skipped when the band is too
-   *  thin on screen to hold it. */
+  /** A band callout: the label hugs the upper trace inside `[y0, y]`, and is
+   *  skipped when the trace is off screen or the band is too thin to hold it. */
   y0?: number
   label: string
   below?: boolean
 }
 
-/** A band callout needs this many px of band to sit inside. */
-const MIN_BAND_PX = 13
 /** Annotation font size, and the box estimate collision culling uses: a
  *  semibold digit run is ~0.62 em wide per char, a line ~1.15 em tall. */
 const ANNO_PT = 10.5
 const ANNO_CHAR_W = ANNO_PT * 0.62
 const ANNO_LINE_H = ANNO_PT * 1.15
+const BAND_INSET = 2
+const MIN_BAND_PX = ANNO_LINE_H + 2 * BAND_INSET
 
 interface PlacedAnnotation { a: Annotation; px: number; py: number; anchor: 'start' | 'middle' | 'end'; dx: number }
 
@@ -84,11 +83,11 @@ function placeAnnotations(
     let py: number
     let y0: number
     if (a.y0 != null) {
-      const t = Math.max(top, Math.min(yToPx(a.y), yToPx(a.y0)))
+      const t = Math.min(yToPx(a.y), yToPx(a.y0))
       const b = Math.min(top + plotH, Math.max(yToPx(a.y), yToPx(a.y0)))
-      if (b - t < MIN_BAND_PX) continue
-      py = (t + b) / 2
-      y0 = py - ANNO_LINE_H / 2
+      if (t < top || b - t < MIN_BAND_PX) continue
+      y0 = t + BAND_INSET
+      py = y0 + ANNO_LINE_H / 2
     } else {
       py = yToPx(a.y) + (a.below ? 14 : -7)
       y0 = py - ANNO_PT // `py` is the baseline
@@ -148,6 +147,11 @@ export interface TimeSeriesProps<T> {
   /** A highlighted x-window (e.g. the diff range the page is showing), drawn
    *  as a shaded band behind the series. */
   window?: [number, number]
+  /** x's with no data (e.g. scans an index doesn't cover): the x-range spans
+   *  them, each stretch of them is shaded, and every line and area breaks
+   *  across them instead of joining its neighbours — a missing value is never
+   *  drawn as a value. */
+  gaps?: number[]
   /** Extra CSS on the outer wrapper. */
   className?: string
   style?: CSSProperties
@@ -157,7 +161,33 @@ export interface TimeSeriesProps<T> {
 
 const DEFAULT_COLORS = DEFAULT_PALETTE
 
+/** A series' sorted x's cut at the gaps: index ranges `[i, j]` (inclusive) with no gap strictly between
+ *  consecutive points — each drawn as its own line. */
+export function splitAtGaps(xs: readonly number[], gaps: readonly number[]): [number, number][] {
+  if (!xs.length) return []
+  const g = [...gaps].sort((a, b) => a - b)
+  const out: [number, number][] = []
+  let start = 0
+  for (let i = 1; i < xs.length; i++) if (g.some(x => x > xs[i - 1] && x < xs[i])) { out.push([start, i - 1]); start = i }
+  out.push([start, xs.length - 1])
+  return out
+}
+
+/** The gaps' stretches `[from, to]`: consecutive gap x's with no data x between them. */
+export function gapStretches(gaps: readonly number[], xs: readonly number[]): [number, number][] {
+  const g = [...new Set(gaps)].sort((a, b) => a - b)
+  const out: [number, number][] = []
+  for (const x of g) {
+    const last = out[out.length - 1]
+    if (last && !xs.some(d => d > last[1] && d < x)) last[1] = x
+    else out.push([x, x])
+  }
+  return out
+}
+
 const PAD = { top: 12, right: 16, bottom: 24, left: 56 }
+/** Height of the window's grip: a strip along the band's top edge that slides the window (anywhere else brushes). */
+const GRIP = 12
 
 function niceTicks(min: number, max: number, count: number, log = false): number[] {
   if (log) {
@@ -200,6 +230,7 @@ export function TimeSeries<T>({
   onPickX,
   onBrush,
   window: xWindow,
+  gaps,
   className,
   style,
   height,
@@ -233,6 +264,7 @@ export function TimeSeries<T>({
     for (const s of series) for (const p of s.points) xs.push(getX(p))
     for (const s of fitTo) for (const p of s.points) ys.push(getY(p))
     if (xs.length === 0) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
+    xs.push(...(gaps ?? []))
     const yMinRaw = Math.min(...ys)
     const yMaxRaw = Math.max(...ys)
     const pad = fit ? Math.max(yMaxRaw - yMinRaw, Math.abs(yMaxRaw) * 0.01) * 0.05 : 0
@@ -245,7 +277,7 @@ export function TimeSeries<T>({
       yMin: yScale === 'log' ? Math.max(1, yMinRaw) : fit ? yMinRaw - pad : below,
       yMax: fit ? yMaxRaw + pad : yMaxRaw > 0 ? yMaxRaw * 1.05 : yMaxRaw < 0 ? 0 : 1,
     }
-  }, [series, getX, getY, yScale, yFrom])
+  }, [series, getX, getY, yScale, yFrom, gaps])
 
   const plotW = Math.max(0, dims.w - PAD.left - PAD.right)
   const plotH = Math.max(0, dims.h - PAD.top - PAD.bottom)
@@ -292,10 +324,10 @@ export function TimeSeries<T>({
   const dragRef = useRef<{ x0: number; x1: number } | null>(null)
   const [drag, setDragState] = useState<{ x0: number; x1: number } | null>(null)
   const setDrag = (d: { x0: number; x1: number } | null) => { dragRef.current = d; setDragState(d) }
-  // A drag that starts inside the shown window SLIDES it (same width in points,
-  // clamped to the data) instead of brushing a new one; a drag that starts
-  // outside brushes as before. Held in point indices so the window keeps its
-  // point count while the x spacing varies. (Upstreamed from mgu `gcs`.)
+  // A drag that starts on the window's grip (the strip along its top edge)
+  // SLIDES it (same width in points, clamped to the data); a drag anywhere
+  // else, inside the window included, brushes a new one. Held in point indices
+  // so the window keeps its point count while the x spacing varies.
   const slideRef = useRef<{ i0: number; span: number; start: number } | null>(null)
   const xsSorted = useMemo(() => [...allXs].sort((a, b) => a - b), [allXs])
   const idxOf = (x: number): number => {
@@ -309,9 +341,18 @@ export function TimeSeries<T>({
     const el = svgRef.current
     return el ? snapX(clientX - el.getBoundingClientRect().left) : null
   }
+  /** Whether a pointer at (x, clientY) is on the window's grip. */
+  const onGrip = (x: number | null, clientY: number): boolean => {
+    const el = svgRef.current
+    if (!el || !inWindow(x)) return false
+    const y = clientY - el.getBoundingClientRect().top
+    return y >= PAD.top && y <= PAD.top + GRIP
+  }
+  const [hoverGrip, setHoverGrip] = useState(false)
   const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const x = xAt(e.clientX)
     setHoverX(x)
+    setHoverGrip(onGrip(x, e.clientY))
     const d = dragRef.current
     if (!d || x == null) return
     const s = slideRef.current
@@ -339,9 +380,9 @@ export function TimeSeries<T>({
     if (x == null) return
     setHoverX(x)
     e.currentTarget.setPointerCapture?.(e.pointerId)
-    // A press inside the current window slides it (keeps its point span); a
-    // press outside brushes a fresh window.
-    if (inWindow(x) && xWindow && xsSorted.length > 1) {
+    // A press on the window's grip slides it (keeps its point span); any other
+    // press brushes a fresh window.
+    if (onGrip(x, e.clientY) && xWindow && xsSorted.length > 1) {
       const i0 = idxOf(xWindow[0])
       const span = Math.max(1, idxOf(xWindow[1]) - i0)
       slideRef.current = { i0, span, start: idxOf(x) }
@@ -383,6 +424,23 @@ export function TimeSeries<T>({
       }
     })
 
+  // The tooltip keeps clear of the trace it describes: on the far side of the
+  // crosshair from the plot's middle, and in the half of the plot the hovered
+  // points don't reach. Hidden while dragging (the band shows the range).
+  const tip = (() => {
+    if (hoverX == null || drag || !hoverPoints.some(p => p.y != null)) return null
+    const px = xToPx(hoverX)
+    const tops = series.flatMap(s => {
+      const pt = s.points.find(p => getX(p) === hoverX)
+      return pt && s.plot !== false ? [yToPx(getY(pt))] : []
+    })
+    const high = tops.length > 0 && Math.min(...tops) < PAD.top + plotH / 2
+    return {
+      ...(px > PAD.left + plotW / 2 ? { right: dims.w - px + 8 } : { left: px + 8 }),
+      ...(high ? { bottom: PAD.bottom + 4 } : { top: PAD.top + 4 }),
+    }
+  })()
+
   return (
     <div
       ref={wrapRef}
@@ -395,12 +453,12 @@ export function TimeSeries<T>({
           width={dims.w}
           height={dims.h}
           onPointerMove={onMove}
-          onPointerLeave={() => { if (!dragRef.current) setHoverX(null) }}
+          onPointerLeave={() => { if (!dragRef.current) { setHoverX(null); setHoverGrip(false) } }}
           onPointerDown={onDown}
           // With a brush, clicks resolve in mouseup (a zero-width drag) — a
           // separate click handler would fire the pick twice.
           onClick={onPickX && !onBrush ? () => { if (hoverX != null) onPickX(hoverX) } : undefined}
-          style={{ display: 'block', cursor: drag ? (slideRef.current ? 'grabbing' : 'col-resize') : onBrush ? (inWindow(hoverX) ? 'grab' : 'crosshair') : onPickX ? 'pointer' : undefined, userSelect: 'none', touchAction: onBrush ? 'pan-y' : undefined }}
+          style={{ display: 'block', cursor: drag ? (slideRef.current ? 'grabbing' : 'col-resize') : onBrush ? (hoverGrip ? 'grab' : 'crosshair') : onPickX ? 'pointer' : undefined, userSelect: 'none', touchAction: onBrush ? 'pan-y' : undefined }}
         >
           {/* Window band (the highlighted x-range, or the drag in progress) */}
           {band && band[1] > band[0] && (
@@ -421,6 +479,33 @@ export function TimeSeries<T>({
                   y2={PAD.top + plotH}
                   stroke="var(--dt-ts-window-edge, rgba(255,255,255,0.35))"
                   strokeDasharray={drag ? undefined : '2 3'}
+                />
+              ))}
+              {/* The grip: drag it to slide the window (brushing starts anywhere else). */}
+              {onBrush && (!drag || slideRef.current) && (
+                <rect
+                  className="dt-ts-grip"
+                  x={xToPx(band[0])}
+                  y={PAD.top}
+                  width={Math.max(0, xToPx(band[1]) - xToPx(band[0]))}
+                  height={GRIP}
+                  fill={hoverGrip || drag ? 'var(--dt-ts-grip-hover, rgba(255,255,255,0.28))' : 'var(--dt-ts-grip, rgba(255,255,255,0.14))'}
+                />
+              )}
+            </g>
+          )}
+          {/* Gaps: each stretch of x's without data, shaded. */}
+          {gaps && gaps.length > 0 && (
+            <g pointerEvents="none" className="dt-ts-gaps">
+              {gapStretches(gaps, allXs).map(([a, b]) => (
+                <rect
+                  key={`g${a}`}
+                  className="dt-ts-gap"
+                  x={xToPx(a) - (a === b ? 1 : 0)}
+                  y={PAD.top}
+                  width={Math.max(2, xToPx(b) - xToPx(a))}
+                  height={plotH}
+                  fill="var(--dt-ts-gap, rgba(139,148,158,0.12))"
                 />
               ))}
             </g>
@@ -510,23 +595,28 @@ export function TimeSeries<T>({
             const color = s.color ?? DEFAULT_COLORS[si % DEFAULT_COLORS.length]
             const sortedPts = [...s.points].sort((a, b) => getX(a) - getX(b))
             const seg = (pts: T[]) => pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xToPx(getX(p))} ${yToPx(getY(p))}`).join(' ')
-            const linePath = seg(sortedPts)
-            // A band's lower edge is its baseline, walked back; a plain area
-            // drops to the axis.
-            const base = getY0
-              ? [...sortedPts].reverse().map(p => `L ${xToPx(getX(p))} ${yToPx(getY0(p))}`).join(' ')
-              : `L ${xToPx(getX(sortedPts[sortedPts.length - 1]))} ${PAD.top + plotH} L ${xToPx(getX(sortedPts[0]))} ${PAD.top + plotH}`
-            const areaPath = (s.area ?? area) ? `${linePath} ${base} Z` : null
-            // `dashBeforeX`: the line up to (and joining) the first point at or
-            // past it is dashed; the rest solid.
-            const cut = s.dashBeforeX != null ? sortedPts.findIndex(p => getX(p) >= s.dashBeforeX!) : -1
-            const dashed = cut > 0 ? seg(sortedPts.slice(0, cut + 1)) : null
-            const solid = cut > 0 ? seg(sortedPts.slice(cut)) : linePath
+            // One run per stretch between gaps (`splitAtGaps`): never a line across missing data.
+            const runs = splitAtGaps(sortedPts.map(getX), gaps ?? []).map(([i, j]) => sortedPts.slice(i, j + 1))
+            const drawn = runs.map(run => {
+              const linePath = seg(run)
+              // A band's lower edge is its baseline, walked back; a plain area
+              // drops to the axis.
+              const base = getY0
+                ? [...run].reverse().map(p => `L ${xToPx(getX(p))} ${yToPx(getY0(p))}`).join(' ')
+                : `L ${xToPx(getX(run[run.length - 1]))} ${PAD.top + plotH} L ${xToPx(getX(run[0]))} ${PAD.top + plotH}`
+              const areaPath = (s.area ?? area) ? `${linePath} ${base} Z` : null
+              // `dashBeforeX`: the line up to (and joining) the first point at or
+              // past it is dashed; the rest solid.
+              const cut = s.dashBeforeX != null ? run.findIndex(p => getX(p) >= s.dashBeforeX!) : -1
+              const dashed = cut > 0 ? seg(run.slice(0, cut + 1)) : null
+              const solid = cut > 0 ? seg(run.slice(cut)) : linePath
+              return { areaPath, dashed, solid }
+            })
             return (
               <g key={s.key}>
-                {areaPath && <path d={areaPath} fill={color} fillOpacity={getY0 ? 0.35 : 0.15} />}
-                {dashed && <path d={dashed} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} strokeDasharray="4 4" />}
-                <path d={solid} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} />
+                {drawn.map((d, i) => d.areaPath && <path key={`a${i}`} d={d.areaPath} fill={color} fillOpacity={getY0 ? 0.35 : 0.15} />)}
+                {drawn.map((d, i) => d.dashed && <path key={`d${i}`} d={d.dashed} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} strokeDasharray="4 4" />)}
+                {drawn.map((d, i) => <path key={`s${i}`} className="dt-ts-line" d={d.solid} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} />)}
                 {(s.dots ?? true) && sortedPts.map((p, i) => (
                   <circle
                     key={i}
@@ -579,12 +669,12 @@ export function TimeSeries<T>({
         </svg>
       )}
       {/* Tooltip */}
-      {hoverX != null && hoverPoints.some(p => p.y != null) && (
+      {tip && hoverX != null && (
         <div
+          className="dt-ts-tip"
           style={{
             position: 'absolute',
-            left: Math.min(xToPx(hoverX) + 8, dims.w - 180),
-            top: PAD.top + 4,
+            ...tip,
             background: 'var(--dt-ts-tip-bg, rgba(20,20,24,0.94))',
             color: 'var(--dt-ts-tip-ink, #e6e6ea)',
             border: '1px solid var(--dt-ts-tip-border, #333)',

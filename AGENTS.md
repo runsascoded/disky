@@ -156,7 +156,9 @@ disk-tree tiers L2        # Cut the path store's sorts (spec `path-store.md` §1
                           # local path or an fsspec URL (copied once through `blobfs.open_read`): `path` =
                           # every row (objects + dirs) sorted `(depth, path, …labels)`; `bysize` = the same
                           # rows sorted `(⌊log2 size⌋ desc, path, …labels)`, size 0 last, the bucket computed
-                          # in SQL (never stored). 8K-row groups (`-r`), `tier`/`sort` (+ `bucket: log2`) in
+                          # in SQL (never stored); over label slices each row carries its path's total `tot` and
+                          # the sort keys on `⌊log2 tot⌋` (spec `bysize-path-total.md`; the `-by-usr` copy stays
+                          # per slice). 8K-row groups (`-r`), `tier`/`sort` (+ `bucket: log2`) in
                           # the parquet metadata, the source's listing format inherited. `-t path,bysize`
                           # (default both), `-s STEM` (may be a URL: cut locally, uploaded), `-g` writes the
                           # `.groups.json` footer sidecar beside each (`find/groups.py`; carries `b_min` now),
@@ -168,6 +170,13 @@ disk-tree tiers L2        # Cut the path store's sorts (spec `path-store.md` §1
                           # `dt-cloud index-write` (cw) and `dt-cloud path-index -P` (gcs, the r2 demo)
                           # cut the same two sorts from their bucket unions — objects as rows, L2 column
                           # names — under `path-index[-bysize][-by-user].parquet` (spec §4.2–4.4)
+dt-cloud index-recut SRC OUT  # Re-cut a published generation's `bysize` from its `path` sort into a NEW
+                          # generation dir (never over one): `-c` checks root + depth-1 views against per-path
+                          # sums over `path` (`bysize_check`); then `index-sync -v bysize -g <gen>` points at it
+dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the interval store as a run beside its
+                          # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
+                          # prepare → ranges (Batch) → publish (cut, binary-counter merges, manifest) → R2 → prune,
+                          # strictly in scan-id order (exit 3: not published / not next; `-c` catches up)
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for
@@ -250,6 +259,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 - `POST /api/app-link` → `GET /auth/app-link?token=` — the macOS app's sign-in hand-off ("Open in disky" in the user menu): a session mints a single-use, 60 s grant for its own email + scopes (same-origin POST only); the app's webview redeems it into an ordinary email session and the grant is revoked. Contract: `specs/app-link.md`
 
 ## Development
+
+During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.
 
 ```bash
 # Python setup — one uv workspace: the engine (root) + the cloud overlay

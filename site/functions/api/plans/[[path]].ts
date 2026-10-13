@@ -6,7 +6,9 @@
 //   PATCH  /api/plans/:id          { state: 'closed' }                     admin
 //   POST   /api/plans/:id/items    { prefixes: [...], note? }              admin
 //   DELETE /api/plans/:id/items    { prefixes: [...] }                     admin
-//   POST   /api/plans/stage        { prefixes: [...], note? } -> { plan_id, batch_id, staged, covered, absorbed }
+//   POST   /api/plans/:id/batches/merge { into, ids: [...], note? } -> { into, merged, items }
+//                                                                          admin, or the batches' stager
+//   POST   /api/plans/stage        { prefixes: [...], objects?: [...], note?, as_of? } -> { plan_id, batch_id, staged, staged_objects, covered, absorbed, as_of }
 //                                                                          stager (`STAGING` deployments)
 //   GET    /api/plans/staged       the shared open plan (+ items, batches, emptied batches, runs), or { plan: null }   viewer
 //   GET    /api/plans/run?id=<run> one run's record + its per-band rows      viewer
@@ -18,7 +20,8 @@
 // deployment's shape (`STORE_SCHEME` / `STORE_BUCKETS`).
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requireViewer } from "../../_lib/auth.js"
-import { audit, canonicalPrefix, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
+import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
+import { pathScans } from "../../_lib/index.js"
 import { notifyPlan, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
 
 type Env = AuthEnv & NotifyEnv & { DB?: D1Database }
@@ -148,12 +151,24 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
     if (gated instanceof Response) return gated
     if (!shape) return json({ error: `staging ${NO_SHAPE}` }, 503)
     const body = await readBody(ctx.request)
-    const prefixes = Array.isArray(body.prefixes)
-      ? (body.prefixes as unknown[]).filter((x): x is string => typeof x === "string")
-      : []
+    const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []
+    // `prefixes`: folders; `objects`: exact keys (specs/file-assign.md) —
+    // the kind is which list an item came in, never its shape.
+    const prefixes = strs(body.prefixes)
+    const objects = strs(body.objects)
     const note = typeof body.note === "string" ? body.note : null
+    // The scan the gesture stages against: a named scan date that exists,
+    // else the latest scan (none synced yet = null: the dispatch scan stands in).
+    const scans = (await pathScans(ctx.env, true)).results.map(r => r.date)
+    let asOf: string | null = scans.at(-1) ?? null
+    if (body.as_of !== undefined && body.as_of !== null) {
+      if (typeof body.as_of !== "string" || !scans.includes(body.as_of)) {
+        return json({ error: `as_of must be a scan date (${scans.length ? `latest ${scans.at(-1)}` : "no scans yet"})`, as_of: body.as_of }, 400)
+      }
+      asOf = body.as_of
+    }
     const by = gated.email ?? gated.name ?? "guest"
-    const res = await stageItems(db, prefixes, by, note, shape)
+    const res = await stageItems(db, { prefixes, objects }, by, note, shape, asOf)
     if ("error" in res) return json(res, 400)
     // Announce the batch in the plan's Slack thread (specs/done/staged-slack.md),
     // after the response — a Slack hiccup never fails the gesture.
@@ -193,7 +208,8 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
   }
 
   // /api/plans/:id/slack — admin: re-render the plan's Slack thread (parent,
-  // and the stage-batch replies named by `{ replies: { <batch_id>: <ts> } }`),
+  // every coalesced stage reply, and the pre-coalescing stage-batch replies
+  // named by `{ replies: { <batch_id>: <ts> } }`),
   // e.g. after the message format changes. Edits don't notify anyone.
   if (segs.length === 2 && segs[1] === "slack" && method === "POST") {
     const gated = await requireAdmin(ctx)
@@ -220,6 +236,26 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
         { text: `:leftwards_arrow_with_hook: ${who.replace(/@.*$/, "")} ${verb} ${n} ${n === 1 ? "prefix" : "prefixes"}` }))
     }
     return res
+  }
+
+  // /api/plans/:id/batches/merge — fold a chunked staging's batches into one
+  // (a stager may merge their own; `mergeBatches` refuses mixed stagers).
+  if (segs.length === 3 && segs[1] === "batches" && segs[2] === "merge" && method === "POST") {
+    if (!staging) return json({ error: "this deployment does not stage" }, 404)
+    const gated = await requireStager(ctx)
+    if (gated instanceof Response) return gated
+    const who = gated.email ?? gated.name ?? "guest"
+    const body = await readBody(ctx.request)
+    const into = Number(body.into)
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).map(Number) : []
+    if (!Number.isInteger(into) || !ids.length || !ids.every(Number.isInteger)) return json({ error: "into (batch id) and ids (batch ids) required" }, 400)
+    if (!gated.admin) {
+      const rows = (await db.prepare("SELECT created_by FROM stage_batches WHERE id IN (SELECT value FROM json_each(?))").bind(JSON.stringify([into, ...ids])).all<{ created_by: string }>()).results
+      if (rows.some(r => r.created_by.toLowerCase() !== who.toLowerCase())) return json({ error: "not yours to merge" }, 403)
+    }
+    const note = typeof body.note === "string" ? body.note : null
+    const res = await mergeBatches(db, id, into, ids, note, who)
+    return "error" in res ? json({ error: res.error }, res.status) : json(res)
   }
 
   return json({ error: "not found" }, 404)

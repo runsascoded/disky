@@ -27,11 +27,13 @@ refetches."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date as Date, timedelta
+from datetime import timedelta
 from json import load
 from pathlib import Path
 
 from click import Choice, Path as CP, command, option
+
+from .scan_id import scan_time
 
 BG = "#0d1117"
 INK = "#c9d1d9"
@@ -101,14 +103,15 @@ def render_tiers(rows: list[dict], out: Path, title: str, host: str, redact: boo
     sign-in."""
     plt, mdates = _mpl()
 
-    xs = [Date.fromisoformat(r["date"]) for r in rows]
+    # x = each scan's UTC instant: a day can hold several scans (`YYYY-MM-DDTHHMM`).
+    xs = [scan_time(r["date"]).replace(tzinfo=None) for r in rows]
     tot = [sum(r[k] for k, _, _ in TIERS) for r in rows]
     # month-wide x frame: stable early in the month (a 1-scan month otherwise
     # degenerates — zero-width stackplot, tick-label explosion) and days fill
     # in left→right as the month progresses.
     from calendar import monthrange
 
-    m0 = xs[-1].replace(day=1)
+    m0 = xs[-1].replace(day=1, hour=0, minute=0)
     m1 = m0.replace(day=monthrange(m0.year, m0.month)[1])
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 4.6), dpi=200, height_ratios=[1, 1.7], sharex=True)
@@ -171,11 +174,13 @@ def render_quota(
     redact: bool = False,
     diff=None,
     diff_label: str = "",
+    scope: str = "",
 ) -> None:
     """Render the PNG for ``rows`` (each ``{ts, tb}``: a UTC datetime and TiB)
     to ``out``. With ``quota_tib``, the quota line (labelled ``quota_name``)
     and headroom band; with ``diff`` (a :class:`DiffNode` root) the treemap
-    panel below. ``redact`` drops the numbers (y tick labels, the call-out) —
+    panel below. ``scope`` names what both panels measure (the primary
+    bucket, when the digest tracks several) in the header and the treemap's title. ``redact`` drops the numbers (y tick labels, the call-out) —
     the shape of the month without the sizes, for a public README."""
     plt, mdates = _mpl()
 
@@ -230,14 +235,14 @@ def render_quota(
     ax.yaxis.set_major_formatter(lambda v, _: f"{v:,.0f}")
     _weekly_ticks(ax, mdates)
     ax.set_title(title, color=INK, fontsize=14, fontweight="bold", loc="left", pad=10)
-    ax.text(1.0, 1.04, f"{host} · TiB", transform=ax.transAxes, ha="right", va="bottom", color=DIM, fontsize=9)
+    ax.text(1.0, 1.04, f"{host} · {scope + ' · ' if scope else ''}TiB", transform=ax.transAxes, ha="right", va="bottom", color=DIM, fontsize=9)
     if redact:
         ax.tick_params(axis="y", labelleft=False, left=False)
         ax.text(0.0, -0.22, f"sizes omitted — sign in at {host} for the numbers", transform=ax.transAxes, ha="left", va="top", color=DIM, fontsize=8)
 
     if ax2 is not None:
         ax2.set_facecolor(BG)
-        _draw_treemap(ax2, diff, diff_label)
+        _draw_treemap(ax2, diff, diff_label, scope)
 
     _save(fig, out, 1.2)
 
@@ -442,7 +447,7 @@ def _draw_node(ax, node, x: float, y: float, w: float, h: float, depth: int, top
         _draw_node(ax, k, *r, depth + 1)
 
 
-def _draw_treemap(ax, diff: DiffNode, label: str) -> None:
+def _draw_treemap(ax, diff: DiffNode, label: str, scope: str = "") -> None:
     """The nested diff treemap on ``ax`` (axes coords 0..1, y down): the
     top-level dirs squarified by area, each box's kids squarified inside it,
     recursively."""
@@ -454,7 +459,7 @@ def _draw_treemap(ax, diff: DiffNode, label: str) -> None:
     leaves = list(_leaves(diff))
     grew = sum(n.delta for n in leaves if n.delta > 0)
     shrank = -sum(n.delta for n in leaves if n.delta < 0)
-    ax.set_title(f"What changed — {label}", color=INK, fontsize=12, fontweight="bold", loc="left", pad=8)
+    ax.set_title(f"What changed{' in ' + scope if scope else ''} — {label}", color=INK, fontsize=12, fontweight="bold", loc="left", pad=8)
     ax.text(1.0, 1.012, f"grew +{grew / TIB:,.1f} Ti · shrank −{shrank / TIB:,.1f} Ti · area = |Δ|", transform=ax.transAxes, ha="right", va="bottom", color=DIM, fontsize=8.5)
 
 
@@ -470,7 +475,7 @@ def _leaves(node):
 @option("-o", "--out", type=CP(path_type=Path), default=Path("tmp/digest-plot.png"), help="Output PNG")
 @option("-R", "--redact", is_flag=True, help="No sizes (y labels, call-out) — a public README version")
 @option("-t", "--title", default=None, help="Title (default: '<template title> — <Month Year>')")
-@option("-T", "--template", type=Choice(["gcs", "cw"]), default="gcs", help="Which template's panels (and preset title/host/quota)")
+@option("-T", "--template", type=Choice(["gcs", "cw"]), required=True, help="Which template's panels (and preset title/host/quota): an example preset, no default")
 def main(rows_path: Path, out: Path, redact: bool, title: str | None, template: str) -> None:
     from urllib.parse import urlparse
 
@@ -480,7 +485,7 @@ def main(rows_path: Path, out: Path, redact: bool, title: str | None, template: 
     rows = load(open(rows_path))
     host = urlparse(cfg.site_url).netloc
     if template == "gcs":
-        title = title or f"{cfg.title} — {Date.fromisoformat(rows[-1]['date']):%B %Y}"
+        title = title or f"{cfg.title} — {scan_time(rows[-1]['date']):%B %Y}"
         render_tiers(rows, out, title, host, redact=redact)
     else:
         q = cfg.primary_quota

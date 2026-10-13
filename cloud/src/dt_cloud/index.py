@@ -217,11 +217,13 @@ def write_sorts(
     variant_tiers: tuple[str, ...] | None = None,
     search: bool = False,
     search_opts: dict | None = None,
+    tiers: tuple[str, ...] | None = None,
 ) -> dict[str, dict]:
     """Cut the store's two sorts (+ ``sort_variants`` of each) from the union
     at ``store`` into ``out_dir`` under their served names, with the
     `.groups.json` footer sidecars. Returns ``{variant: {file, rows, groups}}``
-    in write order.
+    in write order. ``tiers``: only these sorts (default both; `recut_sorts`
+    re-cuts `bysize` alone).
 
     ``row_group_rows``: the HTTP range-read unit — and the D1 footer's row
     count per sort. A fleet the size of gcs (777M rows) needs 32K to keep
@@ -237,12 +239,13 @@ def write_sorts(
 
     out = Path(out_dir)
     stem = str(out / "path-index")
+    tiers = TIERS if tiers is None else tiers
     written = write_tiers(
-        store, stem, tiers=TIERS, row_group_rows=row_group_rows,
+        store, stem, tiers=tiers, row_group_rows=row_group_rows,
         sort_variants=sort_variants, con=con, groups=groups, variant_tiers=variant_tiers,
     )
     result: dict[str, dict] = {}
-    for tier in TIERS:
+    for tier in tiers:
         for variant in ((), *(sort_variants if variant_tiers is None or tier in variant_tiers else ())):
             src = tier_path(stem, tier, variant)
             dst = str(out / variant_file(tier, variant))
@@ -473,3 +476,60 @@ def write_index(
             **{AGE_PYRAMID_VARIANTS[b]: s["file"] for b, s in pyramid["bins"].items()},
         },
     }
+
+
+def recut_sorts(
+    src: str,
+    out: str,
+    *,
+    tiers: tuple[str, ...] = ("bysize",),
+    work: str | Path,
+    mem: str = "8GB",
+    threads: int = 8,
+    row_group_rows: int = ROW_GROUP_SIZE,
+) -> dict[str, dict]:
+    """Re-cut ``tiers`` of a published store generation from its ``path`` sort
+    — every row, the layer-2 columns (spec §1.1), so it is the store the sorts
+    were cut from, re-sorted — into ``out`` (a new generation dir, local or a
+    URL): what a scan cut before a sort's format changed needs (spec
+    `bysize-path-total.md`: a labeled `bysize` keyed on each path's total).
+    ``src`` is the dir holding `path-index.parquet` (local or a URL, copied
+    once into ``work``); the cut runs in ``work`` (DuckDB spills under it) and
+    each sort, with its `.groups.json` and `.groups.parquet`, is then put
+    beside the others in ``out``. Refuses an ``out`` that already holds any of
+    them: a published generation is never overwritten. Returns
+    ``write_sorts``' ``{variant: {file, rows, groups}}``, ``file`` under ``out``."""
+    import shutil
+
+    from disk_tree import blobfs
+    from disk_tree.find.groups import groups_parquet_path, groups_path
+    from disk_tree.find.tiers import connect
+
+    targets = [f"{out.rstrip('/')}/{STORE_SORTS[t]}" for t in tiers]
+    present = [p for t in targets for p in (t, groups_path(t), groups_parquet_path(t)) if blobfs.exists(p)]
+    if present:
+        raise FileExistsError(f"recut: {present} already exist; a generation is never overwritten")
+    w = Path(work)
+    (w / "out").mkdir(parents=True, exist_ok=False)
+    src_pq = f"{src.rstrip('/')}/{STORE_SORTS['path']}"
+    local = str(w / "src.parquet")
+    if blobfs.is_url(src_pq):
+        err(f"recut: copying {src_pq} → {local}")
+        with blobfs.open_read(src_pq) as f, open(local, "wb") as dst:
+            shutil.copyfileobj(f, dst, 64 << 20)
+    else:
+        os.symlink(os.path.abspath(src_pq), local)
+    con = connect(mem=mem, threads=threads, tmp_dir=str(w / ".duckdb-tmp"))
+    sorts = write_sorts(con, local, w / "out", groups=True, row_group_rows=row_group_rows, tiers=tiers)
+    for v, r in sorts.items():
+        name = os.path.basename(r["file"])
+        dst = f"{out.rstrip('/')}/{name}"
+        for a, b in ((r["file"], dst), (groups_path(r["file"]), groups_path(dst)), (groups_parquet_path(r["file"]), groups_parquet_path(dst))):
+            if blobfs.is_url(b):
+                blobfs.put(a, b)
+            else:
+                os.makedirs(os.path.dirname(b) or ".", exist_ok=True)
+                shutil.copyfile(a, b)
+        err(f"recut: {v} → {dst}")
+        r["file"] = dst
+    return sorts

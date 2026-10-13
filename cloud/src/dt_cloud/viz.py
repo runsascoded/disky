@@ -20,6 +20,7 @@ from pathlib import Path
 import duckdb
 
 from .index import AGE_COLS, STORE_L2, age_bucket_sql, duckdb_codec, store_columns
+from .scan_started import listing_started
 
 err = partial(print, file=sys.stderr)
 
@@ -605,6 +606,9 @@ def write_path_index(
         # store object's mtime in, which stops being the publish time once the
         # served copy lives in R2 — specs/done/r2-serving-migration.md step 6).
         "published": dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        # When the scan started: the earliest bucket listing's `started` — a
+        # date-only scan id's real time on a day with other scans (`scan_started`).
+        **({"started": started} if (started := listing_started(listings)) else {}),
         "total_bytes": total_b,
         "total_objects": total_o,
         "class_bytes": {int(c): int(b) for c, b in classes},

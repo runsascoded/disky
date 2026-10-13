@@ -7,6 +7,7 @@ import { exchangeKeyParam } from '@open-athena/auth/react'
 import Root from './Root'
 import { UnitsProvider } from './units'
 import { withoutOg } from './sharePreview'
+import { bootSessionLog } from './sessionLogBoot'
 import 'use-kbd/styles.css'
 import './app.scss'
 
@@ -33,6 +34,7 @@ async function start() {
   // Redeem and remove the key before BrowserRouter snapshots the URL. Otherwise
   // its stale search restores the credential on the next SPA navigation.
   await exchangeKeyParam()
+  void bootSessionLog()
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>

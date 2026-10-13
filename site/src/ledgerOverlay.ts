@@ -27,7 +27,8 @@ const add = (v: Vec, k: string, b: number) => v.set(k, (v.get(k) ?? 0) + b)
  * 'gs://b/', 'gs://b/x/'): the subtrees the overlay must walk into. */
 function touchedPrefixes(idx: OwnerIndex): Set<string> {
   const out = new Set<string>()
-  for (const [p, r] of idx.owners) {
+  // An exact object's row touches only its strict ancestors (all its `/`-cuts).
+  for (const [p, r] of [...idx.owners, ...idx.objects]) {
     if (r.owner == null) continue
     let i = p.indexOf('/', p.indexOf('://') + 3)
     while (i !== -1) {
@@ -68,7 +69,7 @@ export function applyLedger(root: TreeNode, idx: OwnerIndex, scheme: string, can
   const rec = (n: TreeNode, segs: string[] | null, inherited: string | null): TreeNode => {
     const isRoot = segs?.length === 0
     const uri = segs && !isRoot ? scheme + segs.join('/') : null
-    const who = uri ? idx.assignmentOf(uri)?.who : segs ? null : inherited
+    const who = uri ? idx.assignmentOf(uri, n.k === 'file' ? 'object' : 'prefix')?.who : segs ? null : inherited
     const cov = who == null ? null : canon(who)
     if (cov == null && !isRoot && (!uri || !touched.has(uri + '/'))) return n
     const kids = n.c ?? []

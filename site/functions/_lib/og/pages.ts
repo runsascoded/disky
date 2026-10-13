@@ -7,7 +7,8 @@ import { canonId, loadRegistry } from '../identity.js'
 import { loadLedger } from '../ledger.js'
 import { ownerTotals } from '../ownerTotals.js'
 import { openPlanId } from '../plans.js'
-import { prefixesAt, type PrefixStat } from '../prefixes.js'
+import { type PrefixStat } from '../prefixes.js'
+import { stagedStats } from '../stagedSlack.js'
 import { filterStaged } from '../../../src/stagedFilter.js'
 import { ownerIndex } from '../../../src/ownerIndex.js'
 import { type CardData, type CardTile, type Grid, fmtB } from './card.js'
@@ -109,11 +110,12 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
   const base = { tier, site: site.name, title, tiles: [] as CardTile[] }
   if (!env.DB) return { ...base, subtitle: '', total: '', empty: 'nothing staged' }
   const plan = await openPlanId(env.DB).catch(() => null)
-  const rows = plan == null ? [] : (await env.DB.prepare('SELECT prefix, added_by FROM plan_items WHERE plan_id = ?').bind(plan).all<{ prefix: string; added_by: string }>()).results
-  const date = await resolveScan(env, undefined)
-  if (!rows.length || !date) return { ...base, subtitle: plan == null ? '' : `plan #${plan}`, total: '', empty: 'nothing staged' }
-  const [{ stats }, reg, ledger, users] = await Promise.all([
-    prefixesAt(env, date, rows.map(r => r.prefix).slice(0, 1000)),
+  const rows = plan == null ? [] : (await env.DB.prepare("SELECT prefix, COALESCE(kind, 'prefix') AS kind, added_by FROM plan_items WHERE plan_id = ?").bind(plan).all<{ prefix: string; kind: 'prefix' | 'object'; added_by: string }>()).results
+  // Every prefix, sized at the latest scan (as the Slack parent's totals are).
+  const at = rows.length ? await stagedStats(env, rows.map(r => r.prefix)) : null
+  if (!rows.length || !at) return { ...base, subtitle: plan == null ? '' : `plan #${plan}`, total: '', empty: 'nothing staged' }
+  const { scan: date, stats } = at
+  const [reg, ledger, users] = await Promise.all([
     regOf(env),
     loadLedger(env).catch(() => ({ ownerRows: [] })),
     scanUsersOf(env, date).catch(() => []),
@@ -121,7 +123,7 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
   const idx = ownerIndex({ owners: ledger.ownerRows.map(r => ({ ...r, who: r.who ?? '', memo: null })) })
   let items: Item[] = rows.map(r => {
     const stat = stats[r.prefix]
-    const assignment = idx.assignmentOf(r.prefix)
+    const assignment = idx.assignmentOf(r.prefix, r.kind)
     return { prefix: r.prefix, addedBy: r.added_by, stat, owner: assignment ? canonId(assignment.who, reg) : stat?.us?.[0]?.[0] ?? null }
   })
   const name = (who: string) => reg[canonId(who, reg)]?.name ?? who.replace(/@.*$/, '')

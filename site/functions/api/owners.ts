@@ -12,6 +12,7 @@ import { primaryOnly } from '../_lib/stores.js'
 import { hasLedger } from '../_lib/ledger.js'
 import { ownerTotals } from '../_lib/ownerTotals.js'
 import { storeReady } from '../_lib/index.js'
+import { scanArg } from '../_lib/scanArg.js'
 
 export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   // The ownership ledger is the primary store's: `store=<other>` is a 404.
@@ -24,8 +25,9 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
-  const date = new URL(request.url).searchParams.get('date') ?? ''
-  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/.test(date)) return json({ error: 'date=YYYY-MM-DD[THHMM] required' }, 400)
+  const scan = await scanArg(env, new URL(request.url).searchParams)
+  if (scan instanceof Response) return scan
+  const date = scan
   try {
     const t = await ownerTotals(env, date)
     return json({ scan: t.scan, head: t.head, bytes: t.bytes, objects: t.objects, users: t.users, computed: t.computed }, 200, { 'cache-control': 'private, no-store' })

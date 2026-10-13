@@ -8,7 +8,7 @@
  * head at a time). A new assignment invalidates by changing the head; the
  * recompute happens on the next request. */
 import type { Env } from './auth.js'
-import { columnsFor, openIndex, readAsks, type Ask, type Row } from './index.js'
+import { columnsFor, openIndex, slices, readAsks, type Ask, type Row } from './index.js'
 import { loadLedger } from './ledger.js'
 import { shared } from './shared.js'
 import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type AssignmentRow, type OwnerRow, type OwnerTotals, type PathAgg } from './ownerBands.js'
@@ -37,7 +37,7 @@ const MEMO_WAIT = 60_000
 
 async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, head: number): Promise<OwnerTotalsBody> {
   const t0 = Date.now()
-  const idx = await openIndex(env, date)
+  const idx = await openIndex(slices(env), date)
   const want = new Map<string, number>() // index path → depth, for point lookups
   for (const p of owners.keys()) {
     const { path, depth } = idxKey(p)

@@ -50,6 +50,7 @@ def test_load_plan_normalizes(tmp_path: Path) -> None:
         "name": "old ckpts",
         "bucket": BUCKET,
         "sweep": [f"s3://{BUCKET}/marin/ckpt/", "marin/scratch"],
+        "as_of": {"marin/ckpt/": "2026-10-06T0600"},
     }))
     plan = load_plan(p)
     assert plan == Plan(
@@ -57,6 +58,7 @@ def test_load_plan_normalizes(tmp_path: Path) -> None:
         bucket=BUCKET,
         sweep=["marin/ckpt/", "marin/scratch/"],
         plan_id=7,
+        as_of={"marin/ckpt/": "2026-10-06T0600"},
     )
 
 
@@ -113,11 +115,52 @@ def test_build_manifest_covers_staged_prefixes(tmp_path: Path) -> None:
         "name": "p",
         "bucket": BUCKET,
         "sweep": ["marin/ckpt/"],
+        "as_of": {},
         "objects": 2,
         "bytes": 300,
+        "skipped_after_as_of": {"objects": 0, "bytes": 0},
         "manifest": str(out / "manifest" / f"{BUCKET}.parquet"),
     }
     assert json.loads((out / "plan-summary.json").read_text()) == summary
+
+
+def test_build_manifest_holds_back_what_changed_after_as_of(tmp_path: Path) -> None:
+    # `marin/ckpt/` staged as of 2026-10-06; `marin/tmp/` as of the pinned scan.
+    now, then = tmp_path / "now.parquet", tmp_path / "then.parquet"
+    _write_l2(now, [
+        ("marin/ckpt/a", 100, 111, "file"),       # same mtime then → swept
+        ("marin/ckpt/b", 200, 999, "file"),       # rewritten since (mtime 222 then) → held back
+        ("marin/ckpt/new", 400, 999, "file"),     # absent then → held back
+        ("marin/tmp/new", 800, 999, "file"),      # as of the pinned scan → swept
+    ])
+    _write_l2(then, [
+        ("marin/ckpt/a", 100, 111, "file"),
+        ("marin/ckpt/b", 200, 222, "file"),
+        ("marin/ckpt/gone", 1600, 333, "file"),
+    ])
+    plan = Plan(name="p", bucket=BUCKET, sweep=["marin/ckpt/", "marin/tmp/"], plan_id=3,
+                as_of={"marin/ckpt/": "2026-10-06", "marin/tmp/": "2026-10-07"})
+    out = tmp_path / "run"
+    summary = build_manifest(str(now), plan, str(out), date="2026-10-07", l2_for={"2026-10-06": str(then)}.__getitem__)
+    assert _read_manifest(out / "manifest" / f"{BUCKET}.parquet") == [
+        ("marin/ckpt/a", 100, 111, "marin/ckpt/"),
+        ("marin/tmp/new", 800, 999, "marin/tmp/"),
+    ]
+    assert {k: summary[k] for k in ("as_of", "objects", "bytes", "skipped_after_as_of")} == {
+        "as_of": {"marin/ckpt/": "2026-10-06"},
+        "objects": 2,
+        "bytes": 900,
+        "skipped_after_as_of": {"objects": 2, "bytes": 600},
+    }
+
+
+def test_build_manifest_as_of_needs_its_layer2(tmp_path: Path) -> None:
+    l2 = tmp_path / "l2.parquet"
+    _write_l2(l2, [("marin/ckpt/a", 100, 111, "file")])
+    plan = Plan(name="p", bucket=BUCKET, sweep=["marin/ckpt/"], as_of={"marin/ckpt/": "2026-10-06"})
+    with pytest.raises(SweepError) as e:
+        build_manifest(str(l2), plan, str(tmp_path / "run"), date="2026-10-07")
+    assert str(e.value) == "plan items staged as of other scans (2026-10-06) need their layer-2s"
 
 
 def test_prefix_free_and_eligible() -> None:

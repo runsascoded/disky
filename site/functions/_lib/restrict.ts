@@ -32,6 +32,7 @@ export const isPathScope = (scope: string): boolean => /^[a-z0-9-]+:hide:/.test(
 export const RESTRICTED_BLOCKED = [
   '/api/path-index', '/v1', '/api/plans', '/api/actions', '/api/db', '/api/owners',
   '/api/estate', '/api/assignments', '/api/sweep', '/api/plan-sweep', '/api/og',
+  '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/health', '/api/scan-runs',
 ]
 
 export const blockedForRestricted = (pathname: string): boolean =>

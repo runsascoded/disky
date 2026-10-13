@@ -8,8 +8,11 @@ Built on cw-s3 (`c3d592a`), brought onto the base (`cloud`) generic over both ex
 
 ## Shape
 
-- **One thread per staged plan.** The parent message is re-rendered on every event: item and batch counts, who staged, the latest dry-run's result and whether it still matches the plan (or that it ended without a result), the last real run. Every event is a reply: a stage batch (who, count, memo, the first prefixes), an unstage, a batch rejected, a run dispatched (www or Slack), a run finished (totals; for a real run, the undo deadline) or ended without a result.
-- **Buttons.** Parent: *Open in www*, *Dry-run*, *Delete for real…* (the dispatch buttons only where the deployment can dispatch: `GCP_SA_KEY` set). Each batch reply: *Reject batch*, *View in www*.
+- **One thread per staged plan**, in `SLACK_ADMIN_CHANNEL` (the only source of a channel: a plan whose thread lives in another channel gets a new thread here, the old one untouched — so a local stack can point at a private test channel). The parent message is re-rendered on every event: item and batch counts, who staged, the queue's size at the latest scan (every prefix, chunked `MAX_PREFIXES` per lookup as `/staged` chunks `POST /api/prefixes`), the latest dry-run's result and whether it still matches the plan (or that it ended without a result), the last real run. Every other event is a reply: an unstage, a batch rejected, a run dispatched (www or Slack), a run finished (totals; for a real run, the undo deadline) or ended without a result.
+- **Stage replies coalesce** (2026-10-08, after one stager's 13 requests made 13 replies and 13 pings). A stager's stages within 15 minutes of their reply's last update (`COALESCE_S`) edit that one reply in place (`chat.update`, which notifies no one); later, or in a new thread, a new reply. It reads as one or two lines: "<name> staged N paths in K batches · size · objects", then the top 3 folders by size (by count when unsized; the prefixes themselves when ≤ 3, else grouped by parent folder, long paths cut to bucket/…/last two folders), then the latest batch note. `stage_replies` (cw `0015`, gcs `0039`) holds each reply (`slack_ts`, `thread_ts`, `updated_ts`) and `stage_batches.reply_id` the batches it covers; the claim is a partial unique index (one `open = 1` row per plan and stager), so concurrent stages post one reply and every batch attached ends up shown (the claimer re-renders after recording its ts; a joiner that finds the ts edits it).
+- **No mentions in automatic posts.** People are named by their Slack name (`users.lookupByEmail`), else their email's local part; owners by the site's display name. Nothing the site posts on its own is a `<@U…>`. (No action exists to notify someone explicitly; one would be the only place a mention belongs.)
+- **Rotation.** Before an event posts, the parent is read (`conversations.replies?ts=<parent>&limit=1`, which the bot's `channels:history` / `groups:history` allows; it lacks `reactions:read`). A ✅ (`white_check_mark`) on it, or a stage into an emptied queue (everything older deleted by a real run, or empty at the latest scan), moves the plan to a new thread: `plans.slack_ts` is cut race-safely (`… WHERE slack_ts = <old>`), a new parent is posted and claimed, the old thread gets "Continued in a new thread" (its permalink) and the old parent is re-rendered as done (only *Open in www*).
+- **Buttons.** Parent: *Open in www*, *Dry-run*, *Delete for real…* (the dispatch buttons only where the deployment can dispatch: `GCP_SA_KEY` set). Each stage reply: *Reject batch* / *Reject K batches* (value `<plan>:r<reply>`: every batch the reply covers that still has items; admin or the batches' stager), *View in www*. Rejecting one batch out of a coalesced reply is www's. Replies posted before coalescing keep their `<plan>:<batch>` button, still honoured. After a reject the reply re-renders in place.
 - **Authority is the site's.** `/slack/actions` verifies Slack's signature (the app's signing secret, ±300 s replay window), maps the clicker to their email (`users.info`, `users:read.email`), and applies the www rules: dispatch = admin (staff domain or `admin_emails`); reject = admin or the batch's stager.
 - **Best-effort.** Notifications run after the response (`waitUntil`); a Slack failure never fails a gesture.
 - **Inert until configured.** No `SLACK_BOT_TOKEN` + `SLACK_ADMIN_CHANNEL` = no posts; no `SLACK_SIGNING_SECRET` (or no D1) = `/slack/actions` answers 503.
@@ -44,13 +47,13 @@ A real dispatch — from Slack **or** `/staged` — goes through `dispatchPlan`,
 ## Pieces
 
 - `functions/_lib/slack.ts` — Web API, `users.info` email, signature verification.
-- `functions/_lib/stagedSlack.ts` — rendering (`renderParent`, `stageEvent`, `runEvent`), the notifier (`notifyPlan`, `announceFinished`), `planGate`.
+- `functions/_lib/stagedSlack.ts` — rendering (`renderParent`, `stageReply`, `runEvent`, `closedParent`), sizing (`stagedStats`, `sizeOf`), the notifier (`notifyPlan`, `announceFinished`, `updateReplies`, `refreshThread`), `planGate`. End-to-end tests over a faked Slack: `stagedThread.test.ts`.
 - `functions/_lib/plans.ts` — `planDigest`, `realGate`, `planRuns`.
 - `functions/_lib/executor.ts` + `_lib/dispatch.ts` — the seam; `_lib/planDispatch.ts` + `_lib/runReflect.ts` (plan-sweep), `_lib/sweepDispatch.ts` + `_lib/sweepReflect.ts` (sweep).
 - `functions/slack/actions.ts` — interactivity.
 - The notify calls in `functions/api/plans/[[path]].ts` (stage, unstage/add), both dispatch routes, both jobs routes.
 - `functions/_lib/testD1.ts` — test-only in-memory D1 (`node:sqlite`, a lineage applied, FKs on).
-- Migrations, both lineages, plain `ALTER TABLE … ADD COLUMN` (FK-safe on D1): `migrations/cw/0005_staged_slack.sql`, `migrations/gcs/0029_staged_slack.sql` — `plans.slack_channel`, `plans.slack_ts`, `deletion_runs.plan_digest`.
+- Migrations, both lineages, plain `ALTER TABLE … ADD COLUMN` (FK-safe on D1): `migrations/cw/0005_staged_slack.sql`, `migrations/gcs/0029_staged_slack.sql` — `plans.slack_channel`, `plans.slack_ts`, `deletion_runs.plan_digest`. Then `migrations/cw/0015_stage_replies.sql` / `migrations/gcs/0039_stage_replies.sql`: the `stage_replies` table (+ its open-reply index) and `stage_batches.reply_id` (additive; apply before deploying the coalescing build).
 
 ## Per-deployment setup
 
@@ -60,7 +63,7 @@ A real dispatch — from Slack **or** `/staged` — goes through `dispatchPlan`,
    - `EXECUTOR`: cw may leave the default (`plan-sweep`) or set it; **gcs must set `EXECUTOR = "sweep"`**, or Slack's Dry-run would go to cw's bridge.
 3. Pages secrets (`wrangler pages secret put <NAME> --project-name <project>`): `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` — the deployment's own Slack app.
 4. The Slack app's manifest (kept per deployment, not in the base):
-   - `oauth_config.scopes.bot`: `chat:write`, `users:read`, `users:read.email` (plus whatever the app already has).
+   - `oauth_config.scopes.bot`: `chat:write`, `users:read`, `users:read.email`, `channels:history` (or `groups:history` for a private channel: the ✅ read) (plus whatever the app already has).
    - `settings.interactivity`: `is_enabled: true`, `request_url: https://<deployment host>/slack/actions`.
    - Invite the bot to the admin channel.
 5. Executor-side: the plan-sweep job reads `cw-s3-job-grant` from Secret Manager (a site read grant for the exit-trap ping; must exist wherever `plan-sweep` dispatches). The gcs job reuses its `GCS_USAGE_TOKEN`; the ping needs `curl` in the `gcs-usage-snapshot` image (a missing `curl` is harmless: `|| true`, and `/staged` polling or any Slack click reflects instead).

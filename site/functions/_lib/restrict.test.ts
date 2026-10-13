@@ -105,6 +105,12 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
 })
 
 describe('blockedForRestricted', () => {
+  it('blocks the new unfilterable scan, health and search routes for hidden-path grants', () => {
+    expect([
+      '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/health', '/api/scan-runs/x',
+      '/api/name-summary-extra', '/api/filter-covering', '/api/healthcheck', '/api/scan-runs-extra',
+    ].map(blockedForRestricted)).toEqual([true, true, true, true, true, true, false, false, false, false])
+  })
   it('raw-bytes and D1-list routes, by path segment', () => {
     expect([
       '/api/path-index', '/v1/files/listing/x', '/v1', '/api/plans/run', '/api/db/actions', '/api/og/mint',

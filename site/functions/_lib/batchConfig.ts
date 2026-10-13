@@ -3,6 +3,7 @@
 // which image, against which data bucket. All from `[vars]`; nothing here
 // names a deployment. A route asks for the keys it needs and answers 503
 // naming the first one unset.
+import { type Labels, parseLabels } from './costLabels.js'
 
 /** The `[vars]` (and the `GCP_SA_KEY` secret) the executors read. */
 export interface BatchEnv {
@@ -30,6 +31,8 @@ export interface BatchEnv {
   CF_ACCOUNT_ID?: string
   /** The S3 endpoint a plan-sweep run deletes through. */
   SWEEP_S3_ENDPOINT?: string
+  /** Cost-attribution labels (`k=v,…`) for the jobs' VMs and disks (`costLabels.ts`). Unset: none. */
+  DISKY_LABELS?: string
 }
 
 export interface BatchConfig {
@@ -43,6 +46,8 @@ export interface BatchConfig {
   /** The deployment's D1 (`sweep execute`/`undo` record their runs there). */
   d1DbId: string
   d1DbName: string
+  /** `DISKY_LABELS`, parsed; each job adds its `component`. */
+  labels?: Labels
 }
 
 export type BatchKey = 'GCP_PROJECT' | 'DATA_BUCKET' | 'SWEEP_IMAGE' | 'CF_ACCOUNT_ID' | 'SWEEP_S3_ENDPOINT' | 'D1_DB_ID'
@@ -67,6 +72,7 @@ export function batchConfig(env: BatchEnv, need: readonly BatchKey[]): BatchConf
     s3Endpoint: env.SWEEP_S3_ENDPOINT ?? '',
     d1DbId: env.D1_DB_ID ?? '',
     d1DbName: env.D1_DB_NAME ?? '',
+    labels: parseLabels(env.DISKY_LABELS),
   }
   const field: Record<BatchKey, keyof BatchConfig> = {
     GCP_PROJECT: 'project', DATA_BUCKET: 'dataBucket', SWEEP_IMAGE: 'image', CF_ACCOUNT_ID: 'cfAccountId', SWEEP_S3_ENDPOINT: 's3Endpoint', D1_DB_ID: 'd1DbId',

@@ -9,7 +9,7 @@
  * every consumer keeps today's behaviour.
  */
 import type { Env } from './auth.js'
-import { makeStore, schemaRow } from './index.js'
+import { schemaRow, servedStore } from './index.js'
 import { shared } from './shared.js'
 import { storeKey } from './stores.js'
 
@@ -37,9 +37,12 @@ const TTL_MS = 10 * 60_000
 const MISS_TTL_MS = 60_000
 const missAt = new Map<string, number>()
 
-async function readJson(env: Env, key: string): Promise<unknown | null> {
+/** The sidecars' store: the served seam (`INDEX_R2` under `SERVED_R2`), allowed only the generation dir. */
+const sidecars = (env: Env, dir: string) => servedStore(env, [`${dir}/`])
+
+async function readJson(env: Env, dir: string, name: string): Promise<unknown | null> {
   try {
-    const { bytes } = await makeStore(env).get(key)
+    const { bytes } = await sidecars(env, dir).get(`${dir}/${name}`)
     return JSON.parse(new TextDecoder().decode(bytes))
   } catch {
     return null
@@ -55,7 +58,7 @@ async function indexes(env: Env, date: string) {
   const miss = missAt.get(key)
   if (miss != null && Date.now() - miss > MISS_TTL_MS) { idxMemo.delete(key); missAt.delete(key) }
   const got = await shared(idxMemo, key, async () => {
-    const attr = await readJson(env, `${dir}/attr.tsv.idx.json`)
+    const attr = await readJson(env, dir, 'attr.tsv.idx.json')
     if (!attr) return null
     return { dir, attr: attr as BlockIndex | null }
   }, TTL_MS)
@@ -96,21 +99,21 @@ export function blockSpan(idx: BlockIndex, from: number, to: number): [number, n
 }
 
 /** The lines of blocks `from..to` (inclusive), or null when over budget. */
-async function readBlocks(env: Env, key: string, idx: BlockIndex, from: number, to: number): Promise<string[] | null> {
+async function readBlocks(env: Env, dir: string, idx: BlockIndex, from: number, to: number): Promise<string[] | null> {
   const span = blockSpan(idx, from, to)
   if (!span) return []
   const [start, end] = span
   if (end - start > MAX_RANGE) return null
-  const { bytes } = await makeStore(env).get(key, { offset: start, length: end - start })
+  const { bytes } = await sidecars(env, dir).get(`${dir}/attr.tsv`, { offset: start, length: end - start })
   const text = new TextDecoder().decode(bytes)
   return text.split('\n').filter(Boolean)
 }
 
 /** Every key in `[lo, hi)`, via the block index. */
-async function rangeLines(env: Env, key: string, idx: BlockIndex, lo: string, hi: string): Promise<string[] | null> {
+async function rangeLines(env: Env, dir: string, idx: BlockIndex, lo: string, hi: string): Promise<string[] | null> {
   const a = blockOf(idx, lo)
   const b = blockOf(idx, hi)
-  return readBlocks(env, key, idx, a, b < 0 ? 0 : b)
+  return readBlocks(env, dir, idx, a, b < 0 ? 0 : b)
 }
 
 const ancestorsOf = (path: string): string[] => {
@@ -129,10 +132,10 @@ export async function extrasFor(env: Env, date: string, path: string): Promise<E
   const lo = path
   const hi = path === '' ? '￿' : path + '0' // '0' sorts just past '/'
   const [attrLines, ancLines] = await Promise.all([
-    ix.attr ? rangeLines(env, `${ix.dir}/attr.tsv`, ix.attr, lo, hi) : Promise.resolve([]),
+    ix.attr ? rangeLines(env, ix.dir, ix.attr, lo, hi) : Promise.resolve([]),
     // The root's ancestors: one block each (deduped), for inherited provenance.
     ix.attr
-      ? Promise.all([...new Set(ancestorsOf(path).slice(1).map(a => blockOf(ix.attr!, a)))].map(b => readBlocks(env, `${ix.dir}/attr.tsv`, ix.attr!, b, b)))
+      ? Promise.all([...new Set(ancestorsOf(path).slice(1).map(a => blockOf(ix.attr!, a)))].map(b => readBlocks(env, ix.dir, ix.attr!, b, b)))
       : Promise.resolve([]),
   ])
   return viewOf([...(attrLines ?? []), ...ancLines.flatMap(l => l ?? [])])

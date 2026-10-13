@@ -1,0 +1,13 @@
+{
+ "target_rows": 11,
+ "total_rows": 242,
+ "shards": [
+  {
+   "i": 0,
+   "lo": "/a.",
+   "hi": null,
+   "rows": 242,
+   "prefixes": 41
+  }
+ ]
+}

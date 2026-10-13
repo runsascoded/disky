@@ -4,8 +4,8 @@
 # merge-base — files where the two branches' changes differ. Surfaces expected
 # at parity (react lib, python engine, site src + functions) should print
 # `parity`; anything else is either base-bound work not yet cherry-picked up,
-# or a regression from a merge. Run before and after every `git merge cloud`
-# on a deployment branch.
+# or a regression from a merge. Run before and after each parent merge:
+# cloud → local → m3 / tauri-native-app; cloud → gcs / cw-s3.
 #
 # Pairs and surfaces come from `.claude/cp.yml` (every peer vs `cloud`, plus
 # `gcs cw-s3`), so one config drives both `git cp` and this audit.
@@ -23,10 +23,14 @@ CFG=.claude/cp.yml
 if [ $# -ge 2 ]; then
   PAIRS=("$1 $2")
 else
-  # Every non-`cloud` peer vs `cloud`, then the two OA deployments vs each other.
-  PAIRS=()
+  # local is an intermediate parent even when an older peer config omits it.
+  PAIRS=("local cloud")
   for b in $(sed -n '/^branches:/,/^[a-z]/p' "$CFG" | grep -E '^  [a-z0-9-]+:' | sed 's/^  \([^:]*\):.*/\1/'); do
-    [ "$b" = cloud ] || PAIRS+=("$b cloud")
+    case "$b" in
+      cloud|local) ;;
+      m3|tauri-native-app) PAIRS+=("$b local") ;;
+      *) PAIRS+=("$b cloud") ;;
+    esac
   done
   PAIRS+=("gcs cw-s3")
 fi
@@ -43,6 +47,9 @@ for pair in "${PAIRS[@]}"; do
   git rev-parse -q --verify "$b" >/dev/null || { echo "## $a ↔ $b: ref $b missing"; continue; }
   mb=$(git merge-base "$a" "$b")
   echo "## $a ↔ $b  (merge-base ${mb:0:9}, $(git log -1 --format=%ad --date=short "$mb"))"
+  echo "  incoming: $(git rev-list --count "$a..$b") commits; outgoing: $(git rev-list --count "$b..$a") commits (includes deployment changes and adapted picks)"
+  echo "  tagged outgoing candidates (review intent and cherry-pick trailers):"
+  git log --no-merges --format='    %h %s' --grep='^\[cloud\]' --grep='^\[local\]' --grep='^\[base\]' "$b..$a"
   for s in "${SURFACES[@]}"; do
     out=$(git-didi stat --pager never --color never "$mb..$a" "$mb..$b" "$s" 2>&1 || true)
     if grep -q "No differences" <<<"$out"; then

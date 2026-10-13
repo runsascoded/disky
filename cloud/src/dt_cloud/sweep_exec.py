@@ -144,12 +144,49 @@ def delete_batch(client, bkt, blobs: list) -> list[tuple[object, str]]:
     return [(blob, settled.get(id(blob), "delete_failed")) for blob in blobs]
 
 
-def list_roots(dirs: set[str], approved: tuple[str, ...], bucket: str) -> list[str]:
+def exact_only_dirs(approved: tuple[str, ...], approved_objects: tuple[str, ...], bucket: str) -> set[str]:
+    """The dirs (``a/b``, ``''`` = bucket root) of the bucket's exact items
+    (specs/file-assign.md) that no prefix band covers: there only the exact
+    keys are eligible, so a new sibling is not drift and the dir is its own
+    listing root."""
+    pre = f"gs://{bucket}/"
+    bands = [a for a in approved if a.startswith(pre)]
+    out: set[str] = set()
+    for o in approved_objects:
+        if not o.startswith(pre):
+            continue
+        dn = o[len(pre):].rpartition("/")[0]
+        if not any(f"{pre}{dn}/".startswith(b) for b in bands):
+            out.add(dn)
+    return out
+
+
+def band_namer(approved: tuple[str, ...], approved_objects: tuple[str, ...]):
+    """``band(bucket, dn, name)``: the band a decision row is accounted to — its
+    exact item when ``gs://bucket/name`` is one, else the longest approved
+    prefix covering its dir (its top-level segment when none does)."""
+    exact = set(approved_objects)
+
+    def band(bucket: str, dn: str, name: str | None = None) -> str:
+        if name is not None and f"gs://{bucket}/{name}" in exact:
+            return f"gs://{bucket}/{name}"
+        p = f"gs://{bucket}/{dn}/" if dn else f"gs://{bucket}/"
+        hits = [a for a in approved if p.startswith(a)]
+        if hits:
+            return max(hits, key=len)
+        top = dn.split("/", 1)[0] if dn else ""
+        return f"gs://{bucket}/{top}/" if top else f"gs://{bucket}/"
+
+    return band
+
+
+def list_roots(dirs: set[str], approved: tuple[str, ...], bucket: str, exact_dirs: set[str] = frozenset()) -> list[str]:
     """Prefix-free listing roots covering every manifest dir: each dir cut to
     one segment below its band (its top-level segment when no band covers
     it), so a band fans out into its children's listings; a dir that *is* its
     band (or a root's ancestor) becomes the root itself and swallows the
-    deeper ones. `''` = the whole bucket."""
+    deeper ones. An exact-only dir (``exact_dirs``) is its own root. `''` =
+    the whole bucket."""
     root_of_band: dict[str, int] = {}
     for a in approved:
         pre = f"gs://{bucket}/"
@@ -159,6 +196,9 @@ def list_roots(dirs: set[str], approved: tuple[str, ...], bucket: str) -> list[s
     roots: set[str] = set()
     for dn in dirs:
         hit = max((r for r in root_of_band if dn == r or (dn.startswith(r + "/") if r else True)), key=len, default=None)
+        if hit is None and dn in exact_dirs:
+            roots.add(dn)
+            continue
         depth = root_of_band[hit] if hit is not None else 0
         roots.add("/".join(dn.split("/")[: depth + 1]) if dn else "")
     out = sorted(roots)
@@ -241,14 +281,8 @@ def execute_plan(
         raise ValueError("diagnostic manifests cannot be used for real deletion")
     client = client or storage.Client()
     approved = tuple(plan.get("approved") or ())
-
-    def band_of(bucket: str, dn: str) -> str:
-        p = f"gs://{bucket}/{dn}/" if dn else f"gs://{bucket}/"
-        hits = [a for a in approved if p.startswith(a)]
-        if hits:
-            return max(hits, key=len)
-        top = dn.split("/", 1)[0] if dn else ""
-        return f"gs://{bucket}/{top}/" if top else f"gs://{bucket}/"
+    approved_objects = tuple(plan.get("approved_objects") or ())
+    band_of = band_namer(approved, approved_objects)
 
     mode = "deleted" if for_real else "would-delete"
     summary: dict = {"plan": plan_dir, "for_real": for_real, "drift": drift, "buckets": {}}
@@ -363,7 +397,11 @@ def execute_plan(
         # buffered until the listing has moved past it (its keys are contiguous
         # under `dn/`, nested dirs form a stack), and only then deleted — drift
         # discovered late still gates the whole directory.
-        roots = list_roots(dirs_all, approved, bucket)
+        # An exact-only dir holds no prefix band: only its exact keys are
+        # eligible, so a live sibling there is not drift (specs/file-assign.md).
+        exact_dirs = exact_only_dirs(approved, approved_objects, bucket)
+        drift_scope = dirs_all - exact_dirs
+        roots = list_roots(dirs_all, approved, bucket, exact_dirs)
 
         def root_count(root: str) -> int:
             lo, hi = _bisect(root + "/") if root else (0, len(order))
@@ -457,7 +495,7 @@ def execute_plan(
                     else:
                         p["todo"].append(blob)
                     w = next(want, None)
-                elif dn in dirs_all:
+                elif dn in drift_scope:
                     p = ensure(dn)
                     p["extra_o"] += 1
                     p["extra_b"] += blob.size or 0
@@ -570,12 +608,12 @@ def execute_plan(
                         roots_skipped += 1
                         continue
                     for dn, out, drifted, dbytes in done:
-                        band = bands.setdefault(band_of(bucket, dn), Counter())
                         if drifted:
                             drift_dirs.append(drifted)
-                            band["drift_new_objects"] += drifted["new_objects"]
+                            bands.setdefault(band_of(bucket, dn), Counter())["drift_new_objects"] += drifted["new_objects"]
                         total_deleted_b += dbytes
-                        for _name, size, _gen, decision, _dn in out:
+                        for name, size, _gen, decision, _dn in out:
+                            band = bands.setdefault(band_of(bucket, dn, name), Counter())
                             counts[decision] += 1
                             if decision == "delete":
                                 band["bytes"] += size
@@ -673,12 +711,120 @@ def stop_file_watch(plan_dir: str, stop: threading.Event, every: float = 10.0) -
 
 #: Per-key outcomes of an undo (the `restored/` log's `decision` column).
 UNDO_DECISIONS = (
-    "restored",        # soft-deleted generation restored as a new live generation
-    "would_restore",   # dry run: the restore that would be issued
-    "already_live",    # a live object exists under that name (an earlier undo, or a rewrite) — untouched
-    "unrestorable",    # GCS has no soft-deleted copy any more (window elapsed, or never soft-deleted)
-    "failed",          # any other error, message in `error`
+    "restored",            # soft-deleted generation restored as a new live generation (per-object call)
+    "bulk_restored",       # restored by a `bulkRestore` operation (`bulk=True`), confirmed live afterwards
+    "would_restore",       # dry run: the per-object restore that would be issued
+    "would_bulk_restore",  # dry run (`bulk=True`): its dir passed the exactness precheck; a bulk op would cover it
+    "already_live",        # a live object exists under that name (an earlier undo, or a rewrite) — untouched
+    "unrestorable",        # GCS has no soft-deleted copy any more (window elapsed, or never soft-deleted)
+    "failed",              # any other error, message in `error`
 )
+
+#: Bulk undo (`undo_run(bulk=True)`). Directory globs per `bulkRestore`
+#: operation: each op is one long-running job server-side, so fewer, wider ops
+#: beat many tiny ones, but a failed op hands all its dirs to the per-object path.
+BULK_GLOBS_PER_OP = 100
+#: Seconds added on each side of the recorded deletion window: the job's clock
+#: (which stamped the window) vs GCS's (which stamped `softDeleteTime`).
+#: Widening is always safe — the precheck runs over the same widened window.
+BULK_WINDOW_PAD = 120
+#: The padded window must end at least this long before `now`, so no deletion
+#: still to happen can land inside it (the exactness argument needs it in the past).
+BULK_CLOCK_MARGIN = 300
+BULK_POLL_FIRST = 5.0
+BULK_POLL_CAP = 60.0
+BULK_POLL_ERRORS = 8  # consecutive failed operation GETs before giving up on an op (its dirs fall to per-object)
+BULK_SAMPLE = 20  # fallback dirs named in the summary
+#: GCS glob metacharacters: a dir containing one can't be matched literally by
+#: `<dir>/**`, so it always takes the per-object path.
+GLOB_META = frozenset("*?[]{}\\,")
+
+
+def _rfc3339(ts: int) -> str:
+    return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def bulk_restore_body(globs: list[str], after: int, before: int) -> dict:
+    """The `objects.bulkRestore` request for `globs` soft-deleted in
+    `[after, before]` (epoch seconds). `allowOverwrite: false`: a name that is
+    live again is skipped, never clobbered (the per-object path's
+    `if_generation_match=0`)."""
+    return {
+        "matchGlobs": list(globs),
+        "softDeletedAfterTime": _rfc3339(after),
+        "softDeletedBeforeTime": _rfc3339(before),
+        "allowOverwrite": False,
+    }
+
+
+def _bulk_restore(client, bucket: str, body: dict) -> dict:
+    """POST `objects.bulkRestore`. google-cloud-storage (3.15) has no wrapper,
+    so it goes through the client's authenticated JSON connection; the answer
+    is a long-running Operation (`name` = `projects/_/buckets/<b>/operations/<id>`)."""
+    return client._connection.api_request(method="POST", path=f"/b/{bucket}/o/bulkRestore", data=body)
+
+
+def _get_operation(client, bucket: str, name: str) -> dict:
+    return client._connection.api_request(method="GET", path=f"/b/{bucket}/operations/{name.rsplit('/', 1)[-1]}")
+
+
+def run_bulk_op(client, bucket: str, body: dict) -> dict:
+    """Issue one bulk restore and poll it to completion (exp. backoff).
+    Returns its outcome: operation name, succeeded/skipped/failed counts (the
+    Operation's `metadata`), `error` (issue failure, operation error, or
+    polling given up). Never raises: the caller's verification decides what
+    is live, and whatever isn't goes per-object."""
+    out = {"operation": None, "globs": len(body["matchGlobs"]), "succeeded": 0, "skipped": 0, "failed": 0, "error": None}
+    try:
+        op = _bulk_restore(client, bucket, body)
+    except Exception as e:
+        return {**out, "error": f"{type(e).__name__}: {e}"[:500]}
+    out["operation"] = op.get("name")
+    delay, errors = BULK_POLL_FIRST, 0
+    while not op.get("done"):
+        _sleep(delay)
+        delay = min(delay * 2, BULK_POLL_CAP)
+        try:
+            op = _get_operation(client, bucket, out["operation"])
+            errors = 0
+        except Exception as e:
+            errors += 1
+            if errors >= BULK_POLL_ERRORS:
+                return {**out, "error": f"polling gave up: {type(e).__name__}: {e}"[:500]}
+    meta = op.get("metadata") or {}
+    for k in ("succeeded", "skipped", "failed"):
+        out[k] = int(meta.get(f"{k}Count", 0) or 0)  # int64 → a JSON string
+    if op.get("error"):
+        out["error"] = str(op["error"].get("message") or op["error"])[:500]
+    return out
+
+
+def deletion_window(fs, ppath: str, bucket: str) -> tuple[int, int] | None:
+    """The run's deletion window for `bucket` from its final
+    `progress/<bucket>.json` (`started` → `updated`, epoch seconds; `updated`
+    is second-truncated, hence +1). None when the run left none (progress is
+    advisory) — pass `window=` (the D1 row's `started_ts`/`finished_ts`)."""
+    path = f"{ppath}/progress/{bucket}.json"
+    if not fs.exists(path):
+        return None
+    with fs.open(path) as fh:
+        snap = json.load(fh)
+    if snap.get("mode") != "deleted" or not snap.get("done") or not snap.get("updated"):
+        return None
+    ts = lambda s: int(dt.datetime.fromisoformat(s).timestamp())  # noqa: E731
+    return ts(snap["started"]), ts(snap["updated"]) + 1
+
+
+def cover_dirs(dirs) -> dict[str, str]:
+    """Each non-root dir → its outermost ancestor-or-self among `dirs`: the
+    disjoint set of directory prefixes whose `<dir>/**` globs cover every
+    logged dir (a nested dir rides its ancestor's glob)."""
+    s = {d for d in dirs if d}
+    out = {}
+    for d in s:
+        parts = d.split("/")
+        out[d] = next(("/".join(parts[:i]) for i in range(1, len(parts)) if "/".join(parts[:i]) in s), d)
+    return out
 
 
 def undo_run(
@@ -690,6 +836,10 @@ def undo_run(
     client=None,
     deadline: int | None = None,
     now: int | None = None,
+    bulk: bool = False,
+    window: tuple[int, int] | None = None,
+    bulk_ops: int = 4,
+    globs_per_op: int = BULK_GLOBS_PER_OP,
 ) -> dict:
     """Restore what a real run deleted: every `decision == 'delete'` row of its
     `deleted/<bucket>.parquet` logs (optionally only under `prefixes`,
@@ -701,8 +851,44 @@ def undo_run(
     key). Writes `restored/<bucket>-<stamp>.parquet` + `undo-<stamp>-summary.json`
     beside the run's own logs; returns the summary. `deadline` (the run's
     `undo_deadline`) refuses a late undo up front — GCS would just answer 404
-    per object, slowly."""
+    per object, slowly.
+
+    `bulk=True` restores whole directories with `objects.bulkRestore` instead,
+    provably touching only logged objects:
+
+    1. Logged rows are grouped by cover dir (`cover_dirs`: the outermost
+       logged dir above each row's `dir`); each group's filter is
+       `matchGlobs=[<dir>/**]`, `softDeleted{After,Before}Time` = the run's
+       deletion window (`window`, else `deletion_window`; padded by
+       `BULK_WINDOW_PAD` each side), `allowOverwrite=false`.
+    2. Exactness precheck, per group: list every soft-deleted object under
+       `<dir>/` (a prefix listing ⊇ what the glob can match), keep those whose
+       `softDeleteTime` lies in the closed window (⊇ either reading of the
+       bounds' inclusivity), and require each `(name, generation)` to be a
+       wanted row of this run's log. The window ends in the past (≥
+       `BULK_CLOCK_MARGIN` before `now`, else refused), and an object's
+       `softDeleteTime` is fixed when it is deleted — so no object can *enter*
+       the set "soft-deleted under `<dir>/` within the window" after the
+       precheck; it can only leave it (hard-delete at retention, or a
+       restore). The set the bulk op later acts on is therefore a subset of
+       the set the precheck saw, all of it logged: the op can restore only
+       logged objects. A group with any unlogged member (or a dir with glob
+       metacharacters, or root-level rows) takes the per-object path whole.
+    3. Passing groups are packed `globs_per_op` per operation, `bulk_ops`
+       operations at a time, each polled to completion (counts in
+       `restored/<bucket>-<stamp>-bulk.json`).
+    4. Verification: live objects under each bulk dir are listed before and
+       after; a logged name live after but not before is `bulk_restored`
+       (its live generation as `new_generation`), live before is
+       `already_live`, and anything still not live (op failed, skipped,
+       outside the window — e.g. an earlier invocation's deletions in the
+       same log dir) goes through the per-object restore, so every row ends
+       with the same decisions the per-object path writes.
+
+    A dry run with `bulk=True` runs the precheck (read-only listings) and logs
+    `would_bulk_restore` / `would_restore` per row; it issues nothing."""
     import fsspec
+    import pandas as pd
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -725,13 +911,25 @@ def undo_run(
         client = storage.Client()
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
-    def band_of(bucket: str, dn: str) -> str:
-        p = f"gs://{bucket}/{dn}/" if dn else f"gs://{bucket}/"
-        hits = [a for a in approved if p.startswith(a)]
-        if hits:
-            return max(hits, key=len)
-        top = dn.split("/", 1)[0] if dn else ""
-        return f"gs://{bucket}/{top}/" if top else f"gs://{bucket}/"
+    buckets = [b for b in dsum["buckets"] if not only_buckets or b in only_buckets]
+    windows: dict[str, tuple[int, int]] = {}
+    if bulk:
+        for bucket in buckets:
+            w = window or deletion_window(fs, ppath, bucket)
+            if w is None:
+                raise SystemExit(
+                    f"{bucket}: bulk undo needs the run's deletion window — no final progress/{bucket}.json; "
+                    "pass the run's started/finished times (the CLI reads them from D1)"
+                )
+            after, before = int(w[0]) - BULK_WINDOW_PAD, int(w[1]) + BULK_WINDOW_PAD
+            if before > now - BULK_CLOCK_MARGIN:
+                raise SystemExit(
+                    f"{bucket}: deletion window ends {_rfc3339(before)} (padded), under {BULK_CLOCK_MARGIN}s ago — "
+                    "the exactness precheck needs it in the past; retry later or undo per-object"
+                )
+            windows[bucket] = (after, before)
+
+    band_of = band_namer(approved, tuple(plan.get("approved_objects") or ()))
 
     def wanted(bucket: str, name: str) -> bool:
         if not prefixes:
@@ -748,10 +946,8 @@ def undo_run(
         ("name", pa.string()), ("size_bytes", pa.int64()), ("generation", pa.int64()),
         ("new_generation", pa.int64()), ("decision", pa.string()), ("error", pa.string()), ("dir", pa.string()),
     ])
-    summary: dict = {"log_dir": log_dir, "stamp": stamp, "dry_run": dry_run, "prefixes": list(prefixes), "buckets": {}}
-    for bucket in dsum["buckets"]:
-        if only_buckets and bucket not in only_buckets:
-            continue
+    summary: dict = {"log_dir": log_dir, "stamp": stamp, "dry_run": dry_run, "prefixes": list(prefixes), "bulk": bulk, "buckets": {}}
+    for bucket in buckets:
         log = read_log(fs, ppath, "deleted", bucket)
         if log is None:
             continue
@@ -759,65 +955,199 @@ def undo_run(
         t = t[t["decision"] == "delete"]
         t = t[[wanted(bucket, n) for n in t["name"]]]
         todo = list(t[["name", "size_bytes", "generation", "dir"]].itertuples(index=False, name=None))
-        err(f"{bucket}: {len(todo):,} deleted object(s) to restore{' (dry run)' if dry_run else ''}")
+        err(f"{bucket}: {len(todo):,} deleted object(s) to restore{' (dry run)' if dry_run else ''}{' (bulk)' if bulk else ''}")
         bkt = client.bucket(bucket)
 
-        def one(row) -> dict:
+        def base(row) -> dict:
             name, size, gen, dn = row
-            base = {"name": name, "size_bytes": int(size), "generation": int(gen), "new_generation": 0, "error": None, "dir": dn}
+            return {"name": name, "size_bytes": int(size), "generation": int(gen), "new_generation": 0, "error": None, "dir": dn}
+
+        def one(row) -> dict:
+            name, _size, gen, _dn = row
             if dry_run:
-                return {**base, "decision": "would_restore"}
+                return {**base(row), "decision": "would_restore"}
             try:
                 blob = bkt.restore_blob(name, generation=int(gen), if_generation_match=0)
-                return {**base, "decision": "restored", "new_generation": int(getattr(blob, "generation", 0) or 0)}
+                return {**base(row), "decision": "restored", "new_generation": int(getattr(blob, "generation", 0) or 0)}
             except PreconditionFailed:
-                return {**base, "decision": "already_live"}
+                return {**base(row), "decision": "already_live"}
             except NotFound:
-                return {**base, "decision": "unrestorable"}
+                return {**base(row), "decision": "unrestorable"}
             except Exception as e:  # keep going: the log names every failure, the summary counts them
-                return {**base, "decision": "failed", "error": f"{type(e).__name__}: {e}"[:500]}
+                return {**base(row), "decision": "failed", "error": f"{type(e).__name__}: {e}"[:500]}
 
         rows: list[dict] = []
+        bulk_info = None
+        if bulk:
+            per_object, rows, bulk_info = _undo_bulk(
+                client, bucket, todo, windows[bucket], dry_run, workers, bulk_ops, globs_per_op, base,
+            )
+            if bulk_info["ops"]:
+                bpath = f"{ppath}/restored/{bucket}-{stamp}-bulk.json"
+                fs.makedirs(bpath.rsplit("/", 1)[0], exist_ok=True)
+                with fs.open(bpath, "w") as fh:
+                    json.dump(bulk_info["ops"], fh, indent=2)
+            todo = per_object
         with ThreadPoolExecutor(max_workers=workers) as pool:
             rows.extend(pool.map(one, todo))
         counts: Counter = Counter(r["decision"] for r in rows)
         bands: dict[str, Counter] = {}
         restored_b = 0
         for r in rows:
-            band = bands.setdefault(band_of(bucket, r["dir"]), Counter())
+            band = bands.setdefault(band_of(bucket, r["dir"], r["name"]), Counter())
             band[r["decision"]] += 1
-            if r["decision"] == "restored":
+            if r["decision"] in ("restored", "bulk_restored"):
                 restored_b += r["size_bytes"]
                 band["bytes"] += r["size_bytes"]
         if rows:
             rpath = f"{ppath}/restored/{bucket}-{stamp}.parquet"
             fs.makedirs(rpath.rsplit("/", 1)[0], exist_ok=True)
-            pq.write_table(pa.Table.from_pylist(rows, schema=schema), rpath, filesystem=fs, row_group_size=65_536)
+            out = pd.DataFrame(rows, columns=schema.names).sort_values("name", kind="stable")
+            pq.write_table(pa.Table.from_pandas(out, schema=schema, preserve_index=False), rpath, filesystem=fs, row_group_size=65_536)
         summary["buckets"][bucket] = {
             "decisions": dict(counts), "restored_bytes": restored_b,
             "bands": {b: dict(c) for b, c in bands.items()},
         }
+        if bulk_info is not None:
+            summary["buckets"][bucket]["bulk"] = {k: v for k, v in bulk_info.items() if k != "ops"}
+            fb = bulk_info["fallback"]
+            err(
+                f"  {bucket}: bulk {bulk_info['dirs']:,} dir(s) / {bulk_info['objects']:,} object(s) in "
+                f"{bulk_info['operations']:,} op(s); per-object {fb['dirs']:,} dir(s) failing the precheck "
+                f"({fb['unlogged']:,} unlogged soft-deleted object(s) in the window) + {fb['unglobbable']:,} unglobbable row(s)"
+            )
         err(f"  {bucket}: " + ", ".join(f"{n:,} {d}" for d, n in sorted(counts.items())) + f" ({restored_b / 1e12:.2f} TB restored)")
     with fsspec.open(f"{log_dir}/undo-{stamp}-summary.json", "w") as fh:
         json.dump(summary, fh, indent=2)
     return summary
 
 
+def _undo_bulk(
+    client,
+    bucket: str,
+    todo: list[tuple],
+    window: tuple[int, int],
+    dry_run: bool,
+    workers: int,
+    bulk_ops: int,
+    globs_per_op: int,
+    base: Callable[[tuple], dict],
+) -> tuple[list[tuple], list[dict], dict]:
+    """`undo_run(bulk=True)`'s per-bucket work (its docstring has the
+    exactness argument). Returns the rows left for the per-object path, the
+    rows the bulk path settled, and the bucket's bulk summary (+ `ops`, the
+    issued requests and their outcomes)."""
+    after, before = window
+    by_dir: dict[str, list[tuple]] = {}
+    unglobbable: list[tuple] = []
+    cover = cover_dirs({row[3] for row in todo})
+    for row in todo:
+        name, _size, _gen, dn = row
+        c = cover.get(dn) if dn else None
+        if c is None or not name.startswith(f"{c}/") or GLOB_META & set(c):
+            unglobbable.append(row)
+        else:
+            by_dir.setdefault(c, []).append(row)
+
+    def precheck(d: str) -> tuple[str, list[str], dict[str, int]]:
+        logged = {(row[0], int(row[2])) for row in by_dir[d]}
+        unlogged = []
+        for b in client.list_blobs(bucket, prefix=f"{d}/", soft_deleted=True, fields="items(name,generation,softDeleteTime),nextPageToken"):
+            ts = b.soft_delete_time
+            if ts is None or not (after <= ts.timestamp() <= before):
+                continue
+            if (b.name, int(b.generation)) not in logged:
+                unlogged.append(b.name)
+        return d, unlogged, ({} if dry_run else live_under(d))
+
+    def live_under(d: str) -> dict[str, int]:
+        names = {row[0] for row in by_dir[d]}
+        return {
+            b.name: int(b.generation)
+            for b in client.list_blobs(bucket, prefix=f"{d}/", fields="items(name,generation),nextPageToken")
+            if b.name in names
+        }
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        checked = list(pool.map(precheck, sorted(by_dir)))
+    clean = [(d, live) for d, unlogged, live in checked if not unlogged]
+    dirty = [(d, unlogged) for d, unlogged, _ in checked if unlogged]
+    per_object = unglobbable + [row for d, _ in dirty for row in by_dir[d]]
+    clean_dirs = [d for d, _ in clean]
+    batches = [clean_dirs[i:i + globs_per_op] for i in range(0, len(clean_dirs), globs_per_op)]
+    bodies = [bulk_restore_body([f"{d}/**" for d in batch], after, before) for batch in batches]
+    info = {
+        "window": [_rfc3339(after), _rfc3339(before)],
+        "dirs": len(clean_dirs),
+        "objects": sum(len(by_dir[d]) for d in clean_dirs),
+        "operations": len(bodies),
+        "fallback": {
+            "dirs": len(dirty),
+            "objects": len(per_object),
+            "unlogged": sum(len(u) for _, u in dirty),
+            "unglobbable": len(unglobbable),
+            "sample": [{"dir": d, "unlogged": len(u), "example": sorted(u)[0]} for d, u in dirty[:BULK_SAMPLE]],
+        },
+    }
+    if dry_run:
+        info["ops"] = [{"request": body} for body in bodies]
+        rows = [{**base(row), "decision": "would_bulk_restore"} for d in clean_dirs for row in by_dir[d]]
+        return per_object, rows, info
+
+    for d, unlogged in dirty[:BULK_SAMPLE]:
+        err(f"  {bucket}: {d}/ has {len(unlogged):,} soft-deleted object(s) in the window not in this run's log (e.g. {sorted(unlogged)[0]}) — per-object")
+    with ThreadPoolExecutor(max_workers=max(1, bulk_ops)) as pool:
+        outcomes = list(pool.map(lambda body: run_bulk_op(client, bucket, body), bodies))
+    info["ops"] = [{"request": body, **o} for body, o in zip(bodies, outcomes)]
+    info["ops_outcome"] = {k: sum(o[k] for o in outcomes) for k in ("succeeded", "skipped", "failed")}
+    info["ops_errors"] = sum(1 for o in outcomes if o["error"])
+    for o in outcomes:
+        if o["error"]:
+            err(f"  {bucket}: bulk op {o['operation'] or '(not issued)'}: {o['error']} — its dirs fall to per-object")
+
+    def verify(item: tuple[str, dict[str, int]]) -> tuple[list[dict], list[tuple]]:
+        d, before_live = item
+        after_live = live_under(d)
+        done, residual = [], []
+        for row in by_dir[d]:
+            name = row[0]
+            if name in before_live:
+                done.append({**base(row), "decision": "already_live"})
+            elif name in after_live:
+                done.append({**base(row), "decision": "bulk_restored", "new_generation": after_live[name]})
+            else:
+                residual.append(row)
+        return done, residual
+
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for done, residual in pool.map(verify, clean):
+            rows.extend(done)
+            per_object.extend(residual)
+    info["residual"] = len(per_object) - info["fallback"]["objects"]
+    return per_object, rows, info
+
+
 def record_undo(run_id: str, summary: dict, deleted_objects: int) -> str:
     """Persist an undo to D1: `deletion_runs.undo_state` ('full' when every
-    object the run deleted is live again — restored now or already — else
-    'partial') and `deletion_bands.undone_objects` per band."""
+    object the run deleted is live again — restored now (per object or in
+    bulk) or already — else 'partial') and `deletion_bands.undone_objects`
+    per band."""
     from .index_footer import _creds, _d1_query, _q
 
     tok, acct = _creds()
-    live = sum(b["decisions"].get("restored", 0) + b["decisions"].get("already_live", 0) for b in summary["buckets"].values())
+    live = sum(
+        sum(b["decisions"].get(k, 0) for k in ("restored", "bulk_restored", "already_live"))
+        for b in summary["buckets"].values()
+    )
     state = "full" if deleted_objects and live >= deleted_objects else "partial"
     stmts = [f"UPDATE deletion_runs SET undo_state = {_q(state)} WHERE run_id = {_q(run_id)}"]
     for b in summary["buckets"].values():
         for prefix, c in b["bands"].items():
-            if c.get("restored"):
+            undone = c.get("restored", 0) + c.get("bulk_restored", 0)
+            if undone:
                 stmts.append(
-                    f"UPDATE deletion_bands SET undone_objects = undone_objects + {int(c['restored'])} "
+                    f"UPDATE deletion_bands SET undone_objects = undone_objects + {int(undone)} "
                     f"WHERE run_id = {_q(run_id)} AND prefix = {_q(prefix)}"
                 )
     _d1_query("; ".join(stmts), acct, tok)
@@ -871,7 +1201,6 @@ def record_run(
     mode = "real" if summary["for_real"] else "dry"
     run_id = run_id_for(plan, started_ts)
     tot = Counter()
-    band_rows = []
     for bucket, b in summary["buckets"].items():
         d = b.get("decisions", {})
         tot["deleted_objects"] += d.get("delete", 0)
@@ -879,11 +1208,6 @@ def record_run(
         tot["skipped_gone"] += d.get("skipped_gone", 0)
         tot["skipped_overwritten"] += d.get("skipped_overwritten", 0)
         tot["drift_dirs"] += len(b.get("drift_dirs", []))
-        for prefix, c in (b.get("bands") or {}).items():
-            band_rows.append(
-                f"({_q(run_id)}, {_q(prefix)}, {c.get('bytes', 0)}, {c.get('objects', 0)}, "
-                f"{c.get('gone', 0)}, {c.get('overwritten', 0)}, {c.get('drift_new_objects', 0)}, 0)"
-            )
     undo = f"{finished_ts + soft_delete_days * 86400}" if mode == "real" else "NULL"
     tok, acct = _creds()
     _d1_query(
@@ -900,13 +1224,39 @@ def record_run(
         "ledger_drift_dirs = excluded.ledger_drift_dirs, undo_deadline = excluded.undo_deadline",
         acct, tok,
     )
-    if band_rows:
+    record_bands(run_id, summary)
+    return run_id
+
+
+# D1 refuses a statement over 100 KB (SQLITE_TOOBIG): a run's bands go in
+# statements of this many rows (a row is ~200 B with a long checkpoint path).
+# The 2026-10-09 run (6,627 prefixes) sent them as one and recorded none.
+BAND_ROWS_PER_STATEMENT = 200
+
+
+def record_bands(run_id: str, summary: dict) -> int:
+    """Write the summary's per-prefix bands for `run_id` to D1, in statements
+    of `BAND_ROWS_PER_STATEMENT` rows. Idempotent: a band already recorded is
+    left as it is (keeping its `undone_objects`). Returns the bands sent."""
+    from .index_footer import _creds, _d1_query, _q
+
+    rows = [
+        f"({_q(run_id)}, {_q(prefix)}, {c.get('bytes', 0)}, {c.get('objects', 0)}, "
+        f"{c.get('gone', 0)}, {c.get('overwritten', 0)}, {c.get('drift_new_objects', 0)}, 0)"
+        for b in summary["buckets"].values()
+        for prefix, c in (b.get("bands") or {}).items()
+    ]
+    if not rows:
+        return 0
+    tok, acct = _creds()
+    for i in range(0, len(rows), BAND_ROWS_PER_STATEMENT):
         _d1_query(
             "INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES "
-            + ", ".join(band_rows),
+            + ", ".join(rows[i:i + BAND_ROWS_PER_STATEMENT])
+            + " ON CONFLICT (run_id, prefix) DO NOTHING",
             acct, tok,
         )
-    return run_id
+    return len(rows)
 
 
 # What a real run exercises beyond the listing's read access: the bucket GET

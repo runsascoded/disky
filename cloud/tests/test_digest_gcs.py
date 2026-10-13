@@ -96,6 +96,51 @@ def test_op_body_full_week_not_partial():
     assert bullet.startswith(":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) — ")
 
 
+# ---- sub-daily scans: two scans on one day are two rows, never merged -----
+
+# lead-in 8/2 (date-only), then two scans on 8/3 (06:01Z +30, 18:01Z −20).
+SUB = D.rows_from_meta([
+    ("2026-08-02", _meta(3000, 300, 600, 1500, 600)),
+    ("2026-08-03T0601", _meta(3030, 330, 600, 1500, 600)),
+    ("2026-08-03T1801", _meta(3010, 310, 600, 1500, 600)),
+], CFG.prices)[1:]
+
+
+def test_sub_daily_rows_keep_each_scan():
+    assert [(r.date, r.prev, r.tb, r.dtb, r.dcost) for r in SUB] == [
+        ("2026-08-03T0601", "2026-08-02", 3030.0, 30.0, 615),
+        ("2026-08-03T1801", "2026-08-03T0601", 3010.0, -20.0, -410),
+    ]
+
+
+def test_sub_daily_replies_are_distinct_units():
+    # each scan its own unit, sender time and canonical `?d=` slug; the arrow
+    # projects the Δ over the real interval (30h, then 12h) to a weekly rate
+    assert TPL.units(SUB, "sender") == [
+        E.Unit("2026-08-03T0601", "2026-08-03T0601", E.Reply(
+            "8/3 06:01Z — 3,030 TB (+30.0, 1.0%)",
+            "$19,784/mo (+$615) [\u2197\ufe0e](https://site.example.org/?d=26080306#diff)",
+            icon_url="https://icons.example.org/arrows/av_deg40.png?v=4",
+        )),
+        E.Unit("2026-08-03T1801", "2026-08-03T1801", E.Reply(
+            "8/3 18:01Z — 3,010 TB (−20.0, 0.7%)",
+            "$19,374/mo (−$410) [\u2197\ufe0e](https://site.example.org/?d=26080318#diff)",
+            icon_url="https://icons.example.org/arrows/av_deg-50.png?v=4",
+        )),
+    ]
+
+
+def test_sub_daily_op_body_spans_from_the_lead_scan():
+    # one day of the week seen (partial), the span from the 8/2 lead-in to 8/3 18:01Z
+    assert D.op_body(SUB, date(2026, 8, 1), None, CFG).split("\n")[3] == (
+        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=26080318-1d18h#over-time) _(partial)_ — **3,010 TB** (+10.0, 0.3%) · $19,374/mo (+$205)"
+    )
+
+
+def test_sub_daily_plot_rows_are_per_day():
+    assert D.plot_rows(SUB) == [{"date": "2026-08-03", "std": 310.0, "near": 600.0, "cold": 1500.0, "arch": 600.0}]
+
+
 # ---- Discord twin ---------------------------------------------------------
 
 
@@ -233,3 +278,43 @@ def test_converge_discord_edit_replies():
         ("edit", "m3", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", []),
     ]
     assert state["posted"] == {"2026-08-03": "m2", "2026-08-04": "m3"}
+
+
+def test_plot_takes_sub_daily_scan_ids(tmp_path) -> None:
+    """Two scans on one day (`2026-10-09` and `2026-10-09T1236`) plot as two
+    instants; a `T` id crashed `render_tiers` (`date.fromisoformat`) in the
+    2026-10-09T1236 job's digest steps."""
+    from dt_cloud.digest_plot import render_tiers
+
+    rows = [
+        {"date": "2026-10-08", "std": 30.0, "near": 1.0, "cold": 2900.0, "arch": 0.0},
+        {"date": "2026-10-09", "std": 30.0, "near": 1.0, "cold": 2910.0, "arch": 0.0},
+        {"date": "2026-10-09T1236", "std": 30.0, "near": 1.0, "cold": 2620.0, "arch": 0.0},
+    ]
+    out = tmp_path / "tiers.png"
+    render_tiers(rows, out, "marin GCS — October 2026", "gcs.oa.dev")
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert E._md("2026-10-09T1236") == "10/9"
+
+
+def test_links_use_each_scans_canonical_slug():
+    # 10/8 alone on its day; 10/9's date-only run (started 04:30Z, `meta.started`) and a 12:36Z scan. At 16:00Z the
+    # 10/8 link is its day, 10/9's are their hours; at 12:50Z the 12:36Z scan's hour hasn't ended: its minute.
+    import datetime as dt
+
+    dm = [
+        ("2026-10-08", _meta(3000, 300, 600, 1500, 600)),
+        ("2026-10-09", {**_meta(3030, 330, 600, 1500, 600), "started": "2026-10-09T04:30:12.345Z"}),
+        ("2026-10-09T1236", _meta(3010, 310, 600, 1500, 600)),
+    ]
+    at = lambda h, m=0: dt.datetime(2026, 10, 9, h, m, tzinfo=dt.timezone.utc)  # noqa: E731
+    urls = lambda now: [D.reply(r, CFG).body.rsplit("(", 1)[1] for r in D.rows_from_meta(dm, CFG.prices, now)]  # noqa: E731
+    assert urls(at(16)) == [
+        "https://site.example.org/?d=261008#diff)",
+        "https://site.example.org/?d=26100904#diff)",
+        "https://site.example.org/?d=26100912#diff)",
+    ]
+    assert urls(at(12, 50))[2] == "https://site.example.org/?d=2610091236#diff)"
+    # without the start, 10/9's hours stay unknown: both by their minutes
+    dm[1] = ("2026-10-09", _meta(3030, 330, 600, 1500, 600))
+    assert urls(at(16))[1:] == ["https://site.example.org/?d=2610090000#diff)", "https://site.example.org/?d=2610091236#diff)"]

@@ -7,6 +7,7 @@ import { DEFAULT_STORE, STORES } from './stores'
 import { hideScopes } from './hideScopes'
 import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
+import { SessionLogSwitch } from './SessionLogSwitch'
 
 // Share-link console (staff-only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -620,6 +621,7 @@ export function AdminPage() {
       </table>
       </div>
       <PreviewLinks />
+      <SessionLogSwitch />
     </main>
   )
 }

@@ -286,12 +286,11 @@ class CfnDashboard(pulumi.ComponentResource):
                         permission_groups=[
                             cloudflare.AccountTokenPolicyPermissionGroupArgs(id=gid) for gid in group_ids
                         ],
-                        # Scoped to this account's R2 buckets; bucket-level
-                        # scoping (`com.cloudflare.edge.r2.bucket.<acct>_default_<name>`)
-                        # is a tighter follow-up once the bucket id is known.
+                        # Bucket-scoped item permissions cannot reach source
+                        # buckets or another deployment's derived artifacts.
                         # v6 takes the resource map as a JSON string.
                         resources=pulumi.Output.from_input(account_id).apply(
-                            lambda a: json.dumps({f"com.cloudflare.api.account.{a}": "*"})
+                            lambda a: json.dumps({f"com.cloudflare.edge.r2.bucket.{a}_default_{store.r2_bucket}": "*"})
                         ),
                     )
                 ],

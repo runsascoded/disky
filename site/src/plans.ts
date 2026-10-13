@@ -1,6 +1,8 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { getCurrentScan } from './owners'
 import { DEFAULT_STORE } from './stores'
 import { type DeletionRun, EXEC_CAPS, type ExecCaps, type ExecJob } from './runs'
+import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
 
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
@@ -13,18 +15,23 @@ export { LIVE_STATES } from './runs'
 export interface StageResult {
   plan_id: number
   batch_id: number
-  /** What this gesture added (a re-staged prefix counts). */
+  /** What this gesture added (a re-staged item counts). */
   staged: string[]
+  /** The staged items that are exact objects (absent: none). */
+  staged_objects?: string[]
   /** Skipped: a staged ancestor already names them. */
   covered: string[]
   /** Removed: staged descendants a new prefix now names. */
   absorbed: string[]
+  /** The scan the new items are staged against (null: no scan synced yet). */
+  as_of: string | null
 }
 
 /** One trash gesture: the prefixes it stages and an optional shared memo (the
  *  reason for the deletion, stored once on the batch — not copied per path). */
 export interface StageArgs {
-  prefixes: string[]
+  /** Folder prefixes and exact objects; a bare string is a folder prefix. */
+  prefixes: (string | PlanItem)[]
   note?: string
 }
 
@@ -37,7 +44,8 @@ export interface PlanSummary {
   created_ts: number
   closed_ts: number | null
 }
-export interface StagedItem { prefix: string; note: string | null; added_by: string; added_ts: number; batch_id: number | null }
+/** `as_of`: the scan the item was staged against (null: staged before `as_of` existed). */
+export interface StagedItem { prefix: string; /** What `prefix` names (absent: a folder — a pre-`kind` server). */ kind?: 'prefix' | 'object'; note: string | null; added_by: string; added_ts: number; batch_id: number | null; as_of: string | null }
 export interface StageBatch { id: number; plan_id: number; note: string | null; created_by: string; created_ts: number }
 /** A stage batch with no items left, and what became of what it staged
  *  (`functions/_lib/plans.ts` `emptiedBatches`). */
@@ -46,6 +54,8 @@ export interface EmptiedBatch extends StageBatch {
   covered: number
   absorbed: { into: number; n: number }[]
   unstaged: number
+  /** Taken out by the real run that deleted them. */
+  deleted: number
 }
 export interface StagedPlan { plan: PlanSummary | null; items: StagedItem[]; batches: StageBatch[]; emptied?: EmptiedBatch[]; runs: DeletionRun[] }
 /** A plan as `GET /api/plans` lists it. */
@@ -57,7 +67,8 @@ export const EXEC_API = `/api/${DEFAULT_STORE.executor === 'sweep' ? 'sweep' : '
  *  run files): the console keys every control on these, never on a name. */
 export const CAPS: ExecCaps = EXEC_CAPS[DEFAULT_STORE.executor]
 
-async function call<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
+/** One plan-API call: JSON in and out; a non-2xx throws an `HttpError` with its status. */
+export async function call<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
   const r = await fetch(url, {
     method,
     credentials: 'include',
@@ -70,18 +81,25 @@ async function call<T>(url: string, method = 'GET', body?: unknown): Promise<T> 
   try { data = JSON.parse(text) } catch { data = null }
   if (!r.ok) {
     const msg = data && typeof data === 'object' && 'error' in data ? String((data as { error: unknown }).error) : `${r.status} ${text.slice(0, 200)}`
-    throw new Error(msg)
+    throw new HttpError(msg, r.status)
   }
   return data as T
 }
 
-/** Stage prefixes for deletion (POST /api/plans/stage). Pass canonical
+/** Stage `prefixes` in `STAGE_CHUNK`-sized POSTs, then fold the batches into the first
+ *  (`batches.ts` `stageMany`): one gesture, one batch to review, however many prefixes. */
+export const stageMany = (prefixes: (string | PlanItem)[], note?: string, post: typeof call = call): Promise<StageResult> =>
+  stageManyVia(prefixes, note, getCurrentScan(), post)
+
+/** Stage prefixes for deletion (POST /api/plans/stage, batched past `STAGE_CHUNK`). Pass canonical
  *  `<scheme>bucket/…/` prefixes (trailing slash) and, optionally, one memo for
- *  the whole gesture. Invalidates the plans query so /staged reflects it. */
+ *  the whole gesture. The gesture is "as of" the scan on screen: the executor
+ *  deletes only objects that scan already had, unchanged. Invalidates the
+ *  plans query so /staged reflects it. */
 export function useStage() {
   const qc = useQueryClient()
   return useMutation<StageResult, Error, StageArgs>({
-    mutationFn: ({ prefixes, note }: StageArgs) => call('/api/plans/stage', 'POST', { prefixes, note: note?.trim() || undefined }),
+    mutationFn: ({ prefixes, note }: StageArgs) => stageMany(prefixes, note),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }) },
   })
 }

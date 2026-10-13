@@ -1,0 +1,71 @@
+// /health (HealthPage.tsx): rides /scans' frame (`staged-page scans-page`: chips, facts, tables) and themes
+// `pyrmts-react`'s `CoverTimeline` with the site's tokens.
+.health-page {
+  --pyrmts-present: color-mix(in srgb, var(--grew) 80%, var(--surface));
+  --pyrmts-pending: var(--s4);
+  --pyrmts-missing: var(--danger);
+  --pyrmts-now: var(--s1);
+  --pyrmts-timeline-bg: var(--panel);
+  --pyrmts-seg-stroke: var(--surface);
+  --pyrmts-grid-major: var(--ink-3);
+  --pyrmts-grid-minor: var(--line);
+  --pyrmts-text-primary: var(--ink);
+  --pyrmts-text-secondary: var(--ink-3);
+  section { margin-top: 18px; }
+  .sub a { color: inherit; }
+  .hl-err, .hl-cut { color: var(--danger); font-size: 13px; margin: 6px 0; }
+  .hl-cut code, .hl-err code { color: var(--ink); }
+  .hl-win {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 18px 0 0; font-size: 13px;
+    button {
+      font: inherit; padding: 2px 9px; border-radius: 4px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); cursor: pointer;
+      &.on { background: var(--panel); color: var(--ink); border-color: var(--ink-3); }
+    }
+  }
+  .hl-gauge {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 8px 0 0; font-size: 13px; color: var(--ink-2);
+    .hl-gauge-bar { display: inline-block; width: 120px; height: 8px; border-radius: 4px; background: var(--panel); border: 1px solid var(--line); overflow: hidden;
+      i { display: block; height: 100%; background: var(--s1); } }
+  }
+  .hl-carries { font-size: 13px; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .hl-merge { font-size: 13px; margin: 8px 0 0; code { overflow-wrap: anywhere; } }
+  .hl-lastrun { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+  .hl-gaps { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 13px; margin: 4px 0 8px; }
+  .hl-gapcount { color: var(--danger); font-variant-numeric: tabular-nums; }
+  // The timeline keeps a legible width on a phone (its SVG scales with its box): it scrolls inside itself.
+  .hl-tl { position: relative; margin-top: 8px; }
+  .hl-scroll { overflow-x: auto; }
+  .hl-timeline { min-width: 720px; }
+  // Below `.tier-timeline`'s top margin, at its rows.
+  .hl-labels { position: absolute; top: 0.25rem; left: 0; pointer-events: none;
+    span { position: absolute; left: 0; padding: 0 4px 0 0; white-space: nowrap; color: var(--ink-3); background: color-mix(in srgb, var(--surface) 85%, transparent);
+      font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; } }
+  .tier-timeline .tt-label { display: none; }
+  .tier-timeline { margin-bottom: 0; }
+  // One legend for every timeline (in the window row), not one under each.
+  .tier-timeline .tt-legend { display: none; }
+  .hl-legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: auto; color: var(--ink-3); font-size: 12px; }
+  .hl-sw { display: inline-block; width: 11px; height: 9px; border-radius: 1px; margin-left: 6px;
+    &.present { background: var(--pyrmts-present); } &.pending { background: var(--pyrmts-pending); }
+    &.missing { background: var(--pyrmts-missing); } &.now { width: 2px; background: var(--pyrmts-now); } }
+  .hl-days { display: block; width: 100%; height: auto; margin-top: -2px;
+    text { fill: var(--ink-3); font-size: 8px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; } }
+  .hl-cov { th.hl-c, td.hl-c { text-align: center; width: 3.5em; } }
+  .hl-present { color: var(--grew); }
+  .hl-missing { color: var(--danger); font-weight: 700; }
+  .hl-pending { color: var(--s4); }
+  .hl-na { color: var(--ink-3); }
+  .hl-note { font-size: 12px; margin-top: 22px; }
+}
+// The shard tooltip is portaled to <body>: themed outside the page scope.
+.tt-tooltip {
+  background: var(--panel); color: var(--ink);
+  border: 1px solid color-mix(in oklab, var(--ink-3) 55%, var(--line));
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.35);
+  z-index: var(--z-float);
+  .tt-tooltip-key { color: var(--ink-2); }
+  .tt-tooltip-hint { color: var(--ink-3); }
+  .tt-status-present { color: var(--grew); }
+  .tt-status-pending { color: var(--s4); }
+  .tt-status-missing { color: var(--danger); }
+}

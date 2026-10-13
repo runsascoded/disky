@@ -70,6 +70,19 @@ function PrefixStatus({ state, execution }: { state: StagedState; execution: Pre
 const searchName = (who: string) => `${canonId(who)} ${shortName(who)}`
 
 /** Whoami's admin flag: the plan-first console keys on it server-side too. */
+/** Select / deselect a set of rows by key — a batch (every page, folded or
+ *  not) or everything shown — half-checked when some of them are selected. */
+function KeysCheckbox({ sel, keys, label }: { sel: { selected: Set<string>; setKeys: (keys: Iterable<string>, on: boolean) => void }; keys: string[]; label: string }) {
+  const n = keys.filter(k => sel.selected.has(k)).length
+  const all = n === keys.length
+  return <input type="checkbox" checked={all} ref={el => { if (el) el.indeterminate = n > 0 && !all }} onChange={() => sel.setKeys(keys, !all)} aria-label={label} />
+}
+
+/** A fold triangle (▾ open / ▸ closed), drawn: the text glyphs render tiny. */
+function Tri({ open = false }: { open?: boolean }) {
+  return <svg className="tri" viewBox="0 0 10 10" width="10" height="10" aria-hidden><path d={open ? 'M1 2.5h8L5 8z' : 'M2.5 1v8L8 5z'} fill="currentColor" /></svg>
+}
+
 function useIsAdmin(): boolean {
   const [admin, setAdmin] = useState(false)
   useEffect(() => {
@@ -95,6 +108,7 @@ function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { c
       </span>
     )
   })
+  if (e.deleted) parts.push(<span key="d">{n(e.deleted)} deleted</span>)
   if (e.unstaged) parts.push(<span key="u">{n(e.unstaged)} unstaged</span>)
   if (e.covered) parts.push(<span key="c">{n(e.covered)} already covered by a staged ancestor</span>)
   if (!parts.length) parts.push(<span key="none">nothing new (already staged)</span>)
@@ -177,7 +191,7 @@ export function StagedPage() {
   // What a row is found by: its prefix, its owners (the ledger's assignee, else
   // the scan's attribution — what the owner(s) column shows) and its stager.
   const filtered = useMemo(() => filterStaged(rows, q, r => {
-    const cl = ownerIdx.count ? ownerIdx.assignmentOf(r.prefix) : null
+    const cl = ownerIdx.count ? ownerIdx.assignmentOf(r.prefix, r.kind) : null
     const owners = cl ? [cl.who] : r.stat ? ownerShares({ n: r.name, b: r.stat.b, o: r.stat.o, ...(r.stat.us ? { us: r.stat.us } : {}) }).map(([u]) => u) : []
     return { prefix: r.prefix, owners, stagedBy: r.added_by }
   }, searchName), [rows, q, ownerIdx])
@@ -224,7 +238,13 @@ export function StagedPage() {
   const gkey = (g: Group) => String(g.id ?? 'none')
   const defaultFoldKey = groups.map(g => `${gkey(g)}:${completion.get(gkey(g))!.settled}`).join(',')
   const collapsed = useMemo(() => new Set(groups.filter(g => batchIsCollapsed(completion.get(gkey(g))!.settled, folds[gkey(g)], hash === `#${batchAnchor(g.id)}`, flat)).map(gkey)), [groups, defaultFoldKey, folds, hash, flat]) // eslint-disable-line react-hooks/exhaustive-deps
-  const foldable = groups.filter(g => !g.emptied)
+  // Batches with nothing left staged (all deleted, empty at scan, or absorbed
+  // by a later batch) fold into one <details> below the live ones.
+  const settled = flat ? [] : groups.filter(g => g.emptied || !g.rows.some(r => activePrefixes.has(r.prefix)))
+  const liveGroups = groups.filter(g => !settled.includes(g))
+  const [settledOpen, setSettledOpen] = useState(false)
+  useEffect(() => { if (settled.some(g => hash === `#${batchAnchor(g.id)}`)) setSettledOpen(true) }, [hash, settled.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  const foldable = liveGroups
   const pageSize = flat ? FLAT_PAGE : PAGE
   const pageOf = (g: Group) => Math.min(pages[gkey(g)] ?? 0, Math.max(0, Math.ceil(g.rows.length / pageSize) - 1))
   // What's on screen, in order: the rows selection and j/k walk.
@@ -287,6 +307,81 @@ export function StagedPage() {
 
   const sizesNote = !date ? null : statsQ.isLoading ? 'sizing…' : stats ? null : 'sizes unavailable'
   const loadingContents = items.length > 0 && (!date || statsQ.isLoading || history.isLoading || progressQs.some(query => query.isLoading))
+
+  const renderGroup = (g: Group) => {
+    const k = gkey(g)
+    const open = !collapsed.has(k)
+    const status = completion.get(k)!
+    const t = total(g.rows)
+    const pg = pageOf(g)
+    const np = Math.max(1, Math.ceil(g.rows.length / pageSize))
+    const setPg = (p: number) => setPages(ps => ({ ...ps, [k]: p }))
+    const shown = g.rows.slice(pg * pageSize, (pg + 1) * pageSize)
+    // Every page of the batch, open or folded.
+    const batchKeys = g.rows.filter(r => activePrefixes.has(r.prefix)).map(r => r.prefix)
+    if (g.emptied) return (
+      <section key={k} id={batchAnchor(g.id)} className="stage-batch folded emptied">
+        <div className="batch-head">
+          <span className="fold dim" aria-hidden>·</span>
+          <UserChip who={g.emptied.created_by} size={18} /> staged <Tooltip content={iso(g.emptied.created_ts)}><span>{relAgo(g.emptied.created_ts)}</span></Tooltip>
+          <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} /></span>
+          {g.emptied.note && <i className="memo">{g.emptied.note}</i>}
+        </div>
+      </section>
+    )
+    return (
+      <section key={k} id={batchAnchor(g.id)} className={`stage-batch${open ? '' : ' folded'}${status.settled && status.deleted > 0 ? ' completed' : ''}`}>
+        {g.id !== -1 && <div className="batch-head">
+          {batchKeys.length > 0 && <KeysCheckbox sel={sel} keys={batchKeys} label={`select all ${batchKeys.length} in batch ${g.id ?? 'earlier'}`} />}
+          <button type="button" className="fold" aria-expanded={open} aria-label={open ? 'collapse batch' : 'expand batch'}
+            onClick={() => setFolds(f => ({ ...f, [k]: open }))}><Tri open={open} /></button>
+          {(status.deleted > 0 || status.empty === g.rows.length) && <span className={`staged-status ${status.deleted > 0 ? 'deleted' : 'empty'}`}>{status.settled && status.deleted > 0 ? '✓ Deleted' : status.deleted > 0 ? `${status.deleted} deleted` : 'Empty at scan'}</span>}
+          {g.batch
+            ? <><UserChip who={g.batch.created_by} size={18} /> staged <Tooltip content={iso(g.batch.created_ts)}><span>{relAgo(g.batch.created_ts)}</span></Tooltip></>
+            : <span className="dim">staged earlier</span>}
+          <span className="dim">· {g.rows.length} {g.rows.length === 1 ? 'prefix' : 'prefixes'}{status.deleted > 0 && <> · {status.deleted} with logged deletions</>}{status.empty > 0 && <> · {status.empty} empty at scan</>}{stats && t.b > 0 && <> · {fmtBytes(t.b)} at scan</>}</span>
+          {g.id != null && <a className="batch-permalink" href={`#${batchAnchor(g.id)}`} aria-label={`Link to batch ${g.id}`}>#{g.id}</a>}
+          {g.batch?.note && <i className="memo">{g.batch.note}</i>}
+        </div>}
+        {(open || g.id === -1) && (
+          <div className="staged-wrap">
+            <PrefixTable
+              rows={shown}
+              sort={sort}
+              onSort={onSort}
+              shareOf={all.b}
+              userIdx={userIdx}
+              ownerIdx={ownerIdx}
+              loading={!stats}
+              extra={[{
+                key: 'execution', label: 'execution / recovery', className: 'nb',
+                cell: r => <PrefixRecovery execution={outcomes.get(r.prefix)!.execution} fmtBytes={fmtBytes} />,
+              }, {
+                key: 'staged', label: 'staged', className: 'nb staged-by', sort: r => r.added_ts,
+                cell: r => <>{r.added_by !== g.batch?.created_by && <UserChip who={r.added_by} size={16} />}<TimeCell ts={r.added_ts} /></>,
+              }]}
+              namePrefix={r => <PrefixStatus {...outcomes.get(r.prefix)!} />}
+              lead={{
+                header: g.id === -1 && batchKeys.length > 0 ? <KeysCheckbox sel={sel} keys={batchKeys} label="select all" /> : null,
+                cell: r => activePrefixes.has(r.prefix) ? <input type="checkbox" checked={sel.selected.has(r.prefix)} onChange={e => sel.setKeys([r.prefix], e.target.checked)} aria-label={`select ${r.prefix}`} /> : null,
+              }}
+              rowProps={r => { const i = visible.indexOf(r); const state = outcomes.get(r.prefix)!.state; if (i < 0) return { className: `staged-${state}` }; const props = sel.rowProps(i); return { ref: sel.rowRef(i), ...props, className: `${props.className ?? ''} staged-${state}` } }}
+              trail={r => activePrefixes.has(r.prefix) && canRemove(r) && <Tooltip content="Unstage this prefix (does not stop a dispatched run)"><button type="button" className="rm" aria-label="Unstage prefix" disabled={busy} onClick={() => unstage.mutate([r.prefix])}>×</button></Tooltip>}
+            />
+            {np > 1 && (
+              <div className="pg">
+                <button type="button" disabled={pg === 0} onClick={() => setPg(0)} aria-label="first page">«</button>
+                <button type="button" disabled={pg === 0} onClick={() => setPg(pg - 1)} aria-label="previous page">‹</button>
+                <span>{pg * pageSize + 1}–{Math.min(g.rows.length, (pg + 1) * pageSize)} of {g.rows.length.toLocaleString('en-US')}</span>
+                <button type="button" disabled={pg >= np - 1} onClick={() => setPg(pg + 1)} aria-label="next page">›</button>
+                <button type="button" disabled={pg >= np - 1} onClick={() => setPg(np - 1)} aria-label="last page">»</button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+    )
+  }
 
   return (
     <main className="staged-page">
@@ -353,89 +448,27 @@ export function StagedPage() {
             </Tooltip>
           </div>
 
-          <div className="staged-actions">
-            {activeShownRows.length > 0 && <label className="sel-all"><input type="checkbox" checked={sel.pageAll} onChange={sel.togglePage} aria-label="select all shown" /> {sel.selected.size ? `${sel.selected.size} selected · ${fmtBytes(selTotal.b)}` : 'select'}</label>}
-            {sel.selected.size > 0 && <button type="button" onClick={sel.clear}>deselect</button>}
-            {removable.length > 0 && (
-              <button type="button" disabled={busy} onClick={() => unstage.mutate(removable, { onSuccess: () => sel.clear() })}>unstage {removable.length}</button>
-            )}
-            {!flat && <span className="fold-all">
-              <button type="button" disabled={foldable.every(g => !collapsed.has(gkey(g)))} onClick={() => setFolds(Object.fromEntries(groups.map(g => [gkey(g), false])))} aria-label="expand all batches">▾ all</button>
-              <button type="button" disabled={foldable.every(g => collapsed.has(gkey(g)))} onClick={() => setFolds(Object.fromEntries(groups.map(g => [gkey(g), true])))} aria-label="collapse all batches">▸ all</button>
-            </span>}
-          </div>
+          <div className="staged-batches">
+            <div className="staged-actions">
+              {activeShownRows.length > 0 && <label className="sel-all"><KeysCheckbox sel={sel} keys={shownPrefixes} label={q.trim() ? 'select all matching' : 'select all'} /> {sel.selected.size ? `${sel.selected.size} selected · ${fmtBytes(selTotal.b)}` : 'select'}</label>}
+              {sel.selected.size > 0 && <button type="button" onClick={sel.clear}>deselect</button>}
+              {removable.length > 0 && (
+                <button type="button" disabled={busy} onClick={() => unstage.mutate(removable, { onSuccess: () => sel.clear() })}>unstage {removable.length}</button>
+              )}
+              {!flat && <span className="fold-all">
+                <button type="button" disabled={foldable.every(g => !collapsed.has(gkey(g)))} onClick={() => setFolds(Object.fromEntries(groups.map(g => [gkey(g), false])))} aria-label="expand all batches"><Tri open /> all</button>
+                <button type="button" disabled={foldable.every(g => collapsed.has(gkey(g)))} onClick={() => setFolds(Object.fromEntries(groups.map(g => [gkey(g), true])))} aria-label="collapse all batches"><Tri /> all</button>
+              </span>}
+            </div>
 
-          {groups.map(g => {
-            const k = gkey(g)
-            const open = !collapsed.has(k)
-            const status = completion.get(k)!
-            const t = total(g.rows)
-            const pg = pageOf(g)
-            const np = Math.max(1, Math.ceil(g.rows.length / pageSize))
-            const setPg = (p: number) => setPages(ps => ({ ...ps, [k]: p }))
-            const shown = g.rows.slice(pg * pageSize, (pg + 1) * pageSize)
-            if (g.emptied) return (
-              <section key={k} id={batchAnchor(g.id)} className="stage-batch folded emptied">
-                <div className="batch-head">
-                  <span className="fold dim" aria-hidden>·</span>
-                  <UserChip who={g.emptied.created_by} size={18} /> staged <Tooltip content={iso(g.emptied.created_ts)}><span>{relAgo(g.emptied.created_ts)}</span></Tooltip>
-                  <span className="dim">· <EmptiedLine e={g.emptied} batches={batchById} /></span>
-                  {g.emptied.note && <i className="memo">{g.emptied.note}</i>}
-                </div>
-              </section>
-            )
-            return (
-              <section key={k} id={batchAnchor(g.id)} className={`stage-batch${open ? '' : ' folded'}${status.settled && status.deleted > 0 ? ' completed' : ''}`}>
-                {g.id !== -1 && <div className="batch-head">
-                  <button type="button" className="fold" aria-expanded={open} aria-label={open ? 'collapse batch' : 'expand batch'}
-                    onClick={() => setFolds(f => ({ ...f, [k]: open }))}>{open ? '▾' : '▸'}</button>
-                  {(status.deleted > 0 || status.empty === g.rows.length) && <span className={`staged-status ${status.deleted > 0 ? 'deleted' : 'empty'}`}>{status.settled && status.deleted > 0 ? '✓ Deleted' : status.deleted > 0 ? `${status.deleted} deleted` : 'Empty at scan'}</span>}
-                  {g.batch
-                    ? <><UserChip who={g.batch.created_by} size={18} /> staged <Tooltip content={iso(g.batch.created_ts)}><span>{relAgo(g.batch.created_ts)}</span></Tooltip></>
-                    : <span className="dim">staged earlier</span>}
-                  <span className="dim">· {g.rows.length} {g.rows.length === 1 ? 'prefix' : 'prefixes'}{status.deleted > 0 && <> · {status.deleted} with logged deletions</>}{status.empty > 0 && <> · {status.empty} empty at scan</>}{stats && t.b > 0 && <> · {fmtBytes(t.b)} at scan</>}</span>
-                  {g.id != null && <a className="batch-permalink" href={`#${batchAnchor(g.id)}`} aria-label={`Link to batch ${g.id}`}>#{g.id}</a>}
-                  {g.batch?.note && <i className="memo">{g.batch.note}</i>}
-                </div>}
-                {(open || g.id === -1) && (
-                  <div className="staged-wrap">
-                    <PrefixTable
-                      rows={shown}
-                      sort={sort}
-                      onSort={onSort}
-                      shareOf={all.b}
-                      userIdx={userIdx}
-                      ownerIdx={ownerIdx}
-                      loading={!stats}
-                      extra={[{
-                        key: 'execution', label: 'execution / recovery', className: 'nb',
-                        cell: r => <PrefixRecovery execution={outcomes.get(r.prefix)!.execution} fmtBytes={fmtBytes} />,
-                      }, {
-                        key: 'staged', label: 'staged', className: 'nb staged-by', sort: r => r.added_ts,
-                        cell: r => <>{r.added_by !== g.batch?.created_by && <UserChip who={r.added_by} size={16} />}<TimeCell ts={r.added_ts} /></>,
-                      }]}
-                      namePrefix={r => <PrefixStatus {...outcomes.get(r.prefix)!} />}
-                      lead={{
-                        header: null,
-                        cell: r => activePrefixes.has(r.prefix) ? <input type="checkbox" checked={sel.selected.has(r.prefix)} onChange={() => { const i = visible.indexOf(r); if (i >= 0) { sel.toggle(i); sel.commit() } }} aria-label={`select ${r.prefix}`} /> : null,
-                      }}
-                      rowProps={r => { const i = visible.indexOf(r); const state = outcomes.get(r.prefix)!.state; if (i < 0) return { className: `staged-${state}` }; const props = sel.rowProps(i); return { ref: sel.rowRef(i), ...props, className: `${props.className ?? ''} staged-${state}` } }}
-                      trail={r => activePrefixes.has(r.prefix) && canRemove(r) && <Tooltip content="Unstage this prefix (does not stop a dispatched run)"><button type="button" className="rm" aria-label="Unstage prefix" disabled={busy} onClick={() => unstage.mutate([r.prefix])}>×</button></Tooltip>}
-                    />
-                    {np > 1 && (
-                      <div className="pg">
-                        <button type="button" disabled={pg === 0} onClick={() => setPg(0)} aria-label="first page">«</button>
-                        <button type="button" disabled={pg === 0} onClick={() => setPg(pg - 1)} aria-label="previous page">‹</button>
-                        <span>{pg * pageSize + 1}–{Math.min(g.rows.length, (pg + 1) * pageSize)} of {g.rows.length.toLocaleString('en-US')}</span>
-                        <button type="button" disabled={pg >= np - 1} onClick={() => setPg(pg + 1)} aria-label="next page">›</button>
-                        <button type="button" disabled={pg >= np - 1} onClick={() => setPg(np - 1)} aria-label="last page">»</button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </section>
-            )
-          })}
+            {liveGroups.map(renderGroup)}
+            {settled.length > 0 && (
+              <details className="staged-settled" open={settledOpen} onToggle={e => setSettledOpen((e.target as HTMLDetailsElement).open)}>
+                <summary className="dim">{settled.length} {settled.length === 1 ? 'batch' : 'batches'} with nothing left staged (deleted, empty at scan, or absorbed into a later batch)</summary>
+                {settled.map(renderGroup)}
+              </details>
+            )}
+          </div>
 
           {admin && activeRows.length > 0 && (
             <div className="dispatch" id="dispatch">

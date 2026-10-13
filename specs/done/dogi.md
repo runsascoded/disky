@@ -1,5 +1,9 @@
 # Dynamic OG images for every page
 
+The anonymous defaults, cache identity and scan pinning described below are superseded by [the deployment privacy contract][privacy]. Private deployments now default to a generic card; approved GCS-style geometry/totals require explicit `OG_ANONYMOUS=shape` before rollout.
+
+[privacy]: dogi-privacy.md
+
 Status: built 2026-10-02 (gcs session), on dev; prod and the gcs D1 migration `0034` await Ryan's go. Two tiers: anonymous shape-only cards, full-info by minted per-view token. Code is `[cloud]`; each deployment opts in.
 
 ## Why

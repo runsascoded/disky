@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { auditRunControl, bucketOf, canonicalPrefix, covers, planBucket, planDigest, PlanSpansBuckets, planStaging, prefixShape, realGate, relPrefix, type RunRow, uncovered } from './plans'
+import { auditRunControl, bucketOf, canonicalPrefix, covers, emptiedBatches, mergeBatches, planBucket, planDetail, planDigest, PlanSpansBuckets, planStaging, prefixShape, realGate, relPrefix, type RunRow, stageItems, uncovered } from './plans'
+import type { Sqlite } from './testD1'
 
 // An S3 deployment scanning two buckets, the first its primary.
 const P = 'primary-bucket'
@@ -102,6 +103,27 @@ describe('planStaging — one gesture against the plan', () => {
   it('an empty plan stages everything', () => {
     expect(planStaging([], ['s3://b/a/'])).toEqual({ staged: ['s3://b/a/'], covered: [], absorbed: [] })
   })
+  it('matches the quadratic definitions (pairwise `covers`) on random nested prefix sets', () => {
+    const naiveUncovered = (all: readonly string[]) => all.filter(p => !all.some(o => o !== p && covers(o, p)))
+    const naiveStaging = (have: readonly string[], add: readonly string[]) => {
+      const staged: string[] = []
+      const covered: string[] = []
+      for (const p of add) {
+        if (have.includes(p)) { staged.push(p); continue }
+        if (have.some(h => covers(h, p))) covered.push(p)
+        else staged.push(p)
+      }
+      return { staged, covered, absorbed: have.filter(h => !staged.includes(h) && staged.some(p => covers(p, h))) }
+    }
+    let seed = 7
+    const rand = (n: number) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n }
+    const prefix = () => `s3://b/${Array.from({ length: 1 + rand(3) }, () => 'abc'[rand(3)] + (rand(2) ? 'x' : '')).join('/')}${rand(5) ? '/' : ''}`
+    for (let t = 0; t < 300; t++) {
+      const have = naiveUncovered(Array.from({ length: rand(12) }, prefix))
+      const add = Array.from({ length: rand(12) }, prefix)
+      expect([uncovered(add), planStaging(have, uncovered(add))]).toEqual([naiveUncovered(add), naiveStaging(have, naiveUncovered(add))])
+    }
+  })
 })
 
 describe('planDigest — sha-256 of the sorted prefixes joined by `\\n`, first 16 hex', () => {
@@ -163,5 +185,107 @@ describe('auditRunControl — who stopped / undid / purged a run, in `admin_edit
         { tbl: 'deletion_runs', pk: 'run-1', action: 'update', who: 'admin@example.org', old_json: null, new_json: '{"control":"undo","job_id":"gcs-undo-20261007-120000z"}' },
       ])
     }
+  })
+})
+
+describe('stageItems — one gesture is all-or-nothing', () => {
+  const GS = prefixShape({ STORE_SCHEME: 'gs://', STORE_BUCKETS: 'b' })!
+  // A statement failing mid-gesture (here: the item insert, on one prefix)
+  // must leave no plan, batch, item, absorbed-delete or audit row behind.
+  const boom = "CREATE TRIGGER boom BEFORE INSERT ON plan_items WHEN NEW.prefix = 'gs://b/boom/' BEGIN SELECT RAISE(ABORT, 'boom'); END"
+  const dump = (raw: Sqlite) => ({
+    plans: raw.prepare('SELECT id, name, state FROM plans ORDER BY id').all(),
+    batches: raw.prepare('SELECT id, plan_id, note FROM stage_batches ORDER BY id').all(),
+    items: raw.prepare('SELECT plan_id, prefix, batch_id FROM plan_items ORDER BY prefix').all(),
+    edits: raw.prepare('SELECT tbl, pk, action FROM admin_edits ORDER BY id').all(),
+  })
+  it('no open plan yet: nothing is created', async () => {
+    const { sqliteD1 } = await import('./testD1')
+    for (const lineage of ['cw'] as const) {
+      const { db, raw } = await sqliteD1(lineage)
+      raw.exec(boom)
+      await expect(stageItems(db, ['gs://b/a/', 'gs://b/b/', 'gs://b/boom/', 'gs://b/c/'], 'ann', 'memo', GS, '2026-10-07')).rejects.toThrow(/boom/)
+      expect(dump(raw)).toEqual({ plans: [], batches: [], items: [], edits: [] })
+    }
+  })
+  it('an open plan: its items, batches and audit trail are untouched (absorbed items stay)', async () => {
+    const { sqliteD1 } = await import('./testD1')
+    for (const lineage of ['cw'] as const) {
+      const { db, raw } = await sqliteD1(lineage)
+      const first = await stageItems(db, ['gs://b/x/y/'], 'ann', 'first', GS, '2026-10-06')
+      const before = dump(raw)
+      raw.exec(boom)
+      await expect(stageItems(db, ['gs://b/x/', 'gs://b/a/', 'gs://b/boom/'], 'bob', 'second', GS, '2026-10-07')).rejects.toThrow(/boom/)
+      expect([first, before.items, dump(raw)]).toEqual([
+        { plan_id: 1, batch_id: 1, staged: ['gs://b/x/y/'], covered: [], absorbed: [], as_of: '2026-10-06' },
+        [{ plan_id: 1, prefix: 'gs://b/x/y/', batch_id: 1 }],
+        before,
+      ])
+    }
+  })
+})
+
+describe('mergeBatches — a chunked staging folds into one batch', () => {
+  const GS = prefixShape({ STORE_SCHEME: 'gs://', STORE_BUCKETS: 'b' })!
+  const dump = (raw: Sqlite) => ({
+    batches: raw.prepare('SELECT id, note, created_by, created_ts FROM stage_batches ORDER BY id').all(),
+    items: raw.prepare('SELECT prefix, batch_id, as_of FROM plan_items ORDER BY prefix').all(),
+  })
+  it('moves the items, keeps the earliest time, takes the new note, deletes the folded batches', async () => {
+    const { sqliteD1 } = await import('./testD1')
+    for (const lineage of ['cw'] as const) {
+      const { db, raw } = await sqliteD1(lineage)
+      await stageItems(db, ['gs://b/r/1/', 'gs://b/r/2/'], 'ann', 'marks (1/3)', GS, '2026-10-06')
+      await stageItems(db, ['gs://b/r/3/'], 'ann', 'marks (2/3)', GS, '2026-10-07')
+      await stageItems(db, ['gs://b/r/4/'], 'Ann', 'marks (3/3)', GS, '2026-10-07')
+      await stageItems(db, ['gs://b/z/'], 'bob', 'other', GS, '2026-10-07')
+      raw.exec('UPDATE stage_batches SET created_ts = 100 * id')
+      expect(await mergeBatches(db, 1, 2, [1, 3, 2], 'marks', 'ann')).toEqual({ into: 2, merged: [1, 3], items: 3 })
+      expect(dump(raw)).toEqual({
+        batches: [
+          { id: 2, note: 'marks', created_by: 'ann', created_ts: 100 },
+          { id: 4, note: 'other', created_by: 'bob', created_ts: 400 },
+        ],
+        items: [
+          { prefix: 'gs://b/r/1/', batch_id: 2, as_of: '2026-10-06' },
+          { prefix: 'gs://b/r/2/', batch_id: 2, as_of: '2026-10-06' },
+          { prefix: 'gs://b/r/3/', batch_id: 2, as_of: '2026-10-07' },
+          { prefix: 'gs://b/r/4/', batch_id: 2, as_of: '2026-10-07' },
+          { prefix: 'gs://b/z/', batch_id: 4, as_of: '2026-10-07' },
+        ],
+      })
+    }
+  })
+  it('refuses mixed stagers, foreign or missing batches, and a closed plan — writing nothing', async () => {
+    const { sqliteD1 } = await import('./testD1')
+    const { db, raw } = await sqliteD1('cw')
+    await stageItems(db, ['gs://b/a/'], 'ann', null, GS, null)
+    await stageItems(db, ['gs://b/c/'], 'bob', null, GS, null)
+    const before = dump(raw)
+    expect([
+      await mergeBatches(db, 1, 1, [2], null, 'ann'),
+      await mergeBatches(db, 1, 1, [9], null, 'ann'),
+      await mergeBatches(db, 1, 1, [1], null, 'ann'),
+    ]).toEqual([
+      { error: 'batches were staged by different people (ann, bob)', status: 409 },
+      { error: 'not batches of plan 1: 9', status: 404 },
+      { error: 'ids: at least one batch other than `into`', status: 400 },
+    ])
+    raw.exec("UPDATE plans SET state = 'closed'")
+    expect(await mergeBatches(db, 1, 1, [2], null, 'ann')).toEqual({ error: 'plan is closed', status: 409 })
+    expect(dump(raw)).toEqual(before)
+  })
+  it('emptiedBatches replays the merge: a later ancestor absorbs the merged batch', async () => {
+    const { sqliteD1 } = await import('./testD1')
+    const { db } = await sqliteD1('cw')
+    await stageItems(db, ['gs://b/r/1/'], 'ann', null, GS, null)
+    await stageItems(db, ['gs://b/r/2/'], 'ann', null, GS, null)
+    await mergeBatches(db, 1, 1, [2], null, 'ann')
+    await stageItems(db, ['gs://b/r/'], 'bob', null, GS, null)
+    const d = (await planDetail(db, 1, true))!
+    expect(d.emptied.map(({ id, staged, absorbed, unstaged }) => ({ id, staged, absorbed, unstaged }))).toEqual([
+      { id: 1, staged: 2, absorbed: [{ into: 3, n: 2 }], unstaged: 0 },
+    ])
+    expect(emptiedBatches(d.batches, d.items, [])).toEqual([{ ...d.emptied[0], staged: 0, absorbed: [] }])
   })
 })

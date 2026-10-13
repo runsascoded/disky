@@ -45,7 +45,7 @@ from pathlib import Path
 
 from .digest import (
     AVATAR_REV, HOURS_PER_WEEK, TIB, DigestConfig, Quota, Reply, Unit,
-    _dlink, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_ts,
+    _dlink, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_slugs, scan_ts,
 )
 
 VARIANTS = ("sender", "body")
@@ -58,14 +58,15 @@ def _quota(tb: float, q: Quota | None) -> str:
     return f" · {tb / (q.bytes / TIB) * 100:.1f}% of {q.name}" if q else ""
 
 
-def _extras(extra: dict[str, float], dextra: dict[str, float | None]) -> str:
-    """` · <bucket> <TiB> TiB (Δ)` per non-primary bucket (Δ omitted when the
-    prior scan lacked the bucket); `''` with none. The OP + weekly bullets'
-    form; the daily reply uses `_tail` (per-bucket quota clauses)."""
+def _extras(extra: dict[str, float], dextra: dict[str, float | None], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
+    """` · [<label>](<over-time url>) <TiB> TiB (Δ)` per non-primary bucket (Δ
+    omitted when the prior scan lacked the bucket), linked over the same span
+    as the line it's on; `''` with none. The OP's form; the daily reply uses
+    `_tail` (per-bucket quota clauses)."""
     out = ""
     for b, tb in extra.items():
         d = dextra.get(b)
-        out += f" · {b} {tb:,.0f} TiB" + (f" ({_tb(d)})" if d is not None else "")
+        out += f" · {_bucket_link(b, scan, since, cfg, slug)} {tb:,.0f} TiB" + (f" ({_tb(d)})" if d is not None else "")
     return out
 
 
@@ -74,17 +75,18 @@ def _qlabel(b: int) -> str:
     return f"{b / 10**15:g}P" if b >= 10**15 else f"{b / 10**12:g}T"
 
 
-def _diff_url(scan: str, since: dt.datetime | None, site_url: str, bucket: str = "") -> str:
+def _diff_url(scan: str, since: dt.datetime | None, site_url: str, bucket: str = "", slug: str | None = None) -> str:
     """The dashboard's over-time view (optionally scoped to ``bucket``) pinned
-    to ``scan``, looking back to ``since`` (None: the baked previous scan)."""
+    to ``scan`` (by ``slug``, its canonical slug, else its minute), looking back
+    to ``since`` (None: the baked previous scan)."""
     span = f"-{_span(since, scan_ts(scan))}" if since is not None else ""
-    return f"{site_url}/{bucket}?d={_dlink(scan)}{span}#over-time"
+    return f"{site_url}/{bucket}?d={_dlink(scan, slug)}{span}#over-time"
 
 
-def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestConfig) -> str:
+def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
     """`[<label>](<over-time url>)` for one bucket."""
     b = cfg.buckets.get(bucket)
-    return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, bucket)})"
+    return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, bucket, slug)})"
 
 
 def _quota_clause(tb: float, q: Quota) -> str:
@@ -92,20 +94,20 @@ def _quota_clause(tb: float, q: Quota) -> str:
     return f"{tb / qt * 100:.1f}% of {q.short or _qlabel(q.bytes)} ({qt - tb:,.1f} Ti free)"
 
 
-def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None, cfg: DigestConfig) -> str:
+def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
     """`[<label>](<over-time url>): NN.N% of <quota> (<free> Ti free)` for one
     bucket; a bucket with no known quota renders its raw TiB."""
     b = cfg.buckets.get(bucket)
     q = b.quota if b else None
-    link = _bucket_link(bucket, scan, since, cfg)
+    link = _bucket_link(bucket, scan, since, cfg, slug)
     return f"{link}: {tb:,.0f} Ti" if q is None else f"{link}: {_quota_clause(tb, q)}"
 
 
-def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime | None, cfg: DigestConfig) -> str:
+def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
     """Buckets sharing a zone quota as one clause: `[<a>](…) 82 + [<b>](…) 3 Ti:
     NN.N% of <quota> (<free> Ti free)` — the free figure is the zone's."""
     q = cfg.buckets[members[0][0]].quota
-    parts = " + ".join(f"{_bucket_link(b, scan, since, cfg)} {tb:,.0f}" for b, tb in members)
+    parts = " + ".join(f"{_bucket_link(b, scan, since, cfg, slug)} {tb:,.0f}" for b, tb in members)
     total = sum(tb for _, tb in members)
     return f"{parts} Ti" + (f": {_quota_clause(total, q)}" if q else "")
 
@@ -119,7 +121,7 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         z = cfg.buckets[b].zone if b in cfg.buckets else None
         groups.setdefault(f"zone:{z}" if z else f"bucket:{b}", []).append((b, tb))
     return " · ".join(
-        _bucket_clause(*g[0], day.scan, day.since, cfg) if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg)
+        _bucket_clause(*g[0], day.scan, day.since, cfg, day.slug) if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug)
         for g in groups.values()
     )
 
@@ -138,6 +140,8 @@ class Scan:
     # the non-primary buckets' TiB (`meta.buckets` minus the primary), in
     # meta order; empty on single-bucket scans
     extra: dict[str, float] = field(default_factory=dict)
+    # its canonical `?d=` slug (`scan_slugs`); None: its minute
+    slug: str | None = field(default=None, compare=False)
 
     @property
     def date(self) -> str:
@@ -155,9 +159,11 @@ def primary_totals(m: dict, primary: str) -> tuple[int, int, dict[str, float]]:
     return int(m["total_bytes"]), int(m["total_objects"]), {}
 
 
-def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str) -> list[Scan]:
-    """Build ``Scan`` rows from ``(scan_id, meta.json)`` pairs in scan order."""
+def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.datetime | None = None) -> list[Scan]:
+    """Build ``Scan`` rows from ``(scan_id, meta.json)`` pairs in scan order, each with its canonical slug
+    (`scan_slugs`, as of ``now``)."""
     out: list[Scan] = []
+    slugs = scan_slugs(dated_meta, now)
     ptb = pobjs = pts = None
     for scan, m in dated_meta:
         ts = scan_ts(scan)
@@ -172,6 +178,7 @@ def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str) -> list[Sca
                 dobjs=objs - pobjs if pobjs is not None else None,
                 hours=(ts - pts).total_seconds() / 3600 if pts is not None else None,
                 extra={k: round(v, 1) for k, v in extra.items()},
+                slug=slugs[scan],
             )
         )
         ptb, pobjs, pts = tb, objs, ts
@@ -217,6 +224,7 @@ class DayRow:
     extra: dict[str, float] = field(default_factory=dict)  # the other buckets' TiB
     dextra: dict[str, float | None] = field(default_factory=dict)  # …and Δ vs the prior reply scan
     provisional: bool = False  # `sender`: the day's latest scan before its reply scan has landed
+    slug: str | None = field(default=None, compare=False)  # `scan`'s canonical `?d=` slug; None: its minute
 
 
 def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = False) -> list[DayRow]:
@@ -266,6 +274,7 @@ def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False) -> Da
         extra=s.extra,
         dextra=_dextra(s, prev),
         provisional=provisional,
+        slug=s.slug,
     )
 
 
@@ -282,9 +291,12 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -
     mweekly = (mdtb / base.tb * 100 * 7 / days) if base.tb else 0
     # "month-to-date" opens the Diff section over the whole month so far
     # (lead-in scan -> latest), the same way each weekly bullet links its span
-    mtd_url = _diff_url(last.scan, scan_ts(base.scan) if base is not last else None, site_url)
+    mtd_since = scan_ts(base.scan) if base is not last else None
+    mtd_url = _diff_url(last.scan, mtd_since, site_url, slug=last.slug)
+    # with extra buckets alongside, the headline total is visibly the primary's
+    primary = f"{_bucket_link(cfg.primary, last.scan, mtd_since, cfg, last.slug)} " if cfg.primary and last.extra else ""
     lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** [month-to-date]({mtd_url}) · {last.tb:,.0f} TiB{_quota(last.tb, q)}{_extras(last.extra, _dextra(last, base if base is not last else None))} · [dashboard]({site_url}/)",
+        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** [month-to-date]({mtd_url}) · {primary}{last.tb:,.0f} TiB{_quota(last.tb, q)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
         # the OP is re-edited every scan, so it is the thread's live view; say which scan it reflects
         f"_as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_",
         "",
@@ -304,7 +316,7 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -
         partial = " _(partial)_" if mon == last_mon and dt.date.fromisoformat(end.date) < mon + dt.timedelta(days=6) else ""
         # the link opens the Diff section over exactly this bullet's span
         lines.append(
-            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({_diff_url(end.scan, scan_ts(prev_end.scan) if prev_end is not end else None, site_url)}){partial}: "
+            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({_diff_url(end.scan, scan_ts(prev_end.scan) if prev_end is not end else None, site_url, slug=end.slug)}){partial}: "
             f"**{_tb(wdtb)} TiB** → {end.tb:,.0f} TiB{_quota(end.tb, q)}"
         )
         prev_end = end
@@ -330,12 +342,12 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     # the over-time links, so no separate ↗ arrow).
     tail = _tail(day, cfg)
     if day.provisional:
-        url = _diff_url(day.scan, day.since, cfg.site_url)
+        url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
         return Reply(f"{_md(day.date)} · so far", f":arrow_deg{d}: **{size}** · [as of {scan_ts(day.scan):%H:%M}Z]({url}) · {tail}", icon_emoji=PROVISIONAL_ICON)
     if variant == "sender":
         return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.need('icons_base')}/arrows/av_deg{d}.png?v={AVATAR_REV}")
     if variant == "body":
-        url = _diff_url(day.scan, day.since, cfg.site_url)
+        url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
         return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}** · {tail}", icon_emoji=":calendar:")
     raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
 
@@ -411,4 +423,6 @@ class Cw:
             [{"ts": scan_ts(r.scan), "tb": r.tb} for r in month.rows], Path(out), f"{cfg.title} — {m:%B %Y}", cfg.host,
             quota_tib=q.bytes / TIB if q else None, quota_name=q.name if q else "",
             diff=diff, diff_label=f"{_md(base.date)} → {_md(last.date)}",
+            # both panels are the primary's; say so once there are other buckets
+            scope=cfg.primary if cfg.primary and last.extra else "",
         )

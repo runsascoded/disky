@@ -104,6 +104,18 @@ def test_refuses_changed_plan_incomplete_dr_and_totals(source, tmp_path):
         prepare_reviewed(str(directory), str(plan), str(tmp_path / "totals"))
 
 
+def test_refuses_a_dr_that_did_not_honor_the_items_as_of(source, tmp_path):
+    directory, plan, _, original, _ = source
+    # The item is now staged as of an earlier scan than the DR's: the DR (no
+    # `as_of` in its summary) never held back what changed after it.
+    plan.write_text(json.dumps({"plan_id": 1, "sweep": ["gs://b1/a/"], "as_of": {"gs://b1/a/": "2026-10-01"}}))
+    with pytest.raises(ValueError, match="^reviewed DR predates the staged items' as_of scans; dry-run the plan again$"):
+        prepare_reviewed(str(directory), str(plan), str(tmp_path / "stale"))
+    # As of the DR's own scan: nothing to hold back, the DR stands.
+    plan.write_text(json.dumps({"plan_id": 1, "sweep": ["gs://b1/a/"], "as_of": {"gs://b1/a/": original["date"]}}))
+    assert prepare_reviewed(str(directory), str(plan), str(tmp_path / "same"))[0] == original
+
+
 def test_partial_failure_preserves_successful_undo_rows(source, tmp_path):
     directory, plan, rows, _, _ = source
     client = FakeClient(blobs={})

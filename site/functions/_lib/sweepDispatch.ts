@@ -23,11 +23,13 @@
 // the data bucket).
 import type { D1Database } from '@cloudflare/workers-types'
 import { type BatchConfig, batchConfig, notConfigured } from './batchConfig.js'
+import { labelBatchSpec } from './costLabels.js'
 import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, type Prepared, refuse } from './dispatch.js'
 import { batchJobsUrl, batchRegionFor, gcpToken } from './gcp.js'
-import { bucketOf, NO_SHAPE, type PlanBucketsSnapshot, prefixShape, snapshotPlanBuckets } from './plans.js'
+import { bucketOf, digestLines, NO_SHAPE, type PlanBucketsSnapshot, prefixShape, snapshotPlanBuckets } from './plans.js'
 import { listSweepJobs, reflectSweepRuns } from './sweepReflect.js'
 import { DEFAULT_SWEEP_MACHINE, SWEEP_MACHINES, type SweepMachine } from './sweepMachines.js'
+import { RUN_ID_RE, SCAN_ID_RE } from '../../src/scanSlug.js'
 
 /** A run's dir in the data bucket (`DATA_BUCKET`). */
 export const runDir = (cfg: Pick<BatchConfig, 'dataBucket'>, jobId: string): string => `gs://${cfg.dataBucket}/sweep/runs/${jobId}`
@@ -79,19 +81,21 @@ const EXIT_TRAP = `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer 
 
 /** A gcs run id as the executor records it (`sweep_exec.run_id_for`):
  * `<scan>-p<plan_id>/<utc stamp>`. */
-export const RUN_ID_RE = /^\d{4}-\d{2}-\d{2}-p\d+\/\d{8}T\d{6}Z$/
+export { RUN_ID_RE }
 
 /** The undo job's bash: `sweep undo` looks the run up in D1, refuses past
  * its deadline, restores exactly the generations its `deleted/` log names,
- * and records the outcome (`undo_state`, `deletion_bands.undone_objects`). */
-export const undoScript = (): string => [
+ * and records the outcome (`undo_state`, `deletion_bands.undone_objects`).
+ * `bulk` (opt-in) adds `-B`: whole logged dirs via GCS bulk restore, each
+ * gated by the executor's exactness precheck (the rest per object). */
+export const undoScript = ({ bulk = false }: { bulk?: boolean } = {}): string => [
   'set -euo pipefail',
   EXIT_TRAP,
-  'dt-cloud sweep undo "$TARGET_RUN"',
+  `dt-cloud sweep undo${bulk ? ' -B' : ''} "$TARGET_RUN"`,
 ].join('\n')
 
 export interface SweepJobSpec {
-  cfg: Pick<BatchConfig, 'project' | 'image' | 'cfAccountId' | 'dataBucket' | 'd1DbId' | 'd1DbName'>
+  cfg: Pick<BatchConfig, 'project' | 'image' | 'cfAccountId' | 'dataBucket' | 'd1DbId' | 'd1DbName' | 'labels'>
   /** The service account the job runs as (`JOB_SA`). */
   jobSa: string
   region: string
@@ -102,14 +106,16 @@ export interface SweepJobSpec {
   /** Per-job variables, ahead of the shared ones. */
   env: Record<string, string>
   machine?: SweepMachine
+  /** The jobs' cost-attribution `component` label (with `cfg.labels`). */
+  component?: string
 }
 
 /** The Batch job spec every gcs executor job shares (a sweep run, an undo):
  * the executor image running `bash -c <script>` as the job account, in the
  * region of its buckets, with the D1 + site credentials from Secret Manager. */
-export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, machine = DEFAULT_SWEEP_MACHINE }: SweepJobSpec): unknown => {
+export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, machine = DEFAULT_SWEEP_MACHINE, component = 'sweep' }: SweepJobSpec): unknown => {
   const SECRET = (name: string) => `projects/${cfg.project}/secrets/${name}/versions/latest`
-  return {
+  return labelBatchSpec({
     taskGroups: [{
       taskCount: 1,
       taskSpec: {
@@ -146,7 +152,7 @@ export const sweepJobSpec = ({ cfg, jobSa, region, script, actor, siteUrl, env, 
       location: { allowedLocations: [`regions/${region}`] },
     },
     logsPolicy: { destination: 'CLOUD_LOGGING' },
-  }
+  }, cfg.labels, component)
 }
 
 /** Submit a gcs executor job in `region`; null on success, else the refusal
@@ -183,11 +189,14 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (requested.some(b => !shape.buckets.includes(b))) return refuse(400, 'bad bucket name')
   const snapshot: PlanBucketsSnapshot | null = await snapshotPlanBuckets(db, req.planId, shape)
   if (!snapshot) return refuse(404, 'no such plan')
-  if (!snapshot.sweep.length) return refuse(400, 'plan has no items to sweep')
+  if (!snapshot.sweep.length && !snapshot.objects?.length) return refuse(400, 'plan has no items to sweep')
   const buckets = bucketCut(snapshot.buckets, requested)
   if (!buckets.length) return refuse(400, 'buckets name none of the plan\'s', { plan_buckets: snapshot.buckets })
   // The run acts on the items in its cut: that set is what the digest names.
-  const prefixes = snapshot.sweep.filter(p => buckets.includes(bucketOf(p, shape.buckets)))
+  const prefixes = digestLines([
+    ...snapshot.sweep.map(key => ({ key, kind: 'prefix' as const })),
+    ...(snapshot.objects ?? []).map(key => ({ key, kind: 'object' as const })),
+  ].filter(i => buckets.includes(bucketOf(i.key, shape.buckets))))
 
   const launch: Prepared['launch'] = async (date, digest, reviewed) => {
     const reviewedPrefix = `gs://${cfg.dataBucket}/sweep/runs/`
@@ -225,8 +234,8 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
 }
 
 export const sweep: Executor = {
-  dateRe: /^\d{4}-\d{2}-\d{2}$/,
-  dateHint: 'YYYY-MM-DD',
+  dateRe: SCAN_ID_RE,
+  dateHint: 'YYYY-MM-DD[THHMM]',
   prepare,
   async refresh(env, db) {
     if (!env.GCP_SA_KEY) return []
