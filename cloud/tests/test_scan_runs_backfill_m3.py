@@ -9,7 +9,7 @@ from click.testing import CliRunner
 
 from dt_cloud.scan_runs import Output, Phase, Record, Run, SqliteSink, load_profile
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("scan_runs_backfill_m3", REPO / "infra/aws/scan_runs_backfill.py")
 bf = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = bf  # its dataclasses resolve annotations through it
