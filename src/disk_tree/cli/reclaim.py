@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
 from click import argument, option
 from humanize import naturalsize
@@ -41,7 +42,7 @@ def reclaim_cmd(no_human: bool, as_json: bool, partners: tuple[str, ...], no_def
 
     shared_set = rec.shared_set
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for s in rec.subtrees:
         shared = sum(length for _, length in s.extents & shared_set)
         rows.append({

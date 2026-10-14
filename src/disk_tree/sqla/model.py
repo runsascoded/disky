@@ -29,13 +29,13 @@ class ScanProgress(Base):
     @classmethod
     def start(cls, path: str) -> 'ScanProgress':
         """Start tracking a new scan."""
-        from .db import db
+        from .db import session
         import os
 
         from disk_tree.backends import canonical
         path = canonical(path)
         # Remove any existing progress for this path
-        db.session.query(cls).filter_by(path=path).delete()
+        session().query(cls).filter_by(path=path).delete()
         progress = cls(
             path=path,
             pid=os.getpid(),
@@ -44,36 +44,36 @@ class ScanProgress(Base):
             error_count=0,
             status='running',
         )
-        db.session.add(progress)
-        db.session.commit()
+        session().add(progress)
+        session().commit()
         return progress
 
     @classmethod
     def update(cls, path: str, items_found: int, items_per_sec: float | None = None, error_count: int = 0):
         """Update progress for a scan."""
-        from .db import db
+        from .db import session
 
-        progress = db.session.query(cls).filter_by(path=path).first()
+        progress = session().query(cls).filter_by(path=path).first()
         if progress:
             progress.items_found = items_found
             if items_per_sec is not None:
                 progress.items_per_sec = items_per_sec
             progress.error_count = error_count
-            db.session.commit()
+            session().commit()
 
     @classmethod
     def finish(cls, path: str, status: str = 'completed'):
         """Mark a scan as complete and remove progress tracking."""
-        from .db import db
+        from .db import session
 
-        db.session.query(cls).filter_by(path=path).delete()
-        db.session.commit()
+        session().query(cls).filter_by(path=path).delete()
+        session().commit()
 
     @classmethod
     def get_all(cls) -> list['ScanProgress']:
         """Get all active scans."""
-        from .db import db
-        return db.session.query(cls).all()
+        from .db import session
+        return session().query(cls).all()
 
 
 class Scan(Base):
@@ -106,7 +106,7 @@ class Scan(Base):
         progress: bool = True,
         one_fs: bool = False,
     ) -> tuple['Scan', pd.DataFrame]:
-        from .db import db
+        from .db import session
 
         from disk_tree.backends import canonical
         path = canonical(path)
@@ -162,8 +162,8 @@ class Scan(Base):
             n_desc=root_n_desc,
             mtime=root_mtime,
         )
-        db.session.add(scan)
-        db.session.commit()
+        session().add(scan)
+        session().commit()
         err(f"{path}: saved {len(df)} rows to {blob_ref} ({backend.name})")
         if result.error_count > 0:
             err(f"{path}: {result.error_count} listing errors")
@@ -178,16 +178,16 @@ class Scan(Base):
         path: str,
         cutoff: datetime,
     ):
-        from .db import db
+        from .db import session
 
         backend = get_backend()
-        scans = db.session.query(Scan).filter_by(path=path).filter(Scan.time < cutoff).all()
+        scans = session().query(Scan).filter_by(path=path).filter(Scan.time < cutoff).all()
         err(f"{path}: deleting {len(scans)} old scans:")
         for scan in scans:
             blob = scan.blob
             err(f"\t{scan.time}: {blob}")
-            db.session.delete(scan)
-            db.session.commit()
+            session().delete(scan)
+            session().commit()
             backend.delete(blob)
 
     @classmethod
@@ -195,10 +195,10 @@ class Scan(Base):
         cls,
         path: str,
     ) -> 'Scan | None':
-        from .db import db
+        from .db import session
 
         from disk_tree.backends import canonical
-        return db.session.query(cls).filter_by(path=canonical(path)).order_by(cls.time.desc()).first()
+        return session().query(cls).filter_by(path=canonical(path)).order_by(cls.time.desc()).first()
 
     def df(self) -> pd.DataFrame:
         backend = get_backend()
@@ -212,8 +212,8 @@ class Scan(Base):
         whose parquet is on an unmounted volume (spec `r2-scan-target.md`)."""
         from disk_tree.backends import canonical
         from disk_tree.config import blob_reachable
-        from .db import db
-        scans = db.session.query(cls).filter_by(path=canonical(path)).order_by(cls.time.desc()).all()
+        from .db import session
+        scans = session().query(cls).filter_by(path=canonical(path)).order_by(cls.time.desc()).all()
         return next((s for s in scans if blob_reachable(s.blob)), None)
 
     @classmethod

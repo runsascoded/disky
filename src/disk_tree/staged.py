@@ -169,7 +169,7 @@ def dispatch(
     )
     staged_items = items(session, plan)
     subset = uris is not None
-    if subset:
+    if uris is not None:
         by_uri = {it.uri: it for it in staged_items}
         want = sorted({_canonical(u) for u in uris})
         unknown = [u for u in want if u not in by_uri]

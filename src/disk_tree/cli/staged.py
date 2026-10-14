@@ -244,7 +244,8 @@ def _serve(
 
     delete_cfg = _delete_cfg(config_path)
     try:
-        clients = [D1Client.from_env(i) for i in (d1_ids or [delete_cfg.get("database_id")])]
+        db_ids: list[str | None] = list(d1_ids) if d1_ids else [delete_cfg.get("database_id")]
+        clients = [D1Client.from_env(i) for i in db_ids]
     except D1Error as e:
         raise SystemExit(f"dispatch --serve: {e}")
     undo_state = delete_cfg.get("undo", "none")
@@ -290,7 +291,7 @@ def _serve(
         f"chat={delete_cfg.get('chat', 'none')}, "
         f"{'trash' if trash_on else 'rm'}{f', ttl {ttl}' if ttl else ''})")
 
-    def sweep_ttl() -> None:
+    def sweep_ttl(ttl_s: int) -> None:
         for r in trash_mod.expired(ttl_s):
             nbytes, files = trash_mod.empty(r.run_id)
             err(f"  emptied {r.run_id} (older than {ttl}): freed {naturalsize(nbytes, binary=True)}, {files} file(s)")
@@ -318,7 +319,7 @@ def _serve(
                 for uri, why in s["errors"]:
                     err(f"    {uri}: {why}")
             if ttl_s is not None:
-                sweep_ttl()
+                sweep_ttl(ttl_s)
             if once:
                 if not summaries:
                     err("dispatch --serve --once: no enqueued runs")

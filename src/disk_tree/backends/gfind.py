@@ -97,6 +97,7 @@ def run_gfind(
                 progress_callback(items_count, items_per_sec, err_count)
                 last_progress_time = now
 
+    assert proc.stderr is not None  # `stderr=PIPE`
     stderr_bytes = proc.stderr.read()
     if stderr_bytes:
         stderr_output = stderr_bytes.decode('utf-8', errors='replace')
