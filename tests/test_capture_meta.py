@@ -6,7 +6,7 @@ import pytest
 from click.testing import CliRunner
 
 from disk_tree.cli.base import cli
-from disk_tree.cli.capture import capture_space
+from disk_tree.cli.capture import capture_space, started_iso
 
 
 MANIFEST = {
@@ -34,7 +34,7 @@ def test_vm_volume_allocation_survives_publication(tmp_path: Path) -> None:
     snapshot.write_text('{"total_bytes": 1500}\n')
     result = CliRunner().invoke(cli, ['capture-meta', str(manifest), str(snapshot)])
     assert (result.exit_code, result.output) == (0, f'{snapshot}\n')
-    assert json.loads(snapshot.read_text()) == {'total_bytes': 1500, 'captured_at': MANIFEST['time'], 'disk_space': {**SPACE, 'vm_used': 75}}
+    assert json.loads(snapshot.read_text()) == {'total_bytes': 1500, 'captured_at': MANIFEST['time'], 'started': '2026-10-05T15:41:33.000Z', 'disk_space': {**SPACE, 'vm_used': 75}}
     container['volumes'] = [{'roles': ['VM'], 'used': 0}]
     assert capture_space({**MANIFEST, 'container': container}) == {**SPACE, 'vm_used': 0}
 
@@ -67,12 +67,12 @@ def test_publish_and_clear_annotation(tmp_path: Path) -> None:
     result = runner.invoke(cli, ['capture-meta', str(manifest), str(snapshot)])
     assert result.exit_code == 0, result.exception
     assert result.output == f'{snapshot}\n'
-    assert json.loads(snapshot.read_text()) == {**original, 'captured_at': MANIFEST['time'], 'disk_space': SPACE}
+    assert json.loads(snapshot.read_text()) == {**original, 'captured_at': MANIFEST['time'], 'started': '2026-10-05T15:41:33.000Z', 'disk_space': SPACE}
     manifest.write_text(json.dumps({k: v for k, v in MANIFEST.items() if k != 'container'}))
     result = runner.invoke(cli, ['capture-meta', str(manifest), str(snapshot)])
     assert result.exit_code == 0, result.exception
     assert result.output == f'{snapshot}\n'
-    assert json.loads(snapshot.read_text()) == {**original, 'captured_at': MANIFEST['time']}
+    assert json.loads(snapshot.read_text()) == {**original, 'captured_at': MANIFEST['time'], 'started': '2026-10-05T15:41:33.000Z'}
 
 
 def test_same_capture_can_be_reingested_but_a_different_capture_cannot_replace_it(tmp_path: Path) -> None:
@@ -102,3 +102,13 @@ def test_invalid_manifest_does_not_modify_snapshot(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert str(result.exception) == 'expected a version 1 disk-tree-capture manifest'
     assert snapshot.read_text() == '{"total_bytes": 1500}\n'
+
+
+def test_started_is_the_capture_time_as_a_utc_millisecond_instant() -> None:
+    assert [
+        started_iso('2026-10-11T22:01:35.843657+00:00'),
+        started_iso('2026-10-05T15:41:33Z'),
+        started_iso('2026-10-11T18:01:35-04:00'),
+    ] == ['2026-10-11T22:01:35.843Z', '2026-10-05T15:41:33.000Z', '2026-10-11T22:01:35.000Z']
+    with pytest.raises(ValueError, match='capture time without a timezone'):
+        started_iso('2026-10-11T22:01:35')
