@@ -256,13 +256,37 @@ class R2Store:
                 raise RuntimeError(f"{self.name}: delete failed for {len(resp['Errors'])} keys, e.g. {resp['Errors'][0]}")
 
 
+class BlobStore:
+    """Any other root `disk_tree.blobfs` resolves — a local/mounted dir, or an
+    fsspec URL (`s3://<bucket>`, …): keys are paths relative to it."""
+
+    def __init__(self, root: str):
+        self.name = root.rstrip("/")
+
+    def ls(self, prefix: str) -> list[Blob]:
+        from disk_tree import blobfs
+
+        d = blobfs.join(self.name, prefix.rstrip("/"))
+        return [Blob(key=f"{prefix.rstrip('/')}/{k}", size=n, mtime=t) for k, n, t in blobfs.find(d)]
+
+    def delete(self, keys: list[str]) -> None:
+        from disk_tree import blobfs
+
+        blobfs.remove_many(self.name, keys)
+
+
 def open_store(target: str) -> GenStore:
     """`gs://<bucket>` → GCS; `r2` → the R2 serving bucket (`$R2_BUCKET`);
-    `r2://<bucket>` → that R2 bucket (same endpoint + creds)."""
+    `r2://<bucket>` → that R2 bucket (publish-r2's endpoint + creds, `R2_*`);
+    another URL (`s3://<bucket>`, …) or a local/mounted dir (absolute or
+    `.`-relative, so a bare word is never taken for one) through `blobfs`
+    (`BlobStore`)."""
     if target.startswith("gs://"):
         return GcsStore(target[len("gs://"):].strip("/"))
     if target == "r2":
         return R2Store()
     if target.startswith("r2://"):
         return R2Store(target[len("r2://"):].strip("/"))
-    raise ValueError(f"bad --files target {target!r} (want gs://<bucket>, r2, or r2://<bucket>)")
+    if "://" in target or target.startswith(("/", ".")):
+        return BlobStore(target)
+    raise ValueError(f"bad --files target {target!r} (want gs://<bucket>, r2, r2://<bucket>, another URL, or a /dir)")

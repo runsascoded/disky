@@ -138,10 +138,6 @@ def _group_rows(md: "pq.FileMetaData") -> list[dict]:
     return rows
 
 
-def _remote(parquet_path: str) -> bool:
-    return parquet_path.startswith("gs://")
-
-
 def bucket_base(base: str) -> str:
     """A tier location's root as given (`-b`, `$DATA_BUCKET`): an fsspec URL or a
     local/mounted path (absolute, or `.`-relative) as is; a bare name is a GCS
@@ -155,10 +151,6 @@ def exists(parquet_path: str) -> bool:
     """Whether a tier file is there to sync — a deployment produces only some
     of `INDEX_VARIANTS` (gcs's `path-index` writes no age pyramid), and
     `index-sync` skips the rest instead of dying on the first absent one."""
-    if _remote(parquet_path):
-        import gcsfs
-
-        return gcsfs.GCSFileSystem().exists(parquet_path)
     from disk_tree import blobfs
 
     return blobfs.exists(parquet_path)
@@ -178,16 +170,14 @@ def meta_started(meta_path: str) -> str | None:
 
 
 def extract(parquet_path: str) -> tuple[dict, list[dict]]:
-    """Return (schema_meta, group_rows) from a local or fsspec-readable parquet."""
-    import gcsfs
+    """Return (schema_meta, group_rows) from a local/mounted parquet or any URL
+    `blobfs` resolves (`gs://`, `r2://`, `s3://`)."""
+    # `blobfs.open_read` names its cache: gcsfs's adaptive prefetcher, which blobfs
+    # opts the process out of, hung the interpreter at exit once pyarrow had read
+    # through a handle (an `index-sync` from a laptop synced, then never exited).
+    from disk_tree import blobfs
 
-    # `blobfs` opts the process out of gcsfs's adaptive prefetcher, whose handle hangs the
-    # interpreter at exit once pyarrow has read through it (an `index-sync` from a laptop
-    # synced, then never exited).
-    from disk_tree import blobfs  # noqa: F401
-
-    opener = gcsfs.GCSFileSystem().open if _remote(parquet_path) else open
-    with opener(parquet_path, "rb") as f:
+    with (blobfs.open_read(parquet_path) if blobfs.is_url(parquet_path) else open(parquet_path, "rb")) as f:
         md = pq.ParquetFile(f).metadata
     schema = _schema_json(md)
     # A floored tier (the age pyramid; the retired coarse tiers before it)
@@ -228,17 +218,10 @@ def groups_blob(schema: dict, rows: list[dict]) -> str:
 
 
 def _write(out: str, data: bytes) -> None:
-    """Bytes to a local/mounted path, a `gs://` URL (gcsfs), or another fsspec
-    URL (`blobfs`: `r2://`, `s3://`)."""
-    if _remote(out):
-        import gcsfs
+    """Bytes to a local/mounted path or a URL (`blobfs`: `gs://`, `r2://`, `s3://`)."""
+    from disk_tree import blobfs
 
-        with gcsfs.GCSFileSystem().open(out, "wb") as f:
-            f.write(data)
-    else:
-        from disk_tree import blobfs
-
-        blobfs.write_bytes(out, data)
+    blobfs.write_bytes(out, data)
 
 
 def write_groups_blob(parquet_path: str, schema: dict, rows: list[dict]) -> tuple[str, int]:
@@ -278,17 +261,9 @@ def read_groups_blob(parquet_path: str) -> tuple[dict, list[dict]]:
     cheap source: `index-blob -J`)."""
     from disk_tree.find.groups import groups_from_json
 
-    path = groups_blob_path(parquet_path)
-    if _remote(path):
-        import gcsfs
+    from disk_tree import blobfs
 
-        with gcsfs.GCSFileSystem().open(path, "r") as f:
-            text = f.read()
-    else:
-        from disk_tree import blobfs
-
-        text = blobfs.read_text(path)
-    return groups_from_json(text)
+    return groups_from_json(blobfs.read_text(groups_blob_path(parquet_path)))
 
 
 def _sql_escape(s: str) -> str:
@@ -729,13 +704,7 @@ def snapshot_starts(snapshots: str) -> list[tuple[str, str | None]]:
 
     from .scan_id import is_scan_id
 
-    base = snapshots.rstrip("/")
-    if blobfs.is_url(base):
-        fs, p = blobfs.fs_for(base)
-        scheme = base.split("://", 1)[0]
-        metas = {m.rsplit("/", 2)[-2]: f"{scheme}://{m}" for m in fs.glob(f"{p}/*/meta.json")}
-    else:
-        metas = {m.parent.name: str(m) for m in Path(base).glob("*/meta.json")}
+    metas = {m.rsplit("/", 2)[-2]: m for m in blobfs.glob(blobfs.join(snapshots.rstrip("/"), "*/meta.json"))}
     return [(scan, meta_started(metas[scan])) for scan in sorted(metas) if is_scan_id(scan)]
 
 

@@ -220,7 +220,10 @@ def _metadata(bucket: str, key: str, mount: str | None) -> "pq.FileMetaData":
 
 
 def _src(bucket: str, key: str, mount: str | None) -> str:
-    return f"{mount}/{key}" if mount else f"gs://{bucket}/{key}"
+    """A scan's `path` sort: under `mount`, else in `bucket` (a GCS bucket's name, or a store URL / dir)."""
+    if mount:
+        return f"{mount}/{key}"
+    return f"{bucket.rstrip('/')}/{key}" if "://" in bucket or "/" in bucket else f"gs://{bucket}/{key}"
 
 
 # ── Interval kernel ────────────────────────────────────────────────────────

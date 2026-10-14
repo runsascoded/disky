@@ -75,20 +75,38 @@ def over_time_pyramid() -> Pyramid:
     )
 
 
-def _roll_sql(con: "duckdb.DuckDBPyConnection", path_index: str) -> str:
-    """One scan's `path` sort → `(depth, path, b, o)` totals + a depth-0
+#: The registered table a URL scan is read through (`_source`).
+_URL_SRC = "__over_time_src"
+
+
+def _source(con: "duckdb.DuckDBPyConnection", path_index: str) -> str:
+    """The FROM expression for one scan's `path` sort: `read_parquet` for a
+    local/mounted file; for a URL, `blobfs`'s streamed `pyarrow` dataset
+    registered as ``_URL_SRC`` — any scheme `blobfs` resolves (`r2://` with its
+    endpoint + profile, `gs://`, `s3://`), no DuckDB secret or extension."""
+    from disk_tree import blobfs
+
+    if not blobfs.is_url(path_index):
+        return f"read_parquet('{path_index}')"
+    con.register(_URL_SRC, blobfs.dataset(path_index))
+    return _URL_SRC
+
+
+def _roll_sql(con: "duckdb.DuckDBPyConnection", src: str) -> str:
+    """One scan's `path` sort (``src``: `_source`'s FROM expression) →
+    `(depth, path, b, o)` totals + a depth-0
     fleet-root row (sum of the buckets at depth 1). A store generation
     (`kind` on every row; specs/done/path-store.md §4.5) contributes its dir rows'
     `size` / `n_files`; a pre-store index (dir rows only, wire names) its
     `b` / `o` — the same rows in, the same intervals out, across the switch."""
-    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{path_index}') LIMIT 0").fetchall()}
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {src} LIMIT 0").fetchall()}
     if "kind" in cols:
         b, o, where = "size", "n_files", " WHERE kind = 'dir'"
     else:
         b, o, where = "b", "o", ""
     return (
         f"WITH t AS (SELECT depth, path, sum({b})::BIGINT AS b, sum({o})::BIGINT AS o "
-        f"FROM read_parquet('{path_index}'){where} GROUP BY depth, path) "
+        f"FROM {src}{where} GROUP BY depth, path) "
         f"SELECT * FROM t UNION ALL SELECT 0, '', sum(b)::BIGINT, sum(o)::BIGINT FROM t WHERE depth = 1"
     )
 
@@ -106,10 +124,10 @@ def write_over_time_index(
     ``(scan_id, path_index_parquet)`` list, **oldest first**. Rolls each scan to
     a narrow shard, then consolidates via pyrmts' out-of-core DuckDB kernel.
 
-    ``con``: pass a connection with a gcs secret to read `gs://` path-indices
-    directly (out-of-core, no download); else a local connection is used (for
-    mounted/local shards). Returns ``{rows, paths, scans, intervals_per_path,
-    file, scans_file}``."""
+    Each path index is a local/mounted file or a URL (`gs://`, `r2://`,
+    `s3://`), read in place through `blobfs` (`_source`). ``con``: a
+    connection to reuse; else one is opened with ``mem``/``threads``. Returns
+    ``{rows, paths, scans, intervals_per_path, file, scans_file}``."""
     if not scans:
         raise ValueError("write_over_time_index: no scans")
     ids = [s for s, _ in scans]
@@ -129,7 +147,12 @@ def write_over_time_index(
         scan_files: list[tuple[str, str]] = []
         for i, (sid, pi) in enumerate(scans):
             shard = shards / f"{i:04d}.parquet"
-            con.execute(f"COPY ({_roll_sql(con, str(pi))}) TO '{shard}' (FORMAT parquet)")
+            src = _source(con, str(pi))
+            try:
+                con.execute(f"COPY ({_roll_sql(con, src)}) TO '{shard}' (FORMAT parquet)")
+            finally:
+                if src == _URL_SRC:
+                    con.unregister(_URL_SRC)
             scan_files.append((sid, str(shard)))
         ms = consolidate_parquet_duckdb(scan_files, over_time_pyramid(), con=con)
         con.register("ms_over_time", ms.table)

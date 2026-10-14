@@ -62,6 +62,9 @@ bulk = [
 [project.scripts]
 disk-tree = "disk_tree.cli.main:cli"
 
+[project.entry-points."fsspec.specs"]
+r2 = "disk_tree.r2fs.R2FileSystem"
+
 [dependency-groups]
 dev = [
     "pytest",

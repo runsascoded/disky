@@ -183,7 +183,7 @@ def _had(d: str, *tiers: str) -> dict:
 
 def _r2(d: str, runs: list[str], manifest: str | None = None) -> tuple:
     """The R2 job: each run's served files but its `drill/meta.json` and `anchors/meta.json`, then those; a check of them all;
-    the manifest (`d`'s, or a revision) last, alone."""
+    the manifest (`d`'s, or a revision) last, alone; then the runs a carry folded, off R2."""
     cmds = []
     for r in runs:
         cmds.append(_py("static_names", "r2-copy", "-g", f"{GEN}/deltas/{r}", "-x", "drill/meta.json", "-x", "anchors/meta.json",
@@ -193,6 +193,7 @@ def _r2(d: str, runs: list[str], manifest: str | None = None) -> tuple:
         cmds.append(_py("static_names", "r2-copy", "-g", f"{GEN}/deltas/{r}", "-o", "anchors/meta.json", mount=False))
     cmds.append(_py("static_names", "r2-verify", "-g", GEN, "-m", manifest or d, mount=False))
     cmds.append(_py("static_names", "r2-copy", "-g", GEN, "-o", f"manifests/{manifest or d}.json", mount=False))
+    cmds.append(_py("static_merge", "prune", "-g", GEN, "-r", mount=False))
     return ("r2", 1, " && ".join(f"( {c} )" for c in cmds))
 
 
@@ -419,7 +420,8 @@ def test_a_run_without_the_starts_with_catalog_gets_its_anchors_stage_again():
     assert f"{ROOT}/deltas/{d}/anchors/start/meta.json" in f.keys
     f.calls = []
     f.daily(ANCHORS, merge=False).run(d)
-    assert f.calls == [_r2(d, ["2026-10-09", d]), ("prune", d)]
+    # the newest manifest's copy: the merge's revision (`d`'s own lists runs the revision folded, which a prune may delete)
+    assert f.calls == [_r2(d, [f"2026-10-09_{d}"], f"{d}.m001"), ("prune", d)]
 
 
 def test_an_appended_scan_without_its_anchors_gets_them_then_the_r2_copy():
@@ -619,7 +621,7 @@ def test_the_merge_cli_exits_1_on_a_failure_and_runs_add_skips_the_stage_with_M(
     assert f.calls == [_merge(600.0), _r2(SCANS[1], [f"{SCANS[0]}_{SCANS[1]}"], f"{SCANS[1]}.m001")]
     f.calls = []
     r = CliRunner().invoke(sd.add_cmd, ["-M", SCANS[1]])
-    assert (r.exit_code, f.calls) == (0, [_r2(SCANS[1], SCANS[:2]), ("prune", SCANS[1])])
+    assert (r.exit_code, f.calls) == (0, [_r2(SCANS[1], [f"{SCANS[0]}_{SCANS[1]}"], f"{SCANS[1]}.m001"), ("prune", SCANS[1])])
     assert seen[-1] == {"dry_run": False, "verify_terms": None, "merge": False, "merge_wait": 0}
 
 

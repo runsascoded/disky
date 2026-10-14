@@ -20,7 +20,10 @@ Per scan `D`, under `interval-store/<gen>/deltas/<D>/` (data bucket):
 4. `r2` (as the R2 account): each listed run's served files → R2, checked there, then the manifest. A second runnable
    of the publish job's one task (one provisioning, not two), unless the R2 account is another service account; its
    own job when the manifest already exists (a rerun).
-5. `prune` (local): every earlier scan's `state/` in the scratch bucket, once `D`'s is complete (parallel deletes).
+5. `prune` (local): every earlier scan's `state/` in the scratch bucket, once `D`'s is complete (parallel deletes); and
+   the runs a carry folded, on GCS (`append_runner.prune_folded`: kept while a manifest superseded
+   less than `GRACE_S`, 1 h, ago lists them; each keeping `FOLDED_RETAIN`).
+   The R2 job prunes R2 the same way after copying its manifest, and the merge job GCS after its revisions.
 
 Then, once after the scans, the **merge stage** (`append_runner`'s deferred carries, non-fatal): the binary counter's due
 carries as one Batch job (`carry`: each merged run — per range `pyrmts.runs.merge_parquets` on its inputs' deltas, min-`vt`,
@@ -62,7 +65,6 @@ from . import static_names as sn
 from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as this module has always offered them
     NOT_NEXT,
     Carry,
-    GcsRunStore,
     StateIncomplete,
     duckdb_args,
     exit_on,
@@ -71,7 +73,8 @@ from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as thi
     run_key,
     scans_of,
 )
-from .static_names import OPEN, U64, err, q, read_json, upload_tree, write_sorted
+from .blobstore import Store, gs_bucket, run_store, serves, store_url
+from .static_names import OPEN, U64, err, q, write_sorted
 from .static_profile import Profile, from_mapping, level_arg, parse_compact_level
 
 PREFIX = ist.PREFIX
@@ -80,6 +83,9 @@ PREFIX = ist.PREFIX
 RUN_SORTS = ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user")
 #: Cost-attribution `component` of every job the append submits (`cost_labels`).
 COMPONENT = "interval-store"
+#: What a folded run keeps on GCS (`append_runner.plan_prune`'s `retain`): its `ranges/` docs (the next scan's
+#: `prev_open_counts` balances its tasks by them) and its pinned `scans.json`, both small. R2 keeps none of it.
+FOLDED_RETAIN = ("ranges/", "scans.json")
 
 PVF = pa.field("pvf", pa.int64(), nullable=False)
 OP = pa.field("op", pa.int8(), nullable=False)
@@ -353,15 +359,14 @@ def open_counts(docs: dict[str, dict], k: int) -> list[int] | None:
     return out
 
 
-def prev_open_counts(gcs, bucket: str, prefix: str, prev: str, k: int, *, workers: int = 8) -> list[int] | None:
+def prev_open_counts(store: Store, prefix: str, prev: str, k: int, *, workers: int = 8) -> list[int] | None:
     """`open_counts` of the previous scan's run (`<prefix>/deltas/<prev>/ranges/`), read in parallel."""
     root = f"{prefix}/{run_key(prev, prev)}/ranges/"
-    b = gcs.bucket(bucket)
-    names = sorted(x.name for x in gcs.list_blobs(bucket, prefix=root) if x.name.endswith(".json"))
+    names = [n for n in store.keys(root) if n.endswith(".json")]
     if len(names) < k:
         return None
     with ThreadPoolExecutor(workers) as ex:
-        docs = dict(zip((Path(n).stem for n in names), ex.map(lambda n: json.loads(b.blob(n).download_as_bytes()), names)))
+        docs = dict(zip((Path(n).stem for n in names), ex.map(store.read_json, names)))
     return open_counts(docs, k)
 
 
@@ -437,6 +442,14 @@ def load_config(profile: str | None, environ: dict[str, str] | None = None) -> C
         else:
             over[k] = raw
     p = replace(p, **over)
+    # The staged chain's tasks mount the store (Batch's GCS volumes): a whole GCS bucket, by name. Any other store
+    # (`r2://`, `s3://`, a dir) appends on one machine (`interval-store add`, `interval_local`).
+    for f in ("bucket", "scratch"):
+        if getattr(p, f):
+            if (b := gs_bucket(getattr(p, f))) is None:
+                raise SystemExit(f"interval store: the staged append mounts a GCS bucket; {f} {getattr(p, f)!r} is not one "
+                                 "(append on one machine: `dt-cloud interval-store add`)")
+            p = replace(p, **{f: b})
     for f in ("gen", "bucket", "scratch", "layouts", "region", "image", "sa", "r2_bucket"):
         if getattr(p, f) in (None, "", ()):
             raise SystemExit(f"interval store: no {f} in the profile's `append` section" + (f" (or ${ENV[f]})" if f in ENV else ""))
@@ -533,16 +546,16 @@ class Runner(ar.Runner):
         self.stage(f"{d} r2" + (f" (manifests/{stem}.json)" if manifest else ""), lambda: self.run_job(name, spec))
 
 
-def gcs_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merge_wait: float | None = 0) -> Runner:
-    """`Runner` over the real data bucket, Batch, and this module's `prepare` / `prune`."""
+def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merge_wait: float | None = 0) -> Runner:
+    """`Runner` over the profile's store (`blobstore.Store`), Batch, and this module's `prepare` / `prune`."""
     from google.cloud import storage
 
     p = cfg.p
+    store = Store(store_url(p.bucket))
     client = storage.Client(project=p.project)
-    b = client.bucket(p.bucket)
 
     def published(layouts, start):
-        return [s["id"] for s in sn.list_scans(p.bucket, layouts=layouts, start=start)["scans"]]
+        return [s["id"] for s in list_scans(store, layouts, start=start)["scans"]]
 
     def prepare(d):
         try:
@@ -551,16 +564,19 @@ def gcs_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merge_
             raise ar.NotNext(str(e)) from e
 
     def prune(d):
-        k = read_json(f"gs://{p.bucket}/{PREFIX}/{cfg.ranges_gen}/ranges.json")["k"]
+        k = store.read_json(f"{PREFIX}/{cfg.ranges_gen}/ranges.json")["k"]
         doc = prune_state(client, p.gen, d, k, bucket=p.bucket, scratch=p.scratch, dry_run=dry_run)
         err(json.dumps({k_: v for k_, v in doc.items() if k_ != "delete"} | {"deleted_scans": [x["scan"] for x in doc["delete"]]}))
+        folded = ar.prune_folded(GcsRunStore(gs_bucket(p.bucket), None, p.gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN, dry_run=dry_run,
+                                 where=" gcs")
+        err(json.dumps(_summary(folded)))
 
     return Runner(
         cfg=cfg,
-        exists=lambda key: b.blob(key).exists(),
-        count=lambda prefix, suffix: sum(1 for x in client.list_blobs(p.bucket, prefix=prefix) if x.name.endswith(suffix)),
-        read_json=lambda key: read_json(f"gs://{p.bucket}/{key}"),
-        list_keys=lambda prefix: [x.name for x in client.list_blobs(p.bucket, prefix=prefix)],
+        exists=store.exists,
+        count=lambda prefix, suffix: sum(1 for k in store.keys(prefix) if k.endswith(suffix)),
+        read_json=store.read_json,
+        list_keys=store.keys,
         published=published,
         run_job=ar.BatchRunner(p, err),
         prepare=prepare,
@@ -571,45 +587,64 @@ def gcs_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merge_
     )
 
 
-# ── GCS-side stages (local, or a Batch task) ───────────────────────────────
+# ── Store-side stages (local, or a Batch task) ─────────────────────────────
 
 
-def _gcs():
-    from google.cloud import storage
+def list_scans(store: Store, layouts, *, start: str | None = None, through: str | None = None) -> dict:
+    """Every scan's newest `path` sort in the store under `layouts` (`static_names.pick_scans`): on a whole GCS bucket
+    pinned by generation, size, md5 and crc32c (`static_names.list_scans`), elsewhere by size."""
+    if (b := gs_bucket(store.root)) is not None:
+        return sn.list_scans(b, layouts=layouts, start=start, through=through)
+    objects = []
+    for t in layouts:
+        lead = sn.layout_glob(t)[0].split("*", 1)[0]
+        objects += [(k, {"size": n}) for k, n in store.listing(lead.rsplit("/", 1)[0] if "/" in lead else "").items()]
+    return {"bucket": store.root, "layouts": list(layouts), "scans": sn.pick_scans(objects, layouts, start=start, through=through)}
 
-    return storage.Client()
+
+def scan_version(store: Store, key: str) -> int:
+    """A scan's `path` sort's format (1: a v1 index, 2: a store generation's sort), from its footer."""
+    if (b := gs_bucket(store.root)) is not None:
+        from google.cloud import storage
+
+        return sn._version_from_footer(storage.Client().bucket(b), key)
+    from .static_local import source_version
+
+    with store.open(key) as fh:
+        return source_version(fh)
 
 
-def _latest_manifest(bucket: str, gen: str, before: str | None = None) -> dict | None:
+def _latest_manifest(store: Store, gen: str, before: str | None = None) -> dict | None:
     """The newest manifest (of a scan strictly before `before`), revisions included (`append_runner.latest_key`)."""
     prefix = f"{PREFIX}/{gen}/"
-    key = latest_key([b.name.removeprefix(prefix) for b in _gcs().list_blobs(bucket, prefix=f"{prefix}manifests/")], before)
-    return read_json(f"gs://{bucket}/{prefix}{key}") if key else None
+    key = latest_key([k.removeprefix(prefix) for k in store.keys(f"{prefix}manifests/")], before)
+    return store.read_json(f"{prefix}{key}") if key else None
 
 
-def _state(bucket: str, gen: str, scan: str) -> tuple[dict, list[dict]]:
+def _state(store: Store, gen: str, scan: str) -> tuple[dict, list[dict]]:
     """The generation's base `scans.json` and the runs live before `scan` (the newest earlier manifest's)."""
-    base = read_json(f"gs://{bucket}/{PREFIX}/{gen}/scans.json")
-    m = _latest_manifest(bucket, gen, before=scan)
+    base = store.read_json(f"{PREFIX}/{gen}/scans.json")
+    m = _latest_manifest(store, gen, before=scan)
     return base, (m["runs"] if m else [])
 
 
 def prepare_scan(bucket: str, gen: str, scan: str, layouts: tuple[str, ...]) -> dict:
-    """Pin `scan`'s newest `path` sort (GCS generation, size, md5, crc32c, source format) as `deltas/<scan>/scans.json`,
-    refusing (SystemExit) unless it is the next scan after the base and the live runs."""
-    base, runs = _state(bucket, gen, scan)
+    """Pin `scan`'s newest `path` sort (size, source format; on GCS also its generation, md5, crc32c) as
+    `deltas/<scan>/scans.json` in the store `bucket` (a bucket name or URL), refusing (SystemExit) unless it is the next
+    scan after the base and the live runs."""
+    store = Store(store_url(bucket))
+    base, runs = _state(store, gen, scan)
     have = scans_of(base, runs)
-    found = sn.list_scans(bucket, layouts=layouts, start=have[-1])["scans"]
+    found = list_scans(store, layouts, start=have[-1])["scans"]
     nxt = [s for s in found if s["id"] > have[-1]]
     if not nxt or nxt[0]["id"] != scan:
         raise SystemExit(f"the next scan after {have[-1]} is {nxt[0]['id'] if nxt else 'none'}, not {scan}")
     s = nxt[0]
     if s["ts"] <= max(x["ts"] for x in base["scans"]):
         raise SystemExit(f"{scan}: its stamp {s['ts']} is not past the generation's")
-    s["version"] = sn._version_from_footer(_gcs().bucket(bucket), s["src"])
+    s["version"] = scan_version(store, s["src"])
     doc = {"bucket": bucket, "scans": [s]}
-    _gcs().bucket(bucket).blob(f"{PREFIX}/{gen}/{run_key(scan, scan)}/scans.json").upload_from_string(json.dumps(doc, indent=1) + "\n",
-                                                                                                    if_generation_match=0)
+    store.create(f"{PREFIX}/{gen}/{run_key(scan, scan)}/scans.json", json.dumps(doc, indent=1) + "\n")
     err(json.dumps(doc))
     return doc
 
@@ -633,7 +668,7 @@ def cli() -> None:
 
 def stage_options(f):
     for o in reversed([
-        option("-b", "--bucket", required=True, help="Data bucket"),
+        option("-b", "--bucket", required=True, help="The store: a bucket name (gs://) or URL"),
         option("-g", "--gen", required=True, help="Base generation (`interval-store/<gen>/`: its `scans.json`, the runs, the manifests)"),
         option("-R", "--ranges-gen", required=True, help="The generation holding the base's range files and `ranges.json`"),
         option("-S", "--scratch", required=True, help="Bucket for the open versions (`state/<D>/`)"),
@@ -659,25 +694,25 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     previous scan's state, else (the first run) the base's range files."""
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(scan, scan)}"
-    doc_scan = read_json(f"gs://{bucket}/{run}/scans.json")
+    store, sstore = Store(store_url(bucket)), Store(store_url(scratch))
+    doc_scan = store.read_json(f"{run}/scans.json")
     s = doc_scan["scans"][0]
-    ranges = read_json(f"gs://{bucket}/{PREFIX}/{ranges_gen}/ranges.json")
-    base, runs = _state(bucket, gen, scan)
+    ranges = store.read_json(f"{PREFIX}/{ranges_gen}/ranges.json")
+    base, runs = _state(store, gen, scan)
     prev = scans_of(base, runs)[-1]
     smount = str(Path(mount).parent / scratch)
     t = sn._task(index)
     k = ranges["k"]
     # Balanced by the previous scan's open rows (a range's cost), else interleaved: tasks = the job's.
-    counts = prev_open_counts(_gcs(), bucket, prefix, prev, k) if runs else None
+    counts = prev_open_counts(store, prefix, prev, k) if runs else None
     plan = assign_ranges(k, ceil(k / per_task), counts)
     todo = plan[t] if t < len(plan) else []
     err(f"ranges task {t}: {len(todo)} ranges" + (f", {sum(counts[i] for i in todo):,} open rows at {prev} (max task "
                                                   f"{max(sum(counts[i] for i in p) for p in plan):,})" if counts else ", interleaved"))
-    b = _gcs().bucket(bucket)
     con = sn.connect(threads, mem, tmp)
     for i in todo:
         name = f"r{i:04d}"
-        if not force and b.blob(f"{run}/ranges/{name}.json").exists():
+        if not force and store.exists(f"{run}/ranges/{name}.json"):
             err(f"ranges {name}: done")
             continue
         state = (run_state_sql(f"{smount}/{prefix}/state/{prev}", name) if runs
@@ -686,11 +721,11 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
         shutil.rmtree(outp, ignore_errors=True)
         doc = append_range(con, state, s, ranges["ranges"][i], name, outp, bucket=doc_scan["bucket"], mount=mount)
         doc["prev"] = prev
-        upload_tree(outp / "state", scratch, f"{prefix}/state/{scan}")
+        sstore.put_tree(outp / "state", f"{prefix}/state/{scan}")
         for tb in TABLES:
-            upload_tree(outp / tb, bucket, f"{run}/{tb}")
+            store.put_tree(outp / tb, f"{run}/{tb}")
         shutil.rmtree(outp)
-        b.blob(f"{run}/ranges/{name}.json").upload_from_string(json.dumps(doc) + "\n")
+        store.write_text(f"{run}/ranges/{name}.json", json.dumps(doc) + "\n")
         print(json.dumps(doc), flush=True)
 
 
@@ -709,14 +744,14 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
     newest earlier manifest's runs plus D's at level 0 (`publish_run`), after checking every file of every run it lists.
     No carries: those run apart (`carry`, the merge stage)."""
     prefix = f"{PREFIX}/{gen}"
-    store = GcsRunStore(bucket, None, gen, prefix=PREFIX)
+    store = run_store(bucket, None, gen, prefix=PREFIX)
     key = f"manifests/{scan}.json"
     if skip_published and store.exists(key):
         err(f"{prefix}/{key}: published")
         return
     if store.exists(key):
         raise SystemExit(f"{prefix}/{key} exists: manifests are never rewritten")
-    k = read_json(f"gs://{bucket}/{PREFIX}/{ranges_gen}/ranges.json")["k"]
+    k = Store(store_url(bucket)).read_json(f"{PREFIX}/{ranges_gen}/ranges.json")["k"]
     rk = run_key(scan, scan)
     done = len(store.keys(f"{rk}/ranges/"))
     if done < k:
@@ -734,7 +769,7 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
         shutil.rmtree(outp, ignore_errors=True)
         t0 = monotonic()
         docs = cut_run(sn.connect(threads, mem, tmp), f"{mount}/{prefix}/{rk}", outp)
-        upload_tree(outp, bucket, f"{prefix}/{rk}/served")
+        Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
         shutil.rmtree(outp)
         new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
         meta = {**run_meta(gen, new, {scan: s["ts"]}, docs), "cut_s": round(monotonic() - t0, 1)}
@@ -757,12 +792,17 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, compact_level, mount, mem, max_m
     dir (its deltas, its cut, its `meta.json` last), then a revision `manifests/<id>.m<NNN>.json` listing it. One merger
     per generation (a lease in the scratch bucket, mirrored to R2's `interval-store/<gen>/merging.json` for /health when the
     job has the R2 env); resumable."""
-    store = GcsRunStore(bucket, scratch, gen, prefix=PREFIX)
-    k = read_json(f"gs://{bucket}/{PREFIX}/{ranges_gen}/ranges.json")["k"]
+    store = run_store(bucket, scratch, gen, prefix=PREFIX)
+    k = Store(store_url(bucket)).read_json(f"{PREFIX}/{ranges_gen}/ranges.json")["k"]
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
     doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem), Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
                            max_merges=max_merges, max_level=compact_level, status=status)
+    doc["prune"] = _summary(ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs"))
     print(json.dumps(doc, indent=1))
+
+
+def _summary(doc: dict) -> dict:
+    return {k: v for k, v in doc.items() if k != "keys"}
 
 
 @cli.command("r2")
@@ -773,9 +813,35 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, compact_level, mount, mem, max_m
 def r2_cmd(bucket, gen, ranges_gen, scratch, scan, manifest, workers) -> None:
     """Copy the served files of every run the manifest lists GCS → R2 (objects already there with the same size and md5
     skipped), check every one is there, then copy the manifest, last (`append_runner.r2_publish`). R2 via `R2_ENDPOINT`,
-    `R2_BUCKET` and AWS_* (or R2_*) keys."""
-    doc = ar.r2_publish(bucket, f"{PREFIX}/{gen}", manifest or scan, served=("served/",), workers=workers)
-    print(json.dumps({"gen": gen, "scan": scan, **doc}))
+    `R2_BUCKET` and AWS_* (or R2_*) keys. Then, the manifest on R2, the runs a carry folded are deleted there
+    (`append_runner.prune_folded`, planned by R2's own manifests). A no-op when the store is the serving R2 bucket
+    itself (its own `add` prunes it)."""
+    if serves(bucket, os.environ.get("R2_BUCKET")):
+        err(f"r2 {manifest or scan}: the store {bucket} is the serving R2 bucket; nothing to copy")
+        return
+    if gs_bucket(bucket) is None:
+        raise SystemExit(f"r2: copies from a whole GCS bucket, not {bucket}")
+    doc = ar.r2_publish(gs_bucket(bucket), f"{PREFIX}/{gen}", manifest or scan, served=("served/",), workers=workers)
+    pruned = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), where=" r2")
+    print(json.dumps({"gen": gen, "scan": scan, **doc, "prune": _summary(pruned)}))
+
+
+@cli.command("prune")
+@stage_options
+@option("-G", "--grace-s", default=ar.GRACE_S, type=IntRange(min=ar.MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {ar.GRACE_S}, at least {ar.MIN_GRACE_S})")
+@option("-n", "--dry-run", is_flag=True, help="Report what would be deleted; delete nothing")
+@option("-r", "--r2", is_flag=True, help="Prune the R2 copy (`R2_ENDPOINT`, `R2_BUCKET`, keys from the env), planned by R2's own manifests; default: GCS")
+def prune_cmd(bucket, gen, ranges_gen, scratch, grace_s, dry_run, r2) -> None:
+    """Delete the runs a carry folded (`append_runner.prune_folded`): every run dir listed by no manifest but the newest
+    and those superseded less than `-G` s ago, inside one of the newest's runs. On GCS a folded run keeps `FOLDED_RETAIN`; on R2, nothing. The
+    chain does it after each publish (GCS: the prune stage and the merge job; R2: the R2 job); this is the same, alone."""
+    if r2:
+        doc = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), grace_s=grace_s, dry_run=dry_run, where=" r2")
+    else:
+        if gs_bucket(bucket) is None:
+            raise SystemExit(f"prune: the GCS store's prune; for {bucket}, `interval-store add` prunes its own store")
+        doc = ar.prune_folded(GcsRunStore(gs_bucket(bucket), None, gen, prefix=PREFIX), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")
+    print(json.dumps({"gen": gen, "store": "r2" if r2 else "gcs", **_summary(doc)}, indent=1))
 
 
 def ready(profile: str | None) -> Config:
@@ -801,7 +867,7 @@ def append_cmd(catch_up: bool, no_merge: bool, dry_run: bool, profile: str | Non
     exists; then the merge stage (the due carries, non-fatal). Exit 3 when SCAN_ID is not published yet, or an earlier
     published scan is pending (without -c)."""
     cfg = ready(profile)
-    runner = gcs_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
+    runner = store_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
     t0 = monotonic()
     done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
     print(json.dumps({"gen": cfg.p.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "s": round(monotonic() - t0, 1),
@@ -817,7 +883,7 @@ def merge_cmd(dry_run: bool, profile: str | None, wait: float | None) -> None:
     (`append`'s merge stage, alone: for a schedule of its own, or to catch up). Exit 1 when it fails (the store stays as
     it was)."""
     cfg = ready(profile)
-    runner = gcs_runner(cfg, dry_run=dry_run, merge_wait=wait)
+    runner = store_runner(cfg, dry_run=dry_run, merge_wait=wait)
     exit_on("interval-store merge", lambda: runner.carries(fatal=True), lambda m: err(m))
     print(json.dumps({"gen": cfg.p.gen, "manifest": (runner.manifests() or [None])[-1], "dry_run": dry_run}))
 

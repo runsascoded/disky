@@ -4,8 +4,13 @@ instead of a full per-scan copy. The build reuses the static name index's key ra
 gaps-and-islands kernel (`static_names`); `cut` lays the versions out as the served sorts (`path`,
 `bysize`, `reads`) with a `.groups.parquet` beside each, which a reader plans its range reads from.
 
-    dt-cloud interval-store build -g GEN [-i TASK -n PER_TASK | -r RANGES]   # per range: pv/, rd/, digest/
-    dt-cloud interval-store cut -g GEN [-s SORT]                             # served/{path,bysize,reads}.parquet + .groups.parquet
+    dt-cloud interval-store build-ranges -g GEN [-i TASK -n PER_TASK | -r RANGES]   # per range: pv/, rd/, digest/
+    dt-cloud interval-store cut -g GEN [-s SORT]                                    # served/{path,bysize,reads}.parquet + .groups.parquet
+    dt-cloud interval-store build|add -g GEN -L LAYOUT -s SCANS -o STORE            # one machine, every stage (`interval_local`)
+
+The store (the profile's `bucket`, or `-b`) is a URL root (`gs://`, `r2://`, `s3://`) or a local dir; a bare bucket name
+is `gs://` (`blobstore.store_url`). Every key is read, written and listed through `blobstore.Store`; the range files are
+read by DuckDB from `-m` (a mount of the store) or the store's URL (`gs://` or a local dir).
 """
 from __future__ import annotations
 
@@ -22,7 +27,8 @@ import pyarrow.parquet as pq
 from click import Choice, IntRange, group, option
 
 from . import static_names as sn
-from .static_names import OPEN, U64, connect, q, range_preds, read_json, upload_tree, write_sorted
+from .blobstore import Store, store_url
+from .static_names import OPEN, U64, connect, q, range_preds, write_sorted
 
 err = partial(print, file=sys.stderr, flush=True)
 
@@ -39,7 +45,15 @@ def load_profile(name: str | None) -> dict:
 
 
 def _bucket(bucket: str | None, profile: str | None) -> str:
-    return bucket or load_profile(profile)["bucket"]
+    """The store's root URL: `-b`, else the profile's `bucket` (a bare bucket name: `gs://`)."""
+    return store_url(bucket or load_profile(profile)["bucket"])
+
+
+def _root(store: Store, prefix: str, mount: str | None) -> str:
+    """Where DuckDB reads the generation's range files: the store's mount, else the store itself (`gs://`, a dir)."""
+    return f"{mount}/{prefix}" if mount else store.uri(prefix)
+
+
 #: A served sort's row-group size: the per-scan path store's (decode cost per group is the same).
 SERVED_RG = 8192
 #: The range files' row-group size (an intermediate: only `cut` and the verifier read them).
@@ -563,10 +577,10 @@ def cli() -> None:
     """The change-interval path store (specs/interval-store.md)."""
 
 
-@cli.command("build")
-@option("-b", "--bucket", help="Data bucket (default: the profile's)")
+@cli.command("build-ranges")
+@option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-f", "--force", is_flag=True, help="Rebuild ranges whose digest is already uploaded")
-@option("-g", "--gen", required=True, help="Generation: gs://BUCKET/interval-store/GEN/ (its scans.json, ranges.json)")
+@option("-g", "--gen", required=True, help="Generation: STORE/interval-store/GEN/ (its scans.json, ranges.json)")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", help="Local mount of the data bucket")
 @option("-M", "--mem", default="80GB", help="DuckDB memory limit")
@@ -578,15 +592,13 @@ def cli() -> None:
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB database + spill dir")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
-def build_cmd(bucket, profile, force, gen, index, mount, mem, per_task, out, threads, only, slices, tmp, no_upload) -> None:
+def build_ranges_cmd(bucket, profile, force, gen, index, mount, mem, per_task, out, threads, only, slices, tmp, no_upload) -> None:
     """Build key ranges' path and read versions over every scan of GEN's `scans.json`, verifying each
     scan's reconstruction (digest written last: it marks the range done)."""
-    bucket = _bucket(bucket, profile)
-    from google.cloud import storage
-
+    store = Store(_bucket(bucket, profile))
     prefix = f"{PREFIX}/{gen}"
-    scans = read_json(f"gs://{bucket}/{prefix}/scans.json")
-    ranges = read_json(f"gs://{bucket}/{prefix}/ranges.json")
+    scans = store.read_json(f"{prefix}/scans.json")
+    ranges = store.read_json(f"{prefix}/ranges.json")
     if only:
         todo = [int(x) for x in only.split(",")]
         # As a Batch job of several tasks, task t takes every count-th of the listed ranges.
@@ -595,7 +607,6 @@ def build_cmd(bucket, profile, force, gen, index, mount, mem, per_task, out, thr
     else:
         t = sn._task(index)
         todo = list(range(t * per_task, min((t + 1) * per_task, ranges["k"])))
-    b = storage.Client().bucket(bucket)
     import duckdb
 
     Path(tmp).mkdir(parents=True, exist_ok=True)
@@ -608,7 +619,7 @@ def build_cmd(bucket, profile, force, gen, index, mount, mem, per_task, out, thr
     err(f"interval-store build: duckdb {duckdb.__version__}, pyarrow {pa.__version__}, {len(scans['scans'])} scans, ranges {todo}")
     dig = "sv-digest" if slices else "digest"
     for i in todo:
-        if not force and b.blob(f"{prefix}/{dig}/r{i:04d}.json").exists():
+        if not force and store.exists(f"{prefix}/{dig}/r{i:04d}.json"):
             err(f"range {i}: already built")
             continue
         outp = Path(out) / f"r{i}"
@@ -618,8 +629,8 @@ def build_cmd(bucket, profile, force, gen, index, mount, mem, per_task, out, thr
             digest = outp / dig
             moved = Path(out) / f"r{i}-digest"
             shutil.move(str(digest), moved)
-            upload_tree(outp, bucket, prefix)
-            upload_tree(moved, bucket, f"{prefix}/{dig}")
+            store.put_tree(outp, prefix)
+            store.put_tree(moved, f"{prefix}/{dig}")
             shutil.rmtree(outp)
             shutil.rmtree(moved)
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
@@ -643,7 +654,7 @@ def churn_stats(con, root: str, scans: dict) -> dict:
 
 
 @cli.command("fold")
-@option("-b", "--bucket", help="Data bucket (default: the profile's)")
+@option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-g", "--gen", required=True, help="Generation (its pv/, rd/ range files)")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", help="Local mount of the data bucket")
@@ -658,34 +669,31 @@ def churn_stats(con, root: str, scans: dict) -> dict:
 def fold_cmd(bucket, gen, index, mount, mem, per_task, out, threads, profile, slice_totals, tmp, no_upload) -> None:
     """Fold each range's read days into its path versions: `pvl/r####.parquet` (what `cut` serves); with
     `-S`, its slice versions with their path's total: `svt/r####.parquet`."""
-    bucket = _bucket(bucket, profile)
+    store = Store(_bucket(bucket, profile))
     prefix = f"{PREFIX}/{gen}"
-    ranges = read_json(f"gs://{bucket}/{prefix}/ranges.json")
+    ranges = store.read_json(f"{prefix}/ranges.json")
     t = sn._task(index)
     con = connect(threads, mem, tmp)
-    root = f"{mount}/{prefix}" if mount else f"gs://{bucket}/{prefix}"
+    root = _root(store, prefix, mount)
     for i in range(t * per_task, min((t + 1) * per_task, ranges["k"])):
         sub = "svt" if slice_totals else "pvl"
         doc = (slice_totals_range if slice_totals else fold_range)(root, i, Path(out), con)
         if not no_upload:
-            upload_tree(Path(out) / sub, bucket, f"{prefix}/{sub}")
+            store.put_tree(Path(out) / sub, f"{prefix}/{sub}")
             shutil.rmtree(Path(out) / sub)
         print(json.dumps(doc), flush=True)
 
 
-def _refuse_overwrite(bucket: str, keys: list[str]) -> None:
+def _refuse_overwrite(store: Store, keys: list[str]) -> None:
     """Published served files are immutable: a cut into a generation that already has them is refused
     (cut into a new one, `--to-gen`)."""
-    from google.cloud import storage
-
-    b = storage.Client().bucket(bucket)
-    there = [k for k in keys if b.blob(k).exists()]
+    there = [k for k in keys if store.exists(k)]
     if there:
         raise SystemExit(f"refusing to overwrite published files: {', '.join(there)} (cut into a new generation: -O)")
 
 
 @cli.command("cut")
-@option("-b", "--bucket", help="Data bucket (default: the profile's)")
+@option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-D", "--no-dyadic", is_flag=True, help="One closed segment, not one per dyadic block of scans (`seg_sql`)")
 @option("-g", "--gen", required=True, help="Generation (its pv/, rd/ range files)")
 @option("-i", "--index", type=int, help="Task index → sort (path, bysize, reads, then `stats`: per-scan churn; default: $BATCH_TASK_INDEX)")
@@ -701,21 +709,21 @@ def _refuse_overwrite(bucket: str, keys: list[str]) -> None:
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload) -> None:
     """Cut the served sorts from the range files: `served/<sort>.parquet` + `.groups.parquet`."""
-    bucket = _bucket(bucket, profile)
+    store = Store(_bucket(bucket, profile))
     prefix = f"{PREFIX}/{gen}"
     dst_prefix = f"{PREFIX}/{to_gen or gen}"
     todo = list(sorts) or [[*SORTS, "stats"][sn._task(index)]]
     con = connect(threads, mem, tmp)
-    root = f"{mount}/{prefix}" if mount else f"gs://{bucket}/{prefix}"
-    scans = read_json(f"gs://{bucket}/{prefix}/scans.json")
+    root = _root(store, prefix, mount)
+    scans = store.read_json(f"{prefix}/scans.json")
     out_dir = Path(out) / "served"
     if todo == ["stats"]:
         doc = churn_stats(con, root, scans)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "stats.json").write_text(json.dumps(doc, indent=1) + "\n")
         if not no_upload:
-            _refuse_overwrite(bucket, [f"{dst_prefix}/served/stats.json"])
-            upload_tree(out_dir, bucket, f"{dst_prefix}/served")
+            _refuse_overwrite(store, [f"{dst_prefix}/served/stats.json"])
+            store.put_tree(out_dir, f"{dst_prefix}/served")
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
         return
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
@@ -723,7 +731,7 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         sub, _, _ = SORTS[sort]
         schema = SUB_SCHEMA[sub]
         if not no_upload:
-            _refuse_overwrite(bucket, [f"{dst_prefix}/served/{sort}{x}" for x in (".parquet", ".groups.parquet", ".json")])
+            _refuse_overwrite(store, [f"{dst_prefix}/served/{sort}{x}" for x in (".parquet", ".groups.parquet", ".json")])
         t0 = monotonic()
         dst = out_dir / f"{sort}.parquet"
         doc = write_served(con, f"read_parquet({q(root + '/' + sub + '/r*.parquet')})", sort, dst, schema, rg_rows=rg_rows, stamps=stamps)
@@ -731,25 +739,34 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         err(f"cut {sort}: {doc['rows']:,} rows, {doc['groups']:,} groups, {doc['bytes']:,} B in {doc['s']}s")
         (out_dir / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
         if not no_upload:
-            upload_tree(out_dir, bucket, f"{dst_prefix}/served")
+            store.put_tree(out_dir, f"{dst_prefix}/served")
             shutil.rmtree(out_dir)
         print(json.dumps(doc), flush=True)
     if to_gen and not no_upload:
         # The new generation's scans (the reader's `scans.json`), once.
-        from google.cloud import storage
+        try:
+            store.create(f"{dst_prefix}/scans.json", json.dumps(scans, indent=1) + "\n")
+        except FileExistsError:
+            pass
 
-        blob = storage.Client().bucket(bucket).blob(f"{dst_prefix}/scans.json")
-        if not blob.exists():
-            blob.upload_from_string(json.dumps(scans, indent=1) + "\n", content_type="application/json")
 
+def download_served(store: Store, prefix: str, dst: Path, *, workers: int = 16) -> None:
+    """The generation's served sorts (+ `.groups.parquet`) to `dst`: from a whole GCS bucket chunked in parallel, else
+    through the store."""
+    from .blobstore import gs_bucket
 
-def download_served(bucket: str, prefix: str, dst: Path, *, workers: int = 16) -> None:
-    """The generation's served sorts (+ `.groups.parquet`) to `dst`, chunked in parallel."""
+    dst.mkdir(parents=True, exist_ok=True)
+    bucket = gs_bucket(store.root)
+    if bucket is None:
+        for key, size in store.listing(f"{prefix}/served").items():
+            out = dst / key.rsplit("/", 1)[-1]
+            if out.name.endswith(".parquet") and not (out.exists() and out.stat().st_size == size):
+                store.get(key, out)
+        return
     from google.cloud import storage
     from google.cloud.storage import transfer_manager as tm
 
     b = storage.Client().bucket(bucket)
-    dst.mkdir(parents=True, exist_ok=True)
     for blob in storage.Client().list_blobs(bucket, prefix=f"{prefix}/served/"):
         name = blob.name.rsplit("/", 1)[-1]
         if not name.endswith(".parquet"):
@@ -763,7 +780,7 @@ def download_served(bucket: str, prefix: str, dst: Path, *, workers: int = 16) -
 
 
 @cli.command("verify")
-@option("-b", "--bucket", help="Data bucket (default: the profile's)")
+@option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-g", "--gen", required=True, help="Generation")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", help="Local mount of the data bucket (per-scan sorts are copied from it)")
@@ -775,21 +792,21 @@ def download_served(bucket: str, prefix: str, dst: Path, *, workers: int = 16) -
 def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) -> None:
     """Parity against the per-scan path store over the profile's `verify_scans`: every
     view's tiles and every diff's rows, with both sides' read cost; `verify/t##.jsonl` + `.json`."""
-    bucket = _bucket(bucket, profile)
+    store = Store(_bucket(bucket, profile))
     from . import interval_verify as iv
 
     prefix = f"{PREFIX}/{gen}"
     t = sn._task(index)
     tmp = Path(tmp)
-    download_served(bucket, prefix, tmp / "served")
-    scans = read_json(f"gs://{bucket}/{prefix}/scans.json")
+    download_served(store, prefix, tmp / "served")
+    scans = store.read_json(f"{prefix}/scans.json")
     outp = Path(out) / "verify"
     outp.mkdir(parents=True, exist_ok=True)
     sampled = scan_ids.split(",") if scan_ids else load_profile(profile)["verify_scans"]
     tag = f"t{t:02d}" if not scan_ids else f"t{t:02d}-{sampled[0]}"
     summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount)
     (outp / f"{tag}.json").write_text(json.dumps(summaries, indent=1) + "\n")
-    upload_tree(outp, bucket, f"{prefix}/verify")
+    store.put_tree(outp, f"{prefix}/verify")
     print(json.dumps(summaries), flush=True)
 
 
@@ -798,7 +815,7 @@ R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "s
 
 
 @cli.command("r2-copy")
-@option("-b", "--bucket", help="Data bucket (default: the profile's)")
+@option("-b", "--bucket", help="The store: a bucket name (gs://) or URL (default: the profile's)")
 @option("-g", "--gen", required=True, help="Generation")
 @option("-m", "--mount", help="Ignored (the Batch driver passes it)")
 @option("-n", "--dry-run", is_flag=True, help="List what would be copied")
@@ -807,10 +824,16 @@ R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "s
 def r2_copy_cmd(bucket, profile, gen, mount, dry_run, workers) -> None:
     """Copy the generation's served files GCS → R2 under the same keys (`static-names r2-copy`'s streaming
     copy: objects already there with the same size and md5 are skipped). R2 via `R2_ENDPOINT`,
-    `R2_BUCKET` and AWS_* keys."""
+    `R2_BUCKET` and AWS_* keys. A no-op when the store is the serving R2 bucket itself."""
     from .append_runner import r2_copy, r2_objects
+    from .blobstore import gs_bucket, serves
 
-    bucket = _bucket(bucket, profile)
+    root = _bucket(bucket, profile)
+    if serves(root, os.environ.get("R2_BUCKET")):
+        err(f"r2-copy {gen}: the store {root} is the serving R2 bucket; nothing to copy")
+        return
+    if (bucket := gs_bucket(root)) is None:
+        raise SystemExit(f"r2-copy: copies from a whole GCS bucket, not {root}")
     prefix = f"{PREFIX}/{gen}"
     objs = r2_objects(bucket, [prefix + "/"], lambda key: key.removeprefix(prefix + "/").startswith(R2_SERVED))
     doc = r2_copy(bucket, objs, workers=workers, dry_run=dry_run)

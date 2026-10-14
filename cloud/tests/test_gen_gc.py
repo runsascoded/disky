@@ -140,9 +140,84 @@ def test_dates_and_store_scope_the_sweep():
     assert [g.dir for g in G.plan(POINTERS, [gcs], now=NOW, min_age=0).doomed] == [f"cw-l2/{S1}/index/g1", f"cw-l2/{S4}/index/g7"]
 
 
-def test_open_store_rejects_unknown_targets():
+def test_open_store_by_target(monkeypatch):
+    """`r2`/`r2://` reach R2 with publish-r2's client; another URL or a dir
+    goes through `blobfs`; a bare word is refused, never taken for a dir."""
+    import dt_cloud.publish as P
+
+    monkeypatch.setattr(P, "r2_client", lambda: "client")
+    monkeypatch.setenv("R2_BUCKET", "serve")
+    stores = [G.open_store(t) for t in ("r2", "r2://other", "s3://x/", "/srv/data", "./data")]
+    assert [(type(s).__name__, s.name) for s in stores] == [
+        ("R2Store", "r2://serve"),
+        ("R2Store", "r2://other"),
+        ("BlobStore", "s3://x"),
+        ("BlobStore", "/srv/data"),
+        ("BlobStore", "./data"),
+    ]
     with pytest.raises(ValueError):
-        G.open_store("s3://x")
+        G.open_store("data")
+
+
+def _materialize(root, objs: dict[str, tuple[int, float]]) -> None:
+    """`objects()` as real files under ``root``, each `size` bytes with its mtime."""
+    import os
+
+    for k, (size, mtime) in objs.items():
+        f = root / k
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x" * size)
+        os.utime(f, (mtime, mtime))
+
+
+@pytest.mark.parametrize("url", [False, True], ids=["dir", "file-url"])
+def test_cli_files_only_over_a_blobfs_root(monkeypatch, tmp_path, url):
+    """`index-gc -R -F <root>` with only a dir/URL root (no GCS, no D1 row
+    sweep): the unpointed old generation goes, everything else stays, and a
+    re-run finds nothing."""
+    store = tmp_path / "store"
+    _materialize(store, objects())
+    monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(F, "_d1_query", lambda sql, acct, tok, db_id: [{"date": d, "variant": v, "dir": k} for d, v, k in POINTERS])
+    logged: list[str] = []
+    monkeypatch.setattr(G, "err", lambda *a: logged.append(" ".join(map(str, a))))
+    import time
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    target = f"file://{store}" if url else str(store)
+    r = CliRunner().invoke(main, ["index-gc", "-R", "-F", target])
+    assert r.exit_code == 0, r.output
+    assert logged == [
+        f"index-gc: deleted {target}/cw-l2/{S1}/index/g1/ (scan {S1}, gen g1): 2 objects, 105 B (0.0 GB)",
+        f"index-gc: kept {target}/cw-l2/{S4}/index/g7/ (scan {S4}, gen g7): unpointed but younger than the grace period, 165 B (0.0 GB)",
+        f"index-gc: {target}: deleted 1 generations in 1 scans, 2 objects, 105 B (0.0 GB); kept 1 too young",
+    ]
+    left = sorted(str(p.relative_to(store)) for p in store.rglob("*") if p.is_file())
+    assert left == sorted(k for k in objects() if not k.startswith(f"cw-l2/{S1}/index/g1/"))
+    logged.clear()
+    r = CliRunner().invoke(main, ["index-gc", "-R", "-F", target])
+    assert (r.exit_code, logged[-1]) == (0, f"index-gc: {target}: deleted 0 generations in 0 scans, 0 objects, 0 B (0.0 GB); kept 1 too young")
+
+
+def test_cli_files_only_over_r2_alone(monkeypatch):
+    """`index-gc -R -F r2://<bucket>`: the R2 store alone — no GCS store is
+    opened and no data bucket is consulted."""
+    import dt_cloud.publish as P
+
+    r2 = FakeStore("r2://serve", objects())
+    monkeypatch.setattr(P, "r2_client", lambda: None)
+    monkeypatch.setattr(G, "R2Store", lambda bucket=None: r2 if bucket == "serve" else pytest.fail(f"R2Store({bucket!r})"))
+    monkeypatch.setattr(G, "GcsStore", lambda bucket: pytest.fail(f"GcsStore({bucket!r}) opened"))
+    monkeypatch.delenv("DATA_BUCKET")
+    monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(F, "_d1_query", lambda sql, acct, tok, db_id: [{"date": d, "variant": v, "dir": k} for d, v, k in POINTERS])
+    logged: list[str] = []
+    monkeypatch.setattr(G, "err", lambda *a: logged.append(" ".join(map(str, a))))
+    import time
+    monkeypatch.setattr(time, "time", lambda: NOW)
+    r = CliRunner().invoke(main, ["index-gc", "-R", "-F", "r2://serve"])
+    assert r.exit_code == 0, r.output
+    assert r2.deleted == [[f"cw-l2/{S1}/index/g1/path-index.groups.json", f"cw-l2/{S1}/index/g1/path-index.parquet"]]
+    assert logged[-1] == "index-gc: r2://serve: deleted 1 generations in 1 scans, 2 objects, 105 B (0.0 GB); kept 1 too young"
 
 
 def test_cli_dry_run_counts_rows_and_lists_files(monkeypatch):
