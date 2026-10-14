@@ -38,4 +38,8 @@ describe('stagedIndex', () => {
     expect([gs.markOf('gs://b', true), gs.markOf('gs://b/ckpt/step1', true), gs.markOf('gs://b/x.bin', false), gs.markOf('gs://c', true)])
       .toEqual([{ as: 'inside', n: 2 }, { as: 'covered', by: 'gs://b/ckpt/' }, { as: 'self' }, null])
   })
+  it('`isItem` is the plan items themselves only; `size` counts them', () => {
+    expect([idx.size, mark('Users/ryan/Downloads/tmp', true) && idx.isItem('file:///Users/ryan/Downloads/tmp', true), idx.isItem('file:///Users/ryan/Downloads/tmp/x', true), idx.isItem('file:///Users/ryan/Downloads', true), idx.isItem('file:///Users/ryan/Downloads/Photos-1-001 (2).zip', false)])
+      .toEqual([4, true, false, false, true])
+  })
 })

@@ -7,6 +7,10 @@ export type StagedMark = { as: 'self' } | { as: 'covered'; by: string } | { as: 
 export interface StagedIndex {
   /** A node's mark: `uri` is `<scheme><path>` without a trailing `/`, `dir` whether it's a folder. */
   markOf(uri: string, dir: boolean): StagedMark | null
+  /** Whether the node is a plan item itself (a set lookup: cheap enough for every map cell). */
+  isItem(uri: string, dir: boolean): boolean
+  /** How many items the plan holds. */
+  size: number
 }
 
 /** The open plan's items as lookups over node uris (`StagedItem.prefix`: a folder ends in `/`, an
@@ -25,6 +29,8 @@ export function stagedIndex(items: readonly StagedItem[]): StagedIndex {
     return n
   }
   return {
+    size: all.length,
+    isItem: (uri, dir) => (dir ? folders.has(`${uri}/`) : objects.has(uri)),
     markOf(uri, dir) {
       if (dir ? folders.has(`${uri}/`) : objects.has(uri)) return { as: 'self' }
       // A staged ancestor folder: each `/` in the uri past the scheme ends one.

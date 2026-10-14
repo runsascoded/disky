@@ -8,6 +8,7 @@ import { Avatar } from './Avatar'
 import { CopyName, copyText } from './CopyName'
 import { FaRegCopy } from 'react-icons/fa6'
 import { pathCopy, pathCrumbs, pathDisplay, pathText } from './pathCrumbs'
+import { useStagedIndex } from './StageAction'
 import { cellAction } from './objects'
 import { canonId, UserChip, ghHandle, shortName } from './UserChip'
 import { dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonth, inkFor, slotColor, userColor } from './colors'
@@ -254,6 +255,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     [drillLen],
   )
 
+  const staged = useStagedIndex()
   const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
   const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
 
@@ -632,7 +634,13 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       path={path}
       onPathChange={onPathChange}
       onCellHover={onBrush ? (n, p) => onBrush(n && p.length > (path?.length ?? 1) ? p[path?.length ?? 1].n : null) : undefined}
-      lens={brush ? (kid, _p, depth, _ctx, style) => (depth === 0 && kid.n === brush ? { ...style, ring: { color: 'var(--ink)', width: 2 } } : undefined) : undefined}
+      // Brushing rings the table's hovered row; a cell the open plan holds itself (`useStagedIndex`, as the
+      // table marks it) gets a thin inset ring in the deletion hue, its size and colour untouched.
+      lens={brush || staged?.size ? (kid, p, depth, _ctx, style) => {
+        if (brush && depth === 0 && kid.n === brush) return { ...style, ring: { color: 'var(--ink)', width: 2 } }
+        if (staged?.size && !kid.n.startsWith('(') && staged.isItem(uriOf(p[p.length - 1] === kid ? p : [...p, kid]), kid.k !== 'file')) return { ...style, ring: { color: 'var(--s3)', width: 3, inset: true } }
+        return undefined
+      } : undefined}
       // `k` decides (`cellAction`): an object opens in the leaf viewer; a
       // directory drills even when it arrived without `c` (its children fell
       // below this view's pixel budget — the drill's own fetch brings them),
