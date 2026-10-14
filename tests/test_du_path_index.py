@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 from click.testing import CliRunner
 
 from disk_tree.cli.base import cli
-from disk_tree.path_index import latest_path_index
+from disk_tree.path_index import latest_path_index, source_label
 
 ROWS = [
     # path, kind, size, n_desc
@@ -51,6 +51,18 @@ def test_latest_path_index_picks_the_newest_date_then_generation(tmp_path: Path)
         _write(tmp_path / date / "index" / gen / "path-index.parquet", ROWS)
     (tmp_path / "2026-10-02" / "index").mkdir(parents=True)  # a date with no generation yet
     assert latest_path_index(str(tmp_path)) == str(tmp_path / "2026-10-01" / "index" / "202610011155" / "path-index.parquet")
+
+
+def test_latest_path_index_reads_sub_daily_scan_ids(tmp_path: Path):
+    for date, gen in [("2026-10-10", "202610102205"), ("2026-10-14T1003", "202610141003"), ("2026-10-13T2241", "202610132241")]:
+        _write(tmp_path / date / "index" / gen / "path-index.parquet", ROWS)
+    (tmp_path / "2026-10-14T2200" / "index").mkdir(parents=True)  # ingest still running
+    (tmp_path / "2026-10-15-old").mkdir()  # not a scan id
+    path = latest_path_index(str(tmp_path))
+    assert (path, source_label(path)) == (
+        str(tmp_path / "2026-10-14T1003" / "index" / "202610141003" / "path-index.parquet"),
+        "2026-10-14T1003/index/202610141003",
+    )
 
 
 def test_du_reads_a_subtree_from_the_path_index(tmp_path: Path):
