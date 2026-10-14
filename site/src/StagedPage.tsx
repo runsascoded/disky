@@ -1,4 +1,4 @@
-// /staged — the opt-in deletion console (specs/staged-delete.md; the OA build
+// /staged — the opt-in deletion console (specs/done/staged-delete.md; the OA build
 // plan `sweep-plan-union.md` checkpoint 4). Trash gestures on the map's table
 // stage prefixes into one shared set (an open plan, internally — plans are
 // bookkeeping, never shown); this page shows that set — a

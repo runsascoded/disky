@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyarrow"]
 # ///
-"""The static name index's fixture under the hex-run rule (`staticHex.test.ts`; specs/static-hex-runs.md): suffix
+"""The static name index's fixture under the hex-run rule (`staticHex.test.ts`; specs/done/static-hex-runs.md): suffix
 shards and a catalog in `static-names/gen.py`'s layout, built with the rule `{min: 16, tail: 8}` — suffix rows only at
 the positions the rule keeps, catalog members and cells by `occurs` — and `catalog/meta.json` / `scans.json` recording
 `hex_runs`. The rule itself is `cloud/src/dt_cloud/hex_runs.py` (loaded by path: one definition).

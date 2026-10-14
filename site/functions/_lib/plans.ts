@@ -1,4 +1,4 @@
-// Plans store (specs/staged-delete.md): the first-class deletion plan. Trash
+// Plans store (specs/done/staged-delete.md): the first-class deletion plan. Trash
 // gestures stage prefixes into the shared open plan (or an admin curates a
 // named one); a dispatch snapshots the plan's items into the plan.json the
 // Batch executor consumes. D1 CRUD + snapshot + the admin-edit audit trail

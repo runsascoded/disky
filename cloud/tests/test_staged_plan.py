@@ -1,4 +1,4 @@
-"""`sweep manifest --plan`: the staged set as the delete set (specs/staged-delete.md)
+"""`sweep manifest --plan`: the staged set as the delete set (specs/done/staged-delete.md)
 — plan.json parsing, the per-dir rule, the run record's `plan_id`, and the
 manifest command end to end over local shards."""
 

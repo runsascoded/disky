@@ -2,7 +2,7 @@
 stages a generation's row groups (invisible: readers join on the pointer's
 gen), `-p` flips the pointers once every variant's rows match its footer, and
 the default still does both, in that order. Against a real SQLite carrying the
-cw lineage's migrations (the D1 schema)."""
+migrations of each D1 lineage this branch carries (the D1 schema)."""
 import json
 import sqlite3
 from pathlib import Path
@@ -19,12 +19,11 @@ from dt_cloud.cli import main
 DATE = "2026-10-10T2022"
 OLD, NEW = "G1", "G2"
 OLD_KEY, NEW_KEY = f"listing/{DATE}/index/{OLD}", f"listing/{DATE}/index/{NEW}"
-MIGRATIONS = Path(__file__).parents[2] / "site/migrations/cw"
 
 
-def _db() -> sqlite3.Connection:
+def _db(lineage) -> sqlite3.Connection:
     con = sqlite3.connect(":memory:")
-    for f in sorted(MIGRATIONS.glob("*.sql")):
+    for f in lineage.migrations():
         con.executescript(f.read_text())
     return con
 
@@ -72,10 +71,11 @@ class D1:
 
 
 @pytest.fixture
-def d1(monkeypatch) -> D1:
-    db = D1(_db())
+def d1(monkeypatch, d1_lineage) -> D1:
+    db = D1(_db(d1_lineage))
     monkeypatch.setattr(F, "_d1_query", db)
     monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(F, "_now", lambda: 1_790_000_000)
     return db
 
 
@@ -124,9 +124,13 @@ def test_rows_only_stages_an_invisible_generation(gens, d1, logged):
         SKIPPED,
     ]
     # No pointer written: the site still serves G1, G2's rows sit beside it unseen.
-    assert [s for s in d1.writes() if "index_schema" in s and not s.startswith("DELETE FROM index_row_groups")] == []
+    assert [s for s in d1.writes() if "index_schema" in s and not s.startswith(("DELETE FROM index_row_groups", "DELETE FROM footer_cache"))] == []
     assert d1.pointers() == BOTH_POINTED_OLD
     assert d1.groups() == [("bysize", OLD, 1), ("bysize", NEW, 2), ("path", OLD, 2), ("path", NEW, 3)]
+    # The footer LRU's entries: each complete set `hot` (the reader only consults the pointer's).
+    assert d1.con.execute("SELECT variant, gen, state, rows FROM footer_cache ORDER BY variant, gen").fetchall() == [
+        ("bysize", OLD, "hot", 1), ("bysize", NEW, "hot", 2), ("path", OLD, "hot", 2), ("path", NEW, "hot", 3),
+    ]
     assert d1.visible() == [("bysize", OLD, 1), ("path", OLD, 2)]
     # The cold footer files land with the rows.
     assert sorted(p.name for p in new.iterdir()) == [
@@ -218,13 +222,24 @@ def test_default_is_rows_then_pointer_unchanged(gens, d1, logged):
         SKIPPED,
     ]
     default_sent = list(d1.sent)
+    # Per variant: the LRU table probe, the swept generations' entries then rows, the claim, the rows, `hot`, the flip.
+    rows_phase = [
+        "SELECT name FROM sqlite_master", "DELETE FROM footer_cache", "DELETE FROM index_row_groups", "INSERT INTO footer_cache",
+        "INSERT OR REPLACE INTO index_row_groups", "UPDATE footer_cache SET state = 'hot', rows = 3, bytes = 427, filled_ts = 1790000000, last_access_day = 20717",
+    ]
     assert [s.split(" (")[0].split(" WHERE")[0] for s in default_sent] == [
-        "DELETE FROM index_row_groups", "INSERT OR REPLACE INTO index_row_groups", "INSERT INTO index_schema",
+        *rows_phase, "INSERT INTO index_schema",
         *["DELETE FROM index_row_groups"] * 2, *["DELETE FROM index_schema"] * 2,
-        "DELETE FROM index_row_groups", "INSERT OR REPLACE INTO index_row_groups", "INSERT INTO index_schema",
+        *rows_phase[:-1], "UPDATE footer_cache SET state = 'hot', rows = 2, bytes = 282, filled_ts = 1790000000, last_access_day = 20717",
+        "INSERT INTO index_schema",
     ]
     assert d1.pointers() == BOTH_POINTED_NEW
     assert d1.groups() == [("bysize", OLD, 1), ("bysize", NEW, 2), ("path", OLD, 2), ("path", NEW, 3)]
+    # An entry's `bytes` is its rows' text columns + 64 each, as the reader's fill counts them.
+    assert d1.con.execute(
+        "SELECT variant, SUM(LENGTH(p_min) + LENGTH(p_max) + COALESCE(LENGTH(u_min), 0) + COALESCE(LENGTH(u_max), 0) + LENGTH(rg_json) + 64) "
+        f"FROM index_row_groups WHERE gen = '{NEW}' GROUP BY variant ORDER BY variant"
+    ).fetchall() == [("bysize", 282), ("path", 427)]
     end = d1.con.execute("SELECT * FROM index_row_groups ORDER BY 1, 2, 3, 4").fetchall()
 
     # Back to G1 pointed, G2 unsynced; then the split run writes the default's statements, to the same end state.

@@ -4,7 +4,7 @@ One setting, from the env: ``DISKY_LABELS`` (``k=v,k=v``, e.g.
 ``app=disky,deployment=gcs``). Each job adds its own ``component`` (``scan``,
 ``listing``, ``static-names``, ``drill``, ``anchors``, ``sweep``, …), so a
 billing export groups a shared project's spend by deployment and component
-(specs/cost-labels.md).
+(specs/done/cost-labels.md).
 
 Nothing here names a deployment. Unset ``DISKY_LABELS`` = no labels at all, and
 every spec stays byte-identical to an unlabeled one.

@@ -1,10 +1,10 @@
 /** Pixel-budget subtree of any path, served from the index tiers
- * (specs/view-serving.md; the folding lives in `_lib/view.ts`).
+ * (specs/done/view-serving.md; the folding lives in `_lib/view.ts`).
  *
  *   GET /api/subtree?date=<scan>&path=<P>&w=<px>&h=<px>[&minArea=<px²>]
  *                    [&lens=user:<id>|user:me][&o=owned|unowned][&q=<name filter>]
  *
- * The page's scope axes (specs/view-serving.md §2) are applied server-side:
+ * The page's scope axes (specs/done/view-serving.md §2) are applied server-side:
  * the owner axis (`lens` for a user, `o` for the pools), the name filter
  * (`q`). Responses are immutable per (date, path, w₁₂₈, h₁₂₈, minArea,
  * atten, scope) plus the ledger head under a user lens — and cached in the

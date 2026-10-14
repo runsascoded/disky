@@ -5,7 +5,7 @@
   (`b, o, wts, wb, c2..c4, a`), zstd — for `zstd.test.ts` and the v1 side of
   `pathStore.test.ts`. The current writer no longer produces this shape, so it
   is never regenerated here; only its D1 rows are re-extracted.
-- `v2/`: a **version-2** store generation (specs/path-store.md phase 1) cut by
+- `v2/`: a **version-2** store generation (specs/done/path-store.md phase 1) cut by
   the current `dt_cloud.index.write_index` — every row, objects included, the
   layer-2 column names, no wire aliases, both sorts — over a listing shaped
   like `tests/test_tiers_plan.py`'s: a flat dir of `N_FLAT` objects whose sizes
@@ -35,7 +35,7 @@
   single-owner `s/`, 2500 unowned objects directly under `m/`, and `w/`'s
   1100 two-owner dirs (300 KiB slices, 600 KiB totals) filling whole `bysize`
   groups — `path` + `bysize` in 2048-row groups, `bysize` keyed on each path's
-  total (`tot`, specs/bysize-path-total.md), so a group's `b_max` must be
+  total (`tot`, specs/done/bysize-path-total.md), so a group's `b_max` must be
   `MAX(tot)` for a 512 KiB read to keep it (`sliceComplete.test.ts`); its
   `plans.json` is `disk-tree tiers plan -j` (with `matched`) over `SLICE_PLANS`.
 - `v2/plans.json`: `disk-tree tiers plan -j -C` over each v2 sidecar for a

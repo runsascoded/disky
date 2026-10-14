@@ -87,7 +87,7 @@ describe('STATIC_GEN', () => {
     const env = { FILTER_STATIC: '1', INDEX_R2: r2(log), STATIC_GEN: GEN }
     const s = staticFilterStore(env)!
     expect([s.gen, await s.scans(), staticTag(env, { ast: { neg: [], alts: [[{ kind: 'sub', text: 'qqq' }]] } as never })])
-      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.19`])
+      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.21`])
     expect(log.filter(k => !k.includes(`static-names/${GEN}/`))).toEqual([])
   })
 

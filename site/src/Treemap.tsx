@@ -1,6 +1,6 @@
 import { Explain } from './Help'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { PointerEvent, ReactNode } from 'react'
 import { stringParam, useUrlState } from 'use-prms'
 import { DustHatch, Treemap as DtTreemap } from '@disk-tree/react'
 import type { CellCtx, CellStyle } from '@disk-tree/react'
@@ -21,6 +21,8 @@ import { useStore } from './store'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
 import { listingTime } from './listingTime'
+import { gradientBand } from './dayBand'
+import type { DayBand } from './dayBand'
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -170,7 +172,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, scheme = 'gs://', home, redact, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, scheme = 'gs://', home, redact, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -211,6 +213,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
    *  the child under the pointer (any depth inside it), `null` on leave. */
   brush?: string | null
   onBrush?: (name: string | null) => void
+  /** Controlled date brush (shared with the age chart); absent → the map keeps its own. */
+  band?: DayBand | null
+  onBand?: (b: DayBand | null) => void
 }) {
   usePerfCommit('treemap')
   const time = listingTime(scheme)
@@ -257,19 +262,15 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     const b = tiny.reduce((s, it) => s + it.b, 0)
     const o = tiny.reduce((s, it) => s + it.o, 0)
     const us: Record<string, number> = {}
-    let wd = 0
-    let wdb = 0
+    let md = -1
     let ma = -1
     for (const it of tiny) {
       for (const [u, ub] of it.us ?? []) us[u] = (us[u] ?? 0) + ub
-      if (it.d != null) {
-        wd += it.d * it.b
-        wdb += it.b
-      }
+      if (it.d != null && it.d > md) md = it.d
       if (it.a != null && it.a > ma) ma = it.a
     }
     const folded: TreeNode = { n: `(+${tiny.length})`, b, o }
-    if (wdb) folded.d = Math.round(wd / wdb)
+    if (md >= 0) folded.d = md
     if (ma >= 0) folded.a = ma
     const topUs = Object.entries(us).sort((a, c) => c[1] - a[1]).slice(0, 5)
     if (topUs.length) folded.us = topUs as [string, number][]
@@ -279,6 +280,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // Transient solo from hovering a legend row; a pinned `hl` (URL state) wins.
   const [hoverHl, setHoverHl] = useState<Highlight | null>(null)
   const effHl = hl ?? hoverHl
+  const [ownBand, setOwnBand] = useState<DayBand | null>(null)
+  const effBand = band !== undefined ? band : ownBand
+  const setBand = onBand ?? setOwnBand
   // Pinned highlight clears on a click anywhere that isn't a legend row, the
   // map, or a control — the plotly "click empty space to unpin" convention.
   useEffect(() => {
@@ -371,6 +375,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         if (effHl.user) dim = (kid.us?.find(([u]) => u === effHl.user)?.[1] ?? 0) < 0.5 * kid.b
         else if (effHl.unowned) dim = unownedBytes(kid) < 0.5 * kid.b
       }
+      if (effBand && !ctx.hasKids && !dim) {
+        const v = effBand.axis === 'a' ? kid.a : kid.d
+        dim = v == null || v < effBand.lo || v > effBand.hi
+      }
       // Shared-edge stroke, per cell: each neighbor paints its own half of a
       // boundary, so the line can adapt to the face it borders. Top-level
       // (bucket) rects take the page background — the strongest seam the
@@ -386,7 +394,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           : `color-mix(in oklab, ${bg} ${depth === 1 ? 40 : 62}%, var(--surface))`
       return { bg, ink, hatch, segments, edge, opacity: dim ? 0.22 : undefined }
     },
-    [mode, shade, slotOf, userIdx, dateRange, readRange, effHl, lens],
+    [mode, shade, slotOf, userIdx, dateRange, readRange, effHl, effBand, lens],
   )
 
   // owner roll-up for the current view (user coloring only): everyone ≥1% of
@@ -510,6 +518,38 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
      needs no key either: each hue is a child of the drilled node, and those
      children are the map's own labelled tiles — the legend only repeated
      the first row of tile titles (and, on a phone, cost the first fold). */
+  // The gradient key doubles as a brush: hovering a point on it dims every
+  // leaf cell outside a window of days around that point (`gradientBand`).
+  // A band from elsewhere (the age chart) on the same axis shows on it too.
+  const gradLi = (range: DateRange, axis: DayBand['axis']) => {
+    const span = range.max - range.min
+    const shown = effBand?.axis === axis && span > 0 ? effBand : null
+    const at = (e: PointerEvent<HTMLSpanElement>) => {
+      const r = e.currentTarget.getBoundingClientRect()
+      const b = gradientBand(range, (e.clientX - r.left) / r.width, axis)
+      if (b.lo !== effBand?.lo || b.hi !== effBand?.hi || effBand?.axis !== axis) setBand(b)
+    }
+    return (
+      <span className="li gradli">
+        {epochDaysToDate(range.min)}
+        <span
+          className="gradbar" style={{ background: dateGradientCss() }}
+          onPointerMove={at} onPointerDown={at} onPointerLeave={() => setBand(null)}
+          aria-label="Hover to highlight cells from these dates"
+        >
+          {shown && (
+            <span
+              className="gradwin"
+              style={{ left: `${(100 * (shown.lo - range.min)) / span}%`, width: `${Math.max(1, (100 * (shown.hi - shown.lo)) / span)}%` }}
+            />
+          )}
+        </span>
+        {epochDaysToDate(range.max)}
+        {shown && <span className="gradsel">{shown.lo === shown.hi ? epochDaysToDate(shown.lo) : `${epochDaysToDate(shown.lo)}–${epochDaysToDate(shown.hi)}`}</span>}
+      </span>
+    )
+  }
+
   const modeLegend = (mode === 'read' && readRange) || (mode === 'date' && dateRange)
     ? () => (
         <>
@@ -518,19 +558,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
               <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}). Logs may omit events; this is not proof of no access.`}>
                 <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
               </Tooltip>
-              <span className="li gradli">
-                {epochDaysToDate(readRange.min)}
-                <span className="gradbar" style={{ background: dateGradientCss() }} />
-                {epochDaysToDate(readRange.max)}
-              </span>
+              {gradLi(readRange, 'a')}
             </>
-          ) : dateRange ? (
-            <span className="li gradli">
-              {epochDaysToDate(dateRange.min)}
-              <span className="gradbar" style={{ background: dateGradientCss() }} />
-              {epochDaysToDate(dateRange.max)}
-            </span>
-          ) : null}
+          ) : dateRange ? gradLi(dateRange, 'd') : null}
         </>
       )
     : null
@@ -590,7 +620,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <PathBar path={path} scheme={schemeOf(path)} home={home} onDrill={onPathChange} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
-          {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
+          {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
             : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>}
@@ -671,7 +701,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.n), home) : n.n}</div>
           <div className="nums">
             {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
-            {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
+            {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>

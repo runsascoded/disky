@@ -1,4 +1,4 @@
-// specs/health-page.md: the /health computation over a fixture of both stores. The interval store missed scan 04 (an
+// specs/done/health-page.md: the /health computation over a fixture of both stores. The interval store missed scan 04 (an
 // out-of-order append can never join) and has two level-0 runs due to carry; the static index's run for 05 has no
 // drill, which cuts the drill stack there (06's drill is built but unserved), and the two level-0 runs never carry
 // (one drilled, one not). Scan 07's job is still running.

@@ -260,7 +260,7 @@ export function ChildrenTable({ node, segs, scheme, home, onOpen, onOpenObject, 
                     <span className="gradbar" style={{ background: dateGradientCss(), width: 90, height: 8, borderRadius: 2, display: 'inline-block' }} />
                     {epochDaysToMonthShort(dMax)}
                   </span>
-                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = each row’s {time.description} (a directory’s byte-weighted mean), old → new, over the rows listed here.</div>
+                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = each row’s {time.description} (a directory’s newest), old → new, over the rows listed here.</div>
                 </>}>
                   <span className="info" tabIndex={0} onClick={e => e.stopPropagation()} aria-label={`about the ${time.label} colour`}> ⓘ</span>
                 </Tooltip>

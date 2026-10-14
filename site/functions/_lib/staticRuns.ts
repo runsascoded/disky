@@ -1,4 +1,4 @@
-/** The static name index's runs (specs/static-append.md): a base generation plus one small run per newer scan
+/** The static name index's runs (specs/done/static-append.md): a base generation plus one small run per newer scan
  *  (two scans of one day are two runs), each its own little generation under `deltas/<first>[_<last>]/`
  *  (`shards.json`, `sx/`, `catalog/`; scan ids), listed by the newest immutable `manifests/<scan id>.json` (scan
  *  ids sort in time order). Readers query every tier and merge:

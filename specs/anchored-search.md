@@ -1,6 +1,6 @@
 # Anchored name search: `^q`, `q$`, `^q$`
 
-**Current status (2026-10-13 UTC): merged and enabled in GCS's static generation `2026-10-08c`**, including daily run maintenance (`job/static-names.json`: `anchors: true`). The historical-probe fix below recovered `2026-10-12T2006` and is promoted for future jobs. Drill and anchors build concurrently. The Oct 9 1,110/1,110 acceptance below is historical, not an all-new-scan oracle. Heavy starts-with has per-bucket root totals and bounded scoped reads, not a general per-directory heavy-`^q` drill. Compaction integration remains a separate gate. See [GCS operations](gcs-operations.md).
+**Current status (2026-10-13 UTC): merged and enabled in GCS's static generation `2026-10-08c`**, including daily run maintenance (`job/static-names.json`: `anchors: true`). The historical-probe fix below recovered `2026-10-12T2006` and is promoted for future jobs. Drill and anchors build concurrently. The Oct 9 1,110/1,110 acceptance below is historical, not an all-new-scan oracle. Heavy starts-with has per-bucket root totals and bounded scoped reads, not a general per-directory heavy-`^q` drill. Compaction integration remains a separate gate. See [GCS operations](gcs:specs/gcs-operations.md).
 
 ## Original build checkpoint (2026-10-09)
 

@@ -100,7 +100,7 @@ function execution(value: unknown): NameExecution {
   return { plan: body.plan, source: body.source, validation: { ...validation, description: validation.description },
     source_identity: { generation: identity.generation, snapshot_db: identity.snapshot_db, history_manifest_sha256: identity.history_manifest_sha256 } }
 }
-/** A scan id (`YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM`), never just a date (specs/scan-ids-not-dates.md). */
+/** A scan id (`YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM`), never just a date (specs/done/scan-ids-not-dates.md). */
 const iso = isScanId
 /** A store's bucket set: at least one, unique, slash- and NUL-free names — any fleet's size (gcs 6, cw 5). */
 const bucketPaths = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && new Set(value).size === value.length && value.every(path => typeof path === 'string' && !!path && !path.includes('/') && !path.includes('\0'))

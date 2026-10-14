@@ -30,6 +30,7 @@ import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
+import type { DayBand } from './dayBand'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
 import { HttpError } from './batches'
@@ -64,7 +65,7 @@ import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { perf } from './perf'
 import { useDocTitle } from './title'
 import type { AgeRow, ColorMode, Meta, Pricing, Rules, TreeNode } from './types'
-import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
+import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_KEYWORDS, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
 import { SiteKbd } from './SiteKbd'
 import { useUnits } from './units'
 // The leaf viewer (file-tree's renderers, hyparquet…): its own chunk, fetched
@@ -218,6 +219,8 @@ function AppContent() {
   // Brushing: the view's child (by name) hovered in either the treemap or its
   // children table, lit in both (a ring on the cell, the row's hover tint).
   const [brush, setBrush] = useState<string | null>(null)
+  // The date brush shared by the map's gradient key and the age chart's bars.
+  const [band, setBand] = useState<DayBand | null>(null)
   useEffect(() => {
     if (fqDraft == null) return
     const t = setTimeout(() => { setFq(fqDraft || undefined); setFqDraft(null) }, 250)
@@ -742,7 +745,7 @@ function AppContent() {
   // Diff sides: the drilled subtree at each endpoint, scoped like the map.
   // The diff is read server-side (`/api/diff`): both scans' index tiers at
   // one shared byte floor, point lookups for names that crossed it, the
-  // page scope applied to both sides (specs/view-serving.md §2).
+  // page scope applied to both sides (specs/done/view-serving.md §2).
   // First paint: the bucket-level diff (`depth=1` — the two root reads plus
   // one level of lookups, ~2 s cold) stands in for the full walk while it
   // aligns, so the map shows the shape of the change before its detail.
@@ -909,15 +912,19 @@ function AppContent() {
 
   useActions({
     ...Object.fromEntries(
-      MODES.map((m, i) => [
+      // Only the axes this scan can color by (`bar.color`, the picker's own
+      // list): a "Color by read" on a store with no access logs did nothing.
+      // Bindings stay keyed to `MODES` order so a hotkey means one axis everywhere.
+      MODES.flatMap((m, i) => bar.color.length > 1 && bar.color.includes(m) ? [[
         `mode:${m}`,
         {
           label: `Color by ${MODE_LABELS[m]}`,
           group: 'Color mode',
+          keywords: MODE_KEYWORDS[m],
           defaultBindings: [String(i + 1)],
           handler: () => setMode(m),
         },
-      ]),
+      ]] : []),
     ),
     'highlight:clear': {
       label: 'Clear the owner axis (everyone)',
@@ -1152,7 +1159,7 @@ function AppContent() {
           <label className="tb-ctl">
             <span className="lbl">color</span>
             <Explain text={
-              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
+              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (a folder’s cell = its newest object). {store.objectsNote}</>
               : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
@@ -1286,6 +1293,8 @@ function AppContent() {
             onOpen={p => openObject(p.slice(1).map(n => n.n))}
             brush={brush}
             onBrush={setBrush}
+            band={band}
+            onBand={setBand}
           />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
@@ -1538,7 +1547,7 @@ function AppContent() {
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} band={band} onBand={setBand} />
         )}
       </section>
       )}
@@ -1576,7 +1585,7 @@ function AppContent() {
                   .map(([c, b]) => (
                     <tr key={c}>
                       <td>
-                        <Tooltip placement="right" content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
+                        <Tooltip cell content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
                           <span className="dotted">{CLASS_NAMES[c] ?? c}</span>
                         </Tooltip>
                       </td>

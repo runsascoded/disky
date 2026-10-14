@@ -1,4 +1,4 @@
-// The cross-scan over-time index reader (specs/obs-axis-indexing.md Phase 1):
+// The cross-scan over-time index reader (specs/done/obs-axis-indexing.md Phase 1):
 // a path's size-over-time line stitched across sealed capped-K multi-scan
 // groups, replacing `/api/series`'s one point read per scan generation.
 //

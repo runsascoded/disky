@@ -3,9 +3,9 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyarrow"]
 # ///
-"""The runs fixture (`staticRuns.test.ts`; specs/static-append.md): a base generation through
+"""The runs fixture (`staticRuns.test.ts`; specs/done/static-append.md): a base generation through
 2026-09-01 and four runs, one per scan — 2026-10-01 and 2026-10-02 (date ids), then two scans on one day keyed by
-scan id, 2026-10-03T0600 and 2026-10-03T1800 (specs/scan-ids-not-dates.md) — in the layouts `dt-cloud static-names runs` writes, over
+scan id, 2026-10-03T0600 and 2026-10-03T1800 (specs/done/scan-ids-not-dates.md) — in the layouts `dt-cloud static-names runs` writes, over
 `static-names/gen.py`'s versions plus some that open or close on the runs' dates, and a brute-force oracle.
 
 A tier's contents are defined by cuts: `cut(T)` is the versions opened by `T`, a `vt` after `T` read as open.

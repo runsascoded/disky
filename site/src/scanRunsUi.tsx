@@ -1,4 +1,4 @@
-// The scan-run pieces /scans and /health share (specs/scan-runs-ui.md, specs/health-page.md): the run list's fetch
+// The scan-run pieces /scans and /health share (specs/done/scan-runs-ui.md, specs/done/health-page.md): the run list's fetch
 // (one React Query cache entry for both pages), the status chip, the phase bar and its colors.
 import { useQuery } from '@tanstack/react-query'
 import { Tooltip } from './Tooltip'
@@ -53,25 +53,26 @@ const PALETTE = ['--s1', '--s2', '--s4', '--s7', '--s5', '--s6', '--s3', '--s8']
 /** A stable color per phase name: its position in the usual phase order. */
 export const colorer = (order: string[]) => (phase: string) => `var(${PALETTE[Math.max(0, order.indexOf(phase)) % PALETTE.length]})`
 
-export function Status({ run, failedAt, issues = [] }: { run: ScanRun; failedAt?: string | null; issues?: PhaseIssue[] }) {
+/** `cell`: rendered as a table cell's content (`Tooltip`'s `cell`: the cell is the hover target, the tip to its right). */
+export function Status({ run, failedAt, issues = [], cell }: { run: ScanRun; failedAt?: string | null; issues?: PhaseIssue[]; cell?: boolean }) {
   if (run.status === 'succeeded' && issues.length) {
     const outcome = runOutcome(run, issues)
-    return <Tooltip content={<><div>Batch job succeeded, but {issues.length} phase attempt{issues.length === 1 ? '' : 's'} failed.</div>{issues.map(i => <div key={i.phase}>{i.phase}: {i.outcome}{i.recovery ? ' · recovered by a subsequent attempt' : ' · no successful recovery recorded'}</div>)}</>}>
+    return <Tooltip cell={cell} content={<><div>Batch job succeeded, but {issues.length} phase attempt{issues.length === 1 ? '' : 's'} failed.</div>{issues.map(i => <div key={i.phase}>{i.phase}: {i.outcome}{i.recovery ? ' · recovered by a subsequent attempt' : ' · no successful recovery recorded'}</div>)}</>}>
       <span className={`sr-status ${outcome === 'recovered' ? 'succeeded' : 'warn'}`}>{outcome}</span>
     </Tooltip>
   }
   const tag = <span className={`sr-status ${run.status}`}>{run.status === 'nop' ? 'no-op' : run.status}</span>
   if (run.status !== 'failed') return tag
-  return <Tooltip content={<>{failedAt && <div>Failed {failedAt.startsWith('after') ? failedAt : `in ${failedAt}`}</div>}{run.error && <div className="sr-err">{run.error}</div>}</>}>{tag}</Tooltip>
+  return <Tooltip cell={cell} content={<>{failedAt && <div>Failed {failedAt.startsWith('after') ? failedAt : `in ${failedAt}`}</div>}{run.error && <div className="sr-err">{run.error}</div>}</>}>{tag}</Tooltip>
 }
 
 /** A run's main-lane bar, failure stripes for overlapping attempts, and all phases in its tip. */
-export function PhaseBar({ spans, secs, color, width = 160 }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string; width?: number }) {
+export function PhaseBar({ spans, secs, color, width = 160, cell }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string; width?: number; cell?: boolean }) {
   if (!secs) return <span className="dim">—</span>
   const x = (t: number) => (t / secs) * width
   const main = spans.filter(s => s.lane === 0)
   return (
-    <Tooltip content={spans.length ? <table className="sr-tip"><tbody>{spans.map(s => <tr key={s.phase}><td><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase}{s.lane ? ' (beside)' : ''}{s.status !== 'done' ? ` · ${phaseOutcome(s)}` : ''}</td><td className="num">{fmtDur(s.end - s.start)}</td></tr>)}</tbody></table> : 'No phase markers recorded for this run'}>
+    <Tooltip cell={cell} content={spans.length ? <table className="sr-tip"><tbody>{spans.map(s => <tr key={s.phase}><td><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase}{s.lane ? ' (beside)' : ''}{s.status !== 'done' ? ` · ${phaseOutcome(s)}` : ''}</td><td className="num">{fmtDur(s.end - s.start)}</td></tr>)}</tbody></table> : 'No phase markers recorded for this run'}>
       <svg className="sr-bar" width={width} height={10} viewBox={`0 0 ${width} 10`} role="img" aria-label={`${fmtDur(secs)} in ${main.length} phases`}>
         <rect className="sr-bar-bg" x={0} y={0} width={width} height={10} rx={2} />
         {main.map(s => <rect key={s.phase} x={x(s.start)} y={0} width={Math.max(1, x(s.end) - x(s.start))} height={10} style={{ fill: phaseFill(s, color) }} />)}

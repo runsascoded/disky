@@ -4,7 +4,7 @@ import { gateFor } from './auth'
 import { shareKeyGrant } from './og/tokens'
 import { blockedForRestricted, dataAllowed, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionFor, restrictSubtree, restrictTree } from './restrict'
 import { storeEnv } from './stores'
-import { sqliteD1 } from './testD1'
+import { LINEAGES, sqliteD1 } from './testD1'
 import type { ViewNode } from './view'
 import { onRequestGet as subtree } from '../api/subtree'
 import { onRequestGet as diff } from '../api/diff'
@@ -130,89 +130,91 @@ describe('blockedForRestricted', () => {
   })
 })
 
-/** A D1 with the auth tables and a live share link carrying `scopes`; the env
- *  authenticates its key as a Bearer credential, as a link holder's would. */
-async function linkEnv(scopes: string[]): Promise<{ env: Env; key: string }> {
-  const { db } = await sqliteD1('cw')
-  const env = { ...ENV, DB: db } as Env
-  const { token } = await gateFor(env)!.mint({ email: null, scopes, name: 'test link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })
-  return { env, key: token }
-}
-const bearer = (url: string, key: string, init?: RequestInit) =>
-  new Request(`https://disk.example.test${url}`, { ...init, headers: { ...init?.headers, authorization: `Bearer ${key}` } })
+describe.each(LINEAGES)('D1, %s lineage', lineage => {
+  /** A D1 with the auth tables and a live share link carrying `scopes`; the env
+   *  authenticates its key as a Bearer credential, as a link holder's would. */
+  async function linkEnv(scopes: string[]): Promise<{ env: Env; key: string }> {
+    const { db } = await sqliteD1(lineage)
+    const env = { ...ENV, DB: db } as Env
+    const { token } = await gateFor(env)!.mint({ email: null, scopes, name: 'test link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })
+    return { env, key: token }
+  }
+  const bearer = (url: string, key: string, init?: RequestInit) =>
+    new Request(`https://disk.example.test${url}`, { ...init, headers: { ...init?.headers, authorization: `Bearer ${key}` } })
 
-describe('routes, as a restricted link', () => {
-  const scopes = ['laptop', hideScope('laptop', HIDE)]
-  it('a hidden path is absent from subtree, diff, series and largest (before any store read)', async () => {
-    const { env, key } = await linkEnv(scopes)
-    const p = encodeURIComponent(`${HIDE}/W2.pdf`)
-    const got = await Promise.all([
-      subtree({ request: bearer(`/api/subtree?date=2026-10-09&path=${p}`, key), env } as never),
-      diff({ request: bearer(`/api/diff?from=2026-10-08&to=2026-10-09&path=${p}`, key), env } as never),
-      series({ request: bearer(`/api/series?paths=Users/ryan/Documents&paths=${p}`, key), env } as never),
-      largest({ request: bearer(`/api/largest?date=2026-10-09&path=${p}`, key), env } as never),
-    ].map(async r => { const res = await r; return [res.status, await res.text()] }))
-    expect(got).toEqual([[404, 'path not found'], [404, 'path not found'], [404, 'path not found'], [404, 'path not found']])
-  })
-  it('prefixes (caller-supplied probes) and the unfilterable routes are 403', async () => {
-    const { env, key } = await linkEnv(scopes)
-    const body = '{"error":"forbidden for a path-restricted link"}\n'
-    const pre = await prefixes({ request: bearer('/api/prefixes', key, { method: 'POST', body: '{}' }), env } as never)
-    const mw = await Promise.all(['/api/path-index?date=x', '/v1/files/listing/', '/api/plans/run?id=1'].map(u => restrictGate(bearer(u, key), env)))
-    expect([[pre.status, await pre.text()], ...await Promise.all(mw.map(async r => [r!.status, await r!.text()]))]).toEqual([
-      [403, body], [403, body], [403, body], [403, body],
-    ])
-  })
-  it('age-pyramid: a hidden dir itself is absent too (its pyramid breaks down its contents)', async () => {
-    const { env, key } = await linkEnv(scopes)
-    const res = await agePyramid({ request: bearer(`/api/age-pyramid?date=2026-10-09&path=${encodeURIComponent(HIDE)}`, key), env } as never)
-    expect([res.status, await res.text()]).toEqual([404, 'path not found'])
-  })
-  it('the middleware refuses every newly blocked route to a restricted link, and to it alone', async () => {
-    const restricted = await linkEnv(scopes)
-    const open = await linkEnv(['laptop'])
-    const urls = ['/api/name-summary?q=x', '/api/name-summary-registry', '/api/static-bench?q=x', '/api/filter-cover?q=x', '/api/health', '/api/scan-runs/r1']
-    const got = await Promise.all(urls.map(async u => {
-      const r = await restrictGate(bearer(u, restricted.key), restricted.env)
-      return [r!.status, await r!.text()]
-    }))
-    expect(got).toEqual(urls.map(() => [403, '{"error":"forbidden for a path-restricted link"}\n']))
-    expect(await Promise.all(urls.map(u => restrictGate(bearer(u, open.key), open.env)))).toEqual(urls.map(() => null))
-  })
-  it('`/data`: a restricted link is refused lifecycle.json and other snapshot files, before any store read', async () => {
-    const { env, key } = await linkEnv(scopes)
-    const get = async (rel: string) => {
-      const r = await data({ request: bearer(`/data/${rel}`, key), env } as never)
-      return [r.status, await r.text()]
-    }
-    const forbidden = [403, '{"error":"forbidden for a path-restricted link"}\n']
-    expect([await get('2026-10-09/lifecycle.json'), await get('2026-10-09/listing.parquet')]).toEqual([forbidden, forbidden])
-  })
-  it('`dataAllowed`: meta always; age only while no hide prefix is top-level; nothing else', () => {
-    const deep = { hide: [HIDE] }
-    const top = { hide: ['Users', HIDE] }
-    const keys = ['snapshots/2026-10-09/meta.json', 'snapshots/2026-10-09/age.json', 'snapshots/2026-10-09/lifecycle.json', 'snapshots/2026-10-09/x/meta.json', 'snapshots/nas/2026-10-09/meta.json']
-    expect([keys.map(k => dataAllowed(k, 'snapshots/', deep)), keys.map(k => dataAllowed(k, 'snapshots/', top))]).toEqual([
-      [true, true, false, false, false],
-      [true, false, false, false, false],
-    ])
-    expect(dataAllowed('snapshots/nas/2026-10-09/meta.json', 'snapshots/nas/', deep)).toBe(true)
-  })
-  it('an unrestricted link, and an unblocked route, pass the gate', async () => {
-    const open = await linkEnv(['laptop'])
-    const restricted = await linkEnv(scopes)
-    expect([
-      await restrictGate(bearer('/api/path-index?date=x', open.key), open.env),
-      await restrictGate(bearer('/api/subtree?date=x', restricted.key), restricted.env),
-    ]).toEqual([null, null])
-  })
-  it('a restricted link never earns a full OG card; an unrestricted one does', async () => {
-    const restricted = await linkEnv(scopes)
-    const open = await linkEnv(['laptop'])
-    const now = Math.floor(Date.now() / 1000)
-    expect([
-      await shareKeyGrant(restricted.env.DB, restricted.key, ['laptop'], now),
-      typeof await shareKeyGrant(open.env.DB, open.key, ['laptop'], now),
-    ]).toEqual([null, 'string'])
+  describe('routes, as a restricted link', () => {
+    const scopes = ['laptop', hideScope('laptop', HIDE)]
+    it('a hidden path is absent from subtree, diff, series and largest (before any store read)', async () => {
+      const { env, key } = await linkEnv(scopes)
+      const p = encodeURIComponent(`${HIDE}/W2.pdf`)
+      const got = await Promise.all([
+        subtree({ request: bearer(`/api/subtree?date=2026-10-09&path=${p}`, key), env } as never),
+        diff({ request: bearer(`/api/diff?from=2026-10-08&to=2026-10-09&path=${p}`, key), env } as never),
+        series({ request: bearer(`/api/series?paths=Users/ryan/Documents&paths=${p}`, key), env } as never),
+        largest({ request: bearer(`/api/largest?date=2026-10-09&path=${p}`, key), env } as never),
+      ].map(async r => { const res = await r; return [res.status, await res.text()] }))
+      expect(got).toEqual([[404, 'path not found'], [404, 'path not found'], [404, 'path not found'], [404, 'path not found']])
+    })
+    it('prefixes (caller-supplied probes) and the unfilterable routes are 403', async () => {
+      const { env, key } = await linkEnv(scopes)
+      const body = '{"error":"forbidden for a path-restricted link"}\n'
+      const pre = await prefixes({ request: bearer('/api/prefixes', key, { method: 'POST', body: '{}' }), env } as never)
+      const mw = await Promise.all(['/api/path-index?date=x', '/v1/files/listing/', '/api/plans/run?id=1'].map(u => restrictGate(bearer(u, key), env)))
+      expect([[pre.status, await pre.text()], ...await Promise.all(mw.map(async r => [r!.status, await r!.text()]))]).toEqual([
+        [403, body], [403, body], [403, body], [403, body],
+      ])
+    })
+    it('age-pyramid: a hidden dir itself is absent too (its pyramid breaks down its contents)', async () => {
+      const { env, key } = await linkEnv(scopes)
+      const res = await agePyramid({ request: bearer(`/api/age-pyramid?date=2026-10-09&path=${encodeURIComponent(HIDE)}`, key), env } as never)
+      expect([res.status, await res.text()]).toEqual([404, 'path not found'])
+    })
+    it('the middleware refuses every newly blocked route to a restricted link, and to it alone', async () => {
+      const restricted = await linkEnv(scopes)
+      const open = await linkEnv(['laptop'])
+      const urls = ['/api/name-summary?q=x', '/api/name-summary-registry', '/api/static-bench?q=x', '/api/filter-cover?q=x', '/api/health', '/api/scan-runs/r1']
+      const got = await Promise.all(urls.map(async u => {
+        const r = await restrictGate(bearer(u, restricted.key), restricted.env)
+        return [r!.status, await r!.text()]
+      }))
+      expect(got).toEqual(urls.map(() => [403, '{"error":"forbidden for a path-restricted link"}\n']))
+      expect(await Promise.all(urls.map(u => restrictGate(bearer(u, open.key), open.env)))).toEqual(urls.map(() => null))
+    })
+    it('`/data`: a restricted link is refused lifecycle.json and other snapshot files, before any store read', async () => {
+      const { env, key } = await linkEnv(scopes)
+      const get = async (rel: string) => {
+        const r = await data({ request: bearer(`/data/${rel}`, key), env } as never)
+        return [r.status, await r.text()]
+      }
+      const forbidden = [403, '{"error":"forbidden for a path-restricted link"}\n']
+      expect([await get('2026-10-09/lifecycle.json'), await get('2026-10-09/listing.parquet')]).toEqual([forbidden, forbidden])
+    })
+    it('`dataAllowed`: meta always; age only while no hide prefix is top-level; nothing else', () => {
+      const deep = { hide: [HIDE] }
+      const top = { hide: ['Users', HIDE] }
+      const keys = ['snapshots/2026-10-09/meta.json', 'snapshots/2026-10-09/age.json', 'snapshots/2026-10-09/lifecycle.json', 'snapshots/2026-10-09/x/meta.json', 'snapshots/nas/2026-10-09/meta.json']
+      expect([keys.map(k => dataAllowed(k, 'snapshots/', deep)), keys.map(k => dataAllowed(k, 'snapshots/', top))]).toEqual([
+        [true, true, false, false, false],
+        [true, false, false, false, false],
+      ])
+      expect(dataAllowed('snapshots/nas/2026-10-09/meta.json', 'snapshots/nas/', deep)).toBe(true)
+    })
+    it('an unrestricted link, and an unblocked route, pass the gate', async () => {
+      const open = await linkEnv(['laptop'])
+      const restricted = await linkEnv(scopes)
+      expect([
+        await restrictGate(bearer('/api/path-index?date=x', open.key), open.env),
+        await restrictGate(bearer('/api/subtree?date=x', restricted.key), restricted.env),
+      ]).toEqual([null, null])
+    })
+    it('a restricted link never earns a full OG card; an unrestricted one does', async () => {
+      const restricted = await linkEnv(scopes)
+      const open = await linkEnv(['laptop'])
+      const now = Math.floor(Date.now() / 1000)
+      expect([
+        await shareKeyGrant(restricted.env.DB, restricted.key, ['laptop'], now),
+        typeof await shareKeyGrant(open.env.DB, open.key, ['laptop'], now),
+      ]).toEqual([null, 'string'])
+    })
   })
 })

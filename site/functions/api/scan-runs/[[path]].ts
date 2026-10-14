@@ -1,4 +1,4 @@
-// /api/scan-runs[/:run_id] — what each scan job did (specs/scan-runs-ui.md):
+// /api/scan-runs[/:run_id] — what each scan job did (specs/done/scan-runs-ui.md):
 //
 //   GET /api/scan-runs[?store=<key>]          { configured, runs: RunSummary[], project, meta }     viewer
 //   GET /api/scan-runs/:run_id[?store=<key>]  { ...ScanRunDetail, project, meta }                    viewer

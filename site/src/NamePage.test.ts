@@ -35,7 +35,7 @@ it('defaults the existing controlled form to datakit and no baseline', () => {
   const client = new QueryClient()
   try {
     const html = render(client, '/names')
-    expect(html.match(/<input[^>]+>/)?.[0]).toBe('<input required="" aria-describedby="hot-availability" name="name" value="datakit"/>')
+    expect(html.match(/<input[^>]+>/)?.[0]).toBe('<input required="" aria-describedby="hot-availability" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" name="name" value="datakit"/>')
     expect(html.match(/<select name="from">(.*?)<\/select>/)?.[1]).toBe('<option value="" selected="">No baseline</option><option value="2026-10-04">2026-10-04</option>')
     expect([...html.matchAll(/<p role="status">(.*?)<\/p>/g)].map(([, text]) => text)).toEqual(['Loading exact name summary…'])
   } finally { client.clear() }

@@ -1,5 +1,5 @@
 /** The ownership ledger applied to a user lens, server-side
- * (specs/view-serving.md §2, "assignments applied to the user lens"): of a path's
+ * (specs/done/view-serving.md §2, "assignments applied to the user lens"): of a path's
  * bytes, how many are U's once assignments repaint attribution.
  *
  * Model (`ownerBands.ts`): every live assignment is a band — its subtree minus deeper

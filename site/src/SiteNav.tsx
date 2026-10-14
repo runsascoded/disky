@@ -207,7 +207,7 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
               {DEFAULT_STORE.metaTree && <a role="menuitem" className="mi" href={DEFAULT_STORE.metaTree} target="_blank" rel="noreferrer" onClick={() => m.setOpen(false)}>Meta <span className="dim">(the data bucket)</span> ↗</a>}
               {isAdmin && link('/admin', 'Admin')}
               {/* The store switcher — only a multi-store deploy has one
-                  (specs/multi-store.md phase 2): each configured store at its
+                  (specs/done/multi-store.md phase 2): each configured store at its
                   own path, the current one marked. */}
               {STORES.length > 1 && (
                 <>

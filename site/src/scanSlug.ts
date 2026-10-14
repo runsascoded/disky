@@ -3,7 +3,7 @@
  *
  * A scan's identity is its **scan id**: date-only `YYYY-MM-DD`, or timed
  * `YYYY-MM-DDTHHMM` (UTC). A date is never a scan key — a
- * day may hold several scans (specs/scan-ids-not-dates.md).
+ * day may hold several scans (specs/done/scan-ids-not-dates.md).
  *
  * A **slug** is a user-facing spelling of a scan-id *prefix*; it resolves to
  * the **latest** indexed scan whose id starts with it (`resolveScan`):

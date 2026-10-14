@@ -21,7 +21,7 @@ describe('URL-authoritative root search form', () => {
       .toEqual([['date', ['2026-10-05']], ['from', ['2026-10-04']]])
     const html = render('date=2026-10-05&name=.npy')
     expect(selected(html)).toEqual([['date', ['2026-10-05']], ['from', ['']]])
-    expect(html.match(/<input[^>]+>/)?.[0]).toBe('<input required="" aria-describedby="hot-availability" name="name" value=".npy"/>')
+    expect(html.match(/<input[^>]+>/)?.[0]).toBe('<input required="" aria-describedby="hot-availability" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" name="name" value=".npy"/>')
     expect(html.match(/<form[^>]+>/)?.[0]).toBe('<form autoComplete="off">')
     expect(html.match(/<label>Baseline scan \(optional\)(.*?)<\/label>/)?.[1]).toBe(
       '<select name="from"><option value="" selected="">No baseline</option><option value="2026-10-04">2026-10-04</option></select>',

@@ -1,4 +1,4 @@
-/** The static name index's hex-run rule (specs/static-hex-runs.md; `cloud/src/dt_cloud/hex_runs.py`, which this
+/** The static name index's hex-run rule (specs/done/static-hex-runs.md; `cloud/src/dt_cloud/hex_runs.py`, which this
  *  ports exactly): interiors of long hex ids are not indexed.
  *
  *  On a lowercase string `l` (a name or a whole path: `/` is not hex, so a run never crosses a segment), a **hex run**

@@ -1,5 +1,5 @@
 """`dt-cloud scan-run`: the record's SQL path (against the real migration, FKs on), output measuring, and the
-backfill's reconstruction from fake Batch jobs, log lines and a fake store (specs/scan-runs-ui.md)."""
+backfill's reconstruction from fake Batch jobs, log lines and a fake store (specs/done/scan-runs-ui.md)."""
 from __future__ import annotations
 
 import datetime as dt

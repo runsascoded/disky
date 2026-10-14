@@ -13,7 +13,7 @@ Two rules hold everywhere:
   deployment's grants can't clobber anyone else's on a shared project or bucket.
 
 Cost labels: `cost_labels()` reads `$DISKY_LABELS` (`k=v,…`, e.g.
-`app=disky,deployment=gcs`; spec specs/cost-labels.md) into the provider's
+`app=disky,deployment=gcs`; spec specs/done/cost-labels.md) into the provider's
 `default_labels`, so every resource type that takes labels carries them; a
 component passes its own `component` label where it bills on its own.
 

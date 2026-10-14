@@ -8,7 +8,7 @@ import { fixture } from './testStore.js'
 
 // The daily runs' reader (`staticRuns.ts`) over `fixtures/static-runs/` (`gen.py`): a base through 2026-09-01 and
 // a run per scan — 2026-10-01, 2026-10-02 (date ids), then two scans on one day, 2026-10-03T0600 and 2026-10-03T1800
-// (scan ids, specs/scan-ids-not-dates.md) — against a brute-force oracle over every version on every scan.
+// (scan ids, specs/done/scan-ids-not-dates.md) — against a brute-force oracle over every version on every scan.
 
 const RUNS = ['2026-10-01', '2026-10-02', '2026-10-03T0600', '2026-10-03T1800']
 const TIERS = ['base', ...RUNS.map(r => `deltas/${r}`)]
@@ -228,7 +228,7 @@ describe('a broken tier: the stack is cut at it, the scans before it answer exac
   }
   const wantHits = (dates: string[], scans: string[]) => long().map(term => [term, scans, oracle(term, dates)])
 
-  it('a run recording another hex-run rule than the base (specs/static-hex-runs.md) is cut at, never mixed in', async () => {
+  it('a run recording another hex-run rule than the base (specs/done/static-hex-runs.md) is cut at, never mixed in', async () => {
     const logged: string[] = []
     const base = files(MANIFESTS)
     const json = async (key: string): Promise<unknown> => key === `${RUN3}/catalog/meta.json` ? { ...await base.json<object>(key), hex_runs: { min: 16, tail: 8 } } : base.json(key)

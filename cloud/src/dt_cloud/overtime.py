@@ -1,6 +1,6 @@
 """The cross-scan **over-time index** — one path's `(b, o)` at every scan, laid
 out so the size-over-time chart reads a whole line in one contiguous range
-instead of one point read per scan generation (specs/obs-axis-indexing.md
+instead of one point read per scan generation (specs/done/obs-axis-indexing.md
 Phase 1).
 
 The SCD-2 interval consolidation is **pyrmts' generic multiscan kernel**
@@ -40,7 +40,7 @@ OVER_TIME_FILE = "over-time.parquet"
 #: Scans per sealed multi-scan group (capped so each build is bounded-memory +
 #: parallelizable, and a path's line reads ⌈N/K⌉ groups rather than one giant
 #: monolith; the ≤K-scan tip is served by `/api/series`'s per-scan fallback).
-#: 16 ≈ 4 days at the 6h scan cadence (8 at the earlier 12h) (specs/obs-axis-indexing.md Phase 1).
+#: 16 ≈ 4 days at the 6h scan cadence (8 at the earlier 12h) (specs/done/obs-axis-indexing.md Phase 1).
 OVER_TIME_GROUP_SIZE = 16
 #: The ordered scan list rides a sidecar JSON the CFW reader fetches — the
 #: D1-footer read path rebuilds row-group stats but not KV metadata, so the
@@ -78,7 +78,7 @@ def over_time_pyramid() -> Pyramid:
 def _roll_sql(con: "duckdb.DuckDBPyConnection", path_index: str) -> str:
     """One scan's `path` sort → `(depth, path, b, o)` totals + a depth-0
     fleet-root row (sum of the buckets at depth 1). A store generation
-    (`kind` on every row; specs/path-store.md §4.5) contributes its dir rows'
+    (`kind` on every row; specs/done/path-store.md §4.5) contributes its dir rows'
     `size` / `n_files`; a pre-store index (dir rows only, wire names) its
     `b` / `o` — the same rows in, the same intervals out, across the switch."""
     cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{path_index}') LIMIT 0").fetchall()}
@@ -226,7 +226,7 @@ MULTISCAN_ENCODER = "interval"
 
 def multiscan_dataset(store: str | None = None) -> str:
     """The manifest `dataset` of ``store``'s groups: ``over-time`` for the
-    primary, ``<store>:over-time`` for a secondary store (specs/multi-store.md;
+    primary, ``<store>:over-time`` for a secondary store (specs/done/multi-store.md;
     the site's `overTimeDataset`). pyrmts owns `pyramid_multiscans`, whose
     ``(dataset, key)`` PK already keeps stores apart — no store column."""
     from .index_footer import PRIMARY_STORE, check_store

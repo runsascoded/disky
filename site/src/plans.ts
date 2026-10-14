@@ -7,7 +7,7 @@ import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
 
-// Client for the deletion-plan API (specs/staged-delete.md; the OA build plan
+// Client for the deletion-plan API (specs/done/staged-delete.md; the OA build plan
 // `sweep-plan-union.md`). The opt-in trash model: a trash gesture *stages*
 // prefixes (any signed-in full viewer may) into a shared open plan; an admin
 // approves + dispatches from /staged. Nothing is deleted by inaction.

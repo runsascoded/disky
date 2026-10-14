@@ -12,6 +12,7 @@ import { type CoverItem, type FilterCover, groupItems } from './filterCover'
 import { ActStatus, useActDeps, useKeepFocus, useMatchAct } from './MatchActions'
 import { actBlockedLabel } from './matchAct'
 import { Tooltip } from './Tooltip'
+import { NO_AUTOFILL } from './noAutofill'
 
 export { caveats } from './matchAct'
 
@@ -115,7 +116,7 @@ export function BulkBar({ cover, loading, onIntent, resolve, resetKey, scheme, q
         {idle && <>
           {canAssign && <>
             <button type="button" className="act assign" onClick={startAssign}>{assign.trim() ? 'assign' : 'assign to me'}</button>
-            <input list="bb-assign-users" value={assign} onChange={e => setAssign(e.target.value)} placeholder="you" size={7} aria-label="Assign matches to user" />
+            <input list="bb-assign-users" value={assign} onChange={e => setAssign(e.target.value)} placeholder="you" size={7} aria-label="Assign matches to user" {...NO_AUTOFILL} />
             <datalist id="bb-assign-users">{allUsers().map(u => <option key={u.id} value={u.name} />)}</datalist>
           </>}
           {canStage && <button type="button" className="act stage" onClick={startStage}>stage for deletion</button>}

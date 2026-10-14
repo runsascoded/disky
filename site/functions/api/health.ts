@@ -1,4 +1,4 @@
-// GET /api/health — the state of the deployment's append-only stores (specs/health-page.md): each store's stack (base,
+// GET /api/health — the state of the deployment's append-only stores (specs/done/health-page.md): each store's stack (base,
 // runs, due carries, compaction gauge), every scan's coverage and its gaps, and freshness. Gated like /api/scan-runs
 // (viewer). The document is a few R2 lists, gets and heads plus two D1 reads: held in the colo cache for
 // `HEALTH_TTL` s (keyed by the store and its generations), so a page's polling costs one read a minute per colo.

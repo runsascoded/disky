@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parseQuery } from './scope'
-import { sqliteD1 } from './testD1'
+import { LINEAGES, sqliteD1 } from './testD1'
 import { type D1Variant, FILES, GETS, seedGeneration } from './testStore'
 import { buildView } from './view'
 
@@ -54,53 +54,55 @@ vi.mock('@rdub/file-tree/stores/s3', async () => {
   }
 })
 
-const DATE = '2026-10-02'
-const env = { ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+describe.each(LINEAGES)('D1, %s lineage', lineage => {
+  const DATE = '2026-10-02'
+  const env = { ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
 
-describe.skipIf(!DIR)('search bench (latency model)', () => {
-  beforeAll(async () => {
-    ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: () => slot(CACHE_MS, async () => undefined), put: () => slot(CACHE_MS, async () => {}) } }
-    const { readFileSync } = (await import(/* @vite-ignore */ 'node:' + 'fs')) as { readFileSync(p: string, enc?: string): Uint8Array & string }
-    const { db, raw } = await sqliteD1('cw')
-    const v = JSON.parse(readFileSync(`${DIR}/d1.json`, 'utf8')) as Record<string, D1Variant>
-    const files = { path: { parquet: `${DIR}/path-index.parquet`, groups: `${DIR}/path-index.groups.json` }, bysize: { parquet: `${DIR}/path-index-bysize.parquet`, groups: `${DIR}/path-index-bysize.groups.json` } }
-    seedGeneration(raw, { date: DATE, gen: 'g', dir: 'listing/b/index/g', variants: v, files })
-    // `seedGeneration` resolves under `fixtures/`; these are absolute.
-    for (const [k, f] of FILES) if (k.startsWith('listing/b/')) FILES.set(k, f.replace(/^.*\/fixtures\//, ''))
-    for (const role of ['names', 'trigrams', 'search', 'rows', 'rows-search']) {
-      const f = `${DIR}/path-index.${role}.parquet`
-      try { readFileSync(f); FILES.set(`listing/b/index/g/path-index.${role}.parquet`, f) } catch { /* absent: an older layout */ }
-    }
-    env.DB = db
-  })
-
-  for (const q of (process.env.SEARCH_BENCH_Q ?? '2019').split(',')) {
-    it(`q=${q}`, async () => {
-      const timing = new Map<string, number>()
-      const descs = new Map<string, string>()
-      GETS.length = 0
-      const cpu0 = process.cpuUsage()
-      const t0 = performance.now()
-      const v = await buildView(env, {
-        date: DATE, path: '', w: 1408, h: 896, minArea: 19098, atten: 2, query: parseQuery(q)!,
-        trace: (k, ms, d) => { timing.set(k, (timing.get(k) ?? 0) + ms); if (d) descs.set(k, d) },
-      })
-      const wall = performance.now() - t0
-      const cpu = process.cpuUsage(cpu0)
-      const byKey = new Map<string, { n: number; bytes: number }>()
-      for (const g of GETS) {
-        const k = g.key.replace(/^.*\//, '')
-        const e = byKey.get(k) ?? { n: 0, bytes: 0 }
-        e.n++
-        e.bytes += g.length ?? 0
-        byKey.set(k, e)
+  describe.skipIf(!DIR)('search bench (latency model)', () => {
+    beforeAll(async () => {
+      ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: () => slot(CACHE_MS, async () => undefined), put: () => slot(CACHE_MS, async () => {}) } }
+      const { readFileSync } = (await import(/* @vite-ignore */ 'node:' + 'fs')) as { readFileSync(p: string, enc?: string): Uint8Array & string }
+      const { db, raw } = await sqliteD1(lineage)
+      const v = JSON.parse(readFileSync(`${DIR}/d1.json`, 'utf8')) as Record<string, D1Variant>
+      const files = { path: { parquet: `${DIR}/path-index.parquet`, groups: `${DIR}/path-index.groups.json` }, bysize: { parquet: `${DIR}/path-index-bysize.parquet`, groups: `${DIR}/path-index-bysize.groups.json` } }
+      seedGeneration(raw, { date: DATE, gen: 'g', dir: 'listing/b/index/g', variants: v, files })
+      // `seedGeneration` resolves under `fixtures/`; these are absolute.
+      for (const [k, f] of FILES) if (k.startsWith('listing/b/')) FILES.set(k, f.replace(/^.*\/fixtures\//, ''))
+      for (const role of ['names', 'trigrams', 'search', 'rows', 'rows-search']) {
+        const f = `${DIR}/path-index.${role}.parquet`
+        try { readFileSync(f); FILES.set(`listing/b/index/g/path-index.${role}.parquet`, f) } catch { /* absent: an older layout */ }
       }
-      console.log(JSON.stringify({
-        q, matches: v.matches?.length, partial: v.partialReason ?? null, wall: Math.round(wall), cpu: Math.round((cpu.user + cpu.system) / 1000),
-        timing: Object.fromEntries([...timing].map(([k, ms]) => [k, Math.round(ms)])), descs: Object.fromEntries(descs),
-        gets: Object.fromEntries([...byKey].map(([k, e]) => [k, `${e.n} reads, ${(e.bytes / 1048576).toFixed(1)} MiB`])),
-      }, null, 1))
-      expect(v.matches?.length).toBeGreaterThan(0)
-    }, 600_000)
-  }
+      env.DB = db
+    })
+
+    for (const q of (process.env.SEARCH_BENCH_Q ?? '2019').split(',')) {
+      it(`q=${q}`, async () => {
+        const timing = new Map<string, number>()
+        const descs = new Map<string, string>()
+        GETS.length = 0
+        const cpu0 = process.cpuUsage()
+        const t0 = performance.now()
+        const v = await buildView(env, {
+          date: DATE, path: '', w: 1408, h: 896, minArea: 19098, atten: 2, query: parseQuery(q)!,
+          trace: (k, ms, d) => { timing.set(k, (timing.get(k) ?? 0) + ms); if (d) descs.set(k, d) },
+        })
+        const wall = performance.now() - t0
+        const cpu = process.cpuUsage(cpu0)
+        const byKey = new Map<string, { n: number; bytes: number }>()
+        for (const g of GETS) {
+          const k = g.key.replace(/^.*\//, '')
+          const e = byKey.get(k) ?? { n: 0, bytes: 0 }
+          e.n++
+          e.bytes += g.length ?? 0
+          byKey.set(k, e)
+        }
+        console.log(JSON.stringify({
+          q, matches: v.matches?.length, partial: v.partialReason ?? null, wall: Math.round(wall), cpu: Math.round((cpu.user + cpu.system) / 1000),
+          timing: Object.fromEntries([...timing].map(([k, ms]) => [k, Math.round(ms)])), descs: Object.fromEntries(descs),
+          gets: Object.fromEntries([...byKey].map(([k, e]) => [k, `${e.n} reads, ${(e.bytes / 1048576).toFixed(1)} MiB`])),
+        }, null, 1))
+        expect(v.matches?.length).toBeGreaterThan(0)
+      }, 600_000)
+    }
+  })
 })

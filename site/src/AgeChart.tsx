@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { dateColor, dateGradientCss, epochDaysToDate, userColor } from './colors'
 import type { UserIndexEntry } from './colors'
 import type { AgeRow, ColorMode, Granularity } from './types'
+import type { DayBand } from './dayBand'
 import { MODE_LABELS } from './types'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
@@ -30,13 +31,21 @@ const bucketOf = (d: number, gran: Granularity): number => {
   return Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), 1) / 86400_000
 }
 
+// last day (inclusive, epoch days) of the bucket starting at `b`
+const bucketEnd = (b: number, gran: Granularity): number => {
+  if (gran === 'day') return b
+  if (gran === 'week') return b + 6
+  const dt = dayToDate(b)
+  return Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth() + 1, 1) / 86400_000 - 1
+}
+
 const bucketLabel = (b: number, gran: Granularity): string =>
   gran === 'month' ? isoMonth(b) : iso(b)
 
 /** Stacked bars of bytes by created date (month/week/day), split per color mode.
  *  `readRange` null means the read axis is unavailable for this scan (no access
  *  window, or age strata published before they carried `a`). */
-export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, scheme = 'gs://' }: {
+export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, scheme = 'gs://', band, onBand }: {
   rows: AgeRow[]
   /** The diff window's "before" scan, same path — enables the diff toggle. When
    *  present the chart can show per-vintage growth/shrink (created-date bucket
@@ -52,6 +61,10 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   userIdx: Map<string, UserIndexEntry>
   readRange?: { min: number; max: number } | null
   scheme?: string
+  /** The shared date brush: hovering a bar brushes the map to its days; a band
+   *  set elsewhere (the map's gradient) shades the bars it covers. */
+  band?: DayBand | null
+  onBand?: (b: DayBand | null) => void
 }) {
   usePerfCommit('age')
   const time = listingTime(scheme)
@@ -243,15 +256,18 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
           return (
             <g
               key={bk}
-              onMouseMove={e => setHover({ b: bk, x: e.clientX, y: e.clientY })}
-              onMouseLeave={() => setHover(null)}
+              onMouseMove={e => {
+                setHover({ b: bk, x: e.clientX, y: e.clientY })
+                if (onBand && (band?.lo !== bk || band.axis !== 'd')) onBand({ lo: bk, hi: bucketEnd(bk, gran), axis: 'd' })
+              }}
+              onMouseLeave={() => { setHover(null); onBand?.(null) }}
             >
               <rect x={i * bw} y={0} width={bw} height={H} fill="transparent" />
               {body}
               {(i % tickEvery === 0) && (
                 <text x={i * bw + bw / 2} y={H + 16} textAnchor="middle" className="tick">{bucketLabel(bk, gran)}</text>
               )}
-              {hover?.b === bk && <rect x={i * bw} y={0} width={bw} height={H} className="hoverband" />}
+              {(hover?.b === bk || (!hover && band?.axis === 'd' && bk <= band.hi && bucketEnd(bk, gran) >= band.lo)) && <rect x={i * bw} y={0} width={bw} height={H} className="hoverband" />}
             </g>
           )
         })}

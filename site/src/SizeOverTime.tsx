@@ -22,7 +22,7 @@ import { SeriesEmpty } from './SeriesEmpty'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
-// scan in that scan's index tiers; specs/view-serving.md §1). Nothing is
+// scan in that scan's index tiers; specs/done/view-serving.md §1). Nothing is
 // precomputed per prefix and nothing is floored.
 
 interface Pt { x: number; y: number; y0?: number }
@@ -195,7 +195,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const values: Values = ymP === 'd' ? 'delta' : ymP === 'p' ? 'pct' : 'abs'
   const setValues = (m: Values) => setYmP(m === 'delta' ? 'd' : m === 'pct' ? 'p' : undefined)
   const relative = values !== 'abs'
-  // Local-peak/dip callouts (specs/obs-axis-indexing.md): on by default, radius
+  // Local-peak/dip callouts (specs/done/obs-axis-indexing.md): on by default, radius
   // is the prominence-suppression distance in days (`?ex=0` off; `?exr=<days>`),
   // floor the least prominence that earns a label, as % of the trace's range
   // (`?exp=<pct>`).

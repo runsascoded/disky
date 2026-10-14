@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { knownBucket, resolveStores, storeDefaultColor, storeEmailAuth, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
-// The build-time store resolution (specs/multi-store.md phase 2): `VITE_STORE`
+// The build-time store resolution (specs/done/multi-store.md phase 2): `VITE_STORE`
 // picks the primary, `VITE_STORES_EXTRA` mounts secondaries under their own
 // paths, and only a secondary store's requests carry `store=<key>` — the
 // primary's URLs are exactly what they were before stores existed.

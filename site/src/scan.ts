@@ -61,7 +61,7 @@ const selParam = { encode: encodeSel, decode: (e: string | undefined) => decodeS
 
 /** The page's scan selection (`?d=`), read through use-prms's alias hook so a
  * legacy `?date=<id>` / `?from=<id>` (or an ISO `?d=2026-10-06`) folds into
- * the one canonical `?d=` on mount (specs/scan-ids-not-dates.md §3). Writes go
+ * the one canonical `?d=` on mount (specs/done/scan-ids-not-dates.md §3). Writes go
  * through `useUrlState` so a scan pick is a history entry (back button). */
 export function useScanSel(): [ScanSel | undefined, (v: ScanSel | undefined) => void] {
   const [sel] = useUrlAlias<ScanSel>({

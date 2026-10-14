@@ -52,7 +52,7 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
 
   const store = S3Store({ ...storeTarget(env), prefixes: storePrefixes(env, ['listing/']), ...storeCreds(env) })
   // The file lives under the generation dir D1 points at (a run never
-  // overwrites the file being served; specs/view-serving.md).
+  // overwrites the file being served; specs/done/view-serving.md).
   const dir = await indexDir(env, date)
   if (!dir) return new Response(`no path index synced for ${date}`, { status: 404 })
   const key = `${dir}/path-index.parquet`

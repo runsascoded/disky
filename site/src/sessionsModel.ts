@@ -3,7 +3,8 @@
  * event, the URL in effect at each moment ("open this view"), and the strip
  * chart's ticks. Pure, so the rendering is pinned by `sessionsModel.test.ts`.
  */
-import { isErrorEvent, type StoredEvent } from '../functions/_lib/sessionLogShape'
+import { isErrorEvent, type SessionRow, type StoredEvent } from '../functions/_lib/sessionLogShape'
+import { type Registry, whoToHandle } from './identityRegistry'
 
 /** `1h 02m`, `3m 07s`, `12s`, `450ms`. */
 export function fmtDuration(ms: number): string {
@@ -20,6 +21,17 @@ export function fmtOffset(ms: number): string {
   const t = Math.max(0, Math.round(ms))
   const m = Math.floor(t / 60_000), s = Math.floor((t % 60_000) / 1000), r = t % 1000
   return `+${m}:${String(s).padStart(2, '0')}.${String(r).padStart(3, '0')}`
+}
+
+/** A local wall-clock time to the ms (`19:43:09.433`), led by the date (`Oct 13 19:43:09.433`) when its day isn't
+ *  `startMs`'s (the session header carries the start's date). */
+export function fmtClock(ms: number, startMs: number, timeZone?: string): string {
+  const day = (t: number) => new Date(t).toLocaleDateString('en-CA', { timeZone })
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone })
+    .formatToParts(new Date(ms)).map(x => [x.type, x.value]))
+  const clock = `${p.hour}:${p.minute}:${p.second}.${String(((Math.round(ms) % 1000) + 1000) % 1000).padStart(3, '0')}`
+  if (day(ms) === day(startMs)) return clock
+  return `${new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone })} ${clock}`
 }
 
 const str = (v: unknown): string => (v === undefined || v === null ? '' : String(v))
@@ -94,4 +106,24 @@ export function uaLabel(ua: string | null): string {
   const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'other'
   const os = /iPhone|iPad/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS X/.test(ua) ? 'macOS' : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : 'other'
   return `${browser} · ${os}`
+}
+
+/** Who a session was: a known user (rendered as a `UserChip`), else the raw email, else a guest link with no
+ *  bound address (`via: 'grant'`, `email` null — which link isn't recorded), else an anonymous public viewer.
+ *  `guest`: signed in through a share link (`via: 'grant'`), not their own sign-in. */
+export type Viewer =
+  | { kind: 'user'; id: string; email: string; guest: boolean }
+  | { kind: 'email'; email: string; guest: boolean }
+  | { kind: 'guest' }
+  | { kind: 'anonymous' }
+
+/** A session row's viewer. The email → user rule is `ownerIdFor`'s (`functions/_lib/me.ts`): its `user_emails` row
+ *  (`emails`, lowercased keys), else a registry entry for the email's handle. Unlike there, an unknown handle is not
+ *  a user (it stays the email: no chip for a made-up id). */
+export function viewerOf(row: Pick<SessionRow, 'email' | 'via'>, emails: Record<string, string> | undefined, reg: Registry): Viewer {
+  const guest = row.via === 'grant'
+  const email = row.email
+  if (!email) return guest ? { kind: 'guest' } : { kind: 'anonymous' }
+  const id = emails?.[email.toLowerCase()] ?? reg[whoToHandle(email)]?.u
+  return id ? { kind: 'user', id, email, guest } : { kind: 'email', email, guest }
 }

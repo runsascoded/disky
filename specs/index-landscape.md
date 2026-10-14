@@ -80,7 +80,7 @@ Pointers and footers are in D1 (`index_schema`, `index_row_groups`). File names 
 
 ### 1.2 Interval store (gcs only)
 
-Data lives in `gs://oa-gcs-usage-dvx/interval-store/<gen>/`, served from R2 `oa-gcs-usage-index` under the same keys. The profile is `cloud/src/dt_cloud/interval_profiles/gcs.json`. gcs prod reads it: `PATH_STORE="intervals"`, `INTERVAL_STORE_GEN="2026-10-09b"` (`gcs:site/wrangler.toml:53-54`, commit `1db67e1a`; whether this is deployed was not checked). `specs/interval-store.md:173-178` still calls this opt-in, and `specs/interval-store-append-gcs.md` still says the append is off by default. Both are stale: the job defaults `INTERVAL_STORE_APPEND:-1` (`gcs:job/run.sh:418-438`).
+Data lives in `gs://oa-gcs-usage-dvx/interval-store/<gen>/`, served from R2 `oa-gcs-usage-index` under the same keys. The profile is gcs `job/interval-store.json` (on `cloud` until 2026-10-14). gcs prod reads it: `PATH_STORE="intervals"`, `INTERVAL_STORE_GEN="2026-10-09b"` (`gcs:site/wrangler.toml:53-54`, commit `1db67e1a`; whether this is deployed was not checked). `specs/interval-store.md:173-178` still calls this opt-in, and `specs/done/interval-store-append-gcs.md` still says the append is off by default. Both are stale: the job defaults `INTERVAL_STORE_APPEND:-1` (`gcs:job/run.sh:418-438`).
 
 | Artifact | Answers | Builder / when | Size | Readers | Status |
 |---|---|---|---|---|---|
@@ -497,7 +497,7 @@ Extract it as one library with both stores as clients. Everything fleet-specific
 
 ### 6.5 Top recommendations
 
-1. ~~**One runner for both append pipelines, before the interval store's L3 carry (~10-17).**~~ **Done 2026-10-10** (`append_runner.py`; specs/static-append.md "One runner for both stores", specs/interval-store.md §2.7). The interval store has deferred N-way carries (a separate non-fatal `carry` job, revision manifests, the lease, resumable merges), the manifest name filter (Python and TS, one `newestManifest`), threaded prune shared; outputs byte-identical to the pairwise path on fixtures. Not done here: `rebuild-state` for the interval store, the static pipeline's balanced ranges and publish + R2 in one VM, an interval-generation GC.
+1. ~~**One runner for both append pipelines, before the interval store's L3 carry (~10-17).**~~ **Done 2026-10-10** (`append_runner.py`; specs/done/static-append.md "One runner for both stores", specs/interval-store.md §2.7). The interval store has deferred N-way carries (a separate non-fatal `carry` job, revision manifests, the lease, resumable merges), the manifest name filter (Python and TS, one `newestManifest`), threaded prune shared; outputs byte-identical to the pairwise path on fixtures. Not done here: `rebuild-state` for the interval store, the static pipeline's balanced ranges and publish + R2 in one VM, an interval-generation GC.
 2. **Fold anchored search into the base index at the ~11-08 compaction.**
    - `/`+name sentinel rows go into `sx/` (+6% rows, free at compaction).
    - `end`/`exact`/`start` become drill kinds and catalog rows.

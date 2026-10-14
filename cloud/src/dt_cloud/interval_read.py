@@ -149,6 +149,7 @@ class Agg:
     o: int = 0
     wts: float = 0.0
     wb: int = 0
+    m: int | None = None  # newest stamp at or under the path (epoch s) — the node's `d`
     a: int | None = None
     cb: dict[str, int] = field(default_factory=dict)
     ub: dict[str, int] = field(default_factory=dict)
@@ -167,7 +168,8 @@ def us_map(us: str, size: int) -> dict[str, int]:
 
 def agg_of(r: dict) -> Agg:
     a = Agg(b=r["size"], o=r["n_files"], kind=r["kind"], nc=None if r["n_children"] < 0 else r["n_children"],
-            a=r["last_read"] if r.get("last_read", -1) >= 0 else None)
+            a=r["last_read"] if r.get("last_read", -1) >= 0 else None,
+            m=r["mtime"] if r.get("mtime") is not None and r["mtime"] >= 0 else None)
     if r["wb"] > 0:
         a.wts, a.wb = r["wts"], r["wb"]
     for k in ("c2", "c3", "c4"):
@@ -178,7 +180,7 @@ def agg_of(r: dict) -> Agg:
 
 
 def subtract(parent: Agg, kids: list[Agg]) -> Agg:
-    out = Agg(a=parent.a)
+    out = Agg(a=parent.a, m=parent.m)
     out.b = parent.b - sum(k.b for k in kids)
     out.o = max(0, parent.o - sum(k.o for k in kids))
     out.wts = parent.wts - sum(k.wts for k in kids)
@@ -193,8 +195,8 @@ def subtract(parent: Agg, kids: list[Agg]) -> Agg:
 
 def node(name: str, a: Agg) -> dict:
     n = {"n": name, "k": a.kind or "dir", "b": a.b, "o": a.o}
-    if a.wb:
-        n["d"] = round(a.wts / a.wb / 86400)
+    if a.m is not None:
+        n["d"] = a.m // 86400  # newest write, not the byte-weighted mean (site `view.ts` `display`)
     if a.a is not None:
         n["a"] = a.a
     if a.cb:
@@ -363,6 +365,8 @@ class Store:
             for r in roots:
                 a = agg_of(r)
                 root.b += a.b; root.o += a.o; root.wts += a.wts; root.wb += a.wb
+                if a.m is not None:
+                    root.m = a.m if root.m is None else max(root.m, a.m)
                 for key in ("cb", "ub"):
                     for k, v in getattr(a, key).items():
                         getattr(root, key)[k] = getattr(root, key).get(k, 0) + v

@@ -1,4 +1,4 @@
-"""Specs for the store writer (`dt_cloud.index`, specs/path-store.md §4.2): a
+"""Specs for the store writer (`dt_cloud.index`, specs/done/path-store.md §4.2): a
 synthetic layer-2 parquet (disk-tree's names, objects and dirs) → the union
 bucket-prefixed, every row, cut into the `path` and `bysize` sorts under
 their served names, footer sidecars beside them, the age pyramid from the
@@ -274,7 +274,7 @@ def test_write_index_age_only(tmp_path: Path):
 
 def test_write_index_row_group_rows(tmp_path: Path):
     """`row_group_rows` sets the sorts' group size — the range-read unit and the
-    footer's row count per sort (gcs cuts 32K groups; specs/path-store.md §1.6)."""
+    footer's row count per sort (gcs cuts 32K groups; specs/done/path-store.md §1.6)."""
     rows = [(".", 0, "dir", 4100, 4100, 4100, 4100, T17, float(T17))] + [
         (f"f{i:04d}.bin", 1, "file", 1, 1, 0, 0, T17, float(T17)) for i in range(4100)
     ]

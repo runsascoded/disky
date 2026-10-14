@@ -410,11 +410,11 @@ def wandb_mine(
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, default=None, help=f"identities.yaml path or URL, needed with -a (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", "out_dir", type=Path, default=None, help="Output dir for JSON files [default: site/public/data/<asof>]")
-@option("-r", "--row-group-rows", default=None, type=int, help="Parquet row-group size for the store's sorts (default 8192 — the reader decodes ~one group per depth of a drilled subtree, so 32768 pushed small drills past its decode cap; specs/path-store.md §1.6)")
+@option("-r", "--row-group-rows", default=None, type=int, help="Parquet row-group size for the store's sorts (default 8192 — the reader decodes ~one group per depth of a drilled subtree, so 32768 pushed small drills past its decode cap; specs/done/path-store.md §1.6)")
 @option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/path-store-search.md); upload them with the generation dir")
 @option("-u", "--user-sort-tiers", default=None, help="Only these sorts get a `-by-user` copy, comma-separated (`bysize`: the copy a lens view reads; default every sort)")
 @option("-U", "--no-user-sorts", "user_sorts", is_flag=True, flag_value=False, default=True, help="Skip every `-by-user` sort copy (a lens then reads the mixed-user sorts, filtered per row — fine below the root, too wide at a user's root view; see -u)")
-@option("-P", "--path-index", "path_index", type=Path, default=None, help="Write the path store here (`<dir>/path-index.parquet`, the `path` sort; `path-index-bysize.parquet` and the by-user copies land beside it — specs/path-store.md §4.3)")
+@option("-P", "--path-index", "path_index", type=Path, default=None, help="Write the path store here (`<dir>/path-index.parquet`, the `path` sort; `path-index-bysize.parquet` and the by-user copies land beside it — specs/done/path-store.md §4.3)")
 @option("-x", "--access", "access", multiple=True, help="Access-log layer-2a agg parquet glob(s); adds per-node last-read ('a') for the read-recency lens")
 def build_path_index(
     attributions: tuple[str, ...],
@@ -497,7 +497,7 @@ def rules(identities_path: str, out: Path | None) -> None:
         raise SystemExit(1)
 
 
-# --- index tiers + their D1 footers (specs/view-serving.md, ported from gcs) ---
+# --- index tiers + their D1 footers (specs/done/view-serving.md, ported from gcs) ---
 
 
 @main.command()
@@ -725,7 +725,7 @@ def bucket_sources(specs: tuple[str, ...], default_bucket: str) -> list[tuple[st
 @option("-b", "--bucket", default=None, help="Bucket a bare (no `<bucket>=`) layer-2 argument describes (default $SWEEP_BUCKET)")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Output dir: path-index.parquet + path-index-bysize.parquet (+ .groups.json sidecars) + age-pyramid-*.parquet")
-@option("-r", "--row-group-rows", default=8192, type=int, help="Parquet row-group size for the sorts — the range-read unit and the D1 footer's row count per sort (default 8192; a gcs-sized fleet uses 32768, specs/path-store.md §1.6)")
+@option("-r", "--row-group-rows", default=8192, type=int, help="Parquet row-group size for the sorts — the range-read unit and the D1 footer's row count per sort (default 8192; a gcs-sized fleet uses 32768, specs/done/path-store.md §1.6)")
 @option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`, specs/path-store-search.md)")
 @option("-t", "--threads", default=8, type=int, help="DuckDB threads")
 @option("-T", "--tmp", "tmp_dir", type=Path, default=None, help="DuckDB spill dir (default: <out>/.duckdb-tmp)")
@@ -737,7 +737,7 @@ def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row
     layer-2's column names, cut by the engine into the `path` sort
     (`path-index.parquet`, `(depth, path)`) and the `bysize` sort
     (`path-index-bysize.parquet`, `(⌊log2 size⌋ desc, path)`), 8k-row groups,
-    footer sidecars beside them, plus the age pyramid (specs/path-store.md
+    footer sidecars beside them, plus the age pyramid (specs/done/path-store.md
     §4.2). `index-sync` then publishes their footers to D1."""
     from .index import write_index
     from .sweep import sweep_bucket
@@ -802,7 +802,7 @@ def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers:
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Work dir for the group builds")
 @option("-p", "--publish-root", default=None, help="Where the published dirs live (default /gcs/<bucket>, the Batch mount); groups land at <root>/<layer2>/index/<gen>/")
 @option("-r", "--data-root", default=None, help="Root the D1 `path` pointer dirs resolve against (default: the publish root)")
-@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
+@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/done/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-t", "--threads", default=8, type=int, help="DuckDB threads")
 @option("-T", "--tmp", "tmp_dir", type=Path, default=None, help="DuckDB spill dir (default: <out>/.duckdb-tmp)")
 def over_time_groups(
@@ -819,7 +819,7 @@ def over_time_groups(
     threads: int,
     tmp_dir: Path | None,
 ) -> None:
-    """Seal the next over-time groups (specs/obs-axis-indexing.md Phase 1, the
+    """Seal the next over-time groups (specs/done/obs-axis-indexing.md Phase 1, the
     capped-K shape): partition every scan with a synced `path` index into fixed
     K-scan groups, oldest first, and for each group not yet in the manifest
     build its over-time MS, publish it under the group's LAST scan's layer-2 dir
@@ -918,7 +918,7 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 @option("-M", "--snapshots", default=None, help="The store's snapshot dir (local path or URL): `-m` defaults to `<dir>/<DATE>/meta.json`, and after the pointers every other date-only scan of the store still without a start takes its own meta's (the backfill, folded into each sync; one D1 read once filled)")
 @option("-p", "--pointer-only", is_flag=True, help="Only flip the pointers, after `-r` staged the rows: refuses (exit 1, nothing flipped) unless every present variant's rows in D1 match its footer; a variant already pointed at this generation is a no-op")
 @option("-r", "--rows-only", is_flag=True, help="Only upload the row groups (+ the cold footer files), tagged with the generation — invisible until `-p` flips the pointers. Re-runnable (rows are INSERT OR REPLACE)")
-@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
+@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/done/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-v", "--variant", "variants", multiple=True, type=Choice(list(INDEX_VARIANTS)), help="Only sync these variants (default: all)")
 @argument("date", callback=scan_id_option)
 def index_sync(
@@ -941,11 +941,11 @@ def index_sync(
     index_schema pointer) — one generation of files under one bucket dir.
     Per variant the row groups land first, tagged with the generation, and the
     pointer (gen, dir) flips last, so the site moves from the previous complete
-    generation to this one with no window (specs/view-serving.md). Needs
+    generation to this one with no window (specs/done/view-serving.md). Needs
     CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in the env. `--store` files
     the rows under a secondary store (variants recorded as
     `<store>:<variant>`, the `store` column set — needs the store migration;
-    specs/multi-store.md). The default, the primary, writes exactly the
+    specs/done/multi-store.md). The default, the primary, writes exactly the
     pre-stores SQL.
 
     The two halves can run apart (a job uploads the rows while other steps
@@ -1060,7 +1060,7 @@ def index_started(store: str, snapshots: str) -> None:
 @option("-n", "--dry-run", is_flag=True, help="Print what would go (D1 rows counted; generation dirs per store with bytes, and totals); delete nothing")
 @option("-r", "--retain", type=int, default=None, help="Retention: also retire the store sorts' row groups of every scan older than the newest N whose `.groups.parquet` exists (their pointers stay; the reader range-reads that cold footer instead). A variant without one keeps its rows (warned): backfill it with `index-blob`")
 @option("-R", "--no-rows", is_flag=True, help="Skip the D1 row sweep (e.g. an -F pass over every scan after the job's per-scan row sweep)")
-@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
+@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/done/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-w", "--workers", default=8, type=int, help="-F: concurrent listings (default 8)")
 @argument("dates", nargs=-1)
 def index_gc(
@@ -1116,8 +1116,65 @@ def index_gc(
             err(f"index-gc: WARNING kept {d} [{v}] in D1 — no cold footer at {missing} (backfill: dt-cloud index-blob -P {d})")
 
 
+@main.command("footer-evict")
+@option("-A", "--adopt", is_flag=True, help="First track the store sorts synced before the footer LRU (rows in D1, no `footer_cache` entry, cold footer present) as hot, read today: one GROUP BY over their rows — run once after the migration")
+@option("-b", "--base", envvar="DATA_BUCKET", default=None, help="-A's cold-footer check: where the pointers' dirs live (default $DATA_BUCKET), a mounted dir, or an fsspec URL (`r2://bucket`)")
+@option("-B", "--max-rows", type=int, envvar="FOOTER_CACHE_MAX_ROWS", default=None, help="The budget: the most `index_row_groups` rows the hot entries keep (default $FOOTER_CACHE_MAX_ROWS, else 1,000,000)")
+@option("-g", "--grace", type=int, default=None, help="Seconds an evicted entry keeps its rows (readers' handles outlive a demotion by ≤ 60 s); default 120")
+@option("-n", "--dry-run", is_flag=True, help="Report what one pass would demote and delete; write nothing")
+@option("-s", "--store", default="primary", help="-A: the store whose sorts to adopt (`primary`, or a `STORES_JSON` key); eviction spans every store")
+@option("-W", "--no-wait", is_flag=True, help="One pass only: demote, and delete what earlier passes demoted (the admin route's `POST /api/footer-cache`); default waits out the grace and deletes this pass's too")
+@option("-y", "--max-bytes", type=int, envvar="FOOTER_CACHE_MAX_BYTES", default=None, help="…and the most bytes (text columns + 64 per row; default $FOOTER_CACHE_MAX_BYTES, else no byte cap)")
+def footer_evict(
+    adopt: bool,
+    base: str | None,
+    max_rows: int | None,
+    grace: int | None,
+    dry_run: bool,
+    store: str,
+    no_wait: bool,
+    max_bytes: int | None,
+) -> None:
+    """Evict the footer LRU (specs/done/footer-lru.md) down to its budget: the
+    least recently read `hot` entries (scan, sort, generation) are demoted —
+    readers serve their cold `.groups.parquet` from then on, and a later read
+    refills them — and their `index_row_groups` rows deleted once the grace
+    has passed. The same pass as the site's `POST /api/footer-cache`; what a
+    scan job runs after `index-sync` (in place of `index-gc -r N`). Needs the
+    D1 migration `0022_footer_cache.sql`."""
+    import time
+
+    from . import index_footer as F
+
+    rows = F.DEFAULT_MAX_ROWS if max_rows is None else max_rows
+    grace_s = F.EVICT_GRACE_S if grace is None else grace
+    if adopt:
+        if dry_run:
+            raise UsageError("-A writes (it tracks entries); run it without -n")
+        adopted, skipped = F.adopt(store=store, base=base or data_bucket())
+        for e in adopted:
+            err(f"footer-evict: adopted {e.date} [{e.variant}] gen {e.gen} — {e.rows} rows")
+        for d, v, missing in skipped:
+            err(f"footer-evict: WARNING left {d} [{v}] untracked — no cold footer at {missing}")
+
+    def report(ev: F.Eviction) -> None:
+        n, r, b = ev.hot
+        err(f"footer-evict: {n} hot entries, {r} rows, {b} bytes (budget {rows} rows{'' if max_bytes is None else f', {max_bytes} bytes'})")
+        for e in ev.demoted:
+            err(f"footer-evict: {'would demote' if dry_run else 'demoted'} {e.date} [{e.variant}] gen {e.gen} — {e.rows} rows, last read day {e.last_access_day}")
+        for e in ev.deleted:
+            err(f"footer-evict: {'would delete' if dry_run else 'deleted'} {e.date} [{e.variant}] gen {e.gen} — {e.rows} rows")
+
+    ev = F.evict(rows, max_bytes, grace=grace_s, dry_run=dry_run)
+    report(ev)
+    if ev.demoted and not (dry_run or no_wait):
+        err(f"footer-evict: waiting {grace_s}s for readers' handles before deleting the demoted rows")
+        time.sleep(grace_s)
+        report(F.evict(rows, max_bytes, grace=grace_s))
+
+
 @main.command("index-dir")
-@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
+@option("-s", "--store", default="primary", help="The store these index rows belong to (specs/done/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-v", "--variant", default="path", type=Choice(list(INDEX_VARIANTS)), help="Which variant's dir")
 @argument("date", callback=scan_id_option)
 def index_dir_cmd(store: str, variant: str, date: str) -> None:
@@ -1138,7 +1195,7 @@ def index_dir_cmd(store: str, variant: str, date: str) -> None:
 def cost_labels_cmd(component: str | None, as_json: bool) -> None:
     """Print the cost-attribution labels: `$DISKY_LABELS` plus `component` (empty when unset).
 
-    For shell submitters and `gcloud … --update-labels` (spec specs/cost-labels.md)."""
+    For shell submitters and `gcloud … --update-labels` (spec specs/done/cost-labels.md)."""
     from .cost_labels import render
 
     print(render(component, "json" if as_json else "gcloud"))
@@ -1196,7 +1253,7 @@ def index_blob(
     `index-sync` puts in D1. The backfill for generations synced before
     `index-sync` wrote them: `index-gc -r` retires a scan's rows from D1 only
     once its `.groups.parquet` exists, and the site then range-reads it
-    (specs/path-store.md §1.6). E.g. before lowering retention on gcs:
+    (specs/done/path-store.md §1.6). E.g. before lowering retention on gcs:
 
         dt-cloud index-blob -a -S -P
 
@@ -1525,7 +1582,7 @@ def plan_sweep_purge(dry_run: bool, run_dir: str) -> None:
 
 @main.group()
 def sweep() -> None:
-    """The GCS executor's phases — manifest / execute / undo (specs/staged-delete.md)."""
+    """The GCS executor's phases — manifest / execute / undo (specs/done/staged-delete.md)."""
 
 
 @sweep.command("sync-progress")
@@ -1547,7 +1604,7 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
 def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: str | None, plan_path: str, root: str | None) -> None:
-    """Object-level manifest of a staged plan (specs/staged-delete.md): scan
+    """Object-level manifest of a staged plan (specs/done/staged-delete.md): scan
     the pinned listing (every shard in parallel, row groups outside the staged
     prefixes pruned — `sweep_manifest.py`) and write per-bucket parquets of the
     ELIGIBLE keys — every key under a staged prefix — plus a category summary.
@@ -2695,7 +2752,7 @@ def _digest_options(template_default: str):
     opts = [
         option("-b", "--bot-token", help="Discord bot token: opens the month's thread + resolves app emoji (default $DISCORD_BOT_TOKEN; with -P discord)"),
         option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)"),
-        option("-C", "--config", "config_path", type=Path, help="YAML/JSON DigestConfig overlaid on the template's preset (title, site, root, state, plot host, buckets/quotas, prices…; see specs/digest-unification.md)"),
+        option("-C", "--config", "config_path", type=Path, help="YAML/JSON DigestConfig overlaid on the template's preset (title, site, root, state, plot host, buckets/quotas, prices…; see specs/done/digest-unification.md)"),
         option("-D", "--reply-delay", "reply_delay", default=0.0, type=float, help="Seconds to sleep between replies (e.g. 305 for a spaced Slack backfill so per-reply sender chrome survives; Discord needs none)"),
         option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; -P discord only)"),
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
@@ -2819,7 +2876,7 @@ def digest(**kw) -> None:
     webhook OP with the plot attached, bot-opened thread, webhook replies).
     State beside the snapshots, per the config's `state`/`discord_state`
     (gcs: digest/<YYYY-MM>.json; cw: digest/cw/<channel>/<variant>/<YYYY-MM>.json).
-    See specs/digest-unification.md."""
+    See specs/done/digest-unification.md."""
     _digest(**kw)
 
 

@@ -1,5 +1,5 @@
 """End-to-end test of `write_path_index` on a tiny synthetic listing: the
-path store (specs/path-store.md §4.3) — every dir row per owner slice, every
+path store (specs/done/path-store.md §4.3) — every dir row per owner slice, every
 object row attributed to its dir, in the layer-2's names, cut into the `path`
 / `bysize` sorts (+ the by-user copies when attributing) — plus the age strata
 and meta JSONs.
@@ -452,7 +452,7 @@ def test_dir_cache_from_before_the_store_is_rebuilt(tmp_path: Path, listing: str
 def test_store_without_user_sorts(tmp_path: Path, listing: str, attribution: str):
     """`user_sorts=False` writes the two sorts only, attributed rows and all —
     the reader prunes a lens by the footer's `u_min`/`u_max` (gcs's shape:
-    half the bytes and footer rows; specs/path-store.md §1.6)."""
+    half the bytes and footer rows; specs/done/path-store.md §1.6)."""
     identities_path = tmp_path / "identities.yaml"
     identities_path.write_text(IDENTITIES_YAML)
     out = tmp_path / "out"

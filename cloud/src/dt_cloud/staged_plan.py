@@ -1,4 +1,4 @@
-"""The staged set as the executor's delete set (specs/staged-delete.md;
+"""The staged set as the executor's delete set (specs/done/staged-delete.md;
 sweep-plan-union checkpoint 3).
 
 A dispatch snapshots a plan's items into ``plan.json`` in the run dir; ``sweep

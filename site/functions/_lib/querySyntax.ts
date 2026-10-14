@@ -51,6 +51,10 @@ export const matcherText = (m: Matcher): string => m.kind === 'regex'
   ? `/${m.source}/`
   : `${m.start ? '^' : ''}${escapeLiteral(m.kind === 'sub' ? m.text : m.pieces.join('*'))}${m.end ? '$' : ''}`
 
+/** Kind filters (`is:file`, `is:dir`) the syntax reserves but doesn't support yet. */
+const KIND_TOKENS = ['is:file', 'is:dir']
+export const KIND_ERROR = '“is:file” and “is:dir” aren’t supported yet; quote it ("is:file") to search for the text'
+
 /** `simple` (the default): GitHub-search-like terms over the full path.
  *
  * - `tomat` — substring anywhere in the path;
@@ -62,6 +66,8 @@ export const matcherText = (m: Matcher): string => m.kind === 'regex'
  *   ends with, or is `q` (an unquoted `^` first, `$` last);
  * - `"a b"` — a quoted term is literal (spaces, a leading `-`, `*`, `|`, `^`,
  *   `$`, `\`); an unterminated quote runs to the end;
+ * - `is:file` / `is:dir` — reserved (a kind filter, not built): an error
+ *   (`unsupported-kind`); quoted, the text itself;
  * - `\^` / `\$` — the character itself, anywhere in a term (never an anchor);
  *   `\\` is one `\`; any other `\` is itself;
  * - `/…/` — the whole query a full-path regex: an unadvertised fallback (the
@@ -103,6 +109,7 @@ export function makeSimple({ minTerm = MIN_TERM }: { minTerm?: number } = {}): Q
         if (c === '-' && i + 1 < s.length && !sep(s[i + 1])) { isNeg = true; i++ }
         let pieces = ['']
         let quoted = false
+        let quotedAny = false
         // An unquoted `^` opening the term, and an unquoted `$` closing it, are anchors.
         const start = s[i] === '^'
         if (start) i++
@@ -112,11 +119,13 @@ export function makeSimple({ minTerm = MIN_TERM }: { minTerm?: number } = {}): Q
           end = ch === '$' && !quoted
           // Unquoted `\^`, `\$`, `\\`: the character itself (never an anchor); any other `\` is literal.
           if (ch === '\\' && !quoted && i < s.length && ESCAPABLE.includes(s[i])) pieces[pieces.length - 1] += s[i++]
-          else if (ch === '"') quoted = !quoted
+          else if (ch === '"') { quoted = !quoted; quotedAny = true }
           else if (ch === '*' && !quoted) pieces.push('')
           else pieces[pieces.length - 1] += ch
         }
         if (end) pieces[pieces.length - 1] = pieces[pieces.length - 1].slice(0, -1)
+        // `is:file` / `is:dir` (a kind filter, specs/search-extensions.md §3) isn't built: an error, never the text.
+        if (!quotedAny && !start && !end && pieces.length === 1 && KIND_TOKENS.includes(pieces[0])) return { error: KIND_ERROR, code: 'unsupported-kind' }
         // Anchors around nothing (`^`, `$`, `^$`) are the characters themselves.
         const bare = pieces.every(p => !p)
         if (bare && (start || end)) pieces = [`${start ? '^' : ''}${end ? '$' : ''}`]

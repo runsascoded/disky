@@ -52,4 +52,8 @@ jobs:
       dist_branch: dist/treemap
       source_ref: ${{ inputs.source_ref }}
       # The package's `build` script just typechecks (source-first, no emit);
-      # npm-dist runs it to smoke-test the source before publishing.
+      # npm-dist runs it to smoke-test the source before publishing. Only this
+      # package: the root `build` is `pnpm -r build`, which also dry-run-deploys
+      # the workspace's Workers (wrangler needs Node ≥ 22).
+      build_command: pnpm -C packages/treemap run build
+      node_version: '22'

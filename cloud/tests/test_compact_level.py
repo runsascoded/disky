@@ -177,7 +177,7 @@ def test_merge_jobs_pass_the_level(level, arg):
 
 
 def test_examples_set_the_level_explicitly():
-    assert [GCS.compact_level, CW.compact_level, ia.load_config("gcs", {"INTERVAL_STORE_IMAGE": "img"}).p.compact_level] == [5, 5, 5]
+    assert [GCS.compact_level, CW.compact_level] == [5, 5]
     # Unset: the documented fallback.
     assert (Profile().compact_level, from_mapping({}).compact_level, from_mapping({"compact_level": None}).compact_level) == (5, 5, None)
 
@@ -208,9 +208,11 @@ def _append(**kw) -> dict:
 
 def test_interval_env_overrides_and_validates_the_level(tmp_path):
     env = {"INTERVAL_STORE_IMAGE": "img"}
-    assert [ia.load_config("gcs", {**env, "INTERVAL_STORE_COMPACT_LEVEL": v}).p.compact_level for v in ("3", "none")] == [3, None]
+    five = tmp_path / "five.json"
+    five.write_text(json.dumps(_append(compact_level=5)))
+    assert [ia.load_config(str(five), {**env, "INTERVAL_STORE_COMPACT_LEVEL": v}).p.compact_level for v in ("3", "none")] == [3, None]
     with pytest.raises(SystemExit) as e:
-        ia.load_config("gcs", {**env, "INTERVAL_STORE_COMPACT_LEVEL": "0"})
+        ia.load_config(str(five), {**env, "INTERVAL_STORE_COMPACT_LEVEL": "0"})
     assert str(e.value) == "INTERVAL_STORE_COMPACT_LEVEL: '0' is not an integer ≥ 1 or none"
     p = tmp_path / "x.json"
     p.write_text(json.dumps(_append(compact_level=None)))  # JSON null: unbounded

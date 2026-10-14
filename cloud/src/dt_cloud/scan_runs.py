@@ -1,4 +1,4 @@
-"""Scan runs (specs/scan-runs-ui.md): what each scan job did — when it ran, its phases, what it wrote — recorded
+"""Scan runs (specs/done/scan-runs-ui.md): what each scan job did — when it ran, its phases, what it wrote — recorded
 in the site's D1 (`scan_runs`, `scan_run_phases`, `scan_run_outputs`; migration `0016_scan_runs.sql` in the cw
 lineage) and shown at `/scans`.
 
@@ -807,7 +807,7 @@ from click import IntRange, argument, group, option  # noqa: E402
 
 @group("scan-run")
 def cli() -> None:
-    """Scan runs: what each scan job did (specs/scan-runs-ui.md), recorded in the site's D1."""
+    """Scan runs: what each scan job did (specs/done/scan-runs-ui.md), recorded in the site's D1."""
 
 
 @cli.command("record")

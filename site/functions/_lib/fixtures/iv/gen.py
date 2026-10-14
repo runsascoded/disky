@@ -63,6 +63,8 @@ def main() -> None:
     out = HERE / "interval-store" / GEN
     shutil.rmtree(out, ignore_errors=True)
     for sort, (sub, _, _) in ist.SORTS.items():
+        if not (work / "out" / sub).is_dir():  # a sort this fixture's ranges don't build (`slices`: `g2`)
+            continue
         schema = ist.SUB_SCHEMA[sub]
         ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", schema, rg_rows=4,
                          stamps=[x["ts"] for x in scans])

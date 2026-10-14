@@ -1,4 +1,4 @@
-// /health (specs/health-page.md): the state of the deployment's append-only stores, from `/api/health` — each store's
+// /health (specs/done/health-page.md): the state of the deployment's append-only stores, from `/api/health` — each store's
 // stack drawn as binary-counter shards over the scan timeline (`pyrmts-react`'s `CoverTimeline`, the timeline the
 // pyrmts consumers' /health pages share), every scan's coverage and its gaps, and freshness; the last scan job comes
 // from /scans' own fetch (`useScanRuns`).
