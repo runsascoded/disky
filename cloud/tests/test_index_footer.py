@@ -171,8 +171,10 @@ def test_sync_d1_packs_inserts_greedily_under_the_byte_limit(tmp_path, monkeypat
         "AND gen <> COALESCE((SELECT gen FROM index_schema WHERE date='2026-09-01' AND variant='path'), '');"
     )
     assert sent[-1] == (
-        "INSERT OR REPLACE INTO index_schema (date, variant, version, schema_json, floor_bytes, gen, dir) VALUES "
-        "('2026-09-01', 'path', 1, '[]', NULL, '20260901T070000Z', 'listing/2026-09-01/index/20260901T070000Z');"
+        "INSERT INTO index_schema (date, variant, version, schema_json, floor_bytes, gen, dir) VALUES "
+        "('2026-09-01', 'path', 1, '[]', NULL, '20260901T070000Z', 'listing/2026-09-01/index/20260901T070000Z') "
+        "ON CONFLICT DO UPDATE SET version = excluded.version, schema_json = excluded.schema_json, "
+        "floor_bytes = excluded.floor_bytes, gen = excluded.gen, dir = excluded.dir;"
     )
     inserts = sent[1:-1]
     head = "INSERT OR REPLACE INTO index_row_groups (date, variant, gen, rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json) VALUES "

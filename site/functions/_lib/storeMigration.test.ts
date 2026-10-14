@@ -8,9 +8,10 @@ import { migrations, sqliteD1 } from './testD1'
 // admits a second store's scan under the same id.
 // `after`: what follows the store migration in its lineage today — a new
 // migration is added here deliberately (and must not touch the index tables
-// this file's specs pin).
+// this file's specs pin, beyond `0021`'s additive `index_schema.started`,
+// pinned below).
 const CASES = [
-  { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0007_agents.sql', '0008_freed_bytes.sql', '0009_allowlist_read_only.sql', '0010_og_tokens.sql', '0011_run_progress.sql', '0012_agent_tokens_assign.sql', '0013_access_log_location.sql', '0014_plan_items_as_of.sql', '0015_stage_replies.sql', '0016_scan_runs.sql', '0017_plan_items_kind.sql', '0018_session_log.sql'] },
+  { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0007_agents.sql', '0008_freed_bytes.sql', '0009_allowlist_read_only.sql', '0010_og_tokens.sql', '0011_run_progress.sql', '0012_agent_tokens_assign.sql', '0013_access_log_location.sql', '0014_plan_items_as_of.sql', '0015_stage_replies.sql', '0016_scan_runs.sql', '0017_plan_items_kind.sql', '0018_session_log.sql', '0021_index_schema_started.sql'] },
 ] as const
 
 const SCHEMA_COLS = 'store, date, variant, version, schema_json, floor_bytes, gen, dir'
@@ -79,5 +80,34 @@ describe.each(CASES)('$lineage/$file', ({ lineage, file, after }) => {
       raw.exec("INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-09-01', 'path', 1, '[]')")
     } catch (e) { err = e }
     expect(String((err as Error).message)).toBe('UNIQUE constraint failed: index_schema.store, index_schema.date, index_schema.variant')
+  })
+})
+
+// `0021`: `index_schema.started`, added in place over the store-scoped pointer
+// (every earlier migration applied), with foreign keys ON: no row moves, every
+// existing pointer's start is unknown (NULL), and a sync can then record one.
+describe('cw/0021_index_schema_started.sql', () => {
+  const file = '0021_index_schema_started.sql'
+  it('adds a nullable `started`, keeps every pointer and key, with foreign keys intact', async () => {
+    const { raw } = await sqliteD1('cw', { before: file })
+    raw.exec(`
+      INSERT INTO index_schema (store, date, variant, version, schema_json, gen, dir) VALUES
+        ('primary', '2026-09-01', 'path', 2, '[]', 'g1', 'listing/2026-09-01/index/g1'),
+        ('nas', '2026-09-01', 'nas:path', 2, '[]', 'g1', 'listing/nas/2026-09-01/index/g1');
+    `)
+    raw.exec((await migrations('cw')).find(m => m.name === file)!.sql)
+    expect(raw.prepare(`SELECT ${SCHEMA_COLS}, started FROM index_schema ORDER BY store`).all()).toEqual([
+      { store: 'nas', date: '2026-09-01', variant: 'nas:path', version: 2, schema_json: '[]', floor_bytes: null, gen: 'g1', dir: 'listing/nas/2026-09-01/index/g1', started: null },
+      { store: 'primary', date: '2026-09-01', variant: 'path', version: 2, schema_json: '[]', floor_bytes: null, gen: 'g1', dir: 'listing/2026-09-01/index/g1', started: null },
+    ])
+    raw.exec("UPDATE index_schema SET started = '2026-09-01T10:00:01.000Z' WHERE store = 'primary' AND date = '2026-09-01' AND variant = 'path' AND started IS NULL")
+    expect(raw.prepare('SELECT store, started FROM index_schema ORDER BY store').all()).toEqual([
+      { store: 'nas', started: null },
+      { store: 'primary', started: '2026-09-01T10:00:01.000Z' },
+    ])
+    const pk = raw.prepare("SELECT name FROM pragma_table_info('index_schema') WHERE pk > 0 ORDER BY pk").all().map(r => r.name)
+    expect(pk).toEqual(['store', 'date', 'variant'])
+    expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    expect(raw.prepare('PRAGMA integrity_check').all()).toEqual([{ integrity_check: 'ok' }])
   })
 })

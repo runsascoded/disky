@@ -164,6 +164,19 @@ def exists(parquet_path: str) -> bool:
     return blobfs.exists(parquet_path)
 
 
+def meta_started(meta_path: str) -> str | None:
+    """A snapshot `meta.json`'s ``started`` (the scan's start instant, ISO
+    8601: `path-index` stamps a bucket scan's, `capture-meta` a capture's), from
+    a local path or fsspec URL; None when the meta carries none."""
+    from disk_tree import blobfs
+
+    with (blobfs.open_read(meta_path) if blobfs.is_url(meta_path) else open(meta_path, "rb")) as f:
+        started = json.load(f).get("started")
+    if started is not None and not isinstance(started, str):
+        raise ValueError(f"{meta_path}: `started` is {started!r}, not an ISO 8601 string")
+    return started
+
+
 def extract(parquet_path: str) -> tuple[dict, list[dict]]:
     """Return (schema_meta, group_rows) from a local or fsspec-readable parquet."""
     import gcsfs
@@ -415,6 +428,7 @@ class Flip:
     schema: dict
     n: int  # row groups in the footer (= rows the generation holds in D1)
     pointed: bool
+    started: str | None = None  # the scan's start, recorded on the pointer (None: keep the row's)
 
 
 def _scope(store: str) -> tuple[str, str, str]:
@@ -425,16 +439,32 @@ def _scope(store: str) -> tuple[str, str, str]:
     return f"store='{_sql_escape(store)}' AND ", "store, ", f"'{_sql_escape(store)}', "
 
 
-def _pointer_sql(date: str, variant: str, gen: str, key: str, schema: dict, store: str) -> list[str]:
-    """The flip — the ``index_schema`` row, one ``INSERT OR REPLACE`` — then
-    the store-generation retirements that follow it (``variant`` unprefixed)."""
+def _pointer_sql(
+    date: str,
+    variant: str,
+    gen: str,
+    key: str,
+    schema: dict,
+    store: str,
+    started: str | None = None,
+) -> list[str]:
+    """The flip — the ``index_schema`` row, one upsert — then the
+    store-generation retirements that follow it (``variant`` unprefixed).
+
+    The upsert sets every column it names and keeps the rest: ``started`` (the
+    scan's start instant, `0021_index_schema_started`) is named only when
+    given, so a sync without one never clears a recorded start (and runs on a
+    D1 that predates the column)."""
     st, sc, sv = _scope(store)
     d1v = d1_variant(variant, store)
     floor = schema.get("floor_bytes")
+    cols = ["version", "schema_json", "floor_bytes", "gen", "dir"] + ([] if started is None else ["started"])
+    started_v = "" if started is None else f", '{_sql_escape(started)}'"
     schema_sql = (
-        f"INSERT OR REPLACE INTO index_schema ({sc}date, variant, version, schema_json, floor_bytes, gen, dir) VALUES "
+        f"INSERT INTO index_schema ({sc}date, variant, {', '.join(cols)}) VALUES "
         f"({sv}'{date}', '{d1v}', {schema['version']}, '{_sql_escape(json.dumps(schema['schema'], separators=(',', ':')))}', "
-        f"{'NULL' if floor is None else int(floor)}, '{_sql_escape(gen)}', '{_sql_escape(key)}');"
+        f"{'NULL' if floor is None else int(floor)}, '{_sql_escape(gen)}', '{_sql_escape(key)}'{started_v}) "
+        f"ON CONFLICT DO UPDATE SET {', '.join(f'{c} = excluded.{c}' for c in cols)};"
     )
     # A store generation's `path` sort replaces the dir-only index outright: the
     # coarse tiers an earlier generation of the same date synced are stale (and
@@ -470,6 +500,7 @@ def sync_d1(
     blob: bool = True,
     store: str = PRIMARY_STORE,
     rows_only: bool = False,
+    started: str | None = None,
 ) -> int:
     """Extract the footer of ``parquet_path`` (one tier/sort ``variant`` of
     scan ``date``, generation ``gen``, living under the bucket-relative dir
@@ -480,7 +511,7 @@ def sync_d1(
 
     Order matters for atomicity: every group row (tagged ``gen``) lands first;
     the schema row — the pointer readers key off — is written LAST, as one
-    ``INSERT OR REPLACE``, so a reader sees either the previous complete
+    upsert, so a reader sees either the previous complete
     generation or this one, never a half-written set. A mid-run failure leaves
     the pointer untouched (still serving the previous generation) and orphan
     rows the next sync/gc sweeps. Nothing is deleted before the flip.
@@ -499,7 +530,10 @@ def sync_d1(
 
     ``store`` (default the primary, whose SQL is unchanged) files the rows
     under a secondary store: variant ``<store>:<variant>`` and the ``store``
-    column set (which needs the store migration)."""
+    column set (which needs the store migration).
+
+    ``started`` (ISO 8601) records the scan's start on the pointer row
+    (`_pointer_sql`); None keeps whatever start the row already holds."""
     st, sc, sv = _scope(store)
     d1v = d1_variant(variant, store)
     schema, rows = extract(parquet_path)
@@ -512,7 +546,7 @@ def sync_d1(
         f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{d1v}' AND gen <> '{_sql_escape(gen)}' "
         f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '');"
     )
-    pointer_sql = [] if rows_only else _pointer_sql(date, variant, gen, key, schema, store)
+    pointer_sql = [] if rows_only else _pointer_sql(date, variant, gen, key, schema, store, started)
 
     def group_values(r: dict) -> str:
         return (
@@ -555,22 +589,25 @@ def check_flip(
     key: str,
     db_id: str = D1_DB_ID,
     store: str = PRIMARY_STORE,
+    started: str | None = None,
 ) -> Flip:
     """The pointer phase's gate: read ``parquet_path``'s footer and check D1
     holds exactly its row groups under ``gen`` — ``rg`` 0..n-1, one row each
     (the PK makes them distinct) — before anything points at them. Raises
     `IncompleteGeneration` otherwise. A pointer already naming (``gen``,
     ``key``) passes unchecked (``pointed``; retention may since have retired
-    its rows to the cold tier)."""
+    its rows to the cold tier) — and, given ``started``, is ``pointed`` only
+    once it records that start too (else the flip re-writes the row)."""
     st, _, _ = _scope(store)
     d1v = d1_variant(variant, store)
     schema, rows = extract(parquet_path)
     tok, acct = _creds()
     where = f"{st}date='{_sql_escape(date)}' AND variant='{_sql_escape(d1v)}'"
-    cur = _d1_query(f"SELECT gen, dir FROM index_schema WHERE {where};", acct, tok, db_id)
-    flip = Flip(date=date, variant=variant, gen=gen, key=key, store=store, schema=schema, n=len(rows), pointed=False)
+    cols = "gen, dir" if started is None else "gen, dir, started"
+    cur = _d1_query(f"SELECT {cols} FROM index_schema WHERE {where};", acct, tok, db_id)
+    flip = Flip(date=date, variant=variant, gen=gen, key=key, store=store, schema=schema, n=len(rows), pointed=False, started=started)
     if cur and cur[0]["gen"] == gen and cur[0]["dir"] == key:
-        flip.pointed = True
+        flip.pointed = started is None or cur[0]["started"] == started
         return flip
     (got,) = _d1_query(
         f"SELECT COUNT(*) AS n, MIN(rg) AS lo, MAX(rg) AS hi FROM index_row_groups WHERE {where} AND gen='{_sql_escape(gen)}';",
@@ -593,7 +630,7 @@ def flip_d1(flip: Flip, db_id: str = D1_DB_ID) -> bool:
     if flip.pointed:
         return False
     tok, acct = _creds()
-    for sql in _pointer_sql(flip.date, flip.variant, flip.gen, flip.key, flip.schema, flip.store):
+    for sql in _pointer_sql(flip.date, flip.variant, flip.gen, flip.key, flip.schema, flip.store, flip.started):
         _d1_query(sql, acct, tok, db_id)
     return True
 
@@ -619,6 +656,34 @@ def gc_d1(date: str, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE, dry_run:
         return int(rows[0]["n"]) if rows else 0
     rows = _d1_query(f"DELETE FROM index_row_groups {where} RETURNING 1 AS n;", acct, tok, db_id)
     return len(rows)
+
+
+def started_sql(date: str, started: str, store: str = PRIMARY_STORE) -> str:
+    """The backfill of one scan's start onto its `path` pointer
+    (`index_schema.started`, `0021_index_schema_started`), only where none is
+    recorded yet. Names ``store`` explicitly: the column postdates the store
+    migration, so every D1 that has it has ``store``."""
+    return (
+        f"UPDATE index_schema SET started = '{_sql_escape(started)}' WHERE store = '{_sql_escape(check_store(store))}' "
+        f"AND date = '{_sql_escape(date)}' AND variant = '{_sql_escape(d1_variant('path', store))}' AND started IS NULL;"
+    )
+
+
+def snapshot_starts(snapshots: str) -> list[tuple[str, str | None]]:
+    """``(scan id, meta.started)`` for every ``<scan id>/meta.json`` under the
+    snapshot dir ``snapshots`` (local path or fsspec URL), by id."""
+    from disk_tree import blobfs
+
+    from .scan_id import is_scan_id
+
+    base = snapshots.rstrip("/")
+    if blobfs.is_url(base):
+        fs, p = blobfs.fs_for(base)
+        scheme = base.split("://", 1)[0]
+        metas = {m.rsplit("/", 2)[-2]: f"{scheme}://{m}" for m in fs.glob(f"{p}/*/meta.json")}
+    else:
+        metas = {m.parent.name: str(m) for m in Path(base).glob("*/meta.json")}
+    return [(scan, meta_started(metas[scan])) for scan in sorted(metas) if is_scan_id(scan)]
 
 
 def pointers(db_id: str = D1_DB_ID) -> list[tuple[str, str, str]]:

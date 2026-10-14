@@ -114,7 +114,7 @@ def test_sync_d1_retires_coarse_tiers_after_a_store_flip(monkeypatch, version, v
     monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
     monkeypatch.setattr(F, "_d1_query", lambda sql, acct, tok, db_id: sent.append(sql) or [])
     F.sync_d1("2026-09-30", "x.parquet", variant=variant, gen="g2", key="k", store=store)
-    flip = [i for i, s in enumerate(sent) if s.startswith("INSERT OR REPLACE INTO index_schema")]
+    flip = [i for i, s in enumerate(sent) if s.startswith("INSERT INTO index_schema")]
     assert len(flip) == 1
     assert sent[flip[0] + 1:] == retired
 

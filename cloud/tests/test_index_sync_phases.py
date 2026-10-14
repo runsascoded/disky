@@ -3,6 +3,7 @@ stages a generation's row groups (invisible: readers join on the pointer's
 gen), `-p` flips the pointers once every variant's rows match its footer, and
 the default still does both, in that order. Against a real SQLite carrying the
 cw lineage's migrations (the D1 schema)."""
+import json
 import sqlite3
 from pathlib import Path
 
@@ -157,12 +158,12 @@ def test_pointer_only_flips_complete_rows_then_is_a_noop(gens, d1, logged):
         f"SELECT COUNT(*) AS n, MIN(rg) AS lo, MAX(rg) AS hi FROM index_row_groups WHERE date='{DATE}' AND variant='path' AND gen='{NEW}';",
         f"SELECT gen, dir FROM index_schema WHERE date='{DATE}' AND variant='bysize';",
         f"SELECT COUNT(*) AS n, MIN(rg) AS lo, MAX(rg) AS hi FROM index_row_groups WHERE date='{DATE}' AND variant='bysize' AND gen='{NEW}';",
-        "INSERT OR REPLACE INTO index_schema",
+        "INSERT INTO index_schema",
         f"DELETE FROM index_row_groups WHERE date='{DATE}' AND variant LIKE 'coarse%';",
         f"DELETE FROM index_row_groups WHERE date='{DATE}' AND variant='user' AND gen IN",
         f"DELETE FROM index_schema WHERE date='{DATE}' AND variant LIKE 'coarse%';",
         f"DELETE FROM index_schema WHERE date='{DATE}' AND variant='user' AND version < 2;",
-        "INSERT OR REPLACE INTO index_schema",
+        "INSERT INTO index_schema",
     ]
     assert d1.pointers() == BOTH_POINTED_NEW
     assert d1.visible() == [("bysize", NEW, 2), ("path", NEW, 3)]
@@ -218,9 +219,9 @@ def test_default_is_rows_then_pointer_unchanged(gens, d1, logged):
     ]
     default_sent = list(d1.sent)
     assert [s.split(" (")[0].split(" WHERE")[0] for s in default_sent] == [
-        "DELETE FROM index_row_groups", "INSERT OR REPLACE INTO index_row_groups", "INSERT OR REPLACE INTO index_schema",
+        "DELETE FROM index_row_groups", "INSERT OR REPLACE INTO index_row_groups", "INSERT INTO index_schema",
         *["DELETE FROM index_row_groups"] * 2, *["DELETE FROM index_schema"] * 2,
-        "DELETE FROM index_row_groups", "INSERT OR REPLACE INTO index_row_groups", "INSERT OR REPLACE INTO index_schema",
+        "DELETE FROM index_row_groups", "INSERT OR REPLACE INTO index_row_groups", "INSERT INTO index_schema",
     ]
     assert d1.pointers() == BOTH_POINTED_NEW
     assert d1.groups() == [("bysize", OLD, 1), ("bysize", NEW, 2), ("path", OLD, 2), ("path", NEW, 3)]
@@ -243,3 +244,91 @@ def test_rows_and_pointer_flags_exclude_each_other_and_local(tmp_path, d1):
         r = CliRunner().invoke(main, ["index-sync", *flags, "-d", str(tmp_path), "-g", NEW, DATE])
         assert r.exit_code == 2, flags
     assert d1.sent == []
+
+
+# ── `index_schema.started`: `-m <meta.json>` and the `index-started` backfill ──
+
+STARTED = "2026-10-10T20:22:05.123Z"
+
+
+def _meta(path: Path, started: str | None) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"asof": path.parent.name, **({} if started is None else {"started": started})}))
+    return path
+
+
+def starts(d1: D1) -> list[tuple]:
+    return d1.con.execute("SELECT variant, gen, started FROM index_schema ORDER BY variant").fetchall()
+
+
+def test_meta_records_the_start_on_every_pointer_and_a_bare_resync_keeps_it(gens, d1, logged, tmp_path):
+    _, new = gens
+    assert starts(d1) == [("bysize", OLD, None), ("path", OLD, None)]
+    meta = _meta(tmp_path / "snap" / DATE / "meta.json", STARTED)
+    assert sync(new, "-m", str(meta)).exit_code == 0
+    assert starts(d1) == [("bysize", NEW, STARTED), ("path", NEW, STARTED)]
+    # A re-sync naming no meta (or a meta without `started`) flips the pointers and keeps the start.
+    for flags in ([], ["-m", str(_meta(tmp_path / "bare" / DATE / "meta.json", None))]):
+        assert sync(new, *flags).exit_code == 0
+        assert starts(d1) == [("bysize", NEW, STARTED), ("path", NEW, STARTED)]
+    assert d1.pointers() == BOTH_POINTED_NEW
+
+
+def test_pointer_only_writes_a_new_start_onto_an_already_pointed_generation(gens, d1, logged, tmp_path):
+    _, new = gens
+    assert sync(new).exit_code == 0
+    meta = _meta(tmp_path / "snap" / DATE / "meta.json", STARTED)
+    logged.clear()
+    assert sync(new, "-p", "-m", str(meta)).exit_code == 0
+    assert logged == [
+        f"index-sync: {DATE} [path] gen {NEW} @ {NEW_KEY} — pointer flipped (3 row groups)",
+        f"index-sync: {DATE} [bysize] gen {NEW} @ {NEW_KEY} — pointer flipped (2 row groups)",
+        SKIPPED,
+    ]
+    assert starts(d1) == [("bysize", NEW, STARTED), ("path", NEW, STARTED)]
+    logged.clear()
+    d1.sent.clear()
+    assert sync(new, "-p", "-m", str(meta)).exit_code == 0
+    assert logged == [
+        f"index-sync: {DATE} [path] gen {NEW} @ {NEW_KEY} — already pointed (3 row groups)",
+        f"index-sync: {DATE} [bysize] gen {NEW} @ {NEW_KEY} — already pointed (2 row groups)",
+        SKIPPED,
+    ]
+    assert d1.writes() == []
+
+
+def test_meta_with_rows_only_is_a_usage_error(tmp_path, d1):
+    meta = _meta(tmp_path / "snap" / DATE / "meta.json", STARTED)
+    r = CliRunner().invoke(main, ["index-sync", "-r", "-m", str(meta), "-d", str(tmp_path), "-g", NEW, "-k", NEW_KEY, DATE])
+    assert r.exit_code == 2
+    assert d1.sent == []
+
+
+def test_index_started_prints_the_backfill_for_each_meta_with_a_start(tmp_path, d1, logged):
+    snaps = tmp_path / "snapshots" / "nas"
+    _meta(snaps / "2026-10-09" / "meta.json", "2026-10-09T04:30:12.345Z")
+    _meta(snaps / "2026-10-10" / "meta.json", None)
+    _meta(snaps / "2026-10-11T1000" / "meta.json", "2026-10-11T10:00:01.000Z")
+    _meta(snaps / "rules" / "meta.json", "2026-10-11T10:00:01.000Z")  # not a scan dir
+    r = CliRunner().invoke(main, ["index-started", "-s", "nas", str(snaps)])
+    assert r.exit_code == 0, r.output
+    assert r.output.splitlines() == [
+        "UPDATE index_schema SET started = '2026-10-09T04:30:12.345Z' WHERE store = 'nas' AND date = '2026-10-09' AND variant = 'nas:path' AND started IS NULL;",
+        "UPDATE index_schema SET started = '2026-10-11T10:00:01.000Z' WHERE store = 'nas' AND date = '2026-10-11T1000' AND variant = 'nas:path' AND started IS NULL;",
+    ]
+    assert logged == [f"index-started: 3 scans under {snaps}, 2 with a start; none for 1: 2026-10-10"]
+    # Applied: only the store's `path` pointers without a start take one.
+    d1.con.executescript("""
+        INSERT INTO index_schema (store, date, variant, version, schema_json, started) VALUES
+          ('nas', '2026-10-09', 'nas:path', 2, '[]', NULL),
+          ('nas', '2026-10-09', 'nas:bysize', 2, '[]', NULL),
+          ('nas', '2026-10-11T1000', 'nas:path', 2, '[]', 'kept'),
+          ('primary', '2026-10-09', 'path', 2, '[]', NULL);
+    """)
+    d1.con.executescript(r.output)
+    assert d1.con.execute("SELECT store, date, variant, started FROM index_schema ORDER BY store, date, variant").fetchall() == [
+        ("nas", "2026-10-09", "nas:bysize", None),
+        ("nas", "2026-10-09", "nas:path", "2026-10-09T04:30:12.345Z"),
+        ("nas", "2026-10-11T1000", "nas:path", "kept"),
+        ("primary", "2026-10-09", "path", None),
+    ]

@@ -914,6 +914,7 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 @option("-g", "--gen", required=True, help="Generation stamp these files belong to (the run's GEN; `legacy` for a pre-generation layout)")
 @option("-k", "--key", required=True, help="Bucket-relative dir the parquets live under — what the site reads (the deployment's layout, e.g. `<layer-2>/index/<gen>`)")
 @option("-L", "--local", is_flag=True, help="Write to the local wrangler D1 instead of --remote")
+@option("-m", "--meta", default=None, help="The scan's snapshot `meta.json` (local path or URL): its `started` is recorded on each pointer (`index_schema.started`, the scan picker's time for a date-only id). Absent, or a meta without one: the pointers keep the start they hold")
 @option("-p", "--pointer-only", is_flag=True, help="Only flip the pointers, after `-r` staged the rows: refuses (exit 1, nothing flipped) unless every present variant's rows in D1 match its footer; a variant already pointed at this generation is a no-op")
 @option("-r", "--rows-only", is_flag=True, help="Only upload the row groups (+ the cold footer files), tagged with the generation — invisible until `-p` flips the pointers. Re-runnable (rows are INSERT OR REPLACE)")
 @option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
@@ -927,6 +928,7 @@ def index_sync(
     gen: str,
     key: str,
     local: bool,
+    meta: str | None,
     pointer_only: bool,
     rows_only: bool,
     store: str,
@@ -951,8 +953,13 @@ def index_sync(
     rows are complete (count and rg range against the footer), all variants
     before any flip. Between the two, nothing may gc this date's rows (an
     `index-gc` of the same scan, or a REPROC's sync of another generation):
-    `-p` would refuse, and `-r` must run again."""
-    from .index_footer import SORT_VARIANTS, IncompleteGeneration, check_flip, check_store, exists, flip_d1, sync_d1
+    `-p` would refuse, and `-r` must run again.
+
+    `-m <meta.json>` records the scan's `started` on each pointer
+    (`index_schema.started`, which the site's scan picker reads); without it a
+    re-sync keeps the start a pointer already holds. `index-started` backfills
+    scans synced before."""
+    from .index_footer import SORT_VARIANTS, IncompleteGeneration, check_flip, check_store, exists, flip_d1, meta_started, sync_d1
 
     try:
         check_store(store)
@@ -962,6 +969,9 @@ def index_sync(
         raise UsageError("-r and -p are the two halves of one sync: pass at most one (neither = both, rows then pointer)")
     if local and (rows_only or pointer_only):
         raise UsageError("-r/-p run against the remote D1 only")
+    if meta and rows_only:
+        raise UsageError("-m records a start on the pointers, which -r doesn't write (pass it to the -p half)")
+    started = meta_started(meta) if meta else None
 
     base = listing_dir or f"gs://{bucket}/{key}"
     todo = variants or tuple(INDEX_VARIANTS)
@@ -985,7 +995,7 @@ def index_sync(
     pre = f"index-sync: {'' if store == 'primary' else f'[{store}] '}{date}"
     if pointer_only:
         try:
-            flips = [check_flip(date, path, variant=variant, gen=gen, key=key, store=store) for variant, path in present]
+            flips = [check_flip(date, path, variant=variant, gen=gen, key=key, store=store, started=started) for variant, path in present]
         except IncompleteGeneration as e:
             err(f"index-sync: refusing to flip any pointer — {e}")
             raise SystemExit(1) from None
@@ -994,13 +1004,38 @@ def index_sync(
             err(f"{pre} [{f.variant}] gen {gen} @ {key} — {'pointer flipped' if flipped else 'already pointed'} ({f.n} row groups)")
     else:
         for variant, path in present:
-            n = sync_d1(date, path, variant=variant, gen=gen, key=key, remote=not local, store=store, rows_only=rows_only)
+            n = sync_d1(date, path, variant=variant, gen=gen, key=key, remote=not local, store=store, rows_only=rows_only, started=started)
             err(f"{pre} [{variant}] gen {gen} @ {key} — {n} row groups ({'local' if local else 'remote'}){', pointer not flipped' if rows_only else ''}")
     if skipped:
         err(f"index-sync: {date} gen {gen} @ {key} — skipped {len(skipped)} absent variant(s): {', '.join(skipped)}")
     if not present:
         err(f"index-sync: no variant file under {base}")
         raise SystemExit(1)
+
+
+@main.command("index-started")
+@option("-s", "--store", default="primary", help="The D1 store the scans' pointers belong to: `primary` (default) or a secondary store's `STORES_JSON` key")
+@argument("snapshots")
+def index_started(store: str, snapshots: str) -> None:
+    """Print the SQL that backfills `index_schema.started` (the scan picker's
+    start time for a date-only id) from each `<scan id>/meta.json` under
+    SNAPSHOTS (a local dir or fsspec URL, e.g. `r2://<bucket>/snapshots/<store
+    dir>`): one `UPDATE` per scan whose meta has a `started`, on the store's
+    `path` pointer, only where none is recorded. Writes nothing itself: run the
+    output with `wrangler d1 execute <db> --remote --file <out.sql>`. A scan
+    without a D1 pointer matches no row (a no-op)."""
+    from .index_footer import check_store, snapshot_starts, started_sql
+
+    try:
+        check_store(store)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+    starts = snapshot_starts(snapshots)
+    known = [(scan, started) for scan, started in starts if started is not None]
+    for scan, started in known:
+        print(started_sql(scan, started, store))
+    missing = [scan for scan, started in starts if started is None]
+    err(f"index-started: {len(starts)} scans under {snapshots}, {len(known)} with a start{f'; none for {len(missing)}: ' + ', '.join(missing) if missing else ''}")
 
 
 @main.command("index-gc")
