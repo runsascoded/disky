@@ -60,6 +60,10 @@ elif name == 'dt-cloud':
         (out / 'meta.json').write_text(json.dumps({'asof': args[args.index('-d') + 1], 'total_bytes': 4096}))
     else:
         assert args[0] == 'index-sync', args
+        # what `-m` hands index-sync at sync time: the meta's `started`
+        meta = json.loads(Path(args[args.index('-m') + 1]).read_text())
+        with open(os.environ['FAKE_TRACE'], 'a') as f:
+            f.write(json.dumps(['index-sync-meta', meta.get('started')]) + '\n')
 elif name == 'disk-tree':
     from click.testing import CliRunner
     from disk_tree.cli.base import cli
@@ -135,6 +139,10 @@ def test_morning_evening_and_reingest_keep_two_independent_snapshots(pipeline) -
         ('2026-10-11T1000', '202610111000', 'listing/laptop/2026-10-11T1000/index/202610111000', 'primary'),
         ('2026-10-11T2200', '202610112200', 'listing/laptop/2026-10-11T2200/index/202610112200', 'primary'),
         ('2026-10-11T1000', '202610111000', 'listing/laptop/2026-10-11T1000/index/202610111000', 'primary'),
+    ]
+    # Each sync reads the start capture-meta stamped (`-m`), for `index_schema.started`.
+    assert [a[1] for a in map(json.loads, trace.read_text().splitlines()) if a[0] == 'index-sync-meta'] == [
+        '2026-10-11T10:00:01.000Z', '2026-10-11T22:00:02.000Z', '2026-10-11T10:00:01.000Z',
     ]
 
 
@@ -261,6 +269,7 @@ def test_without_a_profile_nothing_is_recorded(pipeline) -> None:
     assert result.returncode == 0, result.stderr
     calls = [c[:2] for c in map(json.loads, trace.read_text().splitlines())]
     assert sorted({tuple(c) for c in calls}) == [
-        ('aws', 's3'), ('disk-tree', 'capture-meta'), ('dt-cloud', 'index-sync'), ('dt-cloud', 'path-index'), ('nproc',), ('time', '-v'),
+        ('aws', 's3'), ('disk-tree', 'capture-meta'), ('dt-cloud', 'index-sync'), ('dt-cloud', 'path-index'),
+        ('index-sync-meta', '2026-10-11T10:00:01.000Z'), ('nproc',), ('time', '-v'),
     ]
     assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]

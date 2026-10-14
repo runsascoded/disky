@@ -123,7 +123,8 @@ ended upload -o "index=r2://$bucket/listing/$store/$date/index/$gen/" -o "snapsh
 phase='index-sync'
 t0=$(date +%s)
 : "${D1_DB_ID:?}" "${CLOUDFLARE_API_TOKEN:?}" "${CLOUDFLARE_ACCOUNT_ID:?}"
+# `-m`: the snapshot's meta (capture-meta stamped `started` above) → the pointers' `index_schema.started`.
 ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" index-sync "$date" -g "$gen" -b "$bucket" -k "listing/$store/$date/index/$gen" \
-    -s "$d1_store" -d "$work/index" -v path -v bysize )
+    -s "$d1_store" -d "$work/index" -v path -v bysize -m "$work/snap/meta.json" )
 echo "[ingest] footers → D1 $D1_DB_NAME in $(( $(date +%s) - t0 ))s"
 ended index-sync
