@@ -161,6 +161,12 @@ if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
   fi
   hex=()
   [[ $cmd == build ]] && hex=(-x off)
+  if [[ $cmd == build && ${STATIC_BUILD:-} != 1 ]]; then
+    # A base build over every scan needs a bigger box than the scheduled job's: only a job submitted
+    # for it (`aws/submit -c 4 -m 16384 -e STATIC_BUILD=1 …`) runs one; until then each ingest skips.
+    echo "[ingest] static-names: generation $STATIC_GEN not built yet; skipping (STATIC_BUILD=1 builds it)"
+    exit 0
+  fi
   ( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
       -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(nproc)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
   echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/static-time.txt")"

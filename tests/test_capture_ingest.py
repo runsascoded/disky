@@ -118,7 +118,7 @@ def pipeline(tmp_path: Path):
         'D1_DB_NAME': 'fixture',
         'HOST_STORES': 'nas=nas',
     }
-    for key in ('DATE', 'GEN', 'STORE', 'STATIC_GEN', 'STATIC_MEM', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'INGEST_SITE_URL', 'AWS_BATCH_JOB_ID', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
+    for key in ('DATE', 'GEN', 'STORE', 'STATIC_GEN', 'STATIC_MEM', 'STATIC_BUILD', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'INGEST_SITE_URL', 'AWS_BATCH_JOB_ID', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
         env.pop(key, None)
 
     def run(stamp: str, host: str = 'm3', **extra: str) -> subprocess.CompletedProcess:
@@ -321,7 +321,7 @@ def static_calls(trace: Path) -> list[list[str]]:
 def test_static_names_builds_the_generation_once_then_appends_primary_scans_only(pipeline) -> None:
     run, bucket, trace = pipeline
     for stamp, host in [('2026-10-14T06-00-01Z', 'm3'), ('2026-10-14T10-00-01Z', 'nas'), ('2026-10-14T18-00-02Z', 'm3')]:
-        result = run(stamp, host, STATIC_GEN='2026-10-14')
+        result = run(stamp, host, STATIC_GEN='2026-10-14', STATIC_BUILD='1')
         assert result.returncode == 0, result.stderr
     common = ['-g', '2026-10-14', '-L', 'listing/laptop/{id}/index/{gen}/path-index.parquet', '-s', 'r2://bucket', '-o', 'r2://bucket']
     calls = [[re.sub(r'^/.*/work/', '<work>/', a) for a in c] for c in static_calls(trace)]
@@ -336,10 +336,22 @@ def test_static_names_builds_the_generation_once_then_appends_primary_scans_only
 
 def test_static_names_failure_fails_the_ingest_in_its_phase(pipeline) -> None:
     run, _, trace = pipeline
-    result = run('2026-10-14T06-00-01Z', STATIC_GEN='2026-10-14', FAKE_FAIL='static-names')
+    result = run('2026-10-14T06-00-01Z', STATIC_GEN='2026-10-14', STATIC_BUILD='1', FAKE_FAIL='static-names')
     assert result.returncode == 3
     assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
     assert notifies(trace) == [[
         'notify', '-p', '1', '-t', 'disky: laptop ingest failed', 'scan 2026-10-14T0600 failed in static-names (exit 3)',
     ]]
+
+
+
+def test_a_scheduled_ingest_never_builds_the_generation(pipeline) -> None:
+    run, bucket, trace = pipeline
+    result = run('2026-10-14T06-00-01Z', STATIC_GEN='2026-10-14')
+    assert result.returncode == 0, result.stderr
+    assert static_calls(trace) == []
+    assert [line for line in result.stdout.splitlines() if line.startswith('[ingest] static-names')] == [
+        '[ingest] static-names: generation 2026-10-14 not built yet; skipping (STATIC_BUILD=1 builds it)',
+    ]
+    assert not (bucket / 'static-names').exists()
 
