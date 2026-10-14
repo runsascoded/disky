@@ -34,7 +34,11 @@ export function Explain({ text, children, className }: { text: ReactNode; childr
   const target = useCallback((el: HTMLElement): HelpTarget => ({ id, text, label: labelOf(el) }), [id, text])
   const enter = useCallback((e: React.PointerEvent<HTMLElement>) => send?.({ type: 'enter', target: target(e.currentTarget) }), [send, target])
   const leave = useCallback(() => send?.({ type: 'leave', id }), [send, id])
-  const focus = useCallback((e: React.FocusEvent<HTMLElement>) => send?.({ type: 'focus', target: target(e.currentTarget) }), [send, target])
+  // Keyboard focus only: a menu auto-focusing its first item on a mouse open
+  // would otherwise light that item up while the pointer is elsewhere.
+  const focus = useCallback((e: React.FocusEvent<HTMLElement>) => {
+    if ((e.target as HTMLElement).matches(':focus-visible')) send?.({ type: 'focus', target: target(e.currentTarget) })
+  }, [send, target])
   const blur = useCallback(() => send?.({ type: 'blur', id }), [send, id])
   const live = on === 'on' && !!send
   const active = live && ctx?.target?.id === id

@@ -4,16 +4,26 @@
  * canonical params), unexpired and unrevoked. Each mint is a new token, so
  * each can be revoked alone. A deployment without the table mints nothing and
  * honours no token (every card stays anonymous). */
+import { isPathScope } from '../restrict.js'
 import type { D1Database } from '@cloudflare/workers-types'
 import { canRedeem, hashToken } from '@open-athena/auth'
 import { d1GrantStore } from '@open-athena/auth/d1'
 import { pageView } from './routes.js'
 import { B62, canonical, expDay, expired, randomToken } from './sign.js'
+import { shareSection } from '../../../src/shareSection.js'
 
 export const TOKEN_CHARS = 10
 
 export const TOKEN_DAYS_DEFAULT = 30
-export const TOKEN_DAYS_MAX = 90
+/** The `exp_day` of a token that never expires (`days` 0); revocation still ends it. */
+export const NEVER_DAY = 2 ** 31 - 1
+
+/** A mint request's `days`: 0 = never expires, a positive number = that many
+ * whole days; anything else (absent, negative, not a number) = the default. */
+export const tokenDays = (raw: unknown): number =>
+  typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : TOKEN_DAYS_DEFAULT
+
+const tokenExpDay = (now: number, days: number): number => (days === 0 ? NEVER_DAY : expDay(now, Math.max(1, days)))
 
 export interface Mint {
   token: string
@@ -22,16 +32,16 @@ export interface Mint {
   expDay: number
 }
 
-/** Mint a token for `pageUrl`'s view and record it. Null when the URL has no
- * card of its own. */
+/** Mint a token for `pageUrl`'s view and record it, good for `days` (`tokenDays`;
+ * 0 = never expires). Null when the URL has no card of its own. */
 export async function mint(db: D1Database, site: string, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = randomToken(TOKEN_CHARS)): Promise<Mint | null> {
-  const u = new URL(pageUrl.href)
+  const u = shareSection(pageUrl)
   u.searchParams.delete('og')
   const pv = pageView(u, site)
   if (!pv) return null
-  const day = expDay(now, Math.min(Math.max(1, Math.floor(days)), TOKEN_DAYS_MAX))
+  const day = tokenExpDay(now, tokenDays(days))
   await db.prepare('INSERT INTO og_tokens (token, kind, view, page, minted_by, minted_ts, exp_day) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .bind(token, pv.kind, canonical(pv.params), u.pathname + u.search, by, now, day).run()
+    .bind(token, pv.kind, canonical(pv.params), u.pathname + u.search + u.hash, by, now, day).run()
   u.searchParams.set('og', token)
   return { token, url: u.href, expDay: day }
 }
@@ -98,6 +108,9 @@ export const shareKeyLive = async (db: D1Database | undefined, key: string | nul
 type GrantLike = { revokedAt: number | null; disabledAt: number | null; expiresAt: number | null; scopes: string[] } & Parameters<typeof canRedeem>[0]
 const grantOk = (g: GrantLike, scopes: readonly string[], now: number): boolean =>
   canRedeem(g, now) && g.scopes.some((sc: string) => sc === '*' || scopes.includes(sc))
+  // A path-restricted link (specs/path-scopes.md) never earns a full card:
+  // its tiles would name what the link hides.
+  && !g.scopes.some(isPathScope)
 
 /** The share-link grant `id` is still live (same rule as `shareKeyGrant`):
  * what a `key=` page's full card image re-checks on every fetch, so

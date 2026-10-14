@@ -1,6 +1,7 @@
 """Specs for the R2 publish step (`dt_cloud.publish`): exact served-subset
 prefixes and the idempotency decision — the pure core the CLI drives."""
 from dt_cloud import publish as P
+import pytest
 
 MD5_B64 = "1B2M2Y8AsgTpgAmY7PhCfg=="  # md5("") as GCS reports it
 MD5_HEX = "d41d8cd98f00b204e9800998ecf8427e"
@@ -143,3 +144,49 @@ def test_served_small_is_the_snapshot_jsons_and_extras_sidecars():
     cw = f"cw-l2/{SCAN}/"
     objs, _ = P.served([*SRC, P.Obj(key=f"{cw}index/g2/attr.tsv", size=4, md5=None), P.Obj(key=f"{cw}rollup.parquet", size=9, md5=None)], cw, small=True)
     assert [o.key for o in objs] == [f"snapshots/cw/{SCAN}/tree.json", f"{cw}index/g2/attr.tsv"]
+
+
+def publication_store(monkeypatch, missing_source=False, corrupt_dest=False):
+    obj = P.Obj(key="snapshots/s/meta.json", size=7, md5=MD5_HEX)
+    dest = {}
+    monkeypatch.setattr(P, "list_source", lambda bucket, prefixes: [] if missing_source else [obj])
+    monkeypatch.setattr(P, "r2_client", lambda: None)
+    monkeypatch.setattr(P, "r2_bucket", lambda: "serve")
+    monkeypatch.setattr(P, "head_dest", lambda s3, bucket, key: dest.get(key))
+
+    def copy(src_bucket, s3, bucket, obj):
+        dest[obj.key] = P.Dest(size=7, md5=None if corrupt_dest else MD5_HEX)
+
+    monkeypatch.setattr(P, "copy_one", copy)
+    return obj, dest
+
+
+def test_publish_refuses_missing_required_source_before_copy(monkeypatch):
+    obj, dest = publication_store(monkeypatch, missing_source=True)
+    with pytest.raises(ValueError) as exc:
+        P.publish("s", layer2="listing/{scan}/index/", required=(obj.key,))
+    assert str(exc.value) == "publish-r2: missing required source keys: snapshots/s/meta.json"
+    assert dest == {}
+
+
+def test_publish_verifies_required_destination_even_when_skipped(monkeypatch):
+    obj, dest = publication_store(monkeypatch)
+    first = P.publish("s", layer2="listing/{scan}/index/", required=(obj.key,))
+    second = P.publish("s", layer2="listing/{scan}/index/", required=(obj.key,))
+    assert first == P.Report(copied=[obj.key], skipped=[], bytes=7)
+    assert second == P.Report(copied=[], skipped=[obj.key], bytes=0)
+    assert dest == {obj.key: P.Dest(size=7, md5=MD5_HEX)}
+
+
+def test_publish_refuses_unverified_required_destination(monkeypatch):
+    obj, _ = publication_store(monkeypatch, corrupt_dest=True)
+    with pytest.raises(ValueError) as exc:
+        P.publish("s", layer2="listing/{scan}/index/", required=(obj.key,))
+    assert str(exc.value) == "publish-r2: required destination verification failed: snapshots/s/meta.json"
+
+
+def test_publish_repairs_required_destination_with_unknown_checksum(monkeypatch):
+    obj, dest = publication_store(monkeypatch)
+    dest[obj.key] = P.Dest(size=7, md5=None)
+    assert P.publish("s", layer2="listing/{scan}/index/", required=(obj.key,)) == P.Report(copied=[obj.key], skipped=[], bytes=7)
+    assert dest == {obj.key: P.Dest(size=7, md5=MD5_HEX)}

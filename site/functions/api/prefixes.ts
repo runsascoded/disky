@@ -8,6 +8,7 @@
  * the action log's prefixes. A prefix gone by that scan is absent from
  * `stats`.
  */
+import { restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { storeReady } from '../_lib/index.js'
 import { MAX_PREFIXES, prefixesAt } from '../_lib/prefixes.js'
@@ -18,6 +19,8 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
+  // Caller-supplied prefixes would probe hidden paths' existence and sizes.
+  if (restrictionFor(gated, env)) return restrictedForbidden()
   const body = (await request.json().catch(() => null)) as { date?: unknown; prefixes?: unknown } | null
   const scan = await scanArg(ctx.env, new URLSearchParams(typeof body?.date === 'string' ? { date: body.date } : {}))
   if (scan instanceof Response) return scan

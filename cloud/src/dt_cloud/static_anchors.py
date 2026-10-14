@@ -48,6 +48,7 @@ from .static_names import (
     CODEC, NAME, OPEN, PREFIX, SX_RG, _batches, _sx_cast, _task, connect, q, read_json,
 )
 from .static_profile import data_bucket, scratch_bucket
+from .resource_monitor import monitor_resources, resource_stage
 
 err = partial(print, file=sys.stderr, flush=True)
 
@@ -496,6 +497,50 @@ def _child(path: str, dir_: str) -> str:
     return f"CASE WHEN {dir_} = '' THEN string_split({path}, '/')[1] ELSE string_split(substring({path}, length({dir_}) + 2), '/')[1] END"
 
 
+def probe_prior_rows(
+    con,
+    prior: list[Tier],
+    mode: str,
+    batch_keys: int = 256,
+) -> int:
+    """Exact prior rows under near's union of subtrees, scanning each shard in bounded key batches.
+
+    Disjoint intervals plus an ASOF lookup replace an O(rows × directories) OR predicate. Nested directories
+    are merged before the lookup; a row contributes once per tier, even under multiple requested ancestors.
+    """
+    if batch_keys <= 0:
+        raise ValueError("batch_keys must be positive")
+    con.execute("""CREATE OR REPLACE TABLE probe_ranges AS
+        WITH roots AS (SELECT DISTINCT k FROM near WHERE dir = ''),
+        bounds AS (SELECT DISTINCT k, dir || '/' AS lo, dir || '0' AS hi FROM near
+            WHERE dir <> '' AND k NOT IN (SELECT k FROM roots)),
+        previous AS (SELECT *, max(hi) OVER (PARTITION BY k ORDER BY lo, hi
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prev_hi FROM bounds),
+        islands AS (SELECT *, sum(CASE WHEN prev_hi IS NULL OR lo > prev_hi THEN 1 ELSE 0 END)
+            OVER (PARTITION BY k ORDER BY lo, hi) AS island FROM previous)
+        SELECT k, min(lo) AS lo, max(hi) AS hi FROM islands GROUP BY k, island
+        UNION ALL SELECT k, '', NULL FROM roots""")
+    keys = [k for (k,) in con.execute("SELECT DISTINCT k FROM near ORDER BY k").fetchall()]
+    queries = 0
+    for ti, tier in enumerate(prior):
+        by_file: dict[str, list[str]] = {}
+        for key in keys:
+            if file := tier.shard_file(mode, key):
+                by_file.setdefault(file, []).append(key)
+        for file, file_keys in by_file.items():
+            for offset in range(0, len(file_keys), batch_keys):
+                selected = file_keys[offset:offset + batch_keys]
+                where = f"s IN ({', '.join(q(k) for k in selected)})"
+                resource_stage(f"anchors {mode}: prior probes", tier=ti, query=queries + 1, keys=len(selected))
+                con.execute(f"""INSERT INTO prows SELECT x.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
+                    FROM ({shard_rows_sql([file], where)}) AS x
+                    ASOF JOIN probe_ranges AS p ON x.k = p.k AND x.path >= p.lo
+                    WHERE p.hi IS NULL OR x.path < p.hi""")
+                queries += 1
+    resource_stage(f"anchors {mode}: prior probes complete", queries=queries, keys=len(keys))
+    return queries
+
+
 def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
     """One level-0 run's rollups of `mode` at scan `D` (epoch seconds) into table `into` (see the module doc).
     `prior`: the tiers before the run, base first, each with its `anchors/`; `run`: the run's shards; `rule`: the
@@ -553,13 +598,8 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
         GROUP BY c.k, c.lvl, c.dir, c.n HAVING c.n + coalesce(sum(g.rows), 0) > {R}""")
     # The prior rows of each near (k, dir), exactly: per key one pushdown read of the tiers' files holding it.
     con.execute("CREATE OR REPLACE TABLE prows AS SELECT * FROM rr WHERE false")
-    for (k,) in con.execute("SELECT DISTINCT k FROM near ORDER BY k").fetchall():
-        dirs = [d for (d,) in con.execute("SELECT dir FROM near WHERE k = ?", [k]).fetchall()]
-        rng = "true" if "" in dirs else " OR ".join(f"(path >= {q(d + '/')} AND path < {q(d + '0')})" for d in dirs)
-        files = [f for f in (t.shard_file(mode, k) for t in prior) if f]
-        if files:
-            con.execute(f"INSERT INTO prows {shard_rows_sql(files, f's = {q(k)} AND ({rng})')}")
-        doc["probes"] += 1
+    probe_prior_rows(con, prior, mode)
+    doc["probes"] = con.execute("SELECT count(DISTINCT k) FROM near").fetchone()[0]
     doc["probe_rows"] = con.execute("SELECT count(*) FROM prows").fetchone()[0]
     con.execute(f"""CREATE OR REPLACE TABLE pv AS SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
             any_value(n_files) AS n_files, any_value(par) AS par FROM prows GROUP BY k, path, usr, vf""")
@@ -1030,8 +1070,11 @@ def _upload_dir(b, local: Path, prefix: str, last: tuple[str, ...] = ()) -> int:
     """Every file under `local` → `prefix/<rel>`, the `last` names after all others."""
     files = sorted(p for p in local.rglob("*") if p.is_file())
     files = [p for p in files if p.name not in last] + [p for p in files if p.name in last]
-    for p in files:
+    resource_stage("anchors upload", prefix=prefix, files=len(files), completed=0)
+    for i, p in enumerate(files, 1):
         b.blob(f"{prefix}/{p.relative_to(local)}").upload_from_filename(str(p))
+        if i % 8 == 0 or i == len(files):
+            resource_stage("anchors upload", prefix=prefix, files=len(files), completed=i)
     return len(files)
 
 
@@ -1295,6 +1338,7 @@ def start_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-R", "--read-rows", "R", default=R_DEFAULT, type=int, help="R")
 @option("-T", "--tmp", default="/stage/tmp", help="Local scratch")
+@monitor_resources(prefix="ANCHOR_RESOURCE")
 def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
     """A level-0 run's `names/` and `anchors/` (both kinds and, when every tier before it carries one, the starts-with
     catalog `anchors/start/`; `meta.json` last), over the tiers before it in the newest manifest (the base and its earlier
@@ -1330,7 +1374,10 @@ def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
     for t in prior:
         if not (t.root / ANCHORS / "meta.json").exists():
             raise SystemExit(f"{t.root}: no {ANCHORS}/meta.json (build the tiers in order)")
-    con = connect(threads, mem, tmp)
+    from .anchor_profile import AnchorConnection
+
+    profiles = Path(tmp) / f"anchor-profiles-{run}"
+    con = AnchorConnection(connect(threads, mem, tmp), profiles)
     local = Path(tmp) / f"run-{run}"
     local.mkdir(parents=True, exist_ok=True)
     src = _tier_root(mount, gen, run)
@@ -1344,7 +1391,12 @@ def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
     else:
         versions = files_sql(cdelta, "depth, path, usr, vf, vt, size, n_files")
     shutil.rmtree(local / ANCHORS, ignore_errors=True)
-    doc = build_run_local(con, prior, Tier(local), scan_epoch(run), R, K, scans, versions, rule=_gen_rule(mount, gen))
+    diagnostics = f"static-names/diagnostics/{gen}/{run}/anchors"
+    try:
+        doc = build_run_local(con, prior, Tier(local), scan_epoch(run), R, K, scans, versions, rule=_gen_rule(mount, gen))
+    finally:
+        _upload_dir(_gcs(scratch_bucket()), profiles, diagnostics)
+        err(f"ANCHOR_PROFILES gs://{scratch_bucket()}/{diagnostics}/")
     if versions is not None:
         _upload_dir(b, local / NAMES, f"{prefix}/{NAMES}", last=("sidecar.parquet",))
     # The starts-with catalog first (its own `meta.json` last), then the rest of `anchors/` (`meta.json` last).

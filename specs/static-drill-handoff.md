@@ -1,5 +1,7 @@
 # Handoff: drilldown runs, their place in `runs add`, and compaction
 
+**Superseded handoff (reconciled 2026-10-11).** Drill-run integration, tier-preserving merges, T1236 backfill and concurrent drill/anchors have landed. Do not replay items 1–4 under “Left” or merge the old branches to implement them again. The Oct 11 scan measured drill at 33.5 minutes despite prefetch; CPU fixes from `917f4369` are now built, with full-scan measurement pending. Compaction remains separately gated; this file's old trial is not a production command. Current runbook: [GCS operations](gcs-operations.md) and [static append](static-append.md). The original handoff below is retained as dated provenance.
+
 Written 2026-10-09 by the session that built the drill runs and started compaction, for the agent that continues. Specs to read first: `specs/static-append.md` ("Drilldown runs (heavy terms)": design, the measured 10-09 run, R2 layout, runbook) and `specs/static-compaction.md` (design).
 
 ## Branches
@@ -29,7 +31,7 @@ Each worktree has its own `.venv`: `UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --
   - Real trial: folding `cintervals` for 256 ranges took 5 min wall (16 tasks). The shard merge took 19 min (32 tasks, 264 shards, 136.4 GB, ~0.7M rows/s per shard).
   - References matched: `ref-ranges` 8/8 files md5-equal to a rebuild from the 71 scan files (ranges 0, 77, 150, 255); `ref-shards` 6/6 (shards 1, 211, 233).
 
-## Left
+## Original open items (2026-10-09; integration items now completed)
 
 1. **The drill stage in `runs add`** (`static_runner.py` `Runner.one`). Put it after shards ∥ catalog and before publish. Make it one Batch job with 2 tasks: `python -m dt_cloud.static_drill build -g GEN -d SCAN_ID -k task` (task 0 long, task 1 short). It is done once `deltas/<id>/drill/meta.json` exists. The R2 job already copies `drill/` with each run (`R2_SERVED`). Add a fake-runner test in `tests/test_static_runner.py`.
 2. **`publish` merges drill tiers.**

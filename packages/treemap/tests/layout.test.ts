@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { edgeEmphFactor, flattenPlaced, hitTest, layoutCells, type LayoutConfig, type PlacedCell } from '../src/layout'
+import { edgeEmphFactor, flattenPlaced, hitTest, layoutCells, reclaimTitleColumns, type LayoutConfig, type PlacedCell } from '../src/layout'
 import { squarify } from '../src/squarify'
 
 interface N {
@@ -52,6 +52,99 @@ function place(): PlacedCell<N>[] {
 }
 
 const label = (c: PlacedCell<N>) => (c.node as N).n
+const round = (n: number) => Number(n.toFixed(8))
+
+describe('reclaimTitleColumns', () => {
+  const columns = [
+    { it: 'left', x: 0, y: 0, w: 120, h: 80 },
+    { it: 'upper', x: 120, y: 0, w: 80, h: 20 },
+    { it: 'lower', x: 120, y: 20, w: 80, h: 60 },
+  ]
+
+  it('accounts for reclaimed space in one shared area scale for every sibling', () => {
+    const raised = reclaimTitleColumns(columns, 100, 80, 20)
+    const scales = raised.map((r, i) => Number((r.w * r.h / (columns[i].w * columns[i].h)).toFixed(8)))
+    expect(scales).toEqual([1.08695652, 1.08695652, 1.08695652])
+    expect(raised.map(r => Number((r.w * r.h).toFixed(8)))).toEqual([10434.7826087, 1739.13043478, 5217.39130435])
+  })
+
+  it('stretches a complete right column together and preserves its bottom edge', () => {
+    expect(reclaimTitleColumns(columns, 100, 80, 20).map(r => ({ ...r, x: round(r.x), w: round(r.w) }))).toEqual([
+      { it: 'left', x: 0, y: 0, w: 130.43478261, h: 80 },
+      { it: 'upper', x: 130.43478261, y: -20, w: 69.56521739, h: 25 },
+      { it: 'lower', x: 130.43478261, y: 5, w: 69.56521739, h: 75 },
+    ])
+    expect(columns).toEqual([
+      { it: 'left', x: 0, y: 0, w: 120, h: 80 },
+      { it: 'upper', x: 120, y: 0, w: 80, h: 20 },
+      { it: 'lower', x: 120, y: 20, w: 80, h: 60 },
+    ])
+  })
+
+  it('does not lift a column intersecting the title', () => {
+    expect(reclaimTitleColumns(columns, 121, 80, 20)).toBe(columns)
+  })
+
+  it('does not stretch a partial column across a wide sibling below it', () => {
+    const rows = [
+      { it: 'left', x: 0, y: 0, w: 120, h: 40 },
+      { it: 'right', x: 120, y: 0, w: 80, h: 40 },
+      { it: 'wide', x: 0, y: 40, w: 200, h: 40 },
+    ]
+    expect(reclaimTitleColumns(rows, 100, 80, 20)).toBe(rows)
+  })
+
+  it('rejects a non-finite reservation or a non-positive available height', () => {
+    expect([reclaimTitleColumns(columns, Infinity, 80, 20), reclaimTitleColumns(columns, 100, 0, 20), reclaimTitleColumns(columns, 100, 80, 0)]).toEqual([columns, columns, columns])
+  })
+})
+
+describe('title-space placement', () => {
+  const branch: N = { n: 'parent', size: 2, children: [{ n: 'left', size: 1 }, { n: 'right', size: 1 }] }
+  const root: N = { n: 'root', size: 2, children: [branch] }
+  const top = [{ it: branch, x: 0, y: 0, w: 200, h: 100 }]
+  const config: LayoutConfig<N> = {
+    ...cfg,
+    getTitleWidth: () => 60,
+    tilingFor: () => 'shared',
+    layTiles: (items, _x, _y, w, h) => items.map((it, i) => ({ it, x: i * w / 2, y: 0, w: w / 2, h })),
+  }
+
+  it('lifts right columns within the parent stroke and hit-tests their reclaimed region', () => {
+    const cells = layoutCells(top, [root], 'shared', config)
+    expect(cells[0].children.map(c => [label(c), ...[c.x, c.y, c.w, c.h].map(round)])).toEqual([
+      ['left', 1, 20, 109.62711864, 79],
+      ['right', 110.62711864, 1, 88.37288136, 98],
+    ])
+    expect(cells[0].titleWidth).toBe(60)
+    expect([hitTest(cells, 30, 10)?.node, hitTest(cells, 150, 10)?.node]).toEqual([branch, branch.children![1]])
+  })
+
+  it('preserves the gaps inset while reclaiming the strip', () => {
+    const cells = layoutCells(top, [root], 'gaps', { ...config, tilingFor: () => 'gaps' })
+    expect(cells[0].children.map(c => [label(c), ...[c.x, c.y, c.w, c.h].map(round)])).toEqual([
+      ['left', 3, 20, 106.64327485, 77],
+      ['right', 109.64327485, 3, 87.35672515, 94],
+    ])
+  })
+
+  it('retains the full strip when the title uses its entire width', () => {
+    const cells = layoutCells(top, [root], 'shared', { ...config, getTitleWidth: (_n, _labels, _w, boxW) => boxW })
+    expect(cells[0].children.map(c => [c.y, c.h])).toEqual([[20, 79], [20, 79]])
+    expect(cells[0].titleWidth).toBe(null)
+  })
+
+  it('measures the collapsed chain and preserves its deepest node identity', () => {
+    const parent: N = { n: 'outer', size: 2, children: [branch] }
+    const calls: string[][] = []
+    const cells = layoutCells([{ ...top[0], it: parent }], [root], 'shared', {
+      ...config, collapseChains: true,
+      getTitleWidth: (_n, labels) => { calls.push(labels!); return 60 },
+    })
+    expect(calls).toEqual([['outer', 'parent']])
+    expect([cells[0].node, cells[0].chainLabels, cells[0].titleWidth]).toEqual([branch, ['outer', 'parent'], 60])
+  })
+})
 
 describe('layoutCells', () => {
   it('places the top level with the viewed node as basePath', () => {

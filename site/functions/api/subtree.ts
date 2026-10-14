@@ -11,6 +11,7 @@
  * edge cache accordingly. w/h arrive quantized-up to 128px so resizes mostly
  * re-hit the cache.
  */
+import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
 import { type Env, type Identity, requireViewer } from '../_lib/auth.js'
 import { ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -101,6 +102,12 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
     if (gated instanceof Response) return gated
     id = gated
   }
+  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  // and every body (cached or fresh) is filtered on the way out.
+  const restriction = restrictionFor(id, ctx.env)
+  if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  const out = (res: Response | Promise<Response>) =>
+    restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictSubtree>[0]) => restrictSubtree(b, restriction))) : res
 
   // A user lens or an owner pool folds the live ledger (assignments repaint
   // attribution, or move bytes in or out of a pool): its cache key carries the head.
@@ -172,13 +179,13 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
       return res
     }
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
-    if (hit) return isPartial(hit) ? upgrade(hit) : hit
+    if (hit) return out(isPartial(hit) ? upgrade(hit) : hit)
 
     const { body, keep } = await render({ trace: st.trace })
     // A phase 2 cut short by its time budget: kept briefly (`keepFor`), so a retry or a second viewer isn't
     // another full recompute; its totals and match counts are exact, only the drawn interiors partial.
     const res = await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keep)
-    return keep === true ? res : upgrade(res)
+    return out(keep === true ? res : upgrade(res))
   } catch (e) {
     if (e instanceof NotFound) return new Response('path not found', { status: 404 })
     if (e instanceof FilterRejected) return new Response(rejectBody(e.reject), { status: 400, headers: { 'content-type': 'application/json' } })

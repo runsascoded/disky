@@ -163,7 +163,12 @@ class Fake:
 
 def _py(module: str, *args: str, mount: bool = True) -> str:
     m = " -m /gcs/data" if mount else ""
-    return f"set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.{module} {' '.join(args)}{m}"
+    diagnostics = ""
+    if module == "static_drill" and args[0] == "build":
+        diagnostics = """trap 'rc=$?; printf "DRILL_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "DRILL_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
+    elif module == "static_anchors" and args[0] == "run":
+        diagnostics = """trap 'rc=$?; printf "ANCHOR_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "ANCHOR_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
+    return f"set -euo pipefail; {diagnostics}mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.{module} {' '.join(args)}{m}"
 
 
 def _runs(*ids: str) -> list[dict]:
@@ -203,7 +208,7 @@ def _chain(d: str, runs: list[str], drill: bool = False, anchors: bool = False) 
         ("append", 4, _py("static_append", "append", g, "-n", "2")),
         ("shards", 1, _py("static_append", "shards", g)),
         ("catalog", 1, _py("static_append", "catalog", g)),
-        *([("drill", 2, _py("static_drill", "build", g, "-k", "task", "-M", "90GB", "-p", "16"))] if drill else []),
+        *([("drill", 2, _py("static_drill", "build", g, "-k", "task", "-M", "60GB", "-p", "16"))] if drill else []),
         *([("anchors", 1, _py("static_anchors", "run", g, "-M", "90GB", "-p", "16"))] if anchors else []),
         ("publish", d),
         _r2(d, runs),
@@ -655,7 +660,7 @@ def _cw_keys(*built: str, tiers: tuple[str, ...] = ("drill",)) -> dict:
 
 
 def _drill_build(d: str) -> tuple:
-    return ("drill", 2, _py("static_drill", "build", f"-g {GEN} -d {d}", "-k", "task", "-M", "90GB", "-p", "16"))
+    return ("drill", 2, _py("static_drill", "build", f"-g {GEN} -d {d}", "-k", "task", "-M", "60GB", "-p", "16"))
 
 
 def _tier_merge(key: str, tier: str = "drill") -> tuple:

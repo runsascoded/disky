@@ -1,7 +1,7 @@
 import type { CardData } from './card.js'
 
 /** Bump whenever rendering or public-disclosure rules change. */
-export const RENDER_VERSION = '5'
+export const RENDER_VERSION = '6'
 export type AnonymousPolicy = 'generic' | 'shape'
 export interface PolicyEnv { OG_ANONYMOUS?: string; ROOT_LABEL?: string; AUTH_MODE?: string }
 

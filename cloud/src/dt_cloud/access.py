@@ -39,6 +39,8 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+from .resource_monitor import monitor_resources, resource_stage
+
 err = partial(print, file=sys.stderr)
 
 
@@ -324,6 +326,7 @@ def ingest_bucket(
     n_rows_total = 0
 
     for ci, chunk in enumerate(chunks):
+        resource_stage("stage-csv", bucket=bucket, chunk=ci + 1, chunks=len(chunks), input_bytes=chunk.bytes)
         csv_dir = stage_dir / bucket / "csv"
         if csv_dir.exists():
             shutil.rmtree(csv_dir)
@@ -351,11 +354,12 @@ def ingest_bucket(
         # Half the cores: the parquet writer keeps per-thread row-group
         # buffers in flight, and 16 threads' worth blew a 24GB cap on a
         # row-heavy chunk (2026-08-23) that byte-similar chunks survived.
-        con.execute(f"SET threads = {max(4, (os.cpu_count() or 8) // 2)}")
+        con.execute(f"SET threads = {int(os.environ.get('DUCKDB_THREADS_ACCESS', max(4, (os.cpu_count() or 8) // 2)))}")
         tmp = stage_dir / bucket / ".duckdb-tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         con.execute(f"SET temp_directory = '{tmp}'")
 
+        resource_stage("parse-csv", bucket=bucket, chunk=ci + 1, chunks=len(chunks))
         rel = parser_for("gcs")(f"{csv_dir}/usage/*", store="gcs", con=con)
         rel.write_parquet(str(raw_local), compression="zstd")
         n_rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{raw_local}')").fetchone()[0]
@@ -371,9 +375,11 @@ def ingest_bucket(
                 f"{DEDUPE_WARN_FRACTION:.0%}; suspect the dedupe key, not the data"
             )
         raw_rel = f"(SELECT * FROM read_parquet('{raw_local}'))"
+        resource_stage("access-aggregate", bucket=bucket, chunk=ci + 1, chunks=len(chunks), rows=n_rows)
         stats = aggregate_access(con, raw_rel, str(agg_local))
         # Layer-2b must read 1a, not 2a: 2a has already summed bytes_out across
         # requests, and the per-request size distribution can't be recovered.
+        resource_stage("read-size-aggregate", bucket=bucket, chunk=ci + 1, chunks=len(chunks), rows=n_rows)
         sizes = aggregate_read_sizes(con, raw_rel, str(sizes_local))
         con.close()
         err(
@@ -384,6 +390,7 @@ def ingest_bucket(
 
         # Upload both, then (and only then) advance the watermark — a crash
         # in between reprocesses this chunk onto the same object names.
+        resource_stage("upload", bucket=bucket, chunk=ci + 1, chunks=len(chunks))
         for local, kind in ((raw_local, "raw"), (agg_local, "agg"), (sizes_local, "sizes")):
             blob = data_bkt.blob(f"access/{kind}/{bucket}/{span}.parquet")
             upload_blob(blob, local, workers=workers)
@@ -409,6 +416,7 @@ def ingest_bucket(
     }
 
 
+@monitor_resources(prefix="ACCESS_RESOURCE")
 def ingest(
     buckets: tuple[str, ...],
     log_bucket: str,
@@ -431,6 +439,7 @@ def ingest(
     out = []
     try:
         for b in buckets:
+            resource_stage("bucket", bucket=b)
             out.append(
                 ingest_bucket(
                     client,

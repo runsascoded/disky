@@ -371,17 +371,12 @@ export function stackTiers(s: StoreHealth, axis: readonly string[], now: number)
   return rows
 }
 
-/** The coverage grid as timeline rows: one per column, one shard per scan (`na` cells left out). */
+/** Short labels shared by the scan-event chart and coverage table. */
 export const COLUMN_LABELS: Record<Column, string> = { path: 'path', interval: 'iv', light: 'light', drill: 'drill', anchors: 'anch', r2: 'r2' }
 
-export function coverageTiers(cov: readonly ScanCoverage[], columns: readonly Column[], now: number): PyramidTierCoverStatus[] {
-  const axis = cov.map(c => c.scan)
-  return columns.map(col => row(COLUMN_LABELS[col], cov.flatMap(c => {
-    const cell = c.cells[col]
-    if (cell === 'na') return []
-    const { start, end } = spanOf(c.scan, c.scan, axis, now)
-    return [{ start: iso(start), end: iso(end), shardDur: c.scan, status: cell }]
-  }), now))
+/** Observations at scan instants; a served snapshot makes no claim about the time until the next scan. */
+export function coverageEvents(cov: readonly ScanCoverage[], columns: readonly Column[]) {
+  return columns.map(column => ({ column, events: cov.filter(c => c.cells[column] !== 'na').map(c => ({ scan: c.scan, time: scanTime(c.scan), status: c.cells[column] })) }))
 }
 
 /** The columns a document has anything in (a store that isn't configured contributes none). */

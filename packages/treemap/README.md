@@ -12,6 +12,7 @@ Ships:
 | [`<Treemap>`](#treemap) | Squarified layout with **two renderers** (SVG/DOM default + whole-map `<canvas>`), drill-on-click, pin-on-leaf tooltip, keyboard nav, fold-small "…" dust tiles, shared-edge (gapless) tiling, per-cell coloring + [emphasis `ring`](#brushing), fullscreen, slot-based coloring/tooltip/legend/rollup, lazy subtrees. |
 | [`<VoronoiTreemap>`](#voronoitreemap) | Circle- (or polygon-) clipped Voronoi tessellation, areas ∝ value. Separate `@rdub/treemap/voronoi` subpath — the only part with dependencies. |
 | [`useHoverPin`](#usehoverpin) | Headless hover+pin state (single pin, touch-safe, outside-click / Esc clear). |
+| `<TitleSpaceToggle>` | Controlled checkbox for `reclaimTitleSpace`; share its `checked` value with `<Treemap reclaimTitleSpace={checked}>`. |
 | `squarify` / `foldSmall` / `foldThin` / `squarifyRemainder` | Pure layout primitives if you want to render the cells yourself. |
 | `layoutCells` / `flattenPlaced` / `hitTest` / `isFolded` | Placed-cell layout + hit-testing, shared by both renderers. |
 | `resolveCellStyle` / `foldedOf` | Cell-style resolution (the `colorForCell` → `lens` → contrast-edge fall-through). |
@@ -25,6 +26,8 @@ Ships:
 > live in [`@disk-tree/react`](../react), which re-exports everything here.
 
 ## Install
+
+`reclaimTitleSpace` defaults to `false`: parents reserve a full-width title bar. Enabling it lets complete columns to the right of the measured label reclaim that strip, while all sibling rectangles retain one shared area multiplier. It works with DOM, canvas, hit-testing and export. `branchOutline="…"` adds quiet, one-pixel parent frames above descendants without changing layout; those frames also appear in exported images.
 
 Published to a SHA-pinnable **dist branch** (via [`npm-dist`][npm-dist]) — no
 npm publish (yet). Pin by SHA so upgrades are explicit:

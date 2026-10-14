@@ -1,5 +1,5 @@
 // specs/scan-runs-ui.md: /api/scan-runs over the cw lineage's migration (FKs on).
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { onRequestGet as route } from '../api/scan-runs/[[path]]'
 import { sqliteD1 } from './testD1'
 
@@ -19,6 +19,48 @@ const get = (db: unknown, path: string, env: object = {}) =>
   route({ request: new Request(`http://localhost/api/scan-runs${path ? `/${path}` : ''}`), env: { DB: db, GCP_PROJECT: 'proj', META_TREE_URL: 'https://h.test/meta', ...env }, params: path ? { path: path.split('/') } : {} } as never)
 
 describe('GET /api/scan-runs', () => {
+  it('returns active overlapping spans to the same request clock on detail and list', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(400_000)
+    try {
+      const { db, raw } = await sqliteD1('cw')
+      raw.exec(SEED)
+      raw.exec(`
+        UPDATE scan_runs SET status = 'running', finished_ts = NULL WHERE run_id = 'a';
+        INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status)
+          VALUES ('a', 'static-names', 2, 305, NULL, 'running');
+      `)
+      const detail = await (await get(db, 'a')).json() as import('./scanRuns').ScanRunDetail
+      const list = await (await get(db, '')).json() as import('./scanRuns').ScanRunsList
+      const active = [{ phase: 'static-names', start: 205, end: 300, status: 'running', note: null, lane: 1 }]
+      expect(detail.spans.filter(p => p.status === 'running')).toEqual(active)
+      expect(list.runs.find(r => r.run.run_id === 'a')?.spans.filter(p => p.status === 'running')).toEqual(active)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+  it('preserves a historical timeout and exposes its linked recovery separately', async () => {
+    const { db, raw } = await sqliteD1('cw')
+    raw.exec(SEED)
+    raw.exec(`
+      UPDATE scan_run_phases SET note = 'failed (exit 124)' WHERE run_id = 'a' AND phase = 'index';
+      INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_ts, source, updated_ts, store)
+        VALUES ('retry', '2026-10-07', 'phase-recovery', 'a', 'succeeded', 500, 600, 'backfill', 600, 'primary');
+      INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note)
+        VALUES ('retry', 'index', 0, 500, 600, 'done', 'Reused earlier stages');
+    `)
+    const r = await get(db, 'a')
+    const b = await r.json() as import('./scanRuns').ScanRunDetail
+    expect({ secs: b.secs, spans: b.spans.map(p => [p.phase, p.start, p.end, p.status]),
+      issues: b.phase_issues.map(i => [i.phase, i.outcome, i.recovery?.run_id]),
+      recoveries: b.recoveries.map(a => [a.run.run_id, a.secs, a.phases.map(p => p.phase)]),
+    }).toEqual({ secs: 300, spans: [['listing', 0, 200, 'done'], ['index', 200, 290, 'failed']],
+      issues: [['index', 'timed out', 'retry']], recoveries: [['retry', 100, ['index']]],
+    })
+    const list = await (await get(db, '')).json() as import('./scanRuns').ScanRunsList
+    expect(list.runs.map(s => [s.run.run_id, s.phase_issues.map(i => [i.phase, i.recovery?.run_id])])).toEqual([
+      ['b', []], ['a', [['index', 'retry']]],
+    ])
+  })
   it('lists the store\'s orchestrating runs with their totals and links', async () => {
     const { db, raw } = await sqliteD1('cw')
     raw.exec(SEED)

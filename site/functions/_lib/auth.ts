@@ -96,6 +96,9 @@ export interface Env {
    *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
    *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */
   PATH_STORE?: string
+  /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
+   *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
+  OWNER_HISTORY_BATCH?: string
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`). */
   INTERVAL_STORE_GEN?: string
   /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */

@@ -2,6 +2,8 @@ import { Explain } from './Help'
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import type { Tiling } from '@disk-tree/react'
 import { Tooltip } from './Tooltip'
+import { TitleSpaceToggle } from '@disk-tree/react'
+import { DEFAULT_STORE } from './stores'
 
 // Treemap rendering preferences — per-browser, persisted in localStorage,
 // read by every treemap on the site. Same module-store + useSyncExternalStore
@@ -40,6 +42,8 @@ function pref<T extends string>(key: string, ok: readonly T[], dflt: T) {
 
 const tiling = pref<Tiling>('tiling', ['shared', 'gaps'], 'shared')
 const renderer = pref<Renderer>('renderer', ['dom', 'canvas'], 'dom')
+const titleSpace = pref<'reclaim' | 'full'>('title-space', ['reclaim', 'full'], DEFAULT_STORE.reclaimTitleSpace ? 'reclaim' : 'full')
+export const useTitleSpace = titleSpace.use
 // The help line (specs/done/edu-drawer.md): on until the reader turns it off.
 const help = pref<'on' | 'off'>('help', ['on', 'off'], 'on')
 export const useHelpPref = help.use
@@ -57,6 +61,7 @@ const RENDERER_TIP = 'DOM (default): one element per cell — every feature, key
 export function SettingsMenu() {
   const [t, setT] = useTiling()
   const [r, setR] = useRenderer()
+  const [space, setSpace] = useTitleSpace()
   // A native <details> only closes on its own summary; close it on any click
   // outside too, like a menu.
   const ref = useRef<HTMLDetailsElement | null>(null)
@@ -76,6 +81,9 @@ export function SettingsMenu() {
           the renderer toggle also drilled the map — the synthesized mouse
           sequence, not the click, is what the cells saw). */}
       <div className="menu" onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchEnd={e => e.stopPropagation()}>
+        <Explain text="Let complete columns to the right of a parent's label use its empty title strip. Sibling areas keep the same bytes-per-pixel scale. Off: reserve a full-width title bar.">
+          <span className="row"><TitleSpaceToggle checked={space === 'reclaim'} onChange={checked => setSpace(checked ? 'reclaim' : 'full')} /></span>
+        </Explain>
         <Explain text={TILING_TIP}>
           <label className="row">
             <input type="checkbox" checked={t === 'gaps'} onChange={e => setT(e.target.checked ? 'gaps' : 'shared')} />

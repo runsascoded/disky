@@ -41,7 +41,7 @@ from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
 from glob import glob as _glob
 from operator import itemgetter
-from typing import Iterator
+from typing import Any, Iterator
 
 _SLASHES = re.compile(r'/+')
 
@@ -261,6 +261,7 @@ def _scan_shard(
             distinct[i].update(vals.to_pylist())
     entry = None
     if starts:
+        assert prev_last is not None  # set by the batch that opened the first run
         lasts.append(prev_last)
         entry = (starts, firsts, lasts)
     return n_rows, dirty, distinct, entry, ckpts
@@ -742,19 +743,20 @@ def _run_partition(
         top.n_files += 1
         top.n_children += 1
         if n_pivot:
-            file_pivot = [0] * n_pivot
+            row_pivot = [0] * n_pivot
             if pmap0 is not None:
                 v = pvals[0]
                 if v is not None:
                     idx = pmap0[v]
                     top.pivot[idx] += size
-                    file_pivot[idx] = size
+                    row_pivot[idx] = size
             else:
                 for pmap, v in zip(pivot_maps, pvals):
                     if v is not None:
                         idx = pmap[v]
                         top.pivot[idx] += size
-                        file_pivot[idx] = size
+                        row_pivot[idx] = size
+            file_pivot: list[int] | tuple[()] = row_pivot
         else:
             file_pivot = ()
         top.mt_wsum += mtime * size
@@ -862,7 +864,7 @@ def _write_boundary_parts(
         '.', r[0], r[1], 'dir', '', scan_root, r[2], r[3], r[4], 0,
         *r[5], *([mean_of(r[6], r[0])] if mean_mtime else []),
     )))
-    def _widx_of(path: str) -> int:
+    def _widx_of(path: str, ranges: list[tuple[str | None, str | None]]) -> int:
         """Worker range owning `path`. Ranges are contiguous and ordered, so
         the first whose `hi` exceeds the key owns it (last range has hi=None)."""
         for i, (_, hi) in enumerate(ranges):
@@ -886,7 +888,7 @@ def _write_boundary_parts(
             continue
         by_w: dict[int, list[tuple]] = {}
         for key, row in rows:
-            by_w.setdefault(_widx_of(key), []).append(row)
+            by_w.setdefault(_widx_of(key, ranges), []).append(row)
         for widx in sorted(by_w):
             fname = f'{depth:04d}-dir.b.w{widx:03d}.parquet'
             w = _Writer(os.path.join(parts_dir, fname), out_cols, mean_mtime)
@@ -1223,6 +1225,7 @@ def _finalize_depth_worker(
                 buf = rest.to_batches()
                 buf_rows = rest.num_rows
         if buf_rows:
+            assert writer is not None  # opened by the first non-empty batch
             writer.write_table(pa.Table.from_batches(buf, schema).combine_chunks())
     finally:
         if writer is not None:
@@ -1602,7 +1605,7 @@ def aggregate_stream(
 
         _stage(f"merge+stream: {len(run_infos)} run source(s), {n_parts_w} partition(s)")
         try:
-            common = dict(
+            common: dict[str, Any] = dict(
                 parts_dir=parts_dir, bucket=bucket, scan_root=scan_root,
                 pivot_sums=pivot_sums, pivot_maps=pivot_maps, pivot_names=pivot_names,
                 mean_mtime=mean_mtime,
@@ -1610,6 +1613,7 @@ def aggregate_stream(
             if n_parts_w == 1:
                 results = [_run_partition(0, sources=run_infos, dirty=dirty, lo=None, hi=None, suffix='', **common)]
             else:
+                assert ex is not None  # n_parts_w > 1 only when jobs > 1
                 futs = []
                 for i, (lo, hi) in enumerate(ranges):
                     srcs_i = _clip_sources(run_infos, ckpts, lo, hi)

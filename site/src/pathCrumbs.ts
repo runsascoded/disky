@@ -67,3 +67,16 @@ export function toUrlSegs(segs: string[], home?: string[]): string[] {
 export function fromUrlSegs(urlSegs: string[], home?: string[]): string[] {
   return home?.length && urlSegs[0] === '~' ? [...home, ...urlSegs.slice(1)] : urlSegs
 }
+
+/** Decode browser path segments once, before expanding the home shortcut.
+ * Old hand-written URLs can contain a literal `%`; keep those as literal names. */
+export function fromUrlPath(path: string, home?: string[]): string[] {
+  const segs = path.split('/').filter(Boolean).map(s => {
+    try { return decodeURIComponent(s) } catch { return s }
+  })
+  return fromUrlSegs(segs, home)
+}
+
+/** Encode each actual directory name, including URL delimiters and literal `%`. */
+export const toUrlPath = (segs: string[], home?: string[]): string =>
+  toUrlSegs(segs, home).map(encodeURIComponent).join('/')

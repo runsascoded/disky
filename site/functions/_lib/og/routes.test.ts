@@ -4,6 +4,15 @@ import { pageView } from './routes'
 const pv = (p: string) => pageView(new URL(`https://site.example.org${p}`), 'marin GCS')
 
 describe('pageView: page URL → card kind, view params, title', () => {
+  it('distinguishes the explicit diff section from a date range on the snapshot map', () => {
+    expect([
+      pv('/bucket?d=26092812-26091700#diff'),
+      pv('/bucket?d=26092812-26091700&section=diff&dm=max'),
+    ]).toEqual([
+      { kind: 'map', params: { path: 'bucket', d: '26092812-26091700' }, title: 'bucket' },
+      { kind: 'diff', params: { path: 'bucket', d: '26092812-26091700', dm: 'max' }, title: 'bucket · changes' },
+    ])
+  })
   it('map pages: the path, and only the params that change the card', () => {
     expect([
       pv('/'),

@@ -105,6 +105,18 @@ header .hrow {
   gap: 12px;
   flex-wrap: wrap;
 }
+.disk-space-diff {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  h3 { margin: 0 0 6px; font-size: 13px; }
+  table { width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 3px 6px; }
+  th:first-child { text-align: left; }
+  p { margin: 6px 0 0; }
+}
 // ---- The top bar (SiteNav): ☰ nav menu · page scope/controls · avatar menu.
 // Sticky, full-bleed across the page container (negative margins undo its
 // padding), the same chrome parked at the top and stuck mid-scroll.
@@ -322,6 +334,9 @@ header .hrow {
     &.sel { font-weight: 700; }
     &.sel::after { content: ' ✓'; color: var(--accent, #7aa2f7); }
     &.active { background: color-mix(in oklab, var(--accent, #7aa2f7) 22%, transparent); }
+    // A day's only scan: one row, the day then its time (dimmed).
+    &.solo { padding-left: 7px; }
+    .sp-time { margin-left: 8px; color: var(--ink-3); font-weight: 400; }
   }
   .sp-empty { padding: 6px 9px; color: var(--ink-3); font-size: 12px; }
 }
@@ -1539,6 +1554,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     input { margin: 0; }
   }
 
+  // The "Hide" paths (specs/path-scopes.md): one per line, monospace like paths elsewhere.
+  textarea.hide-paths {
+    font: 12.5px var(--mono, ui-monospace, monospace); padding: 4px 7px; min-width: 22em;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; resize: vertical;
+  }
+
   // Phone: the 3-column label / input / hint grid squeezes the hint to one word
   // per line — stack each field instead, hint at full width under its input.
   @media (max-width: 640px) {
@@ -1547,7 +1568,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       .field { display: block; margin: 0 0 14px; }
       .field.submit { display: flex; margin-top: 4px; }
       label { display: block; margin-bottom: 4px; }
-      & > .field > input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; }
+      & > .field > input:not([type="checkbox"]), & > .field > textarea { width: 100%; min-width: 0; box-sizing: border-box; }
       input.days { width: 6em; }
       .hint { display: block; margin-top: 4px; }
     }
@@ -1904,6 +1925,22 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     &:disabled { opacity: 0.35; cursor: default; }
     &:hover:not(:disabled) { color: var(--ink); }
   }
+}
+
+// The largest-files table under the children table (`LargestFiles.tsx`):
+// the same worklist look, a heading with its count picker, and each row's dir
+// part (a drill link) muted ahead of the basename (which opens the file).
+#ltbl { overflow-x: auto; }
+.largest-tbl {
+  margin-top: 18px;
+  h3 {
+    display: flex; align-items: center; gap: 4px; margin: 0 0 4px;
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3);
+    .info { cursor: help; text-transform: none; }
+    select.psize { margin-left: 8px; font: inherit; font-size: 11.5px; text-transform: none; letter-spacing: 0; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+  }
+  .worklist .prefix a.dir { color: var(--ink-3); }
+  .loading { font-size: 12px; color: var(--ink-3); margin: 4px 0; }
 }
 
 // "no reads since …" callout in treemap tooltips (dark tip bg → soft red tint)
@@ -2289,7 +2326,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // more rows on narrow viewports). `useHashSpy` reads the computed margin back
 // to decide when a deep link has landed.
 :root { --anchor-gap: 16px; }
-#tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
+#tree-map, #tbl, #ltbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
 .leaf-note { margin: -8px 0 4px; color: var(--ink-2); code { color: var(--ink); } }
 // Nothing drawable under the drilled node: the canvas folds away (the owner
 // panel / rollup above it stay).
@@ -2824,6 +2861,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     input { margin-top: 3px; }
     .hint { display: block; font-size: 12px; color: var(--dim, #999); margin-top: 2px; }
     &.disabled { cursor: default; opacity: 0.55; }
+    .share-days { display: block; margin-top: 6px; font: inherit; font-size: 12px; padding: 2px 4px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
   }
   .share-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; .err { color: var(--danger, #e05050); font-size: 12px; } }
   .share-url { display: block; margin-top: 10px; font-size: 11px; word-break: break-all; opacity: 0.8; }

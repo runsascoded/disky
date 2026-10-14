@@ -529,6 +529,7 @@ class Runner(ar.Runner):
         name = self.job_name("r2", d)
         cmd = self.command("interval_append", ["r2", "-d", d, *(["-m", manifest] if manifest else [])], mount=False)
         spec = self.spec(name, 1, [cmd], stage="r2", r2=True, machine="n2-highmem-4", ssd_gb=375)
+        spec = ar.label_batch_spec(spec, COMPONENT, scan_id=d)
         self.stage(f"{d} r2" + (f" (manifests/{stem}.json)" if manifest else ""), lambda: self.run_job(name, spec))
 
 

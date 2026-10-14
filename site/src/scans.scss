@@ -31,11 +31,16 @@
   }
   .sr-gantt { .lbl { fill: var(--ink-2); font-size: 13px; } .dur { fill: var(--ink-3); font-size: 12px; } .sr-row-hit { fill: transparent; }
     g:hover .sr-row-hit { fill: color-mix(in srgb, var(--ink) 5%, transparent); }
-    rect.failed { stroke: var(--danger); stroke-width: 2; } }
+    rect.failed { stroke: var(--danger); stroke-width: 2; }
+    .active rect:not(.sr-row-hit) { fill-opacity: 0.65; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .active .lbl, .active .dur { fill: var(--ink); }
+    .failed-label { fill: var(--danger); } }
   .sr-bar { vertical-align: middle; .sr-bar-bg { fill: var(--other); } }
   .sr-runs .links, .runs .links { color: var(--ink-3); }
   .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;
+    &.recovered { border-color: var(--grew); background: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
     code { white-space: pre-wrap; word-break: break-word; } }
+  .sr-recovery { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; p { margin: 6px 0 0; } }
   .sr-facts { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 10px 0 0; font-size: 13px;
     div { display: flex; gap: 6px; min-width: 0; } dt { color: var(--ink-3); } dd { margin: 0; min-width: 0; overflow-wrap: anywhere; } }
   .sr-outputs {

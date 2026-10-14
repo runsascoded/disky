@@ -13,13 +13,24 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
+from click.testing import CliRunner
 
 from dt_cloud.viz import write_path_index
+from dt_cloud.cli import main
 
 STORE_COLS = [
     "path", "usr", "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", "mtime_mean", "created", "last_read",
     "sum_storage_class_id_2", "sum_storage_class_id_3", "sum_storage_class_id_4",
 ]
+
+
+def test_cli_lists_daily_and_subdaily_snapshots(tmp_path: Path, listing: str):
+    ids = ['2026-07-20', '2026-07-20T0600', '2026-07-20T1800']
+    for scan in ids:
+        result = CliRunner().invoke(main, ['path-index', '-d', scan, '-l', listing, '-o', str(tmp_path / scan)])
+        assert result.exit_code == 0, result.exception
+    assert json.loads((tmp_path / 'scans.json').read_text()) == ['2026-07-20T1800', '2026-07-20T0600', '2026-07-20']
+    assert [json.loads((tmp_path / scan / 'meta.json').read_text())['asof'] for scan in ids] == ids
 
 
 def _rows(df: pd.DataFrame, cols: list[str]) -> list[tuple]:

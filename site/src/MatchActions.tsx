@@ -127,6 +127,7 @@ export function ActStatus({ state, confirmT, act, fmtBytes, list }: {
       }
       case 'done': return <>
         <span className="act-st ok">✓ {state.text}</span>
+        {state.req.kind === 'stage' && <a className="act" href="/staged">review staged</a>}
         {state.undo && <button type="button" className="act" onClick={() => void act.undo()}>undo</button>}
         {x}
       </>

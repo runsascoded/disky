@@ -107,10 +107,11 @@ def import_cmd(
     tier_opts = None
     if tiers:
         from disk_tree.find.tiers import parse_tiers
-        if not (tiers_dir or out_dir):
+        tiers_out = tiers_dir or out_dir
+        if not tiers_out:
             raise ValueError("--tiers needs --tiers-dir (or --out-dir)")
         tier_opts = TierOpts(
-            tiers=parse_tiers(tiers), out_dir=tiers_dir or out_dir, row_group_rows=row_group_rows,
+            tiers=parse_tiers(tiers), out_dir=tiers_out, row_group_rows=row_group_rows,
             sort_variants=tuple(tuple(c for c in v.split(',') if c) for v in sort_variants),
             groups=groups,
         )

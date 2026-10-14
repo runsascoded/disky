@@ -12,6 +12,7 @@
  * immutable per (from, to, path, budget, scope) plus the ledger head under a
  * user lens, and edge-cached accordingly.
  */
+import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
@@ -82,6 +83,12 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
 
   const gated = await st.time('auth', requireViewer(ctx as never))
   if (gated instanceof Response) return gated
+  // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
+  // and every body (cached or fresh) is filtered on the way out.
+  const restriction = restrictionFor(gated, ctx.env)
+  if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  const out = (res: Response | Promise<Response>) =>
+    restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Parameters<typeof restrictDiff>[0]) => restrictDiff(b, restriction))) : res
   // Both ends must be indexed scans: a miss is a 404, never another scan.
   const miss = (await Promise.all(['from', 'to'].map(key => scanArg(ctx.env, url.searchParams, key)))).find(r => r instanceof Response)
   if (miss) return miss
@@ -131,12 +138,12 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil
       return res
     }
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
-    if (hit) return isPartial(hit) ? upgrade(hit) : hit
+    if (hit) return out(isPartial(hit) ? upgrade(hit) : hit)
 
     const { body, keep } = await render({ trace: st.trace })
     // A phase 2 cut short by its time budget: kept briefly (`keepFor`, as subtree.ts).
     const res = await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keep)
-    return keep === true ? res : upgrade(res)
+    return out(keep === true ? res : upgrade(res))
   } catch (e) {
     if (e instanceof NotFound) return new Response('path not found in either scan', { status: 404 })
     if (e instanceof FilterRejected) return new Response(rejectBody(e.reject), { status: 400, headers: { 'content-type': 'application/json' } })

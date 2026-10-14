@@ -3,3 +3,4 @@ packages:
   - "packages/*"
   - "infra/cf/capture-trigger"
   - "infra/cf/cron-dispatch"
+  - "infra/cf/r2-access"

@@ -42,6 +42,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from ..duck import scalar
+
 if TYPE_CHECKING:
     import duckdb
 
@@ -109,7 +111,7 @@ def aggregate_access(
         FROM {raw_sql}{cut}
     """)
 
-    n_rows = con.execute("SELECT COUNT(*) FROM access_in").fetchone()[0]
+    n_rows = scalar(con, "SELECT COUNT(*) FROM access_in")
     if n_rows == 0:
         raise ValueError("no access rows in input" + (f" before {as_of_utc(as_of).isoformat()}" if as_of is not None else ''))
 
@@ -154,7 +156,7 @@ def aggregate_access(
             WHERE path != ''
             GROUP BY 1, 2, 3, 4
         """)
-        cnt = con.execute(f"SELECT COUNT(*) FROM {next_tbl}").fetchone()[0]
+        cnt = scalar(con, f"SELECT COUNT(*) FROM {next_tbl}")
         if cnt == 0:
             break
         level_tables.append(next_tbl)
@@ -213,11 +215,11 @@ def aggregate_access(
         TO '{out_parquet}' (FORMAT PARQUET, COMPRESSION ZSTD, KV_METADATA {{{kv_sql}}})
     """)
 
-    n_paths = con.execute("SELECT COUNT(DISTINCT (bucket, path)) FROM access_agg").fetchone()[0]
-    n_hours = con.execute("SELECT COUNT(DISTINCT hour) FROM access_agg").fetchone()[0]
-    total_out = con.execute(
+    n_paths = scalar(con, "SELECT COUNT(DISTINCT (bucket, path)) FROM access_agg")
+    n_hours = scalar(con, "SELECT COUNT(DISTINCT hour) FROM access_agg")
+    total_out = scalar(con,
         "SELECT COALESCE(SUM(bytes_out), 0) FROM access_agg WHERE path = '.'"
-    ).fetchone()[0]
+    )
     return {
         'rows_in': int(n_rows),
         'paths_out': int(n_paths),

@@ -2,6 +2,7 @@
 // (specs/done/dogi.md): crawlers never run the React router, so the edge says what
 // each URL shows. Everything else passes through untouched, except an
 // `/assets/` miss (`assetMiss`).
+import { restrictGate } from './_lib/restrict.js'
 import { coloPutsSettled } from './_lib/index.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
 
@@ -23,6 +24,8 @@ export const assetMiss = (): Response => new Response('asset not found\n', {
 })
 
 export const onRequest = async (ctx: { request: Request; env: OgEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
+  const blocked = await restrictGate(ctx.request, ctx.env as never)
+  if (blocked) return blocked
   const url = new URL(ctx.request.url)
   if (ctx.request.method === 'GET') {
     const anonymous = await anonymousPage(ctx.env, url)

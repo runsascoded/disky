@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from .scan_id import is_scan_id
-from .scan_runs import ALL, JobKind, ObjectStore, Output, Phase, Profile, Record, Run, _epoch, job_fields, measure_after
+from .scan_runs import ALL, JobKind, ObjectStore, Output, Phase, Profile, Record, Run, _epoch, job_fields, measure_after, phase_status
 
 GEN_STAMP = re.compile(r"(\d{8}T\d{6}Z)")
 BATCH_STATES = {"SUCCEEDED": "succeeded", "FAILED": "failed", "CANCELLED": "failed", "RUNNING": "running",
@@ -94,17 +94,24 @@ def phases_of(profile: Profile, lines: Sequence[tuple[int, str]], started: int |
     phase at the run's start; a concurrent one where the last serial phase ended). A repeated name keeps its last
     marker."""
     rx = re.compile(profile.phase_marker)
+    start_rx = re.compile(profile.phase_start_marker)
     out: dict[str, Phase] = {}
     prev = serial = started
     for t, x in lines:
+        if m := start_rx.search(x):
+            name = m.group("name")
+            if name not in profile.phase_ignore and name not in out:
+                out[name] = Phase(name, len(out), t, None, "running")
+            continue
         m = rx.search(x)
         if not m or m.group("name") in profile.phase_ignore:
             continue
         name = m.group("name")
         note = m.groupdict().get("note")
-        begin = started if name in profile.overlapped else serial if name in profile.concurrent else prev
+        begin = out[name].started_ts if name in out else (
+            started if name in profile.overlapped else serial if name in profile.concurrent else prev)
         seq = out[name].seq if name in out else len(out)
-        out[name] = Phase(name, seq, begin, t, "done", note)
+        out[name] = Phase(name, seq, begin, t, phase_status(note), note)
         if name not in profile.overlapped:
             prev = t
             if name not in profile.concurrent:
@@ -141,6 +148,8 @@ def run_of(profile: Profile, kind: JobKind, job: Mapping, lines: Sequence[tuple[
     if status == "succeeded" and profile.nop_marker and any(re.search(profile.nop_marker, x) for _, x in lines):
         status = "nop"
     run = Run(run_id=job["uid"], scan=scan, kind=kind.kind, status=status, source="backfill", store=profile.store, **jf)
+    if parent := _commands(job)[3].get("SCAN_ROOT_UID"):
+        run = replace(run, parent=parent)
     if status == "failed":
         run = replace(run, error=failure_of(profile, job, lines))
     return Record(run, tuple(phases_of(profile, lines, jf["started_ts"])))
@@ -211,7 +220,7 @@ def _downstream(profile: Profile, kind: str) -> bool:
 
 def _link(profile: Profile, rec: Record, heads: Sequence[Run]) -> Record:
     """A downstream run's parent: the orchestrating run of its scan whose window holds its start (else the latest)."""
-    if not _downstream(profile, rec.run.kind) or not heads:
+    if rec.run.parent or not _downstream(profile, rec.run.kind) or not heads:
         return rec
     t = rec.run.started_ts or 0
     inside = [h for h in heads if h.started_ts and h.started_ts - 120 <= t <= (h.finished_ts or 2**62)]
@@ -271,7 +280,7 @@ def fetch_jobs(project: str, regions: Sequence[str]) -> list[dict]:
 def log_filter(profile: Profile, since: dt.datetime) -> str:
     """The task-log lines the backfill reads: a server-side prefilter on each marker's literal head (the phase, NOP
     and error markers and the kinds' `log` scan sources); the markers' full regexes then run here."""
-    rxs = [profile.phase_marker] + [r for r in (profile.nop_marker, profile.error_marker) if r]
+    rxs = [profile.phase_marker, profile.phase_start_marker] + [r for r in (profile.nop_marker, profile.error_marker) if r]
     rxs += [s["log"] for k in profile.jobs for s in k.scan if "log" in s]
     heads = list(dict.fromkeys(_head(r) for r in rxs))
     alt = " OR ".join(f'textPayload=~"{h}"' for h in heads)

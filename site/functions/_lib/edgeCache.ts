@@ -28,6 +28,10 @@ const KV_TTL = 30 * 86400
 // pre-deploy diff while every other window was fresh (2026-09-17). The edge
 // tiers keep the long TTL behind the versioned key.
 const PRIVATE = 'private, max-age=300'
+/** A partial answer's browser copy: none. Its full one replaces it at the edge within seconds (`upgradePartial`),
+ *  and the next ask — the client's re-ask while `budgetCut`, or a reload — must reach the edge to get it: a
+ *  browser copy (it was `max-age=<ttl>`, 120 s) served the cut answer again, instantly, on every reload. */
+const PARTIAL_CLIENT = 'no-store'
 const JSON_HDR = { 'content-type': 'application/json; charset=utf-8' }
 
 export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST?: string }
@@ -79,9 +83,7 @@ export async function cacheMatch(env: CacheEnv, key: Request): Promise<Response 
   const hit = await colo().match(key)
   if (hit) {
     const res = new Response(hit.body, hit)
-    // A partial answer's browser copy lives no longer than its edge copy.
-    const partial = /ttl=(\d+)/.exec(hit.headers.get('x-cache-partial') ?? '')
-    res.headers.set('cache-control', partial ? `private, max-age=${partial[1]}` : PRIVATE)
+    res.headers.set('cache-control', isPartial(hit) ? PARTIAL_CLIENT : PRIVATE)
     res.headers.set('x-cache', 'hit')
     return res
   }
@@ -135,7 +137,7 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
   res.headers.set('x-cache-store', stored)
   if (partial != null) {
     res.headers.set('x-cache-partial', `ttl=${partial}`)
-    res.headers.set('cache-control', `private, max-age=${partial}`)
+    res.headers.set('cache-control', PARTIAL_CLIENT)
   }
   return res
 }

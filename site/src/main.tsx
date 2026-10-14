@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
+import { exchangeKeyParam } from '@open-athena/auth/react'
 import Root from './Root'
 import { UnitsProvider } from './units'
 import { withoutOg } from './sharePreview'
@@ -32,14 +33,21 @@ if (clean != null) history.replaceState(history.state, '', clean)
 // The session log (specs/session-log.md): off unless the deployment's window is open; never awaited.
 void bootSessionLog()
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <UnitsProvider>
-          <Root />
-        </UnitsProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
-  </StrictMode>,
-)
+async function start() {
+  // Redeem and strip a share link's `key=` before BrowserRouter snapshots the
+  // URL: its stale search would otherwise restore the credential on the next
+  // SPA navigation (and re-redeem it on a reload).
+  await exchangeKeyParam()
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <UnitsProvider>
+            <Root />
+          </UnitsProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </StrictMode>,
+  )
+}
+void start()

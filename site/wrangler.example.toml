@@ -112,6 +112,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # PATH_STORE = "intervals"                 # read the dates INTERVAL_STORE_GEN holds from the change-interval path store on INDEX_R2 (`_lib/index.ts` `openInterval`, specs/interval-store.md); lenses and owner pools still read per-scan stores. `opt-in`: only requests with `ps=iv`
 # INTERVAL_STORE_GEN = "2026-10-09"         # with PATH_STORE: the generation, `interval-store/<gen>/` on INDEX_R2
 # INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
+# OWNER_HISTORY_BATCH = "1"                # prototype (specs/root-owner-history.md; off): a fleet-root owner series from one bounded interval-store version read, the canonical per-scan reader as fallback
 # STATIC_BENCH = "1"                        # dev: `/api/static-bench`, R2 read timings over INDEX_R2
 # SERVED_R2 = "1"                           # the snapshot JSONs (`snapshots/…`) and extras sidecars (`attr.tsv{,.idx.json}`) from INDEX_R2, under their store keys (`_lib/index.ts` `servedStore`; the job's `dt-cloud publish-r2 -S`); unset = through STORE_*
 # [[r2_buckets]]                            # Worker-served indexes (the static name-search shards)

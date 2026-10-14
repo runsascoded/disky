@@ -115,7 +115,32 @@ describe('the parent sizes the whole queue, as /staged does', () => {
     await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
     expect([lookups, calls.map(c => [c.method, c.body.ts, sectionText(c.body.blocks)])]).toEqual([
       [1000, 1000, 501],
-      [['chat.update', PARENT, PARENT_TEXT(2501, 1, '2.4 PiB', '25,000').replace(` · owners`, ' · 1 empty · owners')]],
+      [['chat.update', PARENT, `${PARENT_TEXT(2500, 1, '2.4 PiB', '25,000')}\n+1 staged prefix empty at scan, not counted`]],
+    ])
+  })
+})
+
+describe('prefixes empty at the scan are not counted', () => {
+  it('the parent counts (prefixes, batches, stagers) and sizes only what still holds data, naming the empty ones apart; so does each reply', async () => {
+    const calls = fakeSlack()
+    const { db } = await planDb()
+    const BO = 'bo@example.org'
+    await notifyPlan(env, db, 1, SITE, await stage(db, 1, ['gs://b/ckpt/run-1/step-0/', 'gs://b/empty/a/']), { now: 1000 })
+    await notifyPlan(env, db, 1, SITE, await stage(db, 2, ['gs://b/empty/b/', 'gs://b/empty/c/'], { by: BO }), { now: 1100 })
+    const parent = (empty: number) => `*Staged for deletion* · plan #1 · 2 prefixes in 2 batches\nstaged by Ann Bee\n*2.0 TiB* · 20 objects at scan ${SCAN} · owners: Ann Bee 2.0 TiB\n+${empty} staged ${empty === 1 ? 'prefix' : 'prefixes'} empty at scan, not counted`
+    expect([
+      calls.filter(c => c.method !== 'conversations.replies').map(c => [show(c), c.body.text]),
+    ]).toEqual([[
+      [`update ${PARENT}: ${parent(1)}`, 'Staged for deletion: plan #1, 2 prefixes'],
+      [`post in ${PARENT}: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects (+1 empty at scan)\n\`b/ckpt/run-1/step-0/\` 1.0 TiB`, 'Ann Bee staged 1 path · 1.0 TiB (+1 empty at scan)'],
+      [`update ${PARENT}: ${parent(3)}`, 'Staged for deletion: plan #1, 2 prefixes'],
+      [`post in ${PARENT}: :wastebasket: *bo* staged 2 paths · all empty at scan`, 'bo staged 2 paths · all empty at scan'],
+    ]])
+    // Rejecting still unstages every path the batch staged, empty or not.
+    const bo = calls.filter(c => c.method === 'chat.postMessage').at(-1)!.body
+    expect((bo.blocks as { elements?: { action_id: string; confirm?: { text: { text: string } } }[] }[])[1].elements!.map(e => [e.action_id, e.confirm?.text.text ?? null])).toEqual([
+      ['staged_reject', 'Unstages the 2 paths it staged. Nothing is deleted.'],
+      ['staged_open', null],
     ])
   })
 })

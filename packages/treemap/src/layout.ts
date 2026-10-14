@@ -50,6 +50,8 @@ export interface PlacedCell<T> {
   boxH: number
   showLbl: boolean
   hasKids: boolean
+  /** Width of the parent's title hover region; null keeps the full-width bar. */
+  titleWidth: number | null
   children: PlacedCell<T>[]
 }
 
@@ -77,6 +79,8 @@ export interface LayoutConfig<T> {
   borderWidth: (depth: number, ctx: { w: number; h: number }) => number
   /** Shallow-edge emphasis (see {@link edgeEmphFactor}); 0 = uniform. */
   edgeEmphasis: number
+  /** Measured title content width. Absent keeps a full-width title strip. */
+  getTitleWidth?: (n: T, chainLabels: string[] | null, w: number, boxW: number) => number
   /** Fold small/thin items before layout (the component's `fold`). */
   fold: (raw: Node<T>[], w: number, h: number) => Node<T>[]
   /** Lay already-folded items into a box (plain squarify or `squarifyRemainder`). */
@@ -90,6 +94,76 @@ export interface LayoutConfig<T> {
     h: number,
     rs: { w: number; h: number }[],
   ) => Tiling
+}
+
+/** Reclaim a title strip while preserving every sibling's original area ratio. */
+export function reclaimTitleColumns<T>(
+  rects: Rect<T>[],
+  titleRight: number,
+  bodyHeight: number,
+  lift: number,
+): Rect<T>[] {
+  if (bodyHeight <= 0 || lift <= 0 || ![titleRight, bodyHeight, lift].every(Number.isFinite)) return rects
+  const epsilon = 1e-6
+  let boundary: number | undefined
+  let rightmost = -Infinity
+  for (const r of [...rects].sort((a, b) => a.x - b.x)) {
+    if (r.x >= titleRight && rightmost <= r.x + epsilon) {
+      boundary = r.x
+      break
+    }
+    rightmost = Math.max(rightmost, r.x + r.w)
+  }
+  if (boundary === undefined) return rects
+  const width = rects.reduce((max, r) => Math.max(max, r.x + r.w), 0)
+  const raisedHeight = bodyHeight + lift
+  // One area multiplier for BOTH partitions. The raised partition grows
+  // vertically and narrows horizontally; the unraised partition widens.
+  // Their widths still sum to the parent width, and every tile gets the same
+  // added area per byte. The wider left partition also protects the title.
+  const areaScale = width * raisedHeight / (width * bodyHeight + boundary * lift)
+  const rightScale = areaScale * bodyHeight / raisedHeight
+  const newBoundary = boundary * areaScale
+  const heightScale = raisedHeight / bodyHeight
+  return rects.map(r => r.x >= boundary - epsilon
+    ? { ...r, x: newBoundary + (r.x - boundary) * rightScale, w: r.w * rightScale, y: r.y * heightScale - lift, h: r.h * heightScale }
+    : { ...r, x: r.x * areaScale, w: r.w * areaScale })
+}
+
+/** One nested layout for DOM, canvas, outlines and exports. Child coordinates are local to the inner box. */
+export function layoutChildren<T>(
+  node: T,
+  path: T[],
+  chainLabels: string[] | null,
+  raw: T[] | undefined,
+  dims: { w: number; h: number; boxW: number; boxH: number; edge: number; showLbl: boolean; depth: number },
+  cfg: LayoutConfig<T>,
+) {
+  const { w, h, boxW, boxH, edge, showLbl, depth } = dims
+  let kw = boxW - 4
+  let kh = boxH - (showLbl ? 21 : 4)
+  let mode: Tiling = 'gaps'
+  let rects: Rect<Node<T>>[] = []
+  let titleWidth: number | null = null
+  if (raw?.length && w > 90 && h > 44) {
+    const lay = (width: number, height: number) => cfg.layTiles(cfg.fold(raw.slice(), width, height), 0, 0, width, height)
+    rects = lay(kw, kh)
+    mode = cfg.tilingFor(node, path, depth + 1, w, h, rects)
+    if (mode === 'shared') {
+      kw = boxW - 2 * edge
+      kh = boxH - (showLbl ? 20 + edge : 2 * edge)
+      rects = lay(kw, kh)
+    }
+    if (showLbl && cfg.getTitleWidth) {
+      const width = cfg.getTitleWidth(node, chainLabels, w, boxW)
+      const left = mode === 'shared' ? edge : 3
+      const top = mode === 'shared' ? edge : 3
+      const raised = reclaimTitleColumns(rects, width - left, kh, 20 - top)
+      if (raised !== rects) titleWidth = width
+      rects = raised
+    }
+  }
+  return { rects, mode, titleWidth }
 }
 
 /**
@@ -107,7 +181,7 @@ function place<T>(
   mode: Tiling,
   cfg: LayoutConfig<T>,
 ): PlacedCell<T> {
-  const { getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor } = cfg
+  const { getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis } = cfg
   const folded = isFolded(node0)
 
   // Single-child wrapper chains collapse into one cell labeled `a/…/z`: the
@@ -145,20 +219,8 @@ function place<T>(
   const boxH = shared ? r.h : r.h - (dust ? 1 : 2)
 
   const kidChildren = folded ? undefined : childrenOf(node as T, path)
-  let kids: Rect<Node<T>>[] = []
-  let kidsMode: Tiling = 'gaps'
-  if (kidChildren && kidChildren.length > 0 && r.w > 90 && r.h > 44) {
-    let kw = boxW - 4
-    let kh = boxH - (showLbl ? 21 : 4)
-    const lay = (w: number, h: number) => layTiles(fold(kidChildren.slice(), w, h), 0, 0, w, h)
-    kids = lay(kw, kh)
-    kidsMode = tilingFor(node as T, path, depth + 1, r.w, r.h, kids)
-    if (kidsMode === 'shared') {
-      kw = boxW - 2 * edge
-      kh = boxH - (showLbl ? 20 + edge : 2 * edge)
-      kids = lay(kw, kh)
-    }
-  }
+  const { rects: kids, mode: kidsMode, titleWidth } = layoutChildren(node as T, path, chainLabels, kidChildren,
+    { w: r.w, h: r.h, boxW, boxH, edge, showLbl, depth }, cfg)
 
   // Inner container offset (absolute) for the children region — matches the
   // DOM inner div's inset. Kids were laid at origin (0,0) inside it.
@@ -195,6 +257,7 @@ function place<T>(
     boxH,
     showLbl,
     hasKids: children.length > 0,
+    titleWidth,
     children,
   }
 }

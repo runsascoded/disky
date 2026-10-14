@@ -115,6 +115,7 @@ const under = (p: string, root: string): boolean => root === '' || p.startsWith(
 export interface HitReader {
   read(key: string, maxRows?: number): Promise<{ io: Io; fold: FirstHits | null; version?: string; scans?: string[] }>
   snapshot?(): Promise<{ version: string; scans: string[] }>
+  defaultMaxRows?(key: string, baseMaxRows: number): Promise<number>
 }
 
 /** The light source: the literal's suffix range from the shards, folded to its first hits once (per
@@ -139,7 +140,8 @@ export class SuffixHits implements HitSource {
     const p = shared(this.held, vkey, async () => {
       const cached = await this.opts.cache?.get(vkey)
       if (cached) return { hits: cached, io: { from: 'cache', version }, scans: snap?.scans }
-      const { io, fold, version: read = 'base', scans } = await this.names.read(key, this.opts.maxRows ?? MAX_ROWS)
+      const maxRows = this.opts.maxRows ?? await this.names.defaultMaxRows?.(key, MAX_ROWS) ?? MAX_ROWS
+      const { io, fold, version: read = 'base', scans } = await this.names.read(key, maxRows)
       if (!fold) return null
       // A stack cut mid-read (a broken tier) is another version's answer: never cached (or held) under this one.
       if (read === version) await this.opts.cache?.put(vkey, fold.hits)
@@ -343,8 +345,9 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  than its newest (published, not yet appended) or before its base — or that its answer doesn't cover is `scan-not-indexed`
  *  on every deployment, indexed-only or not: the walk answered it before, missing small matches; 18: a heavy literal's
  *  rollup view nests — its drawn children answered in turn, to `FILTER_SUBDIV_LEVELS` below the view, in the view and
- *  both sides of a diff). */
-const RESPONSE_V = 18
+ *  both sides of a diff; 19: a budget-cut nest flags `budgetCut` for the client to re-ask — cached 18s from a deploy
+ *  between the two could serve a cut tree unflagged). */
+const RESPONSE_V = 19
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>

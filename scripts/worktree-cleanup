@@ -1,0 +1,163 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["click"]
+# ///
+"""Remove explicitly audited worktrees, retaining branch refs and ignored data."""
+
+import json
+import os
+from pathlib import Path
+from subprocess import run
+
+from click import command, option
+
+
+def git(*args: str) -> str:
+    result = run(["git", *args], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"Git command failed ({result.returncode}): {result.stderr.strip()}")
+    return result.stdout
+
+
+def disposable(path: Path) -> bool:
+    caches = {"node_modules", ".venv", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+    if caches.intersection(path.parts):
+        return True
+    if path == Path("site/dist") or Path("site/dist") in path.parents:
+        return True
+    if path.name.endswith(".tsbuildinfo"):
+        return True
+    return path.parent == Path("tmp/bench") and path.name in {
+        "d1-gcs-local.sqlite", "d1-gcs-local.sqlite-shm", "d1-gcs-local.sqlite-wal",
+    }
+
+
+def inventory(tree: Path) -> tuple[list[Path], list[Path]]:
+    keep = []
+    discard = []
+
+    def visit(relative: Path) -> None:
+        absolute = tree / relative
+        if disposable(relative):
+            discard.append(relative)
+        elif absolute.is_dir() and not absolute.is_symlink():
+            for child in sorted(absolute.iterdir()):
+                visit(child.relative_to(tree))
+        else:
+            keep.append(relative)
+
+    ignored = git("-C", str(tree), "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    roots = {Path(name.rstrip("/")) for name in ignored.split("\0") if name}
+    visited = set()
+    for relative in sorted(roots, key=lambda p: (len(p.parts), str(p))):
+        if not visited.intersection(relative.parents):
+            visit(relative)
+            visited.add(relative)
+    return keep, discard
+
+
+def open_paths(path: Path) -> list[Path]:
+    return [Path(line[1:]) for line in path.read_text().splitlines() if line.startswith("n/")]
+
+
+def validate(
+    row: dict,
+    root: Path,
+    retained: list[str],
+    opened: list[Path],
+) -> Path:
+    tree = Path(row["path"])
+    relative = tree.relative_to(root)
+    if tree.is_symlink() or not tree.is_dir() or relative.parts[0] not in {"wt", ".claude"}:
+        raise ValueError(f"Unsafe worktree target: {relative}")
+    if relative.parts[0] == ".claude" and relative.parts[1] != "worktrees":
+        raise ValueError(f"Unsafe agent worktree target: {relative}")
+    if git("-C", str(tree), "rev-parse", "--show-toplevel").strip() != str(tree):
+        raise ValueError(f"Not an exact worktree root: {relative}")
+    if git("-C", str(tree), "rev-parse", "HEAD").strip() != row["head"]:
+        raise ValueError(f"HEAD changed since audit: {relative}")
+    branch = git("-C", str(tree), "symbolic-ref", "--quiet", "--short", "HEAD") if row["branch"] != "detached" else "detached"
+    if branch.strip() != row["branch"]:
+        raise ValueError(f"Branch changed since audit: {relative}")
+    if git("-C", str(tree), "status", "--porcelain", "--untracked-files=all"):
+        raise ValueError(f"Uncommitted/untracked changes: {relative}")
+    containing = git("branch", "--contains", row["head"], "--format=%(refname:short)").splitlines()
+    if not set(containing).intersection(retained):
+        raise ValueError(f"No longer merged into a retained branch: {relative}")
+    if any(p == tree or tree in p.parents for p in opened):
+        raise ValueError(f"Open process files/cwd in worktree: {relative}")
+    if (tree / ".git").is_dir():
+        raise ValueError(f"Refusing main/nested repository: {relative}")
+    return tree
+
+
+@command()
+@option("-a", "--apply", is_flag=True, help="Remove only the candidates in this previously approved audit")
+@option("-b", "--backup", type=Path, required=True, help="New, private preservation/report directory under project tmp/")
+@option("-o", "--open-files", type=Path, required=True, help="Fresh lsof -n -P -F pn output")
+@option("-r", "--report", type=Path, required=True, help="Previously approved worktree-audit JSON")
+def main(
+    apply: bool,
+    backup: Path,
+    open_files: Path,
+    report: Path,
+) -> None:
+    os.umask(0o077)
+    data = json.loads(report.read_text())
+    root = Path(git("rev-parse", "--show-toplevel").strip())
+    if str(root) != data["root"]:
+        raise ValueError("Audit belongs to a different repository")
+    backup = backup.absolute()
+    if not backup.is_relative_to(root / "tmp") or backup == root / "tmp":
+        raise ValueError("Backup must be a specific directory beneath this project's tmp/")
+    backup.mkdir(mode=0o700, parents=True, exist_ok=False)
+    opened = open_paths(open_files)
+    candidates = [row for row in data["worktrees"] if row["candidate"]]
+    before_refs = git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")
+    (backup / "branches-before.txt").write_text(before_refs)
+    plans = []
+    for row in candidates:
+        try:
+            tree = validate(row, root, data["retained_branches"], opened)
+        except ValueError as error:
+            print(f"HOLD {error}")
+            continue
+        keep, discard = inventory(tree)
+        plans.append({
+            "path": str(tree), "branch": row["branch"], "head": row["head"],
+            "preserve": [str(p) for p in keep], "discard": [str(p) for p in discard],
+            "preserved_bytes": sum((tree / p).lstat().st_size for p in keep),
+        })
+    manifest = backup / "manifest.json"
+    manifest.write_text(json.dumps({"apply": apply, "worktrees": plans}, indent=2) + "\n")
+    print(f"{len(plans)}/{len(candidates)} approved candidates still eligible")
+    print(f"Preserve {sum(len(p['preserve']) for p in plans)} ignored files/symlinks; {sum(p['preserved_bytes'] for p in plans) / 1024**2:.1f} MiB")
+    if not apply:
+        print(f"DRY RUN: {manifest.relative_to(root)}")
+        return
+    completed = []
+    for plan in plans:
+        row = next(r for r in candidates if r["path"] == plan["path"])
+        tree = validate(row, root, data["retained_branches"], opened)
+        keep, discard = inventory(tree)
+        if [str(p) for p in keep] != plan["preserve"] or [str(p) for p in discard] != plan["discard"]:
+            raise ValueError(f"Ignored inventory changed: {tree.relative_to(root)}")
+        destination = backup / "preserved" / tree.relative_to(root)
+        for relative in keep:
+            target = destination / relative
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (tree / relative).rename(target)
+        # Force permits deletion of only the inventoried, ignored generated data.
+        git("worktree", "remove", "--force", str(tree))
+        completed.append(plan["path"])
+        (backup / "completed.json").write_text(json.dumps(completed, indent=2) + "\n")
+        print(f"REMOVED {tree.relative_to(root)}", flush=True)
+    after_refs = git("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")
+    (backup / "branches-after.txt").write_text(after_refs)
+    if before_refs != after_refs:
+        raise ValueError("Branch refs changed during cleanup; inspect before/after snapshots")
+    print(f"Removed {len(completed)} worktrees; all branch refs unchanged. Preserved data: {backup.relative_to(root)}")
+
+
+if __name__ == "__main__":
+    main()

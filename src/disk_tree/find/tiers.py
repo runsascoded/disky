@@ -54,6 +54,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator
 
+from ..duck import scalar
+
 if TYPE_CHECKING:
     import duckdb
 
@@ -244,7 +246,7 @@ def write_tiers(
         if by_tot:
             con.execute("DROP TABLE _multi_tot")
         os.replace(tmp, out)
-        written[out] = int(con.execute(f"SELECT COUNT(*) FROM read_parquet('{out}')").fetchone()[0])
+        written[out] = int(scalar(con, f"SELECT COUNT(*) FROM read_parquet('{out}')"))
         if groups:
             from disk_tree.find.groups import write_groups
             write_groups(out, footer_parquet=True)

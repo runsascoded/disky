@@ -21,12 +21,14 @@ from time import monotonic
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pyarrow.compute import and_, greater_equal, less
 from click import Choice, group, option
 
 from . import static_names as sn
 from . import static_roots as sr
 from .static_names import CODEC, OPEN, PREFIX, _batches, err, q
 from .static_profile import data_bucket
+from .resource_monitor import monitor_resources, resource_stage
 
 KIND_FULL, KIND_KEPT, KIND_REST, KIND_DELTA = 0, 1, 2, -1  # the delta header sorts first, as a full one
 KINDS = ("long", "short")
@@ -42,6 +44,7 @@ FETCH_THREADS = 64
 #: Prefetched raw bytes held at most, as a fraction of the machine's RAM (`build -C` overrides): beyond it, the loops run in
 #: windows (each prefetched in turn) and the byte cache evicts least recently used.
 CACHE_RAM_FRACTION = 1 / 8
+MAX_CACHE_BYTES = 2 << 30
 #: Prefetch coalescing: needed groups of one file at most this far apart are one request, of at most `COALESCE_SPAN` bytes.
 COALESCE_GAP = 64 << 10
 COALESCE_SPAN = 8 << 20
@@ -413,13 +416,13 @@ class TierReads:
 
     def __init__(self, tiers: list[Tier], kind: str, threads: int = 0, cache_bytes: int | None = None):
         """`threads` > 1: `windows` prefetches the groups a loop will read, that many requests at once, into a byte cache of
-        `cache_bytes` (default `CACHE_RAM_FRACTION` of the RAM); else the loops fetch each miss in turn."""
+        `cache_bytes` (default: min(2 GiB, `CACHE_RAM_FRACTION` of the RAM)); else the loops fetch each miss in turn."""
         self.kind = kind
         self.items = [(t, t.group_file(kind, "roots")) for t in tiers]
         self.stats: Counter = Counter()
         self.threads = threads
         self.fetch_io: Counter = Counter()
-        self.raw = ByteCache(cache_bytes or int(ram_bytes() * CACHE_RAM_FRACTION)) if threads > 1 else None
+        self.raw = ByteCache(cache_bytes or min(MAX_CACHE_BYTES, int(ram_bytes() * CACHE_RAM_FRACTION))) if threads > 1 else None
         for _, gf in self.items:
             if gf is not None:
                 gf.raw = self.raw
@@ -457,6 +460,31 @@ class TierReads:
             if gf.has_in(L, H):
                 return True
         return False
+
+    def tables(self, c: str, lo: str, hi: str):
+        """Raw tier slices for bulk insertion; the consumer must combine duplicate roots by minimum vt."""
+        self.stats["rows"] += 1
+        if self.raw is not None:
+            self.prefetch_index([(c, lo, hi)])
+        for t, gf in self.items:
+            if gf is not None:
+                ci = t.canon(c, self.kind)
+                # Each group is an item: even one huge directory is prefetched in bounded windows.
+                groups, _ = gf.select((ci, lo), (ci, hi))
+                for a, b in self.windows([[(gf, g)] for g in groups]):
+                    for g in groups[a:b]:
+                        tab, runs = gf.group_rows(g)
+                        run = runs.get(ci)
+                        if run is not None:
+                            s, e, _ = run
+                            part = tab.slice(s, e - s)
+                            if g["q_min"] == ci == g["q_max"] and lo <= g["k_min"] and g["k_max"] < hi:
+                                yield part
+                            else:
+                                keys = part.column(gf.key)
+                                matched = part.filter(and_(greater_equal(keys, lo), less(keys, hi)))
+                                if matched.num_rows:
+                                    yield matched
 
     def io(self) -> dict:
         out: Counter = Counter(self.stats)
@@ -982,25 +1010,8 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         WHERE coalesce(nh.base, bx.rows) + nh.runs + nh.today > {R}""")
     doc["heavy_new"] = con.execute("SELECT count(*) FROM newh").fetchone()[0]
     if doc["heavy_new"]:
-        con.execute("CREATE OR REPLACE TABLE rtr (q VARCHAR, dir VARCHAR, k INTEGER, path VARCHAR, usr VARCHAR, vf BIGINT, vt BIGINT, size BIGINT, n_files BIGINT)")
-        got: dict[str, list] = {k: [] for k in ("q", "dir", "k", "path", "usr", "vf", "vt", "size", "n_files")}
-        nh = con.execute("SELECT q, dir, k FROM newh WHERE q NOT IN (SELECT q FROM newq) ORDER BY q, dir").fetchall()
-        for a, b in reads.windows(reads.plan([(c, d + "/", d + "0") for c, d, _ in nh], "rows")):
-            for c, d, k in nh[a:b]:
-                for r in reads.rows(c, d + "/", d + "0"):
-                    for col, v in zip(got, (c, d, k, r["path"], r["usr"], r["vf"], r["vt"], r["size"], r["n_files"])):
-                        got[col].append(v)
-        log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {len(got['q']):,} earlier roots read in {monotonic() - t0:.0f}s ({reads.io()})")
-        con.register("rtr_in", pa.table(got))
-        con.execute("INSERT INTO rtr SELECT * FROM rtr_in")
-        con.unregister("rtr_in")
-        con.execute("""CREATE OR REPLACE TABLE rtn AS SELECT q, dir, any_value(k) AS k, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-                any_value(n_files) AS n_files FROM (
-                SELECT * FROM rtr UNION ALL
-                SELECT h.q, h.dir, h.k, d.path, d.usr, d.vf, d.vt, d.size, d.n_files FROM newh AS h JOIN dr AS d ON d.q = h.q AND starts_with(d.path, h.dir || '/'))
-            GROUP BY q, dir, path, usr, vf""")
-        full_rollups(con, "rtn", K, "rup")
-        con.execute("DROP TABLE rtr; DROP TABLE rtn")
+        count = newly_heavy_rollups(con, reads, kind, K, log=log)
+        log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir)")
     for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "dc", "nh", "bx", "newh", "cmap"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
@@ -1009,6 +1020,97 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     log(f"drill {kind}: {doc['heavy_touched']:,} heavy touched, {doc['candidates']:,} candidates, {doc['restated']:,} restated, "
         f"{doc['heavy_new']:,} newly heavy, {doc['probes']:,} probes, {doc['rollup_rows']:,} rollup rows in {monotonic() - t0:.0f}s")
     return dict(doc)
+
+
+def newly_heavy_rollups(
+    con,
+    reads: TierReads,
+    kind: str,
+    K: int,
+    log=err,
+) -> int:
+    """Combine history and write full rollups one (q, dir) at a time, never a global expanded GROUP BY.
+
+    Sort the relevant delta roots once so each directory's equality/prefix predicates can prune row groups.
+    New members already carry their whole history in dr; other members read the same prior roots as before.
+    The combine identity and min(vt) rule are unchanged. A single directory can still require substantial memory.
+    """
+    directories = con.execute("SELECT q, dir, k, q IN (SELECT q FROM newq) AS is_new FROM newh ORDER BY q, dir").fetchall()
+    resource_stage(f"{kind}: newly-heavy prepare", directories=len(directories))
+    con.execute("""CREATE OR REPLACE TABLE newh_today AS SELECT d.* FROM dr AS d
+        SEMI JOIN (SELECT DISTINCT q FROM newh) AS h USING (q) ORDER BY q, path""")
+    total = 0
+    t0 = monotonic()
+    for i, (c, d, k, is_new) in enumerate(directories):
+        started = monotonic()
+        progress = dict(directory=i + 1, directories=len(directories), member=c, prefix=d)
+        con.execute("CREATE OR REPLACE TABLE rtr (q VARCHAR, dir VARCHAR, k INTEGER, path VARCHAR, usr VARCHAR, vf BIGINT, vt BIGINT, size BIGINT, n_files BIGINT)")
+        resource_stage(f"{kind}: newly-heavy history", **progress)
+        count = 0 if is_new else insert_prior_roots(con, reads, [(c, d, k)], stage=f"{kind}: newly-heavy history")
+        total += count
+        resource_stage(f"{kind}: newly-heavy combine", **progress, inserted_rows=count)
+        con.execute(f"""CREATE OR REPLACE TABLE rtn AS SELECT q, dir, any_value(k) AS k, path, usr, vf, min(vt) AS vt,
+                any_value(size) AS size, any_value(n_files) AS n_files FROM (
+                SELECT * FROM rtr UNION ALL
+                SELECT q, {q(d)} AS dir, {int(k)} AS k, path, usr, vf, vt, size, n_files FROM newh_today
+                    WHERE q = {q(c)} AND path >= {q(d + '/')} AND path < {q(d + '0')})
+            GROUP BY q, dir, path, usr, vf""")
+        resource_stage(f"{kind}: newly-heavy rollups", **progress, inserted_rows=count)
+        full_rollups(con, "rtn", K, "rup")
+        con.execute("DROP TABLE rtr; DROP TABLE rtn")
+        if (i + 1) % 25 == 0 or i + 1 == len(directories) or monotonic() - started >= 5:
+            log(f"drill {kind}: newly-heavy directory {i + 1}/{len(directories)}, {total:,} prior roots, {monotonic() - t0:.0f}s")
+    con.execute("DROP TABLE newh_today")
+    return total
+
+
+def _insert_root_batch(con, tables: list[pa.Table]) -> None:
+    con.register("rtr_in", pa.concat_tables(tables))
+    try:
+        con.execute("INSERT INTO rtr SELECT * FROM rtr_in")
+    finally:
+        con.unregister("rtr_in")
+
+
+def duckdb_resources(con) -> dict:
+    """Buffer-managed allocations and spill, sampled on the owning thread, never concurrently with SQL."""
+    memory, spill = con.execute("SELECT coalesce(sum(memory_usage_bytes), 0), coalesce(sum(temporary_storage_bytes), 0) FROM duckdb_memory()").fetchone()
+    return {"duckdb_bytes": int(memory), "duckdb_spill_bytes": int(spill)}
+
+
+def insert_prior_roots(
+    con,
+    reads: TierReads,
+    directories: list[tuple[str, str, int]],
+    batch_rows: int = 65536,
+    stage: str = "newly-heavy history",
+) -> int:
+    """Stream historical roots into rtr. rtn combines tiers by min(vt), as with the former in-memory gather."""
+    if batch_rows <= 0:
+        raise ValueError("batch_rows must be positive")
+    tables, buffered, total = [], 0, 0
+    for i, (c, d, k) in enumerate(directories):
+        for t in reads.tables(c, d + "/", d + "0"):
+            offset = 0
+            while offset < t.num_rows:
+                n = min(t.num_rows - offset, batch_rows - buffered)
+                part = t.slice(offset, n)
+                tables.append(pa.table({
+                    "q": pa.repeat(c, n), "dir": pa.repeat(d, n), "k": pa.repeat(pa.scalar(k, pa.int32()), n),
+                    **{name: part.column(name) for name in ("path", "usr", "vf", "vt", "size", "n_files")},
+                }))
+                buffered += n
+                offset += n
+                if buffered == batch_rows:
+                    _insert_root_batch(con, tables)
+                    total += buffered
+                    tables, buffered = [], 0
+        resource_stage(stage, directory=i + 1, directories=len(directories), inserted_rows=total, buffered_rows=buffered, **duckdb_resources(con))
+    if buffered:
+        _insert_root_batch(con, tables)
+        total += buffered
+    resource_stage(stage, directories=len(directories), inserted_rows=total, buffered_rows=0)
+    return total
 
 
 def _settle(con, D: int, K: int, reads: TierReads) -> int:
@@ -1270,6 +1372,7 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
     meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor}
     for kind in kinds:
         t1 = monotonic()
+        resource_stage(f"{kind}: delta roots")
         if kind == "long":
             meta["classes"] = long_day_roots(con, prior[-1].alias_table(), new_members, sx_files, history, chunk_rows, log, rule)
             meta["new_members_list"] = new_members
@@ -1278,9 +1381,11 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
             meta["short_delta"] = short_day_roots(con, cdelta_files, rule)
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
         reads = TierReads(prior, kind, threads, cache_bytes)
+        resource_stage(f"{kind}: rollups")
         meta[f"{kind}_day"] = day_rollups(con, prior, kind, D, R=R, K=K, floor=floor, reads=reads, log=log)
         meta[f"{kind}_day"]["reads"] = reads.io()
         log(f"drill {kind}: requests {reads.requests()}")
+        resource_stage(f"{kind}: write")
         meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
         write_state(con, out, kind)
         meta[f"{kind}_day"]["s"] = round(monotonic() - t1, 1)
@@ -1463,7 +1568,7 @@ def _new_members(mount: str, prefix: str, run: str, prev: pa.Table) -> list[str]
 @cli.command("build")
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-c", "--chunk-rows", default=1 << 24, type=int, help="Suffix rows per member-loop chunk")
-@option("-C", "--cache-gb", type=float, help=f"Prefetched group bytes held at most (default: {CACHE_RAM_FRACTION:g} of the RAM)")
+@option("-C", "--cache-gb", type=float, help=f"Prefetched group bytes held at most (default: min(2 GiB, {CACHE_RAM_FRACTION:g} of the RAM))")
 @option("-d", "--scan", "date", required=True, help="The run's scan id")
 @option("-f", "--floor", "floor_rows", default=10_000, type=int, help="The base measurement's floor (`roots measure -f`)")
 @option("-F", "--fuse-reads", is_flag=True, help="Read the prior tiers' groups through the mount, not by ranged GCS reads")
@@ -1480,6 +1585,7 @@ def _new_members(mount: str, prefix: str, run: str, prev: pa.Table) -> list[str]
 @option("-R", "--read-rows", "R", default=100_000, type=int, help="Heavy: more stored root rows under the directory")
 @option("-t", "--to", "to_url", help="Write here instead (`gs://bucket/prefix`, e.g. the scratch bucket for a trial), not `deltas/<D>/drill/`")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
+@monitor_resources
 def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, fetch_threads, kind, K, mount, mem, dry_run, out, threads, R,
               to_url, tmp) -> None:
     """The scan's run's `drill/` (`deltas/<scan id>/drill/`, written once: refused if its files are there): delta roots, classes,
@@ -1522,11 +1628,13 @@ def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, f
     hist += [str(p) for d in days for p in sorted((base / run_key(d, d) / "cdelta").glob("*.parquet"))]
     con = connect(threads, mem, tmp)
     t0 = monotonic()
+    resource_stage("new paths")
     con.execute(f"CREATE OR REPLACE TABLE pnew AS {pnew_sql(cdelta, hist)}")
     err(f"drill build {date}: {con.execute('SELECT count(*) FROM pnew').fetchone()[0]:,} new paths in {monotonic() - t0:.0f}s")
     new_members = _new_members(mount, prefix, run, prior[-1].alias_table())
     history = None
     if new_members and "long" in kinds:
+        resource_stage("new member history", new_members=len(new_members))
         history = history_table(con, [str(base), *(str(base / r["key"]) for r in runs), str(base / run)], new_members)
         err(f"drill build {date}: {len(new_members)} new members, {history.num_rows:,} history suffix rows")
     meas = {"long": meas_sql("long", [str(p) for p in sorted((base / "roots-measure" / "dirs").glob("*.parquet"))]),

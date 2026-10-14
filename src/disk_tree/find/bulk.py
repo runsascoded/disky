@@ -88,7 +88,9 @@ class BulkLister(Protocol):
     no non-pickleable state is captured at construction.
     """
 
-    scheme: str  # 'gcs' | 's3' | 'r2'
+    @property
+    def scheme(self) -> str:  # 'gcs' | 's3' | 'r2'
+        ...
 
     def stream_prefix(
         self,
@@ -494,7 +496,7 @@ def list_bucket_to_parquet(
 
     weights = prefix_weights(weights_from) if weights_from else {}
     stream_items: "list[StreamItem]" = list(stream_prefixes)
-    if weights:
+    if weights_from and weights:
         err(f"chunk balancing from {weights_from} ({len(weights)} weighted prefixes)")
         stream_items, weights = split_hot_prefixes(stream_prefixes, weights, weights_from, procs * threads)
     chunks = pack_chunks(stream_items, weights, procs)

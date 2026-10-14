@@ -536,6 +536,7 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 
 
 @main.command()
+@option("-a", "--against", default=None, help="Exact-request mode: compare complete JSON responses against this base URL using the same viewer credential")
 @option("-b", "--budget", default=None, type=float, help="Fail a scenario whose slowest request exceeds this many seconds")
 @option("-c", "--cold", is_flag=True, help="Key subtree and diff reads past the edge cache (a random `minArea` ≈ the default), to measure uncached cost")
 @option("-d", "--date", default=None, help="Query-set mode: the scan to query (default: the truth set's)")
@@ -544,6 +545,7 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 @option("-o", "--out", default=None, help="Write the run record to this path or prefix (`…/` or `gs://…/` → `<prefix><ts>.json`)")
 @option("-q", "--hit", default=None, help="Filter term the filter-hit scenario searches for (default: the largest bucket's largest child)")
 @option("-Q", "--queries", default=None, help="Query-set mode: a query set (YAML, local or gs://; `dt_cloud.bench.queryset`) to score against `-T`")
+@option("-R", "--request", "requests", multiple=True, help="Replay an exact relative /api/ GET (repeatable); skips automatic scenario discovery and retains detailed server timings/error excerpts")
 @option("-r", "--repeat", default=1, type=int, help="Query-set mode: requests per query × view (the first decides the verdict; timings are medians)")
 @option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ (default: $SNAPSHOTS_SUBDIR)")
 @option("-S", "--serial", is_flag=True, help="Send each scenario's requests one at a time (default: concurrently, as a page load does)")
@@ -551,7 +553,7 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 @option("-T", "--truth", default=None, help="Query-set mode: the ground truth (`dt-cloud bench-truth -o`'s dir or gs:// prefix)")
 @option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
 @option("-x", "--param", "params", multiple=True, help="Query-set mode: extra query params for every request, e.g. `ps=iv` (repeatable)")
-def probe(budget: float | None, cold: bool, date: str | None, as_json: bool, only: tuple[str, ...], out: str | None, hit: str | None, queries: str | None, repeat: int, subdir: str | None, serial: bool, token: str | None, truth: str | None, url: str | None, params: tuple[str, ...]) -> None:
+def probe(against: str | None, budget: float | None, cold: bool, date: str | None, as_json: bool, only: tuple[str, ...], out: str | None, hit: str | None, queries: str | None, requests: tuple[str, ...], repeat: int, subdir: str | None, serial: bool, token: str | None, truth: str | None, url: str | None, params: tuple[str, ...]) -> None:
     """Replay the site's page loads (root, largest bucket, a matching and a
     non-matching path filter) against a live deployment.
 
@@ -572,10 +574,14 @@ def probe(budget: float | None, cold: bool, date: str | None, as_json: bool, onl
 
     import random
 
-    from .probe import cold_min_area, http_fetch, record, resolve_targets, run, scenarios, summarize
+    from .probe import Targets, cold_min_area, compare_requests, http_fetch, record, request_paths, resolve_targets, run, scenarios, summarize
     from .site import creds
 
     base, tok = creds(token, url)
+    if against and not requests:
+        raise UsageError("--against requires exact --request paths")
+    if requests and (queries or truth or params or only or repeat != 1 or hit or subdir):
+        raise UsageError("exact-request mode cannot combine with query-set or automatic scenario options")
     if queries or truth:
         if not (queries and truth):
             raise UsageError("query-set mode needs both -Q and -T")
@@ -608,15 +614,35 @@ def probe(budget: float | None, cold: bool, date: str | None, as_json: bool, onl
         return
     sub = subdir if subdir is not None else os.environ.get("SNAPSHOTS_SUBDIR", "")
     fetch = http_fetch(base, tok)
-    t = resolve_targets(fetch, sub, hit)
     min_area = cold_min_area(random.Random()) if cold else ""
-    err(f"probe {base} @ {t.date} (vs {t.prev}; bucket {t.bucket}; filter hit {t.hit!r}{'; cold' if cold else ''})")
-    results = run(fetch, scenarios(t, min_area), parallel=not serial)
+    if requests:
+        try:
+            paths = request_paths(requests, min_area)
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        t = Targets(date or "", None, "", "")
+        cases = {"requests": paths}
+        err(f"probe {base}: {len(paths)} exact requests{'; cold subtree/diff keys' if cold else ''}")
+    else:
+        t = resolve_targets(fetch, sub, hit)
+        cases = scenarios(t, min_area)
+        err(f"probe {base} @ {t.date} (vs {t.prev}; bucket {t.bucket}; filter hit {t.hit!r}{'; cold' if cold else ''})")
+    comparison = None
+    if against:
+        results, before, parity = compare_requests(fetch, http_fetch(against, tok), paths, parallel=not serial)
+        comparison = {"base": against, "results": [asdict(r) for r in before], "parity": parity}
+    else:
+        results = run(fetch, cases, parallel=not serial)
     ok, lines = summarize(results, round(budget * 1000) if budget is not None else None)
+    if comparison:
+        ok = ok and all(p["equal"] for p in comparison["parity"])
+        err(f"complete JSON parity: {sum(p['equal'] for p in comparison['parity'])}/{len(paths)} against {against}")
     for line in lines:
         err(line)
     err("PASS" if ok else "FAIL")
     rec = {**record(base, t, results), "cold": cold}
+    if comparison:
+        rec["comparison"] = comparison
     if out:
         path = f"{out}{rec['ts']}.json" if out.endswith("/") else out
         with fsspec.open(path, "w") as fh:
@@ -1987,7 +2013,95 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
 
 @main.group()
 def access() -> None:
-    """GCS usage-log (access-log) ingest — layer-1a/2a parquet + watermarks."""
+    """Access-log ingest and provider diagnostics."""
+
+
+@access.command("r2-query")
+@option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
+@option("-b", "--bucket", required=True, help="Source R2 bucket")
+@option("-f", "--from", "start", required=True, help="Inclusive query start, ISO timestamp with timezone")
+@option("-l", "--limit", default=100, type=int, help="Bounded diagnostic sample size (1–2000)")
+@option("-o", "--output", type=Path, help="Save private provider response to this local file")
+@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+def access_r2_query(
+    account: str,
+    bucket: str,
+    start: str,
+    limit: int,
+    output: Path | None,
+    end: str,
+) -> None:
+    """Query a bounded sample; NOT a complete daily export or watermark.
+
+    Requires $CF_OBSERVABILITY_TOKEN (or $CLOUDFLARE_API_TOKEN) with Workers
+    Observability Write permission.
+    Responses may contain private object keys, IPs and actor identities.
+    """
+    from .r2_access import query_body, query_events
+
+    token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        raise UsageError("set CF_OBSERVABILITY_TOKEN (Workers Observability Write)")
+    try:
+        response = query_events(account, token, query_body(bucket, start, end, limit=limit))
+    except (ValueError, RuntimeError) as exc:
+        raise UsageError(str(exc)) from exc
+    payload = json.dumps(response, indent=2) + "\n"
+    if output is None:
+        print(payload, end="")
+    else:
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
+        print(f"saved bounded provider response to {output}; no ingest watermark advanced", file=sys.stderr)
+
+
+@access.command("r2-export")
+@option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
+@option("-b", "--bucket", required=True, help="Source R2 bucket")
+@option("-f", "--from", "start", required=True, help="Query start, ISO timestamp with timezone")
+@option("-l", "--limit", default=2000, type=int, help="Events per cursor page (1–2000)")
+@option("-n", "--max-pages", default=20, type=int, help="Refuse export if this page cap is reached")
+@option("-o", "--output", type=Path, required=True, help="New private archive file; existing files refused")
+@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+def access_r2_export(
+    account: str,
+    bucket: str,
+    start: str,
+    limit: int,
+    max_pages: int,
+    output: Path,
+    end: str,
+) -> None:
+    """Drain a bounded window into a private archive; print only a summary.
+
+    Refuses sampled or incomplete queries. Query exhaustion does not prove
+    complete provider delivery. No ingest watermark is advanced.
+    """
+    from .r2_access import export_window, query_body, query_events
+
+    token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        raise UsageError("set CF_OBSERVABILITY_TOKEN (Workers Observability Write)")
+    if output.exists():
+        raise UsageError("output already exists; use a new archive path")
+    try:
+        archive = export_window(
+            query_body(bucket, start, end, limit=limit),
+            fetch=lambda body: query_events(account, token, body),
+            max_pages=max_pages,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise UsageError(str(exc)) from exc
+    archive["account"] = account
+    # Exclusive create prevents overwriting a concurrent collector's output.
+    # A later scheduled collector must publish this before its own watermark.
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(archive, stream, indent=2)
+        stream.write("\n")
+    print(json.dumps(archive["summary"], sort_keys=True))
 
 
 @access.command("ingest")
@@ -2142,8 +2256,9 @@ def job_logs(asc: bool, grep: str | None, key_markers: bool, limit: int, name: s
 
 @job.command("watch")
 @option("-i", "--interval", default=90, help="Poll interval (seconds)")
+@option("-L", "--no-logs", is_flag=True, help="Watch Batch state only (does not require Logging viewer permissions)")
 @argument("name", required=False)
-def job_watch(interval: int, name: str | None) -> None:
+def job_watch(interval: int, no_logs: bool, name: str | None) -> None:
     """Poll a Batch job to terminal state, then print its key log markers."""
     import time
     from datetime import datetime, timezone
@@ -2156,11 +2271,12 @@ def job_watch(interval: int, name: str | None) -> None:
     while True:
         state = _resolve_job(short)["status"].get("state", "?")
         err(f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} {state}")
-        if state in ("SUCCEEDED", "FAILED", "DELETION_IN_PROGRESS"):
+        if state in ("SUCCEEDED", "FAILED", "CANCELLED", "DELETION_IN_PROGRESS"):
             break
         time.sleep(interval)
-    ctx = Context(job_logs)
-    ctx.invoke(job_logs, asc=True, grep=None, key_markers=True, limit=60, name=short)
+    if not no_logs:
+        ctx = Context(job_logs)
+        ctx.invoke(job_logs, asc=True, grep=None, key_markers=True, limit=60, name=short)
     if state != "SUCCEEDED":
         raise SystemExit(1)
 
@@ -2751,6 +2867,7 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
 @option("-L", "--no-listings", is_flag=True, help="Leave the canonical per-bucket listings (`<layer-2 dir>/<bucket>.parquet`) in GCS only; copy the tiers + snapshot JSONs")
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")
 @option("-p", "--prefix", "prefixes", multiple=True, help="Key prefix to publish (repeatable; default: the scan's served subset — snapshots/<subdir>/<scan>/ + the layer-2 dir)")
+@option("-R", "--require-key", "required", multiple=True, help="Required source key (repeatable): refuse before copying if absent, and verify its R2 size/md5 before success")
 @option("-s", "--subdir", default=None, help="Snapshots subdir of this store (default $SNAPSHOTS_SUBDIR, else none)")
 @option("-S", "--small", is_flag=True, help="Only the small files the site reads beside the path store (its `SERVED_R2`): the snapshot JSONs and each generation's extras sidecars (`attr.tsv{,.idx.json}`); no tier, listing or rollup")
 @option("-w", "--workers", default=8, type=int, help="Concurrent HEADs/uploads (default 8)")
@@ -2762,6 +2879,7 @@ def publish_r2(
     no_listings: bool,
     dry_run: bool,
     prefixes: tuple[str, ...],
+    required: tuple[str, ...],
     subdir: str | None,
     small: bool,
     workers: int,
@@ -2805,6 +2923,7 @@ def publish_r2(
         listings=not no_listings,
         pointed=pointed,
         small=small,
+        required=required,
     )
 
 
@@ -2838,7 +2957,17 @@ main.add_command(_interval_store)
 from .scan_runs import cli as _scan_runs  # noqa: E402
 
 main.add_command(_scan_runs)
+from .scan_cost import cost_cmd as _scan_cost  # noqa: E402
+
+_scan_runs.add_command(_scan_cost)
+from .scan_tasks import task_cmd as _scan_task  # noqa: E402
+
+_scan_runs.add_command(_scan_task)
 
 from .scan_started import stamp_started as _stamp_started  # noqa: E402
 
 main.add_command(_stamp_started)
+
+from .job_token import cli as _job_token  # noqa: E402
+
+main.add_command(_job_token)

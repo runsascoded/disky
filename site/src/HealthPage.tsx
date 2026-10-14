@@ -2,7 +2,7 @@
 // stack drawn as binary-counter shards over the scan timeline (`pyrmts-react`'s `CoverTimeline`, the timeline the
 // pyrmts consumers' /health pages share), every scan's coverage and its gaps, and freshness; the last scan job comes
 // from /scans' own fetch (`useScanRuns`).
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { CoverTimeline } from 'pyrmts-react'
@@ -11,12 +11,13 @@ import type { PyramidTierCoverStatus } from 'pyrmts'
 import { SiteNav } from './SiteNav'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
+import { useDocTitle } from './title'
 import {
-  type Cell, type Column, COLUMN_LABELS, coverageTiers, type HealthDoc, liveColumns, type MergeState, mergeLine, stackTiers, type StoreHealth,
+  type Cell, type Column, COLUMN_LABELS, coverageEvents, type HealthDoc, liveColumns, type MergeState, mergeLine, stackTiers, type StoreHealth,
 } from './healthModel'
 import { phaseOrder } from './scanRunsModel'
 import { scanTime } from './scanSlug'
-import { colorer, fmtDur, getJson, PhaseBar, Status, useScanRuns, utc } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
 import './health.scss'
 
@@ -50,7 +51,7 @@ function DayAxis({ genesis, now }: { genesis: number; now: number }) {
   const x = (t: number) => 42 + ((t - genesis) / span) * 1000
   return (
     <svg className="hl-days" viewBox="0 0 1042 12" aria-hidden>
-      {ticks.map(t => <text key={t} x={x(t)} y={9} textAnchor="middle">{new Date(t).toISOString().slice(5, 10)}</text>)}
+      {ticks.map(t => <text key={t} x={x(t)} y={9} textAnchor="middle">{runDay(t / 1000).slice(5)}</text>)}
     </svg>
   )
 }
@@ -87,6 +88,23 @@ function Timeline({ tiers, genesis, now }: { tiers: PyramidTierCoverStatus[]; ge
       )}
     </div>
   )
+}
+
+function CoverageEvents({ doc, columns, genesis, now }: { doc: HealthDoc; columns: Column[]; genesis: number; now: number }) {
+  const rows = coverageEvents(doc.coverage, columns)
+  const span = Math.max(1, now - genesis)
+  return <div className="hl-events" role="group" aria-label="Index availability at each scan time">
+    {rows.map(({ column, events }) => <div className="hl-event-row" key={column}>
+      <span className="dim">{COLUMN_LABELS[column]}</span><div className="hl-event-axis">
+        {events.filter(e => e.time >= genesis && e.time <= now).map(e => <span key={e.scan} className="hl-event-position" style={{ left: `${100 * (e.time - genesis) / span}%` }}>
+          <Tooltip content={<><b>{COLUMN_LABELS[column]} · {e.scan} · {e.status}</b><div>{fmtRunTime(e.time / 1000)}</div></>}>
+            <span className={`hl-event hl-${e.status}`} role="img" aria-label={`${COLUMN_LABELS[column]} · ${e.scan} · ${e.status}`}>{cellMark[e.status]}</span>
+          </Tooltip>
+        </span>)}
+      </div>
+    </div>)}
+    <DayAxis genesis={genesis} now={now} />
+  </div>
 }
 
 const cellMark: Record<Cell, string> = { present: '●', missing: '✕', pending: '◐', na: '·' }
@@ -164,8 +182,8 @@ function LastRun() {
   return (
     <span className="hl-lastrun">
       <Link to={`/scans/${encodeURIComponent(last.run.run_id)}`}><code>{last.run.scan}</code></Link>
-      <Status run={last.run} failedAt={last.failed_at} />
-      <span className="dim">{last.run.started_ts == null ? 'start not recorded' : `${utc(last.run.started_ts)} UTC`}</span>
+      <Status run={last.run} failedAt={last.failed_at} issues={last.phase_issues} />
+      <span className="dim">{last.run.started_ts == null ? 'start not recorded' : fmtRunTime(last.run.started_ts)}</span>
       <span>{last.secs == null ? '—' : fmtDur(last.secs)}</span>
       <PhaseBar spans={last.spans} secs={last.secs} color={colorer(order)} width={140} />
     </span>
@@ -176,7 +194,7 @@ export function HealthPage() {
   const q = useHealth()
   const [win, setWin] = useState<Win>('30d')
   const [showAll, setShowAll] = useState(false)
-  useEffect(() => { document.title = 'Health' }, [])
+  useDocTitle('Health')
   const doc = q.data
   const now = (doc?.now ?? 0) * 1000
   const genesis = useMemo(() => {
@@ -186,7 +204,6 @@ export function HealthPage() {
     return g - Math.max(DAY / 4, (now - g) * 0.02)
   }, [doc, win, now])
   const cols = useMemo(() => (doc ? liveColumns(doc.coverage) : []), [doc])
-  const covTiers = useMemo(() => (doc ? coverageTiers(doc.coverage, cols, now) : []), [doc, cols, now])
   const gapRows = useMemo(() => (doc ? [...doc.coverage].reverse().filter(c => showAll || c.gaps.length) : []), [doc, showAll])
   const totalGaps = doc ? doc.coverage.filter(c => c.gaps.length).length : 0
   return (
@@ -214,6 +231,7 @@ export function HealthPage() {
         {doc.stores.map(s => <StoreSection key={s.kind} s={s} doc={doc} genesis={genesis} now={now} />)}
         <section className="hl-coverage">
           <h3>Coverage per scan</h3>
+          <p className="dim">Each mark is one scan's index availability at its capture time.</p>
           <p className="hl-gaps">
             {totalGaps ? <span className="sr-status failed">{totalGaps} scan{totalGaps === 1 ? '' : 's'} with gaps</span> : <span className="sr-status succeeded">no gaps</span>}
             {cols.filter(c => doc.gaps[c]).map(c => <Tooltip key={c} content={COLUMN_TIPS[c]}><span className="hl-gapcount">{COLUMN_LABELS[c]}: {doc.gaps[c]}</span></Tooltip>)}
@@ -225,7 +243,7 @@ export function HealthPage() {
               </Tooltip>
             </p>
           )}
-          {covTiers.length > 0 && <Timeline tiers={covTiers} genesis={genesis} now={now} />}
+          {cols.length > 0 && <CoverageEvents doc={doc} columns={cols} genesis={genesis} now={now} />}
           {(gapRows.length > 0 || totalGaps < doc.coverage.length) && (
             <div className="run-filters">
               <label><input type="checkbox" checked={showAll} onChange={e => setShowAll(e.target.checked)} /> every scan</label>

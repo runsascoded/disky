@@ -6,7 +6,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import {
   byRunTime, failedAt, outputIndex, type OutputDelta, phaseSpans, type PhaseSpan, runSecs, type RunSummary, type ScanRun,
-  type ScanRunOutput, type ScanRunPhase, summarize, withDeltas,
+  type ScanRunOutput, type ScanRunPhase, type PhaseIssue, type PhaseRecovery, phaseIssues, phaseRecoveries, summarize, withDeltas,
 } from '../../src/scanRunsModel.js'
 
 export interface ScanRunRows { runs: ScanRun[]; phases: ScanRunPhase[]; outputs: ScanRunOutput[] }
@@ -45,6 +45,8 @@ export interface ScanRunDetail {
   /** The scans before and after this run's (with a run), for paging. */
   prev_scan: string | null
   next_scan: string | null
+  phase_issues: PhaseIssue[]
+  recoveries: PhaseRecovery[]
 }
 
 export function scanRunDetail(rows: ScanRunRows, id: string, now: number): ScanRunDetail | null {
@@ -55,11 +57,13 @@ export function scanRunDetail(rows: ScanRunRows, id: string, now: number): ScanR
   const scans = [...new Set(heads.map(r => r.scan))].sort()
   const i = scans.indexOf(run.scan)
   return {
-    run, secs: runSecs(run, now), failed_at: failedAt(run, phases), phases, spans: phaseSpans(run, phases),
+    run, secs: runSecs(run, now), failed_at: failedAt(run, phases), phases, spans: phaseSpans(run, phases, now),
     outputs: withDeltas(run, rows.outputs, outputIndex(rows.runs, rows.outputs)),
     downstream: rows.runs.filter(r => r.parent === id).sort(byRunTime),
     siblings: heads.filter(r => r.scan === run.scan && r.run_id !== id).sort(byRunTime),
     prev_scan: i > 0 ? scans[i - 1] : null,
     next_scan: i >= 0 && i < scans.length - 1 ? scans[i + 1] : null,
+    phase_issues: phaseIssues(run, rows.runs, rows.phases),
+    recoveries: phaseRecoveries(run, rows.runs, rows.phases, now),
   }
 }

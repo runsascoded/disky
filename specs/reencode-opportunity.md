@@ -89,7 +89,7 @@ A rewrite creates a **new object**. Under Autoclass it starts at STANDARD, demot
 
 The overwritten original stays in **soft delete for 7 days**, billed after the read has promoted it to STANDARD. Autoclass charges no early-deletion or retrieval fees.
 
-The model below assumes list regional prices (STANDARD : NEARLINE : COLDLINE : ARCHIVE ≈ 20 : 10 : 4 : 1.2 per GB-month), zstd-3 at 0.62, and that nothing reads the data afterwards. Results are in months of the original object's *current-class* storage cost.
+The model below assumes approximate regional prices (STANDARD : NEARLINE : COLDLINE : ARCHIVE ≈ 20 : 10 : 4 : 1.2 dollars per TiB-month), zstd-3 at 0.62, and that nothing reads the data afterwards. These are rounded modeling inputs, not measured billing rates. Results are in months of the original object's *current-class* storage cost.
 
 | starting class | 12-month net | 36-month net | verdict |
 |---|---|---|---|
@@ -110,6 +110,34 @@ Higher zstd levels barely move the COLDLINE rows: zstd-19 still loses over 12 an
   - compute about 1% of one month's NEARLINE storage per TB at zstd-3 (5× that at zstd-9);
   - Class A writes at a few thousand objects per TB;
   - no egress if the job runs in the bucket's region. Batch has no `us-central2` location, so that bucket would need a VM in the region; cross-continent reads for `marin-eu-west4` would cost real egress.
+
+## What an exact census and better cost model require
+
+Clarification, 2026-10-11: a parquet footer is object **data**, not GCS object metadata. A footer-only range read of an Autoclass-managed object therefore warms the whole object, even though only a small range is transferred. Listing or reading GCS object metadata does not warm it. Autoclass charges no retrieval fee; Coldline/Archive promotion can incur a Class A operation, and the warmed object then incurs higher storage charges. Outside Autoclass, retrieval and data-transfer charges apply to bytes accessed, not the whole object's size; repeated reads are charged again unless served from an applicable cache. See [Autoclass] and [GCS pricing].
+
+The survey and transform should not be conflated:
+
+- Exact `.parquet` file counts and current bytes by bucket/storage class can come from a full immutable layer-1 listing, including files below the earlier 32-MiB cutoff. This reads scan artifacts, not the source objects. It is exact for that listing snapshot, not for a changing live fleet.
+- Exact codec attribution requires each source generation's parquet footer, unless a verified matching footer already exists. A file can mix codecs across columns/row groups. Report compressed chunk bytes by codec, whole-file bytes by uniform/mixed codec, and residual footer/header/padding bytes separately; never multiply a file's size by every codec it contains.
+- Read/copy costs must be estimated **before** a complete cold-footer census. First use existing listing totals and cached footer observations, then a bounded stratified sample. Cold data reads require a reviewed warming/transfer budget; no full cold census is authorized by this document.
+- Estimated output bytes require stratified re-encoding samples by lineage/schema, original codec, writer settings and file size; storage class alone does not predict compressibility. Weight samples by their known stratum bytes, report uncertainty and unsampled strata, and keep inferred codecs distinct from observed ones. Output size becomes exact only after actually encoding all outputs, not after reading all footers.
+- Reuse observations only when object identity is verified. Same relative path or similar CW/GCS file size is evidence for an estimate, not proof of equal rows or a generation-matched footer.
+
+For a horizon `H`, compare two storage trajectories, not just a fixed transform bill divided by today's monthly saving:
+
+```text
+net_savings(H) = baseline_storage_cost(0..H)
+              - replacement_storage_cost(0..H)
+              - retained_original_storage_cost(0..H)
+              - compute_and_operations_cost
+              - retrieval_and_network_cost
+```
+
+The baseline must continue demoting idle Autoclass objects; the replacement starts Standard and demotes on its own schedule. Include soft-delete/version retention, future-read scenarios, regional/dual-region pricing, promotion operations, retries and temporary output storage. Current class alone does not identify the exact last-access age or next transition date: use access history where available, otherwise report age bounds/sensitivity rather than an exact payback date. Transition scheduling is asynchronous. Distinguish no-survey/no-transform baseline, survey-only, and survey-plus-transform, so the census warming cost is not hidden or charged twice.
+
+Under Autoclass a later transform read has no retrieval fee either, but is not entirely free: GET operations, possible network charges and compute remain, and another read resets idle eligibility again. Prefer surveying/re-encoding an approved sample in one pass and saving its footer observation for reuse. Never treat a survey-induced promotion as permission to rewrite the object.
+
+Deliverable: a table by bucket, storage class and codec/lineage with snapshot bytes/counts, measured vs inferred coverage, estimated output bytes with uncertainty, survey-only cost, transform cost, and net savings at 3/12/36 months. Build the full-listing aggregation and model as reusable CLI commands on a remote dev node; do not download the fleet listing or recompress large samples on the laptop.
 
 ## Recommendation
 
@@ -161,3 +189,5 @@ pqtk re-rg -c zstd -l 3 --keep-row-groups --page-index --max-rows-per-page 256 \
 - owners' reader smoke test.
 
 [marin#8401]: https://github.com/marin-community/marin/pull/8401
+[Autoclass]: https://docs.cloud.google.com/storage/docs/autoclass
+[GCS pricing]: https://cloud.google.com/storage/pricing

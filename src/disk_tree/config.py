@@ -19,6 +19,12 @@ VOLUMES = join(sep, 'Volumes')
 #: backend singleton must be rebuilt against it).
 _write_target_hooks: list[Callable[[], None]] = []
 
+#: Root-derived globals, bound by `_apply_root` at import (and on re-root).
+ROOT_DIR: str
+DEFAULT_SCANS_DIR: str
+SQLITE_PATH: str
+SCANS_DIR: str
+
 
 def _volume_mounted(path: str) -> bool:
     """False when `path` sits under a `/Volumes/<name>` that isn't mounted.

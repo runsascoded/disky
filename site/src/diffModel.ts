@@ -42,6 +42,8 @@ export interface DiffData {
   dirsOnly?: true
   /** With `q=`: the static index's hex-run rule applied to the literal (`FilterNote.tsx` `HexRunsInfo`). */
   hexRuns?: { min: number; tail: number }
+  /** With `q=`: phase 2 stopped by its time budget; the whole diff is computing at the edge (`budgetCut.ts`). */
+  budgetCut?: true
 }
 
 export type AreaMode = 'max' | 'delta'

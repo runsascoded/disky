@@ -138,31 +138,50 @@ export function ScanCombobox({ value, scans, onChange, label, className, fmt = f
           />
           <ul ref={listRef} className="sp-list" role="listbox" id={listId} aria-label={label}>
             {groups.length === 0 && <li className="sp-empty" role="presentation">no scans match</li>}
-            {groups.map(g => (
-              <li key={g.day} role="presentation" className="sp-group">
-                <div className="sp-day" role="presentation">{g.day}</div>
-                <ul role="presentation">
-                  {g.scans.map(s => (
-                    <li
-                      key={s.id}
-                      id={optId(s.id)}
-                      role="option"
-                      aria-selected={s.id === value}
-                      className={'sp-opt' + (s.id === activeId ? ' active' : '') + (s.id === value ? ' sel' : '')}
-                      // pointer-down (not click) so the outside-close handler
-                      // doesn't fire first and swallow the selection.
-                      onMouseDown={e => { e.preventDefault(); commit(s.id) }}
-                      onMouseEnter={() => setActiveId(s.id)}
-                    >
-                      {s.label}
-                    </li>
-                  ))}
-                </ul>
-              </li>
-            ))}
+            <ScanOptions groups={groups} value={value} activeId={activeId} optId={optId} onPick={commit} onHover={setActiveId} />
           </ul>
         </div>
       )}
     </div>
   )
+}
+
+/** The listbox's rows: a day with several scans is a header over its times; a
+ *  day with one scan is that one option, the day then its time (dimmed) when
+ *  the label has one — not a header over a lone row. */
+export function ScanOptions({ groups, value, activeId, optId, onPick, onHover }: {
+  groups: { day: string; scans: { id: string; label: string }[] }[]
+  value: string
+  activeId: string | null
+  optId: (id: string) => string
+  onPick: (id: string) => void
+  onHover: (id: string) => void
+}) {
+  return <>{groups.map(g => {
+    const opt = (sc: { id: string; label: string }, solo: boolean) => (
+      <li
+        key={sc.id}
+        id={optId(sc.id)}
+        role="option"
+        aria-selected={sc.id === value}
+        className={'sp-opt' + (solo ? ' solo' : '') + (sc.id === activeId ? ' active' : '') + (sc.id === value ? ' sel' : '')}
+        // pointer-down (not click) so the outside-close handler
+        // doesn't fire first and swallow the selection.
+        onMouseDown={e => { e.preventDefault(); onPick(sc.id) }}
+        onMouseEnter={() => onHover(sc.id)}
+      >
+        {solo
+          ? <>{g.day}{sc.label !== g.day && <span className="sp-time">{sc.label}</span>}</>
+          : sc.label}
+      </li>
+    )
+    return g.scans.length === 1
+      ? opt(g.scans[0], true)
+      : (
+        <li key={g.day} role="presentation" className="sp-group">
+          <div className="sp-day" role="presentation">{g.day}</div>
+          <ul role="presentation">{g.scans.map(sc => opt(sc, false))}</ul>
+        </li>
+      )
+  })}</>
 }

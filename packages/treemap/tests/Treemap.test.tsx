@@ -675,6 +675,45 @@ function cellLabels(container: HTMLElement): string[] {
     .map(el => el.childNodes[0]?.textContent ?? '')
 }
 
+describe('<Treemap> reclaimed titles', () => {
+  const columns: Node = { n: 'root', size: 300, children: [{
+    n: 'parent', size: 300, children: [{ n: 'left', size: 150 }, { n: 'right', size: 150 }],
+  }] }
+  const props = { ...accessors, minCellArea: null, tiling: 'shared' as const, borderWidth: () => 1, formatSize: (n: number) => `${n}` }
+
+  it('uses measured title width and identical raised geometry in DOM and canvas', () => {
+    const restore = withLayout()
+    const context = new Proxy({ measureText: (text: string) => ({ width: text.length * 10 }) }, {
+      get: (target, key) => key in target ? target[key as keyof typeof target] : () => {},
+    })
+    const canvas = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as unknown as CanvasRenderingContext2D)
+    try {
+      const { container, rerender } = render(<Treemap root={columns} {...props} reclaimTitleSpace branchOutline="#aaa" />)
+      const frames = () => [...container.querySelectorAll('.dt-treemap-branch-frames rect')].map(el => ['x', 'y', 'width', 'height', 'stroke', 'stroke-width'].map(k => el.getAttribute(k)))
+      expect(frames()).toEqual([['0.5', '0.5', '399', '299', '#aaa', '1']])
+      const parent = container.querySelector('.dt-treemap-map > .dt-treemap-cell')!
+      const title = parent.querySelector(':scope > .dt-treemap-lbl') as HTMLElement
+      const kids = [...parent.querySelectorAll(':scope > .dt-treemap-inner > .dt-treemap-cell')] as HTMLElement[]
+      expect(title.style.width).toBe('98px')
+      const geometry = (el: HTMLElement) => [el.style.left, el.style.top, el.style.width, el.style.height].map(s => Number(parseFloat(s).toFixed(8)))
+      expect(kids.map(geometry)).toEqual([
+        [0, 0, 206.2247191, 279.5],
+        [206.2247191, -19.5, 192.7752809, 299],
+      ])
+      rerender(<Treemap root={columns} {...props} reclaimTitleSpace branchOutline="#aaa" renderer="canvas" cellHref={n => `/${n.n}`} />)
+      expect(frames()).toEqual([['0.5', '0.5', '399', '299', '#aaa', '1']])
+      const right = container.querySelector('a[href="/right"]') as HTMLElement
+      expect(geometry(right)).toEqual([206.7247191, 0.5, 192.7752809, 299])
+      rerender(<Treemap root={columns} {...props} reclaimTitleSpace sizeAlign="right" />)
+      expect((container.querySelector('.dt-treemap-map > .dt-treemap-cell > .dt-treemap-lbl') as HTMLElement).style.width).toBe('')
+      expect([...container.querySelectorAll('.dt-treemap-inner > .dt-treemap-cell')].map(el => (el as HTMLElement).style.top)).toEqual(['0px', '0px'])
+    } finally {
+      canvas.mockRestore()
+      restore()
+    }
+  })
+})
+
 describe('<Treemap> lazy children', () => {
   // `paged` mirrors a depth-bounded server response: `dir` says it has
   // children, but none came down with this page.

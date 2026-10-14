@@ -3,7 +3,8 @@ import { Fragment, useEffect, useState } from 'react'
 import { AvatarField } from '@open-athena/auth/react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
-import { DEFAULT_STORE } from './stores'
+import { DEFAULT_STORE, STORES } from './stores'
+import { hideScopes } from './hideScopes'
 import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
 import { SessionLogSwitch } from './SessionLogSwitch'
@@ -284,6 +285,8 @@ interface Draft {
   avatar: string | null
   access: Access
   days: string
+  /** Paths the link hides, one per line (specs/path-scopes.md). */
+  hide?: string
   /** Pre-`access` drafts. */
   readOnly?: boolean
 }
@@ -315,9 +318,12 @@ export function AdminPage() {
   // mint, never a hotlink); null = none.
   const [avatar, setAvatar] = useState<string | null>(draft.avatar || null)
   const [days, setDays] = useState(draft.days ?? '30')
+  const [hide, setHide] = useState(draft.hide ?? '')
+  const { scopes: hidden, unresolved: hideUnresolved } = hideScopes(hide, DEFAULT_STORE.key, STORES.slice(1).map(s => s.key), DEFAULT_STORE.home)
   const [access, setAccess] = useState<Access>(draft.access ?? (draft.readOnly === false ? 'view' : 'read'))
   // Admin is an account's, so it needs an email; without one it reads as Viewer.
-  const effAccess: Access = access === 'admin' && !email.trim() ? 'view' : access
+  // A path-restricted link is never admin: an account's session isn't restricted.
+  const effAccess: Access = access === 'admin' && (!email.trim() || hidden.length) ? 'view' : access
   const [openLog, setOpenLog] = useState<string | null>(null)
   const [minted, setMinted] = useState<{ label: string; url: string; allowed: Allowed | null; admin: AdminResult | null } | null>(null)
 
@@ -325,11 +331,11 @@ export function AdminPage() {
     try {
       // A face is a few-KB `data:` URI; keep it in the draft unless it's oversized.
       const face = avatar && avatar.length <= 32_000 ? avatar : null
-      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ memo, name, email, avatar: face, access, days }))
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ memo, name, email, avatar: face, access, days, hide }))
     } catch {
       // sessionStorage can throw (private mode / disabled) — a lost draft is cosmetic.
     }
-  }, [memo, name, email, avatar, access, days])
+  }, [memo, name, email, avatar, access, days, hide])
 
   const grantsQ = useQuery<{ grants: Grant[] }, Error>({
     queryKey: ['auth', 'grants'],
@@ -359,9 +365,11 @@ export function AdminPage() {
           avatar,
           // An email makes it a person's link: their account is created (or
           // updated) with the link's access, so they can also sign in directly.
-          allowlist: !!email.trim(),
+          // Not for a path-restricted link: the account's own sign-ins are
+          // email sessions, which no `:hide:` scope restricts.
+          allowlist: !!email.trim() && !hidden.length,
           // The link itself is never admin: an admin account still has to sign in.
-          scopes: [effAccess === 'read' ? `${DEFAULT_STORE.key}:read` : DEFAULT_STORE.key],
+          scopes: [effAccess === 'read' ? `${DEFAULT_STORE.key}:read` : DEFAULT_STORE.key, ...hidden],
           expiresInS,
         }),
       })
@@ -459,7 +467,8 @@ export function AdminPage() {
     )
   }
 
-  const canMint = !!(name.trim() || memo.trim())
+  // A `~` line this store can't resolve would mint a link that hides nothing there.
+  const canMint = !!(name.trim() || memo.trim()) && !hideUnresolved.length
 
   const grants = grantsQ.data?.grants ?? []
   const revokedCount = grants.filter(g => g.revokedAt).length
@@ -522,9 +531,15 @@ export function AdminPage() {
           <input id="mint-days" className="days" value={days} onChange={e => setDays(e.target.value)} inputMode="numeric" size={4} />
           <span className="hint">days until the link stops working; blank = never</span>
         </div>
+        <div className="field">
+          <label htmlFor="mint-hide">Hide</label>
+          <textarea id="mint-hide" className="hide-paths" rows={2} value={hide} onChange={e => setHide(e.target.value)} placeholder={`${DEFAULT_STORE.home ? '~/Downloads/2025 tax returns' : 'path/to/private-dir'}${STORES.length > 1 ? `\n${STORES[1].key}:…` : ''}`} />
+          <span className="hint">dirs the link sees only as one total, nothing inside (one per line{STORES.length > 1 && <>; {STORES.slice(1).map((s, i) => <Fragment key={s.key}>{i ? '/' : ''}<code>{s.key}:…</code></Fragment>)} for that store</>}){hidden.length ? ' — the link won’t add the email to the allowlist or be admin' : ''}</span>
+          {hideUnresolved.length > 0 && <span className="err">no home dir for <code>~</code> on this store: {hideUnresolved.map((l, i) => <Fragment key={l}>{i ? ', ' : ''}<code>{l}</code></Fragment>)}</span>}
+        </div>
         <div className="field submit">
           <button type="submit" disabled={mint.isPending || !canMint}>Create link</button>
-          {!canMint && <span className="hint">add a name or a memo first</span>}
+          {!canMint && !hideUnresolved.length && <span className="hint">add a name or a memo first</span>}
           {mint.error && <span className="err">{mint.error.message}</span>}
         </div>
       </form>

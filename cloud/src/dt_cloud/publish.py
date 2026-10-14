@@ -271,6 +271,7 @@ def publish(
     listings: bool = True,
     pointed: set[str] | None = None,
     small: bool = False,
+    required: tuple[str, ...] = (),
 ) -> Report:
     """Copy the scan's served subset to R2, skipping what's already there.
     Dry-run lists the keys it would copy on stdout and touches nothing.
@@ -283,6 +284,10 @@ def publish(
         from .deploy import data_bucket
         src_bucket = data_bucket()
     objs, dropped = served(list_source(src_bucket, prefixes), layer2.format(scan=scan), listings=listings, pointed=pointed, small=small)
+    by_key = {o.key: o for o in objs}
+    missing = sorted(set(required) - by_key.keys())
+    if missing:
+        raise ValueError(f"publish-r2: missing required source keys: {', '.join(missing)}")
     for d in sorted(dropped):
         n, b = dropped[d]
         err(f"publish-r2 {scan}: left out unpointed generation {d}/ ({n} objects, {b:,} B)")
@@ -290,9 +295,12 @@ def publish(
         raise SystemExit(f"publish-r2: nothing under {', '.join(prefixes)} in gs://{src_bucket}")
     s3, bucket = r2_client(), r2_bucket()
     report = Report()
+    required_keys = set(required)
 
     def decide(obj: Obj) -> tuple[Obj, bool]:
-        return obj, should_copy(obj, head_dest(s3, bucket, obj.key))
+        dst = head_dest(s3, bucket, obj.key)
+        needs_checksum = obj.key in required_keys and obj.md5 is not None and (dst is None or dst.md5 != obj.md5)
+        return obj, needs_checksum or should_copy(obj, dst)
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         decisions = list(ex.map(decide, objs))
@@ -315,5 +323,17 @@ def publish(
         for obj in ex.map(do_copy, todo):
             report.copied.append(obj.key)
             report.bytes += obj.size
+    # Required artifacts are the visibility barrier: a successful upload or a
+    # same-size skip alone is not proof that their contents can be served.
+    def verified(key: str) -> bool:
+        src = by_key[key]
+        dst = head_dest(s3, bucket, key)
+        return dst is not None and dst.size == src.size and (src.md5 is None or dst.md5 == src.md5)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        checks = list(ex.map(verified, required))
+    bad = sorted(key for key, ok in zip(required, checks) if not ok)
+    if bad:
+        raise ValueError(f"publish-r2: required destination verification failed: {', '.join(bad)}")
     err(report.summary(scan, dry_run=False))
     return report

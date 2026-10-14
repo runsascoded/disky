@@ -7,10 +7,10 @@ export type Cred = { t: string } | { g: string }
 
 /** Split signed render metadata (version, policy, pinned scan) from the
  * original credential view and its explicit share credential. */
-export function splitImageParams(params: Record<string, string>): { view: Record<string, string>; v?: string; scan?: string; cred: Cred | null } {
-  const { t, g, v, s, policy: _policy, r: _render, ...view } = params
+export function splitImageParams(params: Record<string, string>): { view: Record<string, string>; v?: string; scan?: string; before?: string; cred: Cred | null } {
+  const { t, g, v, s, b, policy: _policy, r: _render, ...view } = params
   const cred: Cred | null = t ? { t } : g ? { g } : null
-  return { view, ...(v ? { v } : {}), ...(s ? { scan: s } : {}), cred }
+  return { view, ...(v ? { v } : {}), ...(s ? { scan: s } : {}), ...(b ? { before: b } : {}), cred }
 }
 
 /** The image params for a page view: its view, `/staged`'s version, and the

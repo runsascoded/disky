@@ -1,6 +1,26 @@
 # Anchored name search: `^q`, `q$`, `^q$`
 
+**Current status (2026-10-13 UTC): merged and enabled in GCS's static generation `2026-10-08c`**, including daily run maintenance (`job/static-names.json`: `anchors: true`). The historical-probe fix below recovered `2026-10-12T2006` and is promoted for future jobs. Drill and anchors build concurrently. The Oct 9 1,110/1,110 acceptance below is historical, not an all-new-scan oracle. Heavy starts-with has per-bucket root totals and bounded scoped reads, not a general per-directory heavy-`^q` drill. Compaction integration remains a separate gate. See [GCS operations](gcs-operations.md).
+
+## Original build checkpoint (2026-10-09)
+
 Status: 2026-10-09: built for gcs gen `2026-10-08c` and its two runs (10-09, 10-09T1236), verified 1,110/1,110 against brute force, on GCS and R2, served by dev (`dev.gcs.oa.dev`). Code on branch `anchors` (not on prod). Built from option 2 of `specs/search-extensions.md` (2b ends-with heavy, 2c the name index), with Ryan's syntax `^q` / `q$`. The heavy-`^q` drill (2d) is not built; heavy `^q` degrades instead ("Heavy `^q`" below: a starts-with catalog at the fleet root, scoped reads below, branch `anchor-degrade`).
+
+## Historical-probe recovery (2026-10-13 UTC)
+
+The manual scan `2026-10-12T2006` published its path/interval data and completed both drill tasks, but its search orchestrator timed out after 120 minutes while anchors continued. Live 20-second Python sampling captured 399/399 samples at the per-key historical `INSERT INTO prows` in `run_rollups`, not the earlier bounds join. Locals showed 759 completed probes. Each probe repeatedly scanned a shared historical shard and evaluated an OR predicate over candidate directories; high CPU was measured, not inferred from an absent log. The old builder was cancelled only after preserving the profile, and no replacement overlapped it.
+
+`probe_prior_rows` now groups keys by prior tier/shard and reads at most 256 keys per query. Requested directory intervals are unioned per key before an ASOF lookup; root requests cover the entire key. Nested/overlapping requests contribute each row once per tier, while duplicates across historical tiers remain for the existing minimum-`vt` combination. No search threshold, result cap, sampled acceptance or prior-tier selection changed. Exact subtree/duplicate/Unicode tests and SQL-profile tests pass; the full anchored/hex parity suites passed 26 tests with two skips. The original 1,110-query production acceptance is not a measurement of this recovery.
+
+Anchor `run` emits `ANCHOR_RESOURCE` process/cgroup/CPU samples every 15 seconds, `ANCHOR_QUERY` start/end/failed timings and summaries of slow DuckDB operators. Completed slow-query JSON profiles are uploaded on normal success/failure to `gs://<scratch>/static-names/diagnostics/<gen>/<scan>/anchors/`. The final release also names upload stages with file counts/completed counts, rather than leaving the resource sampler on the last completed SQL statement; upload marker ordering is unchanged and tested exactly. A SIGKILL cannot execute that upload; Cloud Logging progress and the surviving shell's `ANCHOR_EXIT`/`ANCHOR_CGROUP` counters remain the crash evidence. Diagnostics live outside served index paths and are subject to scratch retention.
+
+Cloud Build `792949c7-c816-4739-9b1a-d76ef31df293` built recovery digest `sha256:b1c65e51bf795ad54d978aab64a6682448025d97e98bb3932992ecb5de152ad5` under a separate tag. Anchor-only job `sn-anchors-recovery-20261013-004600` **succeeded in 38m36s**, n2-highmem-16 STANDARD, zero retries, peak process RSS approximately 96.2 GiB and zero OOM events. Its ends-with probes completed 806 keys in 198 physical queries; exact-name probes completed 18 keys in 13 queries. The original builder remained unfinished after 3h00m before cancellation; this is a same-input improvement, not a completed-old-run speedup ratio. The scratch bucket holds 225 profile files (approximately 3.5 MB), and all 575 SQL completions are retained in local `tmp/anchor-fix-recovery-all-logs.json`.
+
+Durable controller `sn-search-recovery-controller-20261013-004800` **succeeded in 40m27s**, waiting for anchor success before `runs add -c -M 2026-10-12T2006`. Prepare, append, shards, catalog, drill and anchors were reused; publication took four seconds, then R2 copy/verification job `sn-r2-2026-10-12-2006-012610` succeeded. No full snapshot was repeated. Production health reports all six coverage cells present and no gaps for the manual scan. Contains (`nemotron`), starts-with (`^nemotron`), ends-with (`.parquet$`) and exact-name (`^config$`) API probes returned successfully with tree byte/object totals equal to reported match totals; these checks are not an independent new-scan brute-force oracle. OA Chrome renders the recovered filtered treemap and the Health page reports no gaps.
+
+Final release `sha256:4a91544bc2f15a32d338f90e716664055cbba233aec15e5e60f1027e58c7c9c5` (Cloud Build `38ad5783-7631-462b-8d56-1e192ecc2d46`) is promoted to `:latest`, with the same validated computations plus explicit upload progress and escaped structured-log regex filters. Targeted tests: 82 passed; anchored/hex parity: 26 passed, two skipped. No active GCS pipeline could resolve an unpinned image at promotion; the unrelated active CW job pins the separate `:cw` tag. Evidence is under local `tmp/anchor-fix-*` and `tmp/anchor-release-v2-*`.
+
+The largest remaining single statement is the candidate row-group-bound nested-loop join (233s, 1,789 CPU-seconds). Large historical probes also decode/ASOF-join far more rows than they retain. Tighter pre-decode row-group pruning and replacing the bound join are measured follow-up targets, not shipped optimizations or timing promises. This recovery does not establish a new full-scan end-to-end time; the parent scan's historical 3h22m includes its failed orchestration timeout.
 
 ## Semantics
 
@@ -172,6 +192,6 @@ Why the hit cap: a 400K-row read can hold ~400K first hits at ~300 B each (≈ 1
 **Left.**
 
 - Compaction (`static_compact`) must rebuild `names/` and `anchors/` for the new generation (the base stages over it).
-- The anchors stage could run in parallel with the drill, which reads none of its outputs.
+- The anchors stage runs in parallel with the drill (landed 2026-10-10); this is no longer an open optimization.
 - ~~The `^q` bound decision (above).~~ Raised to 400K rows with a 150K first-hit cap: "Heavy `^q`" below.
 - The "N others" count after K kept children in a delta is a lower bound.

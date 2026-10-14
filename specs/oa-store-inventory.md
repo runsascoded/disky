@@ -41,7 +41,7 @@ CoreWeave: the `cw` key sees exactly 6 buckets (`marin-us-east-02a`, `hero-check
 
 | Bucket | Size | Objects | Created | Notes |
 |---|---|---|---|---|
-| **`marin-na`** | **289 TB** | **3.28M** | 2026-03-12 | WNAM, Standard, private. Top-level prefixes: `finelog/`, `iris/`, `marin/`, `ot-agent/`, `tmp/`, `users/`. Lifecycle: 9 `tmp/ttl={1..7,14,30}d/` expirations plus 7-day multipart abort, mirroring the CAIOS rules. ≈1.6M Class A writes/day. In Marin's own config this is `MARIN_PREFIX` / Iris state / finelog for the `cw-us-east-02a` and `cw-us-east-08a` clusters (marin `infra/pulumi/README.md`: those clusters "share `marin-na` on R2"). Averages ≈40 TB/month since creation (the dashboard's history view wasn't readable, so recent growth is unknown). ≈$4.3K/mo. |
+| **`marin-na`** | **289 TB** | **3.28M** | 2026-03-12 | WNAM, Standard, private. Top-level prefixes: `finelog/`, `iris/`, `marin/`, `ot-agent/`, `tmp/`, `users/`. Lifecycle: 9 `tmp/ttl={1..7,14,30}d/` expirations plus 7-day multipart abort, mirroring the CAIOS rules. ≈1.6M Class A operations/day, not necessarily writes: listings and multipart operations also count. Marin's `config/coreweave.yaml` registers it under regional alias `na`; North America is the likely expansion, not an explicitly documented name. Finelog archives use it; default CW task config can instead use CAIOS. Oct-11 dashboard: 289.29 TB / 3.28M objects, with a nearly flat recent storage trace. Flat bytes do not prove no writes or reads. ≈$4.3K/mo at Standard list prices. |
 | `oa-gcs-usage-index` | 560 GB | 1.8K | 2026-10-08 | gcs's static name index (Worker-served). disky's own storage, but **not** in `/meta`. |
 | `oa-cw-s3-usage-index` | 284 GB | 5.5K | 2026-09-25 | Already in `/meta`. |
 | `marin-discord` | 23 MB | 1 | 2026-07-30 | Discord archive DB. Noise. |
@@ -66,7 +66,7 @@ No `dial*` buckets exist in this account.
 | `marin-models-us` / `-eu` | US / EU | 0.9 / 0.5 TB | 0.45M | same | 7d |
 | `marin-eval-metadata`, `marin-iac-state`, `marin-data`, `marin-public` | | <0.03 TB each | | | |
 
-All are Standard class and almost all have zero growth in 30 days. That makes them **cold-data / cleanup candidates** (abandoned checkpoints, or data to move to Nearline/Coldline or delete), which is exactly the question disky answers. None has labels, so ownership comes only from bucket names and path prefixes (e.g. VLM, DNA, Levanter-era checkpoints).
+Correction from the Oct-11 class-level query: these are **not all Standard**. Bucket default storage class is not the class of every object. The non-fleet Marin/Levanter/data-values scope has about 148.893 TB Standard with Autoclass off, plus Autoclass-managed 25.044 TB Archive, 18.315 TB Nearline, 0.128 TB Coldline and 0.0095 TB Standard. Flat size can motivate an ownership/retention review, but neither flat size nor current class proves abandonment. The earlier uniform-Standard cost/tiering rationale must not be applied to the cold slices.
 
 Also in `hai-gcp-models`:
 - `marin-usage-logs`: 5.5 TB, 30K objects, **+2.0 TB in 30 days**. This is gcs's own access-log sink (`ACCESS_LOG_BUCKET`), so it's disky's storage but not in `/meta`. `marin-usage-logs-acl` has no size series.
@@ -83,25 +83,20 @@ Also in `hai-gcp-models`:
 
 ## Recommendations
 
-### 1. (a) Add `marin-na` as a secondary store on cw-s3 (highest value)
+### 1. (a) Prepare an independent OA R2 deployment (highest value)
 
-At 289 TB it is larger than `marin-us-west4` and `marin-us-east1` combined, costs about $4.3K/mo, and has no visibility today. It is the R2 half of the CoreWeave clusters' storage, so it serves the same Marin audience and the same questions as cw-s3: `users/` ownership, `tmp/ttl=*` churn, and growth. 3.3M objects lists in minutes.
+The Oct-10 secondary-store-on-CW recommendation is superseded by Ryan's Oct-11 account-scoped direction: `r2.oa.dev`, separate from CW and GCS, with shared engine/site code. The OA account's Sep-7–Oct-6 completed bill was $4,565.99: storage $4,340.75, Class A $216, Class B $9 and Workers CPU $0.24. These are account totals, not a per-bucket bill, though `marin-na` accounts for almost all observed storage. It exceeds either `marin-us-west4` or `marin-us-east1` alone, not their combined size.
 
-- **Why cw-s3 and not a new deployment:** same audience. cw-s3 already has the generic multi-store machinery (`STORES_EXTRA` / `STORES_JSON`, `specs/multi-store.md`) and an S3-generic job chain that already lists `r2://` roots (`cw-meta-run.sh`). Folding it into cw's *primary* store would put an R2 bucket under the CoreWeave provider root and break the per-zone quota/digest semantics, so use a secondary store (e.g. `na` → `cw-s3.oa.dev/na`, viewer scope rather than admin). A future alternative is to rename the primary store's root to "Marin on CoreWeave + R2". That is a UX decision for Ryan.
-- **Work (≈1–2 days, mostly config):**
-  - Run the meta job's chain with `STORE=na`, `META_ROOTS=r2://marin-na` (generalize `cw-meta-run.sh` / `cw-meta-submit.sh` names to a per-store job, or add env defaults).
-  - Add a Batch schedule (daily, or 12 h like cw).
-  - Register the store the way `migrations/cw/0006` did for `meta`, and add a `STORES_JSON.na` entry (`STORE_BUCKET=oa-cw-s3-usage-index`, prefixes `na-l2/,snapshots/na/`).
-  - Optionally snapshot `marin-na`'s lifecycle rules, as cw-run does for CAIOS. Check that R2's S3 `GetBucketLifecycleConfiguration` works with an object-read token.
-- **Access (Ryan):**
-  - Create a new R2 API token in the OA account: **Object Read only, scoped to `marin-na`** (one token per consumer, per the `r2-demo-tokens` lesson).
-  - Store it in Secret Manager for the cw job's service account (`cw-s3-job`).
-  - The site needs no `marin-na` credentials, because it serves the derived outputs from `oa-cw-s3-usage-index`.
-  - Marin owns the bucket, so tell them it's being scanned (it's metadata only).
+- **Deployment boundary:** own deployment branches, IaC stack, D1, derived-output R2 bucket, credential roles, schedule and cost attribution. Reuse shared readers, listing/import code and generic job plumbing rather than maintaining an R2-specific feature fork. Ryan clarified that CW is OA-only, so reusing that viewer policy is a reasonable proposed default; the separate deployment still needs its policy explicitly configured.
+- **Store/view boundary:** a deployment is the host/auth/infrastructure boundary; a store is an indexed root and its scan history; a view is a query/lens over a store. Index the OA account's four approved buckets, keep `/` as all buckets and link people directly to `/marin-na`; no alias redirects. Multiple stores within this deployment may share its D1 and derived bucket with namespaced prefixes. Its `/meta` should describe this pipeline's own footprint, separately from the OA account-wide source-storage/billing view.
+- **First milestone:** one metadata-only remote scan, existing treemap/drill/diff machinery and a last-modified histogram. R2 listing supplies `LastModified`; the S3 adapter stores it in the canonical `created` column, but it is not a true object birth time. Validate listing/build/publication totals and failures before enabling a daily schedule. At 3.28M objects and 1,000 keys/page, a simple daily listing is about 3,280 Class A requests ($0.015 at Standard list prices), excluding adaptive discovery, index IO and compute.
+- **Access:** dedicated source object-read credentials for the approved buckets; separate derived-index publisher credentials. No source credentials in the site. Choose remote job placement explicitly rather than inheriting CW's GCP service account or adding unrelated access scopes. Lifecycle inspection may need additional permissions; do not broaden the scan key just to render lifecycle rules.
+- **Access logging:** [R2 Data Access Logs] now cover supported S3/API/Workers/public object operations. They are not S3 `PutBucketLogging` and do not require proxying existing S3 clients. Logs include only status codes below 400, delivery is asynchronous/best-effort, retention is seven days, and enabling does not backfill history. Actor/access-key identity is useful attribution but shared keys are not individual users. No logging setting was changed. Verify an export/query ingestion path before promising a persistent last-read index; absent events must never be interpreted as proof of no reads.
+- **Logging cost gate:** [Observability pricing] begins December 1, 2026, with Paid account allowances shared across supported datasets: 50 GB ingestion/cycle and 10 GB-month storage, then $0.25/GB and $0.10/GB-month. Measure actual event bytes before projecting costs. A pilot on the personal R2 demo is lower risk, followed by an explicitly approved `marin-na` pilot.
 
 ### 2. (a) Add the ~190 TB of non-fleet Marin/Levanter GCS buckets to gcs
 
-These are the same project, provider and audience as the fleet. Their 30-day flatness and Standard class make them the clearest cleanup/tiering lead: ≈$4–5K/mo with apparently no active writers. Together they hold 11.6M objects, about 3% of the fleet's listing volume.
+These are the same project and provider as the fleet; confirm ownership and intended viewer access before adding them. The earlier $4–5K/mo estimate assumed uniform Standard class and is not established by actual class-level reporting. Their flat footprint motivates a retention review, not a conclusion that they are inactive. The Oct-10 inventory counted roughly 11.6M objects, about 3% of the fleet's listing volume.
 
 - **Work (≈0.5–1 day):**
   - Append the buckets to `FLEET` in `job/run.sh`. Check what else keys off `FLEET`: the lifecycle snapshot, `WARM_PATHS`, `ACCESS_BUCKETS`, sweeps (`PROTECTED_BUCKETS=marin-*` already covers them).
@@ -138,6 +133,10 @@ OA has five AWS accounts behind SSO, and their S3 holdings are unknown. Any subs
 
 ## Caveats
 
-- `total_bytes` is live data only. The 7-day soft-delete retention on most buckets bills extra bytes after deletes, which matters most for the swept fleet.
-- `marin-na`'s growth rate is an average since creation, not a measured trend. Its first scan establishes the real number.
-- GCS and R2 costs are list-price approximations, not billing data.
+- The original `storage/total_bytes` census was live-only. The Oct-11 `storage/v2/total_bytes` / `total_count` query separates live, soft-deleted, noncurrent and multipart storage. Across the six GCS fleet buckets it reports about 750.524 TB / 200.600M soft-deleted objects, in addition to live bytes; multipart series report at least 51.7 GB (one bucket's byte series is missing). These are latest daily gauges, not an instantaneous exact object census; see `tmp/gcs-tier-summary.json` and `tmp/oa-storage-report-2026-10-11.md`.
+- Normal GCS/S3/R2 listings index live objects, not soft-deleted generations, noncurrent versions or incomplete MPU parts. The existing lifecycle-rule display and GCS sweep recovery tooling do not constitute an index of those billable states. Start with provider aggregate gauges, then add separate state-aware inventories with generation/version/upload identities; do not silently mix retained bytes into the live treemap. MPU support needs provider-specific listing/part-size APIs, and an in-progress upload is not necessarily abandoned.
+- `marin-na`'s flat storage trace does not measure churn or access. A first listing establishes current last-modified distribution; subsequent scans and access logs answer different questions.
+- GCS cost estimates remain list-price approximations. The completed OA R2 billing cycle above is actual account billing supplied by Ryan, not an exact attribution to `marin-na`.
+
+[R2 Data Access Logs]: https://developers.cloudflare.com/r2/buckets/data-access-logs/
+[Observability pricing]: https://developers.cloudflare.com/observability/pricing/
