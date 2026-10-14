@@ -3,6 +3,7 @@
 // each URL shows. Everything else passes through untouched, except an
 // `/assets/` miss (`assetMiss`).
 import { restrictGate } from './_lib/restrict.js'
+import { footerCacheDrain } from './_lib/footerCache.js'
 import { coloPutsSettled } from './_lib/index.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
 
@@ -33,8 +34,9 @@ export const onRequest = async (ctx: { request: Request; env: OgEnv; next: () =>
   }
   const res = await ctx.next()
   // The reader puts decoded row groups in the colo without waiting (`putColoGroup`); a Worker drops work still in
-  // flight once the response is sent, so keep the isolate alive until those puts land.
-  ctx.waitUntil?.(coloPutsSettled())
+  // flight once the response is sent, so keep the isolate alive until those puts land. The footer LRU's
+  // queued writes (fills, access stamps: `_lib/footerCache.ts`) start here, after the response.
+  ctx.waitUntil?.(Promise.all([coloPutsSettled(), footerCacheDrain()]).then(() => undefined))
   if (url.pathname.startsWith('/assets/')) return isHtml(res) ? assetMiss() : res
   if (ctx.request.method !== 'GET' || !isHtml(res)) return res
   try {

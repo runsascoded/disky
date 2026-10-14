@@ -1,4 +1,4 @@
-// Scan runs (specs/scan-runs-ui.md): the D1 reads behind `/api/scan-runs`.
+// Scan runs (specs/done/scan-runs-ui.md): the D1 reads behind `/api/scan-runs`.
 // The three tables are small (a row per job run, its phases, its outputs), so
 // each request reads a store's rows whole and derives the views in
 // `src/scanRunsModel.ts`. A D1 without the migration (`0016_scan_runs.sql`)

@@ -5,7 +5,7 @@ process.env.TZ = 'America/New_York'
 import { describe, expect, it } from 'vitest'
 import { scanGroups, scanLabeler, scanMiss } from './scan'
 import { hrefWithScan } from './NoScanMatch'
-import { decodeSel, encodeSel, exactPrefix, exactSlug, nearestScan, resolveAfter, resolveBefore, resolveScan, scanInstant, scanMatches, scanNeighbors, sortScans, startKey, timesNeeded, type ScanTimes } from './scanSlug'
+import { decodeSel, encodeSel, exactPrefix, exactSlug, minSlug, nearestScan, resolveAfter, resolveBefore, resolveScan, scanInstant, scanMatches, scanNeighbors, sortScans, startKey, timesNeeded, type ScanTimes } from './scanSlug'
 
 // gcs on 10/9: the date-only daily run, which started 04:30:12Z (its listings' earliest `started`, `meta.started`),
 // then 12:36Z (8:36a EDT); a date-only 10/8 alone on its day.
@@ -27,6 +27,19 @@ describe('a date-only scan keyed by its real start', () => {
     expect(scanGroups(sortScans(SCANS, TIMES), NOW, label)).toEqual([
       { day: '10/9', scans: [{ id: '2026-10-09T1236', label: '8:36a' }, { id: '2026-10-09', label: '12:30a' }] },
       { day: '10/8', scans: [{ id: '2026-10-08', label: '10/8' }] },
+    ])
+  })
+  it('a date-only scan alone on its day also reads as its start once known; its canonical slug stays the day', () => {
+    const times: ScanTimes = { ...TIMES, '2026-10-08': startKey('2026-10-08', '2026-10-08T10:00:01.000Z')! }
+    const label = scanLabeler(SCANS, times, NOW)
+    expect(sortScans(SCANS, times).map(id => [id, exactSlug(id, times), minSlug(id, SCANS, times, NOW), label(id)])).toEqual([
+      ['2026-10-09T1236', '2610091236', '26100912', '10/9 8:36a'],
+      ['2026-10-09', '2610090430', '26100904', '10/9 12:30a'],
+      ['2026-10-08', '2610081000', '261008', '10/8 6:00a'],
+    ])
+    expect(scanGroups(sortScans(SCANS, times), NOW, label)).toEqual([
+      { day: '10/9', scans: [{ id: '2026-10-09T1236', label: '8:36a' }, { id: '2026-10-09', label: '12:30a' }] },
+      { day: '10/8', scans: [{ id: '2026-10-08', label: '6:00a' }] },
     ])
   })
   it('every scan round-trips through its exact slug; the hour and minute slugs take it, the midnight stays an alias', () => {

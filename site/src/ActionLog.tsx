@@ -66,7 +66,7 @@ export function ActionLog() {
                   <td className="prefix"><Link to={mapLink(r.prefix)}>{r.prefix}</Link></td>
                   <td>{r.owner ? <UserChip who={r.owner} size={15} /> : <span className="dim">cleared</span>}</td>
                   <td>
-                    <Tooltip content={<>{STATUS_TIP[r.status]}{r.retracted && <div className="how">{r.retracted}</div>}</>}>
+                    <Tooltip cell content={<>{STATUS_TIP[r.status]}{r.retracted && <div className="how">{r.retracted}</div>}</>}>
                       <span className={`status ${r.status}`}>{r.status}</span>
                     </Tooltip>
                   </td>

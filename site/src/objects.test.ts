@@ -3,7 +3,7 @@ import { actionItem, cellAction, filesRedirect, listsObjects, objectSource, open
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
-// Objects as first-class nodes (specs/path-store.md §3): the click / link /
+// Objects as first-class nodes (specs/done/path-store.md §3): the click / link /
 // open rules, where an object's bytes are read from per store, and where a
 // retired `/files/…` link lands.
 

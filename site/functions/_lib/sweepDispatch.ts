@@ -1,7 +1,7 @@
 // The `sweep` executor (gcs's bridge; `_lib/executor.ts` is the seam,
 // specs/done/staged-slack.md), and its pure parts: the run dir, the `-b` cut a plan
 // allows, and the executor script over the staged set (`sweep manifest
-// --plan`: specs/staged-delete.md).
+// --plan`: specs/done/staged-delete.md).
 //
 // The plan's items are the delete set: they are snapshotted into `plan.json`
 // in the run dir (a gcs plan MAY span buckets), and the submitted job runs the

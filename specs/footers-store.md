@@ -513,7 +513,7 @@ Ryan's question was whether every store should move onto one blessed FS. **Mostl
 [`staticNames.ts`]: ../site/functions/_lib/staticNames.ts
 [`staticCatalog.ts`]: ../site/functions/_lib/staticCatalog.ts
 [`site package.json`]: ../site/package.json
-[`path-store.md`]: path-store.md
+[`path-store.md`]: done/path-store.md
 [`interval-store.md`]: interval-store.md
 [`index-landscape.md`]: index-landscape.md
 [`static-name-search.md`]: architecture/static-name-search.md

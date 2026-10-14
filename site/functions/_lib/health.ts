@@ -1,4 +1,4 @@
-// /api/health (specs/health-page.md): the deployment's append-only stores read the way their readers read them —
+// /api/health (specs/done/health-page.md): the deployment's append-only stores read the way their readers read them —
 // `INDEX_R2`'s `scans.json` and newest manifest per store (`manifests.ts`), each listed run's files on R2 — plus D1's
 // per-scan path store (`index_schema`) and scan jobs (`scan_runs`), assembled by `src/healthModel.ts`. A store the
 // deployment doesn't configure (`INTERVAL_STORE_GEN`, `STATIC_GEN`, the `INDEX_R2` binding) is left out.

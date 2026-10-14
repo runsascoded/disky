@@ -1,4 +1,4 @@
-"""The heavy-term drilldown's per-scan runs (specs/static-append.md, "Drilldown runs (heavy terms)"): each scan's
+"""The heavy-term drilldown's per-scan runs (specs/done/static-append.md, "Drilldown runs (heavy terms)"): each scan's
 `<run>/drill/`, in the base `drill/`'s layout and schemas (`static_roots`), read beside the base.
 
 - **Roots**: a member's first-hit rows of the scan's version delta (opens; close records with their final `vt`), for
@@ -1530,7 +1530,7 @@ def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: p
 
 @group("drill")
 def cli() -> None:
-    """The drilldown's per-scan runs (specs/static-append.md, "Drilldown runs (heavy terms)")."""
+    """The drilldown's per-scan runs (specs/done/static-append.md, "Drilldown runs (heavy terms)")."""
 
 
 def _gcs():

@@ -52,8 +52,10 @@ export interface SyntaxHelp {
  * - `short-term` — a positive term with under `MIN_TERM` literal characters
  *   in a row (the search index is trigram-based);
  * - `invalid-regex` — a regex that doesn't compile;
- * - `unknown-syntax` — a `qs=` no syntax has. */
-export type QueryErrorCode = 'short-term' | 'invalid-regex' | 'unknown-syntax'
+ * - `unknown-syntax` — a `qs=` no syntax has;
+ * - `unsupported-kind` — an unquoted `is:file` / `is:dir` (specs/search-extensions.md §3: not built — the
+ *   name index has no file/folder bit), never silently searched as the text `is:file`. */
+export type QueryErrorCode = 'short-term' | 'invalid-regex' | 'unknown-syntax' | 'unsupported-kind'
 
 /** What a syntax's `parse` returns: an AST, null for "nothing to filter by"
  * (blank), or a typed error whose message the client shows under the box (a

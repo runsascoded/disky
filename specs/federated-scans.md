@@ -14,7 +14,7 @@ The through-line: **one scan artifact, many readers** — a project's own site (
 
 ## Near-term build (the stepping stone) — DT-owned daily r2 scans
 
-- **disk-tree owns the r2 scans**: a daily DT ingestion job scans ctbk + crashes + jc-taxes and publishes to **one r2 index bucket** (union-at-ingest, cw-multi-bucket style). r2.rbw.sh reads that one index → the union Map (`specs/union-of-roots.md`).
+- **disk-tree owns the r2 scans**: a daily DT ingestion job scans ctbk + crashes + jc-taxes and publishes to **one r2 index bucket** (union-at-ingest, cw-multi-bucket style). r2.rbw.sh reads that one index → the union Map (`specs/done/union-of-roots.md`).
 - This is chosen for speed to a live deploy; it is a **special case** of the north-star where the "union of locations" happens at ingest into a single location, and DT owns all three scans.
 
 ## Design guardrails (so the stepping stone generalizes cleanly)

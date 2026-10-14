@@ -1,5 +1,5 @@
 // POST /api/sweep/dispatch — launch a deletion run on GCP Batch from /staged
-// (specs/staged-delete.md; the "web dispatch bridge" of
+// (specs/done/staged-delete.md; the "web dispatch bridge" of
 // specs/sweep-executor.md).
 //
 // Body: { plan_id: number, mode: 'dry' | 'real', date: 'YYYY-MM-DD', buckets?: string[], machine?: keyof SWEEP_MACHINES }.

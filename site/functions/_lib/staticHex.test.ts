@@ -12,7 +12,7 @@ import { Drill } from './staticDrill.js'
 import { tiers } from './staticRuns.js'
 import { fixture } from './testStore.js'
 
-// The static name index under the hex-run rule (specs/static-hex-runs.md) over `fixtures/static-hex/` (`gen.py`): suffix
+// The static name index under the hex-run rule (specs/done/static-hex-runs.md) over `fixtures/static-hex/` (`gen.py`): suffix
 // rows only where the rule keeps them, a catalog by `occurs`, `hex_runs` recorded in `catalog/meta.json`. The reader,
 // the catalog, the `hexRuns` note and the path-store fallback's predicate, against a brute-force oracle under the rule.
 

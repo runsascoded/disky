@@ -1,4 +1,4 @@
-// Personal agent-token panel (specs/actions-ledger.md § API).
+// Personal agent-token panel (specs/done/actions-ledger.md § API).
 //
 // Opens from the header chip. Shows whether the signed-in user has an active
 // token, mints/rotates one (the server stores only its hash), and revokes.

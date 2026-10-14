@@ -13,7 +13,7 @@ export interface Coverage {
   bucketsOnly?: boolean | 'scoped'
   /** The scan lists folders only (a v1 index; the response's `dirsOnly`): its matches are folder names only. */
   dirsOnly?: boolean
-  /** The static name index's hex-run rule, applied to this literal (specs/static-hex-runs.md): its matches
+  /** The static name index's hex-run rule, applied to this literal (specs/done/static-hex-runs.md): its matches
    * inside hex ids of `min`+ digits aren't counted. */
   hexRuns?: { min: number; tail: number }
 }

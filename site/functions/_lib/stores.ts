@@ -1,5 +1,5 @@
 /**
- * Multi-store deploys (specs/multi-store.md): one deployment serves its
+ * Multi-store deploys (specs/done/multi-store.md): one deployment serves its
  * **primary** store plus any secondary stores named in `STORES_JSON`.
  *
  * Every data Function resolves its store from an explicit `store=<key>` query

@@ -58,7 +58,7 @@ class Profile:
     anchors: bool = False
     #: Mounted dirs copied onto the tasks' PYTHONPATH in place of the image's own code (a staged tree).
     src: tuple[str, ...] = ()
-    #: The hex-run rule a new generation is built with (specs/static-hex-runs.md): `MIN,TAIL` (e.g. `16,8`) or `off`.
+    #: The hex-run rule a new generation is built with (specs/done/static-hex-runs.md): `MIN,TAIL` (e.g. `16,8`) or `off`.
     #: Required (no default): `hex_rule()`. A generation records its rule (`scans.json` `hex_runs`); its runs follow it.
     hex_runs: str = ""
     #: The binary counter's compaction level L (≥ 1): carries stop below it, so a stack holds at most 2^L − 1 scans in

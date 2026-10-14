@@ -1,6 +1,5 @@
 import json
 import sqlite3
-from pathlib import Path
 
 import pytest
 from requests import Response
@@ -36,12 +35,12 @@ def test_failed_progress_is_error(capsys) -> None:
     assert json.loads(capsys.readouterr().err) == {"severity": "ERROR", "event": "sweep_progress", "message": execution_progress_message(snap), "progress": snap}
 
 
-def test_d1_history_insert_is_idempotent_and_quotes_ids(monkeypatch) -> None:
+def test_d1_history_insert_is_idempotent_and_quotes_ids(monkeypatch, d1_lineage) -> None:
     from dt_cloud import index_footer
 
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE deletion_runs(run_id TEXT PRIMARY KEY)")
-    sql = (Path(__file__).parents[2] / "site/migrations/cw/0011_run_progress.sql").read_text()
+    sql = d1_lineage.named("run_progress").read_text()
     db.executescript(sql)
     monkeypatch.setattr(index_footer, "_creds", lambda: ("token", "account"))
     monkeypatch.setattr("dt_cloud.sweep_progress._creds", lambda: ("token", "account"))

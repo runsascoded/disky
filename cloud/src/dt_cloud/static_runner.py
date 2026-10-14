@@ -1,4 +1,4 @@
-"""`dt-cloud static-names runs add SCAN_ID`: append one scan to the static name index as a run (specs/static-append.md),
+"""`dt-cloud static-names runs add SCAN_ID`: append one scan to the static name index as a run (specs/done/static-append.md),
 in Python, so a deployment's scan job calls it directly (no `gcloud`: GCS and Batch over their APIs):
 
     [backfill: each listed run's missing drill / anchors, oldest first] →
@@ -19,7 +19,7 @@ stage (`static_anchors run`, the profile's `anchors`) reads none of the drill's 
 run at once; each keeps its own skip-if-done and post-check, and a failure of either fails the run once both end.
 
 The unit is a scan: any deployment may scan once a day, every 6 h, or once more on demand, and each scan is its own
-run (specs/scan-ids-not-dates.md). Scans are added **strictly in scan-id order**: given SCAN_ID, every published scan
+run (specs/done/scan-ids-not-dates.md). Scans are added **strictly in scan-id order**: given SCAN_ID, every published scan
 after the generation's newest (base + live runs) and up to SCAN_ID is pending; the oldest pending must be SCAN_ID
 itself, else it refuses (exit 3), or with `-c` catches up every pending scan in order. Each stage is skipped when its
 output is in the data bucket, so a rerun resumes at the first missing one; the R2 copy skips objects already there,

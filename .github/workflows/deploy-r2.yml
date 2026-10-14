@@ -97,7 +97,7 @@ jobs:
           cd site
           # Pages rejects a custom config path (-c); swap the target config in as wrangler.toml.
           cp "${{ steps.t.outputs.config }}" wrangler.toml
-          npx wrangler pages deploy dist --project-name "${{ steps.t.outputs.project }}" --branch "${{ steps.t.outputs.branch }}" --commit-dirty=true
+          pnpm exec wrangler pages deploy dist --project-name "${{ steps.t.outputs.project }}" --branch "${{ steps.t.outputs.branch }}" --commit-dirty=true
       - name: Smoke test (served + index reads)
         run: |
           set -euo pipefail

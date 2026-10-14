@@ -594,6 +594,26 @@ export class Drill {
     return this.catalog?.info ? ruleOf((await this.catalog.info()).hex_runs) : null
   }
 
+  /** `t`'s match root at exactly `path` on the tiers of `state` (every version of every owner slice; none when
+   *  `path` is no root of `t`), any scan: one key range `[(c_i, path), (c_i, path + U+0000))` of each tier's roots,
+   *  combined as `view`'s are. Null: a long literal that is no member. */
+  async rootAt(t: string, path: string, state?: DrillState): Promise<Hit[] | null> {
+    const st = state ?? await this.state()
+    const { tiers } = st
+    const kind: Kind = [...t].length <= 2 ? 'short' : 'long'
+    let cs = tiers.map(() => t)
+    if (kind === 'long') {
+      const maps = await perTier(tiers, x => x.aliases())
+      if (!maps[maps.length - 1].has(t)) return null
+      cs = tiers.map((_, i) => this.rules.canon(maps, i, t))
+    }
+    const io = newIo()
+    const lo = (c: string): Key => [c, path], hi = (c: string): Key => [c, path + '\0']
+    const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io))
+    const parts = await perTier(tiers, async (x, i) => sels[i].groups?.length ? x.files[kind].roots.read<Hit>(lo(cs[i]), hi(cs[i]), sels[i].groups!, io, hitOf) : [])
+    return this.rules.combine(parts)
+  }
+
   /** `t`'s (lowercase) view at `P`, on any scan of `state` (default: the current one). */
   view(t: string, P: string, state?: DrillState): Promise<DrillAnswer> { return this.bounded(t, P, state) as Promise<DrillAnswer> }
 
@@ -712,6 +732,23 @@ export class DrillSource implements HitSource {
       if (!st.tiers.length) return null
       try {
         return await this.hitsOn(key, under, st, t0, opts)
+      } catch (e) {
+        if (!(e instanceof TierError) || tries > st.tiers.length) throw e
+        this.drill.broke(e.dir, e)
+      }
+    }
+  }
+
+  /** `key`'s root at exactly `path` (its hits; empty when `path` is none of its roots), exact on the live tiers'
+   *  scans; null: no usable tier, or a long literal that is no member. */
+  async at(key: string, path: string): Promise<Found | null> {
+    const t0 = Date.now()
+    for (let tries = 0; ; tries++) {
+      const st = await this.drill.state()
+      if (!st.tiers.length) return null
+      try {
+        const hits = await this.drill.rootAt(key, path, st)
+        return hits && { hits, io: { from: 'drill', source: 'at', tiers: st.tiers.length, ms: Date.now() - t0 }, scans: st.scans }
       } catch (e) {
         if (!(e instanceof TierError) || tries > st.tiers.length) throw e
         this.drill.broke(e.dir, e)

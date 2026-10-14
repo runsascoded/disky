@@ -14,7 +14,7 @@ import { elideMid } from './CopyName'
 import { AssignSelect } from './AssignSelect'
 import { OwnerFactChip } from './OwnerFactChip'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
-import { PrefixStageAction, tableCoverItem } from './StageAction'
+import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction'
 import { actionItem, rowTarget } from './objects'
 import type { TreeNode } from './types'
 import { fmtN } from './types'
@@ -88,6 +88,9 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   // At the store root every row is a whole bucket (on a `*` store, a whole
   // top-level root), which a plan item can't name: no trash there.
   const canTrash = staging && (segs.length > 0 || !!filter)
+  // The open plan: rows already staged (or under a staged folder) say so, and a folder holding staged items
+  // counts them — the trash's "✓ staged" alone is gone on the next load.
+  const staged = useStagedIndex()
   // A filtered view whose matches can't be acted on (a refusal, a rollup, a catalog or approximate answer,
   // `actBlock`): no row offers an action, and nothing selects — a row's whole prefix is never the stand-in.
   const showSel = filter?.blocked ? false : staging ? canStage && (canTrash || assigning) : assigning
@@ -194,9 +197,10 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
     const to = lab && lab.segs.length > 1 ? rowTarget([...segs, ...lab.segs.slice(0, -1)], end.n, end.k, false) : rowTarget(segs, k.n, k.k, synthetic)
     const label = lab?.label ?? k.n
     const fullSegs = lab ? [...segs, ...lab.segs] : kidSegs
-    return { k, synthetic, kidSegs, fullSegs, label, count: lab?.count, atLeast: !!lab?.atLeast, uri, to, shares: ownerShares(k), cl, si: selectable.indexOf(k) }
+    const mark = staged && !synthetic ? staged.markOf(uri, k.k !== 'file') : null
+    return { k, synthetic, kidSegs, fullSegs, label, count: lab?.count, atLeast: !!lab?.atLeast, uri, to, shares: ownerShares(k), cl, si: selectable.indexOf(k), mark }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [shown, path, scheme, ownerIdx, selectable, filter, rowMatches])
+  }), [shown, path, scheme, ownerIdx, selectable, filter, rowMatches, staged])
   // Every hook above runs on every render: an empty page (a drill can leave
   // no children) must not shorten the hook list, or React throws "Rendered
   // fewer hooks than expected" on the way in.
@@ -278,7 +282,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                     <span className="gradbar" style={{ background: dateGradientCss(), width: 90, height: 8, borderRadius: 2, display: 'inline-block' }} />
                     {epochDaysToMonthShort(dMax)}
                   </span>
-                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = each row’s {time.description} (a directory’s byte-weighted mean), old → new, over the rows listed here.</div>
+                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = each row’s {time.description} (a directory’s newest), old → new, over the rows listed here.</div>
                 </>}>
                   <span className="info" tabIndex={0} onClick={e => e.stopPropagation()} aria-label={`about the ${time.label} colour`}> ⓘ</span>
                 </Tooltip>
@@ -290,7 +294,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
           </tr>
         </thead>
         <tbody>
-          {rowData.map(({ k, synthetic, kidSegs, fullSegs, label, count, atLeast, uri, to, shares, cl, si }) => {
+          {rowData.map(({ k, synthetic, kidSegs, fullSegs, label, count, atLeast, uri, to, shares, cl, si, mark }) => {
             const rowItem = actionItem(uri, k.k)
             // A row's hover is intent to act on it (under a filter: its matches are fetched after a short dwell).
             const enter = () => { onBrush?.(k.n); if (filter) setHovered(k.n) }
@@ -298,7 +302,8 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
             return (
               <tr key={k.n} ref={si >= 0 ? sel.rowRef(si) : undefined} {...(si >= 0 && showSel ? sel.rowProps(si) : {})}
                 {...((onBrush || filter) && !synthetic ? { onMouseEnter: enter, onMouseLeave: leave } : {})}
-                data-brushed={brush === k.n || undefined}>
+                data-brushed={brush === k.n || undefined}
+                className={mark && mark.as !== 'inside' ? 'staged' : undefined}>
                 {showSel && <td className="col-sel" onClick={e => { e.stopPropagation(); if (si >= 0 && !(e.target as HTMLElement).closest('input')) sel.toggle(si) }}>{si >= 0 && <input type="checkbox" aria-label={`select ${label}`} checked={sel.isSelected(k)} onChange={() => sel.toggle(si)} />}</td>}
                 <td className="prefix">
                   {(() => {
@@ -315,7 +320,8 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                     const cell = label.length > NAME_MAX || segs.length > 0
                       ? <Tooltip content={<code className="elide-full">{pathText(scheme, fullSegs, home)}</code>} placement="right">{name}</Tooltip>
                       : name
-                    return count ? <>{cell}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span></> : cell
+                    const inside = mark?.as === 'inside' && <Tooltip content={`${mark.n.toLocaleString('en-US')} staged ${mark.n === 1 ? 'item' : 'items'} inside: review them at /staged`}><a className="row-n staged-n" href="/staged"> · {mark.n.toLocaleString('en-US')} staged</a></Tooltip>
+                    return count ? <>{cell}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{cell}{inside}</>
                   })()}
                 </td>
                 <td className="num">{fmtBytes(k.b)}</td>
@@ -354,7 +360,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                     {!synthetic && !filter && (
                       <>
                         {canTrash && (
-                          <PrefixStageAction item={tableCoverItem(k, kidSegs.join('/'))} scheme={scheme} fmtBytes={fmtBytes} />
+                          <PrefixStageAction item={tableCoverItem(k, kidSegs.join('/'))} scheme={scheme} fmtBytes={fmtBytes} mark={mark} />
                         )}
                         {assigning && <AssignSelect items={rowItem} assigned={cl?.who ?? null} compact />}
                       </>

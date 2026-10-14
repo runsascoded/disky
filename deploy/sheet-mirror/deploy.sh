@@ -36,7 +36,7 @@ if ! $iac; then
 fi
 
 echo "== Cloud Run job (upsert) ==" >&2
-# Cost labels (specs/cost-labels.md): `$DISKY_LABELS` + `component=sheet-sync`, when set.
+# Cost labels (specs/done/cost-labels.md): `$DISKY_LABELS` + `component=sheet-sync`, when set.
 labels=()
 if [ -n "${DISKY_LABELS:-}" ]; then labels=(--update-labels "$(dt-cloud cost-labels -c sheet-sync)"); fi
 # `^@^`: gcloud's alternate list delimiter — base64 has no `@`, but may end in `=`.

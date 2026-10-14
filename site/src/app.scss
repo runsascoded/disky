@@ -1005,10 +1005,26 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .legend .gradli {
   gap: 6px;
   .gradbar {
+    position: relative;
     display: inline-block;
     width: 120px;
     height: 10px;
     border-radius: 3px;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .gradwin {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    min-width: 2px;
+    border: 2px solid var(--ink);
+    border-radius: 2px;
+    pointer-events: none;
+  }
+  .gradsel {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
   }
 }
 
@@ -2252,6 +2268,17 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // A filtered table row's box: its width reserved whatever the state (the controls, a spinner, the accepted
 // line, the muted reason truncated with its tooltip); a confirm wraps within it.
 .children-tbl td.actions .mact { width: 13em; }
+// A row the open plan already holds (`useStagedIndex`): its name struck through and dimmed, the trash
+// replaced by a chip to /staged; a folder holding staged items counts them after its name.
+.children-tbl tr.staged td.prefix a, .children-tbl tr.staged td.prefix > span { text-decoration: line-through; text-decoration-color: var(--s3); color: var(--ink-2); }
+.children-tbl tr.staged td.num { color: var(--ink-2); }
+a.staged-chip {
+  display: inline-block; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px;
+  color: var(--s3); border: 1px solid color-mix(in srgb, var(--s3) 55%, transparent);
+  background: color-mix(in srgb, var(--s3) 10%, transparent); text-decoration: none; white-space: nowrap;
+  &:hover { background: color-mix(in srgb, var(--s3) 20%, transparent); }
+}
+.children-tbl a.staged-n { color: var(--s3); text-decoration: none; &:hover { text-decoration: underline; } }
 .bulkbar .bb-acts { min-width: 18em; justify-content: flex-start; }
 .children-tbl .sel-bar .sel-acts { min-width: 16em; }
 
@@ -2874,8 +2901,11 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .dim { color: var(--ink-3); }
   .sessions-filters {
     display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 12px 0; font-size: 13px;
-    input:not([type]) , input[type="date"] { font: inherit; padding: 3px 6px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
+    input:not([type]), input[type="search"], input[type="date"] { font: inherit; padding: 3px 6px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
   }
+  .session-who { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 2px; }
+  .guest-tag { font-size: 12px; padding: 0 6px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink-2); white-space: nowrap; }
+  h1 .guest-tag { font-size: 14px; vertical-align: middle; }
   .session-meta { font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
   table.sessions {
     width: 100%; border-collapse: collapse; font-size: 13px;
@@ -2884,6 +2914,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     tr.has-err td { background: color-mix(in srgb, var(--danger) 9%, transparent); }
     tr.load td { border-top: 2px solid var(--ink-3); }
     tr.focused td { outline: 2px solid var(--s1); outline-offset: -2px; }
+    tr.hot td { background: color-mix(in srgb, var(--s1) 14%, transparent); }
     td.ev { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   }
   .lane-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; background: var(--lane); }
@@ -2897,6 +2928,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     svg { display: block; width: 100%; height: 70px; cursor: pointer; }
     .lane-bg { fill: var(--panel); &:nth-child(even) { fill: var(--surface); } }
     .tick { stroke: var(--lane); stroke-width: 1.5; &.err { stroke: var(--danger); stroke-width: 2.5; } &.hot { stroke: var(--ink); stroke-width: 3; } }
+    .guide { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 2 2; }
     figcaption { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--ink-2); margin-top: 4px; }
     .lanes { display: inline-flex; gap: 12px; flex-wrap: wrap; }
   }

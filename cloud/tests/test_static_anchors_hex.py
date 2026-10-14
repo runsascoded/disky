@@ -1,4 +1,4 @@
-"""Anchored search (`^q`, `q$`, `^q$`) on a generation built under the hex-run rule (specs/static-hex-runs.md): the
+"""Anchored search (`^q`, `q$`, `^q$`) on a generation built under the hex-run rule (specs/done/static-hex-runs.md): the
 anchors built under the generation's rule (base and runs, rollups at a small R) answer every key at every directory
 on every date exactly as brute force under `segment_occurs`; anchors built under another rule are declined (`q$` still
 reads the light index); the scan-file brute force SQL equals the version brute force under the rule."""

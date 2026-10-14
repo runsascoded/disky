@@ -1,5 +1,5 @@
 /** The page's scope axes, applied server-side to a view's rows
- * (specs/view-serving.md §2): the owner axis (`o=`), the storage-class axis
+ * (specs/done/view-serving.md §2): the owner axis (`o=`), the storage-class axis
  * (`cl=`), and the name filter (`q=`). A user lens (`lens=user:`) lives in
  * `owners.ts` — it needs the ledger.
  *

@@ -900,10 +900,8 @@ def test_the_profile_drives_the_append(tmp_path):
     p.write_text(json.dumps({"bucket": "data", "append": {k: v for k, v in doc["append"].items() if k != "image"}}))
     with pytest.raises(SystemExit, match=r"no image in the profile's `append` section \(or \$INTERVAL_STORE_IMAGE\)"):
         ia.load_config(str(p), {})
-    with pytest.raises(SystemExit, match=r"no image"):  # the gcs profile pins none: the caller passes its job image
-        ia.load_config("gcs", {})
-    gcs = ia.load_config("gcs", {"INTERVAL_STORE_IMAGE": "img"})
-    assert [gcs.p.gen, gcs.ranges_gen, gcs.p.bucket] == ["2026-10-09b", "2026-10-09", "oa-gcs-usage-dvx"]
+    p.write_text(json.dumps({"name": "dep", **doc}))  # a profile's `name`, else its path
+    assert [ia.load_config(str(p), {}).p.name, ia.load_config(str(tmp_path / "x.json"), {}).p.gen] == ["dep", "g1"]
 
 
 PREP = "set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.interval_append"

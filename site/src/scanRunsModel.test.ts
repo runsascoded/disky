@@ -1,4 +1,4 @@
-// specs/scan-runs-ui.md: the derivations /scans shows from the D1 rows.
+// specs/done/scan-runs-ui.md: the derivations /scans shows from the D1 rows.
 import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,

@@ -18,8 +18,8 @@ export interface PrefixStat {
   cb?: Record<string, number>
 }
 
-const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'mtime_mean', 'mtime_w', 'last_read', 'cls2', 'cls3', 'cls4']
-type StatRow = Pick<Row, 'path' | 'depth' | 'usr' | 'size' | 'n_files' | 'mtime_mean' | 'mtime_w' | 'last_read'> & Partial<Pick<Row, 'cls2' | 'cls3' | 'cls4'>>
+const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'mtime', 'last_read', 'cls2', 'cls3', 'cls4']
+type StatRow = Pick<Row, 'path' | 'depth' | 'usr' | 'size' | 'n_files' | 'mtime' | 'last_read'> & Partial<Pick<Row, 'cls2' | 'cls3' | 'cls4'>>
 
 /** The most prefixes one request sizes. */
 export const MAX_PREFIXES = 1000
@@ -33,15 +33,15 @@ export function foldPrefixes(prefixes: string[], rows: StatRow[]): Record<string
     const k = `${depth}\t${path}`
     byKey.set(k, [...(byKey.get(k) ?? []), p])
   }
-  const acc = new Map<string, { b: number; o: number; wts: number; wb: number; a: number | null; ub: Map<string, number>; cb: Map<string, number> }>()
+  const acc = new Map<string, { b: number; o: number; m: number | null; a: number | null; ub: Map<string, number>; cb: Map<string, number> }>()
   for (const r of rows) {
     const k = `${r.depth}\t${r.path}`
     if (!byKey.has(k)) continue
     let a = acc.get(k)
-    if (!a) acc.set(k, (a = { b: 0, o: 0, wts: 0, wb: 0, a: null, ub: new Map(), cb: new Map() }))
+    if (!a) acc.set(k, (a = { b: 0, o: 0, m: null, a: null, ub: new Map(), cb: new Map() }))
     a.b += r.size
     a.o += r.n_files
-    if (r.mtime_mean != null && r.mtime_w > 0) { a.wts += r.mtime_mean * r.mtime_w; a.wb += r.mtime_w }
+    if (r.mtime != null) a.m = a.m == null ? r.mtime : Math.max(a.m, r.mtime)
     if (r.last_read != null) a.a = a.a == null ? r.last_read : Math.max(a.a, r.last_read)
     if (r.usr) a.ub.set(r.usr, (a.ub.get(r.usr) ?? 0) + r.size)
     for (const [c, v] of [['2', r.cls2], ['3', r.cls3], ['4', r.cls4]] as [string, number | undefined][]) if (v) a.cb.set(c, (a.cb.get(c) ?? 0) + v)
@@ -49,7 +49,7 @@ export function foldPrefixes(prefixes: string[], rows: StatRow[]): Record<string
   const out: Record<string, PrefixStat> = {}
   for (const [k, a] of acc) {
     const s: PrefixStat = { b: a.b, o: a.o }
-    if (a.wb) s.d = Math.round(a.wts / a.wb / 86400)
+    if (a.m != null) s.d = Math.floor(a.m / 86400)  // newest write (view.ts `display`)
     if (a.a != null) s.a = a.a
     if (a.ub.size) s.us = [...a.ub].sort((x, y) => y[1] - x[1])
     if (a.cb.size) s.cb = Object.fromEntries([...a.cb].sort((x, y) => y[1] - x[1]))

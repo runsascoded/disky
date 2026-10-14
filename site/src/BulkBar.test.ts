@@ -56,7 +56,7 @@ describe('the bulk bar lists the matches as prefixes, grouped by folder, for rev
 // Offered at once, whatever the cover says: nothing is disabled ahead of the click (over the cap, the click
 // says so, muted, in the button's place — `MatchActions.test.ts`), and a hover's failure shows nothing.
 describe('offered at once: idle, prefetching, listed, over the cap', () => {
-  const ACTS = '<span class="mact bb-acts" tabindex="-1"><button type="button" class="act assign">assign to me</button><input list="bb-assign-users" placeholder="you" size="7" aria-label="Assign matches to user" value=""/><datalist id="bb-assign-users"></datalist><button type="button" class="act stage">stage for deletion</button><span class="act-live" role="status" aria-live="polite"></span></span><input placeholder="memo" size="10" aria-label="Bulk memo" value=""/>'
+  const ACTS = '<span class="mact bb-acts" tabindex="-1"><button type="button" class="act assign">assign to me</button><input list="bb-assign-users" placeholder="you" size="7" aria-label="Assign matches to user" autoComplete="off" data-1p-ignore="true" data-lpignore="true" data-form-type="other" value=""/><datalist id="bb-assign-users"></datalist><button type="button" class="act stage">stage for deletion</button><span class="act-live" role="status" aria-live="polite"></span></span><input placeholder="memo" size="10" aria-label="Bulk memo" value=""/>'
   it('idle (nothing listed yet): the actions, enabled; no count', () => {
     expect(render(undefined)).toBe(`<span class="bulkbar">${ACTS}</span>`)
   })

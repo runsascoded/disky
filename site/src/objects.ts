@@ -1,4 +1,4 @@
-// Objects as first-class nodes (specs/path-store.md §3): what a click on a
+// Objects as first-class nodes (specs/done/path-store.md §3): what a click on a
 // cell or a row does, where an opened object's bytes come from, and where an
 // old `/files/…` link lands. Pure, so every rule is specced in
 // `objects.test.ts`; the components (`Treemap`, `ChildrenTable`,

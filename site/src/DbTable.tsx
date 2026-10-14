@@ -5,6 +5,7 @@ import { useMemo, useState } from 'react'
 import type { ColumnSpec, Row, TableMeta } from './db'
 import { useTable, useTableMutations } from './db'
 import { Skeleton } from './Busy'
+import { NO_AUTOFILL } from './noAutofill'
 
 // Generic editable table over one /api/db table: TanStack Table for the
 // grid (sorting now; filtering/pagination are config away), TSQ mutations
@@ -120,6 +121,7 @@ export function DbTable({ name }: { name: string }) {
               onChange={e => setDraft(d => ({ ...d, [c.name]: e.target.value }))}
               placeholder={c.name + (c.required ? '' : ' (optional)')}
               required={c.required}
+              {...NO_AUTOFILL}
             />
           ))}
           <button type="submit" disabled={insert.isPending}>Add</button>

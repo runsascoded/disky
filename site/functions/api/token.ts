@@ -1,6 +1,6 @@
 /**
  * Personal agent token — self-service, for driving `/api/actions` (and the
- * rest of `/api/*`) from an agent or a shell (specs/actions-ledger.md § API).
+ * rest of `/api/*`) from an agent or a shell (specs/done/actions-ledger.md § API).
  *
  *   GET    /api/token  → { active, created }        — status; never the token
  *   POST   /api/token  → { token, created }          — mint/rotate; token ONCE

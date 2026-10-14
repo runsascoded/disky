@@ -34,7 +34,7 @@ export const INDEXED_SYNTAX: QuerySyntax = { id: simple.id, parse: q => simple.p
 
 /** The refusal codes an API answers a filter with (`functions/_lib/indexedOnly.ts`): a reason to show
  *  inline, never a failure to retry. */
-const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|anchor-not-indexed)$/
+const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|anchor-not-indexed|too-broad)$/
 
 /** A failed API response: `message` as `apiErrorMessage` words it; `refusal` the structured
  *  `{ error, code }` body's reason when its code is a filter refusal (`REFUSAL`); `status` the HTTP status. */

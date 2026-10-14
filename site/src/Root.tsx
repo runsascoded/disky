@@ -35,7 +35,7 @@ const PERF = typeof location !== 'undefined' && new URLSearchParams(location.sea
 // screenshot (public, ungated — it's what unfurl crawlers render); `/files/*`
 // (the retired scan browser) → the same key in the map; every other path → the
 // treemap app for the primary store. A secondary store (`VITE_STORES_EXTRA`,
-// specs/multi-store.md phase 2) gets the same app under its own path (`/meta/*`,
+// specs/done/multi-store.md phase 2) gets the same app under its own path (`/meta/*`,
 // and `/meta/files/*` redirecting like `/files/*`),
 // inside a <StoreProvider> so every data request carries its `store=`; the
 // primary's routes are exactly the single-store build's. The data-backed
@@ -89,10 +89,10 @@ export default function Root() {
       {/* The opt-in deletion console: what the trash gesture staged, and its runs. */}
       <Route path="/staged" element={<AuthGate><StagedPage /></AuthGate>} />
       <Route path="/runs/*" element={<AuthGate><RunPage /></AuthGate>} />
-      {/* What each scan job did (specs/scan-runs-ui.md). */}
+      {/* What each scan job did (specs/done/scan-runs-ui.md). */}
       <Route path="/scans" element={<AuthGate><ScansPage /></AuthGate>} />
       <Route path="/scans/*" element={<AuthGate><ScanRunPage /></AuthGate>} />
-      {/* The append-only stores' state (specs/health-page.md). */}
+      {/* The append-only stores' state (specs/done/health-page.md). */}
       <Route path="/health" element={<AuthGate><HealthPage /></AuthGate>} />
       <Route path="/names" element={<AuthGate><NamePage /></AuthGate>} />
       {/* Retired pages: the mark & sweep console became /staged; the review

@@ -55,7 +55,7 @@ if [ "$mode" = dev ]; then push=false; fi
 # are its own, not production's.
 branch=main; [ "$mode" = dev ] && branch=dev
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
-npx wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch"
+pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch"
 
 # Entry-asset check: the new `index.html` names hashed bundles; an edge still on
 # the previous deployment answers those paths with the SPA fallback (index.html,

@@ -1,5 +1,5 @@
 /**
- * Actions ledger (specs/actions-ledger.md): attribution as an append-only WAL.
+ * Actions ledger (specs/done/actions-ledger.md): attribution as an append-only WAL.
  *
  *   GET  /api/actions?log=1    → { total, rows: [...] } — every owner action,
  *                                newest first, with its status (actionLog.ts).

@@ -8,6 +8,7 @@ import { hideScopes } from './hideScopes'
 import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
 import { SessionLogSwitch } from './SessionLogSwitch'
+import { NO_AUTOFILL } from './noAutofill'
 
 // Share-link console (staff-only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -254,7 +255,7 @@ function HolderCell({ grant, onSave, saving, error }: { grant: Grant; onSave: (e
       }}
       onKeyDown={e => { if (e.key === 'Escape') setEditing(false) }}
     >
-      <input className="memo-input" autoFocus value={name} placeholder="holder’s name" onChange={e => setName(e.target.value)} />
+      <input className="memo-input" autoFocus value={name} placeholder="holder’s name" onChange={e => setName(e.target.value)} {...NO_AUTOFILL} />
       <AvatarField
         id={`holder-avatar-${grant.id}`}
         endpoint="/api/auth/avatar"
@@ -492,12 +493,12 @@ export function AdminPage() {
       >
         <div className="field">
           <label htmlFor="mint-name">Name</label>
-          <input id="mint-name" value={name} onChange={e => setName(e.target.value)} placeholder="full name" />
+          <input id="mint-name" value={name} onChange={e => setName(e.target.value)} placeholder="full name" {...NO_AUTOFILL} />
           <span className="hint">optional — the person the link signs in as; shown as their name (with the avatar below) while they browse</span>
         </div>
         <div className="field">
           <label htmlFor="mint-email">Email</label>
-          <input id="mint-email" type="email" value={email} onChange={e => setEmail(e.target.value)} />
+          <input id="mint-email" type="email" value={email} onChange={e => setEmail(e.target.value)} {...NO_AUTOFILL} />
           <span className="hint">
             optional — makes it a person's link: binds it to this address, and creates their account so they can also sign in directly (Google or an emailed code).
             The account doesn't expire or get revoked with the link; remove it from <Link to="/admin/db/allowed_emails">users</Link>

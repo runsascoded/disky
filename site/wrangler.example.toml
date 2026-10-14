@@ -113,6 +113,8 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # INTERVAL_STORE_GEN = "2026-10-09"         # with PATH_STORE: the generation, `interval-store/<gen>/` on INDEX_R2
 # INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
 # OWNER_HISTORY_BATCH = "1"                # prototype (specs/root-owner-history.md; off): a fleet-root owner series from one bounded interval-store version read, the canonical per-scan reader as fallback
+# FOOTER_CACHE_MAX_ROWS = "1000000"        # the footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most `index_row_groups` rows its hot entries keep; evicted by `POST /api/footer-cache` / `dt-cloud footer-evict`. Default 1,000,000
+# FOOTER_CACHE_MAX_BYTES = "1000000000"    # …and a byte cap over them (text columns + 64 B per row); unset = none
 # STATIC_BENCH = "1"                        # dev: `/api/static-bench`, R2 read timings over INDEX_R2
 # SERVED_R2 = "1"                           # the snapshot JSONs (`snapshots/…`) and extras sidecars (`attr.tsv{,.idx.json}`) from INDEX_R2, under their store keys (`_lib/index.ts` `servedStore`; the job's `dt-cloud publish-r2 -S`); unset = through STORE_*
 # [[r2_buckets]]                            # Worker-served indexes (the static name-search shards)

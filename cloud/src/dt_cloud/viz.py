@@ -1,7 +1,7 @@
 """Data extracts for the web viz (``dt-cloud path-index``).
 
 DuckDB over the deduped listing parquet: the path store's sorts (dir rows
-rolled up per owner slice + the listing's object rows; specs/path-store.md
+rolled up per owner slice + the listing's object rows; specs/done/path-store.md
 §4.3), created-day age strata, and a small meta blob. The JSON outputs are
 consumed by ``site/``; the sorts are what ``index-sync`` publishes.
 """
@@ -102,7 +102,7 @@ def _rss(tag: str) -> None:
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     err(f"[rss] {tag}: peak {peak / (1024**2 if sys.platform == 'linux' else 1024**3):.1f} GB")
 
-# The gcs store's columns (specs/path-store.md §1.1) in the engine's layer-2
+# The gcs store's columns (specs/done/path-store.md §1.1) in the engine's layer-2
 # order — `usr` (the owner slice) right after `path` as the label block, the
 # storage-class pivots the listing carries, `created` / `last_read` (the access
 # log's last-read day).
@@ -131,7 +131,7 @@ def _write_store(
     age_cols: tuple[str, ...] = (),
     search: bool = False,
 ) -> dict[str, dict]:
-    """The store's sorts beside ``path_index`` (specs/path-store.md §4.3) from
+    """The store's sorts beside ``path_index`` (specs/done/path-store.md §4.3) from
     the rolled-up dir slices (``ptu``, ``dir_stats``, ``dir_attr`` when
     attributing) and the listing's object rows (``src``): one layer-2 shaped
     union (`index.STORE_L2`, streamed to disk, removed after) cut by the
@@ -265,7 +265,7 @@ def write_path_index(
     (specs/path-store-search.md).
 
     ``path_index`` (``<dir>/path-index.parquet``) writes the store
-    (specs/path-store.md §4.3): every dir row — every ancestor path ×
+    (specs/done/path-store.md §4.3): every dir row — every ancestor path ×
     attribution slice, descendant-inclusive — and every object row from the
     listing, attributed to its dir's owner (the same deepest-prefix join;
     objects are leaves, so no ancestor explosion), with ``created`` / ``mtime``
@@ -477,7 +477,7 @@ def write_path_index(
             access_window = (int(lo), int(hi))
         _rss("access")
 
-    # --- the path index: every ancestor path, every depth (specs/view-serving.md) ---
+    # --- the path index: every ancestor path, every depth (specs/done/view-serving.md) ---
     # Roll every object up to *all* its ancestor prefixes (descendant-inclusive
     # totals at every depth), attribute per dir, keep only prefixes clearing the
     # fold floor so the Python side stays small regardless of object count, and
@@ -519,7 +519,7 @@ def write_path_index(
 
     # The full rolled-up (path, user) relation — every ancestor path,
     # descendant-inclusive, attributed, NO floor: the store's dir rows, one per
-    # owner slice (specs/path-store.md §1.1 `usr`).
+    # owner slice (specs/done/path-store.md §1.1 `usr`).
     con.execute(
         f"""
         CREATE TEMP TABLE ptu AS

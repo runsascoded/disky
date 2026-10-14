@@ -252,4 +252,4 @@ Decisions for the user:
 - **`-S` default**: off until measured; on for r2 first?
 
 [diff-and-search]: done/diff-and-search.md
-[path-store]: path-store.md
+[path-store]: done/path-store.md

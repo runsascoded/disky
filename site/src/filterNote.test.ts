@@ -50,7 +50,7 @@ describe('apiError / refusalOf: a filter refusal is a reason to state inline, no
   const body = (code: string, error = `why ${code}`) => JSON.stringify({ error, code })
   it('every refusal code carries its reason; anything else is a plain failure', () => {
     expect([
-      ...['unsupported-regex', 'unsupported-glob', 'unsupported-exclusion', 'unsupported-terms', 'unsupported-slash', 'unsupported-scope', 'scan-not-indexed', 'term-too-common', 'anchor-not-indexed']
+      ...['unsupported-regex', 'unsupported-glob', 'unsupported-kind', 'unsupported-slash', 'unsupported-scope', 'scan-not-indexed', 'term-too-common', 'anchor-not-indexed', 'too-broad']
         .map(code => refusalOf(apiError(400, body(code)))),
       refusalOf(apiError(400, body('invalid-regex'))),
       refusalOf(apiError(404, body('scan-not-indexed'))),
@@ -58,7 +58,7 @@ describe('apiError / refusalOf: a filter refusal is a reason to state inline, no
       refusalOf(new Error('400: bad query: x')),
       refusalOf(undefined),
     ]).toEqual([
-      ...['unsupported-regex', 'unsupported-glob', 'unsupported-exclusion', 'unsupported-terms', 'unsupported-slash', 'unsupported-scope', 'scan-not-indexed', 'term-too-common', 'anchor-not-indexed']
+      ...['unsupported-regex', 'unsupported-glob', 'unsupported-kind', 'unsupported-slash', 'unsupported-scope', 'scan-not-indexed', 'term-too-common', 'anchor-not-indexed', 'too-broad']
         .map(code => ({ code, reason: `why ${code}` })),
       null, null, null, null, null,
     ])

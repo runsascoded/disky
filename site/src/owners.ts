@@ -1,4 +1,4 @@
-// Ownership-ledger plumbing (specs/actions-ledger.md, owner axis): TSQ
+// Ownership-ledger plumbing (specs/done/actions-ledger.md, owner axis): TSQ
 // bindings for /api/actions and the most-recent-wins resolver the map and the
 // children table use. The ledger is an append-only WAL of assignments; the
 // API serves the live expanded owner rows, and this module folds them: for a

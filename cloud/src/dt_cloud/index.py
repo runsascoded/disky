@@ -1,5 +1,5 @@
 """The CoreWeave scan's served index (`dt-cloud index-write`): the path store's
-two sorts, cut from the union of the scan's layer-2 parquets (specs/path-store.md
+two sorts, cut from the union of the scan's layer-2 parquets (specs/done/path-store.md
 §4.2; `disk-tree import` writes one layer-2 per bucket).
 
 The store is **one row per path, object or directory** (§1). This module
@@ -227,7 +227,7 @@ def write_sorts(
 
     ``row_group_rows``: the HTTP range-read unit — and the D1 footer's row
     count per sort. A fleet the size of gcs (777M rows) needs 32K to keep
-    two sorts × 120 scans under D1's 10 GB (specs/path-store.md §1.6).
+    two sorts × 120 scans under D1's 10 GB (specs/done/path-store.md §1.6).
 
     ``search``: also write the search sidecars beside the `path` sort
     (`path-index.{rows,trigrams,rows-search}.parquet`, specs/path-store-search.md;

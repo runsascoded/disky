@@ -33,11 +33,11 @@ def agg_sql(version: int) -> str:
     if version == 2:
         return """count(*) AS n, sum(size)::BIGINT AS b, sum(n_files)::BIGINT AS o, bool_or(kind <> 'file') AS is_dir, max(n_children) AS nc,
             sum(CASE WHEN mtime_mean IS NOT NULL THEN mtime_mean * size ELSE 0 END) AS wts,
-            sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT AS wb, max(last_read) AS a,
+            sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT AS wb, max(mtime)::BIGINT AS m, max(last_read) AS a,
             sum(coalesce(sum_storage_class_id_2, 0))::BIGINT AS c2, sum(coalesce(sum_storage_class_id_3, 0))::BIGINT AS c3,
             sum(coalesce(sum_storage_class_id_4, 0))::BIGINT AS c4"""
     return """count(*) AS n, sum(b)::BIGINT AS b, sum(o)::BIGINT AS o, true AS is_dir, NULL::BIGINT AS nc,
-        sum(CASE WHEN wb > 0 THEN (wts / wb) * wb ELSE 0 END) AS wts, sum(coalesce(wb, 0))::BIGINT AS wb, max(a) AS a,
+        sum(CASE WHEN wb > 0 THEN (wts / wb) * wb ELSE 0 END) AS wts, sum(coalesce(wb, 0))::BIGINT AS wb, NULL::BIGINT AS m, max(a) AS a,
         sum(coalesce(c2, 0))::BIGINT AS c2, sum(coalesce(c3, 0))::BIGINT AS c3, sum(coalesce(c4, 0))::BIGINT AS c4"""
 
 
@@ -64,9 +64,9 @@ class Scan:
             return {}
         self.con.execute("CREATE OR REPLACE TEMP TABLE want (depth INTEGER, path VARCHAR)")
         self.con.executemany("INSERT INTO want VALUES (?, ?)", paths)
-        return {p: (b, o, wts, wb, c2, c3, c4) for p, b, o, wts, wb, c2, c3, c4 in self.con.execute(
+        return {p: (b, o, wts, wb, m, c2, c3, c4) for p, b, o, wts, wb, m, c2, c3, c4 in self.con.execute(
             f"""SELECT s.path, sum(size)::BIGINT, sum(n_files)::BIGINT, sum(CASE WHEN mtime_mean IS NOT NULL THEN mtime_mean * size ELSE 0 END),
-                sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT, sum(coalesce(sum_storage_class_id_2, 0))::BIGINT,
+                sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT, max(mtime)::BIGINT, sum(coalesce(sum_storage_class_id_2, 0))::BIGINT,
                 sum(coalesce(sum_storage_class_id_3, 0))::BIGINT, sum(coalesce(sum_storage_class_id_4, 0))::BIGINT
                 FROM {self.src} s JOIN want w ON s.depth = w.depth AND s.path = w.path WHERE s.kind = 'file' AND s.size < {thr_min!r}
                 GROUP BY s.path""").fetchall()}
@@ -84,7 +84,7 @@ class Scan:
 
     @staticmethod
     def to_agg(r: dict, ub: dict[str, int]) -> ir.Agg:
-        a = ir.Agg(b=r["b"], o=r["o"], kind="dir" if r["is_dir"] else "file", nc=r["nc"], a=r["a"])
+        a = ir.Agg(b=r["b"], o=r["o"], kind="dir" if r["is_dir"] else "file", nc=r["nc"], a=r["a"], m=r["m"])
         if r["wb"] > 0:
             a.wts, a.wb = r["wts"], r["wb"]
         for k in ("c2", "c3", "c4"):
@@ -109,6 +109,8 @@ class Scan:
             for r in tops:
                 a = self.to_agg(r, users.get(r["path"], {}))
                 root.b += a.b; root.o += a.o; root.wts += a.wts; root.wb += a.wb
+                if a.m is not None:
+                    root.m = a.m if root.m is None else max(root.m, a.m)
                 for key in ("cb", "ub"):
                     for k, v in getattr(a, key).items():
                         getattr(root, key)[k] = getattr(root, key).get(k, 0) + v
@@ -134,7 +136,9 @@ class Scan:
             extra = self._same_path_objects([(r["depth"], r["path"]) for r in rows if r["is_dir"]], thr_min)
             for r in rows:
                 if r["path"] in extra:
-                    b, o, wts, wb, c2, c3, c4 = extra[r["path"]]
+                    b, o, wts, wb, m, c2, c3, c4 = extra[r["path"]]
+                    if m is not None:
+                        r["m"] = m if r["m"] is None else max(r["m"], m)
                     r["b"] += b; r["o"] += o; r["wts"] += wts; r["wb"] += wb; r["c2"] += c2; r["c3"] += c3; r["c4"] += c4
         # SQL's float threshold vs the reader's: re-test in Python so the boundary is the same arithmetic.
         rows = [r for r in rows if r["b"] >= thr_at(r["depth"])]

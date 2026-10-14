@@ -1,4 +1,4 @@
-"""CoreWeave S3 plan-driven deletion (specs/staged-delete.md).
+"""CoreWeave S3 plan-driven deletion (specs/done/staged-delete.md).
 
 The flow is stage -> dispatch -> run. A **plan** is the staged set (or an
 admin's curated list of prefixes); the plan *is* the eligibility decision, so

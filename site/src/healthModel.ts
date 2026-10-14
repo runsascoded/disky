@@ -1,4 +1,4 @@
-// /health (specs/health-page.md): the state of the deployment's append-only stores — each store's stack (a base
+// /health (specs/done/health-page.md): the state of the deployment's append-only stores — each store's stack (a base
 // generation plus binary-counter runs), what every scan is covered by, and how fresh it all is. DOM-free: the Function
 // (`functions/_lib/health.ts`) reads the stores and assembles the document; the page lays the stacks out as shards on
 // a timeline (`stackTiers`, rendered by `pyrmts-react`'s `CoverTimeline`).

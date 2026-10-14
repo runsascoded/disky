@@ -4,7 +4,7 @@
  *   ?date=<scan id>   (also `from=`, `to=`) exactly that scan
  *   ?d=<slug>         the latest indexed scan the slug names (`261009` a day,
  *                     `26100912` an hour, `2610091236` a minute — a date-only
- *                     scan sharing its day is keyed by its start, `meta.started`
+ *                     scan sharing its day is keyed by its start, `index_schema.started`
  *                     (`2610090430`), else its midnight, `2610090000`, which
  *                     stays an alias; legacy and ISO spellings too)
  *
@@ -20,8 +20,7 @@ import { d1Variant, isPrimary, storeKey } from './stores.js'
  * resolves to nothing. A slug resolves among its day's indexed scans (every
  * decoded prefix names at least a day, and a date-only scan only ever matches
  * on its own day) by the shared resolver, with the starts of that day's
- * date-only scans (`scanTimes`, read from their metas only when the day holds
- * more than one scan). */
+ * date-only scans (`scanTimes`: their pointers' `started`, one D1 query). */
 export async function indexedScan(env: Env, prefix: string, exact: boolean): Promise<string | null> {
   if (!env.DB) return exact ? prefix : null
   // A decoded prefix is `[0-9T-]` only: no LIKE metacharacters to escape.

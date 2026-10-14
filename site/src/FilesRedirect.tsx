@@ -6,7 +6,7 @@ import { useStore, useStoreFetch } from './store'
 import { STORES } from './stores'
 
 // `/files/*` (and a secondary store's `/meta/files/*`) was the raw scan
-// browser; objects now open inside the map (specs/path-store.md §3). An old
+// browser; objects now open inside the map (specs/done/path-store.md §3). An old
 // link lands on the same key there — in whichever configured store scans the
 // proxy's bucket — or on the store root (`objects.ts` `filesRedirect`).
 export function FilesRedirect() {

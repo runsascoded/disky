@@ -1,4 +1,4 @@
-// Cost-attribution labels on the Batch jobs the site submits (specs/cost-labels.md):
+// Cost-attribution labels on the Batch jobs the site submits (specs/done/cost-labels.md):
 // the deployment's `DISKY_LABELS` var (`k=v,k=v`, e.g. `app=disky,deployment=gcs`)
 // plus each job's `component`. `allocationPolicy.labels` is what reaches the VMs and
 // disks a job creates (their Compute cost lines); the job's own `labels` stay on the

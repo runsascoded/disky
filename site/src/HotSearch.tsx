@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { HOT_DATES, changeHotDraft, exactInteger, hotDraft, hotDraftParams, type HotDraft, type HotResult } from './hotModel'
+import { NO_AUTOFILL } from './noAutofill'
 
 export function HotSearchFields({ draft, onChange, dates }: { draft: HotDraft; onChange: (field: keyof HotDraft, value: string) => void; dates?: readonly string[] }) {
   const { date, name, from } = draft
   const scans = dates ?? HOT_DATES
   return <>
-    <label className="hot-literal">Name contains<input name="name" value={name} onChange={event => onChange('name', event.target.value)} required aria-describedby="hot-availability" /></label>
+    <label className="hot-literal">Name contains<input name="name" value={name} onChange={event => onChange('name', event.target.value)} required aria-describedby="hot-availability" {...NO_AUTOFILL} /></label>
     <label>Scan<select name="date" value={date} onChange={event => onChange('date', event.target.value)}>{!scans.some(day => day === date) && <option value={date}>{date} (unavailable)</option>}{scans.map(day => <option key={day}>{day}</option>)}</select></label>
     <label>Baseline scan (optional)<select name="from" value={from} onChange={event => onChange('from', event.target.value)}><option value="">No baseline</option>{dates ? <>
       {from && (!dates.some(day => day === from) || from >= date) && <option value={from}>{from} (unavailable)</option>}

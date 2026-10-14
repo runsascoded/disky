@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { Treemap } from '../src/Treemap'
+import type { CellStyle } from '../src/Treemap'
 import { resolveRing } from '../src/cellStyle'
 
 interface Node {
@@ -482,6 +483,25 @@ describe('<Treemap>', () => {
         expect(barRing({ ring: 'rgb(0, 200, 0)' })).toBe(
           'inset 0 0 0 2px rgb(0, 200, 0), 0 0 0 1px var(--dt-treemap-cell-border, transparent)',
         )
+      } finally {
+        restore()
+      }
+    })
+
+    it('the paint layer leaves an inset ring bare (it would cover it), and only an inset one', () => {
+      const restore = withLayout()
+      try {
+        const insets = (ring?: CellStyle['ring']) => {
+          const { container, unmount } = render(
+            <Treemap root={tree} {...accessors} minCellArea={null}
+              colorForCell={n => (accessors.getLabel(n) === 'bar' ? { bg: '#123456', ...(ring ? { ring } : {}) } : { bg: '#654321' })} />,
+          )
+          const out = rootCells(container).map(c => (c.querySelector(':scope > .dt-treemap-bg') as HTMLElement).style.inset)
+          unmount()
+          return out
+        }
+        expect([insets(), insets({ color: 'rgb(1, 2, 3)', width: 3 }), insets({ color: 'rgb(1, 2, 3)', width: 3, inset: false })])
+          .toEqual([['0', '0'], ['0', '3px'], ['0', '0']])
       } finally {
         restore()
       }
