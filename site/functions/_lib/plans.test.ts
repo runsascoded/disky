@@ -215,6 +215,20 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         before,
       ])
     })
+    it('a gesture that stages nothing new writes no batch and no audit row', async () => {
+      const { db, raw } = await sqliteD1(lineage)
+      await stageItems(db, ['gs://b/x/'], 'ann', null, GS, '2026-10-06')
+      const before = dump(raw)
+      expect([
+        await stageItems(db, ['gs://b/x/'], 'ann', null, GS, '2026-10-07'),
+        await stageItems(db, ['gs://b/x/y/'], 'ann', null, GS, '2026-10-07'),
+        dump(raw),
+      ]).toEqual([
+        { plan_id: 1, batch_id: null, staged: [], covered: [], absorbed: [], as_of: '2026-10-07' },
+        { plan_id: 1, batch_id: null, staged: [], covered: ['gs://b/x/y/'], absorbed: [], as_of: '2026-10-07' },
+        before,
+      ])
+    })
   })
 
   describe('mergeBatches — a chunked staging folds into one batch', () => {

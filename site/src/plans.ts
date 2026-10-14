@@ -14,8 +14,9 @@ export { LIVE_STATES } from './runs'
 
 export interface StageResult {
   plan_id: number
-  batch_id: number
-  /** What this gesture added (a re-staged item counts). */
+  /** null: nothing new staged, so no batch. */
+  batch_id: number | null
+  /** What this gesture added (an item already staged doesn't count). */
   staged: string[]
   /** The staged items that are exact objects (absent: none). */
   staged_objects?: string[]

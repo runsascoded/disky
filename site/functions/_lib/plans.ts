@@ -164,7 +164,7 @@ export async function stageItems(
   note: string | null,
   shape: PrefixShape,
   asOf: string | null,
-): Promise<{ plan_id: number; batch_id: number; staged: string[]; /** The staged items that are exact objects (absent: none). */ staged_objects?: string[]; covered: string[]; absorbed: string[]; as_of: string | null } | { error: string }> {
+): Promise<{ plan_id: number; /** null: nothing new (every item already staged or covered), so no batch */ batch_id: number | null; staged: string[]; /** The staged items that are exact objects (absent: none). */ staged_objects?: string[]; covered: string[]; absorbed: string[]; as_of: string | null } | { error: string }> {
   const { prefixes: rawPrefixes = [], objects: rawObjects = [] } = Array.isArray(raw) ? { prefixes: raw } : raw
   const items: PlanItem[] = []
   const add = (i: PlanItem) => { if (!items.some(x => x.key === i.key && x.kind === i.kind)) items.push(i) }
@@ -186,9 +186,13 @@ export async function stageItems(
       .map(r => ({ key: r.prefix, kind: r.kind === 'object' ? 'object' : 'prefix' }))
     : []
   const plan = planStagingItems(have, uncoveredItems(items))
+  // What the gesture adds: an item already in the plan keeps its first batch, stager and `as_of`, so it is
+  // neither reported as staged (nor announced, nor undoable from here) nor worth a batch of its own.
+  const fresh = plan.staged.filter(i => !have.some(h => h.key === i.key && h.kind === i.kind))
   const keys = (is: PlanItem[]) => is.map(i => i.key)
-  const staged = keys(plan.staged), covered = keys(plan.covered), absorbed = keys(plan.absorbed)
-  const stagedObjects = keys(plan.staged.filter(i => i.kind === 'object'))
+  const staged = keys(fresh), covered = keys(plan.covered), absorbed = keys(plan.absorbed)
+  const stagedObjects = keys(fresh.filter(i => i.kind === 'object'))
+  if (open && !staged.length && !absorbed.length) return { plan_id: open.id, batch_id: null, staged, covered, absorbed, as_of: asOf }
 
   // Every write below is ONE `db.batch` — one D1 transaction, all or nothing
   // (a request cut off mid-gesture used to leave a partial batch). Ids minted
@@ -217,7 +221,7 @@ export async function stageItems(
   stmts.push(db.prepare(
     `INSERT OR IGNORE INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts, as_of, kind)
      SELECT ${planId}, json_extract(value, '$.key'), ${batchId}, ?, ?, ?, json_extract(value, '$.kind') FROM json_each(?)`,
-  ).bind(who, ts, asOf, JSON.stringify(plan.staged.map(i => ({ key: i.key, kind: i.kind === 'object' ? 'object' : null })))))
+  ).bind(who, ts, asOf, JSON.stringify(fresh.map(i => ({ key: i.key, kind: i.kind === 'object' ? 'object' : null })))))
   const audited = { staged, ...(stagedObjects.length ? { objects: stagedObjects } : {}), covered, batch_id: 0, note, as_of: asOf }
   stmts.push(db.prepare(`${edit} SELECT 'plan_items', CAST(${planId} AS TEXT), 'insert', ?, ?, ?, json_set(?, '$.batch_id', ${batchId})`)
     .bind(who, ts, absorbed.length ? JSON.stringify({ absorbed }) : null, JSON.stringify(audited)))

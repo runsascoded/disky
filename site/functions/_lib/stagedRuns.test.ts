@@ -268,7 +268,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         await stage({ prefixes: [c], as_of: 20261007 }),
       ]).toEqual([
         [201, { plan_id: 1, batch_id: 1, staged: [a], covered: [], absorbed: [], as_of: '2026-10-07' }],
-        [201, { plan_id: 1, batch_id: 2, staged: [a, b], covered: [], absorbed: [], as_of: '2026-10-06' }],
+        [201, { plan_id: 1, batch_id: 2, staged: [b], covered: [], absorbed: [], as_of: '2026-10-06' }],
         [400, { error: 'as_of must be a scan date (latest 2026-10-07)', as_of: '2026-10-05' }],
         [400, { error: 'as_of must be a scan date (latest 2026-10-07)', as_of: 20261007 }],
       ])
@@ -283,7 +283,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         { plan_id: 1, name: 'Staged', sweep: [a, b], buckets: [B1], as_of: { [a]: '2026-10-07', [b]: '2026-10-06' } },
         [
           { staged: [a], covered: [], batch_id: 1, note: null, as_of: '2026-10-07' },
-          { staged: [a, b], covered: [], batch_id: 2, note: null, as_of: '2026-10-06' },
+          { staged: [b], covered: [], batch_id: 2, note: null, as_of: '2026-10-06' },
         ],
       ])
     })
