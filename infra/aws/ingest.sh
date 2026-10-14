@@ -17,6 +17,10 @@
 # job's start), fetch, path-index, capture-meta, upload, index-sync; the EXIT
 # trap records the end, a failure with the phase it was in. Each phase also
 # prints `PHASE <name>: <s>s`. Recording never fails the ingest.
+#
+# A failure the script sees is also pushed to a person (`notify_failure`). A
+# kill it never sees (a Spot reclaim, OOM of the shell, an image pull) needs a
+# watcher outside the job.
 set -euo pipefail
 
 job_t0=$(date +%s)
@@ -72,12 +76,26 @@ ended() {
   phase_t0=$now
   scan_run -P "$1" -t "$now" "${@:2}"
 }
+# A failure pushes a notification (`disk-tree notify`: Pushover / a Discord webhook, from the job's
+# env; a no-op without one), linking the run on the site when INGEST_SITE_URL is set.
+notify_failure() {
+  local link=() q=
+  [[ $d1_store != primary ]] && q="?store=$d1_store"
+  [[ -n ${INGEST_SITE_URL:-} && -n ${AWS_BATCH_JOB_ID:-} ]] && link=(-u "$INGEST_SITE_URL/scans/$AWS_BATCH_JOB_ID$q" -l run)
+  "$app/.venv/bin/disk-tree" notify -p 1 -t "disky: $store ingest failed" ${link[@]+"${link[@]}"} \
+    "scan $date failed in $phase (exit $1)" || true
+}
 on_exit() {
   local rc=$?
-  if (( rc )); then scan_run -x "$rc" -F "$phase"; else scan_run -x 0; fi
+  if (( rc )); then
+    scan_run -x "$rc" -F "$phase"
+    notify_failure "$rc"
+  else
+    scan_run -x 0
+  fi
 }
+trap on_exit EXIT
 if [[ -n ${SCAN_RUNS_PROFILE:-} ]]; then
-  trap on_exit EXIT
   facts=()
   [[ -n ${INGEST_MACHINE:-} ]] && facts+=(-m "$INGEST_MACHINE")
   [[ ${INGEST_SPOT:-} == 1 ]] && facts+=(--spot)

@@ -64,6 +64,8 @@ elif name == 'dt-cloud':
         meta = json.loads(Path(args[args.index('-m') + 1]).read_text())
         with open(os.environ['FAKE_TRACE'], 'a') as f:
             f.write(json.dumps(['index-sync-meta', meta.get('started')]) + '\n')
+elif name == 'disk-tree' and args[0] == 'notify':
+    sys.exit(int(os.environ.get('FAKE_NOTIFY_RC', '0')))
 elif name == 'disk-tree':
     from click.testing import CliRunner
     from disk_tree.cli.base import cli
@@ -107,7 +109,7 @@ def pipeline(tmp_path: Path):
         'D1_DB_NAME': 'fixture',
         'HOST_STORES': 'nas=nas',
     }
-    for key in ('DATE', 'GEN', 'STORE', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
+    for key in ('DATE', 'GEN', 'STORE', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'INGEST_SITE_URL', 'AWS_BATCH_JOB_ID', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
         env.pop(key, None)
 
     def run(stamp: str, host: str = 'm3', **extra: str) -> subprocess.CompletedProcess:
@@ -273,3 +275,31 @@ def test_without_a_profile_nothing_is_recorded(pipeline) -> None:
         ('index-sync-meta', '2026-10-11T10:00:01.000Z'), ('nproc',), ('time', '-v'),
     ]
     assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
+
+
+# ── failure notifications (`disk-tree notify`) ──────────────────────────────
+
+def notifies(trace: Path) -> list[list[str]]:
+    return [c[1:] for c in map(json.loads, trace.read_text().splitlines()) if c[:2] == ['disk-tree', 'notify']]
+
+
+def test_a_failure_notifies_with_the_phase_and_a_link_to_the_run(pipeline) -> None:
+    run, _, trace = pipeline
+    site = {'INGEST_SITE_URL': 'https://disk.example', 'AWS_BATCH_JOB_ID': 'job-1'}
+    nas = run('2026-10-11T10-00-01Z', 'nas', **site, FAKE_FAIL='path-index')
+    laptop = run('2026-10-11T22-00-02Z', 'm3', **site, FAKE_FAIL='index-sync')
+    assert (nas.returncode, laptop.returncode) == (3, 3)
+    assert notifies(trace) == [
+        ['notify', '-p', '1', '-t', 'disky: nas ingest failed', '-u', 'https://disk.example/scans/job-1?store=nas', '-l', 'run',
+         'scan 2026-10-11T1000 failed in path-index (exit 3)'],
+        ['notify', '-p', '1', '-t', 'disky: laptop ingest failed', '-u', 'https://disk.example/scans/job-1', '-l', 'run',
+         'scan 2026-10-11T2200 failed in index-sync (exit 3)'],
+    ]
+
+
+def test_success_never_notifies_and_a_failing_notifier_keeps_the_exit_code(pipeline) -> None:
+    run, _, trace = pipeline
+    ok = run('2026-10-11T10-00-01Z')
+    failed = run('2026-10-11T22-00-02Z', FAKE_FAIL='path-index', FAKE_NOTIFY_RC='2')
+    assert (ok.returncode, failed.returncode) == (0, 3)
+    assert notifies(trace) == [['notify', '-p', '1', '-t', 'disky: laptop ingest failed', 'scan 2026-10-11T2200 failed in path-index (exit 3)']]
