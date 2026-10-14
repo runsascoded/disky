@@ -5,6 +5,7 @@ import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import { overlappingFailures, phaseFill, phaseOutcome, runOutcome, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
+import { DEFAULT_STORE, STORES, type Store, storeQuery, storeUrl } from './stores'
 
 export interface Links { project: string | null; meta: string | null }
 export type ListResponse = Links & { configured: boolean; runs: RunSummary[] }
@@ -18,7 +19,27 @@ export async function getJson<T>(url: string): Promise<T> {
   return data as T
 }
 
-export const useScanRuns = () => useQuery<ListResponse, Error>({ queryKey: ['scan-runs'], queryFn: () => getJson('/api/scan-runs'), refetchInterval: 60_000, staleTime: 15_000 })
+/** The store `/scans` shows: its `?store=<key>` among the configured stores, else the primary (an unknown key too,
+ * so a stale link still lands on runs). */
+export function scansStore(search: string, stores: Store[] = STORES): Store {
+  const key = new URLSearchParams(search).get('store')
+  return stores.find(s => s.key === key) ?? stores[0]
+}
+
+/** A `/scans` page link (the list, or run `id`) for `store`: the primary's carries no `store=`. */
+export function scansHref(store: Store, id?: string, primary: Store = DEFAULT_STORE): string {
+  const q = storeQuery(store, primary)
+  return `/scans${id ? `/${encodeURIComponent(id)}` : ''}${q ? `?${q}` : ''}`
+}
+
+/** `/api/scan-runs[/<id>]` as `store` fetches it (`storeUrl`). */
+export const scanRunsApi = (store: Store, id?: string, primary: Store = DEFAULT_STORE): string =>
+  storeUrl(`/api/scan-runs${id ? `/${encodeURIComponent(id)}` : ''}`, store, primary)
+
+/** The run list of `store` (default the primary: /health's), one cache entry per store. */
+export const useScanRuns = (store: Store = DEFAULT_STORE) => useQuery<ListResponse, Error>({
+  queryKey: ['scan-runs', store.key], queryFn: () => getJson(scanRunsApi(store)), refetchInterval: 60_000, staleTime: 15_000,
+})
 
 /** `fmtDur`, with seconds under a minute (a 3 s publish isn't `0m`). */
 export const fmtDur = (s: number): string => (s < 60 ? `${Math.round(s)}s` : fmtDurM(s))

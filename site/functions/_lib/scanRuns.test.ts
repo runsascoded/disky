@@ -15,8 +15,8 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
   ('a', 'listing', 'gs://d/listing/2026-10-07/', 100, 3, 9), ('b', 'listing', 'gs://d/listing/2026-10-08/', 160, 3, 12);
 `
 
-const get = (db: unknown, path: string, env: object = {}) =>
-  route({ request: new Request(`http://localhost/api/scan-runs${path ? `/${path}` : ''}`), env: { DB: db, GCP_PROJECT: 'proj', META_TREE_URL: 'https://h.test/meta', ...env }, params: path ? { path: path.split('/') } : {} } as never)
+const get = (db: unknown, path: string, env: object = {}, query = '') =>
+  route({ request: new Request(`http://localhost/api/scan-runs${path ? `/${path}` : ''}${query}`), env: { DB: db, GCP_PROJECT: 'proj', META_TREE_URL: 'https://h.test/meta', ...env }, params: path ? { path: path.split('/') } : {} } as never)
 
 describe('GET /api/scan-runs', () => {
   it('returns active overlapping spans to the same request clock on detail and list', async () => {
@@ -82,6 +82,20 @@ describe('GET /api/scan-runs', () => {
     ])
     const missing = await get(db, 'nope')
     expect([missing.status, await missing.json()]).toEqual([404, { error: 'no scan run nope' }])
+  })
+  it('`store=<key>` reads that secondary store\'s runs; an unknown store is a 404', async () => {
+    const { db, raw } = await sqliteD1('cw')
+    raw.exec(SEED)
+    const env = { STORES_JSON: JSON.stringify({ meta: {} }) }
+    const primary = await (await get(db, '', env)).json() as import('./scanRuns').ScanRunsList
+    const meta = await (await get(db, '', env, '?store=meta')).json() as import('./scanRuns').ScanRunsList
+    expect([primary.runs.map(s => s.run.run_id), meta.runs.map(s => s.run.run_id)]).toEqual([['b', 'a'], ['m']])
+    const one = await get(db, 'm', env, '?store=meta')
+    expect([one.status, ((await one.json()) as import('./scanRuns').ScanRunDetail).run.run_id]).toEqual([200, 'm'])
+    const other = await get(db, 'a', env, '?store=meta')
+    expect([other.status, await other.json()]).toEqual([404, { error: 'no scan run a' }])
+    const unknown = await get(db, '', env, '?store=nope')
+    expect([unknown.status, await unknown.json()]).toEqual([404, { error: 'unknown store \'nope\'' }])
   })
   it('a D1 without the tables answers configured: false', async () => {
     const { db } = await sqliteD1('cw', { before: '0016_scan_runs.sql' })

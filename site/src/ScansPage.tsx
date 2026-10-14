@@ -5,7 +5,7 @@
 // phase timeline per run.
 import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
@@ -13,13 +13,13 @@ import { Tooltip } from './Tooltip'
 import { axisTicks } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
 import { useUnits } from './units'
-import { DEFAULT_STORE } from './stores'
+import { STORES, type Store } from './stores'
 import { useMinSlug } from './scan'
 import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome,
 } from './scanRunsModel'
-import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -28,12 +28,17 @@ type DetailResponse = Links & {
   phase_issues: PhaseIssue[]; recoveries: PhaseRecovery[]
 }
 
-const useScanRun = (id: string) => useQuery<DetailResponse, Error>({
-  queryKey: ['scan-run', id], queryFn: () => getJson(`/api/scan-runs/${encodeURIComponent(id)}`),
+const useScanRun = (id: string, store: Store) => useQuery<DetailResponse, Error>({
+  queryKey: ['scan-run', store.key, id], queryFn: () => getJson(scanRunsApi(store, id)),
   refetchInterval: q => (q.state.data?.run.status === 'running' || q.state.data?.phase_issues?.some(i => !i.recovery) ? 30_000 : false), staleTime: 15_000,
 })
 
-const scanHref = (id: string) => `/scans/${encodeURIComponent(id)}`
+/** The store this page shows (`?store=<key>`; the primary without one) and its run links. */
+function useScansStore(): { store: Store; scanHref: (id?: string) => string } {
+  const { search } = useLocation()
+  const store = useMemo(() => scansStore(search), [search])
+  return { store, scanHref: (id?: string) => scansHref(store, id) }
+}
 
 function useBytes() {
   const { units, suffixB } = useUnits()
@@ -141,8 +146,9 @@ function Links({ run, links }: { run: ScanRun; links: Links }) {
 }
 
 export function ScansPage() {
-  const q = useScanRuns()
-  const slug = useMinSlug(DEFAULT_STORE)
+  const { store, scanHref } = useScansStore()
+  const q = useScanRuns(store)
+  const slug = useMinSlug(store)
   const nav = useNavigate()
   const { bytes, delta } = useBytes()
   const [kind, setKind] = useState('')
@@ -157,6 +163,9 @@ export function ScansPage() {
     <main className="staged-page scans-page">
       <SiteNav />
       <h1>Scan runs</h1>
+      {STORES.length > 1 && <div className="run-filters">
+        <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(STORES.find(s => s.key === e.target.value) ?? STORES[0]))}>{STORES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>
+      </div>}
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>
@@ -184,7 +193,7 @@ export function ScansPage() {
             <tbody>
               {shown.map(s => {
                 const r = s.run
-                const map = r.status === 'succeeded' ? mapHref(r.scan, DEFAULT_STORE.path, slug) : null
+                const map = r.status === 'succeeded' ? mapHref(r.scan, store.path, slug) : null
                 return (
                   <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
                     <td className="nb"><Link to={scanHref(r.run_id)}><code>{r.scan}</code></Link>
@@ -285,7 +294,7 @@ function OutputsTable({ outputs, meta }: { outputs: OutputDelta[]; meta: string 
   )
 }
 
-function RunList({ runs, links, title }: { runs: ScanRun[]; links: Links; title: string }) {
+function RunList({ runs, links, title, scanHref }: { runs: ScanRun[]; links: Links; title: string; scanHref: (id: string) => string }) {
   if (!runs.length) return null
   return <>
     <h3>{title}</h3>
@@ -309,9 +318,10 @@ function RunList({ runs, links, title }: { runs: ScanRun[]; links: Links; title:
 
 export function ScanRunPage() {
   const id = useParams()['*'] ?? ''
-  const q = useScanRun(id)
-  const list = useScanRuns()
-  const slug = useMinSlug(DEFAULT_STORE)
+  const { store, scanHref } = useScansStore()
+  const q = useScanRun(id, store)
+  const list = useScanRuns(store)
+  const slug = useMinSlug(store)
   useDocTitle(q.data ? q.data.run.scan : 'Scan', 'Scans')
   const order = useMemo(() => phaseOrder((list.data?.runs ?? []).flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [list.data])
   const color = colorer(order.length ? order : (q.data?.spans ?? []).map(s => s.phase))
@@ -321,11 +331,11 @@ export function ScanRunPage() {
   const prev = scanRun(d?.prev_scan ?? null), next = scanRun(d?.next_scan ?? null)
   const r = d?.run
   const kinds = new Set(list.data?.runs.map(s => s.run.kind))
-  const map = r && r.status === 'succeeded' ? mapHref(r.scan, DEFAULT_STORE.path, slug) : null
+  const map = r && r.status === 'succeeded' ? mapHref(r.scan, store.path, slug) : null
   return (
     <main className="staged-page scans-page">
       <SiteNav />
-      <p className="sr-crumbs"><Link to="/scans">Scan runs</Link>{prev && <> · <Link to={scanHref(prev.run.run_id)}>‹ {prev.run.scan}</Link></>}{next && <> · <Link to={scanHref(next.run.run_id)}>{next.run.scan} ›</Link></>}</p>
+      <p className="sr-crumbs"><Link to={scanHref()}>Scan runs</Link>{prev && <> · <Link to={scanHref(prev.run.run_id)}>‹ {prev.run.scan}</Link></>}{next && <> · <Link to={scanHref(next.run.run_id)}>{next.run.scan} ›</Link></>}</p>
       {q.isLoading ? <p>Loading run…</p> : q.error ? <p className="err">{q.error.message}</p> : d && r && <>
         <h1><code>{r.scan}</code>{kinds.size > 1 && <> <span className="dim">{r.kind}</span></>}</h1>
         <p className="sub">
@@ -362,8 +372,8 @@ export function ScanRunPage() {
         </>}
         <h3>Outputs</h3>
         <OutputsTable outputs={d.outputs} meta={d.meta} />
-        <RunList runs={downstream} links={d} title={`Downstream jobs (${downstream.length})`} />
-        <RunList runs={d.siblings} links={d} title="This scan's other runs" />
+        <RunList runs={downstream} links={d} title={`Downstream jobs (${downstream.length})`} scanHref={scanHref} />
+        <RunList runs={d.siblings} links={d} title="This scan's other runs" scanHref={scanHref} />
       </>}
       <SiteKbd />
     </main>
