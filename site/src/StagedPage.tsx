@@ -613,14 +613,14 @@ export function StagedPage() {
             <section className="staged-map">
               <h3>{q.trim() ? <>staged, matching “{q.trim()}”</> : 'everything staged'}</h3>
               <div className="map-box">
-                <Treemap key={`all:${date}`} root={tree} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
+                <Treemap key={`all:${date}`} root={tree} stagedRings={false} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
               </div>
             </section>
             {selTree && (
               <section className="staged-map">
                 <h3>selected · {selected.length} · {fmtBytes(selTotal.b)}</h3>
                 <div className="map-box">
-                  <Treemap key={`sel:${date}:${selKey}`} root={selTree} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
+                  <Treemap key={`sel:${date}:${selKey}`} root={selTree} stagedRings={false} mode="user" userIdx={userIdx} dateRange={null} scheme={store.scheme} />
                 </div>
               </section>
             )}

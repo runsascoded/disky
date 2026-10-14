@@ -179,7 +179,9 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stageHere = false, mapOverlay }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stageHere = false, mapOverlay, stagedRings = true }: {
+  /** Ring the open plan's staged items (off where every cell is one: /staged). */
+  stagedRings?: boolean
   /** Offer the drilled folder's own trash in the owner panel: an unfiltered view (under a filter the bulk bar
    *  stages the matches; a folder's whole prefix never stands in for them). */
   stageHere?: boolean
@@ -281,6 +283,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   )
 
   const staged = useStagedIndex()
+  const ringed = stagedRings ? staged : null
   const canStage = useCanStage()
   const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
   const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
@@ -737,9 +740,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       onCellHover={onBrush ? (n, p) => onBrush(n && p.length > (path?.length ?? 1) ? p[path?.length ?? 1].n : null) : undefined}
       // Brushing rings the table's hovered row; a cell the open plan holds itself (`useStagedIndex`, as the
       // table marks it) gets a thin inset ring in the deletion hue, its size and colour untouched.
-      lens={brush || staged?.size ? (kid, p, depth, _ctx, style) => {
+      lens={brush || ringed?.size ? (kid, p, depth, _ctx, style) => {
         if (brush && depth === 0 && kid.n === brush) return { ...style, ring: { color: 'var(--ink)', width: 2 } }
-        if (staged?.size && !kid.n.startsWith('(') && staged.isItem(uriOf(p[p.length - 1] === kid ? p : [...p, kid]), kid.k !== 'file')) return { ...style, ring: { color: 'var(--s3)', width: 3, inset: true } }
+        if (ringed?.size && !kid.n.startsWith('(') && ringed.isItem(uriOf(p[p.length - 1] === kid ? p : [...p, kid]), kid.k !== 'file')) return { ...style, ring: { color: 'var(--s3)', width: 3, inset: true } }
         return undefined
       } : undefined}
       // `k` decides (`cellAction`): an object opens in the leaf viewer; a
