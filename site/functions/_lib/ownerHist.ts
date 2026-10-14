@@ -56,21 +56,31 @@ export function versionsOf(rows: Row[]): Map<string, Version[]> {
 /** The version live at scan ordinal `d`, if the path is in that scan. */
 export const liveAt = (vs: Version[], d: number): PathAgg | undefined => vs.find(([vf, vt]) => vf <= d && d < vt)?.[2]
 
-// Per isolate: each index tag's rows as loaded (and as this isolate priced them). Rows only gain prefixes or
-// advance `hz`, so a stale entry costs a re-read of the keys it lacks, never a wrong fold.
-const loaded = new Map<string, { at: number; rows: Map<string, Hist> }>()
+// Per isolate: one map of rows per index tag, which every fold holds and pricing writes into, so concurrent folds
+// see each other's pricing. Rows only gain prefixes or advance `hz`, so a refresh merges into it, never replaces it.
+const tables = new Map<string, { at: number; rows: Map<string, Hist> }>()
+const refreshing = new Map<string, Promise<Map<string, Hist>>>()
 const LOAD_TTL = 300_000
 const pricing = new Map<string, Promise<{ groups: number; hz: number } | null>>()
 const WAIT = 60_000
 
-async function load(env: Env, tag: string): Promise<Map<string, Hist>> {
-  const cur = loaded.get(tag)
-  if (cur && Date.now() - cur.at < LOAD_TTL) return cur.rows
-  const { results } = await env.DB!.prepare('SELECT depth, path, hz, versions FROM owner_prefix_hist WHERE idx = ?').bind(tag)
-    .all<{ depth: number; path: string; hz: number; versions: string }>()
-  const rows = new Map(results.map(r => [key(r.depth, r.path), { hz: r.hz, versions: JSON.parse(r.versions) as Version[] }]))
-  loaded.set(tag, { at: Date.now(), rows })
-  return rows
+/** `tag`'s rows; `refresh` re-reads D1 (once, shared by concurrent callers) into the same map. */
+async function load(env: Env, tag: string, refresh = false): Promise<Map<string, Hist>> {
+  const cur = tables.get(tag)
+  if (cur && !refresh && Date.now() - cur.at < LOAD_TTL) return cur.rows
+  return shared(refreshing, tag, async () => {
+    const { results } = await env.DB!.prepare('SELECT depth, path, hz, versions FROM owner_prefix_hist WHERE idx = ?').bind(tag)
+      .all<{ depth: number; path: string; hz: number; versions: string }>()
+    const t = tables.get(tag) ?? { at: 0, rows: new Map<string, Hist>() }
+    for (const r of results) {
+      const k = key(r.depth, r.path)
+      if ((t.rows.get(k)?.hz ?? -1) <= r.hz) t.rows.set(k, { hz: r.hz, versions: JSON.parse(r.versions) as Version[] })
+    }
+    t.at = Date.now()
+    tables.set(tag, t)
+    refreshing.delete(tag)
+    return t.rows
+  }, WAIT)
 }
 
 /** `want` (path → depth) not priced through scan ordinal `d` (and the roots, if they aren't). */
@@ -117,16 +127,15 @@ export const HIST_PRICE_MAX = 64
  *  isn't priced through `d` when that is at most `HIST_PRICE_MAX` prefixes. Null: too many to price here, or
  *  the store doesn't serve `tag` — the caller folds per scan. */
 export async function histAggs(env: Env, tag: string, d: number, want: Map<string, number>): Promise<{ aggs: Map<string, PathAgg>; buckets: string[]; prefixes: number; groups: number } | null> {
-  const rows = await load(env, tag)
-  let { keys, roots } = staleOf(rows, want, d)
+  let fresh = await load(env, tag)
+  let { keys, roots } = staleOf(fresh, want, d)
   if (keys.size || roots) {
     // Another isolate may have priced them since this one loaded.
-    loaded.delete(tag)
-    ;({ keys, roots } = staleOf(await load(env, tag), want, d))
+    fresh = await load(env, tag, true)
+    ;({ keys, roots } = staleOf(fresh, want, d))
   }
   const prefixes = keys.size
   if (prefixes > HIST_PRICE_MAX) return null
-  const fresh = await load(env, tag)
   let groups = 0
   if (prefixes || roots) {
     const got = await price(env, tag, fresh, keys, roots)
@@ -142,7 +151,10 @@ export async function histAggs(env: Env, tag: string, d: number, want: Map<strin
   }
   for (const [path, depth] of want) {
     if (depth === 1) continue
-    const a = liveAt(fresh.get(key(depth, path))!.versions, d)
+    const h = fresh.get(key(depth, path))
+    // Priced through `d` above, by this fold or a concurrent one, into this same map.
+    if (!h || h.hz < d) throw new Error(`owner history: ${key(depth, path)} not priced through ${d}`)
+    const a = liveAt(h.versions, d)
     if (a) aggs.set(path, a)
   }
   return { aggs, buckets: buckets.sort(), prefixes, groups }
@@ -153,8 +165,7 @@ export async function histAggs(env: Env, tag: string, d: number, want: Map<strin
 export async function fillHist(env: Env, tag: string, want: Map<string, number>, n: number): Promise<{ priced: number; remaining: number; groups: number } | null> {
   const hz = await ivHorizon(env)
   if (hz == null) return null
-  loaded.delete(tag)
-  const rows = await load(env, tag)
+  const rows = await load(env, tag, true)
   const { keys, roots } = staleOf(rows, want, hz)
   const batch = new Map([...keys].slice(0, n))
   if (!batch.size && !roots) return { priced: 0, remaining: 0, groups: 0 }

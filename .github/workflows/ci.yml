@@ -18,17 +18,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The suites are deterministic (seeded fixtures): a tree whose inputs
+      # already passed on this Python is not re-run. `engine` keys on the
+      # blob ids of the engine's sources, tests and pins.
+      - name: Test inputs key
+        id: key
+        run: echo "key=engine-${{ matrix.python-version }}-$(git ls-tree -r HEAD -- src tests pyproject.toml uv.lock | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Already passed?
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+
       - name: Install uv
+        if: steps.passed.outputs.cache-hit != 'true'
         uses: astral-sh/setup-uv@v4
 
       - name: Set up Python ${{ matrix.python-version }}
+        if: steps.passed.outputs.cache-hit != 'true'
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
+        if: steps.passed.outputs.cache-hit != 'true'
         run: uv sync --frozen --all-extras
 
       - name: Run tests
+        if: steps.passed.outputs.cache-hit != 'true'
         run: uv run pytest tests/ -v
+
+      - name: Record pass
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: mkdir -p .tests-passed && echo "${{ github.sha }}" > .tests-passed/sha
+
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
 
   typecheck:
     name: Type Check
@@ -107,19 +136,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The suites are deterministic (seeded fixtures): a tree whose inputs
+      # already passed on this Python is not re-run. `dt-cloud` keys on the
+      # tracked files' blob ids, minus docs (they read `site/`'s migrations
+      # and Functions too, so the whole tree counts).
+      - name: Test inputs key
+        id: key
+        run: echo "key=dt-cloud-${{ matrix.python-version }}-$(git ls-tree -r HEAD | grep -vE '[[:space:]](specs/|.*\.md$)' | sha256sum | cut -c1-32)" >> "$GITHUB_OUTPUT"
+
+      - name: Already passed?
+        id: passed
+        uses: actions/cache/restore@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
+          lookup-only: true
+
       - name: Install uv
+        if: steps.passed.outputs.cache-hit != 'true'
         uses: astral-sh/setup-uv@v4
 
       - name: Set up Python ${{ matrix.python-version }}
+        if: steps.passed.outputs.cache-hit != 'true'
         run: uv python install ${{ matrix.python-version }}
 
       # One workspace env from the root lockfile (`cloud/` is a member), at the
       # pins the job images install `--frozen`.
       - name: Sync dt-cloud
+        if: steps.passed.outputs.cache-hit != 'true'
         run: uv sync --frozen --all-packages --all-extras --all-groups
 
       - name: Run dt-cloud tests
+        if: steps.passed.outputs.cache-hit != 'true'
         run: cd cloud && uv run --no-sync pytest tests -v
+
+      - name: Record pass
+        if: steps.passed.outputs.cache-hit != 'true'
+        run: mkdir -p .tests-passed && echo "${{ github.sha }}" > .tests-passed/sha
+
+      - if: steps.passed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .tests-passed
+          key: ${{ steps.key.outputs.key }}
 
   site:
     name: Site typecheck, build + tests

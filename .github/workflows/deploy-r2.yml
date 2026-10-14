@@ -1,7 +1,7 @@
-# r2.rbw.sh CI + deploy (the `cloud` branch's own pipeline; the repo's `ci.yml`
-# covers `main`). On every push to `cloud`: run the
-# hermetic test suites, and only on green deploy the public union-of-roots Map
-# to the `disk-tree-demo` Pages project (r2.rbw.sh), then smoke it.
+# r2.rbw.sh deploy (the `cloud` branch's own pipeline). After `ci.yml` passes
+# on a push to `cloud` / `dev`, deploy the public union-of-roots Map to the
+# `disk-tree-demo` Pages project (r2.rbw.sh), then smoke it. The tests run
+# once, in CI; this only builds what CI tested (`head_sha`).
 #
 # Repo secrets this needs (Settings → Secrets and variables → Actions):
 #   CLOUDFLARE_API_TOKEN   — a token with Pages:Edit on the RAC account
@@ -12,60 +12,29 @@
 name: r2.rbw.sh
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [cloud, dev]
-    paths-ignore: ['specs/**']   # spec-only commits don't need a test run + redeploy
-  pull_request:
-    branches: [cloud]
 
 concurrency:
-  group: r2-${{ github.ref }}
+  group: r2-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
 jobs:
-  web:
-    name: site (typecheck + unit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      # `tsc -b` builds the referenced packages (@rdub/treemap, @disk-tree/react)
-      # too, so this typechecks the whole site + widget graph in one pass.
-      - name: Typecheck (site + packages)
-        run: pnpm -C site exec tsc -b --noEmit
-      - name: Unit tests (Functions + client)
-        run: pnpm -C site test
-
-  py:
-    name: engine + dt_cloud (pytest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
-      - run: uv python install 3.12
-      # One workspace env (engine + `cloud/` overlay, one lockfile): every
-      # package, extra and group, so both suites run against the same pins.
-      - run: uv sync --frozen --all-packages --all-extras --all-groups
-      - name: disk_tree engine tests
-        run: uv run pytest tests/ -q
-      - name: dt_cloud tests
-        run: cd cloud && uv run pytest tests/ -q
-
   deploy:
     # `cloud` → disk-tree-demo (r2.rbw.sh); `dev` → disk-tree-demo-dev (dev.r2.rbw.sh).
     # Both read the same public index; dev is the pre-prod staging mirror.
     name: deploy
-    needs: [web, py]
-    if: github.repository == 'runsascoded/disky' && github.event_name == 'push' && (github.ref == 'refs/heads/cloud' || github.ref == 'refs/heads/dev')
+    if: >-
+      github.repository == 'runsascoded/disky'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -76,7 +45,7 @@ jobs:
       - name: Select target (prod vs dev)
         id: t
         run: |
-          if [ "${{ github.ref_name }}" = "cloud" ]; then
+          if [ "${{ github.event.workflow_run.head_branch }}" = "cloud" ]; then
             echo "project=disk-tree-demo"      >> "$GITHUB_OUTPUT"
             echo "config=wrangler.r2.toml"     >> "$GITHUB_OUTPUT"
             echo "branch=main"                 >> "$GITHUB_OUTPUT"

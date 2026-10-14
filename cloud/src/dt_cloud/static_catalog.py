@@ -585,6 +585,36 @@ def census_cmd(floor_bytes, bucket, floor_rows, gen, index, mount, mem, threads,
         print(json.dumps(doc), flush=True)
 
 
+def cut_members(census_dir: str | Path, out: Path, *, gen: str, max_rows: int, max_bytes: int | None = None) -> dict:
+    """The members (≥ 3 characters) cut from a census dir (`s####.parquet` per shard) → `out` (`members.parquet`:
+    `(q, shard, rows, ubytes)`, sorted by `q`); returns the membership summary (`members.json`)."""
+    import duckdb
+
+    d = str(census_dir)
+    n = len(list(Path(d).glob("*.parquet")))
+    con = duckdb.connect()
+    cond = f"rows > {max_rows}" + (f" OR ubytes > {max_bytes}" if max_bytes else "")
+    con.execute(f"""CREATE TABLE m AS SELECT q, regexp_extract(filename, 's(\\d+)\\.parquet', 1)::INTEGER AS shard, rows, ubytes
+        FROM read_parquet({q(d + '/s*.parquet')}, filename = true) WHERE {cond} ORDER BY q""")
+    floor = con.execute(f"SELECT min(rows) FROM read_parquet({q(d + '/s*.parquet')})").fetchone()[0]
+    summary = {"gen": gen, "max_rows": max_rows, "max_bytes": max_bytes, "census_shards": n, "census_floor_seen": floor,
+               "members": con.execute("SELECT count(*) FROM m").fetchone()[0],
+               "by_length": {str(k): v for k, v in con.execute("SELECT length(q), count(*) FROM m GROUP BY 1 ORDER BY 1").fetchall()},
+               "rows": con.execute("SELECT sum(rows) FROM m").fetchone()[0]}
+    con.execute(f"COPY m TO {q(str(out))} (FORMAT parquet, COMPRESSION zstd)")
+    return summary
+
+
+def catalog_meta(gen: str, assembled: dict, s: float, members: dict | None, rule: HexRule | None) -> dict:
+    """`catalog/meta.json`: `assemble`'s counts, the membership bound (`members.json`'s), and the generation's hex-run
+    rule, which the readers follow (every tier's `catalog/meta.json` carries it)."""
+    meta = {"gen": gen, **assembled, "s": s}
+    if members:
+        meta["membership"] = {k: members[k] for k in ("max_rows", "max_bytes") if k in members}
+    meta.update(rule_json(rule))
+    return meta
+
+
 @cli.command("members")
 @option("-B", "--max-bytes", type=int, help="Also admit prefixes with more than this many decoded bytes")
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
@@ -595,29 +625,15 @@ def members_cmd(max_bytes, bucket, gen, max_rows) -> None:
     and print the membership summary (JSON)."""
     import tempfile
 
-    import duckdb
     from google.cloud import storage
 
     prefix = f"{PREFIX}/{gen}"
     client = storage.Client()
     with tempfile.TemporaryDirectory() as d:
-        n = 0
         for blob in client.list_blobs(bucket, prefix=f"{prefix}/catalog/census/"):
             blob.download_to_filename(f"{d}/{Path(blob.name).name}")
-            n += 1
-        con = duckdb.connect()
-        cond = f"rows > {max_rows}" + (f" OR ubytes > {max_bytes}" if max_bytes else "")
-        con.execute(f"""CREATE TABLE m AS SELECT q, regexp_extract(filename, 's(\\d+)\\.parquet', 1)::INTEGER AS shard, rows, ubytes
-            FROM read_parquet({q(d + '/*.parquet')}, filename = true) WHERE {cond} ORDER BY q""")
-        floor = con.execute(f"SELECT min(rows) FROM read_parquet({q(d + '/*.parquet')})").fetchone()[0]
-        summary = {"gen": gen, "max_rows": max_rows, "max_bytes": max_bytes, "census_shards": n, "census_floor_seen": floor,
-                   "members": con.execute("SELECT count(*) FROM m").fetchone()[0],
-                   "by_length": dict(con.execute("SELECT length(q), count(*) FROM m GROUP BY 1 ORDER BY 1").fetchall()),
-                   "rows": con.execute("SELECT sum(rows) FROM m").fetchone()[0]}
-        out = Path(d) / "members.parquet"
-        con.execute(f"COPY m TO {q(str(out))} (FORMAT parquet, COMPRESSION zstd)")
-        client.bucket(bucket).blob(f"{prefix}/catalog/members.parquet").upload_from_filename(str(out))
-    summary["by_length"] = {str(k): v for k, v in summary["by_length"].items()}
+        summary = cut_members(d, Path(d) / "members.parquet", gen=gen, max_rows=max_rows, max_bytes=max_bytes)
+        client.bucket(bucket).blob(f"{prefix}/catalog/members.parquet").upload_from_filename(str(Path(d) / "members.parquet"))
     client.bucket(bucket).blob(f"{prefix}/catalog/members.json").upload_from_string(json.dumps(summary, indent=1) + "\n")
     print(json.dumps(summary, indent=1))
 
@@ -767,14 +783,10 @@ def assemble_cmd(bucket, gen, mount, mem, threads, scratch, tmp) -> None:
     smount = str(Path(mount).parent / scratch)
     out = Path(tmp) / "catalog"
     t0 = monotonic()
-    meta = {"gen": gen, **assemble(con, f"{smount}/{prefix}/catalog-short/events/*.parquet", f"{smount}/{prefix}/catalog-short/vocab/*.parquet",
-                                   f"{mount}/{prefix}/catalog/cells/*.parquet", out), "s": 0}
-    meta["s"] = round(monotonic() - t0, 1)
+    assembled = assemble(con, f"{smount}/{prefix}/catalog-short/events/*.parquet", f"{smount}/{prefix}/catalog-short/vocab/*.parquet",
+                         f"{mount}/{prefix}/catalog/cells/*.parquet", out)
     members = read_json(f"gs://{bucket}/{prefix}/catalog/members.json") if storage.Client().bucket(bucket).blob(f"{prefix}/catalog/members.json").exists() else None
-    if members:
-        meta["membership"] = {k: members[k] for k in ("max_rows", "max_bytes") if k in members}
-    # The generation's hex-run rule, which the readers follow (every tier's `catalog/meta.json` carries it).
-    meta.update(rule_json(gen_rule(read_json(f"gs://{bucket}/{prefix}/scans.json"))))
+    meta = catalog_meta(gen, assembled, round(monotonic() - t0, 1), members, gen_rule(read_json(f"gs://{bucket}/{prefix}/scans.json")))
     (out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     upload_tree(out, bucket, f"{prefix}/catalog")
     shutil.rmtree(out)

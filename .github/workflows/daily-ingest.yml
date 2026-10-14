@@ -3,9 +3,12 @@
 # the union's path store (`path` + `bysize` sorts, objects included;
 # specs/done/path-store.md §4.4), its search sidecars (specs/path-store-search.md;
 # ~21 MiB beside a 12 MiB `path` sort, <1 s) + snapshot → upload to
-# disk-tree-demo → publish footers to the D1 the Map reads. Idempotent per date
-# (a fresh generation flips the pointer). Run it by hand anytime via "Run
-# workflow" (workflow_dispatch).
+# disk-tree-demo → publish footers to the D1 the Map reads → append the scan to
+# the static name index (`dt-cloud static-names add`: exact `?f=` literals;
+# the generation is the site's `STATIC_GEN`, built once by `static-names build`
+# when it doesn't exist yet). Idempotent per date (a fresh generation flips the
+# pointer; a date the static index already holds is not re-appended). Run it by
+# hand anytime via "Run workflow" (workflow_dispatch).
 #
 # Creds (repo secrets/vars): R2_HCCS_RO_* + R2_HCCS_ENDPOINT_URL (ctbk/crashes,
 # HCCS account); R2_DEMO_SRC_RO_* (token "disky demo bkts RO": read, RAC
@@ -31,7 +34,7 @@ jobs:
     # through `cloud` merges, but their repos have none of its secrets.
     if: github.repository == 'runsascoded/disky'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
       BUCKET: disk-tree-demo
       RAC_ENDPOINT: ${{ vars.R2_ENDPOINT_URL }}
@@ -85,6 +88,25 @@ jobs:
             -g "${{ steps.d.outputs.gen }}" -b "$BUCKET" \
             -k "listing/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
             -d "$GITHUB_WORKSPACE/work/index" -v path -v bysize
+      - name: Static name index — append the scan (or build the generation)
+        timeout-minutes: 75
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+          DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          # One source of truth: the generation the site reads (`site/wrangler.r2.toml`).
+          gen=$(sed -nE 's/^STATIC_GEN *= *"([^"]+)".*/\1/p' site/wrangler.r2.toml)
+          if [ -z "$gen" ]; then echo "no STATIC_GEN in site/wrangler.r2.toml: no static name index"; exit 0; fi
+          L='listing/{id}/index/{gen}/path-index.parquet'
+          cmd=add
+          if ! aws s3 ls "s3://$BUCKET/static-names/$gen/scans.json" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
+            cmd=build  # the first run: the base generation over every scan so far
+          fi
+          echo "static-names $cmd -g $gen"
+          cd cloud && uv run dt-cloud static-names "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
+            -w "$RUNNER_TEMP/static-names" -p 4 -M 10GB $([ "$cmd" = build ] && echo "-x off")
       - name: Smoke — the new generation serves
         run: |
           set -euo pipefail

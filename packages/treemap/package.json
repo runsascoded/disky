@@ -10,6 +10,7 @@
     "./squarify": "./src/squarify.ts",
     "./parseColor": "./src/parseColor.ts",
     "./divergingColor": "./src/divergingColor.ts",
+    "./svg": "./src/svg.ts",
     "./styles.css": "./src/styles.css",
     "./voronoi": "./src/voronoi/index.ts"
   },

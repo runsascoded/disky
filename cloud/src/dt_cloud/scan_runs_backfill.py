@@ -120,9 +120,9 @@ def phases_of(profile: Profile, lines: Sequence[tuple[int, str]], started: int |
 
 
 def failure_of(profile: Profile, job: Mapping, lines: Sequence[tuple[int, str]]) -> str | None:
-    if profile.error_marker:
-        rx = re.compile(profile.error_marker)
-        for _, x in lines:
+    rxs = [re.compile(r) for r in profile.error_marker]
+    for _, x in lines:
+        for rx in rxs:
             if m := rx.search(x):
                 g = m.groupdict()
                 return f"exit {g.get('rc')}: {g.get('cmd', '').strip()}" + (f" (line {g['line']})" if g.get("line") else "")
@@ -280,7 +280,7 @@ def fetch_jobs(project: str, regions: Sequence[str]) -> list[dict]:
 def log_filter(profile: Profile, since: dt.datetime) -> str:
     """The task-log lines the backfill reads: a server-side prefilter on each marker's literal head (the phase, NOP
     and error markers and the kinds' `log` scan sources); the markers' full regexes then run here."""
-    rxs = [profile.phase_marker, profile.phase_start_marker] + [r for r in (profile.nop_marker, profile.error_marker) if r]
+    rxs = [profile.phase_marker, profile.phase_start_marker] + ([profile.nop_marker] if profile.nop_marker else []) + list(profile.error_marker)
     rxs += [s["log"] for k in profile.jobs for s in k.scan if "log" in s]
     heads = list(dict.fromkeys(_head(r) for r in rxs))
     alt = " OR ".join(f'textPayload=~"{h}"' for h in heads)
@@ -288,8 +288,8 @@ def log_filter(profile: Profile, since: dt.datetime) -> str:
 
 
 def _head(rx: str) -> str:
-    """A regex's literal head as an RE2 filter literal: `^PHASE (?P<name>…` → `^PHASE `, `^\\+ fail_alert (…` →
-    `^\\\\+ fail_alert ` (RE2-escaped, then escaped for the filter's string literal)."""
+    """A regex's literal head as an RE2 filter literal: `^PHASE (?P<name>…` → `^PHASE `, `^\\+\\+ fail_alert (…` (a trap's xtrace line is `++ `) →
+    `^\\\\+\\\\+ fail_alert ` (RE2-escaped, then escaped for the filter's string literal)."""
     anchored = rx.startswith("^")
     i, lit = (1 if anchored else 0), []
     while i < len(rx):

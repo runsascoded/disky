@@ -774,6 +774,7 @@ export async function openInterval(env: Env, date: string, variant: string, retr
     // A run that won't open is cut out; the date is then the store's (an older run's or the base's) or per-scan.
     if (e instanceof IvTierBroken && !retried) return openInterval(env, date, variant, true)
     if (!sliced || (e as Error).name !== 'NotFoundError') throw e
+    if (!ivNoSlices.has(gen)) console.error(`interval store ${gen}: no slice sorts (${(e as Error).message}); sliced reads go per-scan for 60s`)
     ivNoSlices.set(gen, Date.now())
     return null
   }

@@ -67,7 +67,6 @@ async function seed(ledger = ''): Promise<{ perScan: Env; iv: Env }> {
     CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
     ${LEDGER_KIND}
     CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
-   
     ${ledger}
   `)
   seedGeneration(raw, { date: S2, gen: 'g', dir: `listing/${S2}/index/g`, variants: lensD1, files: files('v2-lens', { path: 'path-index', bysize: 'path-index-bysize', 'bysize-user': 'path-index-bysize-by-user' }) })
@@ -126,6 +125,25 @@ describe('batched root owner history', () => {
       for (const date of dates) want.push([date, await readRootAgg(current.iv, { date, path: '', ...scope })])
       expect([...(await readRootHistory(current.iv, dates, scope))!]).toEqual(want)
     }
+  })
+})
+
+describe('an owner-scoped root read of a held scan with no sort to read', () => {
+  it('throws, never a null point (a gap a series would cache)', async () => {
+    // The store's slice sorts unreadable (a generation found "without slices": every sliced read goes per-scan
+    // for a minute) and the scan's per-scan index retired, as a v1 scan's lens tiers are.
+    vi.resetModules()
+    const { readRootAgg: fresh } = await import('./view')
+    const { iv: env } = await seed()
+    await env.DB!.prepare('DELETE FROM index_schema WHERE date = ?').bind(S1).run()
+    const r = env.INDEX_R2! as unknown as { get: (k: string, o?: unknown) => Promise<unknown> }
+    const hidden = { ...env, INDEX_R2: { ...r, get: (k: string, o?: unknown) => (k.includes('/served/slices') ? Promise.resolve(null) : r.get(k, o)) } } as unknown as Env
+    const got = await Promise.allSettled([{ lens: { key: 'alice' } }, { owner: 'owned' as const }].map(scope => fresh(hidden, { date: S1, path: '', ...scope })))
+    // A lens fails earlier, folding its ledger on the scan's `path` sort.
+    expect(got.map(g => g.status === 'fulfilled' ? g.value : String(g.reason))).toEqual([
+      `Error: index variant 'path' not synced for ${S1}`,
+      `Error: no owner-scoped sort of ${S1} to read`,
+    ])
   })
 })
 
@@ -226,6 +244,31 @@ describe('owner prefix history', () => {
         expect({ gen, date, hist: h.computed.hist, fold: fold(h) }).toEqual({ gen, date, hist: true, fold: fold(await ownerTotals(perScan, date)) })
       }
     }
+  })
+
+  it('concurrent folds after a new assignment share one pricing and all fold from history', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan')`).run()
+    await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4)`).run()
+    // D1's latency: each statement's result arrives a few ms later, so concurrent folds interleave as on the edge.
+    const late = <T extends object>(o: T): T => new Proxy(o, { get(t, k) {
+      const v = Reflect.get(t, k)
+      if (typeof v !== 'function') return v
+      if (k === 'prepare' || k === 'bind') return (...a: unknown[]) => late(v.apply(t, a))
+      return async (...a: unknown[]) => { await new Promise(r => setTimeout(r, 5)); return v.apply(t, a) }
+    } })
+    const slow = { ...env, DB: late(env.DB!) } as Env
+    const got = await Promise.allSettled([S1, S2, S3].map(d => ownerTotals(slow, d)))
+    expect(got.map(g => g.status === 'fulfilled' ? [g.value.scan, g.value.computed.hist] : [g.status, String(g.reason)])).toEqual([[S1, true], [S2, true], [S3, true]])
+    vi.resetModules()
+    const { ownerTotals: coldTotals } = await import('./ownerTotals')
+    const cold = (await seed(LEDGER + `
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan');
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4);`)).perScan
+    for (const g of got) if (g.status === 'fulfilled') expect(fold(g.value)).toEqual(fold(await coldTotals(cold, g.value.scan)))
   })
 
   it('a new assignment writes one history row, and no per-scan row', async () => {

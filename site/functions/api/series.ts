@@ -203,6 +203,8 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   }
 
   const points: { date: string; b: number; o: number }[] = []
+  /** Scans whose point errored (not ones the path is absent from): named in the body, which isn't cached. */
+  const failed: string[] = []
   // split=roots: each scan's depth-1 rows (the total is their sum), and for
   // tier-less scans whatever meta.json says about its roots.
   const rootsByDate = new Map<string, RootRow[]>()
@@ -252,6 +254,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
       const msg = (e as Error).message
       if (tries > 1 && /internal error/i.test(msg)) return point(date, tries - 1)
       console.log(`series ${path || '/'} ${lensTag || owner || ''}: no point for ${date}: ${msg}`)
+      failed.push(date)
       return null
     }
   }
@@ -277,6 +280,8 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
     for (const g of got) if (g) points.push(g)
   }
   points.sort((a, b) => a.date.localeCompare(b.date))
-  const body = JSON.stringify({ path, ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}) })
+  const body = JSON.stringify({ path, ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
+  // A series missing points to errors is served (gaps beat no chart) but never cached: the next request retries them.
+  if (failed.length) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
 }

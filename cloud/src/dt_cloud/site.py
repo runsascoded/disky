@@ -44,9 +44,23 @@ def get_json(url: str, token: str, endpoint_path: str, params: dict | None = Non
     q = f"?{urlencode(params)}" if params else ""
     endpoint = f"{url.rstrip('/')}{endpoint_path}{q}"
     req = Request(endpoint, headers={"Authorization": f"Bearer {token}", "User-Agent": UA})
+    return json.loads(_fetch(req, endpoint, timeout).decode())
+
+
+def post_json(url: str, token: str, endpoint_path: str, body: dict, timeout: int = 120) -> bytes:
+    """POST ``body`` as JSON to ``<url><endpoint_path>``, authenticated; the response's raw bytes (e.g. a PNG)."""
+    endpoint = f"{url.rstrip('/')}{endpoint_path}"
+    req = Request(endpoint, data=json.dumps(body).encode(), method="POST", headers={
+        "Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": UA,
+    })
+    return _fetch(req, endpoint, timeout)
+
+
+def _fetch(req: Request, endpoint: str, timeout: int) -> bytes:
+    """``req``'s response body; a non-2xx raises `SiteError` with the server's own error string."""
     try:
         with urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+            return resp.read()
     except HTTPError as e:
         body = e.read().decode(errors="replace")
         try:

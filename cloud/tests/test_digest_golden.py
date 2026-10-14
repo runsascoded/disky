@@ -284,14 +284,25 @@ def test_gcs_dry_run(monkeypatch, tmp_path: Path):
     golden("gcs-dry-run.txt", _dry_run(monkeypatch, tmp_path, ["digest", "-C", str(config_file(GCS_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-08"]))
 
 
+@pytest.fixture
+def site_image(monkeypatch) -> list:
+    """The cw OP image is the site's (`POST /api/digest-image`): a stub site records each request and answers a PNG."""
+    from dt_cloud import site
+
+    calls: list = []
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
+    return calls
+
+
 @pytest.mark.parametrize("variant", ["sender", "body"])
-def test_cw_dry_run(monkeypatch, tmp_path: Path, variant: str):
+def test_cw_dry_run(monkeypatch, tmp_path: Path, variant: str, site_image: list):
     root = cw_root(tmp_path)
     golden(f"cw-dry-run-{variant}.txt", _dry_run(monkeypatch, tmp_path, ["cw-digest", "-C", str(config_file(CW_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-09", "-V", variant]))
 
 
 @pytest.mark.parametrize("variant", ["sender", "body"])
-def test_cw_dry_run_provisional(monkeypatch, tmp_path: Path, variant: str):
+def test_cw_dry_run_provisional(monkeypatch, tmp_path: Path, variant: str, site_image: list):
     # `provisional: true` adds the open day's (9/8: only its 00:01Z scan so far) provisional reply to `sender`; `body` is unchanged
     root = cw_root(tmp_path)
     config_file(replace(CW_EXAMPLE, provisional=True), tmp_path / "digest.yml")

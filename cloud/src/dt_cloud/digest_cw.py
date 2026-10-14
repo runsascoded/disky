@@ -6,7 +6,7 @@ read from `meta.buckets[<primary>]` when the scan has it, else the flat
 totals, which were the primary's), the others ride along. The OP: month-to-
 date headline (`· NN% of <quota>` when the primary has one, ` · <bucket> <TiB>
 TiB (Δ)` per other bucket), per-ISO-week bullets, and a quota sparkline + diff
-treemap (`digest_plot.render_quota`). ONE REPLY PER UTC DAY, Δ over the prior
+treemap (drawn by the site: `POST /api/digest-image`). ONE REPLY PER UTC DAY, Δ over the prior
 day's reply scan, the arrow normalised to the real interval; its tail is a
 linked `[<label>](<over-time>): NN.N% of <quota> (<free> Ti free)` clause per
 bucket (`cfg.buckets`; a bucket without a quota shows raw TiB; buckets sharing
@@ -380,6 +380,28 @@ def load_tree(root: str, scan: str, primary: str) -> dict:
         return primary_node(json.load(f), primary)
 
 
+def image_body(month: Month, m: dt.date, cfg: DigestConfig) -> dict:
+    """`POST /api/digest-image`'s request for ``month``: every scan from the lead-in on (bytes of the primary), the
+    primary's quota, and the headline interval's diff (none until the month spans two scans)."""
+    base, last = month.base, month.rows[-1]
+    scans = ([base] if base is not month.rows[0] else []) + month.rows
+    q = cfg.primary_quota
+    body: dict = {
+        "title": f"{cfg.title} — {m:%B %Y}",
+        # the line is the primary's; say so once there are other buckets
+        "note": " · ".join([cfg.host, *([cfg.primary] if cfg.primary and last.extra else []), "TiB"]),
+        "month": f"{m:%Y-%m}",
+        "points": [{"scan": r.scan, "bytes": round(r.tb * TIB)} for r in scans],
+    }
+    if q:
+        body["quota"] = {"bytes": q.bytes, "name": q.name}
+    if base is not last:
+        span = f"{_md(base.date)} → {_md(last.date)}"
+        body["diff"] = {"from": base.scan, "to": last.scan, "path": cfg.primary or "",
+                        "title": f"What changed in {cfg.primary} — {span}" if cfg.primary else f"What changed — {span}"}
+    return body
+
+
 class Cw:
     """The `cw` template over a :class:`DigestConfig` (see `digest.Template`)."""
 
@@ -411,18 +433,13 @@ class Cw:
         return Unit(day.date, day.scan, reply(day, variant, self.cfg)) if day else None
 
     def render_plot(self, month: Month, m: dt.date, out: Path, root: str | None = None) -> None:
-        """The quota sparkline, plus — when ``root`` is given and the month
-        spans two scans — the diff treemap over the OP headline's interval (the
-        lead-in scan → the latest). Needs the `[plot]` extra — matplotlib."""
-        from .digest_plot import diff_tree, render_quota
+        """The OP's image, drawn by the site (`POST /api/digest-image`): the month's usage line against the quota,
+        over the in-app diff map of the headline interval (the lead-in scan → the latest). Authenticated as the job
+        (`$SITE_TOKEN`); ``root`` is unused (the site reads the diff from its own index)."""
+        from .deploy import site_token
+        from .site import post_json
 
-        cfg, q = self.cfg, self.cfg.primary_quota
-        base, last = month.base, month.rows[-1]
-        diff = diff_tree(load_tree(root, base.scan, cfg.primary), load_tree(root, last.scan, cfg.primary), min_frac=0.01) if root and base is not last else None
-        render_quota(
-            [{"ts": scan_ts(r.scan), "tb": r.tb} for r in month.rows], Path(out), f"{cfg.title} — {m:%B %Y}", cfg.host,
-            quota_tib=q.bytes / TIB if q else None, quota_name=q.name if q else "",
-            diff=diff, diff_label=f"{_md(base.date)} → {_md(last.date)}",
-            # both panels are the primary's; say so once there are other buckets
-            scope=cfg.primary if cfg.primary and last.extra else "",
-        )
+        token = site_token()
+        if not token:
+            raise SystemExit("digest image: no site token ($SITE_TOKEN)")
+        Path(out).write_bytes(post_json(self.cfg.site_url, token, "/api/digest-image", image_body(month, m, self.cfg)))

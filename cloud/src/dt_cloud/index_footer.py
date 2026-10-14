@@ -976,25 +976,34 @@ def adopt(
     """Track the store sorts synced before the footer LRU: each pointed (scan, sort) whose rows are in D1
     with no `footer_cache` entry becomes `hot`, read today (so eviction orders them by scan, oldest first —
     what `index-gc -r` did). Only where its cold footer exists (else eviction would leave the scan to the
-    `.groups.json` blob): the rest are returned as skipped, as `retire_d1` does. One GROUP BY over the
-    sorts' rows: run it once after the migration."""
+    `.groups.json` blob): the rest are returned as skipped, as `retire_d1` does. One query per pointed sort
+    (each over its own rows): run it once after the migration."""
     if base is None:
         from .deploy import data_bucket
 
         base = data_bucket()
     tok, acct = _creds()
-    sw = "" if check_store(store) == PRIMARY_STORE else f"g.store = '{_sql_escape(store)}' AND "
+    sw = "" if check_store(store) == PRIMARY_STORE else f"s.store = '{_sql_escape(store)}' AND "
     names = {d1_variant(v, store): v for v in SORT_VARIANTS}
     vin = ", ".join(f"'{_sql_escape(n)}'" for n in names)
-    got = _d1_query(
-        "SELECT g.date AS date, g.variant AS variant, g.gen AS gen, s.dir AS dir, COUNT(*) AS rows, "
-        f"SUM(LENGTH(g.p_min) + LENGTH(g.p_max) + COALESCE(LENGTH(g.u_min), 0) + COALESCE(LENGTH(g.u_max), 0) + LENGTH(g.rg_json) + {ROW_FIXED_BYTES}) AS bytes "
-        "FROM index_row_groups g JOIN index_schema s ON s.date = g.date AND s.variant = g.variant AND s.gen = g.gen "
-        f"WHERE {sw}g.variant IN ({vin}) "
-        "AND NOT EXISTS (SELECT 1 FROM footer_cache c WHERE c.date = g.date AND c.variant = g.variant AND c.gen = g.gen) "
-        "GROUP BY g.date, g.variant, g.gen, s.dir ORDER BY g.date, g.variant;",
+    # The pointed sorts not yet tracked, then each one's size over its own rows: one query over every sort's rows
+    # reads the whole table (gcs: 6.5M rows), past what D1 lets one query scan.
+    pointed = _d1_query(
+        "SELECT s.date AS date, s.variant AS variant, s.gen AS gen, s.dir AS dir FROM index_schema s "
+        f"WHERE {sw}s.variant IN ({vin}) "
+        "AND NOT EXISTS (SELECT 1 FROM footer_cache c WHERE c.date = s.date AND c.variant = s.variant AND c.gen = s.gen) "
+        "ORDER BY s.date, s.variant;",
         acct, tok, db_id,
     )
+    got = []
+    for p in pointed:
+        size = _d1_query(
+            f"SELECT COUNT(*) AS rows, SUM(LENGTH(p_min) + LENGTH(p_max) + COALESCE(LENGTH(u_min), 0) + COALESCE(LENGTH(u_max), 0) + LENGTH(rg_json) + {ROW_FIXED_BYTES}) AS bytes "
+            f"FROM index_row_groups WHERE date = '{_sql_escape(p['date'])}' AND variant = '{_sql_escape(p['variant'])}' AND gen = '{_sql_escape(p['gen'])}';",
+            acct, tok, db_id,
+        )[0]
+        if size["rows"]:
+            got.append({**p, **size})
     now = _now()
     adopted: list[Entry] = []
     skipped: list[tuple[str, str, str]] = []
