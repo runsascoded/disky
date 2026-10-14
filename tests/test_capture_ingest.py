@@ -343,3 +343,10 @@ def test_static_names_failure_fails_the_ingest_in_its_phase(pipeline) -> None:
         'notify', '-p', '1', '-t', 'disky: laptop ingest failed', 'scan 2026-10-14T0600 failed in static-names (exit 3)',
     ]]
 
+
+
+def test_the_job_and_the_site_read_the_same_static_generation() -> None:
+    import yaml
+    env = yaml.safe_load((REPO / 'infra/aws/Pulumi.rac.yaml').read_text())['config']['disk-tree-m3:env']
+    sites = [re.search(r'^STATIC_GEN = "([^"]*)"', (REPO / 'site' / f).read_text(), re.M) for f in ('wrangler.toml', 'wrangler.dev.toml')]
+    assert [env['STATIC_GEN'], *(m and m[1] for m in sites)] == [env['STATIC_GEN']] * 3

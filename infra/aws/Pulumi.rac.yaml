@@ -35,6 +35,9 @@ config:
     SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
     INGEST_MACHINE: fargate-arm64-1vcpu-8gib
     INGEST_SPOT: "1"
+    # The static name index's generation: the site's STATIC_GEN (site/wrangler.toml); ingest.sh builds
+    # it on its first run, then appends each laptop scan.
+    STATIC_GEN: "2026-10-14"
   # Created empty; values set out of band by `aws/put-secrets` (never in state).
   disk-tree-m3:secrets:
     AWS_ACCESS_KEY_ID: disk-tree-m3/r2-access-key-id

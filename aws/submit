@@ -4,7 +4,9 @@
   aws/submit r2://disk-tree/captures/<host>/<root slug>/<stamp>
 
 Prints the job id; `-w` also follows the job's CloudWatch log until it ends
-(exit status = the job's). The account is `.envrc`'s `AWS_PROFILE` (`r`, RAC).
+(exit status = the job's). `-c`/`-m` size this one job past the job def's (a
+Fargate vCPU/memory pair, e.g. `-c 4 -m 16384` for a static name index build),
+`-e KEY=VALUE` adds to its env (e.g. `STATIC_MEM=12GB`). The account is `.envrc`'s `AWS_PROFILE` (`r`, RAC).
 """
 import sys
 import time
@@ -47,17 +49,29 @@ def follow(batch, logs, job_id: str) -> int:
 
 
 @command()
+@option('-c', '--vcpus', help="vCPUs for this job (a Fargate value: 0.25 … 16), overriding the job def's")
+@option('-e', '--env', 'envs', multiple=True, help='KEY=VALUE added to the job env; repeat')
+@option('-m', '--memory', type=int, help="Memory MiB for this job (valid for -c on Fargate), overriding the job def's")
 @option('-w', '--watch', is_flag=True, help='Follow the job log until it finishes')
 @argument('capture')
-def main(watch: bool, capture: str):
+def main(vcpus: str | None, envs: tuple[str, ...], memory: int | None, watch: bool, capture: str):
     session = boto3.Session(region_name='us-east-1')
     batch = session.client('batch')
     name = f'ingest-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}'
+    overrides: dict = {'command': [capture]}
+    resources = [{'type': t, 'value': str(v)} for t, v in (('VCPU', vcpus), ('MEMORY', memory)) if v is not None]
+    if resources:
+        overrides['resourceRequirements'] = resources
+    if envs:
+        pairs = [e.split('=', 1) for e in envs]
+        if any(len(p) != 2 for p in pairs):
+            raise SystemExit(f'-e takes KEY=VALUE: {envs}')
+        overrides['environment'] = [{'name': k, 'value': v} for k, v in pairs]
     job_id = batch.submit_job(
         jobName=name,
         jobQueue=QUEUE,
         jobDefinition=JOB_DEF,
-        containerOverrides={'command': [capture]},
+        containerOverrides=overrides,
     )['jobId']
     print(job_id, flush=True)
     if watch:

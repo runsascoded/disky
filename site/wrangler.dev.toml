@@ -15,6 +15,12 @@ database_id = "e5288564-a010-4177-9f3c-77e25fad9f72"
 migrations_dir = "migrations/cw"
 remote = true
 
+# The static name index (`static-names/<STATIC_GEN>/`, written by the Batch ingest's
+# `dt-cloud static-names`): exact `?f=` once FILTER_STATIC is on.
+[[r2_buckets]]
+binding = "INDEX_R2"
+bucket_name = "disk-tree"
+
 [observability]
 enabled = true
 
@@ -36,6 +42,10 @@ STORE_BUCKETS = "*"               # every top-level dir is a root (a `capture /`
 HOME = "Users/ryan"               # paths under it read as `~/…` (site/src/pathCrumbs.ts)
 # The NAS (specs/multi-store.md): a secondary store at `/nas` (`src/stores/nas.ts`),
 # same bucket and keys as the primary, its own `snapshots/nas/` + D1 rows (store `nas`).
+# The static name index's generation (the job env's STATIC_GEN, infra/aws/Pulumi.rac.yaml; a test pins
+# them equal). FILTER_STATIC stays off until the index is checked against the path store, and per-store
+# indexes land for the NAS (a secondary store would read the laptop's).
+STATIC_GEN = "2026-10-14"
 STORES_EXTRA = "nas"
 STORES_JSON = '{"nas": {"vars": {"ROOT_LABEL": "nas", "SNAPSHOTS_SUBDIR": "nas", "STORE_SCHEME": "file:///", "STORE_BUCKETS": "*", "STORE_BUCKET": "disk-tree", "STORE_REGION": "auto"}, "secrets": {"STORE_ENDPOINT": "STORE_ENDPOINT", "STORE_ACCESS_KEY_ID": "STORE_ACCESS_KEY_ID", "STORE_SECRET_ACCESS_KEY": "STORE_SECRET_ACCESS_KEY"}}}'
 # Secrets (Pages secrets, per project): STORE_ENDPOINT, STORE_ACCESS_KEY_ID,
