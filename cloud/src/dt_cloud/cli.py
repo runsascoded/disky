@@ -915,6 +915,7 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 @option("-k", "--key", required=True, help="Bucket-relative dir the parquets live under — what the site reads (the deployment's layout, e.g. `<layer-2>/index/<gen>`)")
 @option("-L", "--local", is_flag=True, help="Write to the local wrangler D1 instead of --remote")
 @option("-m", "--meta", default=None, help="The scan's snapshot `meta.json` (local path or URL): its `started` is recorded on each pointer (`index_schema.started`, the scan picker's time for a date-only id). Absent, or a meta without one: the pointers keep the start they hold")
+@option("-M", "--snapshots", default=None, help="The store's snapshot dir (local path or URL): `-m` defaults to `<dir>/<DATE>/meta.json`, and after the pointers every other date-only scan of the store still without a start takes its own meta's (the backfill, folded into each sync; one D1 read once filled)")
 @option("-p", "--pointer-only", is_flag=True, help="Only flip the pointers, after `-r` staged the rows: refuses (exit 1, nothing flipped) unless every present variant's rows in D1 match its footer; a variant already pointed at this generation is a no-op")
 @option("-r", "--rows-only", is_flag=True, help="Only upload the row groups (+ the cold footer files), tagged with the generation — invisible until `-p` flips the pointers. Re-runnable (rows are INSERT OR REPLACE)")
 @option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
@@ -929,6 +930,7 @@ def index_sync(
     key: str,
     local: bool,
     meta: str | None,
+    snapshots: str | None,
     pointer_only: bool,
     rows_only: bool,
     store: str,
@@ -957,9 +959,13 @@ def index_sync(
 
     `-m <meta.json>` records the scan's `started` on each pointer
     (`index_schema.started`, which the site's scan picker reads); without it a
-    re-sync keeps the start a pointer already holds. `index-started` backfills
-    scans synced before."""
-    from .index_footer import SORT_VARIANTS, IncompleteGeneration, check_flip, check_store, exists, flip_d1, meta_started, sync_d1
+    re-sync keeps the start a pointer already holds. `-M <snapshot dir>` does
+    the same from `<dir>/<DATE>/meta.json`, then fills every other date-only
+    scan of the store still without a start from its own meta there (so a job
+    passing `-M` needs no separate backfill; `index-started` prints one)."""
+    from disk_tree import blobfs
+
+    from .index_footer import SORT_VARIANTS, IncompleteGeneration, check_flip, check_store, exists, fill_starts, flip_d1, meta_started, sync_d1
 
     try:
         check_store(store)
@@ -969,8 +975,13 @@ def index_sync(
         raise UsageError("-r and -p are the two halves of one sync: pass at most one (neither = both, rows then pointer)")
     if local and (rows_only or pointer_only):
         raise UsageError("-r/-p run against the remote D1 only")
-    if meta and rows_only:
-        raise UsageError("-m records a start on the pointers, which -r doesn't write (pass it to the -p half)")
+    if (meta or snapshots) and rows_only:
+        raise UsageError("-m/-M record starts on the pointers, which -r doesn't write (pass them to the -p half)")
+    if snapshots and local:
+        raise UsageError("-M fills starts on the remote D1 only")
+    if snapshots and not meta:
+        own = f"{snapshots.rstrip('/')}/{date}/meta.json"
+        meta = own if blobfs.exists(own) else None
     started = meta_started(meta) if meta else None
 
     base = listing_dir or f"gs://{bucket}/{key}"
@@ -1011,6 +1022,10 @@ def index_sync(
     if not present:
         err(f"index-sync: no variant file under {base}")
         raise SystemExit(1)
+    if snapshots:
+        filled = fill_starts(snapshots, store)
+        if filled:
+            err(f"index-sync: {'' if store == 'primary' else f'[{store}] '}filled `started` on {len(filled)} earlier scan(s): {', '.join(d for d, _ in filled)}")
 
 
 @main.command("index-started")

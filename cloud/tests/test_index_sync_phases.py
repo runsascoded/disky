@@ -332,3 +332,48 @@ def test_index_started_prints_the_backfill_for_each_meta_with_a_start(tmp_path, 
         ("nas", "2026-10-11T1000", "nas:path", "kept"),
         ("primary", "2026-10-09", "path", None),
     ]
+
+
+def test_snapshots_dir_starts_this_scan_and_fills_earlier_date_only_ones(gens, d1, logged, tmp_path):
+    _, new = gens
+    snaps = tmp_path / "snapshots" / "laptop"
+    _meta(snaps / DATE / "meta.json", STARTED)
+    _meta(snaps / "2026-10-08" / "meta.json", "2026-10-08T22:13:50.123Z")
+    _meta(snaps / "2026-10-09" / "meta.json", None)
+    d1.con.executescript("""
+        INSERT INTO index_schema (store, date, variant, version, schema_json, started) VALUES
+          ('primary', '2026-10-07', 'path', 2, '[]', NULL),
+          ('primary', '2026-10-08', 'path', 2, '[]', NULL),
+          ('primary', '2026-10-08', 'bysize', 2, '[]', NULL),
+          ('primary', '2026-10-09', 'path', 2, '[]', NULL),
+          ('primary', '2026-10-06', 'path', 2, '[]', 'kept'),
+          ('nas', '2026-10-08', 'nas:path', 2, '[]', NULL);
+    """)
+    logged.clear()
+    assert sync(new, "-M", str(snaps)).exit_code == 0
+    assert logged[-1] == "index-sync: filled `started` on 1 earlier scan(s): 2026-10-08"
+    assert d1.con.execute("SELECT store, date, variant, started FROM index_schema ORDER BY store, date, variant").fetchall() == [
+        ("nas", "2026-10-08", "nas:path", None),
+        ("primary", "2026-10-06", "path", "kept"),
+        ("primary", "2026-10-07", "path", None),  # no meta
+        ("primary", "2026-10-08", "bysize", None),  # only the `path` pointer carries a backfilled start
+        ("primary", "2026-10-08", "path", "2026-10-08T22:13:50.123Z"),
+        ("primary", "2026-10-09", "path", None),  # its meta has no `started`
+        ("primary", DATE, "bysize", STARTED),
+        ("primary", DATE, "path", STARTED),
+    ]
+    # Filled: the next sync reads D1 once and writes no start.
+    d1.sent.clear()
+    logged.clear()
+    assert sync(new, "-M", str(snaps)).exit_code == 0
+    assert [s for s in d1.sent if "started IS NULL" in s] == [
+        "SELECT date FROM index_schema WHERE store = 'primary' AND variant = 'path' AND started IS NULL;",
+    ]
+    assert not any(line.startswith("index-sync: filled") for line in logged)
+
+
+def test_snapshots_dir_with_rows_only_or_local_is_a_usage_error(tmp_path, d1):
+    for flag in ("-r", "-L"):
+        r = CliRunner().invoke(main, ["index-sync", flag, "-M", str(tmp_path), "-d", str(tmp_path), "-g", NEW, "-k", NEW_KEY, DATE])
+        assert r.exit_code == 2, (flag, r.output)
+    assert d1.sent == []

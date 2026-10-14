@@ -669,6 +669,34 @@ def started_sql(date: str, started: str, store: str = PRIMARY_STORE) -> str:
     )
 
 
+def fill_starts(snapshots: str, store: str = PRIMARY_STORE, db_id: str = D1_DB_ID) -> list[tuple[str, str]]:
+    """Fill the start of every date-only `path` pointer of ``store`` that has
+    none, from its own ``<snapshots>/<scan id>/meta.json`` (``snapshots``: the
+    store's snapshot dir, a local path or fsspec URL); a scan whose meta is
+    absent or carries no ``started`` is left as it is. A timed id carries its
+    time in the id, so it is never read. Returns the ``(scan id, started)``
+    pairs written; once a store is filled, a call is one D1 read."""
+    from disk_tree import blobfs
+
+    from .scan_id import is_scan_id
+
+    tok, acct = _creds()
+    sw = f"store = '{_sql_escape(check_store(store))}' AND "
+    missing = _d1_query(f"SELECT date FROM index_schema WHERE {sw}variant = '{_sql_escape(d1_variant('path', store))}' AND started IS NULL;", acct, tok, db_id)
+    base = snapshots.rstrip("/")
+    filled: list[tuple[str, str]] = []
+    for date in sorted(r["date"] for r in missing):
+        if not is_scan_id(date) or "T" in date:
+            continue
+        meta = f"{base}/{date}/meta.json"
+        started = meta_started(meta) if blobfs.exists(meta) else None
+        if started is None:
+            continue
+        _d1_query(started_sql(date, started, store), acct, tok, db_id)
+        filled.append((date, started))
+    return filled
+
+
 def snapshot_starts(snapshots: str) -> list[tuple[str, str | None]]:
     """``(scan id, meta.started)`` for every ``<scan id>/meta.json`` under the
     snapshot dir ``snapshots`` (local path or fsspec URL), by id."""
