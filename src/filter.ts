@@ -9,7 +9,7 @@
  * "filtered totals" would not be.
  */
 
-import type { CellStyle } from './Treemap'
+import type { CellStyle } from './cellTypes'
 
 export interface QueryOpts {
   /** Match case-sensitively. Default: false. */

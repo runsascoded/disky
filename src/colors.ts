@@ -3,7 +3,7 @@
  * friendly so consumers can theme without touching component code.
  */
 
-import type { CellStyle } from './Treemap'
+import type { CellStyle } from './cellTypes'
 import { parseColor } from './parseColor'
 export { parseColor } from './parseColor'
 export { divergingColor, divergingInk } from './divergingColor'

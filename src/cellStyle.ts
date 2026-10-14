@@ -8,7 +8,7 @@
  * just reads its inputs off a `PlacedCell` now.
  */
 import { contrastEdge, hierColor } from './colors'
-import type { CellStyle } from './Treemap'
+import type { CellStyle } from './cellTypes'
 import type { FoldedNode, PlacedCell } from './layout'
 
 export interface StyleOpts<T> {
