@@ -3,6 +3,8 @@ import { staticRegistry, staticSummary } from './nameSummaryStatic.js'
 import { rollupAt, staticFilterStore, staticTag } from './staticFilter.js'
 import { staticGen, staticPrefix } from './staticNames.js'
 import { fixture } from './testStore.js'
+import { storeEnv } from './stores.js'
+import type { Env } from './auth.js'
 
 // The generation is required deployment config (`STATIC_GEN`): every read of a deployment's static name index is under its own
 // `static-names/<gen>/` in `INDEX_R2`, and the responses name it. The bucket here holds `fixtures/static-runs/` (a base
@@ -87,8 +89,18 @@ describe('STATIC_GEN', () => {
     const env = { FILTER_STATIC: '1', INDEX_R2: r2(log), STATIC_GEN: GEN }
     const s = staticFilterStore(env)!
     expect([s.gen, await s.scans(), staticTag(env, { ast: { neg: [], alts: [[{ kind: 'sub', text: 'qqq' }]] } as never })])
-      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.21`])
+      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.22`])
     expect(log.filter(k => !k.includes(`static-names/${GEN}/`))).toEqual([])
+  })
+
+  it('a secondary store reads a static index only when its own config names one: none holds no scan, never the primary\'s generation', async () => {
+    const log: string[] = []
+    const env = { FILTER_STATIC: '1', INDEX_R2: r2(log), STATIC_GEN: GEN, FILTER_STATIC_HEAVY: '1' } as Env
+    const bare = staticFilterStore(storeEnv(env, 'meta', {}))!
+    const own = staticFilterStore(storeEnv(env, 'meta', { vars: { STATIC_GEN: GEN } }))!
+    const primary = staticFilterStore(env)!
+    expect([bare.gen, await bare.scans(), await bare.source.hits('qqq', ''), own.gen, await own.scans(), own.source.heavy, primary.gen, primary.source.heavy])
+      .toEqual(['none', [], null, GEN, ['2026-08-01', '2026-09-01', ...RUNS], false, `${GEN}+drill`, true])
   })
 
   it('with no drilldown (`FILTER_STATIC_HEAVY` unset), a heavy literal\'s fleet root is the catalog\'s buckets — `/api/name-summary`\'s numbers — and below it nothing', async () => {

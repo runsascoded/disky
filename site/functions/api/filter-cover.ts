@@ -18,7 +18,8 @@ import { COVER_V, coverFloor, coverSet, overCapReason } from '../_lib/cover.js'
 import { hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, rejectBody, rejectQuery } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
-import { storeKey, withStore } from '../_lib/stores.js'
+import { storeKey, type UnionView, withStore } from '../_lib/stores.js'
+import { filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, resolveUnion, UnionOverlap, unionFor } from '../_lib/union.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { indexedScan, noScan, scanArg } from '../_lib/scanArg.js'
 import { traceJoins } from '../_lib/shared.js'
@@ -41,7 +42,68 @@ export const COVER_MIN_DEPTH = 2
 type Ctx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
 const jsonRes = (body: unknown, status: number) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 
-export async function onRequestGet(ctx0: Ctx): Promise<Response> {
+export function onRequestGet(ctx0: Ctx): Promise<Response> {
+  // A union view (`_lib/union.ts`): its members' covers side by side; a deployment without one never leaves `cover`.
+  const u = unionFor(ctx0.request, ctx0.env)
+  if (u instanceof Response) return Promise.resolve(u)
+  return u ? unionCover(ctx0, u) : cover(ctx0)
+}
+
+type CoverItem = { path: string; kind: string | null; b: number; o: number; roots: number }
+type CoverBody = { date: string; path: string; q: string; items: CoverItem[]; roots: { n: number; b: number; o: number }; complete: boolean; reason?: string; looked: number; unchecked: number }
+
+/**
+ * `/api/filter-cover` on a union view. The root: each ready member's own cover of its roots at its resolved scan
+ * (its own static index; one without refuses for its mount), concatenated — items by path, `roots` / `looked` /
+ * `unchecked` summed, complete only when every member's is and none refused (`reason` names each member's
+ * `<store>: <why>`); `union` carries the vector, a refusing member's refusal beside its scan. Every member refusing:
+ * the first refusal. Below the root: the path's member answers, at its resolved scan.
+ */
+async function unionCover(ctx0: Ctx, view: UnionView): Promise<Response> {
+  const url = new URL(ctx0.request.url)
+  const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
+  if (path.includes('..') || path.startsWith('/')) return new Response('bad path', { status: 400 })
+  try {
+    const got = await resolveUnion(ctx0, view, true)
+    if (got instanceof Response) return got
+    const { resolved } = got
+    const ask = (m: Member) => cover({ ...ctx0, request: memberRequest(ctx0.request, m.store, { date: m.date! }, ['d']) })
+    if (path !== '') {
+      const m = await memberOf(resolved, path)
+      return m ? ask(m) : new Response('path not found', { status: 404 })
+    }
+    const ready = resolved.members.filter(m => m.date !== null)
+    const reads = await Promise.all(ready.map(ask))
+    const refused: Refusal[] = []
+    const parts: { store: string; body: CoverBody }[] = []
+    for (const [i, r] of reads.entries()) {
+      if (r.ok) { parts.push({ store: ready[i].store, body: await r.json() as CoverBody }); continue }
+      const x = await refusalOf(ready[i].store, r)
+      if (!x) return r
+      refused.push(x)
+    }
+    if (!parts.length && refused.length) return refusalResponse(refused[0])
+    const bs = parts.map(p => p.body)
+    const reasons = [...parts.flatMap(p => (p.body.reason ? [`${p.store}: ${p.body.reason}`] : [])), ...refused.map(r => `${r.store}: ${r.error}`)]
+    const sum = (f: (b: CoverBody) => number) => bs.reduce((n, b) => n + f(b), 0)
+    return jsonRes({
+      date: resolved.date, path, q: url.searchParams.get('q') ?? '',
+      items: bs.flatMap(b => b.items).sort((x, y) => (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
+      roots: { n: sum(b => b.roots.n), b: sum(b => b.roots.b), o: sum(b => b.roots.o) },
+      complete: bs.every(b => b.complete) && !refused.length,
+      ...(reasons.length ? { reason: reasons.join(' · ') } : {}),
+      looked: sum(b => b.looked), unchecked: sum(b => b.unchecked),
+      union: filteredVector(resolved, refused),
+    }, 200)
+  } catch (e) {
+    const msg = String((e as Error).message ?? e)
+    if (e instanceof UnionOverlap) return new Response(msg, { status: 500 })
+    if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
+    return new Response(`filter-cover failed: ${msg}`, { status: 500 })
+  }
+}
+
+async function cover(ctx0: Ctx): Promise<Response> {
   const ctx = withStore(ctx0)
   if (ctx instanceof Response) return ctx
   const st = serverTiming()

@@ -14,6 +14,8 @@ export interface TreeNode {
   c?: TreeNode[]
   f?: number                   // an `(other)` fold: how many children it stands in for (drives the dust hatch density)
   pv?: Provenance              // provenance of the top owner's inferred attribution (absent when assigned, or no extras for the scan)
+  src?: string                 // a union view's root child: the store it belongs to (`functions/_lib/union.ts`)
+  at?: string                  // …and that store's scan id at the view's cutoff (its own, not the page's as-of)
 }
 
 /** Where an inferred owner came from: the pipeline signal that attributed

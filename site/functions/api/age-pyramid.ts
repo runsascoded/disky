@@ -18,10 +18,70 @@ import { num, openIndex, readPoint, storeReady } from '../_lib/index.js'
 import { AGE_TIERS, planAge } from '../_lib/agePyramid.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
+import { memberOf, memberRequest, resolveUnion, unionFor, vectorOf } from '../_lib/union.js'
+import type { UnionView } from '../_lib/stores.js'
 
 const COLS = ['path', 'depth', 'binstart', 'b', 'o']
 
-export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promise<Response> => {
+type AgeCtx = { request: Request; env: Env }
+
+export const onRequestGet = async (ctx0: AgeCtx): Promise<Response> => {
+  // A union view (`STORES_JSON` `union`, `_lib/union.ts`): its members' rows side by side; a deployment without
+  // one never leaves `ageOf`.
+  const u = unionFor(ctx0.request, ctx0.env)
+  if (u instanceof Response) return u
+  return u ? unionAge(ctx0, u) : ageOf(ctx0)
+}
+
+type Plan = { outputBin: string; tier: string | null; binBudget: number }
+type Rec = { dt: number; b: number; o: number }
+
+/**
+ * `/api/age-pyramid` on a union view. The root: each member's own rows at its resolved scan, concatenated —
+ * each record qualified by its store (`src`), its absolute bin untouched (never shifted to a scan's time; the
+ * chart sums a bin's records). One bin for all: members asked without a window plan their own extents, so when
+ * one's bin isn't the one the union's extent plans, all are asked again over that extent (`from`/`to`), which
+ * plans that one tier for every member. A member unknown at the cutoff has no rows. Below the root: the path's member answers.
+ */
+async function unionAge(ctx0: AgeCtx, view: UnionView): Promise<Response> {
+  const url = new URL(ctx0.request.url)
+  const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
+  if (path.includes('..') || path.startsWith('/')) return new Response('bad path', { status: 400 })
+  const got = await resolveUnion(ctx0, view, true)
+  if (got instanceof Response) return got
+  const { resolved } = got
+  if (path !== '') {
+    const m = await memberOf(resolved, path)
+    if (!m) return new Response('path not found', { status: 404 })
+    return ageOf({ ...ctx0, request: memberRequest(ctx0.request, m.store, { date: m.date! }, ['d']) })
+  }
+  const ready = resolved.members.filter(m => m.date !== null)
+  const ask = async (window: Record<string, string>) => {
+    const reads = await Promise.all(ready.map(m => ageOf({ ...ctx0, request: memberRequest(ctx0.request, m.store, { date: m.date!, ...window }, ['d']) })))
+    const bad = reads.find(r => !r.ok)
+    return bad ?? Promise.all(reads.map(r => r.json() as Promise<{ records: Rec[]; plan: Plan }>))
+  }
+  let bodies = await ask({})
+  if (bodies instanceof Response) return bodies
+  // The union's extent plans its own bin; a member that planned another (its own extent was narrower, or wider)
+  // is asked again over the union's window, as every member then is.
+  const dts = bodies.flatMap(b => b.records.map(r => r.dt))
+  const [lo, hi] = [Math.min(...dts), Math.max(...dts)]
+  if (dts.length && lo < hi) {
+    const window = { from: url.searchParams.get('from') ?? new Date(lo).toISOString(), to: url.searchParams.get('to') ?? new Date(hi).toISOString() }
+    const p = planAge(new Date(window.from), new Date(window.to), Math.max(1, Number(url.searchParams.get('bin_budget')) || 512))
+    const bin = p.outputTier?.bin ?? p.outputBin
+    if (bodies.some(b => b.records.length && b.plan.outputBin !== bin)) {
+      bodies = await ask(window)
+      if (bodies instanceof Response) return bodies
+    }
+  }
+  const plan = (bodies.find(b => b.records.length) ?? bodies[0])?.plan ?? null
+  const records = bodies.flatMap((b, i) => b.records.map(r => ({ ...r, src: ready[i].store }))).sort((a, b) => a.dt - b.dt)
+  return json({ records, plan, union: vectorOf(resolved) })
+}
+
+async function ageOf(ctx0: AgeCtx): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx = withStore(ctx0)
   if (ctx instanceof Response) return ctx
@@ -62,10 +122,13 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promis
   const dts = baseRows.map(r => num(r.binstart))
   const from = new Date(Number.isNaN(fromMs) ? Math.min(...dts) : fromMs)
   const to = new Date(Number.isNaN(toMs) ? Math.max(...dts) : toMs)
+  if (from > to) return new Response('bad range: `from` is after `to`', { status: 400 })
 
-  const plan = planAge(from, to, binBudget)
-  const bin = plan.outputTier?.bin ?? plan.outputBin
-  const meta = { outputBin: bin, tier: plan.outputTier?.name ?? null, binBudget }
+  // An extent of one instant (every row in one bin, or `from` = `to`) is that bin at the finest tier: the planner
+  // takes only a non-empty range.
+  const plan = from < to ? planAge(from, to, binBudget) : null
+  const bin = plan ? plan.outputTier?.bin ?? plan.outputBin : fine
+  const meta = { outputBin: bin, tier: plan ? plan.outputTier?.name ?? null : fine, binBudget }
   // Reuse the finest rows when the planner chose that tier; else read the coarser one.
   const rows = bin === fine ? baseRows : await readPoint(await openIndex(ctx.env, date, `age-pyramid-${bin}`), depth, path, COLS)
   // Planner extents select a tier; only caller-supplied bounds trim its bins.

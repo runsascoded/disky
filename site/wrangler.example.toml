@@ -73,6 +73,10 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # QUERY_SYNTAX = "simple"                     # the path filter's default syntax (`simple` | `regex`); unset = `simple`
 # OBJECT_BUCKETS = "my-bucket"                # comma-separated scanned buckets `/v1/objects` serves to members
 # STORES_JSON = '{"meta": {"scope": "meta"}}'  # secondary stores: `{"<key>": {"scope": …, "vars": {…}, "secrets": {…}}}`
+#   a store's own static name index: `"vars": {"STATIC_GEN": "<gen>", …}` (its generation in INDEX_R2; FILTER_STATIC_HEAVY /
+#   FILTER_STATIC_ANCHORS per store too, FILTER_STATIC / FILTER_INDEXED_ONLY inherited unless set) — none: `scan-not-indexed`
+#   …and union views: `"<key>": {"union": ["primary", "<store>"…], "main": true}` — the stores' roots side by side
+#   (`_lib/union.ts`); `main` = what a request without `store=` reads (the main map)
 
 # --- Session log (specs/session-log.md; tables: migrations/<lineage>/…_session_log.sql; on/off: the switch at /admin) ---
 # SESSION_LOG_RETAIN_DAYS = "30"             # days a session's log is kept (default 30)

@@ -25,11 +25,15 @@ import { readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
 import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
-import { metaRoots, rootPoints, type RootRow } from '../_lib/series.js'
+import { metaRoots, rootPoints, type RootRow, type RootTrace } from '../_lib/series.js'
+import { latestCutoff, memberOf, memberRequest, membersAt, openUnion, unionFor } from '../_lib/union.js'
+import type { UnionView } from '../_lib/stores.js'
+import { scanTimes } from '../_lib/scanTimes.js'
+import { carryForward } from '../../src/federatedViews.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
-import { isScanId } from '../../src/scanSlug.js'
+import { isScanId, scanInstant } from '../../src/scanSlug.js'
 
 // The default store's snapshot dirs (`snapshots/<date>/`; other stores live in
 // a named subdir that `isScanId` keeps out), and the scan-id shape they're named by.
@@ -68,7 +72,79 @@ async function metaPoint(env: Ctx['env'], date: string): Promise<{ date: string;
   return m && typeof m.total_bytes === 'number' ? { date, b: m.total_bytes, o: m.total_objects ?? 0 } : null
 }
 
-export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
+type SeriesCtx = Ctx & { waitUntil?: (p: Promise<unknown>) => void }
+
+export const onRequestGet = async (ctx0: SeriesCtx): Promise<Response> => {
+  // A union view (`STORES_JSON` `union`, `_lib/union.ts`): its members' series as one step function; a deployment
+  // without one never leaves `seriesOf`.
+  const u = unionFor(ctx0.request, ctx0.env)
+  if (u instanceof Response) return u
+  return u ? unionSeries(ctx0, u) : seriesOf(ctx0)
+}
+
+/** The params a union root's series refuses: one store's axes (as `/api/subtree`'s root does). */
+const UNION_ROOT_UNSCOPED = ['lens', 'o', 'cl', 'q', 'paths'] as const
+
+/**
+ * `/api/series` on a union view. The root: each member's own series (its scans, its points), concurrently, as
+ * one step function over the union's events (`carryForward`): at each instant any member scanned, each member
+ * contributes its latest point at or before it, and nothing before its first — a point some member doesn't
+ * cover yet names it (`missing`), its total partial, never a zero. `split=roots`: every member's roots, each at
+ * its member's carried point. Below the root: the path's member answers (its roots at the latest cutoff).
+ */
+async function unionSeries(ctx0: SeriesCtx, view: UnionView): Promise<Response> {
+  const url = new URL(ctx0.request.url)
+  const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
+  if (path.includes('..') || path.startsWith('/')) return json({ error: 'bad path' }, 400)
+  const un = await openUnion(ctx0, view, true)
+  if (un instanceof Response) return un
+  if (path !== '') {
+    const c = latestCutoff(un)
+    const m = c && await memberOf(membersAt(un, c), path)
+    if (!m) return json({ error: 'path not found' }, 404)
+    return seriesOf({ ...ctx0, request: memberRequest(ctx0.request, m.store) })
+  }
+  const scoped = UNION_ROOT_UNSCOPED.filter(k => url.searchParams.get(k))
+  if (scoped.length) return json({ error: `a union view's root is unscoped (${scoped.join(', ')}: drill into one store)` }, 400)
+  const reads = await Promise.all(view.members.map(s => seriesOf({ ...ctx0, request: memberRequest(ctx0.request, s) })))
+  const bad = reads.find(r => !r.ok)
+  if (bad) return bad
+  const bodies = await Promise.all(reads.map(r => r.json() as Promise<{ points: { date: string; b: number; o: number }[]; roots?: RootTrace[]; failed?: string[] }>))
+  const traces = await Promise.all(bodies.map(async (body, i) => {
+    const env = un.ctxs[i].env
+    const times = await scanTimes(env, body.points.map(p => p.date))
+    const rows = new Map<string, RootRow[]>()
+    for (const t of body.roots ?? []) for (const p of t.points) {
+      const r = rows.get(p.date) ?? []
+      r.push({ path: t.path, b: p.b, o: p.o })
+      rows.set(p.date, r)
+    }
+    return { source: view.members[i], points: body.points.map(p => ({ at: new Date(scanInstant(p.date, times)).toISOString(), value: { ...p, rows: rows.get(p.date) ?? [] } })) }
+  }))
+  const steps = carryForward(traces)
+  const split = url.searchParams.get('split') === 'roots'
+  const byDate = new Map<string, RootRow[]>()
+  const points = steps.map(({ at, values }) => {
+    // The step's scan id: the one a member observed at this instant (the first, in member order).
+    const date = values.find((v, i) => v && traces[i].points.some(p => p.at === at && p.value === v))!.date
+    const missing = view.members.filter((_, i) => !values[i])
+    if (split) byDate.set(date, values.flatMap(v => v?.rows ?? []))
+    return { date, b: values.reduce((n, v) => n + (v?.b ?? 0), 0), o: values.reduce((n, v) => n + (v?.o ?? 0), 0), ...(missing.length ? { missing } : {}) }
+  })
+  const failed = bodies.flatMap(b => b.failed ?? []).sort()
+  const body = JSON.stringify({
+    path, points,
+    ...(split ? { roots: rootPoints(byDate) } : {}),
+    ...(failed.length ? { failed } : {}),
+    union: { view: view.key, sources: view.members.map((store, i) => ({ store, from: bodies[i].points[0]?.date ?? null })) },
+  })
+  return new Response(body, { headers: {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': failed.length ? 'no-store' : reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
+  } })
+}
+
+async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1

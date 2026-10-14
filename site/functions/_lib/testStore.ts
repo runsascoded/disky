@@ -34,9 +34,22 @@ interface NodeFs {
 }
 const load = async <T>(mod: string): Promise<T> => (await import(/* @vite-ignore */ mod)) as T
 
-/** A `Store` (the parts the reader uses) over `FILES`. */
-export function S3Store(_opts: unknown): { get(key: string, range?: { offset: number; length: number }): Promise<{ bytes: Uint8Array; totalSize: number }> } {
+/** A `Store` (the parts the reader uses) over `FILES`: `get`, and `list` — a prefix's immediate entries (one
+ * page; a key below the next `/` is a dir entry). */
+export function S3Store(_opts: unknown): {
+  get(key: string, range?: { offset: number; length: number }): Promise<{ bytes: Uint8Array; totalSize: number }>
+  list(prefix: string, opts?: { cursor?: string }): Promise<{ entries: { key: string; isDir: boolean }[]; cursor?: string }>
+} {
   return {
+    async list(prefix) {
+      const entries = new Map<string, boolean>()
+      for (const k of FILES.keys()) {
+        if (!k.startsWith(prefix)) continue
+        const slash = k.indexOf('/', prefix.length)
+        entries.set(slash < 0 ? k : k.slice(0, slash + 1), slash >= 0)
+      }
+      return { entries: [...entries].sort().map(([key, isDir]) => ({ key, isDir })) }
+    },
     async get(key, range) {
       const path = FILES.get(key)
       if (!path) throw new NotFoundError(key)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  federatedDeltas, federatedEvents, federatedViewKey, parseFederatedPin, parseSourceCatalog,
+  federatedDeltas, federatedEvents, federatedViewKey, latestObserved, parseFederatedPin, parseSourceCatalog,
   pinFederation, resolveFederation, restoreFederation, utcInstant,
   type SourceCatalog, type SourceScan,
 } from './federatedScans'
@@ -125,6 +125,19 @@ describe('one cutoff selects several independent captures', () => {
     const overlap = { ...catalog('other', [scan(8, 80)]), scope: { store: awair.scope.store, prefix: 'pyramid/' } }
     expect(() => resolveFederation([awair, overlap], t(10))).toThrow('overlapping source scopes')
     expect(() => resolveFederation([awair, { ...overlap, mount: 'awair' }], t(10))).toThrow('duplicate source or mount')
+  })
+})
+
+describe('latestObserved: the selection rule over bare observations', () => {
+  const obs = (id: string, hour: number, published = hour, revision = '') => ({ id, revision, observed_through: t(hour), published_at: t(published) })
+  it('the greatest observation through the cutoff; null before the first, never a later one', () => {
+    const scans = [obs('b', 8), obs('a', 6), obs('c', 12)]
+    expect([5, 6, 7, 8, 11, 12, 13].map(h => latestObserved(scans, t(h))?.id ?? null)).toEqual([null, 'a', 'a', 'b', 'b', 'c', 'c'])
+  })
+  it('ties on capture end break by publication, then id, then revision — independent of input order', () => {
+    const scans = [obs('x', 8, 9), obs('y', 8, 9), obs('x', 8, 10, '1'), obs('x', 8, 10, '2')]
+    expect([latestObserved(scans, t(8)), latestObserved([...scans].reverse(), t(8))]).toEqual([obs('x', 8, 10, '2'), obs('x', 8, 10, '2')])
+    expect(latestObserved([obs('x', 8, 9), obs('y', 8, 9)], t(8))).toEqual(obs('y', 8, 9))
   })
 })
 

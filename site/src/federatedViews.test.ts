@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { composeFederatedTrees, federatedSeries, mountFederatedAgeRows } from './federatedViews'
+import { carryForward, composeFederatedTrees, federatedSeries, mountFederatedAgeRows } from './federatedViews'
 import { parseSourceCatalog, resolveFederation } from './federatedScans'
 
 const t = (hour: number) => `2026-10-13T${String(hour).padStart(2, '0')}:00:00.000Z`
@@ -66,5 +66,25 @@ describe('federated source reader adapters', () => {
     expect(federatedSeries([c])).toEqual([{ source: 'awair', points: [{ at: t(8), bytes: 500, objects: 0 }] }])
     expect(resolveFederation([c], t(8)).sources[0].scan).toEqual(correction)
     expect(federatedSeries([])).toEqual([])
+  })
+})
+
+describe('carryForward', () => {
+  const tr = (source: string, pts: [number, string][]) => ({ source, points: pts.map(([h, value]) => ({ at: t(h), value })) })
+  it('a step per distinct instant; each source carries its last value, null before its first', () => {
+    expect(carryForward([tr('a', [[8, 'a8'], [10, 'a10']]), tr('b', [[9, 'b9'], [10, 'b10'], [12, 'b12']])])).toEqual([
+      { at: t(8), values: ['a8', null] },
+      { at: t(9), values: ['a8', 'b9'] },
+      { at: t(10), values: ['a10', 'b10'] },
+      { at: t(12), values: ['a10', 'b12'] },
+    ])
+  })
+  it('input order within a source is irrelevant except at one instant, where the later entry wins', () => {
+    expect(carryForward([tr('a', [[10, 'a10'], [8, 'a8'], [10, 'a10-fix']])])).toEqual([
+      { at: t(8), values: ['a8'] },
+      { at: t(10), values: ['a10-fix'] },
+    ])
+    expect(carryForward([])).toEqual([])
+    expect(carryForward([tr('a', [])])).toEqual([])
   })
 })

@@ -71,6 +71,17 @@ describe('storeEnv', () => {
       STORE_SCOPE: 'admin',
     })
   })
+  it('the static name index is per store: its generation and knobs cleared, the filter policy inherited; a store config sets its own', () => {
+    const KEYS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY', 'STATIC_GEN', 'FILTER_STATIC_HEAVY', 'FILTER_STATIC_ANCHORS', 'NAME_SUMMARY_STATIC', 'STATIC_MAX_ROWS'] as const
+    const env = { ...PRIMARY, FILTER_STATIC: '1', FILTER_INDEXED_ONLY: '1', STATIC_GEN: 'g1', FILTER_STATIC_HEAVY: '1', FILTER_STATIC_ANCHORS: '0', NAME_SUMMARY_STATIC: '1', STATIC_MAX_ROWS: '9' } as Env
+    const pick = (e: Env) => Object.fromEntries(KEYS.flatMap(k => (e as unknown as Record<string, string | undefined>)[k] === undefined ? [] : [[k, (e as unknown as Record<string, string>)[k]]]))
+    const own = { ...META, vars: { ...META.vars, STATIC_GEN: 'g-meta', FILTER_STATIC_ANCHORS: '0', FILTER_INDEXED_ONLY: '0' } }
+    expect([pick(storeEnv(env, 'meta', META)), pick(storeEnv(env, 'meta', own))]).toEqual([
+      { FILTER_STATIC: '1', FILTER_INDEXED_ONLY: '1' },
+      { FILTER_STATIC: '1', FILTER_INDEXED_ONLY: '0', STATIC_GEN: 'g-meta', FILTER_STATIC_ANCHORS: '0' },
+    ])
+    expect(secondaryStores({ STORES_JSON: JSON.stringify({ meta: own }) } as Env)).toEqual({ meta: own })
+  })
   it('the overlay drives the existing seams: snapshots dir, store target, creds, store key', () => {
     const env = storeEnv(PRIMARY, 'meta', META)
     expect([snapshotsPrefix(env), storeTarget(env), storeCreds(env), storeKey(env)]).toEqual([

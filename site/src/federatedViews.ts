@@ -28,18 +28,38 @@ export function mountFederatedAgeRows(mount: string, rows: readonly AgeRow[]): A
 export interface FederatedSeriesPoint { at: string; bytes: number | null; objects: number | null }
 export interface FederatedSeries { source: string; points: FederatedSeriesPoint[] }
 
+/** One source's observations: values at canonical UTC instants, in selection order (`compareScans`; a later
+ * entry at the same instant supersedes an earlier one). */
+export interface Trace<T> { source: string; points: readonly { at: string; value: T }[] }
+export interface Step<T> { at: string; values: (T | null)[] }
+
+/** The step function behind every federated over-time view: one step per union event (each distinct instant any
+ * source observed at, ascending), each source's value there its latest observation at or before it — carried
+ * forward between its own observations, null (unknown) before its first. `values` follow `traces`' order. */
+export function carryForward<T>(traces: readonly Trace<T>[]): Step<T>[] {
+  const events = [...new Set(traces.flatMap(t => t.points.map(p => p.at)))].sort((a, b) => a < b ? -1 : a > b ? 1 : 0)
+  const sorted = traces.map(t => [...t.points].map((p, i) => ({ ...p, i })).sort((a, b) => a.at < b.at ? -1 : a.at > b.at ? 1 : a.i - b.i))
+  const cursors = traces.map(() => -1)
+  return events.map(at => ({
+    at,
+    values: sorted.map((pts, k) => {
+      while (cursors[k] + 1 < pts.length && pts[cursors[k] + 1].at <= at) cursors[k]++
+      return cursors[k] < 0 ? null : pts[cursors[k]].value
+    }),
+  }))
+}
+
 /** Source traces at union event times. Null before the first observation, and
  * carry forward afterward. Consumers draw steps, not interpolated growth. */
 export function federatedSeries(catalogs: readonly SourceCatalog[]): FederatedSeries[] {
-  const events = federatedEvents(catalogs)
-  return [...catalogs].sort((a, b) => a.source < b.source ? -1 : a.source > b.source ? 1 : 0).map(c => {
-    const scans = [...c.scans].sort(compareScans)
-    let cursor = -1
-    const points = events.map(({ at }) => {
-      while (cursor + 1 < scans.length && scans[cursor + 1].observed_through <= at) cursor++
-      const scan = scans[cursor]
-      return { at, bytes: scan?.total_bytes ?? null, objects: scan?.total_objects ?? null }
-    })
-    return { source: c.source, points }
-  })
+  const ordered = [...catalogs].sort((a, b) => a.source < b.source ? -1 : a.source > b.source ? 1 : 0)
+  federatedEvents(catalogs) // its checks: no duplicate source or mount, no overlapping scopes
+  const steps = carryForward(ordered.map(c => ({
+    source: c.source,
+    points: [...c.scans].sort(compareScans).map(s => ({ at: s.observed_through, value: s })),
+  })))
+  return ordered.map((c, k) => ({
+    source: c.source,
+    points: steps.map(({ at, values }) => ({ at, bytes: values[k]?.total_bytes ?? null, objects: values[k]?.total_objects ?? null })),
+  }))
 }
