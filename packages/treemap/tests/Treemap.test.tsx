@@ -490,7 +490,7 @@ describe('<Treemap>', () => {
     it('the paint layer leaves an inset ring bare (it would cover it), and only an inset one', () => {
       const restore = withLayout()
       try {
-        const insets = (ring?: unknown) => {
+        const insets = (ring?: { color: string; width: number; inset?: boolean }) => {
           const { container, unmount } = render(
             <Treemap root={tree} {...accessors} minCellArea={null}
               colorForCell={n => (accessors.getLabel(n) === 'bar' ? { bg: '#123456', ...(ring ? { ring } : {}) } : { bg: '#654321' })} />,
