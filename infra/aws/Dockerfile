@@ -24,4 +24,6 @@ RUN mkdir -p ui/dist && uv sync --frozen --no-dev --package dt-cloud
 # chmod: the source zip (Pulumi `AssetArchive`) doesn't carry file modes.
 COPY infra/aws/ingest.sh /ingest.sh
 RUN chmod 755 /ingest.sh
+# The scan-run profile ingest.sh records with (`SCAN_RUNS_PROFILE`).
+COPY infra/aws/scan-runs.json ./infra/aws/scan-runs.json
 ENTRYPOINT ["/ingest.sh"]

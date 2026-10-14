@@ -6,4 +6,5 @@
 !cloud/pyproject.toml
 !cloud/src
 !infra/aws/ingest.sh
+!infra/aws/scan-runs.json
 **/__pycache__

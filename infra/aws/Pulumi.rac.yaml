@@ -16,6 +16,7 @@ config:
     - cloud/src
     - infra/aws/Dockerfile
     - infra/aws/ingest.sh
+    - infra/aws/scan-runs.json
   disk-tree-m3:vcpu: "1"
   disk-tree-m3:memory_mib: "8192"
   disk-tree-m3:ephemeral_gib: "30"
@@ -28,6 +29,12 @@ config:
     INDEX_VARIANTS: path
     # Capture host → secondary store (ingest.sh); other hosts are the primary (`laptop`).
     HOST_STORES: nas=nas
+    # Record each ingest as a scan run in D1 (`/scans`; ingest.sh, the profile beside it in the image).
+    # INGEST_MACHINE / INGEST_SPOT describe this job def (vcpu/memory_mib above, the FARGATE_SPOT queue,
+    # ARM64): the profile prices that machine.
+    SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
+    INGEST_MACHINE: fargate-arm64-1vcpu-8gib
+    INGEST_SPOT: "1"
   # Created empty; values set out of band by `aws/put-secrets` (never in state).
   disk-tree-m3:secrets:
     AWS_ACCESS_KEY_ID: disk-tree-m3/r2-access-key-id
