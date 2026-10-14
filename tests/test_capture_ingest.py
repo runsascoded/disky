@@ -30,7 +30,11 @@ elif name == 'time':
     Path(args[2]).write_text('Maximum resident set size (kbytes): 1024\n')
     sys.exit(subprocess.call(args[3:]))
 elif name == 'aws' and args[:2] == ['s3api', 'head-object']:
-    print(os.environ['FAKE_MARKED'])
+    key = args[args.index('--key') + 1]
+    if key.endswith('/_SUCCESS.json'):
+        print(os.environ['FAKE_MARKED'])
+    elif not (root / args[args.index('--bucket') + 1] / key).exists():
+        sys.exit(254)
 elif name == 'aws':
     assert args[:2] == ['s3', 'cp'], args[:2]
     source, dest = args[2:4]
@@ -58,6 +62,11 @@ elif name == 'dt-cloud':
         index.parent.mkdir(parents=True, exist_ok=True)
         index.write_bytes(b'index')
         (out / 'meta.json').write_text(json.dumps({'asof': args[args.index('-d') + 1], 'total_bytes': 4096}))
+    elif args[0] == 'static-names':
+        # a generation exists once its manifest does
+        gen = Path(args[args.index('-o') + 1].split('://', 1)[1], 'static-names', args[args.index('-g') + 1])
+        (root / gen).mkdir(parents=True, exist_ok=True)
+        (root / gen / 'scans.json').write_text('{}')
     else:
         assert args[0] == 'index-sync', args
         # what `-m` hands index-sync at sync time: the meta's `started`
@@ -109,7 +118,7 @@ def pipeline(tmp_path: Path):
         'D1_DB_NAME': 'fixture',
         'HOST_STORES': 'nas=nas',
     }
-    for key in ('DATE', 'GEN', 'STORE', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'INGEST_SITE_URL', 'AWS_BATCH_JOB_ID', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
+    for key in ('DATE', 'GEN', 'STORE', 'STATIC_GEN', 'STATIC_MEM', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'INGEST_SITE_URL', 'AWS_BATCH_JOB_ID', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
         env.pop(key, None)
 
     def run(stamp: str, host: str = 'm3', **extra: str) -> subprocess.CompletedProcess:
@@ -303,3 +312,34 @@ def test_success_never_notifies_and_a_failing_notifier_keeps_the_exit_code(pipel
     failed = run('2026-10-11T22-00-02Z', FAKE_FAIL='path-index', FAKE_NOTIFY_RC='2')
     assert (ok.returncode, failed.returncode) == (0, 3)
     assert notifies(trace) == [['notify', '-p', '1', '-t', 'disky: laptop ingest failed', 'scan 2026-10-11T2200 failed in path-index (exit 3)']]
+
+
+def static_calls(trace: Path) -> list[list[str]]:
+    return [a[1:] for a in map(json.loads, trace.read_text().splitlines()) if a[:2] == ['dt-cloud', 'static-names']]
+
+
+def test_static_names_builds_the_generation_once_then_appends_primary_scans_only(pipeline) -> None:
+    run, bucket, trace = pipeline
+    for stamp, host in [('2026-10-14T06-00-01Z', 'm3'), ('2026-10-14T10-00-01Z', 'nas'), ('2026-10-14T18-00-02Z', 'm3')]:
+        result = run(stamp, host, STATIC_GEN='2026-10-14')
+        assert result.returncode == 0, result.stderr
+    common = ['-g', '2026-10-14', '-L', 'listing/laptop/{id}/index/{gen}/path-index.parquet', '-s', 'r2://bucket', '-o', 'r2://bucket']
+    calls = [[re.sub(r'^/.*/work/', '<work>/', a) for a in c] for c in static_calls(trace)]
+    assert calls == [
+        ['static-names', 'build', *common, '-w', '<work>/static-names', '-p', '1', '-M', '5GB', '-x', 'off'],
+        ['static-names', 'add', *common, '-w', '<work>/static-names', '-p', '1', '-M', '5GB'],
+    ]
+    assert sorted(p.relative_to(bucket).as_posix() for p in (bucket / 'static-names').rglob('*') if p.is_file()) == [
+        'static-names/2026-10-14/scans.json',
+    ]
+
+
+def test_static_names_failure_fails_the_ingest_in_its_phase(pipeline) -> None:
+    run, _, trace = pipeline
+    result = run('2026-10-14T06-00-01Z', STATIC_GEN='2026-10-14', FAKE_FAIL='static-names')
+    assert result.returncode == 3
+    assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
+    assert notifies(trace) == [[
+        'notify', '-p', '1', '-t', 'disky: laptop ingest failed', 'scan 2026-10-14T0600 failed in static-names (exit 3)',
+    ]]
+

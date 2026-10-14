@@ -147,3 +147,22 @@ t0=$(date +%s)
     -s "$d1_store" -d "$work/index" -v path -v bysize -m "$work/snap/meta.json" -M "r2://$bucket/snapshots/$store" )
 echo "[ingest] footers → D1 $D1_DB_NAME in $(( $(date +%s) - t0 ))s"
 ended index-sync
+
+# ── The static name index (exact `?f=`; `dt-cloud static-names`): the primary store's scans ──
+# STATIC_GEN is the site's (`site/wrangler.toml`; the job env carries the same value, which
+# `tests/test_capture_ingest.py` pins). `add` appends this scan (and any other the generation
+# lacks) as a run; the first run of a generation `build`s its base over every scan so far.
+if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
+  phase='static-names'
+  t0=$(date +%s)
+  cmd=add
+  if ! aws s3api head-object --bucket "$bucket" --key "static-names/$STATIC_GEN/scans.json" --endpoint-url "$R2_ENDPOINT_URL" > /dev/null 2>&1; then
+    cmd=build
+  fi
+  hex=()
+  [[ $cmd == build ]] && hex=(-x off)
+  ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
+      -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(nproc)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
+  echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s"
+  ended static-names -o "static-names=r2://$bucket/static-names/$STATIC_GEN/"
+fi
