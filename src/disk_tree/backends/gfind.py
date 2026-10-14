@@ -29,12 +29,15 @@ def run_gfind(
     progress_callback: ProgressCallback | None = None,
     progress_interval: float = 1.0,
     progress: bool = True,
+    fatal_codes: frozenset[int] = frozenset(),
 ) -> Iterator[dict]:
     """Spawn `cmd` (expected to produce null-terminated `gfind -printf '%y %b %T@ %p\\0'`
     output), parse entries, yield dicts.
 
     `root_path` is the absolute path on the target filesystem that `gfind` was asked
     to traverse; `uri_for(remote_abs_path) -> uri_string` constructs the per-entry URI.
+    An exit code in `fatal_codes` raises (after the entries already yielded):
+    the walk never ran, as opposed to `find` finishing with unreadable dirs.
     """
     proc = subprocess.Popen(cmd, stdout=PIPE, stderr=PIPE)
 
@@ -94,6 +97,7 @@ def run_gfind(
                 progress_callback(items_count, items_per_sec, err_count)
                 last_progress_time = now
 
+    assert proc.stderr is not None  # `stderr=PIPE`
     stderr_bytes = proc.stderr.read()
     if stderr_bytes:
         stderr_output = stderr_bytes.decode('utf-8', errors='replace')
@@ -107,5 +111,7 @@ def run_gfind(
                 err(line)
 
     code = proc.wait()
+    if code in fatal_codes:
+        raise RuntimeError(f'{cmd[0]} exited {code}: no listing of {root_path}')
     if code != 0 and (errors is None or errors.count == 0):
         err(f"gfind process exited with return code {code}")

@@ -18,7 +18,7 @@
  */
 import { type Auth, createGate, type Gate, hasScope, type Subject } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
-import type { D1Database } from '@cloudflare/workers-types'
+import type { D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 
 export interface Env {
   DB?: D1Database
@@ -70,10 +70,50 @@ export interface Env {
   /** The path filter's default syntax (`q=` without `qs=`; `querySyntax.ts`
    *  ids). Mirrors the client's `Store.querySyntax`. Unset = `simple`. */
   QUERY_SYNTAX?: string
+  /** `1`: a single-literal `q=` is answered from the static name index on `INDEX_R2`
+   *  (`_lib/staticFilter.ts`) on every scan of its generation. */
+  FILTER_STATIC?: string
+  /** `1`: the map's filter accepts only what the static name index answers exactly — one literal substring
+   *  of a name, unscoped, on a scan the index covers (`_lib/indexedOnly.ts`); anything else is a 400 with a
+   *  reason code, never a path-store scan. */
+  FILTER_INDEXED_ONLY?: string
+  /** With `FILTER_STATIC`: how long (ms) a filtered view waits past its phase-2 read for the static
+   *  roots' own rows (kind, ages, classes) before answering without them; unset = until they land. */
+  FILTER_DETAILS_MS?: string
+  /** A filter view's phase-2 time budget, ms (`view.ts` `FILTER_PHASE2_MS`). */
+  FILTER_PHASE2_MS?: string
+  /** Worker-served indexes (the static name index's suffix shards and catalog). */
+  INDEX_R2?: R2Bucket
+  /** `1`: the small served files — snapshot JSONs (`snapshots/…`: `meta.json`, `lifecycle.json`,
+   *  `age.json`, `rules.json`) and the extras sidecars (`<gen dir>/attr.tsv{,.idx.json}`) — are read
+   *  from `INDEX_R2` under their store keys (`index.ts` `servedStore`; the job's `dt-cloud publish-r2 -S`
+   *  copies them there); unset = through the store seam (`STORE_*`). */
+  SERVED_R2?: string
+  /** `1`: the scans' generations carry the filter's search sidecars (`path-index -S`): a filter the
+   *  static index doesn't answer reads them (`_lib/search.ts`). Unset = none are built, never probed. */
+  SEARCH_SIDECARS?: string
+  /** `intervals`: the dates `INTERVAL_STORE_GEN` holds read their path store from the change-interval
+   *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
+   *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */
+  PATH_STORE?: string
+  /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
+   *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
+  OWNER_HISTORY_BATCH?: string
+  /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`). */
+  INTERVAL_STORE_GEN?: string
+  /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
+  INTERVAL_STORE_REV?: string
+  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`); required with `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
+  STATIC_GEN?: string
   STORE_ACCESS_KEY_ID?: string
   STORE_SECRET_ACCESS_KEY?: string
   /** Global second cache tier behind the colo cache (`_lib/edgeCache.ts`). */
   CACHE_KV?: KVNamespace
+  /** The response cache's deployment environment (`_lib/edgeCache.ts` `cacheEnvTag`): set, it is the tag
+   *  (`""` = prod's keys); unset, the request host, except `PROD_HOST` itself (prod's keys). */
+  CACHE_NS?: string
+  /** This deployment's production host (also build-time: `vite.config.ts` → `src/hosts.ts`). */
+  PROD_HOST?: string
   /** The scope every viewer of this deployment needs (`gcs` | `cw`). */
   BASE_SCOPE?: string
   /** Public/no-gate deploys (r2.rbw.sh, per-project embeds): grant the base
@@ -83,6 +123,8 @@ export interface Env {
   PUBLIC_READ?: string
   /** The store root's crumb label (e.g. `my GCS`); unset = `all buckets`. */
   ROOT_LABEL?: string
+  /** The root crumb's tooltip: what the store root covers (e.g. which buckets), in words. */
+  ROOT_TITLE?: string
   /** Snapshot dir of this store inside the data bucket (`snapshots/<sub>/`); unset = the bare `snapshots/`. */
   SNAPSHOTS_SUBDIR?: string
   /** Dedicated SA key (Batch submit + actAs the job SA) for the sweep dispatch bridge. */
@@ -116,6 +158,11 @@ export const baseScope = (env: Env): string => env.BASE_SCOPE ?? GCS_SCOPE
  *  admits it, no write does. What a share link mints by default
  *  (specs/share-link-hardening.md). */
 export const baseReadScope = (env: Env): string => `${baseScope(env)}:read`
+/** Ownership writes (`gcs:assign` / `cw:assign`): assigning any prefix to anyone
+ *  (or clearing it). Every signed-in full viewer gets it from the policy, and
+ *  their personal agent token carries it; a share link doesn't, unless an admin
+ *  mints one with it. */
+export const baseAssignScope = (env: Env): string => `${baseScope(env)}:assign`
 
 /** Staff by email domain (`STAFF_DOMAIN`). Unset or empty = nobody is staff by
  *  domain (an empty domain would otherwise match every address). */
@@ -138,8 +185,8 @@ async function adminRow(env: Env, email: string): Promise<boolean> {
 /**
  * Email → scopes: the in-app policy that the Access policy used to be. Staff
  * get everything; a viewer domain (`VIEWER_DOMAINS`) or a D1 `allowed_emails`
- * row (the app-owned allowlist — see /admin/db) gets the base scope (a
- * `read_only` row: the read-only tier), plus
+ * row (the app-owned allowlist — see /admin/db) gets the base scope + assign
+ * (a `read_only` row: the read-only tier alone), plus
  * `admin` for an `admin_emails` row. Email sessions re-derive scopes here on
  * every request, so removing a row de-authorizes existing sessions on their
  * next request. If the DB isn't bound (local dev), non-staff fall back to
@@ -163,13 +210,13 @@ export const scopesFor = (env: Env) => async (raw: string): Promise<string[] | n
   const email = raw.toLowerCase()
   const base = baseScope(env)
   if (isStaff(env, email)) return allScopes(env)
-  if (!env.DB) return [base]
+  if (!env.DB) return [base, baseAssignScope(env)]
   const byDomain = viewerDomains(env).some(d => email.endsWith(`@${d}`))
   const row = byDomain ? null : await allowedRow(env.DB, email)
   if (!byDomain && !row) return null
-  if (await adminRow(env, email)) return [base, ADMIN_SCOPE]
+  if (await adminRow(env, email)) return [base, baseAssignScope(env), ADMIN_SCOPE]
   // A `read_only` row is the read-only viewer tier (what a read-only share link carries).
-  return row?.read_only ? [baseReadScope(env)] : [base]
+  return row?.read_only ? [baseReadScope(env)] : [base, baseAssignScope(env)]
 }
 
 export function gateFor(env: Env): Gate | null {
@@ -216,7 +263,7 @@ function authIdentity(auth: Auth): Identity {
  *  without a minted session): the deployment's base scope — which a store
  *  other than gcs/cw (e.g. `laptop`) names itself — plus the fixed ones. */
 const allScopes = (env: Env): string[] =>
-  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env)])]
+  [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env), baseAssignScope(env)])]
 
 export async function identify(ctx: Ctx): Promise<Identity | null> {
   // Local dev has no minted session, so `wrangler pages
@@ -273,6 +320,9 @@ export async function requireViewer(ctx: Ctx): Promise<Identity | Response> {
 /** Staging (the opt-in trash proposal) and other non-admin writes: the full
  *  base scope — a read-only guest link can't. */
 export const requireStager = (ctx: Ctx): Promise<Identity | Response> => requireScope(ctx, baseScope(ctx.env))
+/** Ownership writes (`POST /api/actions`): the assign scope, or an admin. */
+export const requireAssigner = (ctx: Ctx): Promise<Identity | Response> =>
+  requireAnyScope(ctx, [baseAssignScope(ctx.env), ADMIN_SCOPE])
 /** An admin (plan writes + sweep dispatch). */
 export const requireAdmin = (ctx: Ctx): Promise<Identity | Response> => requireScope(ctx, ADMIN_SCOPE)
 

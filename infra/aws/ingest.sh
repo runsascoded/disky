@@ -39,11 +39,13 @@ mkdir -p "$work/listing" "$work/index" "$work/snap"
 
 t0=$(date +%s)
 s3 cp "s3://$bucket/$key/" "$work/listing/" --recursive --exclude '*' --include '*.parquet'
+s3 cp "s3://$bucket/$key/_SUCCESS.json" "$work/capture.json"
 echo "[ingest] fetched $(find "$work/listing" -name '*.parquet' | wc -l) shards, $(du -sh "$work/listing" | cut -f1) in $(( $(date +%s) - t0 ))s"
 
 t0=$(date +%s)
 ( cd /app/cloud && /usr/bin/time -v -o "$work/time.txt" /app/.venv/bin/dt-cloud path-index -g -d "$date" \
     -l "$work/listing/*.parquet" -P "$work/index/path-index.parquet" -o "$work/snap" )
+/app/.venv/bin/disk-tree capture-meta "$work/capture.json" "$work/snap/meta.json"
 echo "[ingest] path-index: $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/time.txt")"
 echo "[ingest] outputs: index $(du -sh "$work/index" | cut -f1), snap $(du -sh "$work/snap" | cut -f1)"
 

@@ -1,6 +1,9 @@
+import { execSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
+import { devChildrenActions } from './devChildrenActions'
 
 // Ports: `devPort` in package.json (vite), `PORT` env overrides (a second dev
 // stack, or when another worktree already holds 3263); wrangler pages dev (the
@@ -12,7 +15,12 @@ const WRANGLER = `http://localhost:${PORT + 1}`
 // changes over real data, with no D1 seed or store creds on this machine.
 // Sign-in stays local (its callback origin must be this host).
 const API = process.env.API_ORIGIN ?? WRANGLER
-const apiProxy = API === WRANGLER ? API : { target: API, changeOrigin: true }
+// `API_TOKEN` (a site bearer token) authenticates that proxy, for a deployed
+// site behind sign-in; the localhost page itself stays signed out.
+const apiProxy = API === WRANGLER ? API : {
+  target: API, changeOrigin: true,
+  ...(process.env.API_TOKEN ? { headers: { Authorization: `Bearer ${process.env.API_TOKEN}` } } : {}),
+}
 
 // dev only: serve a locally-generated `tmp/series.json` (from `dt-cloud series
 // -r http://localhost:3254/data -o tmp/series.json`) at /data/series.json, so
@@ -27,6 +35,25 @@ const devSeriesIndex = {
       if (existsSync(p)) { res.setHeader('content-type', 'application/json'); res.end(readFileSync(p)) }
       else next()
     })
+  },
+}
+
+// The deployment's guide for agents — `API.md` at the repo root, on a branch
+// that carries one (gcs) — ships as `/llms.txt`: a static asset, outside the
+// sign-in gate (`public/_routes.json` keeps it off the Functions). No
+// `API.md` (cw-s3, the r2 demo) → no `/llms.txt`, and the SPA fallback answers.
+const LLMS_SRC = fileURLToPath(new URL('../API.md', import.meta.url))
+const llmsTxt: Plugin = {
+  name: 'llms-txt',
+  configureServer(server) {
+    server.middlewares.use('/llms.txt', (_req, res, next) => {
+      if (!existsSync(LLMS_SRC)) return next()
+      res.setHeader('content-type', 'text/plain; charset=utf-8')
+      res.end(readFileSync(LLMS_SRC))
+    })
+  },
+  generateBundle() {
+    if (existsSync(LLMS_SRC)) this.emitFile({ type: 'asset', fileName: 'llms.txt', source: readFileSync(LLMS_SRC, 'utf8') })
   },
 }
 
@@ -87,6 +114,13 @@ const DEV_HOST = process.env.VITE_DEV_HOST ?? VARS.DEV_HOST ?? ''
 // The source link (src/SiteKbd.tsx); unset = this repo.
 const REPO_URL = process.env.VITE_REPO_URL ?? VARS.REPO_URL ?? ''
 
+// The build's commit (the session log stamps it on every batch, specs/session-log.md): `VITE_BUILD_SHA`, else
+// the checkout's HEAD, else none.
+function buildSha(): string {
+  if (process.env.VITE_BUILD_SHA) return process.env.VITE_BUILD_SHA
+  try { return execSync('git rev-parse --short=10 HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() } catch { return '' }
+}
+
 export default defineConfig({
   define: {
     'import.meta.env.VITE_STORE': JSON.stringify(STORE),
@@ -97,8 +131,9 @@ export default defineConfig({
     'import.meta.env.VITE_PROD_HOST': JSON.stringify(PROD_HOST),
     'import.meta.env.VITE_DEV_HOST': JSON.stringify(DEV_HOST),
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
+    'import.meta.env.VITE_BUILD_SHA': JSON.stringify(buildSha()),
   },
-  plugins: [react(), devSeriesIndex],
+  plugins: [react(), devSeriesIndex, devChildrenActions, llmsTxt],
   server: {
     port: PORT,
     host: true,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { applyLedger } from './ledgerOverlay'
 import { ownerIndex, type OwnerRow } from './owners'
-import { unclaimedBytes, type TreeNode } from './types'
+import { unownedBytes, type TreeNode } from './types'
 
 // The ownership ledger repaints the map's owner split (`us`) client-side
 // (specs/done/path-agnostic-serving.md §2.3): an assigned prefix moves its bytes
@@ -56,7 +56,7 @@ describe('applyLedger', () => {
         ] },
       ],
     })
-    expect(unclaimedBytes(out)).toBe(0)
+    expect(unownedBytes(out)).toBe(0)
   })
 
   it('a deeper assignment moves only its bytes; a release under an assignment restores the scan’s split', () => {

@@ -96,9 +96,11 @@ const MISS_TTL = 60_000
 const opened = new Map<string, { at: number; idx: Promise<SearchIndex | null> }>()
 
 /** A generation's search directory — v2's, else v1's — or null when it
- * has neither (a generation written without `-S`, every v1 index).
+ * has neither (a generation written without `-S`, every v1 index), or the
+ * deployment builds none (`SEARCH_SIDECARS` unset: nothing to probe).
  * Remembered per isolate (a miss for `MISS_TTL`). */
 export function openSearch(env: Env, dir: string): Promise<SearchIndex | null> {
+  if (!env.SEARCH_SIDECARS) return Promise.resolve(null)
   const ck = `${storeKey(env)}|${dir}|search`
   const hit = opened.get(ck)
   if (hit && Date.now() - hit.at < MISS_TTL) return hit.idx

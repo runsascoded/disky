@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Callable
 
 import pandas as pd
 
+from ..duck import one, scalar
+
 if TYPE_CHECKING:
     import duckdb
 
@@ -131,9 +133,9 @@ def _mem_probe_for(con: "duckdb.DuckDBPyConnection") -> "Callable[[], str]":
     what it has paged to `temp_directory`. RSS − duck is the unaccounted part:
     allocator retention, parquet writer/reader buffers, Python."""
     def probe() -> str:
-        duck, spill = con.execute(
+        duck, spill = one(con,
             "SELECT COALESCE(SUM(memory_usage_bytes), 0), COALESCE(SUM(temporary_storage_bytes), 0) FROM duckdb_memory()"
-        ).fetchone()
+        )
         g = 1024 ** 3
         label, rss = _rss_mb()
         return f"[{label} {rss / 1024:.1f}G duck {duck / g:.1f}G spill {spill / g:.1f}G]"
@@ -280,7 +282,7 @@ def _build_dirs_cascade(
             WHERE path != ''
             GROUP BY 1{keys}
         """)
-        cnt = con.execute(f"SELECT COUNT(*) FROM {next_tbl}").fetchone()[0]
+        cnt = scalar(con, f"SELECT COUNT(*) FROM {next_tbl}")
         _stage(f"{tag}cascade level {level}: {cnt} rows")
         if cnt == 0:
             break
@@ -562,7 +564,7 @@ class _Labels:
         self.depths = [r[0] for r in con.execute(
             "SELECT DISTINCT depth FROM labels ORDER BY depth DESC"
         ).fetchall()]
-        self.n = con.execute("SELECT COUNT(*) FROM labels").fetchone()[0]
+        self.n = scalar(con, "SELECT COUNT(*) FROM labels")
 
     def join(self, rows_sql: str) -> str:
         """Wrap a SELECT producing `path, …` so each row also carries its labels."""
@@ -665,7 +667,7 @@ class _Side:
         ).fetchall()
         if dupes:
             raise ValueError(f"side table {path}: duplicate path(s) {[d[0] for d in dupes]}")
-        self.n = con.execute("SELECT COUNT(*) FROM side").fetchone()[0]
+        self.n = scalar(con, "SELECT COUNT(*) FROM side")
 
     def join(self, rows_sql: str) -> str:
         picks = ''.join(f', side.{c}' for c in self.cols)
@@ -797,7 +799,7 @@ def _build_partitioned(
         CREATE OR REPLACE TEMP TABLE dirty AS
         {keyed(f' AND NOT ({_CLEAN_NAME})')}
     """)
-    n_dirty = con.execute("SELECT COUNT(*) FROM dirty").fetchone()[0]
+    n_dirty = scalar(con, "SELECT COUNT(*) FROM dirty")
     _stage(f"{n_dirty} dirty keys held aside")
     # Folder placeholders (`…/` objects) are their directory's own row, in
     # whichever cascade their path falls; no cascade may synthesize that row.
@@ -950,10 +952,10 @@ def _write_ranged(
         n_range = 0
         for d in depths:
             cell = os.path.join(run_dir, f'{d:03d}-{j:05d}.parquet')
-            (n,) = con.execute(
+            (n,) = one(con,
                 f"COPY (SELECT * FROM sort_range WHERE depth = {d} {within})"
                 f" TO '{cell}' (FORMAT PARQUET, ROW_GROUP_SIZE {row_group_size})"
-            ).fetchone()
+            )
             cells[(d, j)] = cell
             n_range += n
         total += n_range
@@ -962,10 +964,10 @@ def _write_ranged(
     lst = '[' + ', '.join(f"'{cells[k]}'" for k in sorted(cells)) + ']'
     con.execute("SET preserve_insertion_order = true")
     try:
-        (n,) = con.execute(
+        (n,) = one(con,
             f"COPY (SELECT * FROM read_parquet({lst})) TO '{out}' "
             + (copy_opts or f"(FORMAT PARQUET, ROW_GROUP_SIZE {row_group_size})")
-        ).fetchone()
+        )
     finally:
         con.execute("SET preserve_insertion_order = false")
     if n != total:
@@ -1202,7 +1204,7 @@ def _aggregate_listing_to_parquet(
         # The listing is never materialized whole: each partition (and the
         # final COPY's file leg) reads it back through `files_src`.
         con.execute(f"CREATE TEMP VIEW files_src AS {files_sql_for('')}")
-        n_files = con.execute("SELECT COUNT(*) FROM files_src").fetchone()[0]
+        n_files = scalar(con, "SELECT COUNT(*) FROM files_src")
         _stage(f"listing: {n_files} file rows")
         if n_files == 0:
             raise ValueError(f"no rows for bucket {bucket!r}")
@@ -1218,7 +1220,7 @@ def _aggregate_listing_to_parquet(
         # Build the `inputs` table without a pandas roundtrip: files first, then
         # synthesized dir rows for every unique ancestor path.
         con.execute(f"CREATE TEMP TABLE inputs AS {files_sql_for('')}")
-        n_files = con.execute("SELECT COUNT(*) FROM inputs").fetchone()[0]
+        n_files = scalar(con, "SELECT COUNT(*) FROM inputs")
         _stage(f"inputs table: {n_files} file rows")
         if n_files == 0:
             raise ValueError(f"no rows for bucket {bucket!r}")
@@ -1317,7 +1319,7 @@ def _aggregate_listing_to_parquet(
             END AS parent{extra_final}
         FROM dirs_agg
     """)
-    n_dirs = con.execute("SELECT COUNT(*) FROM dirs_final").fetchone()[0]
+    n_dirs = scalar(con, "SELECT COUNT(*) FROM dirs_final")
     con.execute("DROP TABLE dirs_all")
     con.execute("DROP TABLE n_children_tbl")
     _stage(f"dirs_final: {n_dirs} dirs")
@@ -1398,7 +1400,7 @@ def _aggregate_listing_to_parquet(
     if got != lf.written_columns(fmt):
         raise RuntimeError(f"layer-2 columns {got} != the v2 contract {lf.written_columns(fmt)}")
     _stage("COPY done")
-    rows = con.execute(f"SELECT COUNT(*) FROM read_parquet('{tmp_out}')").fetchone()[0]
+    rows = scalar(con, f"SELECT COUNT(*) FROM read_parquet('{tmp_out}')")
     os.replace(tmp_out, out_parquet)
 
     # Root stats: with labels the root is one row per slice — sum them.

@@ -50,6 +50,7 @@ export interface ExecJob {
   bucket_region?: string | null
   logs?: string
   last_event?: string | null
+  stop_requested?: boolean
   /** The job's run dir (gcs: `plan`; cw: `run`), `gs://<bucket>/…`. */
   plan?: string
   run?: string
@@ -88,7 +89,7 @@ export const EXEC_CAPS: Record<'plan-sweep' | 'sweep' | 'laptop', ExecCaps> = {
   // gcs: a plan may span buckets; soft delete expires deleted generations on
   // its own (nothing to purge); its files proxy serves the data bucket.
   sweep: {
-    stop: true, stopHint: 'Drop the STOP file: roots already listing finish and log, the rest are left for a re-run; the job ends red.',
+    stop: true, stopHint: 'Request a clean stop: in-flight work drains and is logged; remaining work is left for a re-run.',
     undo: true, undoUnwindowed: false, purge: false, bucketCut: true, runFiles: true,
     startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },
@@ -124,7 +125,7 @@ export interface RunView {
  * its job (by `runJobId`) and its ops; then the plan's run jobs no row
  * accounts for yet (dispatched, the executor not yet recording — or died
  * before it did). */
-export function joinRuns(runs: readonly DeletionRun[], jobs: readonly ExecJob[], planId: number | null): RunView[] {
+export function joinRuns(runs: readonly DeletionRun[], jobs: readonly ExecJob[]): RunView[] {
   const byId = new Map(jobs.map(j => [j.job_id, j]))
   const joined = new Set<string>()
   const views: RunView[] = runs.map(run => {
@@ -134,14 +135,14 @@ export function joinRuns(runs: readonly DeletionRun[], jobs: readonly ExecJob[],
     return { key: run.run_id, run, ...(job ? { job } : {}), ops: jobs.filter(j => j.op && j.op !== 'sweep' && j.target === run.run_id) }
   })
   const orphans: RunView[] = jobs
-    .filter(j => (j.op ?? 'sweep') === 'sweep' && planId != null && j.plan_id === planId && !joined.has(j.job_id))
+    .filter(j => (j.op ?? 'sweep') === 'sweep' && !joined.has(j.job_id))
     .map(job => ({ key: job.job_id, job, ops: [] }))
   const at = (v: RunView) => v.run?.started_ts ?? (v.job?.created ? Date.parse(v.job.created) / 1000 : 0)
   return [...views, ...orphans].sort((a, b) => at(b) - at(a))
 }
 
 /** A run's state word: Batch's while its job is listed, else what D1 says. */
-export const viewState = (v: RunView): string => v.job?.state ?? (v.run?.finished_ts ? 'DONE' : 'RECORDING')
+export const viewState = (v: RunView): string => v.job?.stop_requested && v.job.state === 'FAILED' ? 'CANCELLED' : v.job?.state ?? (v.run?.finished_ts ? 'DONE' : 'RECORDING')
 
 export const viewLive = (v: RunView): boolean => LIVE_STATES.has(v.job?.state ?? '')
 
@@ -153,6 +154,19 @@ export function elapsed(v: RunView, now: number): number | null {
   return null
 }
 
+/** Recorded executor timestamps, distinct from Batch runtime and queueing. */
+export function elapsedDetails(v: RunView): string[] {
+  const stamp = (ts: number) => new Date(ts * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC')
+  const lines: string[] = []
+  if (v.job?.created) lines.push(`Dispatched: ${stamp(Date.parse(v.job.created) / 1000)}`)
+  if (v.run) {
+    lines.push(`Executor started: ${stamp(v.run.started_ts)}`)
+    lines.push(v.run.finished_ts != null ? `Executor finished: ${stamp(v.run.finished_ts)}` : viewLive(v) ? 'Executor still running' : 'Executor end not recorded')
+  } else lines.push('Executor start/end not recorded')
+  if (v.job?.run_secs != null) lines.push('Elapsed is Batch running time, excluding queueing; executor timestamps cover its recorded work.')
+  return lines
+}
+
 /** `3m`, `2h 05m`, `1d 3h`. */
 export function fmtDur(s: number): string {
   const m = Math.floor(s / 60)
@@ -160,6 +174,15 @@ export function fmtDur(s: number): string {
   const h = Math.floor(m / 60)
   if (h < 48) return `${h}h ${String(m % 60).padStart(2, '0')}m`
   return `${Math.floor(h / 24)}d ${h % 24}h`
+}
+
+/** A run identifier's timestamp at minute precision. Keep the full opaque ID
+ * in the UI's tooltip/copy affordance; this is only its compact table label. */
+export function runLabel(id: string): string {
+  const compact = id.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\d{2}Z$/)
+  const dashed = id.match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}z$/)
+  const m = compact ?? dashed
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}Z` : id.replace(/^[a-z0-9]+-sweep-(dry|real)-/, '')
 }
 
 /** The buckets a run touched: its recorded cut, else its job's; empty = all. */
@@ -179,6 +202,11 @@ export function commonBucketPrefix(buckets: readonly string[]): string {
 /** A run dir's path in the files proxy (`gs://<bucket>/sweep/runs/<job>` →
  * `sweep/runs/<job>/`). */
 export const runFilesRel = (logDir: string): string => logDir.replace(/^[a-z0-9]+:\/\/[^/]+\//, '').replace(/\/?$/, '/')
+
+/** Raw files-proxy links for the run table's plan and log artifacts. These
+ * deliberately bypass the retired `/files/*` SPA route. */
+export const runFileHref = (rel: string): string => `/v1/files/get?path=${encodeURIComponent(rel)}`
+export const runDirHref = (rel: string): string => `/v1/files/list?prefix=${encodeURIComponent(rel)}`
 
 /** The log subdir a run's decisions land in. */
 export const logSubdir = (mode: 'dry' | 'real'): string => (mode === 'real' ? 'deleted' : 'would-delete')
@@ -207,6 +235,7 @@ export function plannedOf(s: PlanSummaryFile): Tally {
 
 /** `progress/<bucket>.json`, written every 30 s while a bucket runs. */
 export interface ProgressFile {
+  bands?: Record<string, { objects?: number; bytes?: number; gone?: number; overwritten?: number; failed?: number }>
   roots: number
   roots_done: number
   decisions: Record<string, number>
@@ -234,6 +263,21 @@ export function sumProgress(ps: readonly ProgressFile[]): Progress {
   }
   out.rate = Math.round(out.rate)
   return out
+}
+
+/** Decision-based completion, and an explicitly rough fleet ETA at the
+ * active bucket(s)' average decision rate. Never extrapolate stale samples. */
+export function progressEstimate(ps: readonly ProgressFile[], planned: number | undefined, now: number): { decided: number; percent: number | null; secondsLeft: number | null; stale: boolean } {
+  const decided = ps.reduce((n, p) => n + Object.values(p.decisions).reduce((a, b) => a + b, 0), 0)
+  const active = ps.filter(p => !p.done)
+  const stale = active.some(p => !p.updated || !Number.isFinite(Date.parse(p.updated)) || now - Date.parse(p.updated) / 1000 > 90)
+  const rate = active.reduce((n, p) => {
+    const seconds = p.updated ? (Date.parse(p.updated) - Date.parse(p.started)) / 1000 : 0
+    return n + (seconds > 0 ? Object.values(p.decisions).reduce((a, b) => a + b, 0) / seconds : 0)
+  }, 0)
+  const percent = planned && planned > 0 ? Math.min(100, decided / planned * 100) : null
+  const secondsLeft = planned && planned > decided && !stale && rate > 0 ? Math.ceil((planned - decided) / rate) : null
+  return { decided, percent, secondsLeft, stale }
 }
 
 /** `<deleted|would-delete>-summary.json` (`sweep execute`): per bucket, the

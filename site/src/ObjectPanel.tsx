@@ -16,6 +16,7 @@ import type { ElideCtx } from '@rdub/file-tree/renderers/table'
 import { NotFoundError, type GetResult, type ListResult, type Range, type Store as FtStore } from '@rdub/file-tree'
 import { CopyName } from './CopyName'
 import { epochDaysToDate } from './colors'
+import { listingTime } from './listingTime'
 import { objectSource, publicUrl, type ObjectSource, type ProxyInfo } from './objects'
 import { useStore, useStoreFetch } from './store'
 import { storeQuery } from './stores'
@@ -186,7 +187,7 @@ export default function ObjectPanel({ segs, node, onClose }: {
         <CopyName text={pathCopy(store.scheme, segs)}><b className="obj-name">{segs[segs.length - 1]}</b></CopyName>
         <span className="obj-meta">
           {node && <>{fmtBytes(node.b)}</>}
-          {node?.d != null && <> · created {epochDaysToDate(node.d)}</>}
+          {node?.d != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(node.d)}</>}
         </span>
         {dl && <a className="obj-dl" href={dl} download={segs[segs.length - 1]} target="_blank" rel="noreferrer">download</a>}
         <button type="button" className="obj-close" aria-label="Close the object (Esc)" title="Close (Esc)" onClick={onClose}>×</button>

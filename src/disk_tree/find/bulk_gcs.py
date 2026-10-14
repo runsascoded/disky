@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 err = partial(print, file=sys.stderr)
 
-BLOB_FIELDS = "items(name,size,timeCreated,storageClass),nextPageToken"
+BLOB_FIELDS = "items(name,size,timeCreated,storageClass,generation),nextPageToken"
 
 
 @dataclass(frozen=True)
@@ -49,8 +49,8 @@ class GcsBulkLister:
         local = getattr(self, "_local", None)
         if local is None:
             # Frozen dataclass — bypass __setattr__ once.
-            object.__setattr__(self, "_local", threading.local())
-            local = self._local
+            local = threading.local()
+            object.__setattr__(self, "_local", local)
         client = getattr(local, "client", None)
         if client is None:
             client = local.client = storage.Client()
@@ -66,6 +66,7 @@ class GcsBulkLister:
                 size=int(blob.size or 0),
                 created=created,
                 storage_class=blob.storage_class,
+                generation=int(blob.generation) if blob.generation is not None else None,
             )
 
     def stream_pages(
@@ -86,8 +87,8 @@ class GcsBulkLister:
 
         local = getattr(self, "_local", None)
         if local is None:
-            object.__setattr__(self, "_local", threading.local())
-            local = self._local
+            local = threading.local()
+            object.__setattr__(self, "_local", local)
         client = getattr(local, "client", None)
         if client is None:
             client = local.client = storage.Client()
@@ -106,6 +107,7 @@ class GcsBulkLister:
                     size=int(blob.size or 0),
                     created=created,
                     storage_class=blob.storage_class,
+                    generation=int(blob.generation) if blob.generation is not None else None,
                 ))
             yield rows
 
@@ -119,7 +121,7 @@ class GcsBulkLister:
         self,
         bucket: str,
         self_dirs: list[str],
-    ) -> "list[tuple[str, int, Optional[str], Optional[str]]]":
+    ) -> "list[tuple]":
         """Fetch the zero-byte placeholder objects behind self-dir entries.
 
         These only match a streamed prefix when their whole depth-1 dir
@@ -130,7 +132,7 @@ class GcsBulkLister:
         from google.cloud import storage
 
         bkt = storage.Client().bucket(bucket)
-        rows: "list[tuple[str, int, Optional[str], Optional[str]]]" = []
+        rows: "list[tuple]" = []
         for d in self_dirs:
             blob = bkt.get_blob(d)
             if blob is None:
@@ -139,7 +141,13 @@ class GcsBulkLister:
             created = None
             if blob.time_created is not None:
                 created = blob.time_created.isoformat().replace("+00:00", "Z")
-            rows.append((blob.name, int(blob.size or 0), created, blob.storage_class))
+            rows.append((
+                blob.name,
+                int(blob.size or 0),
+                created,
+                blob.storage_class,
+                int(blob.generation) if blob.generation is not None else None,
+            ))
         return rows
 
 

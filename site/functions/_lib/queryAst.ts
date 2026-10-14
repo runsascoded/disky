@@ -12,12 +12,15 @@
  *
  * - `sub` — `text` (lowercase) is a substring of the path;
  * - `glob` — literal `pieces` (lowercase, ≥ 2) joined by "any characters
- *   within one segment" (`[^/]*`), unanchored;
+ *   within one segment" (`[^/]*`);
+ * - either one anchored (specs/search-extensions.md §2): `start` — the match
+ *   begins a segment (`^q`: some name starts with `q`), `end` — it ends one
+ *   (`q$`: some name ends with `q`), both — a whole segment (`^q$`);
  * - `regex` — a JS regex (`source`, flag `i`) over the full path. Never served
  *   by the search index: a query holding one reads as before (§5). */
 export type Matcher =
-  | { kind: 'sub'; text: string }
-  | { kind: 'glob'; pieces: string[] }
+  | { kind: 'sub'; text: string; start?: true; end?: true }
+  | { kind: 'glob'; pieces: string[]; start?: true; end?: true }
   | { kind: 'regex'; source: string }
 
 /** `(OR of AND-groups of positive matchers) AND NOT (any negative matcher)`.

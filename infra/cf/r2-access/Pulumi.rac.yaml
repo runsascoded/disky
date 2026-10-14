@@ -1,0 +1,4 @@
+config:
+  disky-r2-access:enabled: "false"
+  disky-r2-access:retentionDays: "30"
+encryptionsalt: v1:SYqjkvQetbw=:v1:i83jqMoM74Uk121M:WwdWMWD7Ll9Y6LT4edPRw6cQ61vKuw==

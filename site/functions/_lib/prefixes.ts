@@ -3,8 +3,8 @@
  * from point lookups on the floor-free index (the same `readAsks` path owner
  * totals take), never one subtree read per prefix. */
 import type { Env } from './auth.js'
-import { idxKey } from './claims.js'
-import { type Ask, columnsFor, openIndex, readAsks, type Row } from './index.js'
+import { idxKey } from './ownerBands.js'
+import { type Ask, columnsFor, openIndex, slices, readAsks, type Row } from './index.js'
 
 /** One prefix's numbers, in the wire's names (`TreeNode`): bytes, objects,
  *  size-weighted mean created day, last-read day, per-owner bytes (desc),
@@ -59,7 +59,7 @@ export function foldPrefixes(prefixes: string[], rows: StatRow[]): Record<string
 }
 
 export async function prefixesAt(env: Env, date: string, prefixes: string[]): Promise<{ stats: Record<string, PrefixStat>; groups: number }> {
-  const idx = await openIndex(env, date)
+  const idx = await openIndex(slices(env), date)
   const want = new Map<string, number>()
   for (const p of prefixes) {
     const { path, depth } = idxKey(p)

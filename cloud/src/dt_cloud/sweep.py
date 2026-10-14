@@ -14,6 +14,15 @@ consumes this manifest.
 A key is swept iff some plan prefix covers it. The layer-2 parquet has no
 ETag, so the run's overwrite guard keys off (size, mtime) captured here, not a
 version id.
+
+A plan item staged "as of" another scan than the pinned one (plan.json
+`as_of`) holds back what changed since: a key under it is swept only if that
+scan's layer-2 has it with the same mtime (the layer-2 has no generation).
+What is held back is counted as `skipped_after_as_of`.
+
+A plan's `objects` are exact items (specs/file-assign.md): relative keys that
+match `path == key` only — never `key.bak` or `key/…`. The kind is which list
+an item is in; an exact key ending in `/` is refused.
 """
 from __future__ import annotations
 
@@ -23,9 +32,9 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import duckdb
 
@@ -54,6 +63,9 @@ DELETE_BATCH = 1000
 # A plan prefix, once normalized to a relative key prefix: non-empty, no scheme,
 # no leading slash, trailing slash, no `.`/`..` segments or backslashes.
 PREFIX_RE = re.compile(r"^(?!/)(?![.]{1,2}/)[^\\]+/$")
+# An exact item, once normalized to a relative key: non-empty, no leading or
+# trailing slash, no empty / `.` / `..` segments or backslashes.
+OBJECT_RE = re.compile(r"^(?!/)[^\\]+(?<!/)$")
 
 
 class SweepError(Exception):
@@ -72,13 +84,20 @@ class Plan:
     bucket: str
     sweep: list[str]
     plan_id: int | None = None
+    #: The scan each item was staged against, by relative prefix or key (absent = the pinned scan).
+    as_of: dict[str, str] = field(default_factory=dict)
+    #: Exact items: relative keys, each matching only itself.
+    objects: list[str] = field(default_factory=list)
 
     def validate(self) -> None:
-        if not self.sweep:
-            raise SweepError(f"plan {self.name!r} has no sweep prefixes")
+        if not self.sweep and not self.objects:
+            raise SweepError(f"plan {self.name!r} has no items")
         for p in self.sweep:
             if not PREFIX_RE.match(p):
                 raise SweepError(f"bad prefix {p!r} (want a relative key prefix ending in '/')")
+        for k in self.objects:
+            if not OBJECT_RE.match(k) or any(seg in ("", ".", "..") for seg in k.split("/")):
+                raise SweepError(f"bad object {k!r} (want a relative key not ending in '/')")
 
 
 def normalize_prefix(raw: str, bucket: str) -> str:
@@ -93,15 +112,31 @@ def normalize_prefix(raw: str, bucket: str) -> str:
     return s
 
 
+def normalize_key(raw: str, bucket: str) -> str:
+    """`s3://bucket/a/b.mp3` or `/a/b.mp3` or `a/b.mp3` -> `a/b.mp3` (relative;
+    the trailing slash is kept, so `validate` refuses a folder-shaped key)."""
+    s = re.sub(r"^s3://", "", raw.strip())
+    if s.startswith(f"{bucket}/"):
+        s = s[len(bucket) + 1 :]
+    return s.lstrip("/")
+
+
 def load_plan(path: str | Path) -> Plan:
     """Read a plan.json (as written by /api/plan-sweep/dispatch), normalizing prefixes."""
     d = json.loads(Path(path).read_text())
     bucket = d.get("bucket") or sweep_bucket()
+    raw_objects = list(d.get("objects") or [])
+    as_of = {
+        (normalize_key(p, bucket) if p in raw_objects else normalize_prefix(p, bucket)): str(scan)
+        for p, scan in (d.get("as_of") or {}).items()
+    }
     plan = Plan(
         name=d["name"],
         bucket=bucket,
         sweep=[normalize_prefix(p, bucket) for p in d.get("sweep", [])],
         plan_id=d.get("plan_id"),
+        as_of=as_of,
+        objects=sorted({normalize_key(k, bucket) for k in raw_objects}),
     )
     plan.validate()
     return plan
@@ -134,8 +169,8 @@ def _eligible_query() -> str:
     """DuckDB SELECT of the file rows eligible under a plan.
 
     Reads the layer-2 parquet from the `L2` DuckDB variable; `$sweep` binds a
-    list of relative key prefixes. A row is kept iff some sweep prefix covers
-    its path.
+    list of relative key prefixes, `$exact` the exact keys. A row is kept iff
+    some sweep prefix covers its path or it is an exact key.
     """
     return """
         SELECT
@@ -145,13 +180,21 @@ def _eligible_query() -> str:
           CASE WHEN path LIKE '%/%' THEN regexp_replace(path, '/[^/]*$', '/') ELSE '' END AS dir
         FROM read_parquet(getvariable('L2'))
         WHERE kind = 'file'
-          AND len(list_filter($sweep, p -> starts_with(path, p))) > 0
+          AND (len(list_filter($sweep, p -> starts_with(path, p))) > 0 OR list_contains($exact, path))
     """
 
 
-def build_manifest(l2_path: str, plan: Plan, out_dir: str) -> dict:
-    """Expand `plan` against the layer-2 parquet at `l2_path` into an object-level
-    manifest under `out_dir` (`manifest/<bucket>.parquet` + `plan-summary.json`).
+def build_manifest(
+    l2_path: str,
+    plan: Plan,
+    out_dir: str,
+    date: str | None = None,
+    l2_for: Callable[[str], str] | None = None,
+) -> dict:
+    """Expand `plan` against the layer-2 parquet at `l2_path` (scan `date`) into
+    an object-level manifest under `out_dir` (`manifest/<bucket>.parquet` +
+    `plan-summary.json`). An item staged as of another scan keeps only the keys
+    that scan's layer-2 (`l2_for(scan)`) has with the same mtime.
 
     Returns the summary dict. Deletes nothing; pure read + artifact write.
     """
@@ -160,16 +203,53 @@ def build_manifest(l2_path: str, plan: Plan, out_dir: str) -> dict:
     (out / "manifest").mkdir(parents=True, exist_ok=True)
     manifest_path = out / "manifest" / f"{plan.bucket}.parquet"
 
+    held = {p: scan for p, scan in plan.as_of.items() if (p in plan.sweep or p in plan.objects) and scan != date}
+    if held and l2_for is None:
+        raise SweepError(f"plan items staged as of other scans ({', '.join(sorted(set(held.values())))}) need their layer-2s")
+    current = [p for p in plan.sweep if p not in held]
+    current_x = [k for k in plan.objects if k not in held]
+
     con = duckdb.connect()
     con.execute(f"SET memory_limit='{os.environ.get('DUCKDB_MEM', '8GB')}'")
     con.execute("SET VARIABLE L2 = ?", [l2_path])
-    params = {"sweep": plan.sweep}
-    con.execute(
-        f"COPY ({_eligible_query()} ORDER BY name) TO '{manifest_path}' (FORMAT PARQUET)",
-        params,
-    )
-    objects, byts = con.execute(
-        f"SELECT count(*), coalesce(sum(size_bytes), 0) FROM read_parquet('{manifest_path}')"
+    params: dict = {"sweep": plan.sweep, "exact": plan.objects}
+    query = _eligible_query()
+    if held:
+        # A held key (under a held item, under no current one) stays only if
+        # its item's `as_of` layer-2 vouches for it: same path, same mtime.
+        by_scan: dict[str, tuple[list[str], list[str]]] = {}
+        for p, scan in sorted(held.items()):
+            by_scan.setdefault(scan, ([], []))[0 if p in plan.sweep else 1].append(p)
+        refs = []
+        for i, (scan, (prefixes, keys)) in enumerate(sorted(by_scan.items())):
+            con.execute(f"SET VARIABLE AS_OF_{i} = ?", [l2_for(scan)])
+            params[f"held_{i}"] = prefixes
+            params[f"held_x_{i}"] = keys
+            refs.append(
+                f"SELECT path, mtime FROM read_parquet(getvariable('AS_OF_{i}')) WHERE kind = 'file'"
+                f" AND (len(list_filter($held_{i}, p -> starts_with(path, p))) > 0 OR list_contains($held_x_{i}, path))"
+            )
+        params["held"] = sorted(p for p in held if p in plan.sweep)
+        params["held_x"] = sorted(k for k in held if k not in plan.sweep)
+        params["current"] = current
+        params["current_x"] = current_x
+        query = f"""
+            WITH e AS ({query}), ref AS ({' UNION ALL '.join(refs)})
+            SELECT e.*, (
+              (len(list_filter($held, p -> starts_with(e.name, p))) > 0 OR list_contains($held_x, e.name))
+              AND len(list_filter($current, p -> starts_with(e.name, p))) = 0
+              AND NOT list_contains($current_x, e.name)
+              AND NOT EXISTS (SELECT 1 FROM ref WHERE ref.path = e.name AND ref.mtime = e.mtime)
+            ) AS skip
+            FROM e
+        """
+    else:
+        query = f"SELECT *, false AS skip FROM ({query})"
+    con.execute(f"CREATE TEMP TABLE m AS {query}", params)
+    con.execute(f"COPY (SELECT * EXCLUDE (skip) FROM m WHERE NOT skip ORDER BY name) TO '{manifest_path}' (FORMAT PARQUET)")
+    objects, byts, skipped, skipped_bytes = con.execute(
+        "SELECT count(*) FILTER (WHERE NOT skip), coalesce(sum(size_bytes) FILTER (WHERE NOT skip), 0),"
+        " count(*) FILTER (WHERE skip), coalesce(sum(size_bytes) FILTER (WHERE skip), 0) FROM m"
     ).fetchone()
 
     summary = {
@@ -177,8 +257,11 @@ def build_manifest(l2_path: str, plan: Plan, out_dir: str) -> dict:
         "name": plan.name,
         "bucket": plan.bucket,
         "sweep": plan.sweep,
+        **({"approved_objects": plan.objects} if plan.objects else {}),
+        "as_of": dict(sorted(held.items())),
         "objects": int(objects),
         "bytes": int(byts),
+        "skipped_after_as_of": {"objects": int(skipped), "bytes": int(skipped_bytes)},
         "manifest": str(manifest_path),
     }
     (out / "plan-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -197,9 +280,25 @@ def prefix_free(prefixes: list[str]) -> list[str]:
     return out
 
 
-def eligible(key: str, sweep: list[str]) -> bool:
-    """A key is swept iff some sweep prefix covers it (same rule as the manifest SQL)."""
-    return any(key.startswith(p) for p in sweep)
+def eligible(key: str, sweep: list[str], objects: list[str] | set[str] = ()) -> bool:
+    """A key is swept iff some sweep prefix covers it or it is an exact item
+    (same rule as the manifest SQL)."""
+    return key in objects or any(key.startswith(p) for p in sweep)
+
+
+def band_for(key: str, sweep: list[str], objects: set[str], default: str = "") -> str:
+    """The band a key is accounted to: its exact item, else the longest sweep
+    prefix covering it (`default` when none does)."""
+    if key in objects:
+        return key
+    return max((p for p in sweep if key.startswith(p)), key=len, default=default)
+
+
+def listing_roots(plan_summary: dict) -> list[str]:
+    """Where to list: the prefix-free cover of the sweep prefixes and the
+    exact keys (a key lists as `Prefix=key`, which also returns `key.bak` —
+    callers match exact items by equality)."""
+    return prefix_free([*plan_summary["sweep"], *plan_summary.get("approved_objects", [])])
 
 
 def _dir_of(key: str) -> str:
@@ -249,7 +348,8 @@ def execute_plan(
     plan_summary = json.loads((run / "plan-summary.json").read_text())
     bucket = plan_summary["bucket"]
     sweep = plan_summary["sweep"]
-    roots = prefix_free(sweep)
+    objects = set(plan_summary.get("approved_objects", []))
+    roots = listing_roots(plan_summary)
 
     client = client or s3_client()
     if for_real and require_versioning and not versioning_enabled(client, bucket):
@@ -288,7 +388,7 @@ def execute_plan(
             resp = client.list_objects_v2(**kw)
             for obj in resp.get("Contents", []):
                 key = obj["Key"]
-                band = next((p for p in sorted(roots, key=len, reverse=True) if key.startswith(p)), root)
+                band = band_for(key, sweep, objects, root)
                 if key in manifest:
                     seen.add(key)
                     size, mtime = manifest[key]
@@ -300,7 +400,7 @@ def execute_plan(
                         counters["skipped_overwritten"] += 1
                         band_rec(band)["overwritten"] += 1
                         log_rows.append((key, size, mtime, "skipped_overwritten", _dir_of(key), band))
-                elif eligible(key, sweep):
+                elif eligible(key, sweep):  # prefixes only: an exact item's sibling is not drift
                     # live, under a swept prefix, but not in the reviewed manifest → new since scan
                     counters["drift_new"] += 1
                     band_rec(band)["drift_new"] += 1
@@ -312,7 +412,7 @@ def execute_plan(
     for key, (size, mtime) in manifest.items():
         if key not in seen:
             counters["skipped_gone"] += 1
-            band = next((p for p in sorted(roots, key=len, reverse=True) if key.startswith(p)), "")
+            band = band_for(key, sweep, objects)
             band_rec(band)["gone"] += 1
             log_rows.append((key, size, mtime, "skipped_gone", _dir_of(key), band))
 
@@ -406,7 +506,7 @@ def undo_run(run_dir: str, *, client: "S3Client | None" = None,
     run = Path(run_dir)
     plan_summary = json.loads((run / "plan-summary.json").read_text())
     bucket = plan_summary["bucket"]
-    roots = prefix_free(plan_summary["sweep"])
+    roots = listing_roots(plan_summary)
     client = client or s3_client()
 
     keys = set(_deleted_keys(run, bucket))
@@ -445,7 +545,7 @@ def purge_run(run_dir: str, *, client: "S3Client | None" = None, dry_run: bool =
     run = Path(run_dir)
     plan_summary = json.loads((run / "plan-summary.json").read_text())
     bucket = plan_summary["bucket"]
-    roots = prefix_free(plan_summary["sweep"])
+    roots = listing_roots(plan_summary)
     client = client or s3_client()
 
     keys = set(_deleted_keys(run, bucket))

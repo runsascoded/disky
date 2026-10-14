@@ -171,3 +171,20 @@ export function unitTicks(min: number, max: number, base: number, count = 4): nu
   for (let k = Math.ceil(min / step); k * step <= max + step / 100; k++) out.push(k * step)
   return out
 }
+
+/** A series' uncovered scans (`/api/series`'s `unindexed`) as chart gaps: their x's inside the shown range
+ *  (`x ≥ xFrom`), sorted, and the muted note under the chart — `not indexed before <first point>` when every gap
+ *  precedes the points, else how many scans are missing. Never a zero point: a gap is drawn as a gap. */
+export function seriesGaps(
+  unindexed: readonly string[] | undefined,
+  pointXs: readonly number[],
+  xOf: (scan: string) => number,
+  xFrom: number,
+  fmtX: (x: number) => string,
+): { xs: number[]; note: string | null } {
+  const xs = (unindexed ?? []).map(xOf).filter(x => x >= xFrom).sort((a, b) => a - b)
+  if (!xs.length) return { xs, note: null }
+  const first = pointXs.length ? Math.min(...pointXs) : null
+  if (first != null && xs.every(x => x < first)) return { xs, note: `not indexed before ${fmtX(first)}` }
+  return { xs, note: `${xs.length.toLocaleString('en-US')} ${xs.length === 1 ? 'scan' : 'scans'} not indexed (gaps in the line)` }
+}

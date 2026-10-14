@@ -81,13 +81,20 @@ function useScopes(): string[] | null {
 const hasBase = (scopes: string[]): boolean => scopes.includes(DEFAULT_STORE.key) || scopes.includes('*')
 
 /**
- * Who may assign owners: admins — assignment is a staff decision, everyone
- * else proposes deletions by staging (specs/share-link-hardening.md). The
- * server enforces the same (`POST /api/actions` is `requireAdmin`).
+ * Who may assign owners: the assign scope (`gcs:assign`, every signed-in
+ * viewer) or an admin; a share link can't. The server enforces the same
+ * (`POST /api/actions` is `requireAssigner`).
  */
 export function useCanAssign(): boolean {
   const scopes = useScopes()
-  return scopes !== null && (scopes.includes('admin') || scopes.includes('*'))
+  return scopes !== null && [`${DEFAULT_STORE.key}:assign`, 'admin', '*'].some(s => scopes.includes(s))
+}
+
+/** An admin (the `admin` scope): the /admin console's audience; the server
+ *  gates /admin's APIs the same way (`requireAdmin`). */
+export function useIsAdmin(): boolean {
+  const scopes = useScopes()
+  return scopes !== null && ['admin', '*'].some(s => scopes.includes(s))
 }
 
 /**

@@ -1,4 +1,5 @@
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { lazy, Suspense, useEffect } from 'react'
 import { HotkeysProvider } from 'use-kbd'
 import { HelpCard, HelpProvider } from './Help'
 import { AdminDbPage } from './AdminDbPage'
@@ -9,12 +10,22 @@ import { PrivacyPage } from './PrivacyPage'
 import { FilesRedirect } from './FilesRedirect'
 import { AssignmentsPage } from './AssignmentsPage'
 import { StagedPage } from './StagedPage'
+import { RunPage } from './RunPage'
+import { ScanRunPage, ScansPage } from './ScansPage'
+import { HealthPage } from './HealthPage'
+import { NamePage } from './NamePage'
 import { OgPage } from './OgPage'
 import { UserOgPage, UserPage, UsersOgPage, UsersPage } from './UserPage'
 import { StoreProvider } from './store'
 import { DEFAULT_STORE, STORES } from './stores'
 import { useLoadIdentities } from './identities'
 import { PerfOverlay } from './dev/PerfOverlay'
+
+// The session log's viewer (admin-only): its own chunk, so the main bundle carries none of it.
+const SessionsPage = lazy(() => import('./SessionsPage').then(m => ({ default: m.SessionsPage })))
+const sessions = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><SessionsPage /></Suspense></AuthGate>
+const FederatedScansPreview = import.meta.env.DEV ? lazy(() => import('./dev/FederatedScansPreview')) : null
+const ChildrenTablePreview = import.meta.env.DEV ? lazy(() => import('./dev/ChildrenTablePreview')) : null
 
 // `?perf=1` at load: the time-to-render panel (specs/render-bench.md). The
 // marks themselves are always on (`perf.ts`); only the panel is opt-in.
@@ -32,12 +43,21 @@ const PERF = typeof location !== 'undefined' && new URLSearchParams(location.sea
 // session. One hotkey/omnibar registry for the whole site (SiteKbd renders
 // the chrome on each page; pages register their own actions on top of the
 // shared ones).
+/** Leave for the data bucket's `/meta` tree on its own host (`/meta/x?d=…` → `<to>/x?d=…`). */
+function MetaTreeRedirect({ to }: { to: string }) {
+  const { pathname, search, hash } = useLocation()
+  useEffect(() => { location.replace(to.replace(/\/$/, '') + pathname.replace(/^\/meta/, '') + search + hash) }, [to, pathname, search, hash])
+  return <p className="loading">Opening the data bucket's meta tree…</p>
+}
+
 export default function Root() {
   useLoadIdentities()
   return (
     <HotkeysProvider config={{ storageKey: 'gcs-usage' }}>
     <HelpProvider>
     <Routes>
+      {FederatedScansPreview && <Route path="/dev/federated-scans" element={<Suspense fallback={<p className="loading">Loading…</p>}><FederatedScansPreview /></Suspense>} />}
+      {ChildrenTablePreview && <Route path="/dev/children-table" element={<Suspense fallback={<p className="loading">Loading…</p>}><ChildrenTablePreview /></Suspense>} />}
       {STORES.map(s => (
         <Route key={s.key} path={`${s.path.replace(/\/$/, '')}/og`} element={<OgPage store={s} />} />
       ))}
@@ -47,7 +67,13 @@ export default function Root() {
       <Route path="/admin" element={<AuthGate><AdminPage /></AuthGate>} />
       <Route path="/admin/db" element={<AuthGate><AdminDbPage /></AuthGate>} />
       <Route path="/admin/db/:table" element={<AuthGate><AdminDbPage /></AuthGate>} />
+      <Route path="/admin/sessions" element={sessions} />
+      <Route path="/admin/sessions/:sid" element={sessions} />
       <Route path="/files/*" element={<AuthGate><FilesRedirect /></AuthGate>} />
+      {/* `/meta` served by another deployment (`Store.metaTree`): go there, keeping the subpath + query. */}
+      {DEFAULT_STORE.metaTree && !STORES.some(s => s.path.replace(/\/$/, '') === '/meta') && (
+        <Route path="/meta/*" element={<MetaTreeRedirect to={DEFAULT_STORE.metaTree} />} />
+      )}
       {/* The owner pages exist only on an attribution store; elsewhere they go home. */}
       {DEFAULT_STORE.owners ? (<>
       <Route path="/assignments" element={<AuthGate><AssignmentsPage /></AuthGate>} />
@@ -62,9 +88,18 @@ export default function Root() {
       )}
       {/* The opt-in deletion console: what the trash gesture staged, and its runs. */}
       <Route path="/staged" element={<AuthGate><StagedPage /></AuthGate>} />
+      <Route path="/runs/*" element={<AuthGate><RunPage /></AuthGate>} />
+      {/* What each scan job did (specs/scan-runs-ui.md). */}
+      <Route path="/scans" element={<AuthGate><ScansPage /></AuthGate>} />
+      <Route path="/scans/*" element={<AuthGate><ScanRunPage /></AuthGate>} />
+      {/* The append-only stores' state (specs/health-page.md). */}
+      <Route path="/health" element={<AuthGate><HealthPage /></AuthGate>} />
+      <Route path="/names" element={<AuthGate><NamePage /></AuthGate>} />
       {/* Retired pages: the mark & sweep console became /staged; the review
-          lenses became the home page's owner axis. Old links land somewhere sane. */}
+          lenses became the home page's owner axis; the name-search preview
+          became /names. Old links land somewhere sane. */}
       <Route path="/sweep" element={<Navigate to="/staged" replace />} />
+      <Route path="/hot" element={<Navigate to="/names" replace />} />
       <Route path="/marks" element={<Navigate to="/" replace />} />
       <Route path="/mark" element={<Navigate to="/" replace />} />
       {/* Secondary stores: the map (drill paths below it, objects opened in

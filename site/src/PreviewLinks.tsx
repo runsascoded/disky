@@ -15,7 +15,9 @@ interface TokenRow {
 
 // Day 0 of packed expiries (`functions/_lib/og/sign.ts` EPOCH): 2026-01-01.
 const EPOCH_MS = Date.UTC(2026, 0, 1)
-const fmtDay = (day: number) => new Date(EPOCH_MS + day * 86400_000).toISOString().slice(0, 10)
+// A token that never expires (`functions/_lib/og/tokens.ts` NEVER_DAY).
+const NEVER_DAY = 2 ** 31 - 1
+const fmtDay = (day: number) => (day === NEVER_DAY ? 'never' : new Date(EPOCH_MS + day * 86400_000).toISOString().slice(0, 10))
 const fmtTs = (ts: number) => new Date(ts * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
 
 /** `/admin`'s list of full-card share links (specs/done/dogi.md): who minted which
@@ -46,7 +48,7 @@ export function PreviewLinks() {
       <h2>Preview links</h2>
       <p>
         Links minted with “Copy link with preview”: their unfurl card shows the full view (labels, sizes, owners) for that exact page and params.
-        Plain links unfurl as unlabelled shapes. Revoke to send a view back to the anonymous card.
+        Plain links follow this site's anonymous preview policy and carry no detailed-preview token. Revoke to send a view back to the anonymous card.
       </p>
       <div className="table-scroll">
         <table className="grants">

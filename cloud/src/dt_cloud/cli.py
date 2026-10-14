@@ -23,11 +23,12 @@ import pandas as pd
 from click import Choice, UsageError, argument, group, option
 
 from .identity import IDENTITIES_ENV, load_identities
-from .deploy import data_bucket, site_token, site_url as resolve_site_url
+from .deploy import data_bucket, layer2_prefix as resolve_layer2, site_token, site_url as resolve_site_url
 from .secrets import env_secret, secret
 from .index_footer import INDEX_VARIANTS
 from .prefixes import load_prefix_map
 from .records import mine_record_rows
+from .scan_id import scan_id_option, snapshot_scans
 from .signals import RECORD_BASENAME, manual_rows, record_file_paths, user_prefix_rows
 
 err = partial(print, file=sys.stderr)
@@ -206,13 +207,13 @@ def wandb_attr(
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, required=True, help=f"identities.yaml path or URL (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-n", "--top", default=30, help="Rows in the per-user table")
-@option("-u", "--user", "claim_user", default=None, help="Print this user's prefixes (inferred ownership, by bytes)")
+@option("-u", "--user", "owner_user", default=None, help="Print this user's prefixes (inferred ownership, by bytes)")
 def attr_report(
     attributions: tuple[str, ...],
     identities_path: str,
     listings: tuple[str, ...],
     top: int,
-    claim_user: str | None,
+    owner_user: str | None,
 ) -> None:
     """Join listing × attribution (deepest-prefix-wins) → per-user bytes + coverage.
 
@@ -237,7 +238,7 @@ def attr_report(
 
     per_user: dict[str | None, list] = defaultdict(lambda: [0, 0])
     per_source: dict[str, list] = defaultdict(lambda: [0, 0])
-    claim: dict[str, list] = defaultdict(lambda: [0, 0])  # attributed-ancestor prefix -> [bytes, objects] for --user
+    owned: dict[str, list] = defaultdict(lambda: [0, 0])  # attributed-ancestor prefix -> [bytes, objects] for --user
     cache: dict[str, tuple | None] = {}
     prefix_of: dict[str, str] = {}  # dir_key -> matched attribution prefix (only tracked when --user)
 
@@ -275,8 +276,8 @@ def attr_report(
         per_user[user][1] += int(objects)
         per_source[source][0] += int(nbytes)
         per_source[source][1] += int(objects)
-        if claim_user is not None and user == claim_user:
-            c = claim[prefix_of[dir_key]]
+        if owner_user is not None and user == owner_user:
+            c = owned[prefix_of[dir_key]]
             c[0] += int(nbytes)
             c[1] += int(objects)
 
@@ -289,9 +290,9 @@ def attr_report(
     for user, (nbytes, objects) in rows:
         print(f"{user or '-':>24}  {nbytes/1e12:10.3f} TB  {objects:>12,} objects")
 
-    if claim_user is not None:
-        print(f"\n== claim list: {claim_user} ({len(claim)} prefixes) ==")
-        for prefix, (nbytes, objects) in sorted(claim.items(), key=lambda kv: -kv[1][0]):
+    if owner_user is not None:
+        print(f"\n== owned prefixes: {owner_user} ({len(owned)} prefixes) ==")
+        for prefix, (nbytes, objects) in sorted(owned.items(), key=lambda kv: -kv[1][0]):
             print(f"{nbytes/1e9:12.2f} GB  {objects:>10,} objects  {prefix}")
 
 
@@ -404,7 +405,7 @@ def wandb_mine(
 @main.command("path-index")
 @option("-a", "--attribution", "attributions", multiple=True, help="Attribution parquet(s); adds per-node user overlays")
 @option("-c", "--dir-cache", "dir_cache", type=Path, default=None, help="Layer-2 cache dir (dir-stats/age-days parquet): attribution-independent rollups reused by re-attribution runs — see gcs:specs/dir-agg-cache.md")
-@option("-d", "--asof", required=True, help="Scan date the listing came from (YYYY-MM-DD)")
+@option("-d", "--asof", required=True, callback=scan_id_option, help="Scan id the listing came from (YYYY-MM-DD or YYYY-MM-DDTHHMM)")
 @option("-g", "--age-strata", is_flag=True, help="Add bytes-by-age columns (`age_b0`…`age_b6`, specs/done/row-age-strata.md) to every store row; off by default, so a store keeps its schema until it opts in")
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, default=None, help=f"identities.yaml path or URL, needed with -a (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
@@ -433,10 +434,9 @@ def build_path_index(
     """Generate a dated site-data snapshot (tree/age/meta JSONs) from a listing.
 
     Snapshots live at site/public/data/<asof>/; the sibling scans.json index
-    (dates, newest first — the site's scan dropdown) is refreshed afterwards.
+    (scan ids, newest first — the site's scan dropdown) is refreshed afterwards.
     """
     import json
-    import re
 
     from .viz import write_path_index
 
@@ -449,14 +449,7 @@ def build_path_index(
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
     data_root = out_dir.parent
-    dates = sorted(
-        (
-            p.name
-            for p in data_root.iterdir()
-            if p.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.name) and (p / "meta.json").exists()
-        ),
-        reverse=True,
-    )
+    dates = snapshot_scans(data_root)
     if dates:
         (data_root / "scans.json").write_text(json.dumps(dates) + "\n")
         err(f"scans.json: {dates}")
@@ -508,7 +501,7 @@ def rules(identities_path: str, out: Path | None) -> None:
 
 
 @main.command()
-@option("-d", "--date", default=None, help="Scan date YYYY-MM-DD (default: latest from scans.json)")
+@option("-d", "--date", default=None, help="Scan slug: YYMMDD[HH[MM]] or YYYY-MM-DD[THH[MM]] — the latest scan it names; one naming none fails (default: latest from scans.json)")
 @option("-f", "--max-age-days", default=2, type=int, help="Freshness: latest scan must be within this many days")
 @option("-j", "--json", "as_json", is_flag=True, help="Emit machine-readable JSON to stdout")
 @option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ (default: $SNAPSHOTS_SUBDIR; `cw` for the CoreWeave deployment, empty for the default store)")
@@ -543,16 +536,24 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 
 
 @main.command()
+@option("-a", "--against", default=None, help="Exact-request mode: compare complete JSON responses against this base URL using the same viewer credential")
 @option("-b", "--budget", default=None, type=float, help="Fail a scenario whose slowest request exceeds this many seconds")
 @option("-c", "--cold", is_flag=True, help="Key subtree and diff reads past the edge cache (a random `minArea` ≈ the default), to measure uncached cost")
+@option("-d", "--date", default=None, help="Query-set mode: the scan to query (default: the truth set's)")
 @option("-j", "--json", "as_json", is_flag=True, help="Emit the run record (every request) as JSON to stdout")
+@option("-k", "--only", multiple=True, help="Query-set mode: run only these query ids (repeatable)")
 @option("-o", "--out", default=None, help="Write the run record to this path or prefix (`…/` or `gs://…/` → `<prefix><ts>.json`)")
 @option("-q", "--hit", default=None, help="Filter term the filter-hit scenario searches for (default: the largest bucket's largest child)")
+@option("-Q", "--queries", default=None, help="Query-set mode: a query set (YAML, local or gs://; `dt_cloud.bench.queryset`) to score against `-T`")
+@option("-R", "--request", "requests", multiple=True, help="Replay an exact relative /api/ GET (repeatable); skips automatic scenario discovery and retains detailed server timings/error excerpts")
+@option("-r", "--repeat", default=1, type=int, help="Query-set mode: requests per query × view (the first decides the verdict; timings are medians)")
 @option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ (default: $SNAPSHOTS_SUBDIR)")
 @option("-S", "--serial", is_flag=True, help="Send each scenario's requests one at a time (default: concurrently, as a page load does)")
 @option("-t", "--token", default=None, help="Bearer token (default: $SITE_TOKEN; none for a public deployment like r2.rbw.sh)")
+@option("-T", "--truth", default=None, help="Query-set mode: the ground truth (`dt-cloud bench-truth -o`'s dir or gs:// prefix)")
 @option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
-def probe(budget: float | None, cold: bool, as_json: bool, out: str | None, hit: str | None, subdir: str | None, serial: bool, token: str | None, url: str | None) -> None:
+@option("-x", "--param", "params", multiple=True, help="Query-set mode: extra query params for every request, e.g. `ps=iv` (repeatable)")
+def probe(against: str | None, budget: float | None, cold: bool, date: str | None, as_json: bool, only: tuple[str, ...], out: str | None, hit: str | None, queries: str | None, requests: tuple[str, ...], repeat: int, subdir: str | None, serial: bool, token: str | None, truth: str | None, url: str | None, params: tuple[str, ...]) -> None:
     """Replay the site's page loads (root, largest bucket, a matching and a
     non-matching path filter) against a live deployment.
 
@@ -561,26 +562,87 @@ def probe(budget: float | None, cold: bool, as_json: bool, out: str | None, hit:
     recorded. Exits nonzero on any 5xx or transport failure (and on a scenario
     over `--budget`). `-o` keeps the record, so a prefix of runs is a latency
     time series.
+
+    Query-set mode (`-Q queries.yml -T <truth>`): every query × view root of
+    the set goes to `/api/subtree?q=…&full=1`, one request at a time, and is
+    scored against the ground truth: the match-root set, the net totals, and
+    the `partial` / `approximate` flags (an inexact answer must carry one; an
+    unflagged inexact answer is a FAIL). Prints a table; exits nonzero on any
+    FAIL or error.
     """
     import fsspec
 
     import random
 
-    from .probe import cold_min_area, http_fetch, record, resolve_targets, run, scenarios, summarize
+    from .probe import Targets, cold_min_area, compare_requests, http_fetch, record, request_paths, resolve_targets, run, scenarios, summarize
     from .site import creds
 
     base, tok = creds(token, url)
+    if against and not requests:
+        raise UsageError("--against requires exact --request paths")
+    if requests and (queries or truth or params or only or repeat != 1 or hit or subdir):
+        raise UsageError("exact-request mode cannot combine with query-set or automatic scenario options")
+    if queries or truth:
+        if not (queries and truth):
+            raise UsageError("query-set mode needs both -Q and -T")
+        from .bench import queryset, score as bs
+
+        cases = queryset.load(queries)
+        if only:
+            unknown = set(only) - {c.id for c in cases}
+            if unknown:
+                raise UsageError(f"unknown query ids: {sorted(unknown)}")
+            cases = [c for c in cases if c.id in only]
+        tr = bs.Truth(truth)
+        day = date or tr.summary["date"]
+        engine = bs.SubtreeEngine(http_fetch(base, tok, timeout=300), day, params="&".join(params), cold=cold)
+        err(f"probe -Q {base} @ {day}: {len(cases)} queries, {sum(len(c.views) for c in cases)} views{'; cold' if cold else ''}{f'; {params}' if params else ''}")
+        err(bs.HEADER)
+        scores = bs.run(engine, cases, tr, repeat=repeat, log=err)
+        tally = bs.tally(scores)
+        err("  ".join(f"{k}: {v}" for k, v in sorted(tally.items())))
+        rec = bs.record(base, engine, day, truth, scores, cold=cold, repeat=repeat)
+        if out:
+            path = f"{out}{rec['ts']}.json" if out.endswith("/") else out
+            with fsspec.open(path, "w") as fh:
+                json.dump(rec, fh)
+            err(f"wrote {path}")
+        if as_json:
+            print(json.dumps(rec, indent=2))
+        if tally.get("FAIL") or tally.get("error"):
+            raise SystemExit(1)
+        return
     sub = subdir if subdir is not None else os.environ.get("SNAPSHOTS_SUBDIR", "")
     fetch = http_fetch(base, tok)
-    t = resolve_targets(fetch, sub, hit)
     min_area = cold_min_area(random.Random()) if cold else ""
-    err(f"probe {base} @ {t.date} (vs {t.prev}; bucket {t.bucket}; filter hit {t.hit!r}{'; cold' if cold else ''})")
-    results = run(fetch, scenarios(t, min_area), parallel=not serial)
+    if requests:
+        try:
+            paths = request_paths(requests, min_area)
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        t = Targets(date or "", None, "", "")
+        cases = {"requests": paths}
+        err(f"probe {base}: {len(paths)} exact requests{'; cold subtree/diff keys' if cold else ''}")
+    else:
+        t = resolve_targets(fetch, sub, hit)
+        cases = scenarios(t, min_area)
+        err(f"probe {base} @ {t.date} (vs {t.prev}; bucket {t.bucket}; filter hit {t.hit!r}{'; cold' if cold else ''})")
+    comparison = None
+    if against:
+        results, before, parity = compare_requests(fetch, http_fetch(against, tok), paths, parallel=not serial)
+        comparison = {"base": against, "results": [asdict(r) for r in before], "parity": parity}
+    else:
+        results = run(fetch, cases, parallel=not serial)
     ok, lines = summarize(results, round(budget * 1000) if budget is not None else None)
+    if comparison:
+        ok = ok and all(p["equal"] for p in comparison["parity"])
+        err(f"complete JSON parity: {sum(p['equal'] for p in comparison['parity'])}/{len(paths)} against {against}")
     for line in lines:
         err(line)
     err("PASS" if ok else "FAIL")
     rec = {**record(base, t, results), "cold": cold}
+    if comparison:
+        rec["comparison"] = comparison
     if out:
         path = f"{out}{rec['ts']}.json" if out.endswith("/") else out
         with fsspec.open(path, "w") as fh:
@@ -589,6 +651,62 @@ def probe(budget: float | None, cold: bool, as_json: bool, out: str | None, hit:
     if as_json:
         print(json.dumps(rec, indent=2))
     if not ok:
+        raise SystemExit(1)
+
+
+@main.command("bench-truth")
+@option("-a", "--append", is_flag=True, help="Add to (or replace queries in) an existing truth set at `-o` instead of rewriting its summary")
+@option("-c", "--check", multiple=True, help="Also compute these query ids by a full `path` scan and compare (repeatable)")
+@option("-k", "--only", multiple=True, help="Only these query ids (repeatable; with `-a`, to add queries to a set)")
+@option("-m", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-N", "--no-names", is_flag=True, help="Scan for every query (don't use the generation's v1 names file)")
+@option("-o", "--out", required=True, help="Output dir or gs:// prefix: `<id>.json` per query + `summary.json`")
+@option("-s", "--stage", type=Path, default=None, help="Copy gs:// inputs here first (parallel ranged GETs; phase 0: copy, don't mount)")
+@option("-t", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-T", "--tmp", "tmp_dir", default=None, help="DuckDB spill dir")
+@argument("queries")
+@argument("gen")
+def bench_truth(append: bool, check: tuple[str, ...], only: tuple[str, ...], mem: str, no_names: bool, out: str, stage: Path | None, threads: int, tmp_dir: str | None, queries: str, gen: str) -> None:
+    """Ground truth for a filter-bench query set over one index generation
+    (GEN: its dir, local or gs://, holding `path-index.parquet` and, for the
+    names-first method, the v1 `path-index.names.parquet`).
+
+    For each query × view root: the match roots (count, md5 of the sorted
+    list, and the list with each root's net totals when ≤ 50k), the outermost
+    excluded paths, and the net totals — the Worker's filter semantics
+    (specs/path-store-search.md §1). Heavy: run it on a VM beside the data
+    (specs/done/filter-query-service.md §6 phase 1).
+    """
+    import time as _time
+
+    import fsspec
+
+    from .bench import queryset, truth as bt
+
+    cases = queryset.load(queries)
+    unknown = (set(check) | set(only)) - {c.id for c in cases}
+    if unknown:
+        raise UsageError(f"unknown query ids: {sorted(unknown)}")
+    if only:
+        cases = [c for c in cases if c.id in only]
+    g = gen.rstrip("/")
+    names = None if no_names else f"{g}/path-index.names.parquet"
+    if names and not fsspec.core.url_to_fs(names)[0].exists(names):
+        err(f"no names file at {names}: scanning for every query")
+        names = None
+    path_file = f"{g}/path-index.parquet"
+    if stage:
+        path_file = bt.local_or_download(path_file, stage / "path-index.parquet")
+        names = names and bt.local_or_download(names, stage / "path-index.names.parquet")
+    con = bt.connect(threads, mem, tmp_dir)
+    t0 = _time.monotonic()
+    truths = bt.compute(cases, path_file, names, list(check), con)
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", gen)
+    meta = {"date": m.group(1) if m else None, "gen": gen, "ts": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "s": round(_time.monotonic() - t0, 1), "threads": threads, "queries_file": queries}
+    bt.write(truths, out, meta, append=append)
+    bad = [t.id for t in truths if t.check and not t.check["identical"]]
+    err(f"wrote {out} ({len(truths)} queries, {meta['s']}s){f'; CHECK MISMATCH: {bad}' if bad else ''}")
+    if bad:
         raise SystemExit(1)
 
 
@@ -636,11 +754,49 @@ def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row
     print(json.dumps(s))
 
 
+@main.command("index-recut")
+@option("-c", "--check", is_flag=True, help="Then check the re-cut `bysize`'s root and depth-1 views against per-path sums over the `path` sort (`bysize_check`), printed as `check` in the JSON; exit 1 unless every view is exact")
+@option("-m", "--mem", default="8GB", help="DuckDB memory limit")
+@option("-p", "--threads", default=8, type=int, help="DuckDB threads")
+@option("-r", "--row-group-rows", default=8192, type=int, help="Parquet row-group size of the re-cut sorts (default 8192, the store's)")
+@option("-t", "--tier", "tiers", multiple=True, default=("bysize",), type=Choice(["path", "bysize"]), help="Sorts to re-cut (repeatable; default `bysize`)")
+@option("-W", "--work", type=Path, required=True, help="Local work dir (created; must not exist): the source copy, the cut, DuckDB's spill")
+@argument("src")
+@argument("out")
+def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers: tuple[str, ...], work: Path, src: str, out: str) -> None:
+    """Re-cut a published store generation's sorts from its `path` sort: SRC is
+    the generation dir holding `path-index.parquet`, OUT a new generation dir
+    (local or a URL, e.g. `gs://<bucket>/listing/<scan>/index/<gen>`) that
+    must not hold the sorts yet — nothing published is overwritten. Writes
+    each sort under its served name with its `.groups.json` and
+    `.groups.parquet`; `index-sync -v <variant> -g <gen>` then points the scan
+    at it (spec `bysize-path-total.md`: a labeled `bysize` keyed on the
+    path's total)."""
+    from .index import recut_sorts
+
+    sorts = recut_sorts(src, out, tiers=tiers, work=work, mem=mem, threads=threads, row_group_rows=row_group_rows)
+    res: dict = {"src": src, "out": out, "sorts": sorts}
+    ok = True
+    if check:
+        from .bysize_check import check_views
+
+        con = duckdb.connect()
+        con.execute(f"SET memory_limit='{mem}'; SET threads={threads}; SET temp_directory='{work / '.duckdb-tmp'}'")
+        checks = check_views(str(work / "src.parquet"), str(work / "out" / "path-index-bysize.parquet"), con=con)
+        res["check"] = [{**asdict(c), "exact": c.exact} for c in checks]
+        for c in checks:
+            err(f"check {c.path or '(root)'}: thr {c.thr:,.0f}; {c.equal}/{c.ref_paths} paths exact (candidate {c.cand_paths}); per-slice: {c.slice_short} short + {c.slice_missing} missing, {c.slice_missing_bytes:,} B; {c.groups} groups / {c.rows:,} rows")
+        ok = all(c.exact for c in checks)
+    print(json.dumps(res))
+    if not ok:
+        raise SystemExit(1)
+
+
 @main.command("over-time-groups")
 @option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket the D1 `path` dirs resolve against; default $DATA_BUCKET")
 @option("-g", "--gen", required=True, help="Generation id for the published index dirs (the run's, e.g. the job's $GEN)")
 @option("-K", "--group-size", default=None, type=int, help="Scans per sealed group (default: dt_cloud.overtime.OVER_TIME_GROUP_SIZE)")
-@option("-l", "--layer2-prefix", default=None, help="Layer-2 dir template with `{scan}` (default: $LAYER2_PREFIX, e.g. cw-l2/{scan}/)")
+@option("-l", "--layer2-prefix", default=None, help="Layer-2 dir template with `{scan}` (default $LAYER2_PREFIX; one of the two is required)")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
 @option("-n", "--dry-run", is_flag=True, help="Print the groups that would be built; write nothing")
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Work dir for the group builds")
@@ -680,7 +836,7 @@ def over_time_groups(
     from .overtime import OVER_TIME_GROUP_SIZE, multiscan_row, sealed_groups, sync_manifest, synced_groups, write_over_time_index
 
     K = group_size or OVER_TIME_GROUP_SIZE
-    l2 = layer2_prefix or os.environ.get("LAYER2_PREFIX") or "cw-l2/{scan}/"
+    l2 = resolve_layer2(layer2_prefix, "-l/--layer2-prefix")
     root = publish_root or f"/gcs/{bucket}"
     data = data_root or root
     dates = sorted({d for d, v in synced_variants(store=store) if v == "path"})
@@ -755,20 +911,24 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 @option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket holding the index tiers; default $DATA_BUCKET")
 @option("-d", "--dir", "listing_dir", default=None, help="Local/mounted dir holding the parquets (default: <bucket>/<key>)")
 @option("-F", "--sorts-only", is_flag=True, help="Only the store's sorts (path, bysize, and their by-user copies where written)")
-@option("-g", "--gen", required=True, help="Generation stamp these files belong to (the run's GEN; `legacy` for the pre-generation listing/<date>/ layout)")
-@option("-k", "--key", default=None, help="Bucket-relative dir the parquets live under — what the site reads (default: listing/<date>/index/<gen>; listing/<date> for gen `legacy`)")
+@option("-g", "--gen", required=True, help="Generation stamp these files belong to (the run's GEN; `legacy` for a pre-generation layout)")
+@option("-k", "--key", required=True, help="Bucket-relative dir the parquets live under — what the site reads (the deployment's layout, e.g. `<layer-2>/index/<gen>`)")
 @option("-L", "--local", is_flag=True, help="Write to the local wrangler D1 instead of --remote")
+@option("-p", "--pointer-only", is_flag=True, help="Only flip the pointers, after `-r` staged the rows: refuses (exit 1, nothing flipped) unless every present variant's rows in D1 match its footer; a variant already pointed at this generation is a no-op")
+@option("-r", "--rows-only", is_flag=True, help="Only upload the row groups (+ the cold footer files), tagged with the generation — invisible until `-p` flips the pointers. Re-runnable (rows are INSERT OR REPLACE)")
 @option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-v", "--variant", "variants", multiple=True, type=Choice(list(INDEX_VARIANTS)), help="Only sync these variants (default: all)")
-@argument("date")
+@argument("date", callback=scan_id_option)
 def index_sync(
     age_only: bool,
     bucket: str,
     listing_dir: str | None,
     sorts_only: bool,
     gen: str,
-    key: str | None,
+    key: str,
     local: bool,
+    pointer_only: bool,
+    rows_only: bool,
     store: str,
     variants: tuple[str, ...],
     date: str,
@@ -782,36 +942,63 @@ def index_sync(
     the rows under a secondary store (variants recorded as
     `<store>:<variant>`, the `store` column set — needs the store migration;
     specs/multi-store.md). The default, the primary, writes exactly the
-    pre-stores SQL."""
-    from .index_footer import SORT_VARIANTS, check_store, exists, sync_d1
+    pre-stores SQL.
+
+    The two halves can run apart (a job uploads the rows while other steps
+    still run, and lists the scan later): `-r` uploads the rows only — no
+    reader sees them, every D1 read names the pointer's generation — and `-p`
+    flips the pointers only, once it has checked every present variant's
+    rows are complete (count and rg range against the footer), all variants
+    before any flip. Between the two, nothing may gc this date's rows (an
+    `index-gc` of the same scan, or a REPROC's sync of another generation):
+    `-p` would refuse, and `-r` must run again."""
+    from .index_footer import SORT_VARIANTS, IncompleteGeneration, check_flip, check_store, exists, flip_d1, sync_d1
 
     try:
         check_store(store)
     except ValueError as e:
         raise UsageError(str(e)) from None
+    if rows_only and pointer_only:
+        raise UsageError("-r and -p are the two halves of one sync: pass at most one (neither = both, rows then pointer)")
+    if local and (rows_only or pointer_only):
+        raise UsageError("-r/-p run against the remote D1 only")
 
-    key = key or (f"listing/{date}" if gen == "legacy" else f"listing/{date}/index/{gen}")
-    base = listing_dir or f"{bucket}/{key}"
+    base = listing_dir or f"gs://{bucket}/{key}"
     todo = variants or tuple(INDEX_VARIANTS)
     if sorts_only:
         todo = tuple(v for v in todo if v in SORT_VARIANTS)
     if age_only:
         todo = tuple(v for v in todo if v.startswith("age-pyramid"))
-    # A deployment produces only some variants (gcs's `path-index` writes no
-    # age pyramid or over-time tier; a generation before the store has no
-    # `bysize`); an absent file is skipped, not fatal — otherwise every variant
-    # after it in `INDEX_VARIANTS` order went unsynced.
+    # A generation holds only some variants (`path-index` writes no age
+    # pyramid or over-time tier; by-user sorts only where the scan attributes
+    # ownership; a generation before the store has no `bysize`); an absent
+    # file is skipped, not fatal — otherwise every variant after it in
+    # `INDEX_VARIANTS` order went unsynced.
     skipped = []
+    present = []
     for variant in todo:
         path = f"{base}/{INDEX_VARIANTS[variant]}"
-        if not exists(path):
+        if exists(path):
+            present.append((variant, path))
+        else:
             skipped.append(variant)
-            continue
-        n = sync_d1(date, path, variant=variant, gen=gen, key=key, remote=not local, store=store)
-        err(f"index-sync: {'' if store == 'primary' else f'[{store}] '}{date} [{variant}] gen {gen} @ {key} — {n} row groups ({'local' if local else 'remote'})")
+    pre = f"index-sync: {'' if store == 'primary' else f'[{store}] '}{date}"
+    if pointer_only:
+        try:
+            flips = [check_flip(date, path, variant=variant, gen=gen, key=key, store=store) for variant, path in present]
+        except IncompleteGeneration as e:
+            err(f"index-sync: refusing to flip any pointer — {e}")
+            raise SystemExit(1) from None
+        for f in flips:
+            flipped = flip_d1(f)
+            err(f"{pre} [{f.variant}] gen {gen} @ {key} — {'pointer flipped' if flipped else 'already pointed'} ({f.n} row groups)")
+    else:
+        for variant, path in present:
+            n = sync_d1(date, path, variant=variant, gen=gen, key=key, remote=not local, store=store, rows_only=rows_only)
+            err(f"{pre} [{variant}] gen {gen} @ {key} — {n} row groups ({'local' if local else 'remote'}){', pointer not flipped' if rows_only else ''}")
     if skipped:
         err(f"index-sync: {date} gen {gen} @ {key} — skipped {len(skipped)} absent variant(s): {', '.join(skipped)}")
-    if len(skipped) == len(todo):
+    if not present:
         err(f"index-sync: no variant file under {base}")
         raise SystemExit(1)
 
@@ -882,7 +1069,7 @@ def index_gc(
 @main.command("index-dir")
 @option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-v", "--variant", default="path", type=Choice(list(INDEX_VARIANTS)), help="Which variant's dir")
-@argument("date")
+@argument("date", callback=scan_id_option)
 def index_dir_cmd(store: str, variant: str, date: str) -> None:
     """Print the bucket-relative dir holding a scan's index variant (the D1
     pointer). Exits 1, printing nothing, when that (date, variant) was never
@@ -893,6 +1080,18 @@ def index_dir_cmd(store: str, variant: str, date: str) -> None:
     if d is None:
         raise SystemExit(1)
     print(d)
+
+
+@main.command("cost-labels")
+@option("-c", "--component", help="This job's `component` label (scan, listing, static-names, sweep, …)")
+@option("-j", "--json", "as_json", is_flag=True, help="A JSON object (default: `k=v,…`, for gcloud's `--labels` / `--update-labels`)")
+def cost_labels_cmd(component: str | None, as_json: bool) -> None:
+    """Print the cost-attribution labels: `$DISKY_LABELS` plus `component` (empty when unset).
+
+    For shell submitters and `gcloud … --update-labels` (spec specs/cost-labels.md)."""
+    from .cost_labels import render
+
+    print(render(component, "json" if as_json else "gcloud"))
 
 
 @main.command("labels")
@@ -919,9 +1118,9 @@ def labels(attributions: tuple[str, ...], identities_path: str | None, listings:
 @option("-a", "--all", "all_dates", is_flag=True, help="Every scan with a synced pointer (instead of DATES)")
 @option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket holding the index tiers; default $DATA_BUCKET")
 @option("-d", "--dir", "listing_dir", default=None, help="Local/mounted/gs:// dir holding the parquets (default: gs://<bucket>/<key>); one DATE only")
-@option("-g", "--gen", default=None, help="Generation the files belong to (`legacy` for listing/<date>/); default: each variant's D1 pointer dir")
+@option("-g", "--gen", default=None, help="Generation the files belong to: `{gen}` in -k (needs -k); default: each variant's D1 pointer dir")
 @option("-J", "--from-json", is_flag=True, help="Build the .groups.parquet from the .groups.json already beside the tier, not the tier's own footer (implies -P)")
-@option("-k", "--key", default=None, help="Bucket-relative dir the parquets live under (default: listing/<date>/index/<gen>; listing/<date> for gen `legacy`)")
+@option("-k", "--key", default=None, help="Bucket-relative dir template the parquets live under, `{date}` = the scan id, `{gen}` = -g (the deployment's layout, e.g. `<prefix>/{date}/index/{gen}`); default: each variant's D1 pointer dir")
 @option("-n", "--dry-run", is_flag=True, help="Print what would be written; write nothing")
 @option("-P", "--parquet-only", is_flag=True, help="Only the cold footer tier (`.groups.parquet`); leave the .groups.json as it is")
 @option("-s", "--store", default="primary", help="The store whose pointers name the dirs (no -g): `primary` (default) or a secondary store's `STORES_JSON` key")
@@ -959,6 +1158,10 @@ def index_blob(
         raise UsageError("give DATES or -a, not both")
     if listing_dir and (all_dates or len(dates) > 1):
         raise UsageError("-d names one scan's dir: one DATE only")
+    if gen is not None and key is None:
+        raise UsageError("-g needs -k: the bucket-relative dir is the deployment's layout (no default)")
+    if key is not None and "{gen}" in key and gen is None:
+        raise UsageError("-k names `{gen}`: pass -g")
     by_pointer = not (listing_dir or gen is not None or key is not None)
     synced = synced_variants(store=store) if all_dates or by_pointer else []
     todo_dates = sorted({d for d, _ in synced}) if all_dates else list(dates)
@@ -970,9 +1173,8 @@ def index_blob(
         for variant in todo_vars:
             if listing_dir:
                 base = listing_dir
-            elif gen is not None or key is not None:
-                k = key or (f"listing/{date}" if gen == "legacy" else f"listing/{date}/index/{gen}")
-                base = f"gs://{bucket}/{k}"
+            elif key is not None:
+                base = f"gs://{bucket}/{key.format(date=date, gen=gen)}"
             else:
                 if (date, variant) not in have:
                     continue
@@ -1198,15 +1400,20 @@ def plan_sweep_manifest(date: str, l2_path: str | None, out: str, plan_path: str
     """Expand a curated PLAN (json) into an object-level deletion manifest.
 
     Deletes nothing; reads the pinned layer-2 parquet and writes
-    manifest/<bucket>.parquet + plan-summary.json under --out."""
+    manifest/<bucket>.parquet + plan-summary.json under --out. An item staged
+    as of another scan (plan.json `as_of`) keeps only the keys that scan's
+    layer-2 (`cw-l2/<scan>/<bucket>.parquet`) has with the same mtime."""
     import json
 
     from .sweep import build_manifest, load_plan
 
     plan = load_plan(plan_path)
-    if l2_path is None:
-        l2_path = f"/gcs/{data_bucket()}/cw-l2/{date}/{plan.bucket}.parquet"
-    summary = build_manifest(l2_path, plan, out)
+
+    def l2_for(scan: str) -> str:
+        return f"/gcs/{data_bucket()}/cw-l2/{scan}/{plan.bucket}.parquet"
+
+    # Items staged as of another scan are checked against that scan's layer-2.
+    summary = build_manifest(l2_path or l2_for(date), plan, out, date=date, l2_for=l2_for)
     err(f"manifest: {summary['objects']} objects, {summary['bytes']} bytes -> {summary['manifest']}")
     print(json.dumps(summary))
 
@@ -1271,23 +1478,39 @@ def sweep() -> None:
     """The GCS executor's phases — manifest / execute / undo (specs/staged-delete.md)."""
 
 
+@sweep.command("sync-progress")
+@option("-i", "--interval", default=0, type=int, help="Repeat until the job ends (≥30 seconds); default backfills once")
+@option("-o", "--sql-output", default=None, help="Export INSERT SQL instead of writing D1 (for local browser verification)")
+@argument("job_name")
+def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) -> None:
+    """Backfill/tail a recorded Batch run's task-log progress into D1."""
+    from .sweep_progress import sync_progress
+
+    sync_progress(job_name, interval, sql_output)
+
+
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
+@option("-j", "--workers", default=0, type=int, help="Concurrent listing shards (default 2 × CPUs, ≤ 64)")
 @option("-o", "--out", default=None, help="Output dir (default gs://$DATA_BUCKET/sweep/<date>-p<plan_id>)")
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
-def sweep_manifest(only_buckets: tuple[str, ...], date: str, out: str | None, plan_path: str, root: str | None) -> None:
-    """Object-level manifest of a staged plan (specs/staged-delete.md): stream
-    the pinned listing and write per-bucket parquets of the ELIGIBLE keys —
-    every key under a staged prefix — plus a category summary. The plan is
-    the whole intent: nothing carves out. Pure read + artifact write —
-    deletes nothing."""
+def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: str | None, plan_path: str, root: str | None) -> None:
+    """Object-level manifest of a staged plan (specs/staged-delete.md): scan
+    the pinned listing (every shard in parallel, row groups outside the staged
+    prefixes pruned — `sweep_manifest.py`) and write per-bucket parquets of the
+    ELIGIBLE keys — every key under a staged prefix — plus a category summary.
+    The plan is the whole intent: nothing carves out. An item staged as of
+    another scan (plan.json `as_of`) keeps only the keys that scan's listing
+    has with the same generation (else `created`); the rest are counted as
+    `skipped_after_as_of`. Pure read + artifact write — deletes nothing."""
+    import time
+
     import fsspec
-    import pyarrow as pa
-    import pyarrow.parquet as pq
 
     from .staged_plan import CATEGORIES, load_plan
+    from .sweep_manifest import build_manifests
 
     sp = load_plan(plan_path)
     buckets = [b for b in sp.buckets if not only_buckets or b in only_buckets]
@@ -1296,74 +1519,30 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, out: str | None, pl
     root = root or f"gs://{data_bucket()}"
     out = out or f"gs://{data_bucket()}/sweep/{date}-p{sp.plan_id}"
     err(f"sweep manifest: scan {date} from plan {sp.plan_id} ({sp.name!r}) → {out}"
-        + f" · {sum(len(sp.sweep[b]) for b in buckets)} staged prefix(es) on {', '.join(buckets)}")
+        + f" · {sum(len(sp.sweep.get(b, ())) for b in buckets)} staged prefix(es)"
+        + f" + {sum(len(sp.objects.get(b, ())) for b in buckets)} exact object(s) on {', '.join(buckets)}")
     # The staged prefixes are the run's bands: `sweep execute` lists one
     # segment below each and accounts per band, so every `deletion_bands` row
     # is one staged item.
     summary: dict = {
         "date": date, "plan_id": sp.plan_id, "plan_name": sp.name,
         "approved": [a for b in buckets for a in sp.bands(b)],
+        # exact items (specs/file-assign.md): each matches its one key only,
+        # and is its own band in the executor's accounting (absent when none,
+        # so a prefix-only plan's summary is what it always was)
+        **({"approved_objects": objs} if (objs := [a for b in buckets for a in sp.exact(b)]) else {}),
+        # items staged as of another scan: their objects must be unchanged
+        # in that scan too (else `skipped_after_as_of`)
+        "as_of": {f"gs://{b}/{rel}": scan for b in buckets for rel, scan in sorted(sp.as_of.get(b, {}).items()) if scan != date},
         "buckets": {},
     }
 
-    fs, rootpath = fsspec.core.url_to_fs(root)
-    schema = pa.schema([
-        ("name", pa.string()), ("size_bytes", pa.int64()),
-        ("storage_class_id", pa.int8()), ("created", pa.timestamp("us", tz="UTC")),
-        ("dir", pa.string()),
-    ])
-    for bucket in buckets:
-        shards = sorted(fs.glob(f"{rootpath}/listing/{date}/{bucket}/*.parquet"))
-        if not shards:
-            raise SystemExit(f"no listing shards for {bucket} under {root}/listing/{date}/")
-        cache: dict[str, str] = {}
-        cats = {c: [0, 0] for c in CATEGORIES}  # bytes, objects
-        bands = sp.sweep[bucket]
-        writer = None
-        out_path = f"{out}/manifest/{bucket}.parquet"
-        ofs, opath = fsspec.core.url_to_fs(out_path)
-        ofs.makedirs(opath.rsplit("/", 1)[0], exist_ok=True)
-        n = 0
-        for shard in shards:
-          # Open/close each shard deterministically: a gcsfs file left for the
-          # interpreter's exit to finalize calls into fsspec's event loop while
-          # it is tearing down and can hang the process forever (observed
-          # 2026-09-08: the manifest step's last line printed, then 0% CPU for
-          # an hour and `sweep execute` never started).
-          with fs.open(shard, "rb") as fh:
-            pf = pq.ParquetFile(fh)
-            for batch in pf.iter_batches(columns=["name", "size_bytes", "storage_class_id", "created"], batch_size=1 << 17):
-                df = batch.to_pandas()
-                n += len(df)
-                inb = df["name"].str.startswith(bands)
-                if not inb.all():
-                    cats["outside_bands"][0] += int(df["size_bytes"][~inb].sum())
-                    cats["outside_bands"][1] += int((~inb).sum())
-                    df = df[inb]
-                    if df.empty:
-                        continue
-                dirs = df["name"].str.rpartition("/")[0]
-                for dn in dirs.unique():
-                    if dn not in cache:
-                        cache[dn] = sp.classify(bucket, dn)
-                cat = dirs.map(lambda dn: cache[dn])
-                sizes = df["size_bytes"]
-                for c, g in sizes.groupby(cat):
-                    cats[c][0] += int(g.sum())
-                    cats[c][1] += len(g)
-                elig = cat == "eligible"
-                if elig.any():
-                    sel = df[elig].copy()
-                    sel["dir"] = dirs[elig]
-                    t = pa.Table.from_pandas(sel, preserve_index=False).select(schema.names).cast(schema)
-                    if writer is None:
-                        writer = pq.ParquetWriter(opath, schema, filesystem=ofs)
-                    writer.write_table(t)
-        if writer is not None:
-            writer.close()
-        summary["buckets"][bucket] = {"objects": n, "dirs": len(cache), **{c: {"bytes": b, "objects": o} for c, (b, o) in cats.items() if o}}
-        eb, eo = cats["eligible"]
-        err(f"  {bucket}: {n:,} keys, {len(cache):,} dirs — eligible {eb / 1e12:.2f} TB / {eo:,} objects")
+    t0 = time.monotonic()
+    summary["buckets"] = build_manifests(
+        root, date, {b: sp.sweep.get(b, ()) for b in buckets}, out, workers=workers or None, as_of=sp.as_of,
+        objects_by_bucket={b: sp.objects[b] for b in buckets if b in sp.objects},
+    )
+    err(f"manifest: {time.monotonic() - t0:.0f}s")
 
     tot = {c: [0, 0] for c in CATEGORIES}
     for b in summary["buckets"].values():
@@ -1382,15 +1561,38 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, out: str | None, pl
     _hard_exit()
 
 
+@sweep.command("reuse-manifest")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Exact reviewed bucket cut")
+@option("-d", "--date", required=True, help="Pinned scan date")
+@option("-o", "--out", required=True, help="New run directory; manifests must not exist")
+@option("-p", "--plan", "plan_path", required=True, help="The new dispatch's plan.json")
+@argument("source")
+def sweep_reuse_manifest(
+    only_buckets: tuple[str, ...],
+    date: str,
+    out: str,
+    plan_path: str,
+    source: str,
+) -> None:
+    """Reuse an identical completed DR's manifest; never delete anything."""
+    from .sweep_reuse import reuse_manifest
+
+    summary = reuse_manifest(source, plan_path, date, out, only_buckets)
+    err(f"reused reviewed manifest from {source} → {out} ({len(summary['buckets'])} buckets)")
+    print(json.dumps(summary, indent=2))
+    _hard_exit()
+
+
 @sweep.command("execute")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
 @option("-D", "--drift", type=Choice(["skip", "proceed"]), default="skip", help="Dirs that gained new keys since the scan: skip (default) or proceed (manifest keys only — new keys always survive)")
-@option("-w", "--workers", default=8, type=int, help="Concurrent directory re-lists")
-@option("-W", "--delete-workers", default=32, type=int, help="Concurrent delete batches (100 objects each), shared by every re-list; the bucket's ~1000 writes/s is the ceiling")
+@option("-m", "--max-root-objects", default=250_000, type=int, help="Split listing roots above this many manifest objects when safe")
+@option("-w", "--workers", default=0, type=int, help="Concurrent directory re-lists (default 2 × CPUs, ≤ 16)")
+@option("-W", "--delete-workers", default=32, type=int, help="Concurrent delete batches (100 objects each), shared by every re-list")
 @option("--for-real", is_flag=True, help="Actually delete (default: dry-run writes would-delete/)")
 @option("--no-record", is_flag=True, help="Skip the D1 deletion_runs/bands record (recorded by default)")
 @argument("plan_dir")
-def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
+def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: int, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
     """Execute (default: DRY-RUN) a `sweep manifest` plan: fresh re-list per
     eligible dir, generation-matched deletes of manifest∩live keys whose
     timeCreated is unchanged. The plan is the whole intent: nothing is
@@ -1407,12 +1609,14 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
 
     started = int(dt.datetime.now(dt.timezone.utc).timestamp())
     actor = os.environ.get("USER", "?")
+    progress_run_id = None
     if not no_record:
         # The run's D1 row goes in now (finished NULL) so /staged lists it while
         # the re-list runs — hours, on the big bands; completed at the end.
         from .sweep_exec import record_run_start
         try:
             run_id = record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets)
+            progress_run_id = run_id
             err(f"recorded deletion run {run_id} (in progress)")
         except Exception as e:  # recording must never block the run
             err(f"WARN: deletion-run start record failed: {e}")
@@ -1425,6 +1629,13 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     stop_file_watch(plan_dir, stop)
+
+    def progress(snapshot: dict) -> None:
+        from .sweep_progress import sample, write_samples
+
+        if progress_run_id is not None:
+            write_samples(progress_run_id, [sample(snapshot)])
+
     summary = execute_plan(
         plan_dir,
         for_real=for_real,
@@ -1432,7 +1643,9 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
         drift=drift,
         workers=workers,
         delete_workers=delete_workers,
+        max_root_objects=max_root_objects,
         stop=stop,
+        on_progress=progress if not no_record else None,
     )
     finished = int(dt.datetime.now(dt.timezone.utc).timestamp())
     total = sum(b.get("delete_bytes", 0) for b in summary["buckets"].values())
@@ -1465,6 +1678,230 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, delete_workers: int
     _hard_exit()
 
 
+@sweep.command("batch-manifest")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
+@argument("plan_dir")
+def sweep_batch_manifest(only_buckets: tuple[str, ...], plan_dir: str) -> None:
+    """Freeze a completed DR's delete decisions as generation-pinned CSVs."""
+    from .sweep_batch import build_batch_manifests
+
+    summary = build_batch_manifests(plan_dir, only_buckets=only_buckets)
+    print(json.dumps(summary, indent=2))
+
+
+@sweep.command("benchmark")
+@option("-b", "--bucket", required=True, help="One target bucket from the plan")
+@option("-j", "--workers", multiple=True, type=int, default=(8, 16, 32, 64), help="Listing concurrency to measure; repeatable")
+@option("-m", "--max-root-objects", default=250_000, type=int, help="Executor root-splitting threshold")
+@option("-n", "--roots", default=128, type=int, help="Representative listing roots to benchmark")
+@option("-o", "--out", default=None, help="Optional JSON result path or URL")
+@option("-r", "--max-results-per-root", default=50_000, type=int, help="Cap objects read from each root per trial")
+@argument("plan_dir")
+def sweep_benchmark(
+    bucket: str,
+    workers: tuple[int, ...],
+    max_root_objects: int,
+    roots: int,
+    out: str | None,
+    max_results_per_root: int,
+    plan_dir: str,
+) -> None:
+    """Read-only cloud benchmark of the executor's real listing roots."""
+    import fsspec
+
+    from .sweep_benchmark import benchmark_listings
+
+    result = benchmark_listings(
+        plan_dir,
+        bucket,
+        workers=workers,
+        roots=roots,
+        max_root_objects=max_root_objects,
+        max_results_per_root=max_results_per_root,
+    )
+    payload = json.dumps(result, indent=2)
+    if out:
+        with fsspec.open(out, "w") as fh:
+            fh.write(payload + "\n")
+        err(f"wrote {out}")
+    print(payload)
+
+
+@sweep.command("profile")
+@option("-b", "--bucket", required=True, help="One reviewed target bucket")
+@option("-g", "--groups", default=4, type=int, help="Spread manifest row groups to sample")
+@option("-j", "--workers", default=4, type=int, help="Executor listing workers")
+@option("-n", "--rows", default=10_000, type=int, help="Maximum manifest rows per sampled group")
+@option("-o", "--out", "artifact_out", default=None, help="Empty diagnostic artifact directory or gs:// URL (includes remote log I/O)")
+@option("-w", "--work-dir", required=True, help="Empty local directory for diagnostic artifacts and pstats")
+@argument("plan_dir")
+def sweep_profile(
+    bucket: str,
+    groups: int,
+    workers: int,
+    rows: int,
+    artifact_out: str | None,
+    work_dir: str,
+    plan_dir: str,
+) -> None:
+    """Bounded dry-only executor profile; no deletes, no D1 writes."""
+    from .sweep_profile import profile_executor
+
+    print(json.dumps(profile_executor(plan_dir, bucket, work_dir, groups, rows, workers, artifact_out=artifact_out), indent=2))
+    _hard_exit()
+
+
+@sweep.command("benchmark-manifest")
+@option("-b", "--bucket", required=True, help="One staged bucket")
+@option("-d", "--date", required=True, help="Pinned listing date")
+@option("-j", "--workers", default=4, type=int, help="Concurrent shards")
+@option("-n", "--shards", default=4, type=int, help="Largest input shards to sample")
+@option("-o", "--out", required=True, help="Empty diagnostic artifact directory or gs:// URL")
+@option("-p", "--plan", "plan_path", required=True, help="Reviewed plan.json")
+@option("-r", "--root", required=True, help="Listing store root")
+@option("-w", "--work-dir", required=True, help="Empty local directory for staged input shards")
+def sweep_benchmark_manifest(
+    bucket: str,
+    date: str,
+    workers: int,
+    shards: int,
+    out: str,
+    plan_path: str,
+    root: str,
+    work_dir: str,
+) -> None:
+    """Bounded manifest I/O benchmark, with exact row equality checks."""
+    from .sweep_manifest_benchmark import benchmark_manifest_io
+
+    result = benchmark_manifest_io(root, date, plan_path, bucket, out, work_dir, shards, workers)
+    print(json.dumps(result, indent=2))
+    _hard_exit()
+
+
+@sweep.command("benchmark-delete")
+@option("-j", "--workers", default=16, type=int, help="Scratch upload/delete workers (1..64)")
+@option("-m", "--method", "methods", multiple=True, type=Choice(["xml", "json", "gcloud", "reviewed", "reviewed-warm"]), help="Methods to compare; reviewed-warm benchmarks the journal pipeline at an 8k/s scratch ceiling")
+@option("-n", "--objects", default=10_000, type=int, help="New one-byte scratch objects per method (1..100000)")
+@option("-s", "--verified-soft-delete-days", default=None, type=int, help="Scratch-only retention already verified by an admin; for job identities lacking bucket metadata access")
+@argument("target")
+def sweep_benchmark_delete(workers: int, methods: tuple[str, ...], objects: int, verified_soft_delete_days: int | None, target: str) -> None:
+    """Create and delete bounded synthetic scratch data; never production data.
+
+    TARGET must be gs://<bucket>/sweep/smoke-tests/delete-<unique-id>, outside
+    `PROTECTED_BUCKETS` (comma-separated globs; required, '' for none).
+    It must be empty and the bucket must retain soft deletes for seven days.
+    """
+    from .sweep_delete_benchmark import benchmark_deletes
+
+    print(json.dumps(benchmark_deletes(target, objects, workers, methods or ("xml", "json", "gcloud"), verified_soft_delete_days=verified_soft_delete_days), indent=2))
+    _hard_exit()
+
+
+@sweep.command("execute-reviewed")
+@option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets (1..6), sharing the delete-worker pool")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Subset of reviewed DR buckets")
+@option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback pacing; guided retains the GCS 2x/20m envelope, adaptive probes 25%/healthy minute")
+@option("-e", "--backend", type=Choice(["xml", "json"]), default="xml", help="Generation-addressed delete backend")
+@option("-j", "--workers", default=16, type=int, help="Concurrent full batches (1..64)")
+@option("-o", "--out", required=True, help="New output run directory for progress and undo records")
+@option("-p", "--plan", "plan_path", required=True, help="Current staged plan.json; must exactly match DR intent")
+@option("-r", "--max-rate", default=8000, type=int, help="Per-bucket attempted-object/s ceiling, including retries; starts at ≤1000")
+@option("-w", "--work-dir", required=True, help="Empty local directory for pinned decision-log cache")
+@option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Subtract this drained run's reconciled settled identities; include its full resume chain")
+@option("--for-real", is_flag=True, help="Delete reviewed generations; default validates and writes a dry log")
+@option("--no-record", is_flag=True, help="Skip D1 run/band records (scratch only)")
+@argument("source")
+def sweep_execute_reviewed(
+    bucket_workers: int,
+    only_buckets: tuple[str, ...],
+    pacing: str,
+    backend: str,
+    workers: int,
+    out: str,
+    plan_path: str,
+    max_rate: int,
+    work_dir: str,
+    exclude_runs: tuple[str, ...],
+    for_real: bool,
+    no_record: bool,
+    source: str,
+) -> None:
+    """Stream a completed DR's exact generations; no fresh relist/drift audit.
+
+    Full pinned-log preflight, recoverable deletes, bounded batches, progress,
+    and per-object undo records. This is the normal real web-dispatch path.
+    """
+    import signal
+    import threading
+    from .sweep_exec import record_run, record_run_start, stop_file_watch
+    from .sweep_reviewed import execute_reviewed
+
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    stop_file_watch(out, stop)
+    started = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    actor = os.environ.get("USER", "?")
+
+    progress_run_id = None
+
+    def prepared(plan: dict) -> None:
+        nonlocal progress_run_id
+        if for_real and not no_record:
+            try:
+                progress_run_id = record_run_start(plan, out, actor, started, for_real, only_buckets)
+            except Exception as error:
+                err(f"WARN: deletion-run start record failed: {error}")
+
+    def progress(snapshot: dict) -> None:
+        from .sweep_progress import sample, write_samples
+
+        if progress_run_id is not None:
+            write_samples(progress_run_id, [sample(snapshot)])
+
+    summary = execute_reviewed(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing)
+    if for_real and not no_record:
+        windows = [int(entry["soft_delete_days"]) for entry in summary["buckets"].values()]
+        try:
+            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min(windows) if windows else 7)
+        except Exception as error:
+            err(f"WARN: deletion-run final record failed: {error}")
+    failed = any(entry.get("failed_dirs") or entry.get("error") for entry in summary["buckets"].values())
+    print(json.dumps({key: value for key, value in summary.items() if key != "_plan"}, indent=2))
+    if stop.is_set() or failed:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130 if stop.is_set() else 2)
+    _hard_exit()
+
+
+@sweep.command("batch-submit")
+@option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
+@option("--for-real", is_flag=True, help="Actually delete; default submits a managed dry run")
+@option("-p", "--project", default=None, help="Job project (default $GCP_PROJECT / ADC project)")
+@argument("plan_dir")
+def sweep_batch_submit(only_buckets: tuple[str, ...], for_real: bool, project: str | None, plan_dir: str) -> None:
+    """Submit generation-pinned Storage Batch Operations jobs, dry by default."""
+    from .sweep_batch import submit_batch_jobs
+
+    result = submit_batch_jobs(plan_dir, dry_run=not for_real, only_buckets=only_buckets, project=project)
+    print(json.dumps(result, indent=2))
+
+
+@sweep.command("wait-drained")
+@option("-t", "--timeout", default=7200, type=int, help="Maximum seconds to wait; timeout never starts deletion")
+@argument("run")
+def sweep_wait_drained(timeout: int, run: str) -> None:
+    """Handoff barrier: require STOP, wait for the old delete pool's final summary."""
+    from .sweep_job import wait_drained
+
+    summary = wait_drained(run, timeout)
+    counts = Counter()
+    for bucket in summary["buckets"].values():
+        counts.update(bucket.get("decisions", {}))
+    print(json.dumps({"drained": run, "decisions": dict(counts)}))
+    _hard_exit()
+
+
 @sweep.command("stop")
 @argument("plan_dir")
 def sweep_stop(plan_dir: str) -> None:
@@ -1478,19 +1915,65 @@ def sweep_stop(plan_dir: str) -> None:
     _hard_exit()
 
 
+@sweep.command("record")
+@argument("run_dir")
+def sweep_record(run_dir: str) -> None:
+    """Re-record a finished run's per-prefix bands from RUN_DIR's summary
+    (`deleted-summary.json`, else `would-delete-summary.json`) onto its
+    `deletion_runs` row (found by `log_dir`). For a run whose final record
+    failed after the deletes were done; idempotent."""
+    import fsspec
+    from .index_footer import _creds, _d1_query, _q
+    from .sweep_exec import record_bands
+
+    run_dir = run_dir.rstrip("/")
+    fs, _ = fsspec.core.url_to_fs(run_dir)
+    names = [n for n in ("deleted", "would-delete") if fs.exists(f"{run_dir}/{n}-summary.json")]
+    if not names:
+        raise SystemExit(f"no deleted-/would-delete-summary.json under {run_dir}")
+    with fs.open(f"{run_dir}/{names[0]}-summary.json") as fh:
+        summary = json.load(fh)
+    tok, acct = _creds()
+    runs = _d1_query(f"SELECT run_id FROM deletion_runs WHERE log_dir = {_q(run_dir)}", acct, tok)
+    if len(runs) != 1:
+        raise SystemExit(f"expected one deletion_runs row with log_dir {run_dir}, found {len(runs)}")
+    run_id = runs[0]["run_id"]
+    n = record_bands(run_id, summary)
+    err(f"recorded {n:,} bands for {run_id}")
+
+
+@sweep.command("recovery-check")
+@option("-l", "--limit", default=1, type=int, help="Soft-deleted samples per prefix (1–100; not a full inventory)")
+@argument("prefixes", nargs=-1, required=True)
+def sweep_recovery_check(limit: int, prefixes: tuple[str, ...]) -> None:
+    """Read-only, bounded inspection of recoverable generations and their expiry."""
+    from .sweep_recovery import recovery_sample
+    for prefix in prefixes:
+        print(json.dumps(recovery_sample(prefix, limit)))
+
+
 @sweep.command("undo")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
-@option("-n", "--dry-run", is_flag=True, help="List what would be restored; call nothing")
+@option("-B", "--bulk", is_flag=True, help="Restore whole logged dirs with `objects.bulkRestore`, each gated by an exactness precheck (dirs failing it, and anything left unrestored, go per-object)")
+@option("-n", "--dry-run", is_flag=True, help="List what would be restored; call nothing (with -B: run the precheck, report bulk vs per-object)")
+@option("-o", "--bulk-ops", default=4, type=int, help="Concurrent bulk-restore operations (-B)")
 @option("-p", "--prefix", "prefixes", multiple=True, help="Only objects under these prefixes (gs://bucket/dir/); default: everything the run deleted")
-@option("-w", "--workers", default=16, type=int, help="Concurrent restore calls")
+@option("-w", "--workers", default=16, type=int, help="Concurrent restore calls (and, with -B, precheck/verify listings)")
 @option("--no-record", is_flag=True, help="Skip the D1 undo_state / undone_objects update")
 @argument("run")
-def sweep_undo(only_buckets: tuple[str, ...], dry_run: bool, prefixes: tuple[str, ...], workers: int, no_record: bool, run: str) -> None:
+def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_ops: int, prefixes: tuple[str, ...], workers: int, no_record: bool, run: str) -> None:
     """Restore what a real run deleted, from its `deleted/` logs — the
     soft-delete restore of exactly the logged generations, valid until the
-    run's `undo_deadline` (finish + the buckets' 7-day window). RUN is the D1
+    run's recorded `undo_deadline`. Actual retention starts per object at
+    deletion, so that record is not an object-level guarantee. RUN is the D1
     run id (`<scan>-p<plan_id>/<utc stamp>`, as /staged lists it) or the run's
-    gs:// log dir. Re-runnable: names already live again are left alone."""
+    gs:// log dir. Re-runnable: names already live again are left alone.
+
+    `-B` restores per directory with GCS bulk restore, filtered to the run's
+    deletion window (the D1 row's started/finished times, else the log dir's
+    final `progress/<bucket>.json`); a dir goes bulk only when every object
+    soft-deleted under it in that window is in the run's log (see
+    `sweep_exec.undo_run`)."""
     from .index_footer import _creds, _d1_query, _q
     from .sweep_exec import record_undo, undo_run
 
@@ -1498,7 +1981,7 @@ def sweep_undo(only_buckets: tuple[str, ...], dry_run: bool, prefixes: tuple[str
     try:
         tok, acct = _creds()
         rows = _d1_query(
-            "SELECT run_id, mode, undo_deadline, undo_state, log_dir, deleted_objects FROM deletion_runs "
+            "SELECT run_id, mode, started_ts, finished_ts, undo_deadline, undo_state, log_dir, deleted_objects FROM deletion_runs "
             f"WHERE run_id = {_q(run)} OR log_dir = {_q(run)}", acct, tok,
         )
         row = rows[0] if rows else None
@@ -1515,7 +1998,11 @@ def sweep_undo(only_buckets: tuple[str, ...], dry_run: bool, prefixes: tuple[str
     if row is not None:
         err(f"undo {row['run_id']}: {row['deleted_objects']:,} deleted objects, undo_state={row['undo_state']}, "
             f"window until {dt.datetime.fromtimestamp(deadline, dt.timezone.utc):%Y-%m-%d %H:%MZ}" if deadline else f"undo {row['run_id']}")
-    summary = undo_run(log_dir, only_buckets=only_buckets, prefixes=prefixes, dry_run=dry_run, workers=workers, deadline=deadline)
+    window = (int(row["started_ts"]), int(row["finished_ts"])) if row is not None and row.get("started_ts") and row.get("finished_ts") else None
+    summary = undo_run(
+        log_dir, only_buckets=only_buckets, prefixes=prefixes, dry_run=dry_run, workers=workers, deadline=deadline,
+        bulk=bulk, window=window, bulk_ops=bulk_ops,
+    )
     if row is not None and not no_record and not dry_run:
         try:
             err(f"recorded undo_state={record_undo(row['run_id'], summary, int(row['deleted_objects'] or 0))}")
@@ -1526,7 +2013,95 @@ def sweep_undo(only_buckets: tuple[str, ...], dry_run: bool, prefixes: tuple[str
 
 @main.group()
 def access() -> None:
-    """GCS usage-log (access-log) ingest — layer-1a/2a parquet + watermarks."""
+    """Access-log ingest and provider diagnostics."""
+
+
+@access.command("r2-query")
+@option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
+@option("-b", "--bucket", required=True, help="Source R2 bucket")
+@option("-f", "--from", "start", required=True, help="Inclusive query start, ISO timestamp with timezone")
+@option("-l", "--limit", default=100, type=int, help="Bounded diagnostic sample size (1–2000)")
+@option("-o", "--output", type=Path, help="Save private provider response to this local file")
+@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+def access_r2_query(
+    account: str,
+    bucket: str,
+    start: str,
+    limit: int,
+    output: Path | None,
+    end: str,
+) -> None:
+    """Query a bounded sample; NOT a complete daily export or watermark.
+
+    Requires $CF_OBSERVABILITY_TOKEN (or $CLOUDFLARE_API_TOKEN) with Workers
+    Observability Write permission.
+    Responses may contain private object keys, IPs and actor identities.
+    """
+    from .r2_access import query_body, query_events
+
+    token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        raise UsageError("set CF_OBSERVABILITY_TOKEN (Workers Observability Write)")
+    try:
+        response = query_events(account, token, query_body(bucket, start, end, limit=limit))
+    except (ValueError, RuntimeError) as exc:
+        raise UsageError(str(exc)) from exc
+    payload = json.dumps(response, indent=2) + "\n"
+    if output is None:
+        print(payload, end="")
+    else:
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
+        print(f"saved bounded provider response to {output}; no ingest watermark advanced", file=sys.stderr)
+
+
+@access.command("r2-export")
+@option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
+@option("-b", "--bucket", required=True, help="Source R2 bucket")
+@option("-f", "--from", "start", required=True, help="Query start, ISO timestamp with timezone")
+@option("-l", "--limit", default=2000, type=int, help="Events per cursor page (1–2000)")
+@option("-n", "--max-pages", default=20, type=int, help="Refuse export if this page cap is reached")
+@option("-o", "--output", type=Path, required=True, help="New private archive file; existing files refused")
+@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+def access_r2_export(
+    account: str,
+    bucket: str,
+    start: str,
+    limit: int,
+    max_pages: int,
+    output: Path,
+    end: str,
+) -> None:
+    """Drain a bounded window into a private archive; print only a summary.
+
+    Refuses sampled or incomplete queries. Query exhaustion does not prove
+    complete provider delivery. No ingest watermark is advanced.
+    """
+    from .r2_access import export_window, query_body, query_events
+
+    token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        raise UsageError("set CF_OBSERVABILITY_TOKEN (Workers Observability Write)")
+    if output.exists():
+        raise UsageError("output already exists; use a new archive path")
+    try:
+        archive = export_window(
+            query_body(bucket, start, end, limit=limit),
+            fetch=lambda body: query_events(account, token, body),
+            max_pages=max_pages,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise UsageError(str(exc)) from exc
+    archive["account"] = account
+    # Exclusive create prevents overwriting a concurrent collector's output.
+    # A later scheduled collector must publish this before its own watermark.
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(archive, stream, indent=2)
+        stream.write("\n")
+    print(json.dumps(archive["summary"], sort_keys=True))
 
 
 @access.command("ingest")
@@ -1675,13 +2250,15 @@ def job_logs(asc: bool, grep: str | None, key_markers: bool, limit: int, name: s
     if key_markers:
         grep = r"\[rss\]|stage |WARN|SNAPSHOT-JOB-DONE|Deployment complete|reusing|objects listed|Error|Killed|Traceback"
     for e in log_entries(task_log_filter(j["uid"], grep), limit=limit, asc=asc):
-        print(f"{e.get('timestamp', '')[:19]} {e.get('textPayload', '').rstrip()}")
+        message = e.get("textPayload") or e.get("jsonPayload", {}).get("message", "")
+        print(f"{e.get('timestamp', '')[:19]} {message.rstrip()}")
 
 
 @job.command("watch")
 @option("-i", "--interval", default=90, help="Poll interval (seconds)")
+@option("-L", "--no-logs", is_flag=True, help="Watch Batch state only (does not require Logging viewer permissions)")
 @argument("name", required=False)
-def job_watch(interval: int, name: str | None) -> None:
+def job_watch(interval: int, no_logs: bool, name: str | None) -> None:
     """Poll a Batch job to terminal state, then print its key log markers."""
     import time
     from datetime import datetime, timezone
@@ -1694,18 +2271,19 @@ def job_watch(interval: int, name: str | None) -> None:
     while True:
         state = _resolve_job(short)["status"].get("state", "?")
         err(f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} {state}")
-        if state in ("SUCCEEDED", "FAILED", "DELETION_IN_PROGRESS"):
+        if state in ("SUCCEEDED", "FAILED", "CANCELLED", "DELETION_IN_PROGRESS"):
             break
         time.sleep(interval)
-    ctx = Context(job_logs)
-    ctx.invoke(job_logs, asc=True, grep=None, key_markers=True, limit=60, name=short)
+    if not no_logs:
+        ctx = Context(job_logs)
+        ctx.invoke(job_logs, asc=True, grep=None, key_markers=True, limit=60, name=short)
     if state != "SUCCEEDED":
         raise SystemExit(1)
 
 
 @job.command("submit-listing")
 @option("-b", "--bucket", "buckets", multiple=True, help="Bucket(s) to list [default: $FLEET_BUCKETS, space-separated]")
-@option("-d", "--date", "date", required=True, help="Listing date — output goes to listing/<date>/<bucket>/")
+@option("-d", "--date", "date", required=True, callback=scan_id_option, help="Scan id (YYYY-MM-DD or YYYY-MM-DDTHHMM) — output goes to listing/<id>/<bucket>/")
 @option("-L", "--legacy-weights", "legacy", multiple=True, help="`<bucket>=<subdir>`: also take that bucket's chunk weights from an older listing layout under the data bucket (`<subdir>/*`), after its DIY listings; repeatable")
 @option("-m", "--machine", default="n2-standard-32", help="Machine type per task")
 @option("-P", "--procs", default=24, help="bulk-list worker processes per task")
@@ -1746,6 +2324,58 @@ def job_submit_listing(
         states = wait_jobs(jobs, log=err)
         if bad := {n: s for n, s in states.items() if s != "SUCCEEDED"}:
             raise SystemExit(f"listing job(s) failed: {bad}")
+
+
+@job.command("submit-reviewed")
+@option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets, sharing the XML-worker pool")
+@option("-a", "--after-run", default=None, help="Wait for this stopped executor to drain before starting XML")
+@option("-b", "--bucket", "buckets", multiple=True, help="Subset of reviewed buckets")
+@option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback policy (adaptive is the faster opt-in probe)")
+@option("-i", "--image", required=True, help="Executor image pinned by @sha256 digest")
+@option("-j", "--workers", default=32, type=int, help="Concurrent XML batches")
+@option("-n", "--name", required=True, help="New Batch job ID")
+@option("-o", "--out", required=True, help="New run output directory")
+@option("-p", "--plan", required=True, help="Snapshot of current staged plan")
+@option("-r", "--max-rate", default=8000, type=int, help="Per-bucket object/s ceiling")
+@option("-t", "--template", required=True, type=Path, help="Described prior Batch job JSON; reuse deployment settings")
+@option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Exclude reconciled settled identities from a drained run")
+@option("--for-real", is_flag=True, help="Actually delete reviewed generations (default validates only)")
+@option("--submit", is_flag=True, help="Submit to Batch; default prints the spec for review")
+@argument("source")
+def job_submit_reviewed(
+    bucket_workers: int,
+    after_run: str | None,
+    buckets: tuple[str, ...],
+    pacing: str,
+    image: str,
+    workers: int,
+    name: str,
+    out: str,
+    plan: str,
+    max_rate: int,
+    template: Path,
+    exclude_runs: tuple[str, ...],
+    for_real: bool,
+    submit: bool,
+    source: str,
+) -> None:
+    """Explicit XML dispatch; callers must stop any overlapping old executor."""
+    from .batch import submit_job
+    from .sweep_job import reviewed_job_spec
+
+    spec = reviewed_job_spec(json.loads(template.read_text()), source, plan, out, image, workers, max_rate, for_real, buckets, after_run, bucket_workers=bucket_workers, exclude_runs=exclude_runs, pacing=pacing)
+    if not re.fullmatch(r"gcs-sweep-(real|dry)-\d{8}-\d{6}z", name):
+        raise UsageError("job name must use the site's gcs-sweep-(real|dry)-YYYYMMDD-HHMMSSz format")
+    expected = f"gs://{spec['taskGroups'][0]['taskSpec']['environment']['variables']['DATA_BUCKET']}/sweep/runs/{name}"
+    if out != expected:
+        raise UsageError(f"output must match the job's canonical run directory: {expected}")
+    if ("-real-" in name) != for_real:
+        raise UsageError("job name mode must match --for-real")
+    if submit:
+        region = spec["allocationPolicy"]["location"]["allowedLocations"][0].removeprefix("regions/")
+        print(submit_job(spec, name, region))
+    else:
+        print(json.dumps(spec, indent=2))
 
 
 @job.command("metrics")
@@ -2233,11 +2863,13 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
 @main.command("publish-r2")
 @option("-a", "--all-gens", is_flag=True, help="Copy every `index/<gen>/` under the scan, pointed or not (no D1 read); default: only the generations a D1 `index_schema` row names")
 @option("-b", "--bucket", "src_bucket", default=None, help="Source GCS scan store (default $DATA_BUCKET)")
-@option("-l", "--layer2", default=None, help="Layer-2 dir template, `{scan}` = the scan id (default $LAYER2_PREFIX, else listing/{scan}/index/; cw: cw-l2/{scan}/)")
+@option("-l", "--layer2", default=None, help="Layer-2 dir template, `{scan}` = the scan id (default $LAYER2_PREFIX; one of the two is required)")
 @option("-L", "--no-listings", is_flag=True, help="Leave the canonical per-bucket listings (`<layer-2 dir>/<bucket>.parquet`) in GCS only; copy the tiers + snapshot JSONs")
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")
 @option("-p", "--prefix", "prefixes", multiple=True, help="Key prefix to publish (repeatable; default: the scan's served subset — snapshots/<subdir>/<scan>/ + the layer-2 dir)")
+@option("-R", "--require-key", "required", multiple=True, help="Required source key (repeatable): refuse before copying if absent, and verify its R2 size/md5 before success")
 @option("-s", "--subdir", default=None, help="Snapshots subdir of this store (default $SNAPSHOTS_SUBDIR, else none)")
+@option("-S", "--small", is_flag=True, help="Only the small files the site reads beside the path store (its `SERVED_R2`): the snapshot JSONs and each generation's extras sidecars (`attr.tsv{,.idx.json}`); no tier, listing or rollup")
 @option("-w", "--workers", default=8, type=int, help="Concurrent HEADs/uploads (default 8)")
 @argument("scan")
 def publish_r2(
@@ -2247,7 +2879,9 @@ def publish_r2(
     no_listings: bool,
     dry_run: bool,
     prefixes: tuple[str, ...],
+    required: tuple[str, ...],
     subdir: str | None,
+    small: bool,
     workers: int,
     scan: str,
 ) -> None:
@@ -2264,9 +2898,15 @@ def publish_r2(
     so a reindex's superseded `index/<gen>/` never reaches R2; that reads D1
     (`D1_DB_ID` + `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`). `-a`
     copies every generation without it.
+
+    `-S`: a deployment whose path store is served from R2 already (the
+    interval store) publishes just the small files its pages read beside it:
+    `publish-r2 -S -a <scan>` before `index-sync` lists the scan, and
+    `publish-r2 -a -p snapshots/rules.json <scan>` for the registry.
     """
     from . import publish as pub
 
+    l2 = resolve_layer2(layer2, "-l/--layer2")
     pointed = None
     if not all_gens:
         from .index_footer import pointers
@@ -2277,9 +2917,57 @@ def publish_r2(
         src_bucket=src_bucket or data_bucket(),
         prefixes=list(prefixes) or None,
         subdir=pub.SNAPSHOTS_SUBDIR if subdir is None else subdir,
-        layer2=layer2 or pub.LAYER2_PREFIX,
+        layer2=l2,
         dry_run=dry_run,
         workers=workers,
         listings=not no_listings,
         pointed=pointed,
+        small=small,
+        required=required,
     )
+
+
+from .static_append import cli as _static_append  # noqa: E402
+from .static_catalog import cli as _static_catalog  # noqa: E402
+from .static_drill import cli as _static_drill  # noqa: E402
+from .static_runner import add_cmd as _static_runs_add, merge_cmd as _static_runs_merge  # noqa: E402
+from .static_merge import carry_cmd as _static_runs_carry  # noqa: E402
+from .static_names import cli as _static_names  # noqa: E402
+from .static_roots import cli as _static_roots  # noqa: E402
+from .static_anchors import cli as _static_anchors  # noqa: E402
+
+_static_names.add_command(_static_catalog)
+_static_append.add_command(_static_drill)
+_static_append.add_command(_static_runs_add)
+_static_append.add_command(_static_runs_merge)
+_static_append.add_command(_static_runs_carry)
+_static_names.add_command(_static_append)
+_static_names.add_command(_static_roots)
+_static_names.add_command(_static_anchors)
+main.add_command(_static_names)
+
+from .interval_store import cli as _interval_store  # noqa: E402
+from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
+
+_interval_store.add_command(_interval_append)
+_interval_store.add_command(_interval_merge)
+_interval_store.add_command(_interval_runs)
+main.add_command(_interval_store)
+
+from .scan_runs import cli as _scan_runs  # noqa: E402
+
+main.add_command(_scan_runs)
+from .scan_cost import cost_cmd as _scan_cost  # noqa: E402
+
+_scan_runs.add_command(_scan_cost)
+from .scan_tasks import task_cmd as _scan_task  # noqa: E402
+
+_scan_runs.add_command(_scan_task)
+
+from .scan_started import stamp_started as _stamp_started  # noqa: E402
+
+main.add_command(_stamp_started)
+
+from .job_token import cli as _job_token  # noqa: E402
+
+main.add_command(_job_token)

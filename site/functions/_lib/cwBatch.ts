@@ -4,6 +4,7 @@
 // GCP auth lives in `gcp.ts`. A plan-sweep run deletes from one bucket, so it
 // always runs in the default Batch region.
 import type { BatchConfig } from "./batchConfig.js"
+import { labelBatchSpec } from "./costLabels.js"
 import { batchJobsUrl } from "./gcp.js"
 
 export const secretRef = (cfg: BatchConfig, name: string): string =>
@@ -13,10 +14,10 @@ export const secretRef = (cfg: BatchConfig, name: string): string =>
  * as `jobSa`, the data bucket FUSE-mounted at /gcs/<bucket>, and the S3 creds
  * from Secret Manager. `bucket` is the bucket the executor acts on
  * (`SWEEP_BUCKET`); `env` merges in per-job variables, `secrets` per-job Secret
- * Manager refs. */
-export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, bucket: string, env: Record<string, string> = {}, secrets: Record<string, string> = {}): unknown {
+ * Manager refs; `component` the jobs' cost-attribution label (with `cfg.labels`). */
+export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, bucket: string, env: Record<string, string> = {}, secrets: Record<string, string> = {}, component = "sweep"): unknown {
   const DATA_BUCKET = cfg.dataBucket
-  return {
+  return labelBatchSpec({
     taskGroups: [{
       taskCount: 1,
       taskSpec: {
@@ -58,7 +59,7 @@ export function sweepBatchSpec(cfg: BatchConfig, jobSa: string, script: string, 
       location: { allowedLocations: [`regions/${cfg.region}`] },
     },
     logsPolicy: { destination: "CLOUD_LOGGING" },
-  }
+  }, cfg.labels, component)
 }
 
 /** Submit a Batch job; returns { ok, status, text } (caller maps errors). */

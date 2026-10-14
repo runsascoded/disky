@@ -1,0 +1,63 @@
+// /scans and /scans/<run> (ScansPage.tsx): the `staged-page` frame and its
+// `table.runs`, plus the scan-run charts.
+.scans-page {
+  h3 { margin: 22px 0 6px; font-size: 15px; }
+  .sr-crumbs { margin: 10px 0 0; font-size: 13px; }
+  .sr-status {
+    display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--panel); color: var(--ink-2);
+    &.succeeded { color: var(--grew); background: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
+    &.failed { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
+    &.running { color: var(--s1); background: color-mix(in srgb, var(--s1) 10%, var(--surface)); }
+    &.warn { color: color-mix(in srgb, var(--s4) 75%, var(--ink)); background: color-mix(in srgb, var(--s4) 14%, var(--surface)); }
+  }
+  .grew { color: var(--grew); }
+  .shrank { color: var(--shrank); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .nb { white-space: nowrap; }
+  .run-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0 0; font-size: 13px; select { font: inherit; } }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline;
+    &.failed { background: color-mix(in srgb, var(--danger) 70%, transparent); } }
+  .sr-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+  .sr-chart { margin-top: 8px; }
+  .sr-svgwrap { position: relative; }
+  .sr-svgtip { position: absolute; transform: translate(-50%, calc(-100% - 12px)); pointer-events: none; white-space: nowrap; z-index: var(--z-float); }
+  svg { display: block; text { fill: var(--ink-3); font-size: 11.5px; } .grid { stroke: var(--line); } .axis { stroke: var(--ink-3); } }
+  .sr-strip, .sr-gantt { max-width: 100%; }
+  .sr-col { cursor: pointer;
+    .sr-col-hit { fill: transparent; }
+    .sr-col-total { fill: var(--other); }
+    &.failed .sr-col-total { fill: color-mix(in srgb, var(--danger) 70%, transparent); }
+    &:hover .sr-col-hit { fill: color-mix(in srgb, var(--ink) 6%, transparent); }
+  }
+  .sr-gantt { .lbl { fill: var(--ink-2); font-size: 13px; } .dur { fill: var(--ink-3); font-size: 12px; } .sr-row-hit { fill: transparent; }
+    g:hover .sr-row-hit { fill: color-mix(in srgb, var(--ink) 5%, transparent); }
+    rect.failed { stroke: var(--danger); stroke-width: 2; }
+    .active rect:not(.sr-row-hit) { fill-opacity: 0.65; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .active .lbl, .active .dur { fill: var(--ink); }
+    .failed-label { fill: var(--danger); } }
+  .sr-bar { vertical-align: middle; .sr-bar-bg { fill: var(--other); } }
+  .sr-runs .links, .runs .links { color: var(--ink-3); }
+  .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;
+    &.recovered { border-color: var(--grew); background: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
+    code { white-space: pre-wrap; word-break: break-word; } }
+  .sr-recovery { margin: 8px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; font-size: 13px; p { margin: 6px 0 0; } }
+  .sr-facts { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 10px 0 0; font-size: 13px;
+    div { display: flex; gap: 6px; min-width: 0; } dt { color: var(--ink-3); } dd { margin: 0; min-width: 0; overflow-wrap: anywhere; } }
+  .sr-outputs {
+    tr.child td:first-child { padding-left: 26px; color: var(--ink-2); }
+    .fold { background: none; border: 0; color: var(--ink-2); cursor: pointer; padding: 0 4px 0 0; font: inherit; }
+    .fold-pad { display: inline-block; width: 14px; }
+  }
+  @media (max-width: 640px) { h1 { font-size: 19px; } }
+}
+.sr-tip { border-collapse: collapse; td { padding: 1px 6px 1px 0; } .num { text-align: right; } }
+.scans-page {
+  .sr-kind { font-size: 12px; color: var(--ink-3); }
+  .sr-gantt { .lbl { font-size: 12.5px; } .dur, .tick { font-size: 11.5px; } .tail .lbl { fill: var(--ink-3); font-style: italic; } }
+  .sr-strip .tick { font-size: 11.5px; }
+  @media (max-width: 900px) { .hide-md { display: none; } }
+  @media (max-width: 640px) {
+    .hide-sm { display: none; }
+    table.runs { font-size: 13px; }
+  }
+}

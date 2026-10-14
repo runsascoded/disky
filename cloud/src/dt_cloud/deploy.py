@@ -35,6 +35,18 @@ def require(new: str, *old: str, what: str) -> str:
     return v
 
 
+def layer2_prefix(explicit: str | None = None, flag: str = "-l") -> str:
+    """The deployment's layer-2 dir template (`{scan}` = the scan id): `explicit`
+    (the command's `flag`), else `$LAYER2_PREFIX`. No default: each deployment
+    keeps its layer 2 under its own prefix."""
+    v = (explicit or env("LAYER2_PREFIX") or "").strip()
+    if not v:
+        raise SystemExit(f"no layer-2 dir: pass {flag} or export LAYER2_PREFIX (the deployment's layer-2 dir template, `{{scan}}` = the scan id)")
+    if "{scan}" not in v:
+        raise SystemExit(f"layer-2 dir {v!r} has no `{{scan}}`: it is a template, one dir per scan")
+    return v
+
+
 def words(new: str, *old: str, what: str) -> list[str]:
     """A required space-separated list (`$ACCESS_BUCKETS="a b c"`)."""
     return require(new, *old, what=what).split()

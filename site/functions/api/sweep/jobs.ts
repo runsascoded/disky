@@ -14,10 +14,14 @@
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
 import type { ExecEnv } from '../../_lib/dispatch.js'
 import { type BatchConfig, batchConfig, notConfigured } from '../../_lib/batchConfig.js'
-import { gcpToken } from '../../_lib/gcp.js'
+import { batchLogsUrl, gcpToken } from '../../_lib/gcp.js'
 import { runDir } from '../../_lib/sweepDispatch.js'
+import { settleOpenPlan } from '../../_lib/plans.js'
 import { announceFinished } from '../../_lib/stagedSlack.js'
 import { isSweepJob, isUndoJob, jobIdOf, listSweepJobs, reflectSweepRuns, type SweepBatchJob } from '../../_lib/sweepReflect.js'
+import { S3Store } from '@rdub/file-tree/stores/s3'
+import { storeCreds, storeReady, storeTarget } from '../../_lib/index.js'
+import { intentionalStop } from '../../_lib/sweepStop.js'
 
 type Env = AuthEnv & ExecEnv
 
@@ -46,6 +50,7 @@ export interface SweepJob {
   plan: string
   last_event: string | null
   logs: string
+  stop_requested?: boolean
 }
 
 /** One listed Batch job as the console reads it (pure). */
@@ -75,7 +80,7 @@ export function sweepJobView(cfg: Pick<BatchConfig, 'project' | 'dataBucket' | '
     bucket_region: buckets.length === 1 ? cfg.bucketRegions[buckets[0]] ?? null : null,
     plan: runDir(cfg, job_id),
     last_event: last?.description ?? null,
-    logs: `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(`labels.job_uid="${j.uid}"`)}?project=${cfg.project}`,
+    logs: batchLogsUrl(cfg.project, j.uid, j.createTime),
   }
 }
 
@@ -94,6 +99,7 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
   const db = ctx.env.DB
   if (db) {
     const finished = await reflectSweepRuns(cfg, db, jobs)
+    await settleOpenPlan(db)
     if (finished.length) {
       const p = announceFinished(ctx.env, db, finished, new URL(ctx.request.url).origin)
       if (ctx.waitUntil) ctx.waitUntil(p)
@@ -102,5 +108,11 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
   }
 
   const out = jobs.filter(j => isSweepJob(j) || isUndoJob(j)).slice(0, 30).map(j => sweepJobView(cfg, j))
+  if (storeReady(ctx.env)) {
+    const store = S3Store({ ...storeTarget(ctx.env), ...storeCreds(ctx.env), prefixes: ['sweep/runs/'] })
+    await Promise.all(out.map(async j => {
+      if (j.op === 'sweep' && await intentionalStop(j, store.get)) j.stop_requested = true
+    }))
+  }
   return json({ jobs: out, configured: true }, 200, { 'cache-control': 'private, max-age=10' })
 }

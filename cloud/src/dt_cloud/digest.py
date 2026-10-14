@@ -38,6 +38,8 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from .scan_id import META_PATH, min_slug, scan_slug, scan_time, start_key, times_needed
+
 TIB = 1024**4
 GIB = 1024**3
 # Weekly-halving arrow buckets: |dpct| >= THRESH[i] -> deg (i+1)*10 (capped 80).
@@ -47,7 +49,6 @@ HOURS_PER_WEEK = 168.0
 # bump when the av_deg glyphs change: Slack caches avatars per-URL at post
 # time, so a stable URL serves MIXED generations after a redesign.
 AVATAR_REV = 4
-SCAN_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})(\d{2}))?$")
 
 
 # ---- config -------------------------------------------------------------------
@@ -67,10 +68,14 @@ class Quota:
 @dataclass(frozen=True)
 class Bucket:
     """Per-bucket display config: the reply tail's short ``label`` (default:
-    the bucket name) and its ``quota`` (None: the tail shows raw TiB)."""
+    the bucket name) and its ``quota`` (None: the tail shows raw TiB). Buckets
+    naming the same ``zone`` share one quota (a CoreWeave zone quota covers
+    every bucket in the zone): they must carry equal quotas, and the tail
+    renders them as one clause against it."""
 
     label: str | None = None
     quota: Quota | None = None
+    zone: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,20 +207,32 @@ def _keys(where: str, d: Any, allowed: set[str], required: set[str] = frozenset(
 
 
 def _bucket(name: str, b: dict | None) -> Bucket:
-    b = _keys(f"buckets.{name}", b or {}, {"label", "quota"})
-    if b.get("label") is not None and not isinstance(b["label"], str):
-        raise ValueError(f"digest config buckets.{name}.label: expected a string, got {b['label']!r}")
+    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone"})
+    for k in ("label", "zone"):
+        if b.get(k) is not None and not isinstance(b[k], str):
+            raise ValueError(f"digest config buckets.{name}.{k}: expected a string, got {b[k]!r}")
     q = b.get("quota")
     if q is None:
-        return Bucket(b.get("label"))
+        return Bucket(b.get("label"), zone=b.get("zone"))
     q = _keys(f"buckets.{name}.quota", q, {"bytes", "name", "short"}, {"bytes", "name"})
-    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])))
+    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])), b.get("zone"))
+
+
+def _check_zones(buckets: dict[str, Bucket]) -> None:
+    """Buckets sharing a ``zone`` share its quota, so they must state the same one."""
+    seen: dict[str, tuple[str, Quota | None]] = {}
+    for name, b in buckets.items():
+        if b.zone is None:
+            continue
+        first, q = seen.setdefault(b.zone, (name, b.quota))
+        if q != b.quota:
+            raise ValueError(f"digest config buckets.{name}: zone {b.zone!r} quota differs from buckets.{first}'s")
 
 
 def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     """A config from a parsed YAML/JSON mapping, overlaid on ``base`` (default:
     the preset its ``template`` names). ``buckets`` map names to ``{label,
-    quota: {bytes, name, short}}`` (``bytes`` may be `910 TiB`), ``prices``
+    quota: {bytes, name, short}, zone}`` (``bytes`` may be `910 TiB`), ``prices``
     storage-class ids to $/GiB-month. Validated: unknown keys (at any level),
     a wrong-typed value, an unknown template or an out-of-range ``reply_hour``
     raise ``ValueError``."""
@@ -225,13 +242,16 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         if k in d and (not isinstance(d[k], types) or (isinstance(d[k], bool) and bool not in types)):
             want = " or ".join("null" if t is type(None) else t.__name__ for t in types)
             raise ValueError(f"digest config {k}: expected {want}, got {d[k]!r}")
-    if d.get("template", "gcs") not in TEMPLATES:
+    if base is None and "template" not in d:
+        raise ValueError(f"digest config: no template (one of {TEMPLATES}): a deployment names its own")
+    if "template" in d and d["template"] not in TEMPLATES:
         raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
-    base = base or PRESETS[d.get("template", "gcs")]
+    base = base or PRESETS[d["template"]]
     if "buckets" in d:
         d["buckets"] = {str(name): _bucket(name, b) for name, b in _mapping("buckets", d["buckets"] or {}).items()}
+        _check_zones(d["buckets"])
     if "prices" in d:
         prices = _mapping("prices", d["prices"] or {})
         if bad := {k: v for k, v in prices.items() if not isinstance(v, (int, float)) or isinstance(v, bool)}:
@@ -283,24 +303,28 @@ def _pct_val(dtb: float, tb: float) -> float:
 
 
 def _md(date: str) -> str:
-    d = dt.date.fromisoformat(date)
+    d = dt.date.fromisoformat(date[:10])  # a scan id's day (`YYYY-MM-DD[THHMM]`)
     return f"{d.month}/{d.day}"
 
 
-def scan_ts(scan: str) -> dt.datetime:
-    """A scan id's UTC instant; date-only ids read as midnight (site/src/scan.ts)."""
-    m = SCAN_RE.match(scan)
-    if not m:
-        raise ValueError(f"not a scan id: {scan!r}")
-    y, mo, d, hh, mm = m.groups()
-    return dt.datetime(int(y), int(mo), int(d), int(hh or 0), int(mm or 0), tzinfo=dt.timezone.utc)
+# A scan id's UTC instant: `dt_cloud.scan_id`'s, the one definition.
+scan_ts = scan_time
 
 
-def _dlink(scan: str) -> str:
-    """The site's compact `?d=` token for a scan (`260915-0001`; date-only ids
-    stay `260915`)."""
-    y, mo, d, hh, mm = SCAN_RE.match(scan).groups()
-    return f"{y[2:]}{mo}{d}" + (f"-{hh}{mm}" if hh else "")
+def _dlink(scan: str, slug: str | None = None) -> str:
+    """A scan's `?d=` slug in a link: its canonical one (`slug`, from `scan_slugs`), else its minute (`scan_slug`)."""
+    return slug or scan_slug(scan)
+
+
+def scan_slugs(dated_meta: list[tuple[str, dict]], now: dt.datetime | None = None) -> dict[str, str]:
+    """Each scan's canonical `?d=` slug among ``dated_meta``'s scans (`min_slug`: ``261008``, ``26100904``,
+    ``2610091236``), as the site writes it: a date-only scan sharing its day keyed by its ``meta.started``
+    (`start_key`; only those, `times_needed`, as the site reads them). ``dated_meta`` must hold every scan of each
+    day it touches (`load_window`'s lead is a whole day). ``now``: default the current time."""
+    scans = [s for s, _ in dated_meta]
+    meta = dict(dated_meta)
+    times = {s: k for s in times_needed(scans) if (k := start_key(s, meta[s].get("started")))}
+    return {s: min_slug(s, scans, times, now) for s in scans}
 
 
 def _span(a: dt.datetime, b: dt.datetime) -> str:
@@ -413,7 +437,7 @@ def list_scans(root: str) -> list[str]:
     return sorted(
         m.group(1)
         for p in fs.glob(f"{root.split('://', 1)[-1]}/*/meta.json")
-        if (m := re.search(r"/(\d{4}-\d{2}-\d{2}(?:T\d{4})?)/meta\.json$", p))
+        if (m := META_PATH.search(p))
     )
 
 

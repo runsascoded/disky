@@ -6,7 +6,7 @@ export interface TreeNode {
   k?: 'file' | 'dir'
   b: number
   o: number
-  d?: number                   // bytes-weighted mean created date, epoch days
+  d?: number                   // byte-weighted listing date, epoch days (GCS: created; S3/R2/local: modified)
   ag?: number[]                // bytes by age at the scan date: <1d, <1w, <1mo, <3mo, <1y, <3y, older (specs/row-age-strata.md)
   a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
   us?: [string, number][]      // top users -> bytes
@@ -45,12 +45,12 @@ export interface UserInfo {
 
 /** Bytes some person owns under a node (Σ of its user slices). */
 export const userBytes = (n: Pick<TreeNode, 'us'>): number => (n.us ?? []).reduce((s, [, b]) => s + b, 0)
-/** Bytes nobody owns under a node — the unclaimed pool. Ownership has one
+/** Bytes nobody owns under a node — the unowned pool. Ownership has one
  * axis (a person or nobody); there is no group facet. */
-export const unclaimedBytes = (n: Pick<TreeNode, 'b' | 'us'>): number => Math.max(0, n.b - userBytes(n))
+export const unownedBytes = (n: Pick<TreeNode, 'b' | 'us'>): number => Math.max(0, n.b - userBytes(n))
 
 export interface AgeRow {
-  d: number   // created day, epoch days (site aggregates to day/week/month)
+  d: number   // listing day, epoch days (GCS: created; S3/R2/local: modified)
   d1?: string // top-level dir (whole-fleet age.json only; the per-path `age` index omits it — specs/done/age-index.md)
   u?: string  // owning user
   a?: number  // last-read epoch day of the row's dir (access logs; subtree MAX, like TreeNode.a); absent = no read observed
@@ -72,15 +72,28 @@ export const MODE_LABELS: Record<ColorMode, string> = {
   tree: 'tree',
 }
 
+/** Physical container measurements from the capture, not summed path sizes. */
+export interface DiskSpace {
+  capacity: number
+  used: number
+  free: number
+  device: string
+  captured_at: string
+  /** APFS VM volume allocation, including swap and filesystem overhead. */
+  vm_used?: number
+}
+
 export interface Meta {
   asof: string
   generated: string
+  captured_at?: string  // capture instant, when supplied by the source
   published?: string  // object lastModified (ISO) — real publish time behind a date-only id
   total_bytes: number
   total_objects: number
   class_bytes: Record<string, number>
   users?: UserInfo[]
   user_class_bytes?: Record<string, Record<string, number>>
+  disk_space?: DiskSpace
   /** Access-log observation window (epoch days) — bounds the read-recency lens. */
   access?: { from: number; to: number }
 }
@@ -150,6 +163,26 @@ const Ki = 1024, Mi = Ki ** 2, Gi = Ki ** 3, Ti = Ki ** 4
 type Scale = [div: number, name: string]
 const iecScale = (b: number): Scale => (b >= Ti ? [Ti, 'Ti'] : b >= Gi ? [Gi, 'Gi'] : b >= Mi ? [Mi, 'Mi'] : [Ki, 'Ki'])
 const siScale = (b: number): Scale => (b >= 1e12 ? [1e12, 'T'] : b >= 1e9 ? [1e9, 'G'] : b >= 1e6 ? [1e6, 'M'] : [1e3, 'K'])
+/** Run totals retain three significant figures so live byte progress is visible. */
+export const fmtBytesPrecise = (b: number, units: Units, suffixB = false): string => {
+  if (b === 0) return '0'
+  if (b < (units === 'iec' ? Ki : 1e3)) return `${Math.round(b)} B`
+  const [div, name] = (units === 'iec' ? iecScale : siScale)(b)
+  const rounded = Number((b / div).toPrecision(3))
+  const decimals = Math.max(0, 2 - Math.floor(Math.log10(rounded)))
+  return `${rounded.toFixed(decimals)} ${name}${suffixB ? 'B' : ''}`
+}
+/** `b` with just enough decimals that values `step` apart read differently —
+ *  a fitted y-axis spanning 7.40–7.45 T labels its ticks 7.40 · 7.42 · 7.44 T,
+ *  not four "7.4 T"s. Never fewer decimals than `fmtBytesLike` would use. */
+export const fmtBytesStep = (b: number, step: number, units: Units, suffixB = false): string => {
+  if (b === 0) return '0'
+  const [div, name] = (units === 'iec' ? iecScale : siScale)(Math.abs(b))
+  const v = b / div
+  const base = Math.abs(v) >= 10 ? 0 : 1
+  const need = step > 0 ? Math.ceil(-Math.log10(step / div) - 1e-9) : base
+  return v.toFixed(Math.min(4, Math.max(base, need))) + ' ' + name + (suffixB ? 'B' : '')
+}
 export const fmtBytesLike = (b: number, ref: number, units: Units, suffixB = false): string => {
   if (b === 0) return '0'
   const [div, name] = (units === 'iec' ? iecScale : siScale)(ref)

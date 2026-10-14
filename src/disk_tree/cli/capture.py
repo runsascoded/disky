@@ -57,6 +57,7 @@ def _frame(root: str, names: list[str], sizes: list[int], mtimes: list[int]):
 
 
 @cli.command('capture')
+@option('-h', '--host', 'ssh_host', help="Walk PATH on this ssh host (its GNU `find`, over `ssh`; nothing installed there) instead of locally; it is also the capture's host segment")
 @option('-n', '--batch-rows', default=200_000, help='Rows per shard — bounds memory: one batch is buffered at a time')
 @option('-o', '--one-fs', is_flag=True, help="Don't descend into filesystems mounted below PATH. With PATH `/` on macOS: the System volume + the Data volume (via its firmlinks), once — the whole machine")
 @option('-q', '--no-progress', is_flag=True, help='Suppress the tqdm progress bar')
@@ -64,6 +65,7 @@ def _frame(root: str, names: list[str], sizes: list[int], mtimes: list[int]):
 @option('-t', '--to', required=True, help='Where the capture goes: a local dir or an fsspec URL (`r2://bucket/prefix`)')
 @argument('path', required=False)
 def capture_cmd(
+    ssh_host: str | None,
     batch_rows: int,
     one_fs: bool,
     no_progress: bool,
@@ -76,9 +78,11 @@ def capture_cmd(
     Prints the capture dir (`<to>/<host>/<root>/<stamp>`).
     """
     from disk_tree import blobfs
-    from disk_tree.backends import backend_for, ErrorCollector
+    from disk_tree.backends import LocalBackend, backend_for, ErrorCollector
     from disk_tree.find.bulk import _ROW_GROUP_ROWS
 
+    if ssh_host and not path:
+        raise SystemExit('--host needs PATH (an absolute path on that host)')
     root = (path or getcwd()).rstrip('/') or '/'
     if root.startswith(_CLOUD):
         raise SystemExit('capture is for local paths; bucket listings come from `bulk-list`')
@@ -87,12 +91,20 @@ def capture_cmd(
     now = datetime.now(timezone.utc)
     # `DISK_TREE_HOST` pins the capture dir's host segment: the same machine
     # reports `Mac` to a shell and `mac.lan` to a launchd job.
-    host = os.environ.get('DISK_TREE_HOST') or socket.gethostname()
+    # `--host` wins: a remote walk is that machine's capture, whatever this one is called.
+    host = ssh_host or os.environ.get('DISK_TREE_HOST') or socket.gethostname()
     out = capture_dir(to, root, host, now.strftime('%Y-%m-%dT%H-%M-%SZ'))
     if not blobfs.is_url(out):
         os.makedirs(out, exist_ok=True)
     errors = ErrorCollector()
-    backend = backend_for(root)
+    from disk_tree.backends.ssh import SshBackend
+    backend: LocalBackend | SshBackend
+    if ssh_host:
+        backend = SshBackend(ssh_host)
+    else:
+        local = backend_for(root)
+        assert isinstance(local, LocalBackend)  # a bucket URL was refused above (`bulk-list`'s)
+        backend = local
 
     names: list[str] = []
     sizes: list[int] = []
@@ -134,7 +146,7 @@ def capture_cmd(
         'error_count': errors.count,
         'error_paths': errors.paths,
     }
-    if sys.platform == 'darwin':
+    if sys.platform == 'darwin' and not ssh_host:
         # The APFS container the walk sits on (volumes, snapshots, free): what
         # the walk can't attribute, so a UI can draw the whole disk. A root on a
         # non-APFS volume (ExFAT external) legitimately has none; and the field
@@ -150,3 +162,63 @@ def capture_cmd(
     tail = f', {errors.count} permission errors' if errors.count else ''
     err(f'{root}: {n_rows:,} files in {n_shards} shard(s) → {out}{tail}')
     print(out)
+
+
+def capture_space(manifest: dict) -> dict | None:
+    """The capture's physical capacity, independent of its listing's sizes.
+
+    Non-APFS captures and older manifests legitimately omit the container.
+    """
+    if manifest.get('format') != FORMAT or manifest.get('version') != VERSION:
+        raise ValueError('expected a version 1 disk-tree-capture manifest')
+    container = manifest.get('container')
+    if container is None:
+        return None
+    capacity, used, free = (container[k] for k in ('capacity', 'used', 'free'))
+    if any(type(n) is not int for n in (capacity, used, free)) or capacity <= 0 or min(used, free) < 0 or used + free != capacity:
+        raise ValueError('container capacity must be positive integer bytes equal to used + free')
+    space = {
+        'capacity': capacity,
+        'used': used,
+        'free': free,
+        'device': container['device'],
+        'captured_at': manifest['time'],
+    }
+    vm = [v['used'] for v in container.get('volumes', []) if 'VM' in v.get('roles', [])]
+    if vm:
+        if any(type(n) is not int or n < 0 for n in vm):
+            raise ValueError('VM volume usage must be nonnegative integer bytes')
+        space['vm_used'] = sum(vm)
+    return space
+
+
+@cli.command('capture-meta')
+@option('-c', '--check', help="Existing snapshot meta.json (local path or URL): refuse to replace a different capture in the same scan slot")
+@argument('manifest')
+@argument('snapshot')
+def capture_meta_cmd(
+    check: str | None,
+    manifest: str,
+    snapshot: str,
+) -> None:
+    """Copy MANIFEST's physical disk space into a snapshot's meta.json.
+
+    Both paths may be local or fsspec URLs. Missing container measurements
+    remove a previous annotation rather than leave another scan's space.
+    """
+    from disk_tree import blobfs
+
+    capture = json.loads(blobfs.read_text(manifest))
+    space = capture_space(capture)
+    if check and blobfs.exists(check):
+        existing = json.loads(blobfs.read_text(check))
+        if existing.get('captured_at') != capture['time']:
+            raise ValueError('scan slot already belongs to a different capture; refusing to replace it')
+    meta = json.loads(blobfs.read_text(snapshot))
+    meta['captured_at'] = capture['time']
+    if space is None:
+        meta.pop('disk_space', None)
+    else:
+        meta['disk_space'] = space
+    blobfs.write_text(snapshot, json.dumps(meta, indent=2) + '\n')
+    print(snapshot)

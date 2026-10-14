@@ -3,7 +3,8 @@ import type { CSSProperties, ReactNode } from 'react'
 import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
 import type { FoldedNode, LayoutConfig } from './layout'
-import { edgeEmphFactor, isFolded, layoutCells } from './layout'
+import { edgeEmphFactor, flattenPlaced, isFolded, layoutCells, layoutChildren } from './layout'
+import { colorResolver } from './cssColor'
 import { foldSmall, foldThin, squarify, squarifyRemainder } from './squarify'
 import { TreemapCanvas, renderMapToCanvas, type CanvasHit } from './TreemapCanvas'
 import { OutlineOverlay } from './OutlineOverlay'
@@ -121,6 +122,10 @@ export interface TreemapProps<T> {
    * Off by default — chains carry real information in some trees.
    */
   collapseChains?: boolean
+  /** Let complete columns right of a branch's title fill its unused strip. Default: false. */
+  reclaimTitleSpace?: boolean
+  /** Quiet one-pixel frames around rendered parent groups, above descendant fills. Off when unset. */
+  branchOutline?: string
   /** Optional extra content rendered inside the cell after the label. */
   renderCellExtra?: (n: T, path: T[], ctx: CellCtx) => ReactNode
   /** Tooltip body; return null to suppress the tooltip. */
@@ -524,6 +529,8 @@ export function Treemap<T>({
   getId,
   formatSize = defaultFormat,
   collapseChains = false,
+  reclaimTitleSpace = false,
+  branchOutline,
   colorForCell,
   lens,
   renderCellExtra,
@@ -582,6 +589,47 @@ export function Treemap<T>({
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
   const mapRef = useRef<HTMLDivElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const titleProbeRef = useRef<HTMLDivElement>(null)
+  const [titleMetrics, setTitleMetrics] = useState<{
+    ctx: CanvasRenderingContext2D; font: string; sizeFont: string; canvasFont: string; padding: number; tabularNums: boolean
+  } | null>(null)
+  useLayoutEffect(() => {
+    const probe = titleProbeRef.current
+    if (!reclaimTitleSpace || !probe) return
+    const css = getComputedStyle(probe)
+    const sizeCss = getComputedStyle(probe.firstElementChild!)
+    const metrics = {
+      font: css.font || `${css.fontWeight} ${css.fontSize} ${css.fontFamily}`,
+      sizeFont: sizeCss.font || `${sizeCss.fontWeight} ${sizeCss.fontSize} ${sizeCss.fontFamily}`,
+      canvasFont: `${css.fontSize} system-ui, -apple-system, sans-serif`,
+      padding: (parseFloat(css.paddingLeft) || 0) + (parseFloat(css.paddingRight) || 0) + 2,
+      tabularNums: sizeCss.fontVariantNumeric.includes('tabular-nums'),
+    }
+    setTitleMetrics(previous => {
+      if (previous && previous.font === metrics.font && previous.sizeFont === metrics.sizeFont && previous.canvasFont === metrics.canvasFont && previous.padding === metrics.padding && previous.tabularNums === metrics.tabularNums) return previous
+      const ctx = previous?.ctx ?? document.createElement('canvas').getContext('2d')
+      return ctx ? { ctx, ...metrics } : previous
+    })
+  })
+  const getTitleWidth = useCallback((n: T, labels: string[] | null, w: number, boxW: number): number => {
+    if (!titleMetrics || sizeAlign === 'right' || renderCellSubtitle) return boxW
+    const name = labels ? (labels.length > 3 ? `${labels[0]}/…/${labels[labels.length - 1]}` : labels.join('/')) : getLabel(n)
+    const sizeText = w > inlineSizeMinWidth ? formatSize(getSize(n)) : ''
+    const { ctx, font, sizeFont, canvasFont, padding, tabularNums } = titleMetrics
+    const measure = (nameFont: string, valueFont: string) => {
+      ctx.font = nameFont
+      const nameWidth = ctx.measureText(name).width
+      ctx.font = valueFont
+      // Canvas's font shorthand cannot select tabular numerals. Reserve the
+      // widest digit for each DOM digit so aligned numeric sizes never clip.
+      const digitWidth = tabularNums ? Math.max(...'0123456789'.split('').map(d => ctx.measureText(d).width)) : 0
+      const sizeWidth = tabularNums
+        ? [...sizeText].reduce((sum, ch) => sum + (/\d/.test(ch) ? digitWidth : ctx.measureText(ch).width), 0)
+        : ctx.measureText(sizeText).width
+      return nameWidth + (sizeText ? 6 + sizeWidth : 0)
+    }
+    return Math.min(boxW, padding + Math.max(measure(font, sizeFont), measure(canvasFont, canvasFont)))
+  }, [titleMetrics, sizeAlign, renderCellSubtitle, getLabel, inlineSizeMinWidth, formatSize, getSize])
   const tipRef = useRef<HTMLDivElement>(null)
   // The live map `<canvas>` (canvas renderer only), so image export can read
   // its pixels directly (`exportable`).
@@ -838,14 +886,15 @@ export function Treemap<T>({
     // The canvas renderer paints from these; the DOM renderer doesn't, but the
     // outline overlay needs the geometry either way — so build them whenever an
     // `outlineGroups` overlay is present, not only for the canvas renderer.
-    if (renderer !== 'canvas' && !outlineGroups) return []
+    if (renderer !== 'canvas' && !outlineGroups && !branchOutline) return []
     const cfg: LayoutConfig<T> = {
       getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+      getTitleWidth: reclaimTitleSpace ? getTitleWidth : undefined,
     }
     return layoutCells(rects, path, rootMode, cfg)
   }, [
-    renderer, !!outlineGroups, rects, path, rootMode, getSize, getLabel, childrenOf,
-    showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+    renderer, !!outlineGroups, branchOutline, rects, path, rootMode, getSize, getLabel, childrenOf,
+    showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
   ])
 
   // Stable style bundle for the canvas paint. Memoized so the paint effect
@@ -974,21 +1023,10 @@ export function Treemap<T>({
     // 2px gutter — so children never overrun the clipped cell.)
     const boxW = shared ? r.w : r.w - (dust ? 1 : 2)
     const boxH = shared ? r.h : r.h - (dust ? 1 : 2)
-    let kw = boxW - 4
-    let kh = boxH - (showLbl ? 21 : 4)
-    let kidsMode: Tiling = 'gaps'
-    let kids: ReturnType<typeof squarify<T | FoldedNode<T>>> = []
-    if (kidChildren && kidChildren.length > 0 && r.w > 90 && r.h > 44) {
-      const lay = (w: number, h: number) =>
-        layTiles(fold(kidChildren.slice(), w, h), 0, 0, w, h)
-      kids = lay(kw, kh)
-      kidsMode = tilingFor(kid as T, kidPath, depth + 1, r.w, r.h, kids)
-      if (kidsMode === 'shared') {
-        kw = boxW - 2 * edge
-        kh = boxH - (showLbl ? 20 + edge : 2 * edge)
-        kids = lay(kw, kh)
-      }
-    }
+    const { rects: kids, mode: kidsMode, titleWidth } = layoutChildren(kid as T, kidPath, chainLabels, kidChildren,
+      { w: r.w, h: r.h, boxW, boxH, edge, showLbl, depth },
+      { getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+        getTitleWidth: reclaimTitleSpace ? getTitleWidth : undefined })
 
     // Cell color falls through: consumer override → default categorical.
     // A consumer's `colorForCell` may return null/undefined to defer, so we
@@ -1204,6 +1242,8 @@ export function Treemap<T>({
             className={'dt-treemap-lbl' + (r.w < 64 ? ' sm' : '')}
             style={{
               position: 'relative',
+              width: titleWidth ?? undefined,
+              boxSizing: 'border-box',
               zIndex: 1, // above makeup stripes (positioned siblings)
               padding: 'var(--dt-treemap-lbl-pad, 2px 4px)',
               fontSize: r.w < 64
@@ -1304,6 +1344,7 @@ export function Treemap<T>({
         if (size.w <= 0 || size.h <= 0) return
         const cfg: LayoutConfig<T> = {
           getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+          getTitleWidth: reclaimTitleSpace ? getTitleWidth : undefined,
         }
         const cells = layoutCells(rects, path, rootMode, cfg)
         const off = document.createElement('canvas')
@@ -1313,6 +1354,18 @@ export function Treemap<T>({
           mapRef.current,
         )
         src = off
+      }
+      if (branchOutline) {
+        const framed = document.createElement('canvas')
+        framed.width = src.width
+        framed.height = src.height
+        const ctx = framed.getContext('2d')!
+        ctx.drawImage(src, 0, 0)
+        ctx.scale(src.width / size.w, src.height / size.h)
+        ctx.strokeStyle = colorResolver(mapRef.current)(branchOutline)
+        ctx.lineWidth = 1
+        for (const c of flattenPlaced(placedCells)) if (c.hasKids) ctx.strokeRect(c.x + 0.5, c.y + 0.5, Math.max(0, c.boxW - 1), Math.max(0, c.boxH - 1))
+        src = framed
       }
       const cs = getComputedStyle(mapRef.current)
       const ink = cs.color || 'rgb(230, 230, 238)'
@@ -1338,8 +1391,8 @@ export function Treemap<T>({
     },
     [
       exportOpts, path, node, getLabel, getSize, formatSize, onExport, size, rects, rootMode,
-      styleOpts, sizeAlign, inlineSizeMinWidth, dustTexture,
-      childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+      styleOpts, sizeAlign, inlineSizeMinWidth, dustTexture, branchOutline, placedCells,
+      childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
     ],
   )
   const showExport = !!exportOpts
@@ -1386,6 +1439,11 @@ export function Treemap<T>({
       }) : undefined}
       style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%' }}
     >
+      {reclaimTitleSpace && <div aria-hidden="true" className="dt-treemap-cell branch" style={{
+        position: 'absolute', visibility: 'hidden', pointerEvents: 'none',
+      }}><div ref={titleProbeRef} className="dt-treemap-lbl" style={{
+        padding: 'var(--dt-treemap-lbl-pad, 2px 4px)', fontSize: 'var(--dt-treemap-lbl-fs, 0.85rem)', lineHeight: 1.2,
+      }}><span className="sz" /></div></div>}
       {chrome && <div
         className="dt-treemap-bar"
         style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 6px', minHeight: 22 }}
@@ -1532,6 +1590,9 @@ export function Treemap<T>({
         {outlineGroups && size.w > 0 && size.h > 0 && (
           <OutlineOverlay<T> cells={placedCells} width={size.w} height={size.h} groups={outlineGroups} />
         )}
+        {branchOutline && <svg className="dt-treemap-branch-frames" width={size.w} height={size.h} aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 1 }}>
+          {flattenPlaced(placedCells).filter(c => c.hasKids).map((c, i) => <rect key={i} x={c.x + 0.5} y={c.y + 0.5} width={Math.max(0, c.boxW - 1)} height={Math.max(0, c.boxH - 1)} fill="none" stroke={branchOutline} strokeWidth={1} />)}
+        </svg>}
         {failed?.key === viewKey ? (
           <div className="dt-treemap-status error" style={STATUS_STYLE}>
             {renderLoadError

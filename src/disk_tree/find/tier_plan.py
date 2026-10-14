@@ -174,15 +174,18 @@ SELECTORS = {'path': select_path, 'bysize': select_bysize}
 def count_matched(parquet: str, q: Query) -> int:
     """Rows that satisfy the read — `depth ∈ [dLo, dHi]`, `path ∈ [P/, P0)`,
     `size ≥ thrAt(depth)` — from the tier's own rows (a pushdown read of
-    `depth`/`path`/`size`; local or URL)."""
+    `depth`/`path`/`size`; local or URL). A labeled `bysize` keyed on the
+    path's total tests `tot` instead, as its reader does."""
+    from disk_tree.find.groups import read_metadata
+    size_col = 'tot' if 'tot' in read_metadata(parquet).schema.names else 'size'
     filters = [('depth', '>=', q.d_lo), ('path', '>=', q.p_lo), ('path', '<', q.p_hi)]
     if q.d_hi is not None:
         filters.append(('depth', '<=', q.d_hi))
-    t = blobfs.read_table(parquet, columns=['depth', 'size'], filters=filters)
+    t = blobfs.read_table(parquet, columns=['depth', size_col], filters=filters)
     if q.thr <= 0:
         return t.num_rows
     depths = t.column('depth').to_pylist()
-    sizes = t.column('size').to_pylist()
+    sizes = t.column(size_col).to_pylist()
     return sum(1 for d, s in zip(depths, sizes) if s is not None and s >= q.thr_at(d))
 
 

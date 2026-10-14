@@ -3,8 +3,16 @@
 // the effective owner is the most recent live row on an ancestor-or-equal
 // prefix (recency beats specificity). `owners.ts` re-exports it.
 
+// An exact-object row (`kind: 'object'`, specs/file-assign.md) owns its one
+// key: on that key's chain it sits at the leaf — newer than every folder above
+// it, it wins; older, a folder repaints it — and it is on no other path's
+// chain (not `key.bak`'s, not `key/…`'s).
+export type ItemKind = 'prefix' | 'object'
+
 export interface OwnerRow {
   prefix: string
+  /** What `prefix` names (absent = a folder: rows from before `kind`). */
+  kind?: ItemKind
   owner: string | null
   ts: number
   who: string
@@ -15,7 +23,7 @@ export interface OwnerRow {
 /** The resolved (effective) owner of a prefix, with provenance. */
 export interface Owner {
   prefix: string
-  /** Canonical user id (or email, for pre-mapping claims). */
+  /** Canonical user id (or email, for pre-mapping assignments). */
   who: string
   ts: number
   /** The assigner (`actions.actor`) and their memo — provenance. */
@@ -24,9 +32,12 @@ export interface Owner {
 }
 
 export interface OwnerIndex {
-  claimOf: (uri: string) => Owner | null
-  /** Latest live row per prefix (normalized, trailing `/`). */
+  /** The effective assignment of a folder (`kind` 'prefix', the default) or one exact object. */
+  assignmentOf: (uri: string, kind?: ItemKind) => Owner | null
+  /** Latest live folder row per prefix (normalized, trailing `/`). */
   owners: Map<string, OwnerRow>
+  /** Latest live exact-object row per key. */
+  objects: Map<string, OwnerRow>
   count: number
 }
 
@@ -45,12 +56,14 @@ export function foldLatest<R extends { prefix: string; ts: number; action_id: nu
 
 /**
  * Lookups are O(depth): a prefix's owner is decided by the newest live row on
- * one of its ancestors-or-self, so `claimOf` walks the ~6 ancestor prefixes
+ * one of its ancestors-or-self, so `assignmentOf` walks the ~6 ancestor prefixes
  * and probes a Map — not a scan over every assignment.
  */
 export function ownerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIndex {
   const norm = (uri: string) => (uri.endsWith('/') ? uri : uri + '/')
-  const owners = foldLatest((data?.owners ?? []).map(r => (r.prefix.endsWith('/') ? r : { ...r, prefix: r.prefix + '/' })))
+  const rows = data?.owners ?? []
+  const owners = foldLatest(rows.filter(r => r.kind !== 'object').map(r => (r.prefix.endsWith('/') ? r : { ...r, prefix: r.prefix + '/' })))
+  const objects = foldLatest(rows.filter(r => r.kind === 'object'))
   // 'gs://b/x/y/' → ['gs://b/', 'gs://b/x/', 'gs://b/x/y/'] (self last).
   const ancestors = (p: string): string[] => {
     const out: string[] = []
@@ -61,10 +74,12 @@ export function ownerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIndex
     }
     return out
   }
-  const claimOf = (uri: string): Owner | null => {
-    const p = norm(uri)
-    let win: OwnerRow | null = null
-    for (const a of ancestors(p)) {
+  const assignmentOf = (uri: string, kind: ItemKind = 'prefix'): Owner | null => {
+    // A folder: its own prefix and every folder above. An object: every folder
+    // above it (all of its `/`-cuts are strict ancestors) and its exact row.
+    const chain = kind === 'object' ? ancestors(uri) : ancestors(norm(uri))
+    let win: OwnerRow | null = kind === 'object' ? objects.get(uri) ?? null : null
+    for (const a of chain) {
       const r = owners.get(a)
       if (r && (!win || newer(r, win))) win = r
     }
@@ -72,5 +87,6 @@ export function ownerIndex(data: { owners: OwnerRow[] } | undefined): OwnerIndex
   }
   let count = 0
   for (const r of owners.values()) if (r.owner != null) count++
-  return { claimOf, owners, count }
+  for (const r of objects.values()) if (r.owner != null) count++
+  return { assignmentOf, owners, objects, count }
 }

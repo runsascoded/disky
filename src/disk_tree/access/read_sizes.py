@@ -33,6 +33,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..duck import one
+
 if TYPE_CHECKING:
     import duckdb
 
@@ -124,11 +126,11 @@ def aggregate_read_sizes(
               FROM read_sizes ORDER BY bucket, prefix, bin, lg2)
         TO '{out_parquet}' (FORMAT PARQUET, COMPRESSION ZSTD)
     """)
-    rows, prefixes, bins, n_ops, total = con.execute("""
+    rows, prefixes, bins, n_ops, total = one(con, """
         SELECT COUNT(*), COUNT(DISTINCT (bucket, prefix)), COUNT(DISTINCT bin),
                COALESCE(SUM(n_ops), 0), COALESCE(SUM(bytes_out), 0)
         FROM read_sizes
-    """).fetchone()
+    """)
     return {
         'rows': int(rows),
         'prefixes': int(prefixes),

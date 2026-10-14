@@ -43,11 +43,12 @@ import sys
 import threading
 from functools import partial
 from queue import Empty, Queue
-from typing import TYPE_CHECKING, Iterable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Protocol
 
 if TYPE_CHECKING:
     import pandas as pd  # noqa: F401
 
+from disk_tree.duck import one
 from disk_tree.find.bulk import (
     BATCH_ROWS,
     ROWS_PER_SHARD,
@@ -76,7 +77,9 @@ class PagedLister(Protocol):
     pagination, but donation decisions happen *between* pages.)
     """
 
-    scheme: str
+    @property
+    def scheme(self) -> str:
+        ...
 
     def stream_pages(
         self,
@@ -279,7 +282,7 @@ def _range_loop(
                     if end is not None:
                         page = [r for r in page if r.name < end]
                     if page:
-                        buf.extend((r.name, r.size, r.created, r.storage_class) for r in page)
+                        buf.extend((r.name, r.size, r.created, r.storage_class, r.generation) for r in page)
                         if len(buf) >= BATCH_ROWS:
                             flush_rows()
                         if first is None:
@@ -291,7 +294,7 @@ def _range_loop(
                     # Donation gate re-arms after each split (pages *since*
                     # the last one) — without that, one worker floods the
                     # queue with slivers every page while any peer is idle.
-                    if pages_since_split >= _MIN_PAGES_BEFORE_SPLIT and last is not None and idle.value > 0:
+                    if pages_since_split >= _MIN_PAGES_BEFORE_SPLIT and first is not None and last is not None and idle.value > 0:
                         # Bounded range: real interpolation between real keys.
                         # Unbounded: bisect at the observed divergence position
                         # (see open_split — generic bisection lands past the
@@ -442,7 +445,7 @@ def list_bucket_adaptive(
         f"{procs} procs × {threads} threads, {len(seeds)} seed range(s)"
     )
 
-    def proc_args(ns: int) -> tuple:
+    def proc_args(ns: int) -> "tuple[PagedLister, str, str | None, str, int, int, Any, Any, Any, Any]":
         return (lister, bucket, pfx, out_dir, ns, threads, range_q, idle, outstanding, results_q)
 
     total = 0
@@ -521,9 +524,9 @@ def _assert_no_duplicate_keys(out_dir: str) -> None:
     glob = f"{out_dir.rstrip('/')}/shard-*.parquet"
     con = duckdb.connect()
     con.execute("SET threads TO 8")
-    rows, distinct = con.execute(
-        "SELECT count(*), count(DISTINCT name) FROM read_parquet(?)", [glob],
-    ).fetchone()
+    rows, distinct = one(
+        con, "SELECT count(*), count(DISTINCT name) FROM read_parquet(?)", [glob],
+    )
     if rows == distinct:
         return
     sample = con.execute(

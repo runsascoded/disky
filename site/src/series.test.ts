@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bandCallouts, geneses, pickAnnotations, prominentExtrema, relativeSeries, stackSeries, unitTicks, youngestGenesis } from './series'
+import { bandCallouts, geneses, pickAnnotations, prominentExtrema, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
 
 const P = { key: 'p', points: [{ x: 1, y: 90 }, { x: 2, y: 100 }, { x: 3, y: 101 }] }
 const H = { key: 'h', points: [{ x: 3, y: 40 }] }
@@ -243,6 +243,29 @@ describe('stackSeries', () => {
     expect(stackSeries([a, b])).toEqual([
       { key: 'a', points: [{ x: 1, y0: 0, y: 10 }, { x: 2, y0: 0, y: 0 }, { x: 3, y0: 0, y: 10 }] },
       { key: 'b', points: [{ x: 1, y0: 10, y: 15 }, { x: 2, y0: 0, y: 5 }, { x: 3, y0: 10, y: 15 }] },
+    ])
+  })
+})
+
+describe('seriesGaps: a series\' unindexed scans as gaps, never zeros', () => {
+  const xOf = (d: string) => Date.parse(d)
+  const fmt = (x: number) => new Date(x).toISOString().slice(5, 10)
+  const at = (...ds: string[]) => ds.map(xOf)
+  it('leading gaps say where the index starts; interior ones count; none (or all cut by the range) is no note', () => {
+    expect([
+      seriesGaps(['2026-09-29', '2026-09-30'], at('2026-10-01', '2026-10-02'), xOf, -Infinity, fmt),
+      seriesGaps(['2026-10-02'], at('2026-10-01', '2026-10-03'), xOf, -Infinity, fmt),
+      seriesGaps(['2026-09-30', '2026-10-02'], at('2026-10-01', '2026-10-03'), xOf, -Infinity, fmt),
+      seriesGaps(['2026-09-29'], at('2026-10-01'), xOf, xOf('2026-09-30'), fmt),
+      seriesGaps(undefined, at('2026-10-01'), xOf, -Infinity, fmt),
+      seriesGaps(['2026-09-29'], [], xOf, -Infinity, fmt),
+    ]).toEqual([
+      { xs: at('2026-09-29', '2026-09-30'), note: 'not indexed before 10-01' },
+      { xs: at('2026-10-02'), note: '1 scan not indexed (gaps in the line)' },
+      { xs: at('2026-09-30', '2026-10-02'), note: '2 scans not indexed (gaps in the line)' },
+      { xs: [], note: null },
+      { xs: [], note: null },
+      { xs: at('2026-09-29'), note: '1 scan not indexed (gaps in the line)' },
     ])
   })
 })

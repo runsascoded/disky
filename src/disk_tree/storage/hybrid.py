@@ -9,13 +9,16 @@ This keeps parquets small for fast updates while preserving full history.
 """
 from os import makedirs
 from os.path import isabs
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pandas as pd
 
-from .base import BLOB_ROW_GROUP_SIZE, StorageBackend, PathStats, path_prefix_bounds
+if TYPE_CHECKING:
+    import pyarrow as pa
+
+from .base import BLOB_ROW_GROUP_SIZE, Filter, Filters, StorageBackend, PathStats, path_prefix_bounds
 from .. import blobfs, config as _config
-from ..config import ROOT_DIR
 from ..listing_format import write_listing
 from ..shallow import build_shallow, remove_shallow, shallow_path, top_rows, write_shallow
 
@@ -234,7 +237,8 @@ class HybridBackend(StorageBackend):
         if max_depth is not None or min_depth is not None or pushdown_prefix:
             try:
                 schema = blobfs.read_schema(self._resolve(blob_ref))
-                conds = []
+                conds: list[Filter] = []
+                filters: Filters | None
                 if 'depth' in schema.names:
                     if max_depth is not None:
                         conds.append(('depth', '<=', max_depth))
@@ -397,18 +401,18 @@ class HybridBackend(StorageBackend):
                         else:
                             # Deletion is inside the chunk - recurse
                             child_rel_path = rel_path[len(chunk_root) + 1:]
-                            stats = self._delete_path_impl(child_blob_ref, child_rel_path)
-                            if stats:
+                            child_stats = self._delete_path_impl(child_blob_ref, child_rel_path)
+                            if child_stats:
                                 # Update summary row in parent (stats already has +1 applied from recursion)
                                 # But for the summary row itself, we subtract the raw n_desc + 1
-                                df.loc[df['path'] == chunk_root, 'size'] -= stats.size
-                                df.loc[df['path'] == chunk_root, 'n_desc'] -= (stats.n_desc + 1)
+                                df.loc[df['path'] == chunk_root, 'size'] -= child_stats.size
+                                df.loc[df['path'] == chunk_root, 'n_desc'] -= (child_stats.n_desc + 1)
                                 # Update root ancestors
-                                self._update_ancestors(df, chunk_root, stats.size, stats.n_desc + 1)
+                                self._update_ancestors(df, chunk_root, child_stats.size, child_stats.n_desc + 1)
                                 write_listing(df, blob_path, BLOB_ROW_GROUP_SIZE)
                                 self._refresh_shallow(blob_path)
                                 self._cache.clear()
-                            return stats
+                            return child_stats
 
         # Path is directly in this parquet (not chunked)
         match = df[df['path'] == rel_path]

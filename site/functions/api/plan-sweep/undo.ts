@@ -8,7 +8,7 @@ import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/au
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
 import { jobStamp, runMountPath, submitBatch, sweepBatchSpec } from "../../_lib/cwBatch.js"
 import { gcpToken } from "../../_lib/gcp.js"
-import { NO_SHAPE, prefixShape } from "../../_lib/plans.js"
+import { auditRunControl, NO_SHAPE, prefixShape } from "../../_lib/plans.js"
 
 type Env = AuthEnv & BatchEnv & { DB?: D1Database; STORE_SCHEME?: string; STORE_BUCKETS?: string }
 
@@ -46,11 +46,12 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   const jobId = `cw-undo-${jobStamp()}z`
   const script = `set -euo pipefail\ndt-cloud plan-sweep undo "${runMountPath(cfg, runId)}"`
   const token = await gcpToken(ctx.env.GCP_SA_KEY)
-  const { ok, status, text } = await submitBatch(cfg, token, jobId, sweepBatchSpec(cfg, ctx.env.JOB_SA, script, shape.buckets[0], { OP: "undo", TARGET_RUN: runId }))
+  const { ok, status, text } = await submitBatch(cfg, token, jobId, sweepBatchSpec(cfg, ctx.env.JOB_SA, script, shape.buckets[0], { OP: "undo", TARGET_RUN: runId }, {}, "sweep-undo"))
   if (!ok) {
     console.error("undo submit failed", status, text.slice(0, 2000))
     return json({ error: `batch submit failed (${status})`, status }, 500)
   }
   await db.prepare("UPDATE deletion_runs SET undo_state = 'partial' WHERE run_id = ?").bind(runId).run()
+  await auditRunControl(db, "undo", runId, gated.email ?? "admin", jobId)
   return json({ job_id: jobId, target: runId, by: gated.email })
 }

@@ -20,6 +20,15 @@ const texts = (svg: string) => [...svg.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].
 const count = (svg: string, cls: string) => (svg.match(new RegExp(`class="${cls}"`, 'g')) ?? []).length
 
 describe('cardSvg', () => {
+  it('shows the root title once, while keeping the site name on drill cards', () => {
+    const root = { ...data('anon'), site: 'Public R2 Treemap Demo', title: 'Public R2 Treemap Demo' }
+    expect(texts(cardSvg(root))).toEqual([
+      'Public R2 Treemap Demo', 'scan 2026-10-02', '51.1 TiB · 179,327,698 objects',
+    ])
+    const svg = cardSvg(root)
+    expect([...svg.matchAll(/<text x="40" y="([^"]+)"[^>]*font-size="([^"]+)"[^>]*>/g)].map(m => [m[1], m[2]]))
+      .toEqual([['60', '32'], ['92', '20'], ['598', '24']])
+  })
   it('anon: shapes only; the text is the header and the total, nothing naming a child or a person', () => {
     const svg = cardSvg(data('anon'))
     expect([texts(svg), count(svg, 'tile'), count(svg, 'kid')]).toEqual([
@@ -32,6 +41,14 @@ describe('cardSvg', () => {
     expect([texts(svg), count(svg, 'tile'), count(svg, 'kid')]).toEqual([
       ['marin GCS', 'marin-us-central2/checkpoints', 'scan 2026-10-02', 'secret-run-a 30.0 TiB', 'secret-run-b 15.0 TiB', '51.1 TiB · 179,327,698 objects', 'Grace 30.0 TiB', 'Hedy 25.0 TiB'],
       3, 2,
+    ])
+  })
+  it('an explicitly public map labels both levels without a signed tier', () => {
+    const svg = cardSvg({ ...data('anon'), publicLabels: true })
+    expect(texts(svg)).toEqual([
+      'marin GCS', 'marin-us-central2/checkpoints', 'scan 2026-10-02',
+      'step-1000 20.0 TiB', 'step-2000 10.0 TiB', 'secret-run-a 30.0 TiB',
+      'secret-run-b 15.0 TiB', '51.1 TiB · 179,327,698 objects', 'Grace 30.0 TiB', 'Hedy 25.0 TiB',
     ])
   })
   it('heatmap: anon draws the grid with no names; full names rows, columns and cells', () => {

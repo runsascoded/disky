@@ -8,18 +8,23 @@
  * the action log's prefixes. A prefix gone by that scan is absent from
  * `stats`.
  */
+import { restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { storeReady } from '../_lib/index.js'
 import { MAX_PREFIXES, prefixesAt } from '../_lib/prefixes.js'
+import { scanArg } from '../_lib/scanArg.js'
 
 export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const { env, request } = ctx
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
+  // Caller-supplied prefixes would probe hidden paths' existence and sizes.
+  if (restrictionFor(gated, env)) return restrictedForbidden()
   const body = (await request.json().catch(() => null)) as { date?: unknown; prefixes?: unknown } | null
-  const date = typeof body?.date === 'string' ? body.date : ''
-  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/.test(date)) return json({ error: 'date=YYYY-MM-DD[THHMM] required' }, 400)
+  const scan = await scanArg(ctx.env, new URLSearchParams(typeof body?.date === 'string' ? { date: body.date } : {}))
+  if (scan instanceof Response) return scan
+  const date = scan
   const prefixes = Array.isArray(body?.prefixes) ? body.prefixes.filter((p): p is string => typeof p === 'string' && /^[a-z0-9]+:\/\/[^/]+\//.test(p)) : []
   if (!prefixes.length || prefixes.length > MAX_PREFIXES) return json({ error: `expected 1–${MAX_PREFIXES} prefixes` }, 400)
   try {

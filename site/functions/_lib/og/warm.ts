@@ -3,6 +3,7 @@
  * the edge cache with that view's first-paint reads: the `depth=1` subtree
  * and the full one, at the page's commonest canvas. Bounded: those two
  * requests, no retries. */
+import { ownerKey, parseOwner } from '../scope.js'
 
 /** The canvas width a desktop window most often snaps to (`src/canvas.ts`
  * `WARMED_WIDTHS`: 1440–1536 px windows); the page asks `h = 0.6 w`. */
@@ -17,10 +18,9 @@ export function warmUrls(kind: string, params: Record<string, string>, date: str
   const path = kind === 'user' ? '' : params.path ?? ''
   const o = kind === 'user' ? params.id : params.o
   const sp = new URLSearchParams({ date, path, w: String(WARM_W), h: String(Math.round(WARM_W * 0.6)) })
-  if (o && o !== 'me') {
-    if (o === 'owned' || o === 'unowned' || o.startsWith('!')) sp.set('o', o)
-    else sp.set('lens', `user:${canon(o)}`)
-  }
+  const pool = o === undefined ? undefined : parseOwner(o)
+  if (pool) sp.set('o', ownerKey(pool))
+  else if (o && o !== 'me') sp.set('lens', `user:${canon(o)}`)
   if (params.cl) sp.set('cl', params.cl)
   if (params.f) { sp.set('q', params.f); if (params.qs) sp.set('qs', params.qs) }
   const base = `/api/subtree?${sp}`

@@ -61,9 +61,6 @@ export function applyNodeFilter(root: TreeNode, pred: NodePred): TreeNode {
   return reaggregate(root, kids)
 }
 
-/** The outermost matched prefixes (what a bulk action targets): every
- * non-fold node whose path matches, without descending inside matches —
- * exactly the roots `applyFilter` keeps whole. */
 /** Filter below the root by *path* (fold nodes never match). Paths are the
  * node's segments below the root joined with `/` (`bucket/dir/sub`), built
  * during the walk so the predicate sees the whole ancestry. */
@@ -78,32 +75,4 @@ export function applyFilter(root: TreeNode, pred: NamePred): TreeNode {
   }
   const kids = (root.c ?? []).map(b => walk(b, b.n)).filter((c): c is TreeNode => c != null)
   return reaggregate(root, kids)
-}
-
-/** The outermost prefixes a server-side name filter matched — nodes flagged
- * `m` by `/api/subtree?q=` (their whole subtree came along, so descendants
- * aren't flagged). Paths are segments below the root joined with `/`. */
-export function collectFlagged(root: TreeNode): { path: string; b: number }[] {
-  const out: { path: string; b: number }[] = []
-  const walk = (n: TreeNode, path: string) => {
-    if ((n as TreeNode & { m?: number }).m) {
-      out.push({ path, b: n.b })
-      return
-    }
-    for (const c of n.c ?? []) walk(c, c.n.startsWith('(') ? path : path ? `${path}/${c.n}` : c.n)
-  }
-  for (const b of root.c ?? []) walk(b, b.n)
-  return out
-}
-
-/**
- * Under a filter, a table row's numbers are its matched bytes, but an action on
- * the row (assign, trash) takes its whole prefix. So only rows inside a match
- * root act: the root itself or anything under it, whose contents all match.
- * `undefined` roots = no filter (every row acts); roots not yet loaded = none.
- */
-export function inMatchRoots(roots: string[] | undefined, filtered: boolean): ((path: string) => boolean) | undefined {
-  if (!filtered) return undefined
-  const rs = roots ?? []
-  return path => rs.some(r => path === r || path.startsWith(r + '/'))
 }

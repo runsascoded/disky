@@ -28,23 +28,45 @@ const KV_TTL = 30 * 86400
 // pre-deploy diff while every other window was fresh (2026-09-17). The edge
 // tiers keep the long TTL behind the versioned key.
 const PRIVATE = 'private, max-age=300'
+/** A partial answer's browser copy: none. Its full one replaces it at the edge within seconds (`upgradePartial`),
+ *  and the next ask — the client's re-ask while `budgetCut`, or a reload — must reach the edge to get it: a
+ *  browser copy (it was `max-age=<ttl>`, 120 s) served the cut answer again, instantly, on every reload. */
+const PARTIAL_CLIENT = 'no-store'
 const JSON_HDR = { 'content-type': 'application/json; charset=utf-8' }
 
-export interface CacheEnv { CACHE_KV?: KVNamespace }
+export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST?: string }
 
 // Bumped whenever a cached endpoint's answer for the same inputs changes
 // (a reader rule, a diff walk rule): a stale entry lives a day in the colo
 // cache and a month in KV, and neither knows a deploy happened. 2026-09-17:
-// one-sided diff nodes expand.
-export const CACHE_V = '2'
+// one-sided diff nodes expand. 3 (2026-10-07): owner pools fold the live
+// ledger, objects included (a preview of the bytes-only fold wrote pool
+// answers with unconserved object counts into KV). 4: pool and user-lens
+// object counts exact from the manifest's per-user objects (`uo`).
+export const CACHE_V = '4'
 
-/** The cache key for `parts` under namespace `ns`. A secondary store's keys
- * gain an `@<store>/` segment (specs/multi-store.md), so the same path in two
- * stores can't collide; the primary's (`store` omitted or `'primary'`) are
- * exactly what they were before stores existed — no one-time cache miss. */
-export function cacheKeyFor(ns: string, parts: string, store?: string): Request {
+/** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
+ * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
+ * binds the same `CACHE_KV` namespace as its prod and shares its zone's colo cache, so without the tag an
+ * answer computed by dev's reader (new code, dev-only flags) was served on prod for up
+ * to 30 days. `CACHE_NS`, when set, is the tag (`""` = prod's keys); else the request host, except
+ * `PROD_HOST` itself — prod declares `PROD_HOST`, its preview env doesn't inherit `[vars]`, and a request to
+ * the dev host (or a `*.pages.dev` alias) is never at the prod host. */
+export function cacheEnvTag(env: CacheEnv, request: Request): string {
+  if (env.CACHE_NS != null) return env.CACHE_NS
+  const host = new URL(request.url).host
+  return host === env.PROD_HOST ? '' : host
+}
+
+/** The cache key for `parts` of endpoint `kind`, in deployment environment `tag` (`cacheEnvTag`). A
+ * non-prod tag adds a `~<tag>/` segment, which the KV key (a hash of the URL) inherits. A secondary store's
+ * keys gain an `@<store>/` segment (specs/multi-store.md), so the same path in two stores can't collide;
+ * the primary's (`store` omitted or `'primary'`) are exactly what they were before stores existed — no
+ * one-time cache miss. */
+export function cacheKeyFor(kind: string, tag: string, parts: string, store?: string): Request {
+  const e = tag ? `~${encodeURIComponent(tag)}/` : ''
   const s = store && store !== PRIMARY_STORE ? `@${store}/` : ''
-  return new Request(`https://${ns}.cache/v${CACHE_V}/${s}${parts}`)
+  return new Request(`https://${kind}.cache/v${CACHE_V}/${e}${s}${parts}`)
 }
 
 const colo = () => (caches as unknown as { default: Cache }).default
@@ -61,7 +83,7 @@ export async function cacheMatch(env: CacheEnv, key: Request): Promise<Response 
   const hit = await colo().match(key)
   if (hit) {
     const res = new Response(hit.body, hit)
-    res.headers.set('cache-control', PRIVATE)
+    res.headers.set('cache-control', isPartial(hit) ? PARTIAL_CLIENT : PRIVATE)
     res.headers.set('x-cache', 'hit')
     return res
   }
@@ -72,25 +94,108 @@ export async function cacheMatch(env: CacheEnv, key: Request): Promise<Response 
   return clientRes(body, 'kv')
 }
 
-/** Store `body` (already-serialized JSON) in both tiers; return the client response. */
-/** Store `body` (already-serialized JSON) in both tiers and return the client
- * response. With ``waitUntil`` (the Pages `EventContext`'s) the writes run
- * after the response is sent — a KV put is hundreds of ms the viewer needn't
- * wait for; without it they complete first. */
-export async function cacheStore(env: CacheEnv, key: Request, body: string, headers: Record<string, string> = {}, waitUntil?: (p: Promise<unknown>) => void): Promise<Response> {
+/** How long a budget-cut answer (phase 2 stopped by its time budget: `interiors.late`) is kept in the colo
+ * cache, seconds. Its totals and match counts are exact; only the drawn interiors are partial, and a
+ * recompute pays the same budget again (gcs 10-09 `nemotron`: every retry of the root diff re-ran both
+ * sides' 900 ms phase 2 and drew nothing more). Short, and colo-only (never KV): a later miss may complete. */
+export const PARTIAL_TTL = 120
+
+/** What `cacheStore` keeps: `true` both tiers for a day / a month; `false` nothing (served only);
+ * `{ partialTtl }` the colo tier only, for that many seconds (a budget-cut answer, `PARTIAL_TTL`). */
+export type Keep = boolean | { partialTtl: number }
+
+/** What a filter view or diff keeps: a phase 2 cut by its time budget (`interiors.late`) briefly, else all. */
+export const keepFor = (interiors?: { late?: number }): Keep => interiors?.late ? { partialTtl: PARTIAL_TTL } : true
+
+/** Store `body` (already-serialized JSON) per `keep` and return the client response. With ``waitUntil``
+ * (the Pages `EventContext`'s) the writes run after the response is sent — a KV put is hundreds of ms the
+ * viewer needn't wait for; without it they complete first. A partial answer's client copy says so
+ * (`x-cache-partial: ttl=<s>`), on a hit too (the stored copy carries the header). */
+export async function cacheStore(env: CacheEnv, key: Request, body: string, headers: Record<string, string> = {}, waitUntil?: (p: Promise<unknown>) => void, keep: Keep = true): Promise<Response> {
+  // `false`: an answer that must not be kept at all is served only.
+  if (keep === false) {
+    const res = clientRes(body, 'miss')
+    for (const [k, v] of Object.entries(headers)) res.headers.set(k, v)
+    res.headers.set('x-cache-store', 'skipped')
+    return res
+  }
+  const partial = typeof keep === 'object' ? keep.partialTtl : null
   const puts = async () => {
+    if (partial != null) {
+      await colo().put(key, new Response(body, { headers: { ...JSON_HDR, 'cache-control': `public, s-maxage=${partial}`, 'x-cache-partial': `ttl=${partial}` } }))
+      return
+    }
     const ps: Promise<unknown>[] = [colo().put(key, publicRes(body))]
     if (env.CACHE_KV) ps.push(env.CACHE_KV.put(await kvKey(key), body, { expirationTtl: KV_TTL }))
     await Promise.all(ps)
   }
-  let stored = 'deferred'
+  let stored = partial != null ? `partial;ttl=${partial}` : 'deferred'
   if (waitUntil) waitUntil(puts().catch(() => undefined))
-  else { const t0 = performance.now(); await puts(); stored = `awaited;dur=${Math.round(performance.now() - t0)}` }
+  else { const t0 = performance.now(); await puts(); stored = `${partial != null ? `partial;ttl=${partial};` : ''}awaited;dur=${Math.round(performance.now() - t0)}` }
   const res = clientRes(body, 'miss')
   for (const [k, v] of Object.entries(headers)) res.headers.set(k, v)
   res.headers.set('x-cache-store', stored)
+  if (partial != null) {
+    res.headers.set('x-cache-partial', `ttl=${partial}`)
+    res.headers.set('cache-control', PARTIAL_CLIENT)
+  }
   return res
 }
+
+/** A background full run's phase-2 time budget, ms (`upgradePartial`): what the viewer-facing 1.5 s (0.9 s a
+ *  diff side) cut short gets ~7× more, after the response is sent. A Pages Function's `waitUntil` may run
+ *  30 s past the response, and phase 2 stops decoding at its budget, so a diff (both sides at once, then its
+ *  walk) stays well inside. */
+export const UPGRADE_PHASE2_MS = 10_000
+
+/** Per isolate: keys with a background full run in flight (one each: concurrent partial hits don't
+ *  stampede), and keys whose run was cut short too — not retried until the partial they'd replace expires
+ *  (`PARTIAL_TTL`), so a heavy key doesn't re-run every hit. */
+const upgrading = new Set<string>()
+const gaveUp = new Map<string, number>()
+
+/** What `upgradePartial` did: `scheduled`, or why not. */
+export type Upgrade = 'scheduled' | 'no-waituntil' | 'in-flight' | 'gave-up'
+
+/** After serving a partial answer (budget-cut: the miss that produced it, or a partial hit), compute the full
+ *  one in the background (`waitUntil`) with `compute` (the endpoint's build at `UPGRADE_PHASE2_MS`). A whole
+ *  answer replaces the colo entry, at the normal TTL (and goes to KV, as any whole answer does); one cut
+ *  short again leaves the partial as it is. `done` (tests) settles with the run. */
+export function upgradePartial(
+  env: CacheEnv,
+  key: Request,
+  compute: () => Promise<{ body: string; keep: Keep }>,
+  waitUntil: ((p: Promise<unknown>) => void) | undefined,
+  now = Date.now(),
+): Upgrade {
+  if (!waitUntil) return 'no-waituntil'
+  const k = key.url
+  if (upgrading.has(k)) return 'in-flight'
+  const until = gaveUp.get(k)
+  if (until != null) {
+    if (now < until) return 'gave-up'
+    gaveUp.delete(k)
+  }
+  upgrading.add(k)
+  waitUntil((async () => {
+    try {
+      const { body, keep } = await compute()
+      if (keep === true) await cacheStore(env, key, body)
+      else gaveUp.set(k, now + PARTIAL_TTL * 1000)
+    } catch {
+      gaveUp.set(k, now + PARTIAL_TTL * 1000)
+    } finally {
+      upgrading.delete(k)
+    }
+  })())
+  return 'scheduled'
+}
+
+/** Tests: forget the isolate's upgrade state. */
+export const resetUpgrades = (): void => { upgrading.clear(); gaveUp.clear() }
+
+/** Whether a cached response is a partial answer (`x-cache-partial`). */
+export const isPartial = (r: Response): boolean => r.headers.has('x-cache-partial')
 
 /** A `Trace` sink plus its `Server-Timing` rendering (`fetch;dur=812,…`;
  * counts ride as `dur` too — DevTools shows them the same way). */

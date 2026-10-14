@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { actionPrefix, cellAction, filesRedirect, listsObjects, objectSource, openHref, publicUrl, rowTarget, type CellNode } from './objects'
+import { actionItem, cellAction, filesRedirect, listsObjects, objectSource, openHref, publicUrl, rowTarget, type CellNode } from './objects'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -80,6 +80,11 @@ describe('rowTarget', () => {
 })
 
 describe('openHref', () => {
+  it('encodes the directory and leaves consumed access/preview tokens out of navigation', () => {
+    expect(openHref('/', ['bk', '2025 tax returns', 'a #1?.pdf'], '?key=private&og=preview&d=261011')).toEqual({
+      pathname: '/bk/2025%20tax%20returns', search: '?d=261011&open=a+%231%3F.pdf',
+    })
+  })
   it('the object’s directory is the drill path, its basename `open`; the page’s other params stay', () => {
     expect(openHref('/', ['ctbk', 'gbfs', 'a b.parquet'], '?d=260930&c=w')).toEqual({ pathname: '/ctbk/gbfs', search: '?d=260930&c=w&open=a+b.parquet' })
     expect(openHref('/', ['jc-taxes', 'x.json'], '?open=y.json')).toEqual({ pathname: '/jc-taxes', search: '?open=x.json' })
@@ -155,10 +160,10 @@ describe('filesRedirect', () => {
   const proxy = { uri: 'gs://my-data', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
   it('a store that scans the proxy’s bucket shows the key: a directory drills there, an object opens under its directory', () => {
     expect([
-      filesRedirect('', proxy, stores, gcs),
-      filesRedirect('listing/2026-09-30/', proxy, stores, gcs),
-      filesRedirect('listing/2026-09-30/bucket-1/part-0.parquet', proxy, stores, gcs),
-      filesRedirect('sweep/runs/a%20b.json', proxy, stores, gcs),
+      filesRedirect('', proxy, stores),
+      filesRedirect('listing/2026-09-30/', proxy, stores),
+      filesRedirect('listing/2026-09-30/bucket-1/part-0.parquet', proxy, stores),
+      filesRedirect('sweep/runs/a%20b.json', proxy, stores),
     ]).toEqual([
       { pathname: '/meta/my-data', search: '' },
       { pathname: '/meta/my-data/listing/2026-09-30', search: '' },
@@ -166,23 +171,25 @@ describe('filesRedirect', () => {
       { pathname: '/meta/my-data/sweep/runs', search: '?open=a+b.json' },
     ])
   })
-  it('no configured store scans the proxy’s bucket (r2.rbw.sh), or the proxy is unknown: the store root', () => {
+  it('does not redirect an unavailable or malformed legacy path', () => {
     const [r2] = resolveStores('r2', '', TEST_REGISTRY)
     expect([
-      filesRedirect('listing/2026-09-30/', { uri: 'r2://disk-tree-demo', prefixes: ['listing/'] }, [r2], r2),
-      filesRedirect('listing/x.parquet', null, stores, gcs),
-      filesRedirect('listing/x.parquet', proxy, [gcs], gcs),
+      filesRedirect('listing/2026-09-30/', { uri: 'r2://disk-tree-demo', prefixes: ['listing/'] }, [r2]),
+      filesRedirect('listing/x.parquet', null, stores),
+      filesRedirect('listing/x.parquet', proxy, [gcs]),
+      filesRedirect('listing/%E0%A4%A', proxy, stores),
     ]).toEqual([
-      { pathname: '/', search: '' },
-      { pathname: '/', search: '' },
-      { pathname: '/', search: '' },
+      null,
+      null,
+      null,
+      null,
     ])
   })
 })
 
-describe('actionPrefix', () => {
-  it('an object stages / assigns by its key, a directory by its `/`-terminated prefix', () => {
-    expect([actionPrefix('r2://ctbk/a.parquet', 'file'), actionPrefix('r2://ctbk/gbfs', 'dir'), actionPrefix('r2://ctbk/gbfs', undefined)])
-      .toEqual(['r2://ctbk/a.parquet', 'r2://ctbk/gbfs/', 'r2://ctbk/gbfs/'])
+describe('actionItem', () => {
+  it('an object stages / assigns as that exact object (kind carried, not a `key/` prefix), a directory by its `/`-terminated prefix', () => {
+    expect([actionItem('r2://ctbk/a.parquet', 'file'), actionItem('r2://ctbk/gbfs', 'dir'), actionItem('r2://ctbk/gbfs', undefined)])
+      .toEqual([{ key: 'r2://ctbk/a.parquet', kind: 'object' }, { key: 'r2://ctbk/gbfs/', kind: 'prefix' }, { key: 'r2://ctbk/gbfs/', kind: 'prefix' }])
   })
 })

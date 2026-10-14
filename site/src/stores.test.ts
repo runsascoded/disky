@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveStores, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
+import { knownBucket, resolveStores, storeDefaultColor, storeEmailAuth, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
 // The build-time store resolution (specs/multi-store.md phase 2): `VITE_STORE`
@@ -12,6 +12,22 @@ const thrown = (f: () => unknown): string | null => {
   try { f() } catch (e) { return (e as Error).message }
   return null
 }
+
+it('accepts small configured buckets and runtime additions, but rejects unknown routes', () => {
+  const store = { ...TEST_REGISTRY[0], buckets: ['large', 'tiny'] }
+  expect(['large', 'tiny', 'new-bucket', 'typo'].map(name => knownBucket(name, store, [{ n: 'large' }, { n: 'new-bucket' }])))
+    .toEqual([true, true, true, false])
+})
+
+it('preserves owner/tree defaults unless a store explicitly selects another axis', () => {
+  expect([storeDefaultColor({ owners: true }), storeDefaultColor({ owners: false }), storeDefaultColor({ owners: true, defaultColor: 'date' }), storeDefaultColor({ owners: false, defaultColor: 'date' })])
+    .toEqual(['user', 'tree', 'date', 'date'])
+})
+
+it('shows email-code sign-in by default and hides it only for explicit Google-only stores', () => {
+  expect([storeEmailAuth({}), storeEmailAuth({ emailSignIn: true }), storeEmailAuth({ emailSignIn: false })])
+    .toEqual([{ startEndpoint: '/auth/email/start', verifyEndpoint: '/auth/email/code' }, { startEndpoint: '/auth/email/start', verifyEndpoint: '/auth/email/code' }, false])
+})
 
 describe('resolveStores', () => {
   it('nothing configured: the registry’s first store alone', () => {

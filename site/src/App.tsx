@@ -1,23 +1,27 @@
 import { Explain } from './Help'
-import { keepPreviousData, useQueries, useQuery } from '@tanstack/react-query'
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { keepPreviousData, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Link, useLocation, useNavigate, useNavigationType } from 'react-router-dom'
 import { MdLayers } from 'react-icons/md'
 import { useActions } from 'use-kbd'
 import { stringParam, useUrlState } from 'use-prms'
+import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
-import { signInUrl, useCanAssign, useIdent as useIdentity } from './auth'
+import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity } from './auth'
 import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
+import { DiskSpace } from './DiskSpace'
+import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
+import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
-import { fromUrlSegs, pathCopy, pathDisplay, pathText, toUrlSegs } from './pathCrumbs'
+import { fromUrlPath, pathCopy, pathDisplay, pathText, toUrlPath, toUrlSegs } from './pathCrumbs'
 import { listsObjects, openHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
@@ -27,19 +31,38 @@ import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
-import { collectFlagged, DEFAULT_SYNTAX, inMatchRoots, SYNTAXES, syntaxById } from './filterTree'
+import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
+import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
+import { HttpError } from './batches'
+import { budgetCutRefetch } from './budgetCut'
+import type { RowSource } from './MatchActions'
+import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
-import { FilterFlags, FilterNote } from './FilterNote'
+import { apiError, INDEXED_SYNTAX, refusalOf, useFilterCaps, useIndexedScans } from './filterCaps'
+import { RootCrumb } from './RootCrumb'
+import { actBlock, noMatches } from './matchAct'
+import { type BlindPanel, blindNote, blindShown } from './filterBlind'
+import { LoadFailure, mapSlot } from './LoadFailure'
+import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
+import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
 import { BulkBar } from './BulkBar'
-import { setCurrentScan, useMyUser, useOwnerIndex, useOwners } from './owners'
+import { setCurrentScan, useMyUserState, useOwnerIndex, useOwners } from './owners'
+import { ledgerRevOf, ownerScope, ownerScopeReady, pageLedgerKey, scopeKeyOf } from './viewScope'
+import { useRegistryLoaded } from './identities'
 import { applyLedger } from './ledgerOverlay'
 import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, encodeScan, fmtScan, nearestScan, noScansYet, scanTime, useScan } from './scan'
+import { DAY, encodeScan, fmtTimestamp, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
+import { scanCmp } from './scanSlug'
+import { hrefWithScan, NoScanMatch } from './NoScanMatch'
+import { selOf } from './scanSlug'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
+import { listingTime } from './listingTime'
+import { knownBucket, storeDefaultColor } from './stores'
+import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
@@ -61,17 +84,6 @@ const MODES: ColorMode[] = ['read', 'user', 'date', 'tree']
  * accepts the legacy forms and the rewrite is ours. (The retired mark
  * coloring — `m`/`marks`/`mark`/`fate` — decodes to nothing: the default.)
  */
-const MODE_CODES: Record<string, string> = { tree: 't', date: 'w', read: 'r', user: 'u' }
-const MODE_ALIASES: Record<string, string> = {
-  t: 'tree', tree: 'tree',
-  w: 'date', written: 'date', age: 'date', date: 'date',
-  r: 'read', read: 'read',
-  u: 'user', user: 'user',
-}
-const modeCodec = {
-  encode: (v: string | undefined) => (v === undefined ? undefined : MODE_CODES[v] ?? v),
-  decode: (e: string | undefined) => (e === undefined ? undefined : MODE_ALIASES[e] ?? e),
-}
 const shadeCodec = {
   encode: (v: string | undefined) => (v === 'class' ? 'c' : undefined),
   decode: (e: string | undefined): string | undefined => (e === 'c' || e === 'class' ? 'class' : undefined),
@@ -103,12 +115,10 @@ const CLASS_OF: Record<ClassAxis, string> = { s: '1', n: '2', c: '3', a: '4' }
 // Diff-section span presets (days back from the "after" scan).
 const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14], ['30d', 30]]
 
-// The owner axis: `?o=` is `owned`, `unowned`, `me`, or a user key
-// (`?o=rw`); absent = everything. Owned = a person owns it (inferred from
+// The owner axis: `?o` is the unowned pool, `?o=*` the owned one, `?o=me`
+// or a user key (`?o=rw`) a person (`ownerParam`); absent = everything. Owned = a person owns it (inferred from
 // paths/runs, or assigned); unowned
-// = the nobody-owns-it pool. A user narrows "owned" to that person.
-type OwnerMode = 'all' | 'owned' | 'unowned' | 'user' | 'others'
-
+// = the nobody-owns-it pool. A user narrows "owned" to that person (`OwnerMode`, `viewScope.ts`).
 
 // Home-page section anchors, top to bottom — the scroll-spy keeps `#hash`
 // tracking the one in view, and deep links scroll to it. Old ids keep working.
@@ -127,9 +137,12 @@ function AppContent() {
   // one per configured store under its path; the primary is the default).
   // Every data request goes through `sfetch`, which carries `store=<key>` for
   // a secondary store and is the global fetch for the primary.
-  const { pathname, search, hash } = useLocation()
+  const location = useLocation()
+  const { pathname, search } = location
+  const navType = useNavigationType()
   const navigate = useNavigate()
   const store = useStore()
+  const time = listingTime(store.scheme)
   const sfetch = useStoreFetch()
   // Legacy `?path=<prefix>` links (cw-s3 drilled by query param until the
   // union): forward to the URL-path form, keeping the other params.
@@ -140,9 +153,10 @@ function AppContent() {
     q.delete('path')
     const base = store.path === '/' ? '' : store.path
     const rest = q.toString()
-    navigate({ pathname: legacy ? `${base}/${legacy.replace(/^\/+|\/+$/g, '')}` : store.path, search: rest ? `?${rest}` : '', hash }, { replace: true })
-  }, [search, hash, navigate, store])
+    navigate({ pathname: legacy ? `${base}/${legacy.replace(/^\/+|\/+$/g, '')}` : store.path, search: rest ? `?${rest}` : '', hash: window.location.hash }, { replace: true })
+  }, [search, navigate, store])
   const canAssign = useCanAssign()
+  const canStage = useCanStage()
   const ident = useIdentity()
   // The owner axis (`Store.owners`): the ownership ledger overlays the map
   // and the table for any signed-in viewer; admins assign from it.
@@ -165,15 +179,20 @@ function AppContent() {
   // Scan selection (`?d=YYMMDD`) + the polling scan list, shared with /users
   // and /user/:id via useScan (specs/done/scan-param-all-pages.md). Absent `?d` is
   // a first-class "latest", so a parked tab follows new scans.
-  const { asof, scans, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, scansQ } = useScan(store)
+  // A filtered view with no `?d=` on an indexed-only deployment opens on the newest scan the static
+  // index covers (a just-published scan isn't searchable until the index appends it), and says so.
+  const { indexedOnly: indexedOnly0 } = useFilterCaps()
+  const [fFloat] = useUrlState('f', stringParam())
+  const indexedScans = useIndexedScans(indexedOnly0 && !!fFloat)
+  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, scansQ } = useScan(store, indexedOnly0 && fFloat ? indexedScans : undefined)
   const rulesQ = useRules()
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
   useEffect(() => setCurrentScan(asof ?? undefined), [asof])
-  const scanQuery = <T,>(name: string) => ({
-    queryKey: [name, store.key, asof],
-    queryFn: () => sfetch(`${store.base}/${asof}/${name}.json`).then(r => r.json() as Promise<T>),
-    enabled: !!asof,
+  const scanQuery = <T,>(name: string, scan = asof) => ({
+    queryKey: [name, store.key, scan],
+    queryFn: () => sfetch(`${store.base}/${scan}/${name}.json`).then(r => r.json() as Promise<T>),
+    enabled: !!scan,
     staleTime: Infinity,
   })
   // `?f=` (name filter) and `?o=` (owner axis): the page's scope, sent to the
@@ -188,16 +207,24 @@ function AppContent() {
   const [qsP, setQsP] = useUrlState('qs', stringParam(), true)
   const storeSyntax = syntaxById(store.querySyntax ?? '') ?? DEFAULT_SYNTAX
   const syntax = (qsP && syntaxById(qsP)) || storeSyntax
+  // An indexed-only deployment (`FILTER_INDEXED_ONLY`): one literal substring of a name, unscoped; any
+  // other form is refused inline, never sent.
+  const { indexedOnly, rootLabel, rootTitle } = useFilterCaps()
+  const boxSyntax = indexedOnly ? INDEXED_SYNTAX : syntax
   const fParse = useMemo((): { ok: boolean; error?: string } => {
     if (qsP && !syntaxById(qsP)) return { ok: false, error: `unknown query syntax '${qsP}' (want ${SYNTAXES.map(x => x.id).join('|')})` }
     if (!fqRaw) return { ok: false }
+    const refused = indexedOnly ? rejectQuery(fqRaw, qsP, store.querySyntax) : null
+    if (refused) return { ok: false, error: refused.message }
     const r = syntax.parse(fqRaw)
     return r.error !== undefined ? { ok: false, error: r.error } : { ok: !!r.ast }
-  }, [fqRaw, qsP, syntax])
-  const fq = fParse.ok ? fqRaw : undefined
+  }, [fqRaw, qsP, syntax, indexedOnly, store.querySyntax])
   // The box edits a local draft; the URL (and every query keyed on it) follows
   // after a 250 ms pause — one request pair per phrase, not per keystroke.
   const [fqDraft, setFqDraft] = useState<string | null>(null)
+  // Brushing: the view's child (by name) hovered in either the treemap or its
+  // children table, lit in both (a ring on the cell, the row's hover tint).
+  const [brush, setBrush] = useState<string | null>(null)
   useEffect(() => {
     if (fqDraft == null) return
     const t = setTimeout(() => { setFq(fqDraft || undefined); setFqDraft(null) }, 250)
@@ -205,9 +232,9 @@ function AppContent() {
   }, [fqDraft, setFq])
   // Lens changes push history (they change WHAT you're looking at, like a
   // drill); cosmetics (`?c=`, `?s=`, `?n=`) replace.
-  const [oP, setOP] = useUrlState('o', stringParam(), true)
+  const [oP, setOP] = useUrlState('o', ownerParam, true)
   // `?by=<assigner>` — the /assignments heatmap cell lens: with a user owner
-  // lens, fold only the claims that assigner made. Only meaningful alongside a
+  // lens, fold only the assignments that assigner made. Only meaningful alongside a
   // person in `?o=`.
   const [byP] = useUrlState('by', stringParam())
   // `?s=` — the secondary "shade by" axis, a perturbation within each cell's
@@ -222,24 +249,19 @@ function AppContent() {
     return on.size > 0 && on.size < CLASS_AXES.length ? on : null
   }, [clP])
   const setClasses = (ks: ClassAxis[]) => setClP(ks.length === 0 || ks.length === CLASS_AXES.length ? undefined : CLASS_AXES.filter(c => ks.includes(c)).join(''))
-  const myUser = useMyUser(ident?.email, ownersMode)
-  // Owner axis. `me` resolves to the signed-in user's attribution id (a
+  const { user: myUser, ready: myUserReady } = useMyUserState(ident?.email, ownersMode)
+  // Owner axis (`viewScope.ts`). `me` resolves to the signed-in user's attribution id (a
   // shared `?o=me` link shows each reader their own files); an unmapped
   // email resolves to nothing, and the axis falls back to "all" with a note.
   // `?o=!<key>,<key>` — the "owned by someone OTHER than these people" pool
   // (the sweep console's "show me the conflicts under this band" link). The
   // excluded users resolve to canonical ids for the server's row filter.
-  const notUsers: string[] =
-    ownersMode && oP?.startsWith('!') ? oP.slice(1).split(',').filter(Boolean).map(k => canonId(k)) : []
-  const ownerUser: string | null =
-    !ownersMode || !oP || oP === 'owned' || oP === 'unowned' || oP.startsWith('!') ? null
-    : oP === 'me' ? myUser
-    : canonId(oP)
-  const ownerMode: OwnerMode =
-    !ownersMode || !oP ? 'all'
-    : notUsers.length ? 'others'
-    : oP === 'owned' ? 'owned' : oP === 'unowned' ? 'unowned' : ownerUser ? 'user' : 'all'
-  const meUnmapped = ownersMode && oP === 'me' && !myUser
+  const owner = ownerScope({ ownersMode, oP, byP, myUser, canon: canonId })
+  const { notUsers, ownerUser, ownerMode, meUnmapped, activeLens, assigner } = owner
+  // Its params wait on the registry (a golfed key) and the viewer's id (`me`): the view's queries hold
+  // until they're final, so a cold `?o=…` load sends each request once.
+  const registryLoaded = useRegistryLoaded()
+  const scopeReady = ownerScopeReady({ ownersMode, oP, byP, registryReady: registryLoaded || rulesQ.isError, myUserReady })
   const setOwnerUser = (u: string | undefined) => setOP(u === undefined ? undefined : u === 'me' ? 'me' : shortUserKey(canonId(u)))
   // Flip a picked person between their own bytes (`?o=<key>`) and everyone
   // else's under the current view (`?o=!<key>`) — the ≠ toggle beside the picker.
@@ -247,44 +269,53 @@ function AppContent() {
     const key = ownerUser ? shortUserKey(ownerUser) : notUsers.length ? shortUserKey(notUsers[0]) : null
     if (key) setOP(on ? `!${key}` : key)
   }
-  const viewUser = ownerUser
   // Every scope axis is applied server-side by /api/subtree (specs/
-  // view-serving.md §2): a user (`lens=user:`, the live claims folded in), a
+  // view-serving.md §2): a user (`lens=user:`, the live assignments folded in), a
   // pool (`o=`), the classes (`cl=`), the name filter (`q=`). The client
   // receives exactly the current view and only draws it.
-  const lensUser = viewUser
-  const activeLens = lensUser ? `user:${lensUser}` : null
-  const assigner = ownersMode && byP ? canonId(byP) : null
+  // …and unscoped: a filter under a user, owner pool or class scope is refused there too.
+  const fScopeRefused = indexedOnly && !!fqRaw && fParse.ok && (!!activeLens || ownerMode !== 'all' || !!classSet) ? REJECT_MESSAGES['unsupported-scope'] : undefined
+  const fq = fParse.ok && !fScopeRefused ? fqRaw : undefined
   const scopeQs =
-    (activeLens ? `&lens=${activeLens}` : '') +
-    (activeLens && assigner ? `&by=${encodeURIComponent(assigner)}` : '') +
-    (ownerMode === 'owned' || ownerMode === 'unowned' ? `&o=${ownerMode}` : '') +
-    (notUsers.length ? `&o=!${notUsers.map(encodeURIComponent).join(',')}` : '') +
+    owner.qs +
     (classSet ? `&cl=${CLASS_AXES.filter(c => classSet.has(c)).join('')}` : '') +
     (fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : '')
+  // A user lens or an owner pool folds the live ledger server-side, so those
+  // views' queries carry its revision: an assignment (or its undo) refetches
+  // them; everything else ignores the ledger. The ledger's first load is not a
+  // change (`pageLedgerKey`): a view fired before `/api/actions` lands keeps its key.
+  const ledgerRev = useMemo(() => {
+    let max = 0
+    for (const r of ownerIdx.owners.values()) max = Math.max(max, r.action_id)
+    return ledgerRevOf(ownerIdx.count, max)
+  }, [ownerIdx])
+  const ledger = pageLedgerKey(ledgerRev, ownersQ.data !== undefined)
+  const scopeKey = scopeKeyOf(scopeQs, owner.ledgered, ledger)
   // One-time legacy-param rewrite onto the two axes, so old links (Slack
   // digests, /user pages) work and re-share in the current form:
-  //   ?l=todo → ?k=u · ?l=unclaimed|communal, ?t=unattributed|communal → ?o=unclaimed
+  //   ?l=todo → ?k=u · ?l=unclaimed|communal, ?t=unattributed|communal → bare ?o
+  //   ?o=unowned|unclaimed → bare ?o · ?o=owned|claimed → ?o=*
   //   ?l=user[&lu=x] (and older ?mt=mine[&mu=x]) → ?o=x|me · ?u=x (legend pin) → ?o=x
   //   any other ?t= (the retired group pin) → dropped
   useEffect(() => {
     const sp = new URLSearchParams(search)
     const legacy = ['l', 'lu', 'u', 'mt', 'mu', 't']
     const t = sp.get('t')
-    // The owner pools were `claimed` / `unclaimed` until 2026-09-07.
-    const oldPool = sp.get('o') === 'claimed' ? 'owned' : sp.get('o') === 'unclaimed' ? 'unowned' : null
-    if (!legacy.some(k => sp.has(k)) && !oldPool) return
-    if (oldPool) sp.set('o', oldPool)
+    // A pool spelled long (`unowned` / `owned`) or retired (`unclaimed` /
+    // `claimed`, until 2026-09-07) → its short form (bare `o` / `o=*`).
+    const oldPool = legacyOwner(sp.get('o'))
+    if (!legacy.some(k => sp.has(k)) && oldPool === null) return
+    if (oldPool !== null) sp.set('o', oldPool)
     const l = sp.get('l') ?? sp.get('mt')
     const lu = sp.get('lu') ?? sp.get('mu')
     const u = sp.get('u')
     for (const k of legacy) sp.delete(k)
-    if (t === 'unattributed' || t === 'communal') sp.set('o', 'unowned')
+    if (t === 'unattributed' || t === 'communal') sp.set('o', '')
     if (l === 'todo') sp.set('k', 'u')
-    else if (l === 'unclaimed' || l === 'communal') sp.set('o', 'unowned')
+    else if (l === 'unclaimed' || l === 'communal') sp.set('o', '')
     else if (l === 'user' || l === 'mine') sp.set('o', lu ? shortUserKey(canonId(lu)) : 'me')
     if (u && !sp.has('o')) sp.set('o', shortUserKey(canonId(u)))
-    navigate({ pathname, search: `?${sp.toString()}`, hash }, { replace: true })
+    navigate({ pathname, search: `?${bareEmpty(sp.toString(), 'o')}`, hash: window.location.hash }, { replace: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search])
   const metaQ = useQuery(scanQuery<Meta>('meta'))
@@ -297,27 +328,37 @@ function AppContent() {
   // pinned row, `?f=`) exactly like the map — one code path for every scope;
   // the batch job's root-only `diff.json` is no longer read here.
   const prevScan = asof ? scans[scans.indexOf(asof) + 1] ?? null : null
-  const earlier = useMemo(() => (asof ? scans.filter(s => s < asof) : []), [asof, scans])
-  const spanScan = span && asof ? nearestScan(earlier, scanTime(asof) - span) : null
+  const earlier = useMemo(() => (asof ? scans.filter(s => scanCmp(s, asof, times) < 0) : []), [asof, scans, times])
+  const spanScan = span && asof ? nearestScan(earlier, scanInstant(asof, times) - span, times) : null
   // A pinned start (`from`) wins over a look-back span; both fall back to the
-  // immediately-previous scan.
-  const fromScan = from && asof ? nearestScan(earlier, scanTime(from)) : null
-  const diffPrev = fromScan ?? spanScan ?? prevScan
+  // immediately-previous scan. `from` is a slug: the latest earlier scan it
+  // matches (the resolver). One matching none is a miss — the diff says so
+  // and draws nothing, never the nearest scan instead.
+  const fromScan = from && asof ? latestScan(from, earlier, times) : null
+  const startMiss = useMemo(() => fromMiss(from, asof, scans, times), [from, asof, scans, times])
+  const diffPrev = startMiss ? null : fromScan ?? spanScan ?? prevScan
+  // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
+  // any other store never fetches the earlier scan's meta (`diskDiffScan`).
+  const beforeMetaQ = useQuery({
+    ...scanQuery<Meta>('meta', diffPrev),
+    enabled: diskDiffScan(metaQ.data?.disk_space, diffPrev) != null,
+  })
   // Hour-rounded span back from `to` — the previous scan clears it, anything
   // else round-trips as its own span (nearest-scan resolution recovers it,
   // and the link keeps following `latest`).
   const spanTo = (to: string, from: string): number | undefined =>
     scans[scans.indexOf(to) + 1] === from
       ? undefined
-      : Math.max(3600_000, Math.round((scanTime(to) - scanTime(from)) / 3600_000) * 3600_000)
-  const pickBefore = (scan: string) => { if (asof) setSpan(spanTo(asof, scan)) }
-  // A brush on the size chart hands back calendar dates; each resolves to the
-  // scan on that date, and the pair becomes the page's `?d=` (after + span).
+      : Math.max(3600_000, Math.round((scanInstant(to, times) - scanInstant(from, times)) / 3600_000) * 3600_000)
+  // A brush on the size chart hands back the scan ids its ends sit on (else a
+  // prefix, which resolves to the latest scan matching it — never a date-only
+  // id read as its whole day), and the pair becomes the page's `?d=` (after + span).
+  const brushScan = (v: string) => (scans.includes(v) ? v : latestScan(v, scans, times))
   const brushRange = (from: string, to: string) => {
-    const toScan = scans.find(s => s.startsWith(to))
-    const fromScan = scans.find(s => s.startsWith(from))
-    if (!toScan || !fromScan || toScan <= fromScan) return
-    setRange(toScan, spanTo(toScan, fromScan))
+    const toScan = brushScan(to)
+    const fromScan = brushScan(from)
+    if (!toScan || !fromScan || scanCmp(toScan, fromScan, times) <= 0) return
+    setRange(toScan, spanTo(toScan, fromScan), fromScan)
   }
   const diffWindow: [string, string] | undefined = diffPrev && asof ? [diffPrev, asof] : undefined
   // Two orthogonal, low-key toggles for the diff window (see scan.ts grammar):
@@ -329,27 +370,27 @@ function AppContent() {
   const endIsLatest = !!asof && asof === scans[0]
   const endPinned = dP !== undefined
   // Presets past the history's reach — nearest scan more than a quarter of
-  // the span off, or already claimed by a shorter preset — are dropped
+  // the span off, or already assigned by a shorter preset — are dropped
   // rather than mislabeled.
   const spanPicks = useMemo(() => {
     if (!asof) return []
-    const t0 = scanTime(asof)
+    const t0 = scanInstant(asof, times)
     const picks: { label: string; ms: number; scan: string }[] = []
     for (const [label, days] of SPANS) {
       const ms = days * DAY
-      const best = nearestScan(earlier, t0 - ms)
-      if (!best || Math.abs(scanTime(best) - (t0 - ms)) > ms / 4) continue
+      const best = nearestScan(earlier, t0 - ms, times)
+      if (!best || Math.abs(scanInstant(best, times) - (t0 - ms)) > ms / 4) continue
       if (!picks.some(p => p.scan === best)) picks.push({ label, ms, scan: best })
     }
     return picks
-  }, [asof, earlier])
+  }, [asof, earlier, times])
   // Lazy drill (specs/done/path-index-lazy-drill.md step 3, now the primary
   // source): the map's base is the pixel-budget subtree at the store root,
   // and every level of the drilled path gets its own subtree query, grafted
   // in depth order — interactive drills hit each level's cache as they go,
   // and a cold deep link fans the whole chain out in parallel.
-  // The URL's `~` (a store home) expanded: `/~/c` → `Users/ryan/c`.
-  const graftPath = fromUrlSegs(pathname.slice((store.path === '/' ? '' : store.path).length).split('/').filter(Boolean), store.home).join('/')
+  // The URL's `~` (a store home) expanded: `/~/c` → `Users/ryan/c`; each segment decoded once.
+  const graftPath = fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length), store.home).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
@@ -360,9 +401,11 @@ function AppContent() {
   }, [graftPath])
   const subtreeQs = useQueries({
     queries: subtreePaths.map(p => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeQs],
-      enabled: !!asof,
+      queryKey: ['subtree', store.key, asof, p, canW, scopeKey],
+      enabled: !!asof && scopeReady,
       staleTime: Infinity,
+      // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
+      refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
       // Retry transient failures, but not the deterministic ones (409: no
       // user index for this scan; 413: view too wide) — those surface as-is.
       retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
@@ -375,8 +418,8 @@ function AppContent() {
           `/api/subtree?cv=${API_CV}&date=${asof}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
           { credentials: 'include', signal },
         ))
-        if (!r.ok) { pf.fail(); throw new Error(`${r.status}: ${(await r.text()).slice(0, 120)}`) }
-        const j = await r.json() as { tree: TreeNode; tier?: string; matches?: string[]; matched?: { path: string; b: number; o: number }[]; threshold?: number; partialReason?: string; approximateReason?: string }
+        if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true }
         pf.decoded()
         return j
       },
@@ -391,9 +434,10 @@ function AppContent() {
   // so a scope change never downgrades a held full tree to a coarse one.
   const coarseQs = useQueries({
     queries: subtreePaths.map((p, i) => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeQs, 'depth1'],
-      // Deepest path only — see `dataFor`; ancestors never use it.
-      enabled: !!asof && i === subtreePaths.length - 1,
+      queryKey: ['subtree', store.key, asof, p, canW, scopeKey, 'depth1'],
+      // Deepest path only — see `dataFor`; ancestors use it only under a filter, where it is the
+      // exact forest of match roots (cheap from the static name index).
+      enabled: !!asof && scopeReady && (i === subtreePaths.length - 1 || !!fq),
       staleTime: Infinity,
       retry: false,
       // Plain view: one depth band. Filtered view: the whole forest from the
@@ -406,7 +450,7 @@ function AppContent() {
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw new Error(`${r.status}`) }
-        const j = await r.json() as { tree: TreeNode; tier?: string }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number } }
         pf.decoded()
         return j
       },
@@ -426,16 +470,33 @@ function AppContent() {
   // arithmetic (`(other)` = parent − Σ kids) negative — its layout then never
   // converges until a consistent tree lands. The previous *rendered* tree is
   // held whole instead, below (`mapTree`).
-  const dataFor = (i: number): TreeNode | null =>
-    subtreeQs[i]?.data?.tree ?? (i === subtreePaths.length - 1 ? coarseQs[i]?.data?.tree ?? null : null)
+  // Under a filter an ancestor may stand in with its first-paint forest, when that forest carries the
+  // next spine segment WITH children (an ancestor of match roots): a drilled deep link then paints
+  // from the cheap reads instead of waiting on every ancestor's full forest.
+  const spineHasKids = (t: TreeNode, i: number): boolean => {
+    const seg = subtreePaths[i + 1]?.split('/').pop()
+    return !!t.c?.some(k => k.n === seg && k.c?.length)
+  }
+  const dataFor = (i: number): TreeNode | null => {
+    const full = subtreeQs[i]?.data?.tree
+    if (full) return full
+    const coarse = coarseQs[i]?.data?.tree ?? null
+    if (i === subtreePaths.length - 1) return coarse
+    return fq && coarse && spineHasKids(coarse, i) ? coarse : null
+  }
   const baseTree: TreeNode | null = dataFor(0)
   // Whether this scan lists objects (a path-store generation, whose leaves
   // can be objects) or is a v1 dir-only index — every response of one scan
   // answers alike, so the first that has landed says.
   const objects = listsObjects([...subtreeQs, ...coarseQs].find(q => q.data?.tier)?.data?.tier)
   const rootErr = subtreeQs[0]?.error as Error | undefined
+  // A drilled view the filter refuses (a heavy literal with no drilldown is `term-too-common` below the fleet
+  // root): its reason, in the box's note and the map slot, as the root's would be — never the held parent's tiles.
+  const deepErr = subtreePaths.length > 1 ? subtreeQs[subtreePaths.length - 1]?.error as Error | undefined : undefined
+  const deepRefused = !rootErr && fq && refusalOf(deepErr) ? deepErr : undefined
+  const viewErr = rootErr ?? deepRefused
   // The box's error: the client's own parse, else the server's 400.
-  const fErr = fParse.error ?? /^400: bad query: (.*)/s.exec(rootErr?.message ?? '')?.[1]
+  const fErr = fParse.error ?? fScopeRefused ?? /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1]
   // useQueries returns a fresh array each render; stamp the data so the graft
   // memo re-runs exactly when a response lands.
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
@@ -488,11 +549,16 @@ function AppContent() {
   if (tree) lastTree.current = tree
   // The live ownership ledger over the scan's attribution (`applyLedger`):
   // assignments recolor the map and its legend as soon as `/api/actions`
-  // refetches, with no subtree re-read. A user lens is already folded
-  // server-side (`ownerLens`), so it is left as served.
+  // refetches. A pool or user-lens view also re-reads (`ledger` is in its
+  // key) and comes back with the ledger folded in; a user lens is left as served.
   const heldTree = tree ?? lastTree.current
   const mapTree = useMemo(
-    () => (heldTree && ownersMode && ownerMode !== 'user' ? applyLedger(heldTree, ownerIdx, store.scheme, canonId) : heldTree),
+    () => {
+      if (!heldTree || !ownersMode || ownerMode === 'user') return heldTree
+      // A pool is served with the ledger folded in (bytes assigned since the
+      // scan move in or out of it); this only recolors by assignee.
+      return applyLedger(heldTree, ownerIdx, store.scheme, canonId)
+    },
     [heldTree, ownersMode, ownerMode, ownerIdx, store.scheme],
   )
   // What the map shows vs. what the page asked for: a held previous tree
@@ -501,30 +567,82 @@ function AppContent() {
   // depth-1 one, or a refresh; a corner marker, nothing dimmed).
   const mapStale = !tree && !!lastTree.current
   const mapBusy = mapStale || subtreeQs.some(q => q.isFetching)
+  // The asked-for view failed (any non-2xx, its retries spent): the slot states it — a held tree from another
+  // scan or scope would sit dimmed under "loading" forever (gcs 2026-10-09: 80 s of a gray map on a 500).
+  const mapFailed = !!deepRefused || mapSlot(tree, lastTree.current, rootErr) === 'failed'
+  const retryMap = () => { for (const q of [...subtreeQs, ...coarseQs]) if (q.isError) void q.refetch() }
+  // A failed attempt being retried: say so on the held map's marker.
+  const mapRetrying = subtreeQs[0]?.failureReason && !rootErr ? `retrying (${subtreeQs[0].failureReason.message.slice(0, 80)})…` : null
 
-  // Bulk actions target the outermost matched prefixes — the nodes the server
-  // flagged `m` (a match root's whole subtree comes along, so its descendants
-  // aren't flagged).
-  const fMatches = useMemo(() => (tree && fq ? collectFlagged(tree) : []), [tree, fq])
+  // Bulk actions (the bar, the table's rows) under a filter take its matches under the view as the fewest
+  // exact prefixes (`/api/filter-cover`): every match, listed, never a drawn subset or a row's whole prefix.
+  // Unscoped only — under an owner or class scope a match's scoped bytes aren't a prefix.
+  const canStageHere = store.staging && canStage
+  const canAssignHere = ownersMode && canAssign
+  const coverScoped = !!activeLens || ownerMode !== 'all' || !!classSet
+  // Fetched on the viewer's intent (hovering or focusing the bulk bar, a row or its controls) and awaited
+  // by a click, per scan, path and filter: a cold cover costs seconds, and most filtered page loads never act.
+  // The page only observes the cache (`enabled: false`); `prefetchCover` / `fetchCover` fill it, deduped.
+  const qc = useQueryClient()
+  const coverArgs = useMemo(() => ({ date: asof ?? null, path: graftPath, q: fq, qs: syntax.id }), [asof, graftPath, fq, syntax.id])
+  const coverKey = JSON.stringify([store.key, coverArgs])
+  const coverQ = useFilterCover(sfetch, store.key, { ...coverArgs, enabled: false })
+  const coverOk = !!fq && !!coverArgs.date && (canAssignHere || canStageHere)
+  const coverIntent = useCallback(() => { if (coverOk && !coverScoped) void prefetchCover(qc, sfetch, store.key, coverArgs) }, [coverOk, coverScoped, qc, sfetch, store.key, coverArgs])
+  const noScan = (): Promise<never> => Promise.reject(new HttpError('This scan isn’t loaded yet; try again in a moment.', 409))
+  const coverResolve = useCallback(() => coverArgs.date ? fetchCover(qc, sfetch, store.key, coverArgs) : noScan(), [qc, sfetch, store.key, coverArgs])
+  // A view whose answer doesn't list its matches — refused, a rollup or catalog answer, approximate — or has
+  // none (the drilled root's matched total is empty, as the filter note's "no matches" says) offers no action
+  // on them (`actBlock`): the bulk bar says why, muted, and no row offers one.
+  const actBlocked = useMemo(() => {
+    if (!fq) return null
+    const d = subtreeQs[subtreeQs.length - 1]?.data ?? coarseQs[coarseQs.length - 1]?.data ?? subtreeQs[0]?.data
+    const r = (d as { rollup?: { bucketsOnly?: true } } | undefined)?.rollup
+    return actBlock({ refused: !!refusalOf(viewErr), rollup: !!r, bucketsOnly: !!r?.bucketsOnly, approximate: !!d?.approximateReason, dirsOnly: !!(d as { dirsOnly?: true } | undefined)?.dirsOnly, none: noMatches(dataFor(subtreePaths.length - 1)) })
+  }, [fq, subStamp, viewErr]) // eslint-disable-line react-hooks/exhaustive-deps
+  const tblFilter = useMemo((): RowSource | undefined => {
+    if (!fq) return undefined
+    // Under an owner or class scope a match's scoped bytes aren't a prefix: the click says so, muted.
+    const scoped = (): Promise<never> => Promise.reject(new HttpError('Clear the owner or storage-class scope to act on the matches.', 409))
+    return {
+      key: `${coverKey}|${coverScoped}|${actBlocked ?? ''}`,
+      blocked: actBlocked,
+      resolve: row => coverScoped ? scoped() : !coverArgs.date ? noScan() : rowCover(qc, sfetch, store.key, coverArgs, row),
+      prefetch: row => coverScoped || !coverOk ? Promise.resolve() : rowCover(qc, sfetch, store.key, coverArgs, row).catch(() => {}),
+    }
+  }, [fq, coverKey, coverScoped, coverOk, qc, sfetch, store.key, coverArgs, actBlocked]) // eslint-disable-line react-hooks/exhaustive-deps
   // The filter's match roots (the deepest subtree response carries them);
   // the series sums them per scan (the age chart follows the drill instead —
   // its own per-path index, below).
-  const matchedRoots = useMemo((): string[] | undefined => {
+  // A heavy literal's view from its rollup (the server's `rollup`): its cells are children, not match
+  // roots, and the series is the query's own sum per scan (`queryOnly`).
+  const fRollup = useMemo(() => {
+    if (!fq) return false
+    const d = subtreeQs[subtreeQs.length - 1]?.data ?? coarseQs[coarseQs.length - 1]?.data ?? subtreeQs[0]?.data
+    return !!(d as { rollup?: unknown } | undefined)?.rollup
+  }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
+  const fSeries = useMemo(() => {
     if (!fq) return undefined
-    const m = subtreeQs[subtreeQs.length - 1]?.data?.matched ?? subtreeQs[0]?.data?.matched
-    return m?.map(x => x.path)
+    // The first paint carries the same roots (the full read adds only what is inside them).
+    const d = subtreeQs[subtreeQs.length - 1]?.data ?? coarseQs[coarseQs.length - 1]?.data ?? subtreeQs[0]?.data
+    return seriesMatches(d)
   }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
   // The same response's completeness: a budget-cut search (`partial`) or a
   // read without the search index (`approximate`) — shown beside the count.
+  // The drilled view's own response root: its matched total under the drill path (the grafted `tree`'s root
+  // is the fleet's).
+  const fHere = fq ? dataFor(subtreePaths.length - 1) : null
   const fCoverage = useMemo(() => {
     if (!fq) return undefined
-    const d = subtreeQs[subtreeQs.length - 1]?.data ?? subtreeQs[0]?.data
-    return d && { partialReason: d.partialReason, approximateReason: d.approximateReason }
+    const d = subtreeQs[subtreeQs.length - 1]?.data ?? coarseQs[coarseQs.length - 1]?.data ?? subtreeQs[0]?.data
+    const r = (d as { rollup?: { bucketsOnly?: true; scopedBelow?: true } } | undefined)?.rollup
+    return d && { partialReason: d.partialReason, approximateReason: d.approximateReason, bucketsOnly: r?.bucketsOnly ? (r.scopedBelow ? 'scoped' as const : true) : false, dirsOnly: !!(d as { dirsOnly?: true }).dirsOnly, hexRuns: d.hexRuns }
   }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
   const meta: Meta | null = metaQ.data ?? null
-  // Section `#hash` both ways (deep link in, scroll-spy out). Re-armed as the
-  // map, meta and scans land (sections mount off different queries).
-  useHashSpy({ ids: SECTION_IDS, hash, deps: [mapTree, meta, scans], legacy: LEGACY_ANCHORS, offset: topbarH })
+  // Section `#hash` both ways (deep link in, scroll-spy out) and the scroll
+  // position across navigation. A pending deep link is re-armed as the map,
+  // meta and scans land (sections mount off different queries).
+  useHashSpy({ ids: SECTION_IDS, location, navType, deps: [mapTree, meta, scans], legacy: LEGACY_ANCHORS, offset: topbarH })
   const [lens, setLens] = useState(false)  // treemap storage-class lens (hatch by cold fraction)
   const { fmtBytes } = useUnits()
   // The treemap's drill path now lives in the URL *path* (below the store's own
@@ -533,14 +651,14 @@ function AppContent() {
   // options stay query params (`?c`, `?mt`, …); the section stays in the `#hash`.
   const storeBase = store.path === '/' ? '' : store.path
   // A store home reads as `~` in the URL (`/~/c`); the path itself is the
-  // expanded one (`Users/ryan/c`), and a home URL spelled out is replaced by
+  // expanded one (`Users/ryan/c`), each name travels encoded (`toUrlPath`), and a home URL spelled out is replaced by
   // its `~` form below.
   const urlPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
-  const drillPath = fromUrlSegs(urlPath.split('/').filter(Boolean), store.home).join('/')
-  const urlOf = (segs: string[]) => toUrlSegs(segs, store.home).join('/')
+  const drillPath = fromUrlPath(urlPath, store.home).join('/')
+  const urlOf = (segs: string[]) => toUrlPath(segs, store.home)
   const canonUrlPath = urlOf(drillPath.split('/').filter(Boolean))
   useEffect(() => {
-    if (urlPath.replace(/\/+$/, '') !== canonUrlPath) navigate({ pathname: `${storeBase}/${canonUrlPath}`, search, hash }, { replace: true })
+    if (urlPath.replace(/\/+$/, '') !== canonUrlPath) navigate({ pathname: `${storeBase}/${canonUrlPath}`, search, hash: window.location.hash }, { replace: true })
   }, [urlPath, canonUrlPath]) // eslint-disable-line react-hooks/exhaustive-deps
   // Per-path created-time strata for `AgeChart`, keyed on the drilled prefix so
   // it follows the drill exactly instead of showing the whole fleet at every
@@ -557,7 +675,7 @@ function AppContent() {
     queryKey: ['age', store.key, asof, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${asof}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${asof}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?date=${asof}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       // No rows (no age tier for this deploy, or a prefix below the index
@@ -578,7 +696,7 @@ function AppContent() {
     queryKey: ['age', store.key, diffPrev, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${diffPrev}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${diffPrev}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?date=${diffPrev}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       if (j.records.length) pf.decoded(); else pf.empty()
@@ -592,17 +710,20 @@ function AppContent() {
     [ageBaseQ.data],
   )
   // A drill leaves any opened object behind (`?open=` names a child of the
-  // drilled directory).
+  // drilled directory), and the section hash: a new path starts at the top
+  // (`useHashSpy`). Never copy the router's `hash` into a navigation — the spy
+  // rewrites the URL's behind the router's back, so it's whatever section was
+  // last *linked*, not the one in view (a crumb click warped to it).
   const drillTo = (segs: string[]) => {
     const q = new URLSearchParams(search)
     q.delete('open')
-    navigate({ pathname: segs.length ? `${storeBase}/${urlOf(segs)}` : store.path, search: q.size ? `?${q}` : '', hash })
+    navigate({ pathname: segs.length ? `${storeBase}/${urlOf(segs)}` : store.path, search: q.size ? `?${q}` : '' })
   }
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
   // Back closes it.
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
-  const openObject = (segs: string[]) => navigate({ ...openHref(store.path, toUrlSegs(segs, store.home), search), hash })
+  const openObject = (segs: string[]) => navigate(openHref(store.path, toUrlSegs(segs, store.home), search))
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
   const readRange = useMemo((): DateRange | null =>
@@ -610,9 +731,9 @@ function AppContent() {
   [meta])
   // No explicit `?c=` → a scope-appropriate default; an explicit pick always
   // wins: an attribution store colors by owner (on a one-owner view the
-  // interesting axis is who else is in there), any other by tree.
-  const lensDefaultMode: ColorMode = store.owners ? 'user' : 'tree'
-  const mode: ColorMode = (MODES as string[]).includes(modeP ?? '') ? (modeP as ColorMode) : lensDefaultMode
+  // interesting axis is who else is in there), any other by tree, unless the
+  // deployment selects a different default.
+  const lensDefaultMode: ColorMode = storeDefaultColor(store)
   const setMode = (m: ColorMode) => setModeP(m === lensDefaultMode ? undefined : m)
   // The scan carries attribution (the owner axis and user coloring apply) —
   // from the scan's meta, not the current view, which may hold no user bytes
@@ -620,7 +741,7 @@ function AppContent() {
   const hasAttr = !!meta?.users?.length
   // The page bar's controls, each on what backs it (`pageBar.ts`).
   const bar = barControls({ owners: store.owners, hasAttr, classes: store.prices, readRange: !!readRange })
-  const effMode: ColorMode = bar.color.includes(mode) ? mode : bar.color.includes('user') ? 'user' : 'tree'
+  const effMode = mapColorMode(modeP, bar.color, lensDefaultMode)
   // The age chart's color axis: an explicit `?ac=` wins; otherwise it follows
   // the map. The read axis needs strata that carry `a` (scans published from
   // 8/29 on) — without them it's offered disabled and the chart falls back to
@@ -657,8 +778,8 @@ function AppContent() {
   // (`depth` only caps what's drawn), so without a search index the "first"
   // paint costs as much as the full walk (gcs 2026-10-02: 9.3 s vs 4.5 s).
   const diffQ1 = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs, 'l1'],
-    enabled: !!asof && !!diffPrev && !fq,
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'l1'],
+    enabled: !!asof && !!diffPrev && scopeReady && !fq,
     staleTime: Infinity,
     retry: false,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
@@ -667,7 +788,7 @@ function AppContent() {
         `/api/diff?cv=${API_CV}&from=${diffPrev}&to=${asof}&path=${encodeURIComponent(graftPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&depth=1`,
         { credentials: 'include', signal },
       ))
-      if (!r.ok) { pf.fail(); throw new Error(`${r.status}: ${(await r.text()).slice(0, 120)}`) }
+      if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
       const j = await r.json() as DiffData
       // No rows: the section says "no changes" and the map never mounts.
       if (j.rows.length) pf.decoded(); else pf.empty()
@@ -680,13 +801,14 @@ function AppContent() {
   const diffSlotRef = useRef<HTMLDivElement>(null)
   const diffSlotH = useRef(0)
   const diffQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs],
-    enabled: !!asof && !!diffPrev,
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey],
+    enabled: !!asof && !!diffPrev && scopeReady,
     // While the full walk aligns: the bucket-level diff of the SAME pair once
     // it lands, else the last pair's diff — drawn dimmed either way, so the
     // section holds its height and shows something before the detail.
     placeholderData: (prev: DiffData | undefined) => diffL1 ?? prev,
     staleTime: Infinity,
+    refetchInterval: q => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
     retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
     retryDelay: (n: number) => 400 * 2 ** n,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
@@ -695,7 +817,7 @@ function AppContent() {
         `/api/diff?cv=${API_CV}&from=${diffPrev}&to=${asof}&path=${encodeURIComponent(graftPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}`,
         { credentials: 'include', signal },
       ))
-      if (!r.ok) { pf.fail(); throw new Error(`${r.status}: ${(await r.text()).slice(0, 120)}`) }
+      if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
       const j = await r.json() as DiffData
       // No rows: the section says "no changes" and the map never mounts.
       if (j.rows.length) pf.decoded(); else pf.empty()
@@ -705,8 +827,8 @@ function AppContent() {
   // The headline first: the same pair's totals without the row walk land in
   // a second or two, so the +X / Δobjects line shows while the rows align.
   const diffSumQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeQs, 'summary'],
-    enabled: !!asof && !!diffPrev,
+    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'summary'],
+    enabled: !!asof && !!diffPrev && scopeReady,
     staleTime: Infinity,
     retry: false,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
@@ -714,7 +836,7 @@ function AppContent() {
         `/api/diff?cv=${API_CV}&from=${diffPrev}&to=${asof}&path=${encodeURIComponent(graftPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&summary=1`,
         { credentials: 'include', signal },
       )
-      if (!r.ok) throw new Error(`${r.status}: ${(await r.text()).slice(0, 120)}`)
+      if (!r.ok) throw apiError(r.status, await r.text())
       return r.json() as Promise<DiffData>
     },
   })
@@ -779,14 +901,20 @@ function AppContent() {
   }, [mapTree, drillPath])
   // The table's path segments, stable while `mapPath` is (a fresh array per
   // render defeated every memo keyed on it).
-  const tblActionable = useMemo(() => inMatchRoots(matchedRoots, !!fq), [matchedRoots, fq])
   const tblSegs = useMemo(() => mapPath?.slice(1).map(n => n.n) ?? [], [mapPath])
+  // Each table row's listed match roots: from the table's own path's response (full, else its first paint) —
+  // exact when its `matched` list is every root, a lower bound when it is capped, unknown otherwise.
+  const tblPath = mapPath ? tblSegs.join('/') : null
+  const tblRowMatches = useMemo(() => {
+    if (!fq || tblPath == null) return undefined
+    const i = subtreePaths.indexOf(tblPath)
+    const d = i < 0 ? undefined : (subtreeQs[i]?.data ?? coarseQs[i]?.data) as (MatchFields & { matchesCapped?: boolean; partialReason?: string; approximateReason?: string; rollup?: unknown }) | undefined
+    return rowMatchesOf(d?.matched, matchedListOf(d))
+  }, [fq, subStamp, tblPath, subtreePaths]) // eslint-disable-line react-hooks/exhaustive-deps
   const onMapPath = (p: TreeNode[]) => drillTo(p.slice(1).map(n => n.n))
-  // Worklist rows / children table → drill the map to a prefix and show it.
-  const openPath = (segs: string[]) => {
-    drillTo(segs)
-    document.querySelector('.dt-treemap')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
+  // Worklist rows / children table → drill the map to a prefix (the new path
+  // starts at the top, where the map is).
+  const openPath = (segs: string[]) => drillTo(segs)
   // A server user-lens map is already just that user's bytes — nothing to dim.
   const effHl: Highlight | null = activeLens ? null : hl
 
@@ -796,15 +924,15 @@ function AppContent() {
     [meta],
   )
 
-  // Legend-row pins land on the owner axis (a user, or the unclaimed pool).
+  // Legend-row pins land on the owner axis (a user, or the unowned pool).
   // `switchMode`: a ⌘K pick from any coloring jumps to an axis where the pick
   // is visible; a legend-row click is already on such an axis and must not
   // move it.
   const pickUser = (u: string, switchMode = true) => {
     setOwnerUser(u)
-    if (switchMode && mode !== 'user') setMode('user')
+    if (switchMode && effMode !== 'user') setMode('user')
   }
-  const pickUnclaimed = () => setOP('unowned')
+  const pickUnowned = () => setOP('unowned')
   const clearHl = () => setOP(undefined)
 
   useActions({
@@ -836,8 +964,8 @@ function AppContent() {
       handler: () => { const s = drillPath.split('/').filter(Boolean); if (s.length) drillTo(s.slice(0, -1)) },
     },
     'owner:me': { label: 'Owner: my files', group: 'Scope', handler: () => setOP('me') },
-    'owner:claimed': { label: 'Owner: owned only', group: 'Scope', handler: () => setOP('owned') },
-    'owner:unclaimed': { label: 'Owner: unowned only', group: 'Scope', handler: () => setOP('unowned') },
+    'owner:owned': { label: 'Owner: owned only', group: 'Scope', handler: () => setOP('owned') },
+    'owner:unowned': { label: 'Owner: unowned only', group: 'Scope', handler: () => setOP('unowned') },
     'lens:classes': {
       label: 'Storage-class lens (hatch colder-class bytes)',
       group: 'View',
@@ -858,7 +986,7 @@ function AppContent() {
       scans.map(s => [
         `scan:${s}`,
         {
-          label: `Scan ${fmtScan(s)}`,
+          label: `Scan ${fmtS(s)}`,
           group: 'Scans',
           handler: () => setDP(s),
         },
@@ -923,9 +1051,9 @@ function AppContent() {
   // instead of silently rendering the root view at a bogus address. Only an
   // unscoped root lists every bucket: under a filter or owner scope a real
   // bucket with nothing in scope is absent from it, and is "no matches", not
-  // a 404.
+  // a 404. Display thresholds can also omit configured small buckets.
   const seg0 = drillPath.split('/')[0]
-  if (!scopeQs && baseTree?.c && seg0 && !baseTree.c.some(k => k.n === seg0)) {
+  if (!scopeQs && baseTree?.c && seg0 && !knownBucket(seg0, store, baseTree.c)) {
     return (
       <main>
         <SiteNav />
@@ -938,10 +1066,16 @@ function AppContent() {
   }
 
   const segs = drillPath.split('/').filter(Boolean)
+  const pathScheme = store.bucketSchemes?.[segs[0]] ?? store.scheme
+  const capturedAt = meta?.captured_at ?? meta?.disk_space?.captured_at
+  const recordedAt = capturedAt ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
+      {capturedAt && (
+        <div>captured {fmtTimestamp(capturedAt)}</div>
+      )}
       {meta.published && (
-        <div>published {new Date(meta.published).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+        <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
       {estCost && (
@@ -1001,22 +1135,22 @@ function AppContent() {
   // The deepest crumb is a tap-to-open path card (the full `<scheme>…/` prefix +
   // copy) rather than another drill link — it's where the page already is.
   // A store home (`Users/ryan`) folds to one `~` crumb.
-  const crumbFullPath = pathText(store.scheme, segs, store.home, true)
-  const crumbCopy = pathCopy(store.scheme, segs, true)
-  const disp = pathDisplay(store.scheme, segs, store.home)
+  const crumbFullPath = pathText(pathScheme, segs, store.home, true)
+  const crumbCopy = pathCopy(pathScheme, segs, true)
+  const disp = pathDisplay(pathScheme, segs, store.home)
   const crumbItems: { label: string; segs: string[] }[] = [
     ...(disp.lead === '~' ? [{ label: '~', segs: segs.slice(0, disp.leadSegs) }] : []),
     ...disp.rest.map((sg, i) => ({ label: sg, segs: segs.slice(0, disp.leadSegs + i + 1) })),
   ]
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
-      <Tooltip content={store.rootLabel}><button type="button" className={segs.length ? '' : 'here'} onClick={() => drillTo([])}>{mapTree?.n ?? store.rootLabel}</button></Tooltip>
+      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={!segs.length} onClick={() => drillTo([])} />
       {crumbItems.map((c, i) => (
         <span key={i}>
           <span className="sep">/</span>
           {i === crumbItems.length - 1
             ? <PathPopover label={c.label} fullPath={crumbFullPath} copy={crumbCopy} />
-            : <Tooltip content={<code>{pathText(store.scheme, c.segs, store.home)}</code>}><button type="button" onClick={() => drillTo(c.segs)}>{c.label}</button></Tooltip>}
+            : <Tooltip content={<code>{pathText(pathScheme, c.segs, store.home)}</code>}><button type="button" onClick={() => drillTo(c.segs)}>{c.label}</button></Tooltip>}
         </span>
       ))}
     </span>
@@ -1033,22 +1167,22 @@ function AppContent() {
       <SiteNav menu={menu} crumbs={crumbs}>
         {asof && scans.length > 1 && (
           <span className="tb-scan">
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" />
+            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />
           </span>
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
             its date); the tip carries the exact publish time + totals. */}
-        {meta?.published && (
+        {recordedAt && (
           <Tooltip content={scanTip}>
-            <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(meta.published) / 1000)} ago</span>
+            <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</span>
           </Tooltip>
         )}
         {bar.color.length > 1 && (
           <label className="tb-ctl">
             <span className="lbl">color</span>
             <Explain text={
-              effMode === 'date' ? <>Object <b>creation time</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
-              : effMode === 'read' ? <><b>Last read</b> — the most recent GET/HEAD/LIST anywhere under each cell, from the GCS usage logs (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>never read</b> since then: prime deletion candidates.</>
+              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
+              : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
             }>
@@ -1090,39 +1224,44 @@ function AppContent() {
         )}
         {bar.pathFilter && (
           <span className="filterbox">
-            <Explain text={`Filter paths (${syntax.describe().label}): ${syntax.describe().summary} — the ? lists the forms.`}>
+            <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
               <input
                 value={fqDraft ?? fqRaw ?? ''}
                 onChange={e => setFqDraft(e.target.value)}
-                placeholder={syntax.describe().placeholder}
+                placeholder={boxSyntax.describe().placeholder}
                 aria-label="Filter tree by path"
+                data-log-input="filter"
                 aria-invalid={!!fErr}
                 size={30}
               />
             </Explain>
-            <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />
-            <FilterNote error={fErr} matched={fq && tree ? (tree.b > 0 ? `${fmtBytes(tree.b)} matched` : 'no matches') : null} coverage={fCoverage}>
+            {indexedOnly
+              ? <QueryHelpTip syntaxes={[INDEXED_SYNTAX]} active={INDEXED_SYNTAX} />
+              : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
+            <FilterNote error={fErr} matched={fq && fHere ? matchedNote(fHere.b, !!graftPath, fmtBytes) : null} coverage={fCoverage}>
               <Explain text="Clear the path filter"><button type="button" onClick={() => { setFqDraft(null); setFq(undefined) }}>✕</button></Explain>
             </FilterNote>
           </span>
         )}
-        {fq && fMatches.length > 0 && ownersMode && canAssign && (
-          <BulkBar matches={fMatches} scheme={store.scheme} query={fq} />
+        {fq && !coverScoped && (
+          <BulkBar cover={coverQ.data} loading={coverQ.isFetching && !coverQ.data} onIntent={actBlocked ? undefined : coverIntent} resolve={coverResolve} resetKey={coverKey} blocked={actBlocked}
+            scheme={store.scheme} query={fq} canAssign={canAssignHere} canStage={canStageHere} />
         )}
       </SiteNav>
 
       {/* Ambiguous `?d`: render the newest match (a best guess beats a dead
           end) with a strip listing every candidate to pin one. */}
+      {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending)}</p>}
       {dMatches.length > 1 && (
         <p className="disambig">
           <code>?d={encodeScan(dP) ?? dP}</code> matches {dMatches.length} scans — showing the newest; pin one:
           {dMatches.map(s => (
-            <button key={s} className={s === asof ? 'on' : ''} onClick={() => setDP(s)}>{fmtScan(s)}</button>
+            <button key={s} className={s === asof ? 'on' : ''} onClick={() => setDP(s)}>{fmtS(s)}</button>
           ))}
         </p>
       )}
       {ownersQ.error && <p className="tab-note err">Assignments unavailable: {ownersQ.error.message}</p>}
-      {meUnmapped && (
+      {meUnmapped && myUserReady && (
         <p className="tab-note">
           Your email isn't mapped to an owner id yet — ping Ryan (or an admin can add you at{' '}
           <code>/admin/db/user_emails</code>); pick any user from the owner menu to view their files.
@@ -1135,7 +1274,9 @@ function AppContent() {
         </p>
       )}
 
-      {mapTree ? (
+      <DiskSpace space={meta?.disk_space} />
+
+      {mapTree && !mapFailed ? (
         <>
           {/* Remount per store: the treemap's caches are tied to the tree it
               mounted with, and a switch can swap `tree` without ever passing
@@ -1164,7 +1305,7 @@ function AppContent() {
             readRange={readRange}
             hl={effHl}
             onPickUser={u => pickUser(u, false)}
-            onPickUnclaimed={pickUnclaimed}
+            onPickUnowned={pickUnowned}
             onClearHl={clearHl}
             pricing={pricing}
             lens={lens}
@@ -1175,7 +1316,9 @@ function AppContent() {
             onPathChange={onMapPath}
             objects={objects}
             onOpen={p => openObject(p.slice(1).map(n => n.n))}
-          />{mapStale ? <Busy label="loading view…" /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
+            brush={brush}
+            onBrush={setBrush}
+          />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
               under this view's floor. Say so rather than show a blank canvas. */}
@@ -1184,8 +1327,8 @@ function AppContent() {
               // The scope, not the directory, is what's empty here: say whose
               // filter came up dry rather than describe a 0-byte directory.
               <p className="hint leaf-note">
-                {ownerMode === 'user' && lensUser
-                  ? <><b>{shortName(lensUser)}</b> owns nothing under <code>{mapPath[mapPath.length - 1].n}</code> in this scan</>
+                {ownerMode === 'user' && ownerUser
+                  ? <><b>{shortName(ownerUser)}</b> owns nothing under <code>{mapPath[mapPath.length - 1].n}</code> in this scan</>
                   : ownerMode === 'unowned'
                     ? <>Nothing under <code>{mapPath[mapPath.length - 1].n}</code> is unowned in this scan</>
                     : ownerMode === 'owned'
@@ -1223,16 +1366,37 @@ function AppContent() {
               onPickUser={u => pickUser(u, false)}
               onOpen={openPath}
               onOpenObject={openObject}
-              actionable={tblActionable}
+              filter={tblFilter}
+              rowMatches={tblRowMatches}
+              brush={brush}
+              onBrush={setBrush}
+            /></div>
+          )}
+          {/* …and its flat twin: the largest files anywhere below it. The whole directory's, so not
+              shown under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
+          {mapPath && objects && (
+            <div id="ltbl"><LargestFiles
+              segs={tblSegs}
+              scheme={store.scheme}
+              home={store.home}
+              scan={asof}
+              total={mapPath[mapPath.length - 1].b}
+              enabled={!scopeQs}
+              onOpen={openPath}
+              onOpenObject={openObject}
             /></div>
           )}
         </>
-      ) : rootErr ? (
+      ) : miss ? (
+        <NoScanMatch miss={miss} fmt={fmtS} hrefFor={scan => hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), scan, true, times, scans)} />
+      ) : rootErr && /^(409|413)/.test(rootErr.message) ? (
         <p className="loading">
           {rootErr.message.startsWith('409') ? 'no per-user index for this scan — pick a newer scan, or clear the user'
-            : rootErr.message.startsWith('413') ? 'this view is too wide for the index — drill in, or narrow the scope'
-            : `view failed: ${rootErr.message}`}
+            : 'this view is too wide for the index — drill in, or narrow the scope'}
         </p>
+      ) : viewErr ? (
+        // The filter's refusal as its reason, inline; any other failure as its message, a 5xx with a retry.
+        <LoadFailure err={viewErr} what="view" onRetry={retryMap} />
       ) : noScansYet(scansQ) ? (
         // The list answered and is empty: no snapshot has index rows in D1,
         // so no view will ever load — a skeleton here would spin forever.
@@ -1254,16 +1418,27 @@ function AppContent() {
           chart still hides under any scope. */}
       <SizeOverTime
         scopeLabel={store.rootLabel}
-        paths={matchedRoots}
+        refused={fq && refusalOf(viewErr) ? viewErr : undefined}
+        paths={fSeries?.paths}
+        pathsTotal={fSeries?.pathsTotal}
+        queryOnly={fRollup}
         filterLabel={fq ?? undefined}
-        scans={scans} prefix={drillPath}
+        filterQs={fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : undefined}
+        scans={scans} times={times} fmt={fmtS} prefix={drillPath}
         user={ownerUser}
         pool={ownerMode === 'unowned' ? 'unowned' : ownerMode === 'owned' ? 'owned' : null}
+        ledgerRev={ledger}
+        scopeReady={scopeReady}
         onPickDate={setDP}
         onBrush={brushRange}
         window={diffWindow}
       />
 
+      {startMiss && (
+        <section id="diff">
+          <NoScanMatch what="diff start" miss={startMiss} fmt={fmtS} hrefFor={scan => hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), scan, false, times, scans)} />
+        </section>
+      )}
       {asof && diffPrev && (
         <section id="diff">
           <h2>Diff{diff && (
@@ -1275,8 +1450,8 @@ function AppContent() {
               {diff.lookups_capped && <> Some small one-sided names went unread (lookup budget); they may sit in “(other)”.</>}
               {diff.truncated && <> Largest changes shown — the diff walk was budget-capped, so the smallest movements aren’t enumerated (the totals are exact).</>}
             </>}><span className="info" tabIndex={0} aria-label="how this diff is read"> ⓘ</span></Tooltip>
-          )}{diff && fq && (diff.partialReason || diff.approximateReason) && (
-            <span className="fflags"><FilterFlags partialReason={diff.partialReason} approximateReason={diff.approximateReason} /></span>
+          )}{diff && fq && (diff.partialReason || diff.approximateReason || diff.dirsOnly || diff.hexRuns) && (
+            <span className="fflags"><FilterFlags partialReason={diff.partialReason} approximateReason={diff.approximateReason} dirsOnly={diff.dirsOnly} hexRuns={diff.hexRuns} /></span>
           )}</h2>
           {/* 2-row header band above the map: scan pickers + presets (with the
               status/error line) sit as `controls`, the colour legend beneath
@@ -1287,7 +1462,7 @@ function AppContent() {
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
             <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              <ScanCombobox value={diffPrev} scans={earlier} onChange={startPinned ? setFrom : pickBefore} label="Diff from scan" />
+              <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />
             </Explain>
             <Explain text={startPinned
               ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>
@@ -1300,7 +1475,7 @@ function AppContent() {
               </button>
             </Explain>
             <span className="arrow"> → </span>
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" />
+            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />
             {endIsLatest && (
               <Explain text={endPinned
                 ? <>End is <b>pinned</b> to this scan. Click to follow the latest scan as new ones arrive.</>
@@ -1314,7 +1489,7 @@ function AppContent() {
             {!startPinned && spanPicks.length > 0 && (
               <span className="gran spans" role="radiogroup" aria-label="Diff span (back from the after scan)">
                 {spanPicks.map(({ label, ms, scan }) => (
-                  <Explain key={label} text={<>Diff over the last {label}: {fmtScan(scan)} → {fmtScan(asof)}</>}>
+                  <Explain key={label} text={<>Diff over the last {label}: {fmtS(scan)} → {fmtS(asof)}</>}>
                     <button role="radio" aria-checked={diffPrev === scan} className={diffPrev === scan ? 'on' : ''}
                       onClick={() => setSpan(scan === prevScan ? undefined : ms)}>
                       {label}
@@ -1327,19 +1502,20 @@ function AppContent() {
               <>
                 {diffStale && <span className="loading"> · aligning the rows…</span>}
               </>
-            ) : diffErr && !diffStale ? (
+            ) : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
                 {' '}· {diffErr.message.startsWith('404')
                   ? <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
-                  : diffErr.message.startsWith('409')
-                    ? <>no per-user index for one of these scans — pick newer scans, or clear the user.</>
-                    : <>couldn’t diff {fmtScan(diffPrev)} → {fmtScan(asof)} ({diffErr.message}).</>}
-                {' '}<button type="button" className="linkish" onClick={() => diffQ.refetch()}>retry</button>
+                  : <>no per-user index for one of these scans — pick newer scans, or clear the user.</>}
               </span>
+            ) : diffErr && !diffStale ? (
+              // The filter's refusal as its reason; any other failure as its message, a 5xx with a retry.
+              <>{' · '}<LoadFailure as="span" className="tab-note" err={diffErr} what={`diff ${fmtS(diffPrev)} → ${fmtS(asof)}`} onRetry={() => void diffQ.refetch()} /></>
             ) : (
-              <span className="loading"> · aligning {fmtScan(diffPrev)} → {fmtScan(asof)}…</span>
+              <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
             )}
           </span>} />
+          <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
           {/* The slot keeps the treemap's height through a reload: the last
               diff dims under the marker, or (first load) a skeleton stands in.
               The height held is the one the last settled map actually drew
@@ -1355,7 +1531,7 @@ function AppContent() {
                   row's name drills like its cell (and scrolls the maps up). */}
               <DiffTable model={diffModel} scheme={store.scheme} home={store.home} segs={segs} onDrill={rel => openPath([...segs, ...rel])} onOpen={rel => openObject([...segs, ...rel])} />
               {diffStaleOther
-                ? <Busy label={`aligning ${fmtScan(diffPrev)} → ${fmtScan(asof)}…`} />
+                ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
                   ? <Busy label="aligning rows…" corner />
                   : null}
@@ -1363,43 +1539,56 @@ function AppContent() {
           )}
           {diff && diff.rows.length === 0 && !diffStale && <p className="hint">No changes in this scope between the two scans.</p>}
           {!diff && diffStale && (
-            <div className="diff-tm tm-skel busy-host stale" aria-busy="true"><Busy label={`aligning ${fmtScan(diffPrev)} → ${fmtScan(asof)}…`} /></div>
+            <div className="diff-tm tm-skel busy-host stale" aria-busy="true"><Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} /></div>
           )}
         </section>
       )}
 
 
+      {/* The panels that don't follow the name filter hide under one (`filterBlind.ts`), one muted line in
+          their place naming them. */}
+      {(() => {
+        const present: BlindPanel[] = [
+          ...(!lensScoped && (ageQ.isPending || age.length > 0) ? ['age' as const] : []),
+          ...(store.lifecycle ? ['lifecycle' as const] : []),
+          ...(meta && store.prices ? ['classes' as const] : []),
+          ...(hasAttr && mapTree ? ['ownership' as const] : []),
+        ]
+        const note = blindNote(!!fq, present)
+        return note && <p className="loading filter-blind">{note}</p>
+      })()}
+
       {/* Hidden when there's no age index for this deploy (e.g. r2 has no
           age-pyramid tier yet): show while loading or once rows arrive. */}
-      {!lensScoped && (ageQ.isPending || age.length > 0) && (
+      {blindShown(!!fq) && !lensScoped && (ageQ.isPending || age.length > 0) && (
       <section id="mtime">
         {/* Granularity is auto-picked (and user-switchable) inside AgeChart, so
             the heading stays unit-free rather than lying about "month". */}
-        <h2>Bytes by creation date{' '}
+        <h2>Bytes by {time.noun} date{' '}
           <Tooltip content={<>
-            When each stored byte was <b>written</b> — the object’s creation time from the listing.
-            {store.objectsNote}{readRange ? <>{' '}The other time axis is <b>last read</b> (from the usage logs, since {epochDaysToDate(readRange.min)}) —
-            color by it to see which vintages nobody has touched.</> : null}{' '}The chart’s color axis is its own (right):
+            The object’s <b>{time.description}</b> from the listing.
+            {store.objectsNote}{readRange ? <>{' '}The other time axis is <b>last observed read</b> (from the usage logs, since {epochDaysToDate(readRange.min)}) —
+            color by it to see which vintages have no recorded reads. Logs may omit events.</> : null}{' '}The chart’s color axis is its own (right):
             it follows the map’s until you pick one.
           </>}><span className="info" tabIndex={0} aria-label="about this chart">ⓘ</span></Tooltip>
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtScan(diffPrev), to: fmtScan(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} />
         )}
       </section>
       )}
 
       {/* Stores whose scan job snapshots the buckets' lifecycle rules get the
           fold here, last among the data sections; the rows diff against the previous scan. */}
-      {store.lifecycle && (
+      {blindShown(!!fq) && store.lifecycle && (
         <LifecycleFold
           store={store} asof={asof} prevScan={prevScan}
           note={<>Intended state is tracked in <code>{store.lifecycle.tracked}</code> (<code>dt-cloud lifecycle diff|push</code>).</>}
         />
       )}
 
-      {meta && store.prices && (() => {
+      {blindShown(!!fq) && meta && store.prices && (() => {
         // Class mix of the *drilled* node (each node carries descendant-inclusive
         // `cb`), so this tracks the treemap instead of always showing fleet totals.
         const node = mapPath ? mapPath[mapPath.length - 1] : tree
@@ -1439,7 +1628,7 @@ function AppContent() {
 
       {/* Static attribution reference — how ownership is inferred + the rule tables.
           Reference material, so it sits last rather than sandwiched mid-page. */}
-      {hasAttr && mapTree && <AttributionRules tree={mapTree} />}
+      {blindShown(!!fq) && hasAttr && mapTree && <AttributionRules tree={mapTree} />}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}

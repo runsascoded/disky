@@ -22,7 +22,7 @@ def freshest_scan_covering(db, uri: str, scan_id: str | None = None) -> dict | N
     # Every scan of `uri` or an ancestor (not just the newest per path), so a
     # newest-but-unreachable scan can be skipped in favor of an older reachable
     # one rather than being the sole candidate and crashing at load.
-    candidates = []
+    candidates: list[dict] = []
     test_path = uri
     while test_path:
         rows = db.execute(

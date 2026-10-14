@@ -1,8 +1,9 @@
 /** Which card a page URL gets (specs/done/dogi.md): its kind, the canonical view
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
+import { canonicalSel } from '../../../src/scanSlug.js'
 
-export type OgKind = 'map' | 'staged' | 'users' | 'user' | 'assignments'
+export type OgKind = 'map' | 'diff' | 'staged' | 'users' | 'user' | 'assignments'
 
 export interface PageView {
   kind: OgKind
@@ -22,7 +23,14 @@ const MAP_KEYS = ['d', 'f', 'qs', 'o', 'by', 'c', 'cl'] as const
 
 const pick = (sp: URLSearchParams, keys: readonly string[]): Record<string, string> => {
   const out: Record<string, string> = {}
-  for (const k of keys) { const v = sp.get(k); if (v) out[k] = v }
+  // A bare `o` is a value (the unowned pool); other keys need one. The scan
+  // (`d`) is canonicalized — legacy `?date=`/`?from=` and ISO spellings fold
+  // into the page's compact `?d=` (`scanSlug.ts`), so a card keys by the
+  // same view whichever spelling the shared link used.
+  for (const k of keys) {
+    const v = k === 'd' ? canonicalSel(sp) : sp.get(k)
+    if (v || (v === '' && k === 'o')) out[k] = v
+  }
   return out
 }
 
@@ -45,6 +53,10 @@ export function pageView(url: URL, site: string): PageView | null {
   const path = segs.join('/')
   const params: Record<string, string> = { ...(path ? { path } : {}), ...pick(sp, MAP_KEYS) }
   const where = path || site
-  const extras = [params.f ? `filter: ${params.f}` : null, params.o ? `owner: ${params.o}` : null].filter(Boolean)
+  const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
+  if (sp.get('section') === 'diff') {
+    const dm = sp.get('dm')
+    return { kind: 'diff', params: { ...params, ...(dm === 'max' ? { dm } : {}) }, title: [where, 'changes', ...extras].join(' · ') }
+  }
   return { kind: 'map', params, title: [where, ...extras].join(' · ') }
 }

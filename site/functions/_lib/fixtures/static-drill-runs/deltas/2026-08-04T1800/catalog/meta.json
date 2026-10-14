@@ -1,0 +1,19 @@
+{
+ "cells_rows": 657,
+ "row_groups": 1,
+ "bytes": 4430,
+ "index_bytes": 2239,
+ "cell_rg": 4096,
+ "headers": 328,
+ "headers_changed": 321,
+ "membership": {
+  "max_rows": 2
+ },
+ "append": {
+  "scan": 1785866400,
+  "cells_rows": 2190,
+  "candidates": 493,
+  "new_members": 2,
+  "members": 407
+ }
+}

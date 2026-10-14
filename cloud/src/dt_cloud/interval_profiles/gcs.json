@@ -1,0 +1,20 @@
+{
+ "about": "The gcs deployment's interval-store settings: where its per-scan path sorts and the store live, and the scans the parity check samples (v1 indexes from the first scan, every v2 store generation's span, the newest). `append`: the per-scan append's (`interval_append`): the generation runs append to, the one holding its range files, and the Batch and R2 settings (`static_profile.Profile` fields; the R2 endpoint from $R2_ENDPOINT); `compact_level` L: carries stop below it, so a compaction into a new base generation is due after ~2^L scans (5: 32 scans, ~32 days).",
+ "bucket": "oa-gcs-usage-dvx",
+ "verify_scans": ["2026-07-30", "2026-08-05", "2026-08-12", "2026-08-19", "2026-08-26", "2026-09-02", "2026-09-09", "2026-09-15",
+                  "2026-09-16", "2026-09-22", "2026-09-25", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-03",
+                  "2026-10-05", "2026-10-06", "2026-10-08", "2026-10-09"],
+ "append": {
+  "gen": "2026-10-09b",
+  "ranges_gen": "2026-10-09",
+  "layouts": ["listing/{id}/path-index.parquet", "listing/{id}/index/{gen}/path-index.parquet"],
+  "scratch": "oa-gcs-usage-scratch",
+  "r2_bucket": "oa-gcs-usage-index",
+  "r2_secrets": {"key_id": "gcs-static-index-r2-key-id", "secret": "gcs-static-index-r2-secret"},
+  "project": "oa-internal-450019",
+  "region": "us-east1",
+  "sa": "gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com",
+  "append_tasks": 16,
+  "compact_level": 5
+ }
+}

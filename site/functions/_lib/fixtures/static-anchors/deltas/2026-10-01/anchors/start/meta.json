@@ -1,0 +1,14 @@
+{
+ "R": 3,
+ "K": 2,
+ "rg": 5,
+ "idx_rg": 3,
+ "start_rollups": {
+  "row_groups": 123,
+  "rows": 490,
+  "files": 1
+ },
+ "scans": [
+  "2026-10-01"
+ ]
+}

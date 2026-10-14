@@ -1,0 +1,8 @@
+name: disky-r2-access
+description: Private, account-isolated R2 access-log archive and scheduled collector
+backend:
+  url: file://./state
+runtime:
+  name: python
+  options:
+    virtualenv: ../../.venv

@@ -12,6 +12,11 @@ Two rules hold everywhere:
 - **Additive IAM only** (`IAMMember`, never `IAMPolicy` / `IAMBinding`), so a
   deployment's grants can't clobber anyone else's on a shared project or bucket.
 
+Cost labels: `cost_labels()` reads `$DISKY_LABELS` (`k=v,…`, e.g.
+`app=disky,deployment=gcs`; spec specs/cost-labels.md) into the provider's
+`default_labels`, so every resource type that takes labels carries them; a
+component passes its own `component` label where it bills on its own.
+
 Adoption: the resources predate this code, so a stack first imports them. Each
 component takes `existing=` (the resource is live, import it) and the stack's
 `adopting` config gates every import id at once (`Adopt`). After the adopting
@@ -21,6 +26,8 @@ component takes `existing=` (the resource is live, import it) and the stack's
 import base64
 import json
 import os
+import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,8 +35,53 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 from pulumi import ComponentResource, ResourceOptions
+from pulumi_command import local
 
 SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+LABELS_ENV = "DISKY_LABELS"
+_KEY_RE = re.compile(r"[a-z][a-z0-9_-]{0,62}")
+_VALUE_RE = re.compile(r"[a-z0-9_-]{0,63}")
+
+
+def parse_labels(text: str) -> dict[str, str]:
+    """`"k=v,k2=v2"` → `{"k": "v", "k2": "v2"}`; raises on anything GCP would refuse.
+
+    The twin of `dt_cloud.cost_labels.parse_labels` (infra is its own uv project)."""
+    out: dict[str, str] = {}
+    for item in (i.strip() for i in text.split(",")):
+        if not item:
+            continue
+        k, eq, v = (s.strip() for s in item.partition("="))
+        if not eq or not _KEY_RE.fullmatch(k) or not _VALUE_RE.fullmatch(v) or k in out:
+            raise ValueError(f"{LABELS_ENV}: bad or duplicate label {item!r}")
+        out[k] = v
+    return out
+
+
+def cost_labels(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """The deployment's cost labels, from `$DISKY_LABELS`.
+
+    Required to be *set* (empty = deliberately none): run from a shell without it,
+    an `up` would strip the labels off every live resource."""
+    env = os.environ if environ is None else environ
+    if LABELS_ENV not in env:
+        raise ValueError(f"${LABELS_ENV} is unset: set it (e.g. app=disky,deployment=<stack>), or to '' to manage no labels")
+    return parse_labels(env[LABELS_ENV])
+
+
+def labeled_provider(name: str, *, project: str, region: str, labels: dict[str, str]) -> gcp.Provider:
+    """The stack's GCP provider with `labels` as its `default_labels`, made the provider of every
+    `gcp:` resource in the program (a stack transform), so no component needs threading."""
+    provider = gcp.Provider(name, project=project, region=region, default_labels=labels or None)
+
+    def transform(args: pulumi.ResourceTransformArgs) -> pulumi.ResourceTransformResult | None:
+        if not args.type_.startswith("gcp:") or args.custom is False or args.opts.provider is not None:
+            return None
+        return pulumi.ResourceTransformResult(args.props, ResourceOptions.merge(args.opts, ResourceOptions(provider=provider)))
+
+    pulumi.runtime.register_resource_transform(transform)
+    return provider
 
 
 @dataclass(frozen=True)
@@ -38,7 +90,7 @@ class Adopt:
 
     on: bool
 
-    def opts(self, existing: bool, import_id: str, **kw) -> ResourceOptions:
+    def opts(self, existing: bool, import_id: pulumi.Input[str], **kw) -> ResourceOptions:
         return ResourceOptions(import_=import_id if self.on and existing else None, **kw)
 
 
@@ -111,7 +163,8 @@ class Secrets(ComponentResource):
 
     `secrets` maps secret id → labels (or `None`). `existing` covers the
     containers; `grants_existing` the accessor bindings (default: the same), for
-    a new account taking over live secrets.
+    a new account taking over live secrets. `grant_only` selects accessor grants
+    without removing any secret containers; None preserves the all-secrets default.
     """
 
     def __init__(
@@ -125,12 +178,16 @@ class Secrets(ComponentResource):
         adopt: Adopt,
         existing: bool = False,
         grants_existing: bool | None = None,
+        grant_only: set[str] | None = None,
         opts: ResourceOptions | None = None,
     ):
+        if grant_only is not None and not grant_only.issubset(secrets):
+            raise ValueError("grant_only must be a subset of the managed secret ids")
         super().__init__("disky:gcp:Secrets", name, None, opts)
         if grants_existing is None:
             grants_existing = existing
         self.secrets: dict[str, gcp.secretmanager.Secret] = {}
+        self.grants: dict[str, gcp.secretmanager.SecretIamMember] = {}
         for sid, labels in secrets.items():
             path = f"projects/{project}/secrets/{sid}"
             secret = gcp.secretmanager.Secret(
@@ -142,17 +199,18 @@ class Secrets(ComponentResource):
                 opts=adopt.opts(existing, path, parent=self, protect=True),
             )
             self.secrets[sid] = secret
-            grant_secret(
-                f"{sid}-accessor",
-                project=project,
-                secret_id=sid,
-                member=accessor,
-                member_email=accessor_email,
-                adopt=adopt,
-                existing=grants_existing,
-                parent=self,
-                depends_on=[secret],
-            )
+            if grant_only is None or sid in grant_only:
+                self.grants[sid] = grant_secret(
+                    f"{sid}-accessor",
+                    project=project,
+                    secret_id=sid,
+                    member=accessor,
+                    member_email=accessor_email,
+                    adopt=adopt,
+                    existing=grants_existing,
+                    parent=self,
+                    depends_on=[secret],
+                )
         self.register_outputs({})
 
 
@@ -184,7 +242,7 @@ def grant_secret(
 def grant_bucket(
     name: str,
     *,
-    bucket: str,
+    bucket: pulumi.Input[str],
     role: str,
     member: pulumi.Input[str],
     member_email: str,
@@ -198,8 +256,103 @@ def grant_bucket(
         bucket=bucket,
         role=role,
         member=member,
-        opts=adopt.opts(existing, f"b/{bucket} {role} serviceAccount:{member_email}", parent=parent),
+        opts=adopt.opts(existing, pulumi.Output.concat("b/", bucket, f" {role} serviceAccount:{member_email}"), parent=parent),
     )
+
+
+class StorageBatchDelete(ComponentResource):
+    """Opt-in prerequisites for generation-pinned Storage Batch Operations.
+
+    Storage Intelligence is a paid fleet subscription (``TRIAL`` rolls into
+    ``STANDARD`` after 30 days), so callers must choose the edition
+    explicitly. The config is bucket-filtered and managed through ``gcloud``
+    because pulumi-gcp has no IntelligenceConfig resource yet.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        control_project: str,
+        fleet_project: str,
+        buckets: list[str],
+        manifest_bucket: str,
+        submitter: pulumi.Input[str],
+        edition: str,
+        opts: ResourceOptions | None = None,
+    ):
+        super().__init__("disky:gcp:StorageBatchDelete", name, None, opts)
+        edition = edition.upper()
+        if edition not in {"TRIAL", "STANDARD"}:
+            raise ValueError(f"Storage Intelligence edition must be TRIAL or STANDARD, got {edition!r}")
+        if not buckets:
+            raise ValueError("Storage Batch Operations requires at least one target bucket")
+
+        self.api = gcp.projects.Service(
+            f"{name}-api",
+            project=control_project,
+            service="storagebatchoperations.googleapis.com",
+            disable_on_destroy=False,
+            deletion_policy="ABANDON",
+            opts=ResourceOptions(parent=self),
+        )
+        self.agent = gcp.projects.ServiceIdentity(
+            f"{name}-agent",
+            project=control_project,
+            service="storagebatchoperations.googleapis.com",
+            opts=ResourceOptions(parent=self, depends_on=[self.api]),
+        )
+        gcp.projects.IAMMember(
+            f"{name}-submitter",
+            project=control_project,
+            role="roles/storagebatchoperations.admin",
+            member=submitter,
+            opts=ResourceOptions(parent=self, depends_on=[self.api]),
+        )
+        gcp.storage.BucketIAMMember(
+            f"{name}-manifest-reader",
+            bucket=manifest_bucket,
+            role="roles/storage.objectViewer",
+            member=self.agent.member,
+            opts=ResourceOptions(parent=self, depends_on=[self.agent]),
+        )
+        for bucket in buckets:
+            gcp.storage.BucketIAMMember(
+                f"{name}-{bucket}-object-user",
+                bucket=bucket,
+                role="roles/storage.objectUser",
+                member=self.agent.member,
+                opts=ResourceOptions(parent=self, depends_on=[self.agent]),
+            )
+
+        patterns = ",".join(f"^{re_escape(bucket)}$" for bucket in buckets)
+        base = ["gcloud", "storage", "intelligence-configs"]
+        scope = f"--project={fleet_project}"
+        filters = f"--include-bucket-id-regexes={patterns}"
+        edition_flag = ["--trial-edition"] if edition == "TRIAL" else []
+
+        def command(verb: str, args: list[str]) -> str:
+            return " ".join(map(shlex.quote, [*base, verb, scope, filters, *args, "--quiet"]))
+
+        # Protecting this resource makes ending a trial/subscription an
+        # explicit two-step operation. Once unprotected and removed, Pulumi
+        # disables the project-level config rather than leaving billing behind.
+        self.intelligence = local.Command(
+            f"{name}-intelligence",
+            create=command("enable", edition_flag),
+            update=command("update", edition_flag),
+            delete=" ".join(map(shlex.quote, [*base, "disable", scope, "--quiet"])),
+            triggers=[edition, fleet_project, patterns],
+            opts=ResourceOptions(parent=self, protect=True),
+        )
+        self.register_outputs({"service_agent": self.agent.email, "edition": edition})
+
+
+def re_escape(value: str) -> str:
+    """RE2-safe exact literal for a GCS bucket id."""
+    import re
+
+    return re.escape(value)
 
 
 def submitter_spec(submitter: Path) -> dict:
@@ -207,9 +360,13 @@ def submitter_spec(submitter: Path) -> dict:
 
     `PIN=1` makes the submitter ignore every ambient override, and the process
     runs under a scrubbed env, so the spec is a function of the submitter alone:
-    the cron body can't drift from the tracked script.
+    the cron body can't drift from the tracked script. The one exception is
+    `$DISKY_LABELS`, the stack's own cost labels, so the cron's jobs carry the
+    same labels as the stack's resources.
     """
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "PIN": "1", "DRY": "1"}
+    if LABELS_ENV in os.environ:
+        env[LABELS_ENV] = os.environ[LABELS_ENV]
     out = subprocess.run(
         ["bash", str(submitter)],
         cwd=submitter.parent.parent,
@@ -320,9 +477,10 @@ class BatchCron(ComponentResource):
 class RunJobCron(ComponentResource):
     """A Cloud Run job and the Cloud Scheduler cron that runs it, both as `sa`.
 
-    Pulumi owns the job's shell (account, limits, the secret env it reads); the
-    image and plain env are a deploy's (`gcloud run jobs update`), so they are
-    `ignore_changes`, as `wrangler` owns a Pages deploy's contents under `cf/`.
+    Pulumi owns the job's shell (account, limits, the secret env it reads, its
+    `labels` on top of the provider's defaults); the image and plain env are a
+    deploy's (`gcloud run jobs update`), so they are `ignore_changes`, as
+    `wrangler` owns a Pages deploy's contents under `cf/`.
     """
 
     def __init__(
@@ -342,6 +500,7 @@ class RunJobCron(ComponentResource):
         max_retries: int = 1,
         time_zone: str = "Etc/UTC",
         trigger: str | None = None,
+        labels: dict[str, str] | None = None,
         adopt: Adopt,
         existing: bool = False,
         opts: ResourceOptions | None = None,
@@ -354,6 +513,7 @@ class RunJobCron(ComponentResource):
             location=region,
             name=job,
             deletion_protection=True,
+            labels=labels,
             template=gcp.cloudrunv2.JobTemplateArgs(
                 template=gcp.cloudrunv2.JobTemplateTemplateArgs(
                     service_account=sa_email,
@@ -380,7 +540,7 @@ class RunJobCron(ComponentResource):
                 existing,
                 job_path,
                 parent=self,
-                ignore_changes=["template.template.containers[0].image", "template.template.containers[0].envs", "client", "clientVersion", "labels", "annotations", "launchStage"],
+                ignore_changes=["template.template.containers[0].image", "template.template.containers[0].envs", "client", "clientVersion", "annotations", "launchStage"],
             ),
         )
         invoker = "roles/run.invoker"
@@ -409,4 +569,3 @@ class RunJobCron(ComponentResource):
             depends_on=[self.job],
         )
         self.register_outputs({"job": self.job.name, "cron": self.cron.name})
-

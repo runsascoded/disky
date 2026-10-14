@@ -57,16 +57,16 @@ def top_paths(base_url: str, headers: dict[str, str], date: str, timeout: float 
 
 
 def scan_dates(root: str) -> list[str]:
-    """Published scan dates under ``root`` (``gs://<bucket>/snapshots``), ascending."""
-    import re
-
+    """Published scan ids under ``root`` (``gs://<bucket>/snapshots``), ascending."""
     import fsspec
+
+    from .scan_id import META_PATH
 
     fs, _, _ = fsspec.get_fs_token_paths(root)
     return sorted(
         m.group(1)
         for p in fs.glob(f"{root.split('://', 1)[-1]}/*/meta.json")
-        if (m := re.search(r"/(\d{4}-\d{2}-\d{2}(?:T\d{4})?)/meta\.json$", p))  # date-only or sub-daily ids
+        if (m := META_PATH.search(p))
     )
 
 

@@ -1,0 +1,102 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# dependencies = ["click"]
+# ///
+"""Read-only worktree cleanup inventory. Never removes files or branches."""
+
+import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from subprocess import run
+
+from click import command, option
+
+
+def git(*args: str) -> str:
+    return run(["git", *args], check=True, capture_output=True, text=True).stdout
+
+
+def worktrees() -> list[dict]:
+    rows = []
+    for block in git("worktree", "list", "--porcelain").strip().split("\n\n"):
+        row = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            row[key] = value
+        rows.append(row)
+    return rows
+
+
+def process_cwds(path: Path) -> list[tuple[int, Path]]:
+    rows = []
+    pid = None
+    for line in path.read_text().splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            rows.append((pid, Path(line[1:])))
+    return rows
+
+
+@command()
+@option("-o", "--output", type=Path, required=True, help="JSON report destination (no file contents or secrets)")
+@option("-p", "--processes", type=Path, required=True, help="Saved lsof -d cwd -F pn output")
+@option("-s", "--sizes", type=Path, required=True, help="Saved du -sk output over individual worktrees")
+def main(
+    output: Path,
+    processes: Path,
+    sizes: Path,
+) -> None:
+    root = Path(git("rev-parse", "--show-toplevel").strip())
+    size_map = {}
+    for line in sizes.read_text().splitlines():
+        kib, name = line.split("\t", 1)
+        size_map[str((root / name).resolve())] = int(kib)
+    trees = worktrees()
+    cwds = process_cwds(processes)
+    keep = {"cloud", "gcs", "cw-s3", "m3", "local", "tauri-native-app", "gcs-prod", "cw-s3-prod"}
+    refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
+    retained = sorted(keep.intersection(refs))
+    paths = sorted((Path(t["worktree"]) for t in trees), key=lambda p: len(p.parts), reverse=True)
+    active: dict[str, list[int]] = {str(p): [] for p in paths}
+    for pid, cwd in cwds:
+        for path in paths:
+            if cwd == path or path in cwd.parents:
+                active[str(path)].append(pid)
+                break
+
+    def audit(tree: dict) -> dict:
+        path = tree["worktree"]
+        status = git("-C", path, "status", "--porcelain", "--untracked-files=normal").splitlines()
+        branch = tree.get("branch", "detached").removeprefix("refs/heads/")
+        containing = git("branch", "--contains", tree["HEAD"], "--format=%(refname:short)").splitlines()
+        merged_into = sorted(set(containing).intersection(retained))
+        blocked = []
+        if Path(path) == root or branch in keep:
+            blocked.append("long-lived")
+        if status:
+            blocked.append("uncommitted-or-untracked")
+        if active[path]:
+            blocked.append("process-cwd")
+        if not merged_into:
+            blocked.append("head-not-in-retained-branches")
+        return {
+            "path": path, "branch": branch, "head": tree["HEAD"],
+            "kib": size_map.get(path), "status": status, "process_pids": sorted(active[path]),
+            "merged_into": merged_into, "hold_reasons": blocked,
+            "candidate": not blocked,
+        }
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = sorted(pool.map(audit, trees), key=lambda row: row["kib"] or 0, reverse=True)
+    output.write_text(json.dumps({"root": str(root), "retained_branches": retained, "worktrees": rows}, indent=2) + "\n")
+    candidates = [row for row in rows if row["candidate"]]
+    print(f"{len(rows)} worktrees; {len(candidates)} clean/inactive/merged candidates")
+    print(f"Candidate apparent allocated size: {sum(row['kib'] or 0 for row in candidates) / 1024**2:.1f} GiB")
+    for row in candidates:
+        print(f"{(row['kib'] or 0) / 1024**2:5.2f} GiB  {Path(row['path']).relative_to(root)}  {row['branch']}")
+    print("Ignored data and APFS clones/hardlinks still need checking before removal; this is not a deletion approval.")
+
+
+if __name__ == "__main__":
+    main()

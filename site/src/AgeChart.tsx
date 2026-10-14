@@ -5,6 +5,7 @@ import type { AgeRow, ColorMode, Granularity } from './types'
 import { MODE_LABELS } from './types'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
+import { listingTime } from './listingTime'
 
 const SLOTS = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8']
 
@@ -35,7 +36,7 @@ const bucketLabel = (b: number, gran: Granularity): string =>
 /** Stacked bars of bytes by created date (month/week/day), split per color mode.
  *  `readRange` null means the read axis is unavailable for this scan (no access
  *  window, or age strata published before they carried `a`). */
-export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange }: {
+export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, scheme = 'gs://' }: {
   rows: AgeRow[]
   /** The diff window's "before" scan, same path — enables the diff toggle. When
    *  present the chart can show per-vintage growth/shrink (created-date bucket
@@ -50,8 +51,10 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   onMode?: (m: ColorMode) => void
   userIdx: Map<string, UserIndexEntry>
   readRange?: { min: number; max: number } | null
+  scheme?: string
 }) {
   usePerfCommit('age')
+  const time = listingTime(scheme)
   const { fmtBytes } = useUnits()
   // Default to the finest granularity that still fits on screen: the most
   // bars we'll draw is MAX (≈8px each across the 900-unit viewBox), and finer
@@ -118,7 +121,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
       : userMode ? (k === 'unattributed' ? 'var(--t-unattr)' : userColor(k, userIdx))
       : `var(${slotMap.get(k) ?? '--other'})`
     const labelOf = (k: string): string =>
-      mode === 'read' ? (k === String(NEVER) ? 'never read' : `read ${epochDaysToDate(Number(k))}`)
+      mode === 'read' ? (k === String(NEVER) ? 'no observed reads' : `read ${epochDaysToDate(Number(k))}`)
       : k === 'unattributed' ? 'unowned' // internal key; display name is standardized
       : k
     // Stack order: categorical modes put the biggest slice at the base; the
@@ -176,7 +179,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
           </span>
         ) : mode === 'read' ? (
           <>
-            <span className="li"><span className="sw" style={{ background: 'var(--never-read)' }} />never read*</span>
+            <span className="li"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
             {readRange && (
               <span className="li gradli">
                 {epochDaysToDate(readRange.min)}
@@ -200,7 +203,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
               <button role="radio" aria-checked={showDiff} className={showDiff ? 'on' : ''} onClick={() => setDiffOn(true)}>diff</button>
             </span>
           )}
-          {onMode && !showDiff && (
+          {onMode && modes.length > 1 && !showDiff && (
             <span className="gran" role="radiogroup" aria-label="Color by">
               <span className="lbl">color by</span>
               {modes.map(m => (
@@ -219,7 +222,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
           </span>
         </span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H + 24}`} preserveAspectRatio="none" role="img" aria-label={showDiff ? `Bytes changed by created ${gran}` : `Bytes by created ${gran}`}>
+      <svg viewBox={`0 0 ${W} ${H + 24}`} preserveAspectRatio="none" role="img" aria-label={showDiff ? `Bytes changed by ${time.label} ${gran}` : `Bytes by ${time.label} ${gran}`}>
         {showDiff && <line x1={0} y1={zeroY} x2={W} y2={zeroY} className="zeroline" />}
         {bars.map((bk, i) => {
           let body

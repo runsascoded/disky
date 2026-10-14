@@ -11,6 +11,7 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { batchConfig, notConfigured } from './batchConfig.js'
 import { type DispatchErr, type ExecEnv, refuse } from './dispatch.js'
 import { batchRegionFor, gcpToken } from './gcp.js'
+import { auditRunControl } from './plans.js'
 import { jobStampOf, RUN_ID_RE, submitSweepJob, sweepJobSpec, undoScript } from './sweepDispatch.js'
 
 /** The `deletion_runs` columns the undo gate reads. */
@@ -50,6 +51,7 @@ export async function undoSweepRun(
   actor: string,
   siteUrl: string,
   now: Date = new Date(),
+  { bulk = false }: { bulk?: boolean } = {},
 ): Promise<UndoOk | DispatchErr> {
   if (!env.DB) return refuse(503, 'undo not configured (no D1 binding)')
   if (!env.GCP_SA_KEY) return refuse(503, 'undo not configured (GCP_SA_KEY secret missing)')
@@ -67,12 +69,13 @@ export async function undoSweepRun(
   const region = batchRegionFor(cfg, await runBuckets(db, row!))
   const jobId = `gcs-undo-${jobStampOf(now)}z`
   const spec = sweepJobSpec({
-    cfg, jobSa: env.JOB_SA, region, script: undoScript(), actor, siteUrl,
-    env: { OP: 'undo', TARGET_RUN: runId },
+    cfg, jobSa: env.JOB_SA, region, script: undoScript({ bulk }), actor, siteUrl,
+    env: { OP: 'undo', TARGET_RUN: runId }, component: 'sweep-undo',
   })
   const token = await gcpToken(env.GCP_SA_KEY)
   const failed = await submitSweepJob(cfg, token, region, jobId, spec)
   if (failed) return failed
   await db.prepare("UPDATE deletion_runs SET undo_state = 'partial' WHERE run_id = ? AND undo_state != 'full'").bind(runId).run()
+  await auditRunControl(db, 'undo', runId, actor, jobId)
   return { ok: true, job_id: jobId, target: runId, region }
 }

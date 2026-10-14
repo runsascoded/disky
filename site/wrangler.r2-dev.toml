@@ -25,11 +25,13 @@ enabled = true
 [vars]
 STORE = "r2"                     # build-time: the `src/stores.ts` registry key (vite.config.ts)
 AUTH_MODE = "public"             # build-time: no sign-in wall (src/auth.ts)
-ROOT_LABEL = "public R2 (dev)"   # distinguishes dev.r2.rbw.sh from prod at a glance
+ROOT_LABEL = "Public R2 Treemap Demo (dev)"
 BASE_SCOPE = "r2"
+OG_CARDS = "1"
+STORE_SCHEME = "r2://"
 PUBLIC_READ = "1"
 SNAPSHOTS_SUBDIR = "r2"
-INDEX_VARIANTS = "path"
+SEARCH_SIDECARS = "1"            # the daily ingest builds them (`path-index -S`): filters the static index lacks read them (_lib/search.ts)
 STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
 

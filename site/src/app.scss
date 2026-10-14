@@ -10,7 +10,7 @@
   --s1: #2a78d6; --s2: #008300; --s3: #e87ba4; --s4: #eda100;
   --s5: #1baf7a; --s6: #eb6834; --s7: #4a3aa7; --s8: #e34948;
   --other: #a6a49b; --shared: #8f9aa6;
-  --t-unattr: #c9c7be;  // the unclaimed pool (bytes no person owns)
+  --t-unattr: #c9c7be;  // the unowned pool (bytes no person owns)
   --grew: #1a8f3a; --shrank: #d7302f;
   --danger: #c4302a;  // destructive actions (a real delete, its arming) and error copy
   --never-read: #b0685e;  // read lens: no GET/HEAD/LIST since logging began
@@ -18,6 +18,29 @@
   // bars); the core default is a dark constant, so follow the theme instead.
   --dt-treemap-container-bg: var(--panel);
   --dt-treemap-edge: var(--line);
+  // The stacking scale: every z-index on the page is one of these, so a layer's
+  // place is a decision made once, here — not a number picked to beat whatever
+  // collided last. Bottom to top:
+  //  - raised: a bit lifted within its own widget (sticky table heads, a cell's
+  //    focus ring, a map's busy pill or floated bar)
+  //  - sticky: in-content bars that stick while their section scrolls (the bulk
+  //    bar, the staged selection bar) — under the page header, which they ride
+  //  - drawer: the treemap's docked detail panel
+  //  - popover: menus/panels a content control opens (⚙ map settings, the bulk
+  //    review list) — over the drawer, still under the header
+  //  - header: the sticky top bar; page content (drawer included) scrolls UNDER it
+  //  - corner: fixed lower-left cards (help, perf) — over everything in flow
+  //  - modal: dialog backdrops
+  //  - float: pointer-driven floats (tooltips, the bar's menus, a path card) —
+  //    over a modal too, since a modal's own controls open them
+  --z-raised: 1;
+  --z-sticky: 4;
+  --z-drawer: 10;
+  --z-popover: 30;
+  --z-header: 100;
+  --z-corner: 900;
+  --z-modal: 1000;
+  --z-float: 10000;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme='light'])) {
@@ -67,6 +90,14 @@ main {
   gap: var(--main-gap);
 }
 header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+.disk-space {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  .disk-space-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; }
+  .disk-space-labels > span { white-space: nowrap; }
+  .disk-space-bar { height: 5px; overflow: hidden; border-radius: 3px; background: var(--line); }
+  .disk-space-bar > span { display: block; height: 100%; background: var(--s1); }
+}
 header .hrow {
   display: flex;
   align-items: baseline;
@@ -74,13 +105,25 @@ header .hrow {
   gap: 12px;
   flex-wrap: wrap;
 }
+.disk-space-diff {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  h3 { margin: 0 0 6px; font-size: 13px; }
+  table { width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 3px 6px; }
+  th:first-child { text-align: left; }
+  p { margin: 6px 0 0; }
+}
 // ---- The top bar (SiteNav): ☰ nav menu · page scope/controls · avatar menu.
 // Sticky, full-bleed across the page container (negative margins undo its
 // padding), the same chrome parked at the top and stuck mid-scroll.
 .topbar {
   position: sticky;
   top: 0;
-  z-index: 5;
+  z-index: var(--z-header);
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -232,7 +275,7 @@ header .hrow {
   &:hover { text-decoration-color: var(--ink); }
 }
 .path-pop {
-  z-index: 10001;
+  z-index: calc(var(--z-float) + 1);
   display: flex; align-items: center; gap: 8px;
   max-width: min(92vw, 560px);
   background: var(--panel); color: var(--ink);
@@ -262,7 +305,7 @@ header .hrow {
     .sp-caret { color: var(--ink-3); font-size: 10px; }
   }
   .sp-pop {
-    position: absolute; z-index: 30; top: calc(100% + 3px); left: 0;
+    position: absolute; z-index: var(--z-popover); top: calc(100% + 3px); left: 0;
     min-width: max(100%, 15ch); width: max-content; max-width: min(60vw, 320px);
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
     box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
@@ -291,6 +334,9 @@ header .hrow {
     &.sel { font-weight: 700; }
     &.sel::after { content: ' ✓'; color: var(--accent, #7aa2f7); }
     &.active { background: color-mix(in oklab, var(--accent, #7aa2f7) 22%, transparent); }
+    // A day's only scan: one row, the day then its time (dimmed).
+    &.solo { padding-left: 7px; }
+    .sp-time { margin-left: 8px; color: var(--ink-3); font-weight: 400; }
   }
   .sp-empty { padding: 6px 9px; color: var(--ink-3); font-size: 12px; }
 }
@@ -307,7 +353,7 @@ button.mini.neg {
 #diff .sub .arrow { color: var(--ink-3); }
 // Bar menus (floating): the ☰ page list and the avatar's session menu.
 .menu-pop {
-  z-index: 10000;
+  z-index: var(--z-float);
   min-width: 190px;
   background: var(--panel);
   color: var(--ink);
@@ -367,7 +413,7 @@ button.mini.neg {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
 }
 .about-modal {
   width: min(680px, calc(100vw - 32px));
@@ -700,6 +746,11 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
 // the diff map can't drift from the main map's cell chrome.
 .treemap .dt-treemap-cell,
 .diff-tm .dt-treemap-cell {
+  // Keep nested directory groups legible before hover, including date coloring.
+  &.branch {
+    outline: 1px solid color-mix(in oklab, var(--ink) 24%, transparent);
+    outline-offset: -1px;
+  }
   // Cells nest, `:hover` matches every ancestor of the pointer, and `filter`
   // compounds multiplicatively down the tree — so a leaf 3 deep used to light
   // up at 1.07³ and kept brightening as the pointer crossed each ancestor.
@@ -715,7 +766,7 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
     &:not(:has(.dt-treemap-cell:hover)) {
       outline: 2px solid var(--ink);
       outline-offset: -2px;
-      z-index: 1;
+      z-index: var(--z-raised);
     }
   }
   &:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
@@ -776,6 +827,12 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
       // Google's own rendered button (`oneTap`): GSI sizes it to its content,
       // so centre it; the box reserves the button's height while GSI loads.
       .signin-onetap { display: flex; justify-content: center; min-height: 40px; }
+      // "Not <you>? Use another Google account", under "Continue as <you>".
+      .signin-switch {
+        display: block; margin-top: 8px; text-align: center;
+        font-size: 13px; color: var(--ink-3);
+        &:hover { color: var(--ink); }
+      }
       // The panel emits an empty <div class="signin-or">; draw the rule with a
       // gradient and the "or" label as ::before, masked by the card background.
       .signin-or {
@@ -1054,7 +1111,7 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .busy-host.stale > :not(.busy-overlay) { opacity: 0.45; transition: opacity 0.15s; }
 .busy-overlay {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  pointer-events: none; z-index: 2;
+  pointer-events: none; z-index: var(--z-raised);
   &.corner { align-items: flex-start; justify-content: flex-end; padding: 8px; }
   .pill {
     display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px;
@@ -1072,6 +1129,7 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .object-panel .cell-tail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 // The full value behind a clipped table cell (the leaf viewer's tables, via
 // file-tree's `elide.tooltip`): a long GCS path, wrapped so it fits the panel.
+.tooltip-content .bb-tip { color: var(--ink-2); }
 .tooltip-content .pin-hint { color: var(--ink-3); font-size: 10.5px; margin-top: 5px; }
 .tooltip-content.pinned { border-color: var(--ink-3); }
 .tt-ref.pinnable { cursor: pointer; }
@@ -1082,7 +1140,7 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 }
 
 .tooltip-content {
-  z-index: 10000;
+  z-index: var(--z-float);
   background: var(--panel);
   color: var(--ink);
   border: 1px solid color-mix(in oklab, var(--ink-3) 55%, var(--line));
@@ -1117,7 +1175,7 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 
 .tip, .dt-treemap-tip {
   position: fixed;
-  z-index: 10;
+  z-index: var(--z-float);
   pointer-events: none;
 
   &.pinned {
@@ -1362,6 +1420,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
   h1 { margin-bottom: 8px; }
 
+  .session-log-switch {
+    margin-top: 24px;
+    .status { font-weight: 600; }
+    form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+  }
+
   .mint {
     display: grid;
     grid-template-columns: max-content minmax(200px, 340px) 1fr;
@@ -1447,6 +1511,21 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     // Who minted the link, under its created timestamp.
     .by { font-size: 11px; color: var(--ink-2); }
     tr.revoked td { opacity: 0.5; }
+    .expired { color: var(--del, #c33); font-size: 12px; }
+    .expires-edit { display: flex; flex-direction: column; gap: 6px; input { font: inherit; } }
+    // The redeem count opens the link's activity log in a row beneath it.
+    .log-toggle {
+      background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer;
+      .caret { color: var(--ink-2); font-size: 11px; }
+      &:hover .caret { color: var(--ink); }
+    }
+    tr.grant-log-row > td { padding: 4px 8px 10px 24px; }
+    .grant-log {
+      border-collapse: collapse; font-size: 12px;
+      th, td { padding: 2px 10px 2px 0; border-bottom: 0; }
+      th { position: static; color: var(--ink-2); font-weight: normal; }
+      .ua { max-width: 36em; overflow-wrap: anywhere; color: var(--ink-2); }
+    }
     .revoked-label { font-size: 12px; }
     // Rotate / revoke: side-by-side icon buttons, muted until hovered.
     .row-actions { display: inline-flex; align-items: center; gap: 10px; }
@@ -1463,7 +1542,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     // Long ledger: the table scrolls inside its own box (sideways on a phone,
     // and vertically past ~70vh) and the header row stays pinned to the box top.
     thead th {
-      position: sticky; top: 0; z-index: 1;
+      position: sticky; top: 0; z-index: var(--z-raised);
       background: var(--surface);
     }
   }
@@ -1475,6 +1554,12 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     input { margin: 0; }
   }
 
+  // The "Hide" paths (specs/path-scopes.md): one per line, monospace like paths elsewhere.
+  textarea.hide-paths {
+    font: 12.5px var(--mono, ui-monospace, monospace); padding: 4px 7px; min-width: 22em;
+    background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; resize: vertical;
+  }
+
   // Phone: the 3-column label / input / hint grid squeezes the hint to one word
   // per line — stack each field instead, hint at full width under its input.
   @media (max-width: 640px) {
@@ -1483,7 +1568,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       .field { display: block; margin: 0 0 14px; }
       .field.submit { display: flex; margin-top: 4px; }
       label { display: block; margin-bottom: 4px; }
-      & > .field > input:not([type="checkbox"]) { width: 100%; box-sizing: border-box; }
+      & > .field > input:not([type="checkbox"]), & > .field > textarea { width: 100%; min-width: 0; box-sizing: border-box; }
       input.days { width: 6em; }
       .hint { display: block; margin-top: 4px; }
     }
@@ -1594,6 +1679,10 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // actions are always live here — the panel is interactive by construction, so
 // there's no "hover onto the floating tip" gesture to gate them behind.
 .dt-treemap-tip.dock {
+  // In flow, so it scrolls with the map — and UNDER the sticky header, like the
+  // rest of the content (the floating tip's `--z-float` would paint it over the
+  // ☰, the crumbs and the controls once the page is scrolled).
+  z-index: var(--z-drawer);
   max-width: 100% !important;
   width: 100%;
   margin-top: 4px;
@@ -1675,11 +1764,15 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     // Created = three columns (swatch · month · year) under one header, so
     // every part aligns down the page; the year column is omitted when no
     // listed row needs one.
+    // Right-aligned like the numbers beside it: the group ends at the column's
+    // right edge with "created" over it, and the months (all three letters)
+    // still line up down the page.
+    th.created { text-align: right; }
     td.created {
       white-space: nowrap;
       &.sw { padding-right: 5px; text-align: right; }
-      &.mon { padding-left: 0; padding-right: 0; text-align: left; }
-      &.yr { padding-left: 4px; text-align: left; color: var(--ink-3); font-size: 11px; }
+      &.mon { width: 1px; padding-left: 0; text-align: right; }
+      &.yr { width: 1px; padding-left: 4px; text-align: right; color: var(--ink-3); font-size: 11px; }
       // A contrast ring so the pale (new) and dark (old) ends of the viridis
       // ramp both read against the row — the swatch was invisible at each end.
       i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 35%, transparent); }
@@ -1691,6 +1784,8 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
       .bar > span { min-width: 1px; }
     }
     td.owners { white-space: nowrap; }
+    // The row of the treemap cell under the pointer (brushing, `data-brushed`).
+    tr[data-brushed] td { background: color-mix(in srgb, var(--ink) 8%, transparent); }
     // The row's actions: the trash gesture (a staging store) and the assign
     // select (an attribution store, admins).
     // A table cell (an `inline-flex` cell stops being one: its borders and
@@ -1806,11 +1901,11 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // reach on a long list, and centered — it appears below the rows, never
 // shifting the row just clicked.
 .children-tbl .sel-bar-dock {
-  // Below the sticky topbar (z 5), and click-through except for the bar itself:
+  // Below the sticky topbar (`--z-header`), and click-through except for the bar itself:
   // once the table scrolls up under the topbar, this sticky slot rides its
   // bottom edge there, and an empty 30 px strip above the topbar swallowed
   // clicks on the filter box.
-  position: sticky; bottom: 8px; z-index: 4; pointer-events: none;
+  position: sticky; bottom: 8px; z-index: var(--z-sticky); pointer-events: none;
   display: flex; justify-content: center; margin-top: 8px;
   // Reserve the bar's height even when empty, so selecting / deselecting fills
   // (or clears) this slot instead of pushing the rest of the page up and down.
@@ -1830,6 +1925,22 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     &:disabled { opacity: 0.35; cursor: default; }
     &:hover:not(:disabled) { color: var(--ink); }
   }
+}
+
+// The largest-files table under the children table (`LargestFiles.tsx`):
+// the same worklist look, a heading with its count picker, and each row's dir
+// part (a drill link) muted ahead of the basename (which opens the file).
+#ltbl { overflow-x: auto; }
+.largest-tbl {
+  margin-top: 18px;
+  h3 {
+    display: flex; align-items: center; gap: 4px; margin: 0 0 4px;
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3);
+    .info { cursor: help; text-transform: none; }
+    select.psize { margin-left: 8px; font: inherit; font-size: 11.5px; text-transform: none; letter-spacing: 0; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+  }
+  .worklist .prefix a.dir { color: var(--ink-3); }
+  .loading { font-size: 12px; color: var(--ink-3); margin: 4px 0; }
 }
 
 // "no reads since …" callout in treemap tooltips (dark tip bg → soft red tint)
@@ -1892,6 +2003,8 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   &::before { content: '· '; color: var(--ink-3); }
 }
 .fflags { margin-left: 8px; }
+// The hex-run rule's note (`FilterNote.tsx` `HexRunsInfo`): an info icon, its text in a tooltip.
+.fhex { cursor: help; }
 
 // The filter box's syntax card (`QueryHelp.tsx`), inside a pinnable tooltip.
 .qhelp-card {
@@ -2047,7 +2160,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     font-size: 12px;
     padding: 1px 8px;
     cursor: pointer;
-    &.claim { --act: var(--s1); }
+    &.assign { --act: var(--s1); }
     &.go { --act: var(--s1); font-weight: 600; }
     &:disabled { opacity: 0.45; cursor: default; }
   }
@@ -2060,8 +2173,92 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     padding: 1px 6px;
   }
   .bb-confirm { color: var(--ink); }
+  .bb-note { color: var(--ink-2); }
   .bb-warn { color: var(--s3); }
+  // Disabled actions with their reason in a tooltip: the hover lands on the wrapper, not the disabled buttons.
+  .bb-muted { display: inline-flex; gap: 5px; button:disabled { pointer-events: none; } }
   .bb-progress { color: var(--s1); }
+  // The review list floats below the bar (a native <details>), so opening it shifts nothing.
+  .bb-review {
+    position: relative;
+    > summary { cursor: pointer; color: var(--s1); list-style: none; text-decoration: underline dotted; }
+    > summary::-webkit-details-marker { display: none; }
+  }
+  .bb-panel {
+    position: absolute;
+    z-index: var(--z-popover);
+    top: calc(100% + 4px);
+    left: 0;
+    width: min(560px, calc(100vw - 32px));
+    max-height: min(60vh, 520px);
+    overflow: auto;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    padding: 6px 8px;
+    color: var(--ink);
+    .bb-help { margin: 0 0 4px; color: var(--ink-2); }
+    .bb-bulk { display: flex; gap: 4px; margin-bottom: 4px; }
+    ul { list-style: none; margin: 0; padding: 0; }
+    .bb-group > ul { padding-left: 18px; }
+    .bb-row { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; cursor: pointer; }
+    .bb-row code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+    .bb-parent code { font-weight: 600; }
+    .bb-n { color: var(--ink-2); white-space: nowrap; }
+    .bb-more { color: var(--ink-2); padding: 1px 0 3px; }
+  }
+}
+// An action on a filter's matches (`MatchActions.tsx`): the controls, then — in the same box, which keeps its
+// width so the row or bar never jumps — a spinner / batch bar, the accepted state, or the muted reason.
+.mact {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  vertical-align: middle;
+  &:focus { outline: none; }
+  &.warming button.trash, &.warming select { cursor: progress; }
+  .act-live { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+  .act-live:empty { display: none; }
+  .act-st { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .act-st.busy { color: var(--ink-2); }
+  .act-st.ok { color: var(--s1); }
+  .act-st.muted { color: var(--ink-3); display: inline-block; max-width: 100%; }
+  .act-st.err { color: var(--s3); white-space: normal; }
+  .act-confirm { white-space: normal; font-size: 12px; color: var(--ink); text-align: left; }
+  .act-note { color: var(--ink-2); }
+  .act-items { display: flex; flex-direction: column; gap: 1px; margin: 3px 0; }
+  .act-items code { font-size: 11px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .act-more { color: var(--ink-3); font-size: 11px; }
+  .spin {
+    width: 10px; height: 10px; border-radius: 50%; flex: none;
+    border: 2px solid var(--ink-3); border-top-color: transparent; animation: busy-spin 0.8s linear infinite;
+  }
+  .act-bar {
+    display: inline-block; flex: none; width: 56px; height: 6px; border-radius: 3px; overflow: hidden;
+    background: color-mix(in srgb, var(--ink) 12%, transparent);
+    > i { display: block; height: 100%; background: var(--s1); transition: width 0.2s; }
+  }
+  button.act {
+    background: transparent; border: 1px solid var(--act, var(--line)); color: var(--act, var(--ink-2));
+    border-radius: 5px; font-size: 12px; padding: 0 6px; cursor: pointer;
+    &.go { --act: var(--s1); font-weight: 600; }
+    &.x { border: none; padding: 0 3px; color: var(--ink-3); }
+    &:disabled { opacity: 0.45; cursor: default; }
+  }
+}
+// A filtered table row's box: its width reserved whatever the state (the controls, a spinner, the accepted
+// line, the muted reason truncated with its tooltip); a confirm wraps within it.
+.children-tbl td.actions .mact { width: 13em; }
+.bulkbar .bb-acts { min-width: 18em; justify-content: flex-start; }
+.children-tbl .sel-bar .sel-acts { min-width: 16em; }
+
+@media (max-width: 600px) {
+  // On a phone the bar wraps under the filter box; the panel spans the screen's width.
+  .bulkbar .bb-review { position: static; }
+  .bulkbar .bb-panel { left: 16px; right: 16px; width: auto; }
 }
 
 // `gaps` treemap-tiling chip — sits in the crumbs bar beside ⛶, so it stays
@@ -2078,7 +2275,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   }
   &[open] summary { color: var(--ink); }
   .menu {
-    position: absolute; right: 0; top: 22px; z-index: 30;
+    position: absolute; right: 0; top: 22px; z-index: var(--z-popover);
     touch-action: manipulation;  // no double-tap zoom delay on the toggles
     display: flex; flex-direction: column; gap: 8px;
     min-width: 190px; padding: 8px 10px;
@@ -2121,9 +2318,15 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   --dt-ts-window-edge: rgb(255 255 255 / 0.4);
 }
 
-// Anchored sections scroll in under the sticky bar otherwise (its height is
-// published as --topbar-h; it wraps to more rows on narrow viewports).
-#tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: var(--topbar-h, 48px); }
+// Size over time: the scans a filter's index doesn't cover (gaps in the line).
+.gap-note { color: var(--ink-3); font-size: 0.85em; margin: 2px 0 0; }
+
+// An anchored section parks a little below the sticky bar — not under it, not
+// flush against it (the bar's height is published as --topbar-h; it wraps to
+// more rows on narrow viewports). `useHashSpy` reads the computed margin back
+// to decide when a deep link has landed.
+:root { --anchor-gap: 16px; }
+#tree-map, #tbl, #ltbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
 .leaf-note { margin: -8px 0 4px; color: var(--ink-2); code { color: var(--ink); } }
 // Nothing drawable under the drilled node: the canvas folds away (the owner
 // panel / rollup above it stay).
@@ -2132,7 +2335,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
 // The leaf viewer (`?open=`): an opened object under the map — its name, size,
 // date and a download link over file-tree's renderer for its type.
-#object { scroll-margin-top: var(--topbar-h, 48px); }
+#object { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
 .object-panel {
   margin: 8px 0 14px;
   border: 1px solid var(--line);
@@ -2166,7 +2369,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     border-collapse: collapse; font-size: 12.5px;
     th, td { border: 1px solid var(--line); padding: 3px 6px; text-align: center; white-space: nowrap; }
     th.corner { text-align: left; font-weight: 500; .dim { font-size: 11px; } }
-    th.row-head { text-align: left; position: sticky; left: 0; background: var(--surface); z-index: 1; }
+    th.row-head { text-align: left; position: sticky; left: 0; background: var(--surface); z-index: var(--z-raised); }
     th.col-head { vertical-align: bottom; }
     td.cell { font-variant-numeric: tabular-nums; min-width: 4.5em; }
     .cell-link { color: var(--ink); text-decoration: none; display: block; }
@@ -2186,9 +2389,6 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   // the mobile layout viewport wider than the screen (which desynced the visual
   // viewport and left the bar scrolled off). SiteNav auto-hides it on scroll
   // down / shows on scroll up (`ctrl-hidden`), like a native toolbar.
-  // Lift the whole topbar context above the docked treemap tip (`position:
-  // fixed; z-index: 10`) so the controls overlay isn't painted behind it.
-  .topbar { z-index: 20; }
   .topbar .tb-row2 {
     position: absolute; top: 100%; left: 0; right: 0;
     margin: 0; padding: 3px var(--pad-x, 24px) 7px;
@@ -2247,7 +2447,7 @@ select.assign-sel {
 // Idle it is a small "?" chip. It fades in; a prefers-reduced-motion reader
 // gets no transition.
 .help-card {
-  position: fixed; left: 16px; bottom: 16px; z-index: 900;
+  position: fixed; left: 16px; bottom: 16px; z-index: var(--z-corner);
   width: min(340px, calc(100vw - 32px));
   background: var(--panel); color: var(--ink);
   border: 1px solid color-mix(in oklab, var(--ink-3) 45%, var(--line));
@@ -2276,7 +2476,7 @@ select.assign-sel {
 .has-help.help-active { border-radius: 4px; box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent, #58a6ff) 55%, transparent); }
 .has-help .help-tgt { display: contents; }
 .help-chip {
-  position: fixed; left: 16px; bottom: 16px; z-index: 900;
+  position: fixed; left: 16px; bottom: 16px; z-index: var(--z-corner);
   display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px;
   background: var(--panel); color: var(--ink-3); border: 1px solid var(--line);
   border-radius: 999px; font: inherit; font-size: 11.5px; cursor: pointer;
@@ -2304,7 +2504,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
 // the fullscreen button, floated over the map's top-right corner.
 .diff-tm { position: relative; }
 .diff-tm .dt-treemap-bar {
-  position: absolute; top: 6px; right: 6px; z-index: 2;
+  position: absolute; top: 6px; right: 6px; z-index: var(--z-raised);
   min-height: 0; margin: 0; padding: 0; background: none; border: none;
 }
 .diff-tm .dt-treemap-fs {
@@ -2339,18 +2539,45 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .staged-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .pp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 16px; flex-wrap: wrap; h2 { margin: 18px 0 4px; } }
   .scan-pick { font-size: 13px; color: var(--ink-2); select { font: inherit; } }
+  .staged-no-map {
+    border-left: 3px solid var(--line); padding: 10px 14px; background: var(--panel);
+    h3 { margin: 0 0 4px; font-size: 15px; }
+    p { margin: 0; color: var(--ink-2); font-size: 13px; }
+    &.complete { border-color: var(--grew); h3 { color: var(--grew); } }
+  }
+  .staged-status {
+    display: inline-block; white-space: nowrap; font-size: 12px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
+    background: var(--panel); color: var(--ink-2);
+    &.deleted { color: var(--grew); background: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
+    &.restored, &.recorded { color: var(--ink); }
+    &.running { color: var(--s1); }
+  }
+  .prefix-table .staged-status { margin-right: 8px; }
+  .prefix-table tr.staged-deleted:not(.sel):not(.cur) td { background: color-mix(in srgb, var(--grew) 4%, var(--surface)); }
+  .stage-batch.completed .batch-head { padding: 7px 8px; border-left: 2px solid var(--grew); background: color-mix(in srgb, var(--grew) 4%, var(--surface)); }
   // The staged set as a map (and the selection's, beside it when there is one).
   .staged-maps {
     display: grid; grid-template-columns: 1fr; gap: 16px; margin: 10px 0 14px;
     &.two { grid-template-columns: 1fr 1fr; @media (max-width: 900px) { grid-template-columns: 1fr; } }
     h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
     .map-box { min-width: 0;
+      &.pending {
+        height: 514px; border-radius: 6px; background: var(--panel); animation: tm-pulse 1.4s ease-in-out infinite;
+        @media (max-width: 640px) { height: 434px; }
+        > p { padding: 12px; }
+      }
       .dt-treemap-map { flex-basis: 380px !important; height: 380px; @media (max-width: 640px) { flex-basis: 300px !important; height: 300px; } }
     }
   }
-  .fold-all { margin-left: auto; display: inline-flex; gap: 4px; }
+  .run-id { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .run-copy {
+    display: inline-flex; align-items: center; justify-content: center; padding: 1px; border: 0; background: none; color: var(--ink-3); cursor: pointer;
+    &:hover { color: var(--ink); }
+    svg { width: 11px; height: 11px; }
+  }
+  .fold-all { margin-left: auto; display: inline-flex; gap: 4px; button { display: inline-flex; align-items: center; gap: 5px; } }
   .batch-head {
-    .fold { background: none; border: 0; color: var(--ink-2); cursor: pointer; padding: 0 2px; font-size: 13px; &:hover { color: var(--ink); } }
+    .fold { background: none; border: 0; color: var(--ink-2); cursor: pointer; padding: 2px 3px; display: inline-flex; align-items: center; &:hover { color: var(--ink); } }
     .memo { flex-basis: 100%; padding-left: 20px; }
   }
   .stage-batch.folded { margin: 6px 0; }
@@ -2371,8 +2598,16 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .err { color: var(--danger, #e05050); font-size: 12px; }
     .group-by { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   }
-  .staged-actions { display: flex; align-items: center; gap: 12px; margin: 6px 0 10px; font-size: 13px; .sel-all { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; } }
-  .stage-batch { margin: 12px 0 18px; }
+  // The selection is page-level state: its bar sticks under the top bar while
+  // the batches scroll by, and lets go after the last one.
+  .staged-actions {
+    display: flex; align-items: center; gap: 12px; margin: 6px 0 10px; padding: 6px 0; font-size: 13px;
+    position: sticky; top: var(--topbar-h, 48px); z-index: var(--z-sticky); background: var(--surface); border-bottom: 1px solid var(--line);
+    .sel-all { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  }
+  .staged-settled { margin: 18px 0 6px; > summary { cursor: pointer; font-size: 13px; } }
+  .stage-batch { margin: 12px 0 18px; scroll-margin-top: 70px; &:target { outline: 1px solid var(--ink-3); outline-offset: 6px; } }
+  .batch-permalink { color: var(--ink-3); font-size: 12px; }
   .batch-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); .memo { color: var(--ink); } }
   .staged-empty { color: var(--ink-3); margin: 18px 0; }
   // A wide table scrolls inside its own box; the page never scrolls sideways.
@@ -2432,12 +2667,18 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   table.runs {
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
     td.nb, td.num { white-space: nowrap; }
-    .tag.real { margin-left: 0; color: var(--danger); border-color: var(--danger); font-weight: 650; }
+    .tag.real { margin-left: 0; color: #d6b65a; border-color: #d6b65a; font-weight: 650; }
+    .tag.dry { margin-left: 0; color: var(--ink-3); border-color: var(--line); }
+    tr.cancelled > td { background: color-mix(in srgb, var(--ink-3) 6%, transparent); }
+    .run-sort { color: inherit; font: inherit; font-weight: inherit; padding: 0; border: 0; background: none; cursor: pointer; }
+    .run-outcome .prediction-label { display: block; color: var(--ink-2); font-size: .9em; font-weight: 600; }
     .fold { background: none; border: 0; padding: 0 2px; color: var(--ink-2); &:hover { color: var(--ink); } }
     .prog progress { width: 64px; height: 8px; vertical-align: middle; }
+    .prog-estimate { display: block; font-size: .9em; }
     td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
     tr.live td.rid { font-weight: 600; }
     tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
+    tr.run.linked > td { background: color-mix(in srgb, var(--accent, #4a9eff) 14%, transparent); }
   }
   .run-detail {
     font-size: 13px;
@@ -2449,10 +2690,49 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
       dd { margin: 0; overflow-wrap: anywhere; }
     }
     table.runs { margin-top: 2px; font-size: 12.5px; tr.total td { font-weight: 600; } }
-    .rd-checks { list-style: none; margin: 0; padding: 0;
-      li.ok { color: var(--ink-2); }
+    .rd-checks { list-style: none; margin: 10px 0; padding: 0; display: grid; gap: 5px;
+      li { display: flex; align-items: baseline; gap: 10px; }
+      .check-status { min-width: 90px; font-weight: 650; }
+      li.ok .check-status { color: #3cba87; }
+      li.pending .check-status { color: var(--ink-3); }
       li.off { color: var(--danger); }
     }
+  }
+  .run-sparkline { display: inline-flex; flex-direction: column; width: 140px; text-decoration: none; svg { width: 100%; height: 32px; } path { fill: none; stroke: var(--accent, #4a9eff); stroke-width: 1.5; } .spark-lifetime { font-size: 11px; white-space: nowrap; } }
+  .run-progress {
+    margin: 14px 0 20px; max-width: 960px; min-height: 90px;
+    .graph-controls { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; h3 { margin: 0 10px 0 0; } }
+    .graph-spacer { flex: 1; }
+    button { background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; &.on { color: var(--ink); border-color: var(--ink-2); } }
+    select { max-width: 100%; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px; }
+    > .tt-ref { display: block; }
+    .progress-chart { width: 100%; display: block; touch-action: none; user-select: none; path { fill: none; stroke: var(--accent, #4a9eff); stroke-width: 1.5; } line { stroke: var(--line); } text { font-size: 12px; fill: var(--ink-3); } .primary-label { fill: #4a9eff; } .secondary-label { fill: #ecb14f; } path.chart-secondary { stroke: #ecb14f; } path.chart-raw { opacity: .25; stroke-width: 1; } .chart-selection { fill: #4a9eff; opacity: .15; } .chart-cursor { stroke: var(--ink); stroke-dasharray: 3 3; } }
+    .graph-window { margin-top: 10px; form, label { display: inline-flex; align-items: center; gap: 5px; } input:not([type=datetime-local]) { width: 75px; } }
+    .graph-controls label { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); }
+    .graph-times { display: flex; justify-content: space-between; color: var(--ink-3); }
+    .graph-scale { margin-top: 12px; color: var(--ink-3); }
+  }
+  .run-artifacts { max-width: 100%; .artifact-path button, td button { background: none; border: 0; padding: 0; color: var(--ink); text-decoration: underline; cursor: pointer; } }
+  .run-filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 15px; label { display: inline-flex; align-items: center; gap: 5px; } input { max-width: 240px; } }
+  .run-buckets { margin: 24px 0; .graph-controls { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; h3 { margin: 0 10px 0 0; } button { background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; &.on { color: var(--ink); border-color: var(--ink-2); } } } }
+  .run-bucket-map { height: 420px; margin: 10px 0 20px; }
+  .run-buckets select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 3px; }
+  .run-band-table { overflow-x: auto; td { white-space: nowrap; } }
+  .progress-chart .chart-target { line { stroke: #4a9eff; stroke-dasharray: 6 4; opacity: .7; } text { fill: #4a9eff; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; } &.secondary-target { line { stroke: #ecb14f; } text { fill: #ecb14f; } } }
+  .run-plan { max-height: 260px; overflow: auto; code { white-space: nowrap; } }
+  .run-page h1 { margin-top: 20px; }
+  .run-task-logs {
+    margin: 28px 0;
+    .log-controls, .log-pagination { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    h3 { margin: 0; }
+    button { background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; cursor: pointer; &:disabled { opacity: .5; cursor: default; } }
+    .task-log-scroll { margin-top: 12px; max-height: 450px; overflow: auto; border: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    th { position: sticky; top: 0; background: var(--panel); z-index: var(--z-raised); text-align: left; color: var(--ink-3); }
+    td, th { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .log-time, .log-severity { white-space: nowrap; }
+    .log-severity { color: var(--ink-3); }
+    pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 240px; }
   }
 }
 
@@ -2473,7 +2753,9 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   // prefix may break anywhere, but never below a readable width — past that
   // the table scrolls in its box instead of crushing it.
   th.col-lead, td.col-lead { width: 1.6em; padding-right: 0; input { margin: 0; vertical-align: middle; cursor: pointer; } }
-  td.pfx { overflow-wrap: anywhere; min-width: 16em; code { word-break: break-all; } }
+  td.pfx { min-width: 20em; white-space: nowrap; }
+  .prefix-name { display: flex; align-items: center; gap: 6px; }
+  .prefix-copy { background: none; border: 0; padding: 0 3px; cursor: pointer; color: var(--ink-3); &:hover { color: var(--ink); } }
   tbody tr { cursor: default; }
   tr.sel td { background: color-mix(in srgb, var(--accent, #58a6ff) 14%, transparent); }
   // The cursor is the keyboard row (j/k target) and the anchor a shift-click
@@ -2488,7 +2770,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
 // `?perf=1` time-to-render panel (dev/PerfOverlay.tsx). Sits where the help
 // card does (lower-left; the speed dial owns the lower-right), same surface.
 .perf-ov {
-  position: fixed; left: 16px; bottom: 16px; z-index: 900;
+  position: fixed; left: 16px; bottom: 16px; z-index: var(--z-corner);
   width: min(460px, calc(100vw - 32px));
   max-height: min(60vh, 520px); overflow-y: auto;
   background: var(--panel); color: var(--ink);
@@ -2558,6 +2840,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     th, td { padding: 4px 8px; border-bottom: 1px solid var(--border, #333); text-align: left; vertical-align: top; }
     td.when { white-space: nowrap; }
     td.prefix { font-family: var(--mono, ui-monospace, monospace); word-break: break-all; min-width: 360px; }
+    td.prefix .row-n { color: var(--ink-3); font-size: 11px; white-space: nowrap; }
     td.memo { max-width: 320px; color: var(--dim, #999); .clip { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
     tr.retracted td:not(:nth-child(5)), tr.superseded td:not(:nth-child(5)), tr.overridden td:not(:nth-child(5)) { opacity: 0.55; }
     tr.retracted td.prefix a { text-decoration: line-through; }
@@ -2578,7 +2861,44 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     input { margin-top: 3px; }
     .hint { display: block; font-size: 12px; color: var(--dim, #999); margin-top: 2px; }
     &.disabled { cursor: default; opacity: 0.55; }
+    .share-days { display: block; margin-top: 6px; font: inherit; font-size: 12px; padding: 2px 4px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
   }
   .share-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; .err { color: var(--danger, #e05050); font-size: 12px; } }
   .share-url { display: block; margin-top: 10px; font-size: 11px; word-break: break-all; opacity: 0.8; }
 }
+
+// /admin/sessions (specs/session-log.md): the session list, the strip chart and the timeline.
+.sessions-page {
+  max-width: 1200px;
+  .err { color: var(--danger); }
+  .dim { color: var(--ink-3); }
+  .sessions-filters {
+    display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 12px 0; font-size: 13px;
+    input:not([type]) , input[type="date"] { font: inherit; padding: 3px 6px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
+  }
+  .session-meta { font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+  table.sessions {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+    .num { text-align: right; white-space: nowrap; }
+    tr.has-err td { background: color-mix(in srgb, var(--danger) 9%, transparent); }
+    tr.load td { border-top: 2px solid var(--ink-3); }
+    tr.focused td { outline: 2px solid var(--s1); outline-offset: -2px; }
+    td.ev { overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  }
+  .lane-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; background: var(--lane); }
+  .lane-nav { --lane: var(--s1); }
+  .lane-input { --lane: var(--s5); }
+  .lane-api { --lane: var(--other); }
+  .lane-error { --lane: var(--danger); }
+  .lane-page { --lane: var(--s7); }
+  .session-strip {
+    margin: 12px 0;
+    svg { display: block; width: 100%; height: 70px; cursor: pointer; }
+    .lane-bg { fill: var(--panel); &:nth-child(even) { fill: var(--surface); } }
+    .tick { stroke: var(--lane); stroke-width: 1.5; &.err { stroke: var(--danger); stroke-width: 2.5; } &.hot { stroke: var(--ink); stroke-width: 3; } }
+    figcaption { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+    .lanes { display: inline-flex; gap: 12px; flex-wrap: wrap; }
+  }
+}
+// The privacy notice while the session log is on (About, /privacy).

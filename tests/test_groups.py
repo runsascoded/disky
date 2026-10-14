@@ -158,7 +158,7 @@ def test_user_slice_bounds_and_size_column_fallback(tmp_path: Path):
     assert [(r['b_min'], r['b_max'], r['u_min']) for r in group_rows(pq.read_metadata(tmp_path / 'mgu.parquet'))] == [(3, 7, None)]
     # Without any size column the manifest is undefined, loudly.
     pd.DataFrame({'path': ['.'], 'depth': [0]}).to_parquet(tmp_path / 'nosize.parquet')
-    with pytest.raises(ValueError, match=r'no size column \(size/b\)'):
+    with pytest.raises(ValueError, match=r'no size column \(tot/size/b\)'):
         group_rows(pq.read_metadata(tmp_path / 'nosize.parquet'))
 
 

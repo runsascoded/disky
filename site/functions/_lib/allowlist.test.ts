@@ -30,7 +30,7 @@ describe('siteAllowlist: the `allowed_emails` table as an `AllowlistStore`', () 
     expect(await store.lookup('ro@x.org')).toEqual(['laptop:read'])
     expect(await scopesFor(env)('ro@x.org')).toEqual(['laptop:read'])
     await store.put({ email: 'ro@x.org', scopes: ['laptop'], source: 'manual', note: null, addedBy: STAFF, updatedAt: 2 })
-    expect(await scopesFor(env)('ro@x.org')).toEqual(['laptop'])
+    expect(await scopesFor(env)('ro@x.org')).toEqual(['laptop', 'laptop:assign'])
   })
 
   it('removes a row, and refuses a directory sync (the table has no `source`)', async () => {

@@ -1,6 +1,7 @@
-"""`dt-cloud index-sync`: a deployment's index generation holds only some of
-`INDEX_VARIANTS` (gcs's `path-index` writes no age pyramid or over-time tier);
-the absent ones are skipped and reported, the present ones synced in order."""
+"""`dt-cloud index-sync`: a generation holds only some of `INDEX_VARIANTS`
+(`path-index` writes no age pyramid or over-time tier; by-user sorts only where
+the scan attributes ownership); the absent ones are skipped and reported, the
+present ones synced in order — the files decide, not a deployment setting."""
 from pathlib import Path
 
 import pytest
@@ -33,9 +34,8 @@ def logged(monkeypatch) -> list[str]:
 
 
 def test_index_sync_skips_absent_variants(tmp_path: Path, synced, logged):
-    """The registry: the store's two sorts, their by-user copies (the default
-    `$INDEX_VARIANTS` names `user`), the age pyramid, over-time — no coarse
-    tiers. A cw-shaped generation (no by-user, no over-time here) syncs
+    """The registry: the store's two sorts, their by-user copies, the age
+    pyramid, over-time — no coarse tiers. A cw-shaped generation (no by-user, no over-time here) syncs
     `path` + `bysize` and reports the rest absent."""
     assert list(F.INDEX_VARIANTS) == [
         "path", "bysize", "user", "bysize-user",
@@ -66,7 +66,7 @@ def test_index_sync_sorts_only(tmp_path: Path, synced, logged):
     """`-F` keeps just the store sorts: a pre-store generation dir (no
     `bysize`) syncs `path` alone."""
     (tmp_path / "path-index.parquet").write_bytes(b"")
-    r = CliRunner().invoke(main, ["index-sync", "-F", "-d", str(tmp_path), "-g", "G1", "2026-09-30"])
+    r = CliRunner().invoke(main, ["index-sync", "-F", "-d", str(tmp_path), "-g", "G1", "-k", "listing/2026-09-30/index/G1", "2026-09-30"])
     assert r.exit_code == 0, r.output
     assert [c[2] for c in synced] == ["path"]
     assert logged == [
@@ -76,7 +76,7 @@ def test_index_sync_sorts_only(tmp_path: Path, synced, logged):
 
 
 def test_index_sync_fails_when_nothing_is_there(tmp_path: Path, synced, logged):
-    r = CliRunner().invoke(main, ["index-sync", "-d", str(tmp_path), "-g", "G1", "-v", "path", "-v", "user", "2026-09-30"])
+    r = CliRunner().invoke(main, ["index-sync", "-d", str(tmp_path), "-g", "G1", "-k", "listing/2026-09-30/index/G1", "-v", "path", "-v", "user", "2026-09-30"])
     assert r.exit_code == 1
     assert synced == []
     assert logged == [

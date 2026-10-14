@@ -12,7 +12,14 @@ db: Optional[SQLAlchemy] = None
 cache_url = None
 
 
-def init(sqlite_path: str = None) -> SQLAlchemy:
+
+def session():
+    """The initialized DB's session: `init` must have run (`db` is None before it)."""
+    if db is None:
+        raise RuntimeError('`disk_tree.sqla.db.init()` has not run')
+    return db.session
+
+def init(sqlite_path: str | None = None) -> SQLAlchemy:
     global db
     if db:
         return db

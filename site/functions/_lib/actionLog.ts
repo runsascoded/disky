@@ -9,13 +9,17 @@ export type { ActionLogRow, ActionStatus } from './actionLogShape.js'
 export const LOG_MAX = 500
 
 // `substr(…) = prefix`, never LIKE: `_` (common in these paths) is a LIKE wildcard.
+// `kind` (NULL = prefix, 'object' = an exact key; specs/file-assign.md): a row
+// is superseded only by a newer row of the same kind on the same pattern, and
+// overridden only by a newer *prefix* row above it — an object row covers
+// nothing but its own key (not `key.bak`, though that string starts with it).
 const LOG_SQL = `
-SELECT a.id, a.ts, a.actor AS who, a.pattern AS prefix, a.owner, a.memo, o.tombstoned AS retracted,
+SELECT a.id, a.ts, a.actor AS who, a.pattern AS prefix, COALESCE(o.kind, 'prefix') AS kind, a.owner, a.memo, o.tombstoned AS retracted,
   CASE
     WHEN o.tombstoned IS NOT NULL THEN 'retracted'
-    WHEN EXISTS (SELECT 1 FROM owner_prefixes n WHERE n.prefix = o.prefix AND n.tombstoned IS NULL
+    WHEN EXISTS (SELECT 1 FROM owner_prefixes n WHERE n.prefix = o.prefix AND n.kind IS o.kind AND n.tombstoned IS NULL
                  AND (n.ts > o.ts OR (n.ts = o.ts AND n.action_id > o.action_id))) THEN 'superseded'
-    WHEN EXISTS (SELECT 1 FROM owner_prefixes n WHERE n.prefix <> o.prefix AND n.tombstoned IS NULL
+    WHEN EXISTS (SELECT 1 FROM owner_prefixes n WHERE n.prefix <> o.prefix AND n.kind IS NULL AND n.tombstoned IS NULL
                  AND substr(o.prefix, 1, length(n.prefix)) = n.prefix
                  AND (n.ts > o.ts OR (n.ts = o.ts AND n.action_id > o.action_id))) THEN 'overridden'
     ELSE 'live'

@@ -52,6 +52,7 @@ from . import listing_format as lf
 from .storage.base import BLOB_ROW_GROUP_SIZE
 
 if TYPE_CHECKING:
+    from fsspec import AbstractFileSystem
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -136,7 +137,7 @@ class Analysis:
     digest: int
 
 
-def _open(path: str) -> tuple["pq.ParquetFile", object | None, str]:
+def _open(path: str) -> tuple["pq.ParquetFile", "AbstractFileSystem | None", str]:
     """`(ParquetFile, fs | None, path-within-fs)` for a local path or URL. A
     URL is read through `blobfs.open_read` (its cache named, no prefetcher);
     read it under `_opened`, which closes that handle — `ParquetFile.close()`
@@ -149,7 +150,7 @@ def _open(path: str) -> tuple["pq.ParquetFile", object | None, str]:
 
 
 @contextmanager
-def _opened(path: str) -> Iterator[tuple["pq.ParquetFile", object | None, str]]:
+def _opened(path: str) -> Iterator[tuple["pq.ParquetFile", "AbstractFileSystem | None", str]]:
     pf, fs, p = _open(path)
     try:
         yield pf, fs, p
@@ -290,7 +291,7 @@ def analyze_v2(pf: "pq.ParquetFile", fmt: lf.ListingFormat, batch_rows: int = BL
     what a re-encode under another codec verifies against."""
     dcols = tuple(c for c in DIGEST_COLUMNS if c in pf.schema_arrow.names)
     rows, dg = digest(pf.iter_batches(batch_size=batch_rows, columns=list(dcols)), dcols)
-    return Analysis(scan_root=fmt.scan_root, implied=dict(fmt.implied), rows=rows, digest=dg)
+    return Analysis(scan_root=fmt.root(), implied=dict(fmt.implied), rows=rows, digest=dg)
 
 
 def _v2_schema(schema: "pa.Schema", fmt: lf.ListingFormat, dropped: list[str]) -> "pa.Schema":
@@ -361,7 +362,7 @@ def recompress(
         raise
     kept_path = _keep_name(path) if keep else None
     if fs is None:
-        if keep:
+        if kept_path is not None:
             os.replace(path, kept_path)
         os.replace(tmp, path)
     else:

@@ -16,10 +16,12 @@ import { OwnerControls } from './OwnerControls'
 import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
-import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unclaimedBytes } from './types'
-import { SettingsMenu, useRenderer, useTiling } from './prefs'
+import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
+import { SettingsMenu, useRenderer, useTiling, useTitleSpace } from './prefs'
+import { useStore } from './store'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
+import { listingTime } from './listingTime'
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -153,8 +155,8 @@ export type ShadeMode = 'none' | 'class'
 
 export interface Highlight {
   user?: string
-  /** The unclaimed pool (bytes no person owns). */
-  unclaimed?: boolean
+  /** The unowned pool (bytes no person owns). */
+  unowned?: boolean
 }
 
 // Domain wrapper over @disk-tree/react's generic <Treemap>: all layout,
@@ -169,7 +171,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnclaimed, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -183,7 +185,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
    *  fade, map dims to it), click = pin (sticky `hl`; click again, any empty
    *  spot, or `x` clears). Absent → rows are inert. */
   onPickUser?: (u: string) => void
-  onPickUnclaimed?: () => void
+  onPickUnowned?: () => void
   onClearHl?: () => void
   pricing?: Pricing | null
   lens?: boolean
@@ -212,8 +214,13 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   objects?: boolean
   /** An object cell was clicked: its path from the root (the leaf viewer opens it). */
   onOpen?: (p: TreeNode[]) => void
+  /** Brushing with the children table: the view's child (by name) to ring, and
+   *  the child under the pointer (any depth inside it), `null` on leave. */
+  brush?: string | null
+  onBrush?: (name: string | null) => void
 }) {
   usePerfCommit('treemap')
+  const time = listingTime(scheme)
   const { fmtBytes, fmtBytesLike } = useUnits()
   const [liP, setLiP] = useUrlState('li', stringParam('s'))
   const liMetrics = useMemo(() => new Set([...(liP ?? 's')].filter((m): m is LiMetric => m === 's' || m === 'p' || m === 'c')), [liP])
@@ -222,7 +229,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const liToggle = (m: LiMetric) => setLiP(LI_METRIC_CHIPS.map(([k]) => k).filter(k => liMetrics.has(k) !== (k === m)).join(''))
   // Tiling is a user preference (header toggle): `shared` by default.
   const [tiling] = useTiling()
+  const store = useStore()
   const [renderer] = useRenderer()
+  const [titleSpace] = useTitleSpace()
   // Macro/micro hue for a cell, relative to the drilled root (see childRanks).
   // Every cell path starts with the drilled path, so the view root sits at a
   // fixed index — NOT `len - 2 - depth`: a collapsed chain (`run/…/checkpoints`
@@ -245,7 +254,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     [drillLen],
   )
 
-  const uriOf = (path: TreeNode[]) => scheme + path.slice(1).map(n => n.n).join('/')
+  const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
+  const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
 
   // Fold merger: first-class TreeNode aggregating us/d so folded tiles keep
   // real tooltips (upstream calls this at every nesting level).
@@ -326,7 +336,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       } else {
         // user: a wholly-owned (~100%) cell takes its user's color; a mixed
         // cell renders its top users as proportional stripes (with a gray
-        // remainder for unclaimed bytes) instead of one blob.
+        // remainder for unowned bytes) instead of one blob.
         const [u, ub] = kid.us?.[0] ?? [null, 0]
         if (ub >= 0.98 * kid.b) {
           const base = userColor(u, userIdx)
@@ -361,11 +371,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         ? `repeating-linear-gradient(135deg, rgb(120 170 255 / ${(0.18 + 0.5 * coldFrac).toFixed(2)}) 0 4px, transparent 4px 9px)`
         : undefined
       // highlight mode: leaf cells not majority-owned by the selected user
-      // (or, for the unclaimed pin, not majority-unclaimed) fade back
+      // (or, for the unowned pin, not majority-unowned) fade back
       let dim = false
       if (effHl && !ctx.hasKids) {
         if (effHl.user) dim = (kid.us?.find(([u]) => u === effHl.user)?.[1] ?? 0) < 0.5 * kid.b
-        else if (effHl.unclaimed) dim = unclaimedBytes(kid) < 0.5 * kid.b
+        else if (effHl.unowned) dim = unownedBytes(kid) < 0.5 * kid.b
       }
       // Shared-edge stroke, per cell: each neighbor paints its own half of a
       // boundary, so the line can adapt to the face it borders. Top-level
@@ -387,7 +397,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
 
   // owner roll-up for the current view (user coloring only): everyone ≥1% of
   // the node, at least 5, at most 12; the rest roll into "(other users)";
-  // what no person owns is the unclaimed pool. $ figures use class-aware
+  // what no person owns is the unowned pool. $ figures use class-aware
   // per-user rates when the snapshot carries them.
   const rollupFor = (node: TreeNode) => {
     if (mode !== 'user' || !node.us) return []
@@ -400,7 +410,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     return [
       ...shown.map(([u, b]) => ({ k: u, b, col: userColor(u, userIdx), rate: userRate(u), mix: pricing?.userMix?.[u], hl: { user: u } as Highlight | undefined })),
       ...(otherUsers > 0 ? [{ k: `(other users ×${us.length - shown.length})`, b: otherUsers, col: 'var(--other)', rate: pricing?.blended, mix: undefined, hl: undefined }] : []),
-      ...(unattr > 0 ? [{ k: 'unowned', b: unattr, col: 'var(--t-unattr)', rate: pricing?.blended, mix: undefined, hl: { unclaimed: true } as Highlight | undefined }] : []),
+      ...(unattr > 0 ? [{ k: 'unowned', b: unattr, col: 'var(--t-unattr)', rate: pricing?.blended, mix: undefined, hl: { unowned: true } as Highlight | undefined }] : []),
     ].sort((a, b) => b.b - a.b)
   }
 
@@ -455,8 +465,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           // Real per-user rows (not "(other users)"/"unowned") get a GitHub
           // avatar next to the color swatch.
           const isUser = mode === 'user' && !r.k.startsWith('(') && r.k !== 'unowned'
-          const pickable = !!r.hl && !!(r.hl.user ? onPickUser : onPickUnclaimed)
-          const same = (a: Highlight | null | undefined, b: Highlight | undefined) => !!a && !!b && a.user === b.user && !!a.unclaimed === !!b.unclaimed
+          const pickable = !!r.hl && !!(r.hl.user ? onPickUser : onPickUnowned)
+          const same = (a: Highlight | null | undefined, b: Highlight | undefined) => !!a && !!b && a.user === b.user && !!a.unowned === !!b.unowned
           const pinned = same(hl, r.hl)
           // Hover-solo fades the other rows; a pin (the map is scoped to the
           // pinned row's bytes) hides them.
@@ -466,7 +476,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             if (!r.hl) return
             if (pinned) onClearHl?.()
             else if (r.hl.user) onPickUser?.(r.hl.user)
-            else if (r.hl.unclaimed) onPickUnclaimed?.()
+            else if (r.hl.unowned) onPickUnowned?.()
           }
           return (
           <span
@@ -520,8 +530,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <>
           {mode === 'read' && readRange ? (
             <>
-              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}) — activity before that predates the logs, so "never read" really means "not read in the observed window".`}>
-                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />never read*</span>
+              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}). Logs may omit events; this is not proof of no access.`}>
+                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
               </Tooltip>
               <span className="li gradli">
                 {epochDaysToDate(readRange.min)}
@@ -531,9 +541,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             </>
           ) : dateRange ? (
             <span className="li gradli">
-              {epochDaysToMonth(dateRange.min)}
+              {epochDaysToDate(dateRange.min)}
               <span className="gradbar" style={{ background: dateGradientCss() }} />
-              {epochDaysToMonth(dateRange.max)}
+              {epochDaysToDate(dateRange.max)}
             </span>
           ) : null}
         </>
@@ -595,13 +605,13 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     )
     return (
       <>
-        <PathBar path={path} scheme={scheme} home={home} onDrill={onPathChange} />
+        <PathBar path={path} scheme={schemeOf(path)} home={home} onDrill={onPathChange} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
-          {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+          {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
-            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no reads since {epochDaysToDate(readRange.min)}</span></>}
+            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>}
         </div>
         {classes}
         {users}
@@ -621,6 +631,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       initialPath={initialPath}
       path={path}
       onPathChange={onPathChange}
+      onCellHover={onBrush ? (n, p) => onBrush(n && p.length > (path?.length ?? 1) ? p[path?.length ?? 1].n : null) : undefined}
+      lens={brush ? (kid, _p, depth, _ctx, style) => (depth === 0 && kid.n === brush ? { ...style, ring: { color: 'var(--ink)', width: 2 } } : undefined) : undefined}
       // `k` decides (`cellAction`): an object opens in the leaf viewer; a
       // directory drills even when it arrived without `c` (its children fell
       // below this view's pixel budget — the drill's own fetch brings them),
@@ -637,6 +649,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       getId={(_n, p) => uriOf(p)}
       formatSize={fmtBytes}
       collapseChains
+      reclaimTitleSpace={titleSpace === 'reclaim'}
+      branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)"
       mergeSmall={mergeSmall}
       colorForCell={colorForCell}
       // Opaque cells. Upstream's default fades every nesting level by 0.82,
@@ -672,10 +686,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // current view, so the panel never collapses to an empty stub.
       renderTipDefault={(n, p) => (
         <div className="tip-viewcard">
-          <div className="vc-scope">{p.length > 1 ? pathText(scheme, p.slice(1).map(x => x.n), home) : n.n}</div>
+          <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.n), home) : n.n}</div>
           <div className="nums">
             {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
-            {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+            {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>

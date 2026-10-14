@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { AvatarField } from '@open-athena/auth/react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
-import { DEFAULT_STORE } from './stores'
+import { DEFAULT_STORE, STORES } from './stores'
+import { hideScopes } from './hideScopes'
 import { useDocTitle } from './title'
 import { PreviewLinks } from './PreviewLinks'
+import { SessionLogSwitch } from './SessionLogSwitch'
 
 // Share-link console (staff-only; the backend enforces the `admin` scope on
 // every /api/auth/grants route — this page just renders the 403 politely).
@@ -85,6 +87,123 @@ function MemoCell({ grant, onSave, saving }: { grant: Grant; onSave: (note: stri
   )
 }
 
+/** `<input type="date">`'s value for a unix time, in local time. */
+const dateValue = (ts: number): string => {
+  const d = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+/** The end of a local calendar day (`YYYY-MM-DD`), as a unix time: a link set
+ *  to expire "on the 12th" works through the 12th. */
+const endOfDay = (value: string): number => {
+  const [y, m, d] = value.split('-').map(Number)
+  return Math.floor(new Date(y, m - 1, d, 23, 59, 59).getTime() / 1000)
+}
+
+/** A link's expiry, editable in place (`PATCH … { expiresAt }`): pick a day to
+ *  shorten or extend it, or "Never". An expiry in the past stops the link at
+ *  once and ends the sessions it minted; moving it forward revives it. */
+function ExpiresCell({ grant, onSave, saving }: { grant: Grant; onSave: (expiresAt: number | null) => void; saving: boolean }) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const expired = grant.expiresAt != null && grant.expiresAt * 1000 < Date.now()
+  const label = grant.expiresAt == null ? <em>never</em> : <>{fmtTs(grant.expiresAt)}{expired && <span className="expired"> expired</span>}</>
+  if (grant.revokedAt) return label
+  if (draft == null) {
+    const initial = grant.expiresAt ?? Math.floor(Date.now() / 1000) + 30 * 86400
+    return (
+      <button type="button" className="memo-edit" aria-label="Edit expiry" onClick={() => setDraft(dateValue(initial))} disabled={saving}>
+        {label}
+      </button>
+    )
+  }
+  const save = (expiresAt: number | null) => {
+    setDraft(null)
+    if (expiresAt !== grant.expiresAt) onSave(expiresAt)
+  }
+  return (
+    <form
+      className="expires-edit"
+      onSubmit={e => {
+        e.preventDefault()
+        if (draft) save(endOfDay(draft))
+      }}
+      onKeyDown={e => { if (e.key === 'Escape') setDraft(null) }}
+    >
+      <input type="date" autoFocus value={draft} onChange={e => setDraft(e.target.value)} aria-label="Expires on" />
+      <div className="row-actions">
+        <button type="submit" disabled={!draft}>Save</button>
+        <button type="button" onClick={() => save(null)}>Never</button>
+        <button type="button" onClick={() => setDraft(null)}>Cancel</button>
+      </div>
+    </form>
+  )
+}
+
+/** One `access_log` row for a link (`GET /api/auth/log?grant=`). `ipHash` is
+ *  an HMAC of the address; raw IPs are never stored. `city`/`region`/`asOrg`
+ *  (Cloudflare's `request.cf`) are null on rows logged before auth `e14287a`. */
+interface LogEvent {
+  id: number
+  ts: number
+  event: string
+  sessionSub: string | null
+  path: string | null
+  reason: string | null
+  country: string | null
+  ua: string | null
+  ipHash: string | null
+  referer: string | null
+  city: string | null
+  region: string | null
+  asOrg: string | null
+}
+
+/** "Brooklyn, NY, US": the most specific location the log has. */
+const where = (e: LogEvent): string => [e.city, e.region, e.country].filter(Boolean).join(', ') || '—'
+
+/** A link's lifecycle events (mint, redeem, deny, revoke…), newest first;
+ *  page views only when the gate logs them. */
+function GrantLog({ id }: { id: string }) {
+  const q = useQuery<{ events: LogEvent[] }, Error>({
+    queryKey: ['auth', 'log', id],
+    queryFn: async () => {
+      const r = await fetch(`/api/auth/log?grant=${encodeURIComponent(id)}&limit=200`, { credentials: 'include' })
+      if (!r.ok) throw new Error(`log: ${r.status}`)
+      return r.json()
+    },
+  })
+  if (q.error) return <p className="err">{q.error.message}</p>
+  if (!q.data) return <p className="dim">loading…</p>
+  const events = q.data.events
+  if (!events.length) return <p className="dim">no events logged</p>
+  const hasNetwork = events.some(e => e.asOrg != null)
+  return (
+    <table className="grant-log">
+      <thead>
+        <tr>
+          <th>when</th><th>event</th><th>where</th>
+          {hasNetwork && <th>network</th>}
+          <th>client</th><th>browser</th>
+          <th>detail</th>
+        </tr>
+      </thead>
+      <tbody>
+        {events.map(e => (
+          <tr key={e.id}>
+            <td>{fmtTs(e.ts)}</td>
+            <td>{e.event}</td>
+            <td>{where(e)}</td>
+            {hasNetwork && <td>{e.asOrg ?? '—'}</td>}
+            <td><code>{e.ipHash ? e.ipHash.slice(0, 8) : '—'}</code></td>
+            <td className="ua">{e.ua ?? '—'}</td>
+            <td>{e.reason ?? e.path ?? ''}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 const linkFor = (token: string): string => `${window.location.origin}/?key=${token}`
 
 /** `POST /api/auth/grants`' allowlist outcome for a link minted with `allowlist: true`. */
@@ -103,7 +222,7 @@ const holderName = (g: Grant): string | null => g.subject?.name || g.subject?.em
 /** A body for `PATCH /api/auth/grants/:id`: the memo, or the holder's name and
  *  face (`avatar` absent = keep it, null = clear, a `data:` URI = replace;
  *  copied server-side, as at mint). */
-type GrantEdit = { note?: string | null; subjectName?: string | null; avatar?: string | null }
+type GrantEdit = { note?: string | null; subjectName?: string | null; avatar?: string | null; expiresAt?: number | null }
 
 /** Who a link is for, editable in place: click to rename the holder or change
  *  their face (`<AvatarField>`, the mint form's picker), Save or Cancel. */
@@ -166,6 +285,8 @@ interface Draft {
   avatar: string | null
   access: Access
   days: string
+  /** Paths the link hides, one per line (specs/path-scopes.md). */
+  hide?: string
   /** Pre-`access` drafts. */
   readOnly?: boolean
 }
@@ -197,20 +318,24 @@ export function AdminPage() {
   // mint, never a hotlink); null = none.
   const [avatar, setAvatar] = useState<string | null>(draft.avatar || null)
   const [days, setDays] = useState(draft.days ?? '30')
+  const [hide, setHide] = useState(draft.hide ?? '')
+  const { scopes: hidden, unresolved: hideUnresolved } = hideScopes(hide, DEFAULT_STORE.key, STORES.slice(1).map(s => s.key), DEFAULT_STORE.home)
   const [access, setAccess] = useState<Access>(draft.access ?? (draft.readOnly === false ? 'view' : 'read'))
   // Admin is an account's, so it needs an email; without one it reads as Viewer.
-  const effAccess: Access = access === 'admin' && !email.trim() ? 'view' : access
+  // A path-restricted link is never admin: an account's session isn't restricted.
+  const effAccess: Access = access === 'admin' && (!email.trim() || hidden.length) ? 'view' : access
+  const [openLog, setOpenLog] = useState<string | null>(null)
   const [minted, setMinted] = useState<{ label: string; url: string; allowed: Allowed | null; admin: AdminResult | null } | null>(null)
 
   useEffect(() => {
     try {
       // A face is a few-KB `data:` URI; keep it in the draft unless it's oversized.
       const face = avatar && avatar.length <= 32_000 ? avatar : null
-      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ memo, name, email, avatar: face, access, days }))
+      sessionStorage.setItem(DRAFT_KEY, JSON.stringify({ memo, name, email, avatar: face, access, days, hide }))
     } catch {
       // sessionStorage can throw (private mode / disabled) — a lost draft is cosmetic.
     }
-  }, [memo, name, email, avatar, access, days])
+  }, [memo, name, email, avatar, access, days, hide])
 
   const grantsQ = useQuery<{ grants: Grant[] }, Error>({
     queryKey: ['auth', 'grants'],
@@ -240,9 +365,11 @@ export function AdminPage() {
           avatar,
           // An email makes it a person's link: their account is created (or
           // updated) with the link's access, so they can also sign in directly.
-          allowlist: !!email.trim(),
+          // Not for a path-restricted link: the account's own sign-ins are
+          // email sessions, which no `:hide:` scope restricts.
+          allowlist: !!email.trim() && !hidden.length,
           // The link itself is never admin: an admin account still has to sign in.
-          scopes: [effAccess === 'read' ? `${DEFAULT_STORE.key}:read` : DEFAULT_STORE.key],
+          scopes: [effAccess === 'read' ? `${DEFAULT_STORE.key}:read` : DEFAULT_STORE.key, ...hidden],
           expiresInS,
         }),
       })
@@ -340,7 +467,8 @@ export function AdminPage() {
     )
   }
 
-  const canMint = !!(name.trim() || memo.trim())
+  // A `~` line this store can't resolve would mint a link that hides nothing there.
+  const canMint = !!(name.trim() || memo.trim()) && !hideUnresolved.length
 
   const grants = grantsQ.data?.grants ?? []
   const revokedCount = grants.filter(g => g.revokedAt).length
@@ -403,9 +531,15 @@ export function AdminPage() {
           <input id="mint-days" className="days" value={days} onChange={e => setDays(e.target.value)} inputMode="numeric" size={4} />
           <span className="hint">days until the link stops working; blank = never</span>
         </div>
+        <div className="field">
+          <label htmlFor="mint-hide">Hide</label>
+          <textarea id="mint-hide" className="hide-paths" rows={2} value={hide} onChange={e => setHide(e.target.value)} placeholder={`${DEFAULT_STORE.home ? '~/Downloads/2025 tax returns' : 'path/to/private-dir'}${STORES.length > 1 ? `\n${STORES[1].key}:…` : ''}`} />
+          <span className="hint">dirs the link sees only as one total, nothing inside (one per line{STORES.length > 1 && <>; {STORES.slice(1).map((s, i) => <Fragment key={s.key}>{i ? '/' : ''}<code>{s.key}:…</code></Fragment>)} for that store</>}){hidden.length ? ' — the link won’t add the email to the allowlist or be admin' : ''}</span>
+          {hideUnresolved.length > 0 && <span className="err">no home dir for <code>~</code> on this store: {hideUnresolved.map((l, i) => <Fragment key={l}>{i ? ', ' : ''}<code>{l}</code></Fragment>)}</span>}
+        </div>
         <div className="field submit">
           <button type="submit" disabled={mint.isPending || !canMint}>Create link</button>
-          {!canMint && <span className="hint">add a name or a memo first</span>}
+          {!canMint && !hideUnresolved.length && <span className="hint">add a name or a memo first</span>}
           {mint.error && <span className="err">{mint.error.message}</span>}
         </div>
       </form>
@@ -446,7 +580,8 @@ export function AdminPage() {
         </thead>
         <tbody>
           {shown.map(g => (
-            <tr key={g.id} className={g.revokedAt ? 'revoked' : ''}>
+            <Fragment key={g.id}>
+            <tr className={g.revokedAt ? 'revoked' : ''}>
               <td className="memo"><MemoCell grant={g} onSave={note => editGrant.mutate({ id: g.id, edit: { note } })} saving={editGrant.isPending} /></td>
               <td>
                 <HolderCell
@@ -457,9 +592,13 @@ export function AdminPage() {
                 />
               </td>
               <td>{g.scopes.join(' ')}</td>
-              <td>{g.redeems}{g.maxRedeems != null ? `/${g.maxRedeems}` : ''}</td>
+              <td>
+                <button type="button" className="log-toggle" aria-expanded={openLog === g.id} aria-label="Show this link's activity" onClick={() => setOpenLog(openLog === g.id ? null : g.id)}>
+                  {g.redeems}{g.maxRedeems != null ? `/${g.maxRedeems}` : ''} <span className="caret">{openLog === g.id ? '▾' : '▸'}</span>
+                </button>
+              </td>
               <td>{fmtTs(g.lastUsedAt)}</td>
-              <td>{fmtTs(g.expiresAt)}</td>
+              <td><ExpiresCell grant={g} onSave={expiresAt => editGrant.mutate({ id: g.id, edit: { expiresAt } })} saving={editGrant.isPending && editGrant.variables?.id === g.id} /></td>
               <td>{fmtTs(g.createdAt)}<div className="by">{g.createdBy}</div></td>
               <td>
                 {g.revokedAt
@@ -472,6 +611,10 @@ export function AdminPage() {
                   )}
               </td>
             </tr>
+            {openLog === g.id && (
+              <tr className="grant-log-row"><td colSpan={8}><GrantLog id={g.id} /></td></tr>
+            )}
+            </Fragment>
           ))}
           {!shown.length && !grantsQ.isPending && (
             <tr><td colSpan={8}><em>{grants.length ? 'no active links (all revoked)' : 'no links created yet'}</em></td></tr>
@@ -480,6 +623,7 @@ export function AdminPage() {
       </table>
       </div>
       <PreviewLinks />
+      <SessionLogSwitch />
     </main>
   )
 }
