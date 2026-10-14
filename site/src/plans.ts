@@ -107,11 +107,12 @@ export function useStage() {
 /** The plan /staged shows (polled while a run is live): the shared open plan
  * (GET /api/plans/staged), or plan `id` (GET /api/plans/:id — a closed one
  * keeps its runs and their undo windows reachable). */
-export function useStagedPlan(live = false, id: number | null = null) {
+export function useStagedPlan(live = false, id: number | null = null, enabled = true) {
   return useQuery<StagedPlan, Error>({
     queryKey: ['plans', id ?? 'staged'],
     queryFn: () => call<StagedPlan>(id == null ? '/api/plans/staged' : `/api/plans/${id}`),
     refetchInterval: live ? 20_000 : false,
+    enabled,
   })
 }
 

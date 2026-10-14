@@ -2252,6 +2252,17 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // A filtered table row's box: its width reserved whatever the state (the controls, a spinner, the accepted
 // line, the muted reason truncated with its tooltip); a confirm wraps within it.
 .children-tbl td.actions .mact { width: 13em; }
+// A row the open plan already holds (`useStagedIndex`): its name struck through and dimmed, the trash
+// replaced by a chip to /staged; a folder holding staged items counts them after its name.
+.children-tbl tr.staged td.prefix a, .children-tbl tr.staged td.prefix > span { text-decoration: line-through; text-decoration-color: var(--s3); color: var(--ink-2); }
+.children-tbl tr.staged td.num { color: var(--ink-2); }
+a.staged-chip {
+  display: inline-block; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px;
+  color: var(--s3); border: 1px solid color-mix(in srgb, var(--s3) 55%, transparent);
+  background: color-mix(in srgb, var(--s3) 10%, transparent); text-decoration: none; white-space: nowrap;
+  &:hover { background: color-mix(in srgb, var(--s3) 20%, transparent); }
+}
+.children-tbl a.staged-n { color: var(--s3); text-decoration: none; &:hover { text-decoration: underline; } }
 .bulkbar .bb-acts { min-width: 18em; justify-content: flex-start; }
 .children-tbl .sel-bar .sel-acts { min-width: 16em; }
 
