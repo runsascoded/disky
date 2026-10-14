@@ -161,8 +161,8 @@ if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
   fi
   hex=()
   [[ $cmd == build ]] && hex=(-x off)
-  ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
+  ( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
       -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(nproc)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
-  echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s"
+  echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/static-time.txt")"
   ended static-names -o "static-names=r2://$bucket/static-names/$STATIC_GEN/"
 fi
