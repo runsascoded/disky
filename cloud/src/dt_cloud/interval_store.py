@@ -116,7 +116,7 @@ SV_HASH = "hash(depth, path, usr, kind, size, n_files, n_children, n_desc, mtime
 
 #: A scan's raw rows in the reader's terms (`index.ts` `toRowV1` / `toRowV2`): `mw` is the bytes the
 #: mean stamp weighs and `wt` = `mtime_mean · mw` (`view.ts` `merge` adds both only where `mw > 0`).
-V2_ROW = """depth::UTINYINT AS depth, path, coalesce(usr, '') AS usr, kind = 'file' AS is_file, size::BIGINT AS size,
+V2_ROW = """depth::UTINYINT AS depth, path, coalesce({usr}, '') AS usr, kind = 'file' AS is_file, size::BIGINT AS size,
     n_files::BIGINT AS n_files, coalesce({n_children}, -1)::BIGINT AS n_children, coalesce({n_desc}, -1)::BIGINT AS n_desc,
     coalesce({mtime}, -1)::BIGINT AS mtime, CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE size END::BIGINT AS mw,
     CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE {mtime_mean}::DOUBLE * size::DOUBLE END AS wt,
@@ -253,6 +253,8 @@ def build_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mount: str
         "range": r, "i": i, "versions": n_pv, "reads": n_rd,
         "open": con.execute(f"SELECT count(*) FROM pv WHERE vt = {OPEN}").fetchone()[0],
         "reads_open": con.execute(f"SELECT count(*) FROM rd WHERE vt = {OPEN}").fetchone()[0],
+        # Versions naming an owner: none in any range, and the generation has no owner axis (`owners_of`).
+        "owners": con.execute("SELECT count(*) FROM pv WHERE us <> ''").fetchone()[0],
         "kinds": kinds, "scans": per_scan,
         "eq": all(s["eq"] and s["reads_eq"] for s in per_scan),
         "long_s": round(t_long, 1), "kernel_s": round(t_kernel, 1), "s": round(monotonic() - t0, 1),
@@ -407,6 +409,65 @@ SORTS = {
 }
 #: Each range-file dir's schema.
 SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHEMA, "svt": SVT_SCHEMA}
+#: The owner-slice range files (`build -S`, `fold -S`), and the sorts cut from them. A generation whose scans name no
+#: owner (`usr` NULL or '' on every row: cw-s3, r2.rbw.sh) has no owner axis and builds none of them: its slices would
+#: be its path rows again, each slice sort about the size of `path`.
+SLICE_SUBS = ("sv", "svt")
+
+
+def owners_of(digests) -> bool:
+    """Whether a generation has the owner axis, from its ranges' `build_range` digests: some version names an owner.
+    A digest from before the count (no `owners`) counts as sliced, as its generation was cut."""
+    return any(d.get("owners", 1) for d in digests)
+
+
+def sliced(scans: dict) -> bool:
+    """Whether a generation (its `scans.json`) has the owner axis: its `slices`, recorded by the base build. A
+    generation from before the flag was cut with every sort."""
+    return bool(scans.get("slices", True))
+
+
+def served_sorts(has_slices: bool) -> list[str]:
+    """The sorts a generation serves: every `SORTS` entry, the slice sorts only with the owner axis."""
+    return [s for s, (sub, _, _) in SORTS.items() if has_slices or sub not in SLICE_SUBS]
+
+
+def owners_refused(scan: str) -> str:
+    """Why scan `scan`, which names owners, isn't appended to a generation without the owner axis."""
+    return (f"{scan}: names owners (`usr`), but the generation has no owner axis (`scans.json` `\"slices\": false`); "
+            "its owners need a new base generation (`interval-store build`)")
+
+
+def names_owners(con, src: str) -> bool:
+    """Whether the scan `src` (a `path` sort) names an owner on any row (`usr` neither NULL nor ''). Footer statistics
+    prune the row groups of an all-NULL `usr`; the first named row ends the read."""
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(src)})").fetchall()}
+    if "usr" not in cols:
+        return False
+    return con.execute(f"SELECT count(*) FROM (SELECT 1 FROM read_parquet({q(src)}) WHERE usr <> '' LIMIT 1)").fetchone()[0] > 0
+
+
+def gen_sliced(store: Store, prefix: str) -> bool:
+    """A staged generation's owner axis: its `scans.json`'s `slices` once recorded (`cut`), else measured from every
+    range's `build_range` digest (refused until all are built)."""
+    scans = store.read_json(f"{prefix}/scans.json")
+    if "slices" in scans:
+        return sliced(scans)
+    k = store.read_json(f"{prefix}/ranges.json")["k"]
+    keys = [f"{prefix}/digest/r{i:04d}.json" for i in range(k)]
+    if missing := [x for x in keys if not store.exists(x)]:
+        raise SystemExit(f"{prefix}: {len(missing)} of {k} ranges' path versions not built (`build-ranges`); "
+                         "whether the generation has owner slices is measured there")
+    return owners_of(store.read_json(x) for x in keys)
+
+
+def record_slices(store: Store, prefix: str, scans: dict, has_slices: bool) -> None:
+    """`scans.json` under `prefix` with the generation's `slices` (the reader's flag), unless it says so already."""
+    key = f"{prefix}/scans.json"
+    cur = store.read_json(key) if store.exists(key) else None
+    if cur is None or cur.get("slices") != has_slices:
+        store.write_text(key, json.dumps({**scans, "slices": has_slices}, indent=1) + "\n")
+
 GROUPS_SCHEMA = pa.schema([
     pa.field("rg", pa.int32(), nullable=False),
     pa.field("seg", pa.int32(), nullable=False),
@@ -618,6 +679,9 @@ def build_ranges_cmd(bucket, profile, force, gen, index, mount, mem, per_task, o
     con.execute(f"SET temp_directory={q(str(Path(tmp) / 'spill'))}")
     err(f"interval-store build: duckdb {duckdb.__version__}, pyarrow {pa.__version__}, {len(scans['scans'])} scans, ranges {todo}")
     dig = "sv-digest" if slices else "digest"
+    if slices and not gen_sliced(store, prefix):
+        err(f"interval-store build -S: {prefix} names no owner; no slices to build")
+        return
     for i in todo:
         if not force and store.exists(f"{prefix}/{dig}/r{i:04d}.json"):
             err(f"range {i}: already built")
@@ -675,6 +739,9 @@ def fold_cmd(bucket, gen, index, mount, mem, per_task, out, threads, profile, sl
     t = sn._task(index)
     con = connect(threads, mem, tmp)
     root = _root(store, prefix, mount)
+    if slice_totals and not gen_sliced(store, prefix):
+        err(f"interval-store fold -S: {prefix} names no owner; no slices to fold")
+        return
     for i in range(t * per_task, min((t + 1) * per_task, ranges["k"])):
         sub = "svt" if slice_totals else "pvl"
         doc = (slice_totals_range if slice_totals else fold_range)(root, i, Path(out), con)
@@ -716,19 +783,24 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
     con = connect(threads, mem, tmp)
     root = _root(store, prefix, mount)
     scans = store.read_json(f"{prefix}/scans.json")
+    has_slices = gen_sliced(store, prefix)
     out_dir = Path(out) / "served"
     if todo == ["stats"]:
-        doc = churn_stats(con, root, scans)
+        doc = {**churn_stats(con, root, scans), "slices": has_slices}
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "stats.json").write_text(json.dumps(doc, indent=1) + "\n")
         if not no_upload:
             _refuse_overwrite(store, [f"{dst_prefix}/served/stats.json"])
             store.put_tree(out_dir, f"{dst_prefix}/served")
+            record_slices(store, dst_prefix, scans, has_slices)
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
         return
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
     for sort in todo:
         sub, _, _ = SORTS[sort]
+        if sort not in served_sorts(has_slices):
+            err(f"cut {sort}: {prefix} names no owner; no slice sorts")
+            continue
         schema = SUB_SCHEMA[sub]
         if not no_upload:
             _refuse_overwrite(store, [f"{dst_prefix}/served/{sort}{x}" for x in (".parquet", ".groups.parquet", ".json")])
@@ -742,12 +814,9 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
             store.put_tree(out_dir, f"{dst_prefix}/served")
             shutil.rmtree(out_dir)
         print(json.dumps(doc), flush=True)
-    if to_gen and not no_upload:
-        # The new generation's scans (the reader's `scans.json`), once.
-        try:
-            store.create(f"{dst_prefix}/scans.json", json.dumps(scans, indent=1) + "\n")
-        except FileExistsError:
-            pass
+    if not no_upload:
+        # The generation's scans and owner axis (the reader's `scans.json`; under `-O`, the new generation's).
+        record_slices(store, dst_prefix, scans, has_slices)
 
 
 def download_served(store: Store, prefix: str, dst: Path, *, workers: int = 16) -> None:

@@ -12,7 +12,9 @@ this module only chains them, and moves files between the store and the work dir
 `build` writes a base generation (never over one): `scans.json` (written last: the reader's liveness marker),
 `ranges.json`, the range files (`pv/`, `rd/`, `pvl/`, `sv/`, `svt/`, `digest/`, `sv-digest/`: every scan's reconstruction
 checked, or the build fails), and the served sorts (`served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, every
-sort of `interval_store.SORTS`, dyadic segments; `served/stats.json`).
+sort of `interval_store.SORTS`, dyadic segments; `served/stats.json`). A generation whose scans name no owner has no owner
+axis: no `sv/`, `svt/`, `sv-digest/` or slice sorts, `"slices": false` in `scans.json` (measured from the versions,
+`interval_store.owners_of`); its `add` appends `pvl` alone and refuses a scan naming owners (a new base is needed).
 
 `add` appends every scan published after the generation's newest (base + runs), oldest first, each as a run
 (`deltas/<id>/`: per key range `interval_append.append_range`'s deltas and its `ranges/r####.json`, the run's served sorts,
@@ -94,48 +96,53 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
     t = monotonic()
     ranges = sn.plan_ranges(doc, k, mount)
     (gen_dir / "ranges.json").write_text(json.dumps(ranges, indent=1) + "\n")
-    bad = []
+    bad, digests = [], []
     for r in ranges["ranges"]:
         d = ist.build_range(doc, ranges, r["i"], gen_dir, con, mount=mount)
+        digests.append(d)
         bad += [(r["i"], s["id"]) for s in d["scans"] if not (s["eq"] and s["reads_eq"])]
         ist.fold_range(str(gen_dir), r["i"], gen_dir, con)
     t = done("versions", t)
-    for r in ranges["ranges"]:
-        d = ist.build_slices_range(doc, ranges, r["i"], gen_dir, con, mount=mount)
-        bad += [(r["i"], s["id"]) for s in d["scans"] if not s["eq"]]
-        ist.slice_totals_range(str(gen_dir), r["i"], gen_dir, con)
-    t = done("slices", t)
+    # The owner axis, from the versions: a generation whose scans name no owner builds no slices.
+    doc["slices"] = ist.owners_of(digests)
+    if doc["slices"]:
+        for r in ranges["ranges"]:
+            d = ist.build_slices_range(doc, ranges, r["i"], gen_dir, con, mount=mount)
+            bad += [(r["i"], s["id"]) for s in d["scans"] if not s["eq"]]
+            ist.slice_totals_range(str(gen_dir), r["i"], gen_dir, con)
+        t = done("slices", t)
     if bad:
         raise RuntimeError(f"build {gen}: the versions don't reconstruct every scan: (range, scan) {bad}")
     stamps = [s["ts"] for s in doc["scans"]]
     served, sorts = gen_dir / "served", {}
-    for sort, (sub, _, _) in ist.SORTS.items():
+    for sort in ist.served_sorts(doc["slices"]):
+        sub, _, _ = ist.SORTS[sort]
         t1 = monotonic()
         sd = ist.write_served(con, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", ist.SUB_SCHEMA[sub],
                               rg_rows=rg_rows, stamps=stamps)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
         sorts[sort] = {"rows": sd["rows"], "groups": sd["groups"], "bytes": sd["bytes"]}
-    stats = ist.churn_stats(con, str(gen_dir), doc)
+    stats = {**ist.churn_stats(con, str(gen_dir), doc), "slices": doc["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
     done("cut", t)
     (gen_dir / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     disk.close()
-    return {"gen": gen, "scans": len(doc["scans"]), "ranges": ranges["k"], "versions": stats["versions"], "open": stats["open"], "sorts": sorts,
+    return {"gen": gen, "scans": len(doc["scans"]), "ranges": ranges["k"], "slices": doc["slices"], "versions": stats["versions"], "open": stats["open"], "sorts": sorts,
             "s": round(monotonic() - t0, 1), "stages": times, "peaks": peaks}
 
 
 # ── add: scans appended as runs ────────────────────────────────────────────
 
 
-def open_state_sql(root: str, runs: list[str], name: str) -> dict[str, str]:
+def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True) -> dict[str, str]:
     """Key range `name`'s open versions after the newest of `runs` (run dirs, the manifest's order), refolded: the base's
     (`interval_append.base_state_sql` over the range files under `root`) and every run's delta rows (opened versions and
     close records, `pvf` carried), one row per version (`IDENT`) with the smallest `vt`, those still open. What the staged
-    path reads from `state/<prev>/`, as `STATE_SCHEMA` relations."""
-    base = ia.base_state_sql(root, name)
+    path reads from `state/<prev>/`, as `STATE_SCHEMA` relations (`interval_append.tables(sliced)`)."""
+    base = ia.base_state_sql(root, name, sliced)
     out = {}
-    for t in ia.TABLES:
+    for t in ia.tables(sliced):
         cols = ", ".join(ia.STATE_SCHEMA[t].names)
         parts = [f"SELECT {cols} FROM ({base[t]})", *(f"SELECT {cols} FROM read_parquet({q(f'{r}/{t}/{name}.parquet')})" for r in runs)]
         if len(parts) == 1:
@@ -156,6 +163,7 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     d = scan["id"]
     store = LocalRunStore(gen_dir, work / "lease", gen)
     base = store.read_json("scans.json")
+    sliced = ist.sliced(base)
     prev = latest_key(store.keys("manifests/"), before=d)
     runs = store.read_json(prev)["runs"] if prev else []
     have = scans_of(base, runs)
@@ -173,13 +181,14 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     roots = [str(gen_dir / r["key"]) for r in runs]
     for r in ranges["ranges"]:
         name = f"r{r['i']:04d}"
-        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name), scan, r, name, run, bucket=base["bucket"], mount=mount)
+        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced), scan, r, name, run, bucket=base["bucket"], mount=mount,
+                              sliced=sliced)
         doc["prev"] = have[-1]
         (run / "ranges").mkdir(exist_ok=True)
         (run / "ranges" / f"{name}.json").write_text(json.dumps(doc) + "\n")
     shutil.rmtree(run / "state")
     t1 = monotonic()
-    docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows)
+    docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced)
     new = {"key": rk, "first": d, "last": d, "level": 0, "scans": [d]}
     meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs), "cut_s": round(monotonic() - t1, 1)}
     (run / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
@@ -194,7 +203,7 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
     """The newest manifest's due carries (`append_runner.merge_pending` with `interval_append.carry`, over the generation
     dir), each published as a revision of it."""
     store = LocalRunStore(gen_dir, work / "lease", gen)
-    carry = ia.carry(gen, k, threads=threads, mem=mem, rg_rows=rg_rows)
+    carry = ia.carry(gen, k, threads=threads, mem=mem, rg_rows=rg_rows, sliced=ist.sliced(store.read_json("scans.json")))
     return ar.merge_pending(store, carry, gen_dir, tmp=work / "merge", max_level=compact_level, heartbeat_s=None)
 
 
@@ -272,7 +281,12 @@ def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, 
         stale = sorted(key for key in before if key.startswith(redo)) if redo else []
         before = {key: n for key, n in before.items() if not (redo and key.startswith(redo))}
         con = sn.connect(threads, mem, w / "duckdb")
-        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows) for s in pending]
+        if not ist.sliced(base):
+            # No owner axis in the generation: a pending scan naming owners is refused before anything is appended.
+            for s in pending:
+                if ist.names_owners(con, sn._src(base["bucket"], s["src"], scans["mount"])):
+                    raise SystemExit(ist.owners_refused(s["id"]))
+        added =[append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows) for s in pending]
         k = lstore.read_json("ranges.json")["k"]
         merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, k=k, compact_level=compact_level, rg_rows=rg_rows,
                                                                 threads=threads, mem=mem)

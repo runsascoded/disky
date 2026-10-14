@@ -51,6 +51,9 @@ class Scan:
     def __init__(self, con, file: str, version: int, key: str = ""):
         self.con, self.file, self.v, self.key = con, file, version, key
         self.src = f"read_parquet({q(file)})"
+        if "usr" not in {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}:
+            # A scan without the owner column (no owner axis) names no owner.
+            self.src = f"(SELECT *, NULL::VARCHAR AS usr FROM {self.src})"
 
     def _aggs(self, where: str, having: str = "") -> list[dict]:
         cur = self.con.execute(f"SELECT depth, path, {agg_sql(self.v)} FROM {self.src} WHERE {where} GROUP BY depth, path {having}")

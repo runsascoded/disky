@@ -8,7 +8,7 @@ per `(date, path, w, h, depth)` the view computed from that scan's own rows by t
 (`interval_verify.Scan.view`), flattened (`interval_read.flatten`). The generator asserts the Python
 interval reader returns the same trees.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | tiered]
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv/gen.py [g2 | g7 | tiered]
 
 `tiered`: the base + per-scan runs generations (`interval_append`): `g3` / `g4` / `g6` over `g1`'s scans (runs unmerged /
 merged pairwise as the old inline publish did / merged by the deferred carries, a revision manifest listing the merged
@@ -220,6 +220,35 @@ def slices_gen() -> None:
     print(f"{G2}: {sorted(p.name for p in (out / 'served').iterdir())}", file=sys.stderr)
 
 
+#: `g7`: the per-scan store fixtures with no `usr` column (`v2`, `v2-search`, `v2` again) built by the single-machine
+#: build (`interval_local.build_gen`): a generation without the owner axis (`scans.json` `"slices": false`, no slice
+#: sorts), whose sliced reads (lens, owner pools, owner totals) `intervalSlices.test.ts` compares with the per-scan
+#: reader over the same files.
+G7 = "g7"
+G7_SCANS = [("2026-09-30T0007", "v2"), ("2026-09-30T0008", "v2-search"), ("2026-09-30T0009", "v2")]
+
+
+def unowned_gen() -> None:
+    from dt_cloud import interval_local as il
+    from dt_cloud import static_names as sn
+
+    fx = HERE.parent
+    work = HERE / "work7"
+    shutil.rmtree(work, ignore_errors=True)
+    scans = {"bucket": "b", "scans": [{"id": d, "src": f"{name}/path-index.parquet", "ts": sn.scan_epoch(d), "version": 2} for d, name in G7_SCANS]}
+    s = il.build_gen(scans, str(fx), work / "gen", work / "build", gen=G7, k=1, rg_rows=256, threads=1, mem="1GB")
+    assert s["slices"] is False, s
+    out = HERE / "interval-store" / G7
+    shutil.rmtree(out, ignore_errors=True)
+    (out / "served").mkdir(parents=True)
+    for f in sorted((work / "gen" / "served").glob("*.parquet")):
+        shutil.copy(f, out / "served" / f.name)
+    doc = json.loads((work / "gen" / "scans.json").read_text())
+    (out / "scans.json").write_text(json.dumps({"scans": [{"id": x["id"], "ts": x["ts"]} for x in doc["scans"]], "slices": doc["slices"]}, indent=1) + "\n")
+    shutil.rmtree(work)
+    print(f"{G7}: {sorted(p.name for p in (out / 'served').iterdir())}", file=sys.stderr)
+
+
 def tiered() -> None:
     """`g3`, `g4` over `g1`'s six scans (the same generator, seed and ranges as `main`), and `g5` over `g2`'s three."""
     from dt_cloud import static_names as sn
@@ -246,4 +275,4 @@ def tiered() -> None:
 
 
 if __name__ == "__main__":
-    {"g2": slices_gen, "tiered": tiered}.get(sys.argv[1] if sys.argv[1:] else "", main)()
+    {"g2": slices_gen, "g7": unowned_gen, "tiered": tiered}.get(sys.argv[1] if sys.argv[1:] else "", main)()

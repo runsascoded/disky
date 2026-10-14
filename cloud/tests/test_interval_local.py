@@ -118,10 +118,10 @@ def test_build_writes_the_staged_generation(world, local, staged):
         [*(f"{s}{x}" for s in ist.SORTS for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     assert json.loads((gen / "scans.json").read_text()) == {
         "bucket": str(world["root"]), "layouts": [LAYOUT],
-        "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]]}
+        "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": True}
     s = local["summary"]
-    assert (s["gen"], s["scans"], s["ranges"], sorted(s["stages"]), sorted(s["peaks"])) == (
-        "g", BASE, staged["ranges"]["k"], ["cut", "slices", "versions"], ["cut", "slices", "versions"])
+    assert (s["gen"], s["scans"], s["ranges"], s["slices"], sorted(s["stages"]), sorted(s["peaks"])) == (
+        "g", BASE, staged["ranges"]["k"], True, ["cut", "slices", "versions"], ["cut", "slices", "versions"])
 
 
 def test_build_refuses_an_existing_generation(world, local, tmp_path):
@@ -322,3 +322,131 @@ def test_add_prunes_the_folded_runs_after_the_grace(world, tmp_path):
     for t in ia.TABLES:
         full = build_full(world["scans"], world["root"], tmp_path / f"full-{t}")
         assert combine([_rows(gen, t), *(_rows(gen / k, t) for k in sorted(live))], t) == combine([_rows(full, t)], t)
+
+
+# ── A generation without the owner axis ────────────────────────────────────
+
+
+def _unowned_world(root: Path, owned: tuple[str, ...] = ()) -> dict:
+    """The world's scans (same generator and seed) with no owner named (cw-s3, r2.rbw.sh): `usr` NULL on every row of the
+    v1 indexes, no `usr` column in the v2 sorts; but the `owned` scans, which keep theirs."""
+    import pyarrow.parquet as pq
+
+    rng = random.Random(11)
+    paths = _universe(rng)
+    scans = []
+    for j, d in enumerate(DATES):
+        v = 2 if j >= V2_FROM else 1
+        key = LAYOUT.replace("{id}", d)
+        (root / key).parent.mkdir(parents=True, exist_ok=True)
+        rows = _scan_rows(rng, paths, j)
+        _write(rows if d in owned else [{**r, "usr": None} for r in rows], root / key, v)
+        if v == 2 and d not in owned:
+            pq.write_table(pq.read_table(root / key).drop_columns(["usr"]), root / key, row_group_size=7)
+        scans.append({"id": d, "src": key, "ts": sn.scan_epoch(d), "version": v})
+    return {"root": root, "scans": scans, "paths": paths}
+
+
+@pytest.fixture(scope="module")
+def unowned(tmp_path_factory):
+    """A store over the unowned scans: the base built over the first four, then the other four added."""
+    tmp = tmp_path_factory.mktemp("ivl-unowned")
+    world = _unowned_world(tmp / "scans")
+    store = tmp / "store"
+    summary = _build(world, store, tmp / "work-build")
+    out = _add(world, store, tmp / "work-add")
+    return {"world": world, "tmp": tmp, "gen": store / ist.PREFIX / "g", "summary": summary, "out": out}
+
+
+def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
+    """No scan names an owner: the build records `"slices": false` and builds no `sv/`, `svt/`, `sv-digest/` or slice sort;
+    each run carries `pvl` and the folded sorts alone, and so does the merged run."""
+    gen, world = unowned["gen"], unowned["world"]
+    ids = DATES[BASE:]
+    assert json.loads((gen / "scans.json").read_text()) == {
+        "bucket": str(world["root"]), "layouts": [LAYOUT],
+        "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": False}
+    assert json.loads((gen / "served" / "stats.json").read_text())["slices"] is False
+    s = unowned["summary"]
+    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "path", "reads"])
+    assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served"]
+    assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
+        [*(f"{x}{e}" for x in ("path", "bysize", "reads") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+    k = json.loads((gen / "ranges.json").read_text())["k"]
+    merged = ar.run_key(ids[0], ids[-1])
+    for key in [*(f"deltas/{d}" for d in ids), merged]:
+        assert sorted(_parquets(gen / key)) == sorted([*(f"pvl/r{i:04d}.parquet" for i in range(k)),
+                                                       *(f"served/{x}{e}" for x in ("path", "bysize") for e in (".parquet", ".groups.parquet"))]), key
+    newest = json.loads((gen / "manifests" / f"{ids[-1]}.m001.json").read_text())
+    assert [(r["key"], r["scans"]) for r in newest["runs"]] == [(merged, ids)]
+
+
+def test_an_unowned_generation_is_a_full_rebuild(unowned, tmp_path):
+    """Base + the newest manifest's run (merged), and base + the level-0 runs: `build`/`fold` over every scan, version for
+    version (`pvl`), and every directory's view at every scan is the per-scan reference's."""
+    from dt_cloud import interval_read as ir
+
+    gen, world = unowned["gen"], unowned["world"]
+    full = build_full(world["scans"], world["root"], tmp_path / "full")
+    want = combine([_rows(full, "pvl")], "pvl")
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    for runs in ([gen / r["key"] for r in newest["runs"]], [gen / "deltas" / d for d in DATES[BASE:]]):
+        assert combine([_rows(gen, "pvl"), *(_rows(r, "pvl") for r in runs)], "pvl") == want
+    paths = ["", *sorted({p for p in world["paths"] if "." not in p.rsplit("/", 1)[-1]})]
+    assert _views_equal(world, lambda s: ir.Store(gen / "served", [gen / r["key"] / "served" for r in newest["runs"]]), paths) > 0
+
+
+def test_a_scan_naming_owners_is_refused_by_an_unowned_generation(tmp_path):
+    """The base names no owner; the first scan past it does: `add` refuses before appending anything (its owners need a
+    new base generation), and the staged append's range task refuses it too."""
+    owned = DATES[BASE]
+    world = _unowned_world(tmp_path / "scans", owned=(owned,))
+    store = tmp_path / "store"
+    _build(world, store, tmp_path / "work-build")
+    gen = store / ist.PREFIX / "g"
+    before = {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob("*")) if p.is_file()}
+    args = ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(store), "-w", str(tmp_path / "work-add"), "-r", str(RG), "-p", "2", "-M", "1GB"]
+    res = CliRunner().invoke(il.add_cmd, args)
+    msg = (f"{owned}: names owners (`usr`), but the generation has no owner axis (`scans.json` `\"slices\": false`); "
+           "its owners need a new base generation (`interval-store build`)")
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, msg)
+    assert {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob("*")) if p.is_file()} == before
+    ranges = json.loads((gen / "ranges.json").read_text())
+    s = world["scans"][BASE]
+    with pytest.raises(SystemExit) as e:
+        for i, r in enumerate(ranges["ranges"]):
+            name = f"r{i:04d}"
+            ia.append_range(duckdb.connect(), ia.base_state_sql(str(gen), name, False), s, r, name, tmp_path / "run", bucket="b",
+                            mount=str(world["root"]), sliced=False)
+    assert str(e.value) == msg
+
+
+def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
+    """The staged commands over the unowned base (its `scans.json` without the flag, its `ranges.json`): the slice stages
+    (`build-ranges -S`, `fold -S`, the slice sorts' `cut`) build nothing, the rest the local build's files byte for byte,
+    and the cut records `"slices": false` in `scans.json`, as the local build does."""
+    gen = unowned["gen"]
+    store = tmp_path / "store"
+    prefix = store / ist.PREFIX / "g"
+    prefix.mkdir(parents=True)
+    scans = json.loads((gen / "scans.json").read_text())
+    (prefix / "scans.json").write_text(json.dumps({k: v for k, v in scans.items() if k != "slices"}, indent=1) + "\n")
+    shutil.copy(gen / "ranges.json", prefix / "ranges.json")
+    k = json.loads((gen / "ranges.json").read_text())["k"]
+    common = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "tmp"), "-p", "2", "-M", "1GB"]
+    every = ",".join(str(i) for i in range(k))
+    stages = [
+        ["build-ranges", *common, "-r", every],
+        ["build-ranges", *common, "-r", every, "-S"],
+        ["fold", *common, "-i", "0", "-n", str(k)],
+        ["fold", *common, "-i", "0", "-n", str(k), "-S"],
+        ["cut", *common, "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))],
+        ["cut", *common, "-i", str(len(ist.SORTS))],
+    ]
+    for args in stages:
+        res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
+        assert res.exit_code == 0, (args, res.output)
+    assert json.loads((prefix / "scans.json").read_text()) == scans
+    assert json.loads((prefix / "served" / "stats.json").read_text())["slices"] is False
+    base = {key: v for key, v in _parquets(gen).items() if not key.startswith(("deltas/", "manifests/"))}
+    assert _parquets(prefix) == base
