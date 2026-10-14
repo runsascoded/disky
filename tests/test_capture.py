@@ -172,3 +172,11 @@ def test_capture_over_ssh_fails_without_a_marker_when_ssh_cannot_connect(tree: P
     assert r.returncode == 1
     assert r.stderr.rstrip('\n').split('\n')[-1] == f'RuntimeError: {ssh} exited 255: no listing of {tree}'
     assert list(to.glob(f'**/{MARKER}')) == []
+
+
+def test_capture_refuses_a_bucket_root_before_writing(tmp_path: Path):
+    root, to = tmp_path / 'root', tmp_path / 'cap'
+    r = _run(['capture', '-q', '-t', str(to), 's3://some-bucket/prefix'], root)
+    assert r.returncode == 1
+    assert r.stderr.rstrip('\n').split('\n')[-1] == 'capture is for local paths; bucket listings come from `bulk-list`'
+    assert list(to.glob(f'**/{MARKER}')) == []

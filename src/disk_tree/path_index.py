@@ -60,7 +60,7 @@ def read_subtree(path: str, uri: str, depth: int) -> tuple[pd.DataFrame, int]:
     size. Owner slices (`usr`, where a store has them) are summed per path."""
     prefix = uri.strip('/')
     d0 = prefix.count('/') + 1 if prefix else 0
-    filters = [('depth', '>=', d0 + 1), ('depth', '<=', d0 + depth)]
+    filters: list[tuple[str, str, int | str]] = [('depth', '>=', d0 + 1), ('depth', '<=', d0 + depth)]
     if prefix:
         # (depth, path)-sorted: a `[prefix/, prefix0)` range prunes row groups.
         filters += [('path', '>=', prefix + '/'), ('path', '<', prefix + '0')]

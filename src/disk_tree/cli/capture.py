@@ -78,7 +78,7 @@ def capture_cmd(
     Prints the capture dir (`<to>/<host>/<root>/<stamp>`).
     """
     from disk_tree import blobfs
-    from disk_tree.backends import backend_for, ErrorCollector
+    from disk_tree.backends import LocalBackend, backend_for, ErrorCollector
     from disk_tree.find.bulk import _ROW_GROUP_ROWS
 
     if ssh_host and not path:
@@ -97,11 +97,14 @@ def capture_cmd(
     if not blobfs.is_url(out):
         os.makedirs(out, exist_ok=True)
     errors = ErrorCollector()
+    from disk_tree.backends.ssh import SshBackend
+    backend: LocalBackend | SshBackend
     if ssh_host:
-        from disk_tree.backends.ssh import SshBackend
         backend = SshBackend(ssh_host)
     else:
-        backend = backend_for(root)
+        local = backend_for(root)
+        assert isinstance(local, LocalBackend)  # a bucket URL was refused above (`bulk-list`'s)
+        backend = local
 
     names: list[str] = []
     sizes: list[int] = []

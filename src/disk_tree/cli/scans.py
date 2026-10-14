@@ -58,10 +58,10 @@ def scans_move(src_dir: str | None, no_keep_latest: bool, dry_run: bool, dest: s
     if not sources:
         raise SystemExit(f'no source dirs to move from (dest={dest})')
 
-    keep = set()
+    keep: set[str] = set()
     if not no_keep_latest:
         db = init()
-        latest = {}
+        latest: dict[str, Scan] = {}
         for scan in db.session.query(Scan).filter(Scan.blob.isnot(None)):
             cur = latest.get(scan.path)
             if cur is None or scan.time > cur.time:
@@ -173,9 +173,10 @@ def scans_chunks(path: str, show_all: bool):
     """
     from os.path import isfile
     from disk_tree.storage import get_backend
+    from disk_tree.storage.hybrid import HybridBackend
 
     backend = get_backend()
-    if backend.name != 'hybrid':
+    if not isinstance(backend, HybridBackend):
         err(f"Chunks only available for hybrid backend (current: {backend.name})")
         return
 
@@ -209,7 +210,7 @@ def scans_chunks(path: str, show_all: bool):
 @argument('path')
 def scans_info(path: str):
     """Show detailed info for a scan path (most recent scan)."""
-    from os.path import isfile
+    from os.path import getsize, isfile
     import pandas as pd
 
     db = init()
