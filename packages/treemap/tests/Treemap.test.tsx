@@ -487,6 +487,25 @@ describe('<Treemap>', () => {
       }
     })
 
+    it('the paint layer leaves an inset ring bare (it would cover it), and only an inset one', () => {
+      const restore = withLayout()
+      try {
+        const insets = (ring?: unknown) => {
+          const { container, unmount } = render(
+            <Treemap root={tree} {...accessors} minCellArea={null}
+              colorForCell={n => (accessors.getLabel(n) === 'bar' ? { bg: '#123456', ...(ring ? { ring } : {}) } : { bg: '#654321' })} />,
+          )
+          const out = rootCells(container).map(c => (c.querySelector(':scope > .dt-treemap-bg') as HTMLElement).style.inset)
+          unmount()
+          return out
+        }
+        expect([insets(), insets({ color: 'rgb(1, 2, 3)', width: 3 }), insets({ color: 'rgb(1, 2, 3)', width: 3, inset: false })])
+          .toEqual([['0', '0'], ['0', '3px'], ['0', '0']])
+      } finally {
+        restore()
+      }
+    })
+
     it('inset:false draws the ring outside the box (no `inset` keyword)', () => {
       const restore = withLayout()
       try {
