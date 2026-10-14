@@ -24,5 +24,7 @@ dt-index = { path = "../crates/dt-index" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "objc2-core-services"] }
 objc2-service-management = { version = "0.3", features = ["SMAppService"] }
+objc2-user-notifications = { version = "0.3", features = ["block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger"] }
+block2 = "0.6"

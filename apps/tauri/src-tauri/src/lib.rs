@@ -11,6 +11,7 @@
 mod agent;
 mod applink;
 mod jobs;
+mod notify;
 mod services;
 mod settings;
 mod status;
@@ -29,7 +30,7 @@ use tauri::{AppHandle, Manager, Wry, WebviewUrl, WebviewWindowBuilder};
 use settings::Settings;
 
 /// System Settings → Privacy & Security → Full Disk Access.
-const FDA_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+pub(crate) const FDA_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
 
 fn site_url() -> String {
     settings::load().site_url()
@@ -46,7 +47,7 @@ pub(crate) fn locate_walker() -> Option<PathBuf> {
     [dir.join("dt-walker"), dir.join("../Resources/dt-walker")].into_iter().find(|c| c.is_file())
 }
 
-/// A headless mode (`agent`, `job`, `probe`, `scan now`, `agents`, `login-item`) when
+/// A headless mode (`agent`, `alert`, `job`, `probe`, `scan now`, `agents`, `login-item`) when
 /// `args` selects one: its exit code. Checked before `run()`, so launchd jobs
 /// never touch Tauri/AppKit.
 pub fn headless(args: &[std::ffi::OsString]) -> Option<i32> {
@@ -276,6 +277,7 @@ fn open_fda_settings() {
 
 #[tauri::command]
 fn scan_now() -> Result<(), String> {
+    notify::ask();
     status::scan_now()
 }
 
@@ -284,6 +286,7 @@ fn scan_now() -> Result<(), String> {
 struct Tray {
     scan: MenuItem<Wry>,
     fda: MenuItem<Wry>,
+    alerts: MenuItem<Wry>,
     prod: CheckMenuItem<Wry>,
     dev: CheckMenuItem<Wry>,
     local: CheckMenuItem<Wry>,
@@ -297,6 +300,9 @@ impl Tray {
         let granted = agent::has_full_disk_access();
         let _ = self.fda.set_text(fda_line(granted));
         let _ = self.fda.set_enabled(!granted);
+        let route = notify::route();
+        let _ = self.alerts.set_text(notify::menu_line(route));
+        let _ = self.alerts.set_enabled(route == notify::Route::Unasked);
         let site = settings::load().site;
         let _ = self.prod.set_checked(site == "prod");
         let _ = self.dev.set_checked(site == "dev");
@@ -358,6 +364,39 @@ fn local_server_config(web: PathBuf) -> dt_index::http::Config {
     dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())) }
 }
 
+/// A scheduled slot that passed with no scan starting (the agent isn't
+/// loaded, or can't start), which the scan job itself can't report. The agent
+/// wakes every 15 min, so an hour of this app *awake* with the slot still
+/// unstarted is a miss (`Instant` stops while the Mac sleeps: a slot slept
+/// through is the next wake's to run, not a miss).
+#[derive(Default)]
+struct MissedSlot {
+    since: Option<std::time::Instant>,
+}
+
+impl MissedSlot {
+    const GRACE: Duration = Duration::from_secs(3600);
+
+    fn check(&mut self) {
+        let st = settings::load_state();
+        let due = services::agents_enabled() && st.pid.is_none() && settings::due(&settings::load().times(), st.last_start, settings::now());
+        if !due {
+            self.since = None;
+            return;
+        }
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= Self::GRACE {
+            notify::alert(&notify::Alert {
+                key: format!("scan-missed-{}", st.last_start.unwrap_or(0)),
+                title: "disky: scheduled scan didn't start".into(),
+                body: "A scheduled slot passed over an hour ago and no scan started. Check \"Scheduled scans\" in the menu, or the logs.".into(),
+                open: Some(jobs::logs_dir().to_string_lossy().into_owned()),
+                every: 30 * 86_400,
+            });
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -365,6 +404,10 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            notify::install_delegate();
+            if services::agents_enabled() {
+                notify::ask();
+            }
             if let Err(e) = services::migrate_agents() {
                 jobs::note(&format!("disky: agent migration: {e}"));
             }
@@ -374,6 +417,7 @@ pub fn run() {
             let tray = Tray {
                 scan: MenuItem::with_id(app, "scan_status", status::scan_line(), false, None::<&str>)?,
                 fda: MenuItem::with_id(app, "fda", fda_line(true), false, None::<&str>)?,
+                alerts: MenuItem::with_id(app, "alerts", notify::menu_line(notify::Route::Native), false, None::<&str>)?,
                 prod: CheckMenuItem::with_id(app, "site_prod", "disk.rbw.sh", true, site == "prod", None::<&str>)?,
                 dev: CheckMenuItem::with_id(app, "site_dev", "dev.disk.rbw.sh", true, site == "dev", None::<&str>)?,
                 local: CheckMenuItem::with_id(app, "site_local", "This Mac (local)", true, site == "local", None::<&str>)?,
@@ -387,6 +431,7 @@ pub fn run() {
                 &[
                     &tray.scan,
                     &tray.fda,
+                    &tray.alerts,
                     &PredefinedMenuItem::separator(app)?,
                     &MenuItem::with_id(app, "scan_now", "Scan now", true, None::<&str>)?,
                     &MenuItem::with_id(app, "window", "Open disky", true, None::<&str>)?,
@@ -412,6 +457,7 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
                         "scan_now" => {
+                            notify::ask();
                             if let Err(e) = status::scan_now() {
                                 jobs::note(&format!("disky: scan now: {e}"));
                             }
@@ -424,6 +470,7 @@ pub fn run() {
                         "settings" => show_settings(app),
                         "logs" => open(&jobs::logs_dir().to_string_lossy()),
                         "fda" => open(FDA_PANE),
+                        "alerts" => notify::ask(),
                         "scheduled" => {
                             if let Err(e) = set_agents(!services::agents_enabled()) {
                                 jobs::note(&format!("disky: scheduled scans: {e}"));
@@ -460,11 +507,15 @@ pub fn run() {
             // Keep the menu fresh (launchd, the run state and settings are the
             // record): every 3 s while a scan runs (its progress line), else 20 s.
             let handle = app.handle().clone();
-            std::thread::spawn(move || loop {
-                let busy = settings::load_progress().is_some() || settings::load_state().force;
-                std::thread::sleep(Duration::from_secs(if busy { 3 } else { 20 }));
-                if let Some(t) = handle.try_state::<Tray>() {
-                    t.refresh();
+            std::thread::spawn(move || {
+                let mut missed = MissedSlot::default();
+                loop {
+                    let busy = settings::load_progress().is_some() || settings::load_state().force;
+                    std::thread::sleep(Duration::from_secs(if busy { 3 } else { 20 }));
+                    if let Some(t) = handle.try_state::<Tray>() {
+                        t.refresh();
+                    }
+                    missed.check();
                 }
             });
             Ok(())

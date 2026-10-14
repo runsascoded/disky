@@ -50,13 +50,17 @@ disky probe
 disky agents register|unregister|status
 disky login-item on|off|status
 disky agent -- COMMAND ARGS…
+disky alert TITLE MESSAGE   # send a test failure alert the way a job does
+disky alert ask             # request notification permission, print the answer
 ```
 
 `disky serve` serves the bundled SPA and local scans on loopback for browser diagnostics. `DISK_TREE_ROOT` selects another configuration directory; `DISKY_URL` overrides the viewer. A configured scan job can index locally (`local: true`), upload (`to`), or do both in one walk. Selecting a viewer does not create an upload destination.
 
+Failure alerts: a failed scan or drain job, a scan started without Full Disk Access, a retry that was interrupted again, or a scheduled slot that an hour later (awake) still hasn't started. The alert goes out as a macOS notification when disky may post one. That needs a Developer ID build; macOS refuses the self-signed and ad-hoc builds (`UNErrorDomain` 1). Otherwise it shows a banner through AppleScript (posted as Script Editor) and runs the optional push fallback, `"notify": {"command": [...]}` in `disky.json`, with `-t TITLE MESSAGE` appended, e.g. `direnv exec <wt> <wt>/.venv/bin/disk-tree notify -f` so its Pushover/Discord credentials stay in that environment. The menu shows the route; `disky-alerts.json` throttles repeats (the drainer's to one per 6 h).
+
 For the stable self-signed development identity and the existing m3 installation, `cargo tauri build --bundles app` retains `disk-tree-selfsigned` from `tauri.conf.json`. `scripts/agentctl install` installs into `~/Applications`, re-registers agents and refuses to interrupt a running scan unless forced. A pilot build is kept separate until tested.
 
-Design/status: [Rust engine][rust-engine], [native app][native-app], [app-link contract][app-link].
+Design/status: [Rust engine][rust-engine], [native app][native-app], [app-link contract][app-link], [failure alerts][alerts].
 
 [GitHub Releases]: https://github.com/runsascoded/disky/releases
 [pilot]: PILOT.md
@@ -64,4 +68,5 @@ Design/status: [Rust engine][rust-engine], [native app][native-app], [app-link c
 [rust-engine]: ../../specs/rust-engine.md
 [native-app]: ../../specs/tauri-native-app.md
 [app-link]: ../../specs/app-link.md
+[alerts]: ../../specs/done/scan-failure-notifications.md
 [sources]: ../../specs/app-source-schedules.md

@@ -115,6 +115,27 @@ pub fn log_paths(name: &str, job: Option<&Job>) -> (PathBuf, PathBuf) {
     (d.join(format!("{stem}.out.log")), d.join(format!("{stem}.err.log")))
 }
 
+/// A job that couldn't run, or exited with an error (not a signal: an
+/// interruption is retried, see [`run_scheduled_scan`]): alert, with the
+/// error log's last line. Scan failures always alert; others (the drainer,
+/// which launchd restarts) at most every 6 h.
+fn job_failed(name: &str, job: Option<&Job>, code: i32, why: Option<String>) {
+    let (_, err) = log_paths(name, job);
+    let detail = why.or_else(|| crate::notify::last_line(&err)).unwrap_or_else(|| format!("exit {code}"));
+    crate::notify::alert(&crate::notify::Alert {
+        key: format!("{name}-failed"),
+        title: format!("disky: {name} failed"),
+        body: detail,
+        open: Some(err.to_string_lossy().into_owned()),
+        every: if name == "scan" { 0 } else { 6 * 3600 },
+    });
+}
+
+/// An exit worth an alert: an error, not success or a signal (128+N).
+fn alerts(code: i32) -> bool {
+    code != 0 && code < 128
+}
+
 pub fn note(msg: &str) {
     let _ = std::fs::create_dir_all(logs_dir());
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(logs_dir().join("disky.log")) {
@@ -147,6 +168,17 @@ pub fn run_scheduled_scan() -> i32 {
         }
         if retry {
             note("disky job scan: retrying an interrupted run");
+        } else if st.retried && st.interrupted() {
+            // The retry was interrupted too: say so once (per run), then wait.
+            if let Some(start) = st.last_start {
+                crate::notify::alert(&crate::notify::Alert {
+                    key: format!("scan-interrupted-{start}"),
+                    title: "disky: scan interrupted".into(),
+                    body: "The scan was stopped twice before finishing; the next scheduled slot will try again.".into(),
+                    open: Some(logs_dir().to_string_lossy().into_owned()),
+                    every: 30 * 86_400,
+                });
+            }
         }
         st.retried = retry;
         let _ = settings::save_state(&st);
@@ -171,13 +203,14 @@ pub fn run(name: &str) -> i32 {
         match lock {
             Ok(file) => Some(file),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => { note("disky: a scan is already running"); return 0; },
-            Err(e) => { note(&format!("disky: can't lock the scan: {e}")); return 1; },
+            Err(e) => { note(&format!("disky: can't lock the scan: {e}")); job_failed(name, None, 1, Some(format!("can't lock the scan: {e}"))); return 1; },
         }
     } else { None };
     let cfg = match load() {
         Ok(c) => c,
         Err(e) => {
             note(&format!("disky job {name}: bad config: {e}"));
+            job_failed(name, None, 1, Some(format!("bad config: {e}")));
             return 1;
         }
     };
@@ -197,6 +230,7 @@ pub fn run(name: &str) -> i32 {
     let open = |p: &PathBuf| OpenOptions::new().create(true).append(true).open(p);
     let (Ok(out_f), Ok(err_f)) = (open(&out), open(&err)) else {
         note(&format!("disky job {name}: can't open {} / {}", out.display(), err.display()));
+        job_failed(name, Some(job), 1, Some(format!("can't open its logs in {}", logs_dir().display())));
         return 1;
     };
     let in_process = name == "scan" && job.command.is_empty() && (job.to.is_some() || indexes_locally(job));
@@ -205,6 +239,7 @@ pub fn run(name: &str) -> i32 {
     } else {
         let Some((program, args)) = job.command.split_first() else {
             note(&format!("disky job {name}: empty command"));
+            job_failed(name, Some(job), 1, Some("its command is empty".into()));
             return 1;
         };
         let mut cmd = Command::new(program);
@@ -212,7 +247,11 @@ pub fn run(name: &str) -> i32 {
         Some(cmd)
     };
     if name != "scan" {
-        return crate::agent::run_child(cmd.unwrap());
+        let code = crate::agent::run_child(cmd.unwrap());
+        if alerts(code) {
+            job_failed(name, Some(job), code, None);
+        }
+        return code;
     }
     use crate::settings;
     let root = settings::load().scan_root();
@@ -234,6 +273,9 @@ pub fn run(name: &str) -> i32 {
     st.last_exit = Some(code);
     st.pid = None;
     let _ = settings::save_state(&st);
+    if alerts(code) {
+        job_failed(name, Some(job), code, None);
+    }
     code
 }
 
@@ -252,6 +294,17 @@ fn capture(job: &Job, root: &str, mut out: std::fs::File, mut err: std::fs::File
     }
     use crate::settings::{save_progress, Progress};
     let since = crate::settings::now();
+    // The walk runs without it, but misses every protected folder: say so
+    // (daily at most), since the scan "succeeds".
+    if !crate::agent::has_full_disk_access() {
+        crate::notify::alert(&crate::notify::Alert {
+            key: "no-full-disk-access".into(),
+            title: "disky: scanning without Full Disk Access".into(),
+            body: "Protected folders (Mail, Messages, Safari, other apps' data) are left out. Click to grant it.".into(),
+            open: Some(crate::FDA_PANE.into()),
+            every: 86_400,
+        });
+    }
     save_progress(&Progress { phase: "capture".into(), files: 0, bytes: 0, since });
     let (id, asof) = scan_id(since);
     let mut index = indexes_locally(job).then(|| dt_index::Reducer::new(dt_index::epoch_day(&asof).unwrap_or(0)));

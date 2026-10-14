@@ -63,6 +63,28 @@ pub fn dispatch(args: &[OsString]) -> Option<i32> {
                 Err(e) => { eprintln!("disky serve: {e}"); 1 }
             }
         }),
+        // Send an alert the way a failed job does (unthrottled): checks the
+        // notification permission and the `notify` fallback end to end.
+        Some("alert") => Some(match &args[2..] {
+            [title, body] => {
+                let route = crate::notify::route();
+                println!("permission: {:?}, route: {route:?}", crate::notify::status());
+                crate::notify::alert(&crate::notify::Alert {
+                    key: "test".into(),
+                    title: title.to_string_lossy().into_owned(),
+                    body: body.to_string_lossy().into_owned(),
+                    open: Some(crate::jobs::logs_dir().to_string_lossy().into_owned()),
+                    every: 0,
+                });
+                0
+            }
+            // Ask for (or re-check) notification permission, and say what came back.
+            [ask] if ask == "ask" => match crate::notify::request() {
+                Ok(r) => { println!("notifications {r}"); 0 }
+                Err(e) => { eprintln!("notifications not allowed: {e}"); 1 }
+            },
+            _ => { eprintln!("usage: disky alert TITLE MESSAGE | disky alert ask"); 2 }
+        }),
         Some("agent") => Some(agent(&args[2..])),
         Some("probe") => Some(probe()),
         Some("job") => Some(match (args.get(2).and_then(|a| a.to_str()), args.get(3).and_then(|a| a.to_str())) {
