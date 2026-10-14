@@ -30,7 +30,7 @@ import {
 // Everything here is folded server-side from the index tiers and the live
 // ownership ledger (`/api/owners`, `/api/estate`, the user lens of
 // `/api/subtree`): the same numbers the map's rollup shows, with no scan tree
-// on the client (specs/view-serving.md §2).
+// on the client (specs/done/view-serving.md §2).
 
 type ClassMix = Record<string, number>
 /** One person's owned bytes (assignments applied) + the class mix behind them. */

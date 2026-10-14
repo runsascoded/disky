@@ -197,6 +197,6 @@ Not recommended:
 
 [`index-landscape.md`]: index-landscape.md
 [`interval-store.md`]: interval-store.md
-[`static-append.md`]: static-append.md
+[`static-append.md`]: done/static-append.md
 [`latency-observability.md`]: latency-observability.md
 [`done/r2-serving-migration.md`]: done/r2-serving-migration.md

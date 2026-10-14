@@ -7,7 +7,7 @@ import { HttpError, type PlanItem, stageMany as stageManyVia } from './batches'
 export type { DeletionRun, ExecJob } from './runs'
 export { LIVE_STATES } from './runs'
 
-// Client for the deletion-plan API (specs/staged-delete.md; the OA build plan
+// Client for the deletion-plan API (specs/done/staged-delete.md; the OA build plan
 // `sweep-plan-union.md`). The opt-in trash model: a trash gesture *stages*
 // prefixes (any signed-in full viewer may) into a shared open plan; an admin
 // approves + dispatches from /staged. Nothing is deleted by inaction.
@@ -107,11 +107,12 @@ export function useStage() {
 /** The plan /staged shows (polled while a run is live): the shared open plan
  * (GET /api/plans/staged), or plan `id` (GET /api/plans/:id — a closed one
  * keeps its runs and their undo windows reachable). */
-export function useStagedPlan(live = false, id: number | null = null) {
+export function useStagedPlan(live = false, id: number | null = null, enabled = true) {
   return useQuery<StagedPlan, Error>({
     queryKey: ['plans', id ?? 'staged'],
     queryFn: () => call<StagedPlan>(id == null ? '/api/plans/staged' : `/api/plans/${id}`),
     refetchInterval: live ? 20_000 : false,
+    enabled,
   })
 }
 

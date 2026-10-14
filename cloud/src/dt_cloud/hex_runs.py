@@ -1,4 +1,4 @@
-"""The static name index's hex-run rule (specs/static-hex-runs.md): interiors of long hex ids are not indexed.
+"""The static name index's hex-run rule (specs/done/static-hex-runs.md): interiors of long hex ids are not indexed.
 
 On a lowercase string `l` (a name, or a parent path: `/` is not hex, so runs never cross a segment), a **hex run** is
 a maximal substring of `[0-9a-f]` of at least `min` characters, `l[a..b]` (0-based, inclusive). A position `p` is

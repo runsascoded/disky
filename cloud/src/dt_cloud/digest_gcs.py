@@ -6,7 +6,7 @@ arrow to the day's diff, its avatar the colour-coded trend arrow
 (`av_deg{N}.png?v=REV`). The OP: month-to-date headline, per-ISO-week bullets
 (TB + $/mo), and a storage-class mosaic plot (`digest_plot.render_tiers`).
 Scan ids are `YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM` (UTC): a day may hold
-several scans, each its own reply, delta and link (specs/scan-ids-not-dates.md);
+several scans, each its own reply, delta and link (specs/done/scan-ids-not-dates.md);
 meta.json carries `total_bytes` + `class_bytes`. Design + rationale: specs/done/slack-digest-shape-c.md; the
 engine: `digest`."""
 from __future__ import annotations

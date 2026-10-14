@@ -258,20 +258,20 @@ Sources: §3–5 above; [serving-options §6][so], [retirement][retire], [index-
 
 [retire]: ../ch-store-retirement.md
 [journal]: ch-store.md
-[so]: ../serving-options.md
+[so]: serving-options.md
 [fqs]: filter-query-service.md
 [p0]: filter-query-service-p0.md
-[arch-ch]: ../architecture/clickhouse.md
+[arch-ch]: architecture/clickhouse.md
 [arch-readme]: ../architecture/README.md
 [alt]: ../architecture/alternatives.md
-[mega]: ../architecture/mega-index.md
+[mega]: architecture/mega-index.md
 [sns]: ../architecture/static-name-search.md
-[sa]: ../static-append.md
+[sa]: static-append.md
 [anch]: ../anchored-search.md
 [iv]: ../interval-store.md
-[ps]: ../path-store.md
+[ps]: path-store.md
 [landscape]: ../index-landscape.md
-[r2sql]: ../r2-sql-eval.md
+[r2sql]: r2-sql-eval.md
 [msu]: mgu-scale-unification.md
 [a3]: mgu-scale-a3-gate.md
 [stream]: streaming-aggregation.md

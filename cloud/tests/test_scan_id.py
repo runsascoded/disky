@@ -1,5 +1,5 @@
 """`dt_cloud.scan_id`: scan ids (not dates) as the scan key, and the CLI's
-acceptance of sub-daily ids (specs/scan-ids-not-dates.md)."""
+acceptance of sub-daily ids (specs/done/scan-ids-not-dates.md)."""
 from __future__ import annotations
 
 import json

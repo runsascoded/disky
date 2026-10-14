@@ -1,4 +1,4 @@
-// Scan runs (specs/scan-runs-ui.md): the D1 rows `dt-cloud scan-run record |
+// Scan runs (specs/done/scan-runs-ui.md): the D1 rows `dt-cloud scan-run record |
 // backfill` writes, and the pure derivations `/scans` shows — each output's
 // delta against the previous scan, a run's summary row, phase lanes, links.
 // DOM-free: the Functions (`_lib/scanRuns.ts`) and the pages share it.

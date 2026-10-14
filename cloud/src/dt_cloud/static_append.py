@@ -1,4 +1,4 @@
-"""The static name index's per-scan append (specs/static-append.md): each new scan becomes a small
+"""The static name index's per-scan append (specs/done/static-append.md): each new scan becomes a small
 **run** beside an immutable base generation, published by an immutable per-scan manifest, merged into bigger
 runs on a binary counter, read by merging base and runs (the smallest `vt` of a version's rows wins).
 
@@ -480,7 +480,7 @@ def rebuild_open(con, base_cintervals: str, cdeltas_oldest_first: list[str], out
 
 @group("runs")
 def cli() -> None:
-    """The static name index's per-scan runs beside a base generation (specs/static-append.md)."""
+    """The static name index's per-scan runs beside a base generation (specs/done/static-append.md)."""
 
 
 def _gcs():

@@ -1,4 +1,4 @@
-"""Deferred carries for the static name index's runs (specs/static-append.md, "Deferred carries"): the static store's
+"""Deferred carries for the static name index's runs (specs/done/static-append.md, "Deferred carries"): the static store's
 merged-run build plugged into the shared runner's carries (`append_runner`: `plan_carries`, `merge_pending`,
 `publish_revision`, the lease, revision manifests `manifests/<id>.m<NNN>.json`).
 

@@ -1,7 +1,7 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react'
 import { DEFAULT_STORE, storeFetch, storeUrl, type Store } from './stores'
 
-// Which store a page subtree renders (specs/multi-store.md phase 2). Root
+// Which store a page subtree renders (specs/done/multi-store.md phase 2). Root
 // mounts one <StoreProvider> per configured store under its `path`; anything
 // outside a provider — every page of a single-store build — is the primary,
 // so components that read `useStore()` behave exactly as they did reading

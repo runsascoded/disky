@@ -1,5 +1,5 @@
 """A scan's start: the earliest ``started`` across its bucket listings' ``_SUCCESS.json`` markers
-(``disk_tree/find/bulk*.py``), recorded as ``meta.started`` (specs/scan-ids-not-dates.md, "Remaining" item 1).
+(``disk_tree/find/bulk*.py``), recorded as ``meta.started`` (specs/done/scan-ids-not-dates.md, "Remaining" item 1).
 
 A date-only scan id (``2026-10-09``) can't say when in its day it ran; on a day with another scan, the site keys
 it by this start (``2610090430``) instead of its midnight (`scan_id.start_key`). ``path-index`` stamps it on every

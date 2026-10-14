@@ -278,7 +278,7 @@ describe('the static name index', () => {
   })
 })
 
-describe('sub-daily scan ids and any fleet size (specs/scan-ids-not-dates.md)', () => {
+describe('sub-daily scan ids and any fleet size (specs/done/scan-ids-not-dates.md)', () => {
   it('parses a five-bucket registry of sub-daily scans and its generation', () => {
     const registry = parseNameRegistry(fiveBucketRegistry())
     expect([registry.bucket_paths, registry.static, registry.dates.map(row => row.date)]).toEqual([

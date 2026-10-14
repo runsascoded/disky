@@ -3,7 +3,7 @@
  *
  * A scan's identity is its **scan id**: date-only `YYYY-MM-DD`, or timed
  * `YYYY-MM-DDTHHMM` (UTC). A date is never a scan key — a
- * day may hold several scans (specs/scan-ids-not-dates.md).
+ * day may hold several scans (specs/done/scan-ids-not-dates.md).
  *
  * A **slug** is a user-facing spelling of a scan-id *prefix*; it resolves to
  * the **latest** indexed scan whose id starts with it (`resolveScan`):
@@ -113,7 +113,8 @@ export const decodeScan = (e: string | undefined, now = new Date()): string | un
 // date-only scan matches, sorts and is linked by an effective minute, its
 // **key** (`scanKey`):
 //  - its real start, when known (`ScanTimes`: the earliest bucket listing's
-//    `started`, which `path-index` writes to `meta.started`) — 2026-10-09's
+//    `started`, which `path-index` writes to `meta.started` and `index-sync -m`
+//    records on the scan's pointer, `index_schema.started`) — 2026-10-09's
 //    04:30Z run is `2026-10-09T0430`, slug `2610090430`, and the hour slug
 //    `26100904` takes it too;
 //  - else its midnight, `2026-10-09T0000` (slug `2610090000`), the instant
@@ -126,7 +127,8 @@ export const decodeScan = (e: string | undefined, now = new Date()): string | un
 
 /** Date-only scan ids → their start minute (`YYYY-MM-DDTHHMM`, UTC; `startKey`).
  * Only the ids whose start is known are present; only date-only ids on a day
- * with more than one scan need one (`timesNeeded`). */
+ * with more than one scan need one to be told apart (`timesNeeded`), though a
+ * known start also labels a scan alone on its day (`scanLabeler`). */
 export type ScanTimes = Readonly<Record<string, string>>
 
 /** A date-only scan's start key from its ISO `started` instant: the UTC minute,

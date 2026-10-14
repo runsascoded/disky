@@ -1,4 +1,4 @@
-"""The hex-run rule end to end (specs/static-hex-runs.md): a generation built under `16,8` over names with long hex ids
+"""The hex-run rule end to end (specs/done/static-hex-runs.md): a generation built under `16,8` over names with long hex ids
 (at a name's start, middle and end; mixed case; runs of exactly 15, 16 and 17 digits; digits only; a word glued to a
 hash) holds exactly the suffix rows the rule keeps, and every reader — the suffix reader, the catalog (census, cells,
 short literals), the drill's roots, base ⊕ runs — answers exactly as brute force under `occurs` on every date. The same

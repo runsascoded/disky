@@ -1,22 +1,28 @@
 import { describe, expect, it } from 'vitest'
-import { migrations, sqliteD1 } from './testD1'
+import { LINEAGES, migrationNamed, migrations, sqliteD1 } from './testD1'
 
-// The store-scoped index migration (specs/multi-store.md phase 1), in the `cw`
-// D1 lineage (the only one `cloud` carries; gcs's lives on the `gcs` branch),
-// applied over a seeded DB with foreign keys ON (as D1 enforces them): existing
-// rows become the primary store's, nothing else moves, and the rebuilt pointer
-// admits a second store's scan under the same id.
-// `after`: what follows the store migration in its lineage today — a new
-// migration is added here deliberately (and must not touch the index tables
-// this file's specs pin).
-const CASES = [
-  { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0007_agents.sql', '0008_freed_bytes.sql', '0009_allowlist_read_only.sql', '0010_og_tokens.sql', '0011_run_progress.sql', '0012_agent_tokens_assign.sql', '0013_access_log_location.sql', '0014_plan_items_as_of.sql', '0015_stage_replies.sql', '0016_scan_runs.sql', '0017_plan_items_kind.sql', '0018_session_log.sql', '0019_owner_prefix_aggs.sql'] },
-] as const
+// The store-scoped index migration (specs/done/multi-store.md phase 1), in each
+// D1 lineage this branch carries, applied over a seeded DB with foreign keys ON
+// (as D1 enforces them): existing rows become the primary store's, nothing
+// else moves, and the rebuilt pointer admits a second store's scan under the
+// same id. No later migration may drop, rebuild or re-key the index tables
+// this file's specs pin; an additive column (cw `0021`'s `started`) is fine.
 
 const SCHEMA_COLS = 'store, date, variant, version, schema_json, floor_bytes, gen, dir'
+const STEM = 'store_scoped_index'
+const T = 'index_(?:schema|row_groups)\\b'
+/** Statements that would undo what the store migration pins. */
+const UNDOES = [
+  new RegExp(`\\bDROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${T}`, 'i'),
+  new RegExp(`\\bCREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${T}`, 'i'),
+  new RegExp(`\\bALTER\\s+TABLE\\s+${T}\\s+(?:RENAME|DROP)\\b`, 'i'),
+  new RegExp(`\\bRENAME\\s+TO\\s+${T}`, 'i'),
+  new RegExp(`\\bCREATE\\s+(?:UNIQUE\\s+)?INDEX\\b[^;]*\\bON\\s+${T}[^;]*\\bstore\\b`, 'i'),
+]
 
-describe.each(CASES)('$lineage/$file', ({ lineage, file, after }) => {
+describe.each(LINEAGES)(`%s/…_${STEM}.sql`, lineage => {
   const seeded = async () => {
+    const file = await migrationNamed(lineage, STEM)
     const { raw } = await sqliteD1(lineage, { before: file })
     raw.exec(`
       INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@example.test', 1);
@@ -33,9 +39,23 @@ describe.each(CASES)('$lineage/$file', ({ lineage, file, after }) => {
     return raw
   }
 
-  it('is followed in its lineage by exactly the migrations listed', async () => {
-    const names = (await migrations(lineage)).map(m => m.name)
-    expect(names.slice(names.indexOf(file))).toEqual([file, ...after])
+  it('is followed by no migration that drops, rebuilds or re-keys the index tables', async () => {
+    const [all, file] = [await migrations(lineage), await migrationNamed(lineage, STEM)]
+    const later = all.slice(all.findIndex(m => m.name === file) + 1)
+    const code = (sql: string) => sql.replace(/--[^\n]*/g, '')
+    const undoing = later.flatMap(m => code(m.sql).split(';').filter(st => UNDOES.some(re => re.test(st))).map(st => [m.name, st.trim()]))
+    expect([later.length > 0, undoing]).toEqual([true, []])
+  })
+
+  it('the rule catches a rebuild and a store-keyed index, and lets an added column through', () => {
+    const hits = (st: string) => UNDOES.some(re => re.test(st))
+    expect([
+      'CREATE TABLE index_schema_new (store TEXT); ALTER TABLE index_schema_new RENAME TO index_schema',
+      'DROP TABLE index_row_groups',
+      'CREATE INDEX idx_x ON index_row_groups (store, date)',
+      'ALTER TABLE index_schema ADD COLUMN started TEXT',
+      'CREATE INDEX idx_y ON footer_cache (state, date)',
+    ].map(hits)).toEqual([true, true, true, false, false])
   })
 
   it('keeps every row, as the primary store, with foreign keys intact', async () => {
@@ -79,5 +99,35 @@ describe.each(CASES)('$lineage/$file', ({ lineage, file, after }) => {
       raw.exec("INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-09-01', 'path', 1, '[]')")
     } catch (e) { err = e }
     expect(String((err as Error).message)).toBe('UNIQUE constraint failed: index_schema.store, index_schema.date, index_schema.variant')
+  })
+})
+
+// `0021`: `index_schema.started`, added in place over the store-scoped pointer
+// (every earlier migration applied), with foreign keys ON: no row moves, every
+// existing pointer's start is unknown (NULL), and a sync can then record one.
+// (cw only until another lineage ports it: `scripts/port-migration`.)
+describe('cw/…_index_schema_started.sql', () => {
+  it('adds a nullable `started`, keeps every pointer and key, with foreign keys intact', async () => {
+    const file = await migrationNamed('cw', 'index_schema_started')
+    const { raw } = await sqliteD1('cw', { before: file })
+    raw.exec(`
+      INSERT INTO index_schema (store, date, variant, version, schema_json, gen, dir) VALUES
+        ('primary', '2026-09-01', 'path', 2, '[]', 'g1', 'listing/2026-09-01/index/g1'),
+        ('nas', '2026-09-01', 'nas:path', 2, '[]', 'g1', 'listing/nas/2026-09-01/index/g1');
+    `)
+    raw.exec((await migrations('cw')).find(m => m.name === file)!.sql)
+    expect(raw.prepare(`SELECT ${SCHEMA_COLS}, started FROM index_schema ORDER BY store`).all()).toEqual([
+      { store: 'nas', date: '2026-09-01', variant: 'nas:path', version: 2, schema_json: '[]', floor_bytes: null, gen: 'g1', dir: 'listing/nas/2026-09-01/index/g1', started: null },
+      { store: 'primary', date: '2026-09-01', variant: 'path', version: 2, schema_json: '[]', floor_bytes: null, gen: 'g1', dir: 'listing/2026-09-01/index/g1', started: null },
+    ])
+    raw.exec("UPDATE index_schema SET started = '2026-09-01T10:00:01.000Z' WHERE store = 'primary' AND date = '2026-09-01' AND variant = 'path' AND started IS NULL")
+    expect(raw.prepare('SELECT store, started FROM index_schema ORDER BY store').all()).toEqual([
+      { store: 'nas', started: null },
+      { store: 'primary', started: '2026-09-01T10:00:01.000Z' },
+    ])
+    const pk = raw.prepare("SELECT name FROM pragma_table_info('index_schema') WHERE pk > 0 ORDER BY pk").all().map(r => r.name)
+    expect(pk).toEqual(['store', 'date', 'variant'])
+    expect(raw.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    expect(raw.prepare('PRAGMA integrity_check').all()).toEqual([{ integrity_check: 'ok' }])
   })
 })

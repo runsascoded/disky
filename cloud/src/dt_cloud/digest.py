@@ -25,7 +25,7 @@ A template is a small object (`load`, `op_body`, `units`, `provisional`,
 scan ids and `?d=` link tokens, Discord emoji, snapshot listing, state IO,
 plot hosting (`wrangler pages deploy`), and the converge shells
 (`converge_slack`, `converge_slack_now`, `converge_discord`,
-`redo_replies`). Design: specs/digest-unification.md; history:
+`redo_replies`). Design: specs/done/digest-unification.md; history:
 specs/done/slack-digest-shape-c.md, specs/cw-slack-digest.md."""
 from __future__ import annotations
 

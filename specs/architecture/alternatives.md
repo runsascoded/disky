@@ -1,6 +1,6 @@
 # Architectural alternatives: what has actually been tested
 
-Evidence checkpoint: 2026-10-06. This compares the alternatives in [serving-options], [filter-query-service], [phase-0], [path-store], [path-store-search] and [ch-store]. “Measured” means the stated workload was run; “proposed” is not a performance result. Deployment status and release decisions belong in the architecture index, rather than being inferred from these experiments.
+Evidence checkpoint: 2026-10-06; dispositions updated 2026-10-14. The outcome: the Worker reads static files on R2 (the [static name index][static-name] and the [interval store][interval-store]), and the ClickHouse direction was retired on 2026-10-10 ([post-mortem][postmortem]). The measurements below are kept as the record of why. This compares the alternatives in [serving-options], [filter-query-service], [phase-0], [path-store], [path-store-search] and [ch-store]. “Measured” means the stated workload was run; “proposed” is not a performance result. Deployment status and release decisions belong in the architecture index, rather than being inferred from these experiments.
 
 ## The problem is aggregation, not just retrieval
 
@@ -12,11 +12,11 @@ This does not require sending 100M files to the browser. It requires an access p
 
 | Architecture | Actual evidence | Historical TM/dTM tradeoff | Disposition |
 | --- | --- | --- | --- |
-| Worker + D1 footer + object-store parquet | Unified path/bysize sorts, cold footer tier, range merging and search sidecars implemented; original GCS bench had 71/105 flagged answers, median 6.9 s | Cheap, independently persisted snapshots; bounded decode and repeated network/string work constrain broad exact queries | Retain as front door and existing reader, not sole fleet-wide broad-search engine |
-| Always-on custom RAM index | One 778M-node scan: 105/105 exact roots/totals; p50/p90/max 0.44/2.1/5.2 s | Fast ID-array traversal; independently loading two scans multiplies RAM, and all-history representation was not built | Promising baseline; historical delta version is proposed |
-| Serverful DuckDB over locally cached parquet | Same 105 roots/totals exact; 2.0/12.1/91 s; 11.8 GB resident, 39.7 GB peak | Reuses files and SQL; broad names map into costly row-group decoding, sometimes full path scans | Useful ingestion/oracle tool; not winning serving plan |
-| Disk-backed ClickHouse + RAM caches | Latest-scan roots/totals 0.20/1.46/4.33 s warm; append-only historical and numeric prototypes implemented separately | Multiple physical orders and historical compression; rich broad TM still has large aggregation tails | Main implementation direction, not yet general fast-FTS acceptance |
-| Sparse predicate summaries on either RAM or disk | Frozen leaf `zarr.json` and `.npy` TM/dTM partitions validated; explicit directory-coverage mode also validated | Exact additive totals with bounded geometry; arbitrary Boolean/owner/age/rich fields and incremental maintenance missing | Strongest measured broad-query direction, narrower contract |
+| Worker + D1 footer + object-store parquet | Unified path/bysize sorts, cold footer tier, range merging and search sidecars implemented; original GCS bench had 71/105 flagged answers, median 6.9 s | Cheap, independently persisted snapshots; bounded decode and repeated network/string work constrain broad exact queries | **Chosen**: the serving path on every deployment, now over the interval store and the static name index |
+| Always-on custom RAM index | One 778M-node scan: 105/105 exact roots/totals; p50/p90/max 0.44/2.1/5.2 s | Fast ID-array traversal; independently loading two scans multiplies RAM, and all-history representation was not built | Not pursued: the static index answers without a server |
+| Serverful DuckDB over locally cached parquet | Same 105 roots/totals exact; 2.0/12.1/91 s; 11.8 GB resident, 39.7 GB peak | Reuses files and SQL; broad names map into costly row-group decoding, sometimes full path scans | Kept as the batch engine for builds, merges and oracles; not a serving engine |
+| Disk-backed ClickHouse + RAM caches | Latest-scan roots/totals 0.20/1.46/4.33 s warm; append-only historical and numeric prototypes implemented separately | Multiple physical orders and historical compression; rich broad TM still has large aggregation tails | **Retired 2026-10-10**: exact and fast on retrieval, but broad aggregation stayed slow and it needed an always-on VM |
+| Sparse predicate summaries on either RAM or disk | Frozen leaf `zarr.json` and `.npy` TM/dTM partitions validated; explicit directory-coverage mode also validated | Exact additive totals with bounded geometry; arbitrary Boolean/owner/age/rich fields and incremental maintenance missing | The idea lives on in the static index's catalog and per-child drill rollups for heavy terms |
 | Managed/serverless alternatives | Platform survey: Lambda/Cloud Run fan-out, Modal, Aurora/pg_trgm, BigQuery, ClickHouse Cloud, MotherDuck | Different cold-start, billing and ops choices; none removes aggregation or access-path requirements | Surveyed, not locally benchmarked alternatives |
 
 The figures above are different contracts and machine/cache states, not a head-to-head production ranking.
@@ -49,7 +49,7 @@ For scale, canonical bookkeeping through 10-04 records **1,142,160,667 opened ve
 
 A RAM engine should therefore be evaluated with a concrete packed schema and the same complete TM/dTM oracle, measuring build peak and concurrent-query peak as well as loaded rows. Restart/replay, generation overlap during updates and a second serving replica need separate headroom. A “128 GiB node could fit” hypothesis would not establish that 128 GiB safely builds, updates and serves it. Storing durable history on SSD while pinning just dictionaries and hot summaries is a coherent intermediate design; all-history residency is optional, not an architectural prerequisite.
 
-## Disk-backed indexed node: the current main direction
+## Disk-backed indexed node (ClickHouse, retired 2026-10-10)
 
 ClickHouse separates name discovery, name-to-node postings, subtree/path order and historical values. Initial seven-scan scalar history compressed to 569M object versions plus 218M directory versions, only 1.009/1.004 scan-equivalents. Its 0.1–0.5 s warm history probes were view-level/scalar aggregations; some filtered diffs still scanned hundreds of millions of rows rather than only changes. [Measured experiment][serving-options].
 
@@ -73,11 +73,14 @@ Own-object signed additive deltas can avoid treating every recursive dir rollup 
 
 The sparse-query intuition is useful for **frequent expensive predicates**, not proof that all query combinations can be precomputed cheaply. `zarr.json`'s 68.4M postings compress into 92,096 sparse blocks; validated resident-summary views take 0.35–0.41 s, diffs 0.63–0.80 s. Conversely `.json` matches 55.93M vocabulary names: the live guard refuses that enumeration. Template normalization reduced 127.3M names to 2.16M shapes, but exact residual verification remains necessary. [Summary measurements][ch-store], [templates][phase-0].
 
-Next gates should test maintained popular-predicate summaries and subtree-first queries, then complete correctness across dates and publication failures. Prepared Set membership and ordered aggregation were measured and rejected for worse pruning/latency; finer granules did not provide a decisive broad-query win. Limits should remain explicit refusals, not silent truncation. The aim is exact bounded aggregation, not rendering millions of cells and not declaring broad search fundamentally hopeless.
+These gates were not run on ClickHouse: the static name index took the predicate-summary idea (a catalog plus per-child drills for heavy terms) without a server, with its drills verified against brute force. On ClickHouse, prepared Set membership and ordered aggregation were measured and rejected for worse pruning/latency; finer granules did not provide a decisive broad-query win. Limits should remain explicit refusals, not silent truncation. The aim is exact bounded aggregation, not rendering millions of cells and not declaring broad search fundamentally hopeless.
 
-[serving-options]: ../serving-options.md
+[serving-options]: ../done/serving-options.md
 [filter-query-service]: ../done/filter-query-service.md
 [phase-0]: ../done/filter-query-service-p0.md
-[path-store]: ../path-store.md
+[path-store]: ../done/path-store.md
 [path-store-search]: ../path-store-search.md
 [ch-store]: ../done/ch-store.md
+[static-name]: static-name-search.md
+[interval-store]: ../interval-store.md
+[postmortem]: ../done/ch-postmortem.md

@@ -19,7 +19,7 @@ dependencies = [
     "thrds @ https://github.com/runsascoded/thrds/archive/70548988ac6827a81a770b938b36057f67ae0e3d.tar.gz",
     # The shared engine: `dt_cloud` builds on `disk_tree` (listing normalization,
     # aggregation, backends). Workspace member of the parent repo (one lockfile;
-    # specs/union-of-roots.md). The `gcs` + `s3` extras are what the overlay's
+    # specs/done/union-of-roots.md). The `gcs` + `s3` extras are what the overlay's
     # jobs read and write through (`gs://` via gcsfs, `r2://`/CAIOS via s3fs +
     # boto3), so an image built from this package alone has them.
     "disk-tree[gcs,s3]",

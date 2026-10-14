@@ -42,8 +42,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // one-sided diff nodes expand. 3 (2026-10-07): owner pools fold the live
 // ledger, objects included (a preview of the bytes-only fold wrote pool
 // answers with unconserved object counts into KV). 4: pool and user-lens
-// object counts exact from the manifest's per-user objects (`uo`).
-export const CACHE_V = '4'
+// object counts exact from the manifest's per-user objects (`uo`). 5 (2026-10-14): a
+// node's `d` is its newest write, not the byte-weighted mean.
+export const CACHE_V = '5'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
@@ -60,7 +61,7 @@ export function cacheEnvTag(env: CacheEnv, request: Request): string {
 
 /** The cache key for `parts` of endpoint `kind`, in deployment environment `tag` (`cacheEnvTag`). A
  * non-prod tag adds a `~<tag>/` segment, which the KV key (a hash of the URL) inherits. A secondary store's
- * keys gain an `@<store>/` segment (specs/multi-store.md), so the same path in two stores can't collide;
+ * keys gain an `@<store>/` segment (specs/done/multi-store.md), so the same path in two stores can't collide;
  * the primary's (`store` omitted or `'primary'`) are exactly what they were before stores existed — no
  * one-time cache miss. */
 export function cacheKeyFor(kind: string, tag: string, parts: string, store?: string): Request {

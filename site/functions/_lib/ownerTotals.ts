@@ -6,13 +6,15 @@
  * Cost model: one point lookup per live assignment prefix plus the depth-1 roots.
  * A prefix's bytes/objects on a scan never change (the scan's index is
  * immutable), so they are kept per (scan, index) in D1 (`owner_prefix_aggs`)
- * and only prefixes not priced yet are read. The folded body is cached per
- * (scan, ledger head) (`owner_totals`, one head at a time): a new assignment
- * changes the head, and the refold re-reads just its new prefixes — not every
- * live one (~1,260 on gcs, ~22 s a scan), which made an owner-lens series
- * (one fold per scan) time out after any assignment. */
+ * and only prefixes not priced yet are read — a new assignment's on every
+ * interval-store scan at once. Folding the ledger over a scan's cached prefixes
+ * is cheap (~0.1 s), so a folded body is only memoized in the isolate: an owner
+ * change writes nothing per scan. (Folded bodies stored per (scan, ledger head)
+ * cost ~290 KB × every scan on each change; re-pricing every live prefix on a
+ * new head, ~22 s a scan on gcs, made an owner-lens series time out.) */
 import type { Env } from './auth.js'
-import { columnsFor, openIndex, slices, readAsks, type Ask, type Row } from './index.js'
+import { columnsFor, ivHeldDates, openIndex, slices, readAsks, type Ask, type Row } from './index.js'
+import { fillHist, histAggs } from './ownerHist.js'
 import { loadLedger } from './ledger.js'
 import { shared } from './shared.js'
 import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type AssignmentRow, type OwnerRow, type OwnerTotals, type PathAgg } from './ownerBands.js'
@@ -31,7 +33,7 @@ export interface OwnerTotalsBody extends OwnerTotals {
   v: number
   scan: string
   head: number
-  computed: { at: number; ms: number; groups: number; prefixes: number; index: string }
+  computed: { at: number; ms: number; groups: number; prefixes: number; index: string; hist?: true }
 }
 
 // Per-isolate memo on top of D1. A fresh estate manifest is a multi-second
@@ -50,14 +52,37 @@ const PREFIX_CACHE_MAX = 1_800_000
 /** The index a scan's prefixes are priced on: a reindex (new generation) prices them again. */
 const indexTag = (idx: { mode: string }): string => `${idx.mode}:${'gen' in idx ? (idx as { gen: string }).gen : ''}`
 
+async function storePriced(env: Env, date: string, tag: string, cache: PrefixCache): Promise<void> {
+  const body = JSON.stringify(cache)
+  if (body.length > PREFIX_CACHE_MAX) return
+  await env.DB!.prepare('INSERT OR REPLACE INTO owner_prefix_aggs (scan, idx, body, updated_ts) VALUES (?, ?, ?, ?)')
+    .bind(date, tag, body, Math.floor(Date.now() / 1000)).run()
+}
+
+/** The ledger's prefixes as index lookups: path → depth. */
+function wantOf(owners: Map<string, OwnerRow>): Map<string, number> {
+  const want = new Map<string, number>()
+  for (const p of owners.keys()) {
+    const { path, depth } = idxKey(p)
+    want.set(path, depth)
+  }
+  return want
+}
+
 async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, head: number): Promise<OwnerTotalsBody> {
   const t0 = Date.now()
   const idx = await openIndex(slices(env), date)
   const tag = indexTag(idx)
-  const want = new Map<string, number>() // index path → depth, for point lookups
-  for (const p of owners.keys()) {
-    const { path, depth } = idxKey(p)
-    want.set(path, depth)
+  const want = wantOf(owners)
+  // An interval-store scan folds from the prefixes' history rows (one per prefix, every scan); the rest — other
+  // stores, scans appended since the rows were priced, or a first fill still pending — per scan below.
+  const hist = idx.asOf != null ? await histAggs(slices(env), tag, idx.asOf, want) : null
+  if (hist) {
+    const totals = computeOwners({ owners, aggs: hist.aggs, buckets: hist.buckets })
+    return {
+      v: MANIFEST_VERSION, scan: date, head, ...totals,
+      computed: { at: Math.floor(Date.now() / 1000), ms: Date.now() - t0, groups: hist.groups, prefixes: hist.prefixes, index: idx.mode, hist: true },
+    }
   }
   const row = await env.DB!.prepare('SELECT body FROM owner_prefix_aggs WHERE scan = ? AND idx = ?').bind(date, tag).first<{ body: string }>()
   const prior = row ? JSON.parse(row.body) as PrefixCache : null
@@ -89,13 +114,8 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
     }
     for (const [path, a] of added) cache.aggs[path] = a
     cache.buckets = [...buckets].sort()
-    for (const [path, depth] of missing) asked.add(`${depth}:${path}`)
-    cache.asked = [...asked].sort()
-    const body = JSON.stringify(cache)
-    if (body.length <= PREFIX_CACHE_MAX) {
-      await env.DB!.prepare('INSERT OR REPLACE INTO owner_prefix_aggs (scan, idx, body, updated_ts) VALUES (?, ?, ?, ?)')
-        .bind(date, tag, body, Math.floor(Date.now() / 1000)).run()
-    }
+    cache.asked = [...new Set([...cache.asked, ...[...missing].map(([path, depth]) => `${depth}:${path}`)])].sort()
+    await storePriced(env, date, tag, cache)
   }
   const aggs = new Map(Object.entries(cache.aggs))
   const totals = computeOwners({ owners, aggs, buckets: cache.buckets })
@@ -108,45 +128,26 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
   }
 }
 
-/** The owner totals for `date` at the current ledger head, persisted in D1
- * (`owner_totals`, keyed by scan + head). */
+/** The owner totals for `date` at the current ledger head: folded from the scan's cached prefixes (a refold
+ * after an owner change reads and writes nothing per scan), memoized per (scan, head) in the isolate. */
 export async function ownerTotals(env: Env, date: string): Promise<OwnerTotalsBody> {
   const { ownerRows, head } = await loadLedger(env)
-  const key = `${date}:${head}`
-  return shared(memo, key, async () => {
-    const cached = await env.DB!.prepare('SELECT body FROM owner_totals WHERE scan = ? AND head = ?').bind(date, head).first<{ body: string }>()
-    if (cached) {
-      const body = JSON.parse(cached.body) as OwnerTotalsBody
-      if (body.v === MANIFEST_VERSION) return body
-    }
-    const body = await compute(env, date, foldLatest(ownerRows), head)
-    // Every reader keys by the live head, so bodies of older heads are dead
-    // weight: drop them as this one lands.
-    await env.DB!.batch([
-      env.DB!.prepare('INSERT OR REPLACE INTO owner_totals (scan, head, body, claims, computed_ts, ms) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(date, head, JSON.stringify(body), JSON.stringify(body.assignments), body.computed.at, body.computed.ms),
-      env.DB!.prepare('DELETE FROM owner_totals WHERE head < ?').bind(head),
-    ])
-    return body
-  }, MEMO_WAIT)
+  return shared(memo, `${date}:${head}`, () => compute(env, date, foldLatest(ownerRows), head), MEMO_WAIT)
 }
 
-// Assignments alone, per (scan, head): a fraction of the body.
-const assignmentsMemo = new Map<string, Promise<AssignmentRow[]>>()
-
-/** The live assignments priced against `date` — what a user lens folds. A lens
- * series reads one per scan, so they are stored beside the body
- * (`owner_totals.claims`) and fetched alone. */
+/** The live assignments priced against `date` — what a user lens folds. */
 export async function ownerAssignments(env: Env, date: string): Promise<AssignmentRow[]> {
-  const { head } = await loadLedger(env)
-  const full = memo.get(`${date}:${head}`)
-  if (full) return (await full).assignments
-  const key = `${date}:${head}`
-  return shared(assignmentsMemo, key, async () => {
-    const row = await env.DB!.prepare('SELECT claims FROM owner_totals WHERE scan = ? AND head = ?').bind(date, head).first<{ claims: string }>()
-    // Rows stored before `uo` (manifest v2) recompute with the body.
-    const rows = row ? JSON.parse(row.claims) as AssignmentRow[] : null
-    if (rows && rows.every(r => r.uo)) return rows
-    return (await ownerTotals(env, date)).assignments
-  }, MEMO_WAIT)
+  return (await ownerTotals(env, date)).assignments
+}
+
+/** Fill the history rows for the ledger's prefixes not yet priced through the interval store's newest scan,
+ * `n` per call (one read each): the first fill, and catching up after scans are appended. */
+export async function fillOwnerHist(env: Env, n: number): Promise<{ priced: number; remaining: number; groups: number; index: string } | null> {
+  const dates = await ivHeldDates(slices(env))
+  if (!dates.length) return null
+  const idx = await openIndex(slices(env), dates[dates.length - 1])
+  const tag = indexTag(idx)
+  const { ownerRows } = await loadLedger(env)
+  const got = await fillHist(slices(env), tag, wantOf(foldLatest(ownerRows)), n)
+  return got && { ...got, index: tag }
 }

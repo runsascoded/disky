@@ -416,7 +416,7 @@ ENV = {"src": "INTERVAL_STORE_SRC", "image": "INTERVAL_STORE_IMAGE", "r2_endpoin
 
 
 def load_config(profile: str | None, environ: dict[str, str] | None = None) -> Config:
-    """The interval profile's `append` section (`interval_profiles/<name>.json`, or a path; `$INTERVAL_STORE_PROFILE`)
+    """The interval profile's `append` section (the deployment's profile JSON; `$INTERVAL_STORE_PROFILE`)
     with `ENV` over it; every field a run needs is checked (`need`)."""
     env = os.environ if environ is None else environ
     doc = ist.load_profile(profile)
@@ -793,7 +793,7 @@ def ready(profile: str | None) -> Config:
 @option("-c", "--catch-up", is_flag=True, help="Append every earlier published scan still pending first, in scan-id order")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `interval-store merge`)")
 @option("-n", "--dry-run", is_flag=True, help="Report each stage's state and what would run; submit and write nothing")
-@option("-P", "--profile", help="Deployment profile (`interval_profiles/<name>.json` or a path; default $INTERVAL_STORE_PROFILE)")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
 def append_cmd(catch_up: bool, no_merge: bool, dry_run: bool, profile: str | None, merge_wait: float, scan_id: str) -> None:
@@ -810,7 +810,7 @@ def append_cmd(catch_up: bool, no_merge: bool, dry_run: bool, profile: str | Non
 
 @command("merge")
 @option("-n", "--dry-run", is_flag=True, help="Report the due carries; submit and write nothing")
-@option("-P", "--profile", help="Deployment profile (`interval_profiles/<name>.json` or a path; default $INTERVAL_STORE_PROFILE)")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-w", "--wait", type=float, help="Seconds to wait on the merge job (default: to its end, Batch's own cap)")
 def merge_cmd(dry_run: bool, profile: str | None, wait: float | None) -> None:
     """The newest manifest's due carries, on their own: the merge job (`carry`), then R2 for the revision it publishes

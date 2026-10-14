@@ -1,31 +1,30 @@
-/** The known starts of a store's date-only scans that share a day with
- * another scan (`src/scanSlug.ts` `ScanTimes`): each read from its published
- * `meta.json`'s `started` (`path-index` writes it; `dt-cloud stamp-started`
- * back-stamps older metas). Only those scans need one, so this reads a meta
- * only for them — usually none. */
-import { startKey, timesNeeded, type ScanTimes } from '../../src/scanSlug.js'
+/** The known starts of a store's date-only scans (`src/scanSlug.ts`
+ * `ScanTimes`): each `path` pointer's `index_schema.started` (`dt-cloud
+ * index-sync -m <meta.json>` records the snapshot's `meta.started`;
+ * `index-started` backfills older scans), read in one D1 query — the same
+ * source as the picker's `/data/<store>/scan-times.json`, so a slug resolves
+ * here as it does in the page. */
+import { startKey, type ScanTimes } from '../../src/scanSlug.js'
 import type { Env } from './auth.js'
-import { servedStore } from './index.js'
-import { snapshotsPrefix } from './shared.js'
+import { pathScanStarts } from './index.js'
 
-/** A scan's `meta.started`, or null (no meta, no `started`, an unreadable store). */
-export async function scanStarted(env: Env, id: string): Promise<unknown> {
-  try {
-    const own = env.STORE_KEY ? snapshotsPrefix(env) : 'snapshots/'
-    const store = servedStore(env, [own])
-    const { bytes } = await store.get(`${own}${id}/meta.json`)
-    return (JSON.parse(new TextDecoder().decode(bytes)) as { started?: unknown }).started ?? null
-  } catch {
-    return null
-  }
+/** Every date-only scan of the env's store with a known start → its start
+ * instant, as recorded (ISO 8601). No D1: none. */
+export async function scanStarts(env: Env): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  if (!env.DB) return out
+  for (const r of (await pathScanStarts(env)).results) out[r.date] = r.started
+  return out
 }
 
-/** `scans`' needed start keys (`timesNeeded`); a scan whose start is unknown is
- * left out (its midnight form stands). */
-export async function scanTimes(env: Env, scans: readonly string[], started = scanStarted): Promise<ScanTimes> {
-  const need = timesNeeded(scans)
-  const keys = await Promise.all(need.map(async id => startKey(id, await started(env, id))))
+/** `scans`' start keys (`startKey`): a date-only scan whose start is unknown,
+ * or falls on another day, is left out (its midnight form stands). */
+export async function scanTimes(env: Env, scans: readonly string[]): Promise<ScanTimes> {
+  const starts = await scanStarts(env)
   const out: Record<string, string> = {}
-  need.forEach((id, i) => { if (keys[i]) out[id] = keys[i]! })
+  for (const id of scans) {
+    const k = startKey(id, starts[id])
+    if (k) out[id] = k
+  }
   return out
 }

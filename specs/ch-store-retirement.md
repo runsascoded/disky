@@ -16,7 +16,7 @@ Status: **mostly executed** (2026-10-10). What ran, by runbook step:
 
 Move this spec to `done/` once 7, 8 and 10 are settled. Prepared 2026-10-09: Ryan agreed to retire the VM once the static name search has run on gcs prod for a few days. This spec is the inventory, the preconditions, and the ordered runbook.
 
-The VM was the experiment platform for an append-only historical query service ([`ch-store.md`], [`filter-query-service.md`], [`serving-options.md`]). It ended up serving one production-adjacent thing, the name search, which now comes from the static name index on R2 (`specs/static-append.md` on `gcs`, `specs/architecture/static-name-search.md`). Nothing in gcs prod reads from the VM any more; its last jobs are the hourly `ch-daily` catch-up and, until the code change below, the R2 copy in `job/static-daily.sh`.
+The VM was the experiment platform for an append-only historical query service ([`ch-store.md`], [`filter-query-service.md`], [`serving-options.md`]). It ended up serving one production-adjacent thing, the name search, which now comes from the static name index on R2 (`specs/done/static-append.md` on `gcs`, `specs/architecture/static-name-search.md`). Nothing in gcs prod reads from the VM any more; its last jobs are the hourly `ch-daily` catch-up and, until the code change below, the R2 copy in `job/static-daily.sh`.
 
 ## Inventory
 
@@ -154,4 +154,4 @@ Not saved: the GCS → R2 copies. The VM sent 617.7 GB in the 24 h to 12:00 UTC 
 
 [`ch-store.md`]: done/ch-store.md
 [`filter-query-service.md`]: done/filter-query-service.md
-[`serving-options.md`]: serving-options.md
+[`serving-options.md`]: done/serving-options.md

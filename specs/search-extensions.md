@@ -1,6 +1,6 @@
 # Search extensions: costed options for the static name index
 
-Status: spec only (2026-10-09), nothing built. It prices five extensions of the exact, indexed name search beyond one plain substring, each grounded in the index formats of `specs/architecture/static-name-search.md` and `specs/static-append.md`. The measurements are cheap reads of gen `2026-10-08c` metadata (`sidecar.parquet` 29 MB, `catalog/members.parquet`, `roots-measure/`, `drill/aliases.parquet`) and a 60-row-group sample of the 2026-10-08 scan's `path` sort. No Batch was spent. Where an answer needs a census, the census is priced as a gated first step.
+Status: §1 (compound queries) built 2026-10-14, reader only (see its status); §2 anchors built earlier (`staticAnchors.ts`); the rest spec only. It prices five extensions of the exact, indexed name search beyond one plain substring, each grounded in the index formats of `specs/architecture/static-name-search.md` and `specs/done/static-append.md`. The measurements are cheap reads of gen `2026-10-08c` metadata (`sidecar.parquet` 29 MB, `catalog/members.parquet`, `roots-measure/`, `drill/aliases.parquet`) and a 60-row-group sample of the 2026-10-08 scan's `path` sort. No Batch was spent. Where an answer needs a census, the census is priced as a gated first step.
 
 ## Baseline: what the index answers today
 
@@ -18,7 +18,7 @@ Status: spec only (2026-10-09), nothing built. It prices five extensions of the 
 
 **Light vs heavy.** A literal whose suffix range the group index bounds by `MAX_ROWS` (V plus two groups) is **light**. Its range is read once, folded to first hits (`FirstHits`), and cached per isolate and per colo. Every other literal is **heavy** and goes to the drill.
 
-**Indexed-only** (`FILTER_INDEXED_ONLY=1`, gcs; `indexedOnly.ts`). Only one literal is accepted, unscoped. Every other form is a 400 with a code: `unsupported-{regex,glob,exclusion,terms,slash,scope}`, `scan-not-indexed`, or `term-too-common` (a heavy literal with no heavy source).
+**Indexed-only** (`FILTER_INDEXED_ONLY=1`, gcs; `indexedOnly.ts`). As costed (2026-10-09), only one literal was accepted, unscoped; every other form was a 400 with a code: `unsupported-{regex,glob,exclusion,terms,slash,scope}`, `scan-not-indexed`, or `term-too-common` (a heavy literal with no heavy source). Since §1 (2026-10-14), AND / OR / NOT of literals are accepted (`unsupported-exclusion` and `unsupported-terms` are gone; `too-broad` and `unsupported-kind` are new).
 
 **Columns the postings do not have:**
 - `kind`: it is dropped at coalescing (`CINTERVAL_SCHEMA` = depth, path, usr, vf, vt, size, n_files).
@@ -40,26 +40,64 @@ Prices used: spot n2-highmem-16 ≈ $0.22/VM-hour (the 2026-10-08c build: 165 VM
 
 ## 1. Exclusions and compound queries (`tomat -mp3`, `a b`, `-b`, `a|b`)
 
+**Status: built (2026-10-14), reader only, no index change.** `site/functions/_lib/staticBool.ts` (`boolPlan`, `evalBool`), wired into the view (`view.ts` `readView`: subtree, diff, filter-cover), the series (`api/series.ts`) and the indexed-only gate (`staticFilter.ts` `staticCompound`, `indexedGate`; `indexedOnly.ts` `rejectAst`). `RESPONSE_V` 21. Not deployed; the real-data decline count (below) is still to measure.
+
+### Syntax (unchanged, `querySyntax.ts` `simple`)
+
+- `a b`: AND. `a|b`: OR, looser than AND (`a b|c` = (a AND b) OR c). `-b`: NOT, always the whole query's (whichever alternative it is written in). Only negatives = everything except them.
+- Quotes make a term literal: `"a b"` (a space), `"-draft"` (a positive term), `-"a b"` (a negative one), `"a|b"`.
+- Anchors (§2) apply per term, positive or negative: `^tomat bin`, `ckpt -.pt$`, `^config.json$|.yaml$`. Each anchored term needs its `ANCHOR_MIN` length, as alone.
+- **`is:file` / `is:dir`** (§3) are reserved: unquoted, either is a parse error (`unsupported-kind`, on every deployment) — never searched as the text `is:file`, which `"is:file"` still does. They wait on the kind bit.
+- What the static index refuses in a compound: a glob (`*`) or a `/` in any term, positive or negative (`unsupported-glob`, `unsupported-slash`), an anchor too short (`anchor-too-short`). The `simple` syntax's 3-character minimum still applies to every positive term of a compound (`ab cd` is "type at least 3 characters"); one literal alone is exempt, as before.
+- **Rewrites before reading** (`boolPlan`): terms deduplicate within a group; a group holding every term of another group is dropped (`a|a b` → `a`); a group of negatives only makes the query "everything except" (`-a|b` → `-a`). Terms P's path holds are true everywhere under P and dropped (a negative one: nothing under P matches, an empty view).
+
 ### Semantics
 
-As the path-store filter defines them (`queryAst.ts`), over the lowercase full path:
+Over the lowercase full path, "holds `t`" being `staticAnchors.ts` `termInPath` under the generation's hex-run rule (substring; for `^q` / `q$` / `^q$`, some segment starts with / ends with / is `q`):
 
-- `a b`: the path contains every term, in any segments.
-- `-b`: the path contains no `b`. Negatives are the whole query's.
-- `a|b`: OR, looser than AND.
+- A path **matches** `(g₁ | g₂ | …) -b₁ … -bₘ` when it holds every term of some AND-group `gᵢ` and no `bⱼ`.
+- The view draws the **match roots**: the outermost matching paths under P, each counted whole less its **excluded paths** (the outermost paths under it holding some `bⱼ`), which are dropped from the tree.
+- **Per object, the same answer**: an object is counted iff its own full path matches. A match root's subtree is exactly its matching objects plus its excluded paths' objects. This is the path-store filter's model (`pathQuery.ts` `compileQuery`, `testBrute.ts` `brute`), so static and walked views agree.
+- **First hits, per matched node.** Which paths are roots depends on names only, never on the scan, so one answer (hits with `vf`/`vt` per version and owner slice) serves every date; liveness is per version.
 
-The match roots are the outermost matching paths. A term without `/` lies inside one segment, so "the path holds `t`" means "the path is at or under one of `t`'s match roots `S_t`". `staticBool.ts` (parked, `filter-bool-parked` bf58d793) proves the static forms from that:
+How `evalBool` answers it from each term's first hits `S_t` under P (the single-literal answers, `HitSource.hits`):
 
-- **conjunction** `C = ∪ₜ {r ∈ S_t : r's path holds every term}`;
-- an **exclusion** subtracts the negative's roots under each root;
-- **exclusions alone** take P as the single root, less the negatives.
+- **AND** `g`: `C_g = ∪_{t∈g} {r ∈ S_t : r holds every term of g}`. An outermost path holding all of `g` has a parent missing some `t`, so it is a first hit of `t`; conversely a first hit holding all of `g` has a parent missing that `t`. With every `S_t` listed this is a filter. A term whose answer at P is a rollup (heavy) is resolved under the candidates the listed terms give: at the candidate itself when it holds the heavy term, else the heavy term's roots under it, read at the candidate or grouped at an ancestor, descending through rollups whose remainder rules a child out.
+- **OR**: the outermost paths of `∪_g C_g` (a root of one group inside another group's root is inside a match). An AND-group whose every term P holds makes P the single match root.
+- **NOT**: a match root holding a negative term is dropped (everything under it holds it too). Under each root, the excluded paths are each negative's own match roots there, outermost across negatives. A negative heavy under a root is enumerated through its rollup when the remainder is zero: a kept child holding it is a root itself (`HitSource.at`, `Drill.rootAt`: one key range of each tier's roots), one that doesn't recurses.
+- **NOT alone** (or an AND-group P holds): P is the one match root, less the above. The series' point is P's own total less the excluded paths' live totals.
 
-### Light terms (every term light at P)
+### Never approximate: `too-broad`
+
+Where the combination can't be exact it declines (`BoolDecline`) instead of guessing:
+
+- every term of an AND-group heavy at P (the rollups' "N others" can't be intersected) — this includes an OR alternative that is one heavy term (`f00|tomat` at the fleet root);
+- a heavy positive term under a candidate, or a candidate together with its descendants;
+- a negative term heavy under a root whose rollup has a non-zero remainder (which folders hold it is unknown); the parked branch's "cuts" (subtract the rollup total, draw nothing inside) are not built: they would draw part of the view coarse, so the answer declines;
+- past the budget: 24 reads beyond each term's own at P, or 400K hits held (`BOOL_BUDGET`).
+
+A term no source answers declines with that term (`declined: 'term'`), and the refusal is the term's own (`term-too-common` with no heavy source, `anchor-not-indexed`, `scan-not-indexed`). An answer whose terms' answers don't cover the scan (a heavy term past the drill base) is `scan-not-indexed`.
+
+- **Indexed-only (gcs):** a decline is the 400 `too-broad` ("These terms match too much here to combine exactly; open a folder, or make a term more specific.") on subtree, diff and series, before any walk; the client shows it inline (`filterCaps.ts` `REFUSAL`) and keeps the last good view (`refusalOf`).
+- **Otherwise (cw, r2, local):** a decline reads as before — the search sidecars, else the thresholded walk — which sets `partial` / `approximate` with its reason when it may miss matches. A compound query on a scan outside the generation (or one a term's answer doesn't cover) is `scan-not-indexed` on every deployment, as a single literal is: no fallback for a missing index.
+- Not built from the costing above: per-term totals with "apply alone" links in the refusal, co-descent for "every positive term heavy", OR by inclusion–exclusion over rollups. Build them if the real-data decline count says declines are common.
+
+### Tests
+
+- `staticBool.test.ts` (16): `boolPlan`'s parsing — precedence, quoting, anchors, dedup and subsumption, refused shapes, `is:file`; `evalBool` against brute force from the objects (`testBrute.ts` mirrors `fixtures/static-filter/gen.py`'s objects) over 44 queries × 11 view roots × 2 scans for three sources: the suffix index alone (920 served, 48 declined: 1–2 character terms with no heavy source), + the drill past 40 rows (932 served; 30 `too-broad`, 6 a term the fixture drill lacks), the drill alone (674 served; 46 `too-broad`, 248 non-member terms); anchored terms (`^q`, `q$`, `^q$` from a brute-force source) in every position; the budget's two bounds; `buildView` (light and mixed: roots, excluded paths, totals, never flagged) and `buildDiff` (each side's matched total) equal brute force.
+- `api/indexedOnly.test.ts`: the indexed-only forms (compounds pass, globs / slashes anywhere refused, `is:file` `unsupported-kind`), subtree / diff / series answering compounds, the series' points = brute force (roots less exclusions, the view root less them), `too-broad` on every route with the flag and the search read without it, a term's own refusal, `scan-not-indexed`, a view root holding a negative term (an empty view).
+- Still to do before flipping gcs: ~100 compound queries at 10-08, 10-01 and one run date against the batch reference (`wt/hot-preview/tmp/sf-acc/ref.py`), recording served / declined counts per P depth — the real decline rate this section estimated.
+
+### The original costing (2026-10-09)
+
+Kept for its numbers; the status above supersedes its plan.
+
+#### Light terms (every term light at P)
 
 - Read every term's first hits (one cached suffix-range read each, ≤ V rows, all in parallel), then filter as above. Exact.
 - Latency is about the slowest term's cold read (~0.3–0.7 s), or ~0 when the terms are warm.
 
-### Heavy terms (parked algorithm)
+#### Heavy terms (parked algorithm)
 
 - **A positive term heavy at P** (a rollup) is read under each candidate that the light terms give, at the candidate itself or grouped at an ancestor. The read descends through rollups whose remainder rules a child out.
 - **A negative term heavy under a root** is enumerated through its rollup where it can be: a kept child holding the term is read by `at`, one that doesn't is recursed into, and only when the remainder is zero. Otherwise the path becomes a **cut**: its rollup total is subtracted and nothing inside it is drawn.
@@ -77,7 +115,7 @@ The match roots are the outermost matching paths. A term without `/` lies inside
 
 The fixture sweep (668 / 694 / 498 of 726 served with the light / mixed / heavy sources) is not a real-data rate. Measuring the real rate is step 1 of shipping.
 
-### Making declines rare
+#### Making declines rare
 
 The first three changes need no index work.
 
@@ -98,7 +136,7 @@ The first three changes need no index work.
    - Today `a|b` is `unsupported-terms`.
 4. **Pair rollups** (precomputed `(a ∧ b, dir)` for popular pairs): not recommended. The pair space is unbounded, and the rewrites plus co-descent cover the natural cases.
 
-### UX for a declined case (indexed-only)
+#### UX for a declined case (indexed-only)
 
 - **A new code `too-broad`.** Message: "“train” and “test” each match too many files here to combine. Open a folder, or make a term more specific."
 - **Each term's own total at P** is shown beside the message (from the drill: one read per term, already done by the attempt), with links that apply one term alone.
@@ -106,11 +144,11 @@ The first three changes need no index work.
 - **Diff and series** decline per date the same way. A series names the declined dates the way it names `unindexed` ones today.
 - Off indexed-only, a decline falls back to the path-store walk, as the parked code already does.
 
-### Index changes and cost
+#### Index changes and cost
 
 - **None for the forms above.** Per-owner rollups (`(q, dir, usr)` cells, one more rollup set per kind; parked spec) matter only if scoped filters are opened up. Indexed-only refuses scopes, so skip them.
 
-### Reader changes, tests and effort
+#### Reader changes, tests and effort
 
 - **Rebase the parked branch** onto the tiered drill (`475515b4`: `Drill` reads base + run tiers). `Drill.at` (one path's root rows, added by the parked commit) must combine tiers by smallest `vt` and take each tier's alias, as the reader's `hits` does.
 - **Widen `rejectAst`** to accept `alts.length ≥ 1` of `sub` literals without `/`, with negatives, and add `too-broad`.
@@ -336,7 +374,7 @@ The CS rows can't be found without reading the whole CI range. Two options:
 | Option | Index work | One-off $ | Storage (GCS and R2 each) | Per scan | Effort (agent-days) | Declines left |
 |---|---|---|---|---|---|---|
 | 5 quotes / spaces | none | 0 | 0 | 0 | 0.5 | none new |
-| 1 compound (parked + rewrites, co-descent, OR) | none | 0 | 0 | 0 | 2–3 + 2–3 | every positive term heavy and remainders overlapping; budget |
+| 1 compound (AND, OR, NOT; built 2026-10-14) | none | 0 | 0 | 0 | done; co-descent / inclusion–exclusion +2–3 if needed | every term of an AND-group heavy at P; a heavy term under a candidate; a negative's rollup with a remainder; budget |
 | 2a anchors, light only | none | 0 | 0 | 0 | 1–1.5 | heavy `q$` (~2–4K suffixes, the common extensions); `^q` for any member |
 | 2b ends-with heavy | sidecar path keys + anchored rollups | ~3–4 | ~0.1 GB | +$0.05/day, MBs | 3–4 | < 3 characters |
 | 2c name index (starts-with on members, exact names) | `names/` | ~2–5 | ~8–12 GB | ~30 MB | 2 | heavy `^q` |
@@ -356,7 +394,7 @@ Ryan's goal: plain substring vs path segments must be seamless first; extensions
 
    No extension should ship before a plain heavy literal is answered on the newest scan.
 1. **Quotes and spaces** (0.5 day, $0): close the gaps and test what is advertised.
-2. **Compound, light-and-parked** (2–3 days, $0): `ckpt -tmp`, `llama sft`, `-tmp` are high-value and exact today for specific terms. Ship with `too-broad` UX and the real-data decline count; then rewrites + co-descent + OR (2–3 days) if that count says declines are common.
+2. **Compound** (built 2026-10-14, $0): `ckpt -tmp`, `llama sft`, `-tmp`, `qwen|llama` exact for specific terms, `too-broad` otherwise. Before flipping gcs, the real-data decline count; then co-descent / inclusion–exclusion over rollups (2–3 days) if it says declines are common.
 3. **Anchors, light only** (1–1.5 days, $0): `.safetensors$`, `.pt$`, `.ckpt$`, `.index$` and rare `^q` work at once. Heavy ones decline with a clear message.
 4. **Ends-with heavy** (3–4 days, ~$4 + $0.05/day): extension queries are likely the commonest real anchored use, and the shards already are their roots, so this is the cheapest heavy extension by far.
 5. **Kind**, folded into the first compaction (~$15 marginal, 3–4 days): `is:dir` is a pure subset filter; decide F1 vs F2 for `is:file` then.

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { auditRunControl, bucketOf, canonicalPrefix, covers, emptiedBatches, mergeBatches, planBucket, planDetail, planDigest, PlanSpansBuckets, planStaging, prefixShape, realGate, relPrefix, type RunRow, stageItems, uncovered } from './plans'
-import type { Sqlite } from './testD1'
+import { LINEAGES, type Sqlite, sqliteD1 } from './testD1'
 
 // An S3 deployment scanning two buckets, the first its primary.
 const P = 'primary-bucket'
@@ -172,11 +172,10 @@ describe('a `*` bucket list (a filesystem-root store)', () => {
   })
 })
 
-describe('auditRunControl — who stopped / undid / purged a run, in `admin_edits`', () => {
-  it('appends one row per control', async () => {
-    const { sqliteD1 } = await import('./testD1')
-    {
-      const { db, raw } = await sqliteD1('cw')
+describe.each(LINEAGES)('D1, %s lineage', lineage => {
+  describe('auditRunControl — who stopped / undid / purged a run, in `admin_edits`', () => {
+    it('appends one row per control', async () => {
+      const { db, raw } = await sqliteD1(lineage)
       await auditRunControl(db, 'stop', 'gcs-sweep-real-20261005-024600z', 'admin@example.org', null)
       await auditRunControl(db, 'undo', 'run-1', 'admin@example.org', 'gcs-undo-20261007-120000z')
       const rows = raw.prepare("SELECT tbl, pk, action, who, old_json, new_json FROM admin_edits ORDER BY id").all()
@@ -184,33 +183,27 @@ describe('auditRunControl — who stopped / undid / purged a run, in `admin_edit
         { tbl: 'deletion_runs', pk: 'gcs-sweep-real-20261005-024600z', action: 'update', who: 'admin@example.org', old_json: null, new_json: '{"control":"stop","job_id":null}' },
         { tbl: 'deletion_runs', pk: 'run-1', action: 'update', who: 'admin@example.org', old_json: null, new_json: '{"control":"undo","job_id":"gcs-undo-20261007-120000z"}' },
       ])
-    }
+    })
   })
-})
 
-describe('stageItems — one gesture is all-or-nothing', () => {
-  const GS = prefixShape({ STORE_SCHEME: 'gs://', STORE_BUCKETS: 'b' })!
-  // A statement failing mid-gesture (here: the item insert, on one prefix)
-  // must leave no plan, batch, item, absorbed-delete or audit row behind.
-  const boom = "CREATE TRIGGER boom BEFORE INSERT ON plan_items WHEN NEW.prefix = 'gs://b/boom/' BEGIN SELECT RAISE(ABORT, 'boom'); END"
-  const dump = (raw: Sqlite) => ({
-    plans: raw.prepare('SELECT id, name, state FROM plans ORDER BY id').all(),
-    batches: raw.prepare('SELECT id, plan_id, note FROM stage_batches ORDER BY id').all(),
-    items: raw.prepare('SELECT plan_id, prefix, batch_id FROM plan_items ORDER BY prefix').all(),
-    edits: raw.prepare('SELECT tbl, pk, action FROM admin_edits ORDER BY id').all(),
-  })
-  it('no open plan yet: nothing is created', async () => {
-    const { sqliteD1 } = await import('./testD1')
-    for (const lineage of ['cw'] as const) {
+  describe('stageItems — one gesture is all-or-nothing', () => {
+    const GS = prefixShape({ STORE_SCHEME: 'gs://', STORE_BUCKETS: 'b' })!
+    // A statement failing mid-gesture (here: the item insert, on one prefix)
+    // must leave no plan, batch, item, absorbed-delete or audit row behind.
+    const boom = "CREATE TRIGGER boom BEFORE INSERT ON plan_items WHEN NEW.prefix = 'gs://b/boom/' BEGIN SELECT RAISE(ABORT, 'boom'); END"
+    const dump = (raw: Sqlite) => ({
+      plans: raw.prepare('SELECT id, name, state FROM plans ORDER BY id').all(),
+      batches: raw.prepare('SELECT id, plan_id, note FROM stage_batches ORDER BY id').all(),
+      items: raw.prepare('SELECT plan_id, prefix, batch_id FROM plan_items ORDER BY prefix').all(),
+      edits: raw.prepare('SELECT tbl, pk, action FROM admin_edits ORDER BY id').all(),
+    })
+    it('no open plan yet: nothing is created', async () => {
       const { db, raw } = await sqliteD1(lineage)
       raw.exec(boom)
       await expect(stageItems(db, ['gs://b/a/', 'gs://b/b/', 'gs://b/boom/', 'gs://b/c/'], 'ann', 'memo', GS, '2026-10-07')).rejects.toThrow(/boom/)
       expect(dump(raw)).toEqual({ plans: [], batches: [], items: [], edits: [] })
-    }
-  })
-  it('an open plan: its items, batches and audit trail are untouched (absorbed items stay)', async () => {
-    const { sqliteD1 } = await import('./testD1')
-    for (const lineage of ['cw'] as const) {
+    })
+    it('an open plan: its items, batches and audit trail are untouched (absorbed items stay)', async () => {
       const { db, raw } = await sqliteD1(lineage)
       const first = await stageItems(db, ['gs://b/x/y/'], 'ann', 'first', GS, '2026-10-06')
       const before = dump(raw)
@@ -221,19 +214,16 @@ describe('stageItems — one gesture is all-or-nothing', () => {
         [{ plan_id: 1, prefix: 'gs://b/x/y/', batch_id: 1 }],
         before,
       ])
-    }
+    })
   })
-})
 
-describe('mergeBatches — a chunked staging folds into one batch', () => {
-  const GS = prefixShape({ STORE_SCHEME: 'gs://', STORE_BUCKETS: 'b' })!
-  const dump = (raw: Sqlite) => ({
-    batches: raw.prepare('SELECT id, note, created_by, created_ts FROM stage_batches ORDER BY id').all(),
-    items: raw.prepare('SELECT prefix, batch_id, as_of FROM plan_items ORDER BY prefix').all(),
-  })
-  it('moves the items, keeps the earliest time, takes the new note, deletes the folded batches', async () => {
-    const { sqliteD1 } = await import('./testD1')
-    for (const lineage of ['cw'] as const) {
+  describe('mergeBatches — a chunked staging folds into one batch', () => {
+    const GS = prefixShape({ STORE_SCHEME: 'gs://', STORE_BUCKETS: 'b' })!
+    const dump = (raw: Sqlite) => ({
+      batches: raw.prepare('SELECT id, note, created_by, created_ts FROM stage_batches ORDER BY id').all(),
+      items: raw.prepare('SELECT prefix, batch_id, as_of FROM plan_items ORDER BY prefix').all(),
+    })
+    it('moves the items, keeps the earliest time, takes the new note, deletes the folded batches', async () => {
       const { db, raw } = await sqliteD1(lineage)
       await stageItems(db, ['gs://b/r/1/', 'gs://b/r/2/'], 'ann', 'marks (1/3)', GS, '2026-10-06')
       await stageItems(db, ['gs://b/r/3/'], 'ann', 'marks (2/3)', GS, '2026-10-07')
@@ -254,38 +244,36 @@ describe('mergeBatches — a chunked staging folds into one batch', () => {
           { prefix: 'gs://b/z/', batch_id: 4, as_of: '2026-10-07' },
         ],
       })
-    }
-  })
-  it('refuses mixed stagers, foreign or missing batches, and a closed plan — writing nothing', async () => {
-    const { sqliteD1 } = await import('./testD1')
-    const { db, raw } = await sqliteD1('cw')
-    await stageItems(db, ['gs://b/a/'], 'ann', null, GS, null)
-    await stageItems(db, ['gs://b/c/'], 'bob', null, GS, null)
-    const before = dump(raw)
-    expect([
-      await mergeBatches(db, 1, 1, [2], null, 'ann'),
-      await mergeBatches(db, 1, 1, [9], null, 'ann'),
-      await mergeBatches(db, 1, 1, [1], null, 'ann'),
-    ]).toEqual([
-      { error: 'batches were staged by different people (ann, bob)', status: 409 },
-      { error: 'not batches of plan 1: 9', status: 404 },
-      { error: 'ids: at least one batch other than `into`', status: 400 },
-    ])
-    raw.exec("UPDATE plans SET state = 'closed'")
-    expect(await mergeBatches(db, 1, 1, [2], null, 'ann')).toEqual({ error: 'plan is closed', status: 409 })
-    expect(dump(raw)).toEqual(before)
-  })
-  it('emptiedBatches replays the merge: a later ancestor absorbs the merged batch', async () => {
-    const { sqliteD1 } = await import('./testD1')
-    const { db } = await sqliteD1('cw')
-    await stageItems(db, ['gs://b/r/1/'], 'ann', null, GS, null)
-    await stageItems(db, ['gs://b/r/2/'], 'ann', null, GS, null)
-    await mergeBatches(db, 1, 1, [2], null, 'ann')
-    await stageItems(db, ['gs://b/r/'], 'bob', null, GS, null)
-    const d = (await planDetail(db, 1, true))!
-    expect(d.emptied.map(({ id, staged, absorbed, unstaged }) => ({ id, staged, absorbed, unstaged }))).toEqual([
-      { id: 1, staged: 2, absorbed: [{ into: 3, n: 2 }], unstaged: 0 },
-    ])
-    expect(emptiedBatches(d.batches, d.items, [])).toEqual([{ ...d.emptied[0], staged: 0, absorbed: [] }])
+    })
+    it('refuses mixed stagers, foreign or missing batches, and a closed plan — writing nothing', async () => {
+      const { db, raw } = await sqliteD1(lineage)
+      await stageItems(db, ['gs://b/a/'], 'ann', null, GS, null)
+      await stageItems(db, ['gs://b/c/'], 'bob', null, GS, null)
+      const before = dump(raw)
+      expect([
+        await mergeBatches(db, 1, 1, [2], null, 'ann'),
+        await mergeBatches(db, 1, 1, [9], null, 'ann'),
+        await mergeBatches(db, 1, 1, [1], null, 'ann'),
+      ]).toEqual([
+        { error: 'batches were staged by different people (ann, bob)', status: 409 },
+        { error: 'not batches of plan 1: 9', status: 404 },
+        { error: 'ids: at least one batch other than `into`', status: 400 },
+      ])
+      raw.exec("UPDATE plans SET state = 'closed'")
+      expect(await mergeBatches(db, 1, 1, [2], null, 'ann')).toEqual({ error: 'plan is closed', status: 409 })
+      expect(dump(raw)).toEqual(before)
+    })
+    it('emptiedBatches replays the merge: a later ancestor absorbs the merged batch', async () => {
+      const { db } = await sqliteD1(lineage)
+      await stageItems(db, ['gs://b/r/1/'], 'ann', null, GS, null)
+      await stageItems(db, ['gs://b/r/2/'], 'ann', null, GS, null)
+      await mergeBatches(db, 1, 1, [2], null, 'ann')
+      await stageItems(db, ['gs://b/r/'], 'bob', null, GS, null)
+      const d = (await planDetail(db, 1, true))!
+      expect(d.emptied.map(({ id, staged, absorbed, unstaged }) => ({ id, staged, absorbed, unstaged }))).toEqual([
+        { id: 1, staged: 2, absorbed: [{ into: 3, n: 2 }], unstaged: 0 },
+      ])
+      expect(emptiedBatches(d.batches, d.items, [])).toEqual([{ ...d.emptied[0], staged: 0, absorbed: [] }])
+    })
   })
 })

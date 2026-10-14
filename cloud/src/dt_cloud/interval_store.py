@@ -27,17 +27,15 @@ from .static_names import OPEN, U64, connect, q, range_preds, read_json, upload_
 err = partial(print, file=sys.stderr, flush=True)
 
 PREFIX = "interval-store"
-PROFILES = Path(__file__).parent / "interval_profiles"
 
 
 def load_profile(name: str | None) -> dict:
-    """A deployment profile (`interval_profiles/<name>.json`, or a path): its bucket and the scans the
-    parity check samples. `$INTERVAL_STORE_PROFILE` names one when `-P` doesn't."""
+    """A deployment's profile (a JSON file it carries, e.g. its `job/interval-store.json`): its bucket and the
+    scans the parity check samples. `$INTERVAL_STORE_PROFILE` names it when `-P` doesn't."""
     name = name or os.environ.get("INTERVAL_STORE_PROFILE")
     if not name:
-        raise SystemExit("no profile: pass -P NAME|PATH or set $INTERVAL_STORE_PROFILE (e.g. `gcs`)")
-    p = Path(name) if name.endswith(".json") else PROFILES / f"{name}.json"
-    return json.loads(p.read_text())
+        raise SystemExit("no profile: pass -P PATH or set $INTERVAL_STORE_PROFILE")
+    return json.loads(Path(name).read_text())
 
 
 def _bucket(bucket: str | None, profile: str | None) -> str:
@@ -579,7 +577,7 @@ def cli() -> None:
 @option("-S", "--slices", is_flag=True, help="Build the owner-slice versions (`sv/`, `sv-digest/`) instead of the path versions")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB database + spill dir")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
-@option("-P", "--profile", help="Deployment profile (`interval_profiles/<name>.json` or a path; default $INTERVAL_STORE_PROFILE)")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def build_cmd(bucket, profile, force, gen, index, mount, mem, per_task, out, threads, only, slices, tmp, no_upload) -> None:
     """Build key ranges' path and read versions over every scan of GEN's `scans.json`, verifying each
     scan's reconstruction (digest written last: it marks the range done)."""
@@ -653,7 +651,7 @@ def churn_stats(con, root: str, scans: dict) -> dict:
 @option("-n", "--per-task", default=1, type=IntRange(min=1), help="Ranges per task: task t folds [t·n, (t+1)·n)")
 @option("-o", "--out", default="/stage/out", help="Local output dir (uploaded, then removed)")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
-@option("-P", "--profile", help="Deployment profile (`interval_profiles/<name>.json` or a path; default $INTERVAL_STORE_PROFILE)")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-S", "--slice-totals", is_flag=True, help="Instead: each range's slice versions with their path's total (`svt/`, `slice_totals_range`)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
@@ -700,7 +698,7 @@ def _refuse_overwrite(bucket: str, keys: list[str]) -> None:
 @option("-s", "--sort", "sorts", multiple=True, type=Choice(list(SORTS)), help="Sort(s) to cut (default: the task's)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
-@option("-P", "--profile", help="Deployment profile (`interval_profiles/<name>.json` or a path; default $INTERVAL_STORE_PROFILE)")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload) -> None:
     """Cut the served sorts from the range files: `served/<sort>.parquet` + `.groups.parquet`."""
     bucket = _bucket(bucket, profile)
@@ -773,7 +771,7 @@ def download_served(bucket: str, prefix: str, dst: Path, *, workers: int = 16) -
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-s", "--scans", "scan_ids", help="Comma-separated scan ids to sample (default: the profile's `verify_scans`)")
 @option("-T", "--tmp", default="/stage/tmp", help="Local scratch (served store, per-scan copies, spill)")
-@option("-P", "--profile", help="Deployment profile (`interval_profiles/<name>.json` or a path; default $INTERVAL_STORE_PROFILE)")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) -> None:
     """Parity against the per-scan path store over the profile's `verify_scans`: every
     view's tiles and every diff's rows, with both sides' read cost; `verify/t##.jsonl` + `.json`."""
@@ -805,7 +803,7 @@ R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "s
 @option("-m", "--mount", help="Ignored (the Batch driver passes it)")
 @option("-n", "--dry-run", is_flag=True, help="List what would be copied")
 @option("-w", "--workers", default=8, type=int, help="Parallel copies")
-@option("-P", "--profile", help="Deployment profile (`interval_profiles/<name>.json` or a path; default $INTERVAL_STORE_PROFILE)")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def r2_copy_cmd(bucket, profile, gen, mount, dry_run, workers) -> None:
     """Copy the generation's served files GCS → R2 under the same keys (`static-names r2-copy`'s streaming
     copy: objects already there with the same size and md5 are skipped). R2 via `R2_ENDPOINT`,

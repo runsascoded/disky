@@ -287,7 +287,7 @@ The per-scan stores read GCS through S3-compat from Cloudflare (cross-provider).
 
 1. **Measure the provider term in every run.** Generalize `api/static-bench.ts` into an admin/bench-gated `GET /api/bench/origin?size=262144&n=16&par=1|8`. It times *n* same-size range GETs against a fixed object in each origin (one in `STORE_BUCKET` via `makeStore`, one in `INDEX_R2`) from the same isolate. It reports per-read p50/p90 and the 8-wide wall time. Run it at the start and end of each bench run, from the same colo.
 2. **Report reads, not just ms.** With `range=…o;b=…;r=…`, each colo-cold sample records origin read count, bytes and critical-path rounds. A sample's normalized cost is `rounds × RTT_p50(provider) + bytes / throughput(provider)`, plus the rest (decode, D1, walk). The report shows each store's cold result **as measured** and **re-costed at the other provider's RTT/throughput**. Then "interval on R2 vs per-scan *as if* on R2" is a layout comparison.
-3. **The clean A/B, once.** Copy one per-scan generation (a date's `path` + `bysize` sorts and their `.groups.parquet`) from GCS to R2. Serve it as a secondary store (`store=` overlay, `specs/multi-store.md`) whose `STORE_*` target is R2's S3 endpoint, and run the catalogue's per-scan queries against it.
+3. **The clean A/B, once.** Copy one per-scan generation (a date's `path` + `bysize` sorts and their `.groups.parquet`) from GCS to R2. Serve it as a secondary store (`store=` overlay, `specs/done/multi-store.md`) whose `STORE_*` target is R2's S3 endpoint, and run the catalogue's per-scan queries against it.
    - per-scan-GCS vs per-scan-R2 is the pure provider effect;
    - per-scan-R2 vs interval-R2 is the pure layout effect.
 

@@ -80,9 +80,9 @@ export function foldLatest<R extends LedgerRow>(rows: R[]): Map<string, R> {
   return m
 }
 
-/** `gs://marin-b/x/y/` → index key `marin-b/x/y` at depth 3. */
+/** `gs://marin-b/x/y/` → index key `marin-b/x/y` at depth 3; `file:///Users/x/` → `Users/x` at depth 2. */
 export const idxKey = (prefix: string): { path: string; depth: number } => {
-  const path = prefix.replace(/^[a-z0-9]+:\/\//, '').replace(/\/+$/, '')
+  const path = prefix.replace(/^[a-z0-9]+:\/\/\/*/, '').replace(/\/+$/, '')
   return { path, depth: path.split('/').length }
 }
 

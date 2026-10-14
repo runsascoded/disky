@@ -87,7 +87,7 @@ elif [ "$LOCALDB" = 1 ] && [ ! -d .wrangler/state/v3/d1 ]; then
   # No local D1 yet and not refreshing: apply the migrations so the auth gate
   # has its schema (empty ledger). `--refresh` instead mirrors prod's rows in.
   echo "→ no local D1 yet — applying migrations (empty ledger; use --refresh to seed from prod)" >&2
-  npx wrangler d1 migrations apply "$DB" --local
+  pnpm exec wrangler d1 migrations apply "$DB" --local
 fi
 
 # Boot wrangler in the background. Local mode has no tunnel and needs no auth, so
@@ -103,11 +103,11 @@ deploy_account() {
 }
 run_wrangler() {
   if [ "$LOCALDB" = 1 ]; then
-    npx wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01
+    pnpm exec wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01
   else
     while :; do
       env -u CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID="$(deploy_account)" \
-        npx wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01 || true
+        pnpm exec wrangler pages dev public --port "$WPORT" --compatibility-date 2026-01-01 || true
       echo "wrangler exited; restarting in 3s (ctrl-c to stop)" >&2
       sleep 3
     done

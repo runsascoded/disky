@@ -1,4 +1,4 @@
-"""The hex-run rule (specs/static-hex-runs.md): suffix starts, `occurs`, hex-affected literals, and the SQL forms equal
+"""The hex-run rule (specs/done/static-hex-runs.md): suffix starts, `occurs`, hex-affected literals, and the SQL forms equal
 to the Python ones. `site/functions/_lib/fixtures/hex-runs/cases.json` is the shared table the TS `occurs` is tested
 against (`hexRuns.test.ts`); this test checks it is exactly what the Python rule computes (regenerate with
 `HEX_RUNS_UPDATE=1 pytest tests/test_hex_runs.py`)."""

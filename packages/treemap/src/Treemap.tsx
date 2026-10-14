@@ -1189,7 +1189,9 @@ export function Treemap<T>({
           className="dt-treemap-bg"
           style={{
             position: 'absolute',
-            inset: shared ? edge : 0,
+            // An inset `ring` is a box-shadow on the cell box, under this layer: leave it bare too, or it
+            // would only show as far as the shared edge (and not at all in gaps mode).
+            inset: Math.max(shared ? edge : 0, ring?.inset ? ring.width : 0),
             background: style.bg,
             ...(style.hatch && { backgroundImage: style.hatch }),
             // Dashed frame marks the dust tile as not-a-real-cell.

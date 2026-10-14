@@ -77,7 +77,7 @@ const UNSET_SLASH = { error: 'Use one nonempty NUL/slash-free literal of at most
 describe('an indexed-only deployment (`FILTER_INDEXED_ONLY=1`)', () => {
   it('refuses a name with `/` with its reason code; unset, the validator\'s own message (no code)', async () => {
     const flagged = await request('date=2026-10-05&name=a%2Fb', { ...env, FILTER_INDEXED_ONLY: '1' } as NameSummaryEnv)
-    expect([flagged.status, await flagged.json(), sent()]).toEqual([400, { error: 'Only plain text search (a substring of a file or folder name) is supported here; a term can’t contain “/” (it matches within one name).', code: 'unsupported-slash' }, []])
+    expect([flagged.status, await flagged.json(), sent()]).toEqual([400, { error: 'Only text search (substrings of file or folder names, combined with spaces, | and -) is supported here; a term can’t contain “/” (it matches within one name).', code: 'unsupported-slash' }, []])
     const unset = await request('date=2026-10-05&name=a%2Fb')
     expect([unset.status, await unset.json()]).toEqual([400, UNSET_SLASH])
   })

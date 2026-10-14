@@ -20,7 +20,7 @@ V2_FROM = 3  # scans from here on are store generations (v2); earlier ones v1 in
 #: (a scan every 6 h, ids to the minute, no owners: its v2 sorts carry no `usr` column, `cw-l2/<scan>/index/<gen>/…`).
 FLAVORS = {
     "gcs": {"ids": DATES, "layout": "listing/{id}/path-index.parquet", "owners": True, "per_dir": 5},
-    # gcs moving to sub-daily scan ids (specs/scan-ids-not-dates.md): date ids, then two scans on one day
+    # gcs moving to sub-daily scan ids (specs/done/scan-ids-not-dates.md): date ids, then two scans on one day
     "gcs-sub": {"ids": ["2026-07-30", "2026-07-31", "2026-08-02", "2026-08-03T0001", "2026-08-03T1200"],
                 "layout": "listing/{id}/path-index.parquet", "owners": True, "per_dir": 5},
     # the appends (`test_static_append`: the last two scans) are two scans of one day

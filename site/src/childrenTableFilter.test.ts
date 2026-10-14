@@ -6,10 +6,14 @@ import { type CoverItem, type RowMatches, rowMatchesOf } from './filterCover'
 
 // The table's own logic under a filter, with its surroundings stubbed: the selection is preset (`selected`),
 // and the assign / trash controls render what they would send.
-const { selected, staged, acts } = vi.hoisted(() => ({ selected: new Set<string>(), staged: [] as string[][], acts: [] as { resolve: () => Promise<unknown> }[] }))
+const { selected, staged, acts, planItems } = vi.hoisted(() => ({ selected: new Set<string>(), staged: [] as string[][], acts: [] as { resolve: () => Promise<unknown> }[], planItems: [] as { prefix: string; kind?: 'prefix' | 'object' }[] }))
 vi.mock('./auth', () => ({ useCanAssign: () => true, useCanStage: () => true }))
 vi.mock('./store', () => ({ useStore: () => ({ staging: true, owners: true }) }))
-vi.mock('./plans', () => ({ useStage: () => ({ error: null, mutate: (v: { prefixes: string[] }) => staged.push(v.prefixes) }) }))
+vi.mock('./plans', () => ({
+  useStage: () => ({ error: null, mutate: (v: { prefixes: string[] }) => staged.push(v.prefixes) }),
+  // The open plan (`useStagedIndex`): `planItems`, preset per test.
+  useStagedPlan: () => ({ data: { items: planItems } }),
+}))
 vi.mock('./perf', () => ({ usePerfCommit: () => {} }))
 vi.mock('./units', () => ({ useUnits: () => ({ fmtBytes: (b: number) => `${b} B` }) }))
 vi.mock('use-prms', () => ({ intParam: () => ({}), useUrlState: () => [20, () => {}] }))
@@ -67,7 +71,7 @@ const assigns = (html: string) => [...html.matchAll(/data-assign="([^"]*)" data-
 const checkboxes = (html: string) => rows(html).map(r => /<td class="col-sel">(.*?)<\/td>/.exec(r)?.[1] === '' ? 'no box' : 'box')
 const actionsCell = (row: string) => /<td class="actions">(.*)<\/td>$/.exec(row)?.[1] ?? ''
 
-beforeEach(() => { selected.clear(); staged.length = 0; acts.length = 0; asked.length = 0 })
+beforeEach(() => { selected.clear(); staged.length = 0; acts.length = 0; asked.length = 0; planItems.length = 0 })
 
 describe('the children table under a filter', () => {
   it('a row holding exactly one match shows the path to it (as its tile); several: its name and how many; none: its name', () => {
@@ -153,5 +157,17 @@ describe('the children table under a filter', () => {
     expect(rows(html).map(r => /data-tip="Stage[^"]*" data-placement="([^"]*)"/.exec(actionsCell(r))?.[1])).toEqual([
       'right', 'right', 'right', 'right',
     ])
+  })
+  it('rows the open plan holds are marked: staged itself or under a staged folder (a chip in place of the trash), a folder holding staged items counts them', () => {
+    const show = (node.c![1].c![0])
+    planItems.push({ prefix: 'gs://marin-us-central1/show/x1.mp3', kind: 'object' }, { prefix: 'gs://marin-us-central1/show/sub/' }, { prefix: 'gs://marin-us-central1/show/keep/deep/' })
+    const html = renderToStaticMarkup(createElement(ChildrenTable, {
+      node: { ...show, c: [...show.c!, { n: 'sub', k: 'dir', b: 1, o: 1 }, { n: 'keep', k: 'dir', b: 1, o: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
+      ownerIdx: { assignmentOf: () => null } as never, onOpen: () => {}, onOpenObject: () => {},
+    }))
+    expect(rows(html).map(r => [name(r), /<a class="staged-chip"[^>]*>([^<]*)<\/a>/.exec(actionsCell(r))?.[1] ?? (/aria-label="trash"/.test(actionsCell(r)) ? 'trash' : '?')])).toEqual([
+      ['x1.mp3', 'staged'], ['x2.mp3', 'trash'], ['x3.mp3', 'trash'], ['sub', 'staged'], ['keep · 1 staged', 'trash'],
+    ])
+    expect([...html.matchAll(/<tr([^>]*)>/g)].map(([, a]) => /class="([^"]*)"/.exec(a)?.[1] ?? '')).toEqual(['', 'staged', '', '', 'staged', '', 'total-row'])
   })
 })

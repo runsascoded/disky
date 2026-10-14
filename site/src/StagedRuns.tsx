@@ -227,7 +227,7 @@ export function RunsSection({ runs, jobs, configured, jobsError, admin, busy, ac
                       {r?.purge_state === 'done' && <span className="tag">purged</span>}
                     </td>
                     <td>{CAPS.runFiles && r && <RunProgress id={r.run_id} live={live} compact fmtBytes={fmtBytes} lifetime={secs != null ? { objects: r.finished_ts ? r.deleted_objects : p?.deletes ?? 0, seconds: secs } : undefined} />}</td>
-                    <td className="num"><Tooltip content={<>{elapsedDetails(v).map(line => <div key={line}>{line}</div>)}</>}><span>{secs == null ? <span className="dim">—</span> : fmtDur(secs)}</span></Tooltip></td>
+                    <td className="num"><Tooltip cell content={<>{elapsedDetails(v).map(line => <div key={line}>{line}</div>)}</>}><span>{secs == null ? <span className="dim">—</span> : fmtDur(secs)}</span></Tooltip></td>
                     <td className="num">{r?.finished_ts ? fmtN(r.skipped_gone) : p ? fmtN(p.gone) : <span className="dim">—</span>}</td>
                     <td className="num">{r?.finished_ts ? fmtN(r.skipped_overwritten ?? 0) : <span className="dim">—</span>}</td>
                     <td className="num">{r?.finished_ts ? fmtN((r.drift_dirs ?? 0) + (r.ledger_drift_dirs ?? 0)) : <span className="dim">—</span>}</td>

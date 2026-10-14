@@ -1,4 +1,4 @@
-"""Scan ids: a scan's identity is its id, never its date (specs/scan-ids-not-dates.md).
+"""Scan ids: a scan's identity is its id, never its date (specs/done/scan-ids-not-dates.md).
 
 A scan id is date-only ``YYYY-MM-DD`` or timed ``YYYY-MM-DDTHHMM`` (UTC — a job's
 ``SNAP_ID``); any deployment may scan at any cadence. A day may hold several scans, so a

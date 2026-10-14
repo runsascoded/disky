@@ -1,5 +1,5 @@
 /** One view = "path + scan + scope + pixel budget", answered from the index
- * tiers (specs/view-serving.md §1–2). Shared by `/api/subtree` (the map),
+ * tiers (specs/done/view-serving.md §1–2). Shared by `/api/subtree` (the map),
  * `/api/todo` (the review backlog) and anything else that wants a folded tree.
  *
  * Treemap area is proportional to bytes, so "everything this canvas can draw
@@ -18,7 +18,7 @@
  * the coarsest such tier; a path below every floor (or a scan without
  * coarse tiers) reads the floor-free tier.
  *
- * Sort choice, version-2 generations (the path store, specs/path-store.md:
+ * Sort choice, version-2 generations (the path store, specs/done/path-store.md:
  * every row, objects included, `kind` on each, no coarse tiers): a
  * thresholded subtree read goes to the `bysize` sort — the groups above the
  * threshold under P, whatever the tree's shape — unless P's subtree is small
@@ -41,7 +41,8 @@ import { shared } from './shared.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
 import { loadRegistry } from './identity.js'
-import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
+import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticCompound, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
+import { type BoolAnswer, boolPlan, compound } from './staticBool.js'
 import { scanAt } from './staticNames.js'
 import { FilterRejected, indexedOnly, reject } from './indexedOnly.js'
 
@@ -94,7 +95,7 @@ export interface ViewOpts {
   /** Absolute byte threshold instead of the pixel-budget one (e.g. the to-do
    * backlog's min bytes). Still attenuated per level by `atten`. */
   threshold?: number
-  // --- the page's scope axes (specs/view-serving.md §2) -------------------
+  // --- the page's scope axes (specs/done/view-serving.md §2) -------------------
   /** `o=owned|unowned`: the owner axis's pools (a user is `lens`). */
   owner?: OwnerScope
   /** `cl=` ⊆ snca: keep only these storage classes' bytes (rows are scaled,
@@ -250,6 +251,8 @@ interface Agg {
   /** Σ size·mtime_mean over rows with a mean, and the bytes weighed. */
   wts: number
   wb: number
+  /** Newest stamp at or under the path (epoch seconds; the rows' `mtime` max) — the wire's `d`; null on v1 rows. */
+  m: number | null
   a: number | null // subtree-max last-read epoch day (read lens); null = never read
   cb: Record<string, number>
   ub: Record<string, number>  // per-user bytes; unowned = b − Σ ub
@@ -267,7 +270,7 @@ interface Agg {
   ver?: { vf: number; vt: number } | null
 }
 
-const newAgg = (): Agg => ({ b: 0, o: 0, wts: 0, wb: 0, a: null, cb: {}, ub: {}, kind: null, nc: null, nd: null, ag: null })
+const newAgg = (): Agg => ({ b: 0, o: 0, wts: 0, wb: 0, m: null, a: null, cb: {}, ub: {}, kind: null, nc: null, nd: null, ag: null })
 
 function merge(a: Agg, r: Row): void {
   a.b += r.size
@@ -276,6 +279,7 @@ function merge(a: Agg, r: Row): void {
     a.wts += r.mtime_mean * r.mtime_w
     a.wb += r.mtime_w
   }
+  if (r.mtime != null) a.m = a.m == null ? r.mtime : Math.max(a.m, r.mtime)
   if (r.last_read != null) a.a = a.a == null ? r.last_read : Math.max(a.a, r.last_read)
   if (r.cls2) a.cb['2'] = (a.cb['2'] ?? 0) + r.cls2
   if (r.cls3) a.cb['3'] = (a.cb['3'] ?? 0) + r.cls3
@@ -292,6 +296,7 @@ function merge(a: Agg, r: Row): void {
 function subtract(parent: Agg, kids: Agg[]): Agg {
   const out = newAgg()
   out.a = parent.a // max isn't subtractable; the residual's read day ≤ parent's
+  out.m = parent.m // likewise its newest stamp
   const sum = (f: (a: Agg) => number) => kids.reduce((s, k) => s + f(k), 0)
   out.b = parent.b - sum(a => a.b)
   out.o = Math.max(0, parent.o - sum(a => a.o))
@@ -317,6 +322,7 @@ function scale(a: Agg, frac: number): Agg {
   out.o = a.o * frac
   out.wts = a.wts * frac
   out.wb = a.wb * frac
+  out.m = a.m
   out.a = a.a
   out.kind = a.kind
   out.nc = a.nc
@@ -328,7 +334,9 @@ function scale(a: Agg, frac: number): Agg {
 
 function display(a: Agg): Record<string, unknown> {
   const out: Record<string, unknown> = {}
-  if (a.wb) out.d = Math.round(a.wts / a.wb / 86400)
+  // A folder's date is its newest write, not a byte-weighted mean: a mean of
+  // half-July, half-September reads "August", a date nothing was written on.
+  if (a.m != null) out.d = Math.floor(a.m / 86400)
   if (a.a != null) out.a = a.a
   if (a.ag?.some(v => v > 0)) out.ag = a.ag.map(v => Math.round(v))
   const desc = (m: Record<string, number>) =>
@@ -807,6 +815,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   if (query && !ol && (!rootHit || negP)) {
     const sumAgg = (into: Agg, from: Agg) => {
       into.b += from.b; into.o += from.o; into.wts += from.wts; into.wb += from.wb
+      if (from.m != null) into.m = into.m == null ? from.m : Math.max(into.m, from.m)
       if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
       for (const k in from.cb) into.cb[k] = (into.cb[k] ?? 0) + from.cb[k]
       for (const k in from.ub) into.ub[k] = (into.ub[k] ?? 0) + from.ub[k]
@@ -872,6 +881,22 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // (a deployment that builds none never opens that per-scan sort for them).
     const searchIdx = pathIdx && pathIdx.asOf != null && env.SEARCH_SIDECARS ? withTrace(await openFine(perScan(env), date, 'path'), tr) : pathIdx
     const pq = query.ast
+    // A compound query of literals (`a b`, `a|b`, `a -b`, `-b`; `staticBool.ts`) from the static name index: the
+    // match roots and excluded paths on any scan its answers cover, exact. Where it can't be exact (too broad
+    // to combine, a term no source answers) an indexed-only deployment refuses, and any other reads as before (the
+    // search or the thresholded walk, flagged); a scan it doesn't cover is `scan-not-indexed` on every deployment,
+    // as for a single literal — never the walk's answer for a missing index.
+    const bplan = !lens && !classes ? boolPlan(pq) : null
+    let sb: BoolAnswer | null = null
+    if (compound(bplan)) {
+      const sfs = staticFilterStore(env)
+      const got = sfs ? await staticCompound(sfs, bplan, path, [date]) : null
+      tr?.('static', performance.now() - t0, got ? ('answer' in got ? `bool ${got.answer.roots.length} roots, ${got.answer.excl.length} excl, ${got.answer.io.reads} reads` : `bool ${got.reject.code}${got.why ? ` (${got.why})` : ''}`) : undefined)
+      if (got && 'answer' in got) {
+        sb = got.answer
+        if ((await dirsOnlyOf(sfs, [date])).length) noteCoverage(cov, 'dirsOnly', DIRS_ONLY)
+      } else if (indexedOnly(env) || got?.reject.code === 'scan-not-indexed') throw new FilterRejected(got?.reject ?? reject('scan-not-indexed'))
+    }
     const traceSearch = (what: string, f: SearchFound) => tr?.('search', performance.now() - t0, `${what} ${f.stats.mode} c${f.stats.candidates} ${f.stats.layout === 2 ? `r${f.stats.rowsRgs}` : `n${f.stats.namesRgs} g${f.stats.pathRgs}`}${f.truncated ? ' cut' : ''}`)
     if (rootHit) {
       // The view root is the match: its aggregate is the root read's.
@@ -886,7 +911,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // A literal the static index answers, on a scan its generation doesn't hold (newer than its newest — published,
       // not yet appended — or before its base): `scan-not-indexed` on every deployment, indexed-only or not — never the
       // thresholded walk, which can't see small matches and reads as "no matches". Queries the index can't answer at
-      // all (regexes, globs, several terms: no literal) still walk.
+      // all (regexes, globs: no literal) still walk; compound literals are `sb`'s, above.
       if (sfs && !skey && staticLiteral(pq)) throw new FilterRejected(reject('scan-not-indexed'))
       // A dir-only (v1) scan's index never saw a file: whatever answers, its matches are its folders'.
       if (skey && (await dirsOnlyOf(sfs, [date])).length) noteCoverage(cov, 'dirsOnly', DIRS_ONLY)
@@ -905,12 +930,18 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // matches": below the fleet root it is `term-too-common`, and the root's catalog buckets know no owners.
       // Nor does an anchored term on a generation with no anchors build (`anchor-not-indexed`), indexed-only or not.
       const noDrill = !!sfs && !!skey && sfs.source.heavy === false
-      const why = shits ? null : (noDrill || raw?.rollup?.scopedBelow) && raw?.rollup?.bucketsOnly && owner ? reject('unsupported-scope') : declined(sfs, skey, raw)
+      const why = shits || sb ? null : (noDrill || raw?.rollup?.scopedBelow) && raw?.rollup?.bucketsOnly && owner ? reject('unsupported-scope') : declined(sfs, skey, raw)
       if (why && (indexedOnly(env) || why.code === 'anchor-not-indexed' || (noDrill && why.code !== 'scan-not-indexed'))) throw new FilterRejected(why)
       tr?.('static', performance.now() - t0, shits ? `${skey} ${shits.rollup ? `rollup ${shits.rollup.cells.length}` : shits.hits.length}` : skey ? `declined${off ? ` (${off})` : ''}` : undefined)
       if (shits?.rollup) {
         const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
         return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho) })
+      }
+      if (sb) {
+        p1 = aggregateHits(sb.roots)
+        roots = [...p1.depth.keys()].sort()
+        p1Tier = 'static'
+        staticRoots = true
       }
       if (shits) {
         // Per isolate: the same held hits, scan and owner scope aggregate the same (a view's first paint,
@@ -931,7 +962,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         p1Tier = shits.io.from === 'drill' ? 'drill' : 'static'
         staticRoots = true
       }
-      const plan = !shits && store && pq ? planPositive(pq) : null
+      const plan = !shits && !sb && store && pq ? planPositive(pq) : null
       const searched = plan ? await searchRoots(perScan(env), searchIdx!, query, plan, path, o.searchLimits, `pos:${JSON.stringify(pq)}`) : null
       if (searched) traceSearch('pos', searched)
       // A search cut before it found anything (its heaviest name alone is
@@ -945,18 +976,18 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         noteCoverage(cov, 'partial', found.reason)
       } else if (searched) {
         noteCoverage(cov, 'partial', `the search stopped before finding a match (${searched.reason}); showing a thresholded read`)
-      } else if (!shits) {
+      } else if (!shits && !sb) {
         // Phase 1 is a thresholded read: what it can't see, it can't match.
         noteCoverage(cov, 'approximate', lens ? APPROX_LENS : !store || plan ? APPROX_NO_INDEX : APPROX_UNINDEXED)
       }
-      for (const t of found || shits ? [] : tiers) {
+      for (const t of found || shits || sb ? [] : tiers) {
         const rs = await readRows(t.idx, dP + 1, 1e9, pLo, pHi, t === tiers[0] ? undefined : thrAt)
         p1 = aggregate(rs)
         roots = matchRoots(p1.depth.keys(), query, path)
         p1Tier = t.name
         if (roots.length) break
       }
-      const fineIdx = roots.length || found || shits ? null : pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
+      const fineIdx = roots.length || found || shits || sb ? null : pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
       if (fineIdx && !isStore(fineIdx) && rootAll.o > (o.v1ScanObjects ?? V1_FILTER_SCAN_OBJECTS)) noteCoverage(cov, 'approximate', APPROX_V1_TOO_BIG)
       if (fineIdx && (isStore(fineIdx) || rootAll.o <= (o.v1ScanObjects ?? V1_FILTER_SCAN_OBJECTS))) {
         // Every depth: `maxDepth` caps what phase 2 draws, never where
@@ -1005,7 +1036,11 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       for (let q = p; q.length > path.length; q = parentOf(q)) { if (excl.has(q)) return true; if (q === '') break }
       return false
     }
-    if (negP && pq) {
+    if (negP && sb) {
+      // The static answer's excluded paths, live on this scan: every one there is (`staticBool.ts`).
+      const an = aggregateHits(sb.excl)
+      for (const e of [...an.depth.keys()].sort()) if (rootFor(e) !== null) exclude(e, scoped(e, an.all.get(e)!, an.mine.get(e)!))
+    } else if (negP && pq) {
       t0 = performance.now()
       const nplan = store ? planNegative(pq) : null
       const ns = nplan ? await searchRoots(perScan(env), searchIdx!, negP, nplan, path, o.searchLimits, `neg:${JSON.stringify(pq)}`) : null
@@ -1186,14 +1221,14 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         const a = rootAggOf.get(r)
         if (!a) continue
         // A copy: phase 1's aggregates may be the isolate's (`staticPhase1`), shared across views.
-        rootAggOf.set(r, { ...a, kind: m.kind, wts: m.wts, wb: m.wb, a: m.a, cb: m.cb, nc: m.nc, nd: m.nd })
+        rootAggOf.set(r, { ...a, kind: m.kind, wts: m.wts, wb: m.wb, m: m.m, a: m.a, cb: m.cb, nc: m.nc, nd: m.nd })
       }
       tr?.('details', performance.now() - t0, String(d.mine.size))
       netOf.clear()
     }
     const p2 = aggregate(rows2)
-    // Excluded paths only phase 2 saw (without the index, below phase 1's read).
-    if (negP) {
+    // Excluded paths only phase 2 saw (without the index, below phase 1's read; a static answer lists them all).
+    if (negP && !sb) {
       const fresh = matchRoots([...p2.depth.keys()].filter(p => rootFor(p) !== null && !underExcl(p)), negP, path)
       for (const e of fresh) exclude(e, scoped(e, p2.all.get(e)!, p2.mine.get(e)!))
     }
@@ -1219,6 +1254,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       const copied = new Set<string>()
       const addDetail = (into: Agg, d: Agg) => {
         into.wts += d.wts; into.wb += d.wb
+        if (d.m != null) into.m = into.m == null ? d.m : Math.max(into.m, d.m)
         if (d.a != null) into.a = into.a == null ? d.a : Math.max(into.a, d.a)
         for (const k in d.cb) into.cb[k] = (into.cb[k] ?? 0) + d.cb[k]
       }
@@ -1459,7 +1495,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       { path, agg: rootAgg },
       new Map([...aggs].map(([p, agg]) => [p, { depth: aggDepth.get(p)!, agg }])),
       query,
-      (into, from) => { for (const k of ['b', 'o', 'wts', 'wb'] as const) into[k] += from[k]; if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a); for (const key of ['cb', 'ub'] as const) for (const [k, v] of Object.entries(from[key])) into[key][k] = (into[key][k] ?? 0) + v },
+      (into, from) => { for (const k of ['b', 'o', 'wts', 'wb'] as const) into[k] += from[k]; if (from.m != null) into.m = into.m == null ? from.m : Math.max(into.m, from.m)
+      if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a); for (const key of ['cb', 'ub'] as const) for (const [k, v] of Object.entries(from[key])) into[key][k] = (into[key][k] ?? 0) + v },
       newAgg,
     )
     rootAgg = f.root
@@ -1734,7 +1771,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: { dP: number
     }
     for (const [p, d] of own) {
       const a = exact.get(p)!
-      a.kind = d.kind; a.wts = d.wts; a.wb = d.wb; a.a = d.a; a.cb = d.cb; a.ub = d.ub; a.nc = d.nc; a.nd = d.nd
+      a.kind = d.kind; a.wts = d.wts; a.wb = d.wb; a.m = d.m; a.a = d.a; a.cb = d.cb; a.ub = d.ub; a.nc = d.nc; a.nd = d.nd
     }
     tr?.('details', performance.now() - t0, String(own.size))
   }
@@ -1855,7 +1892,8 @@ class Overlay<K, V> extends Map<K, V> {
 /** `from` summed into `into` (`readView`'s `sumAgg`). */
 function addAgg(into: Agg, from: Agg): void {
   into.b += from.b; into.o += from.o; into.wts += from.wts; into.wb += from.wb
-  if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
+  if (from.m != null) into.m = into.m == null ? from.m : Math.max(into.m, from.m)
+      if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
   for (const k in from.cb) into.cb[k] = (into.cb[k] ?? 0) + from.cb[k]
   for (const k in from.ub) into.ub[k] = (into.ub[k] ?? 0) + from.ub[k]
 }
@@ -2072,7 +2110,7 @@ function sumInteriors(a?: View['interiors'], b?: View['interiors']): NonNullable
   return { read: xs.reduce((n, x) => n + x.read, 0), skipped: xs.reduce((n, x) => n + x.skipped, 0), reason: [...new Set(xs.map(x => x.reason))].join(' · '), ...(late ? { late } : {}) }
 }
 
-/** What changed under P between two scans (specs/view-serving.md §2):
+/** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
  * the larger side's pixel-budget threshold — so a directory is named on both
  * sides or folded on both, never named here and hidden in `(other)` there

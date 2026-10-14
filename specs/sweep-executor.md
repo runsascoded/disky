@@ -231,7 +231,7 @@ The runs table moves buckets after progress, state, recent-rate history, elapsed
 - User self-serve deletion (v2, above). — Regex mark patterns (don't exist). — Ledger tombstoning (follow-up). — CW/S3 sweep (separate estate, no marks yet).
 
 [mark-sweep-ui.md]: gcs:specs/done/mark-sweep-ui.md
-[actions-ledger.md]: actions-ledger.md
+[actions-ledger.md]: done/actions-ledger.md
 [repo-hygiene-audit.md]: gcs:specs/done/repo-hygiene-audit.md
 [xml-bulk-delete]: https://docs.cloud.google.com/storage/docs/xml-api/post-bucket
 

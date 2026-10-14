@@ -1,5 +1,5 @@
 /** Bytes under a path per scan — the size-over-time chart, scoped like the
- * map (specs/view-serving.md §1 "series.json" → this).
+ * map (specs/done/view-serving.md §1 "series.json" → this).
  *
  *   GET /api/series?path=<P>[&lens=user:<id>|user:me][&o=owned|unowned]
  *
@@ -19,7 +19,8 @@ import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, ownerKey, ownerOk, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
-import { hexNote, hexQuery, liveTotal, rollupTotal, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
+import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
+import { type BoolAnswer, boolPlan, compound } from '../_lib/staticBool.js'
 import { indexedOnly, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
@@ -128,8 +129,14 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   qp.query = hx.query
   const query = qp.query && !qp.query(path) ? qp.query : undefined
   if (qp.query && !query) paths.length = 0
-  const sfs = query && !lens && !classes ? staticFilterStore(env) : null
-  const skey = sfs ? staticLiteral(query!.ast) : null
+  // A compound query (`a b`, `a|b`, `a -b`, `-b`; `staticBool.ts`): Σ each scan's match roots less its excluded
+  // paths from the static answer — or, where the view root is the one match root (exclusions alone, an AND-group
+  // its path holds), the root's own point less what it excludes.
+  const bplan = qp.query && !lens && !classes ? boolPlan(qp.query.ast) : null
+  const sfs = (query || compound(bplan)) && !lens && !classes ? staticFilterStore(env) : null
+  const skey = sfs && query ? staticLiteral(query.ast) : null
+  /** The query the response is keyed and answered by: a compound one the view root matches still subtracts its exclusions. */
+  const keyed = query ?? (sfs && compound(bplan) && bplan.neg.length ? qp.query! : undefined)
   // `split=roots` (specs/done/root-geneses.md §1): the unscoped store root only —
   // one trace per depth-1 row (bucket) beside the total.
   const split = url.searchParams.get('split')
@@ -150,11 +157,11 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, query)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&oh=${env.OWNER_HISTORY_BATCH === '1' ? 4 : 0}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&oh=${env.OWNER_HISTORY_BATCH === '1' ? 4 : 0}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
-  // Fast path (specs/obs-axis-indexing.md Phase 1): a path's series (or a
+  // Fast path (specs/done/obs-axis-indexing.md Phase 1): a path's series (or a
   // filter's, one line per match root) reads the cross-scan over-time index —
   // ⌈scans/K⌉ pruned reads per root — instead of one point read per scan.
   // Read only on a cache miss (it used to precede the check: ~1.2 s per hit).
@@ -167,18 +174,20 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // or a rollup under an owner pool (rollups carry no owners).
   const found = skey ? await st.time('static', sfs!.source.hits(skey, path)) : null
   const shits = found?.rollup && owner ? null : found
+  const bgot = sfs && !skey && keyed && compound(bplan) ? await st.time('static', staticCompound(sfs, bplan, path, [])) : null
+  const sbool: BoolAnswer | null = bgot && 'answer' in bgot ? bgot.answer : null
   // The scans it is exact on: the drilldown's are its base generation's, less the dir-only ones (a v1 source
   // lists no files, so a name's total there reads ~0 — a gap, not a point).
-  const sscans = shits ? new Set(shits.scans ?? await sfs!.scans()) : null
+  const sscans = shits || sbool ? new Set((shits ?? sbool)!.scans ?? await sfs!.scans()) : null
   if (sscans) for (const d of await sfs!.dirOnly?.() ?? []) sscans.delete(d)
   // An anchored term with no anchors build is `anchor-not-indexed`, indexed-only or not; else, indexed-only, no
   // answer is `scan-not-indexed` (never the client's roots read per scan).
   const unanchored = query && skey && !found && sfs!.source.why?.(skey) === 'anchor-not-indexed'
-  if (unanchored || (query && strict && !shits)) return new Response(rejectBody(reject(unanchored ? 'anchor-not-indexed' : 'scan-not-indexed')), { status: 400, headers: { 'content-type': 'application/json' } })
-  if (query && !shits && !paths.length) return json({ error: 'a filtered series needs its match roots (paths=)' }, 400)
+  if (unanchored || (keyed && strict && !shits && !sbool)) return new Response(rejectBody(bgot && 'reject' in bgot ? bgot.reject : reject(unanchored ? 'anchor-not-indexed' : 'scan-not-indexed')), { status: 400, headers: { 'content-type': 'application/json' } })
+  if (query && !shits && !sbool && !paths.length) return json({ error: 'a filtered series needs its match roots (paths=)' }, 400)
   /** The scans a static answer doesn't cover: gaps in the series, named (indexed-only or not). */
   const unindexed: string[] = []
-  const indexable = !split && !lens && !owner && !classes && !shits
+  const indexable = !split && !lens && !owner && !classes && !shits && !(sbool && !sbool.whole)
   const lines = indexable ? await st.time('overtime', Promise.all((paths.length ? paths : [path]).map(p => readOverTime(env, p)))) : []
   const ot: OverTime[] | null = lines.length && lines.every(Boolean) ? lines as OverTime[] : null
   let ownerHistory: Awaited<ReturnType<typeof readRootHistory>> = null
@@ -206,9 +215,18 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
         const t = shits.rollup ? rollupTotal(shits.rollup, date) : liveTotal(shits.hits, date, u => ownerOk(u, owner))
         return { date, b: t.b, o: t.o }
       }
+      if (sbool && sscans!.has(date)) {
+        if (sbool.none) return { date, b: 0, o: 0 }
+        const keep = (u: string | null) => ownerOk(u, owner)
+        const r = liveTotal(sbool.roots, date, keep), e = liveTotal(sbool.excl, date, keep)
+        if (!sbool.whole) return { date, b: r.b - e.b, o: r.o - e.o }
+        const covered = ot ? overTimePoint(ot, date) : undefined
+        const all = covered !== undefined ? covered : await ivRetry(() => readRootAgg(env, { date, path, lens, owner, classes }))
+        return all ? { date, b: all.b - e.b, o: all.o - e.o } : null
+      }
       // A scan the static answer doesn't cover: a gap, named — never the current scan's match roots read on
       // it (another scan's roots, or a rollup's few) nor a zero.
-      if (shits) { unindexed.push(date); return null }
+      if (shits || sbool) { unindexed.push(date); return null }
       if (ownerHistory?.has(date)) {
         const value = ownerHistory.get(date)
         return value ? { date, ...value } : null

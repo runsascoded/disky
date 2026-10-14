@@ -1,5 +1,5 @@
 // POST /api/plan-sweep/dispatch — launch a plan-first deletion run on GCP
-// Batch from /staged (specs/staged-delete.md). Admin only. Body: { plan_id,
+// Batch from /staged (specs/done/staged-delete.md). Admin only. Body: { plan_id,
 // mode: 'dry' | 'real', date: <scan id> }. The work is the `plan-sweep`
 // executor behind `_lib/executor.ts` (shared with `/slack/actions`): a real
 // run needs a finished dry-run of exactly the current item set, on its scan.

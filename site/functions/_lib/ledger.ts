@@ -1,6 +1,6 @@
 /** The live ownership ledger (assignments) and its head, straight from D1 — the
  * WAL every owner-aware read applies on top of the scan
- * (specs/view-serving.md §2). */
+ * (specs/done/view-serving.md §2). */
 import type { Env } from './auth.js'
 import type { OwnerRow } from './ownerBands.js'
 import { shared } from './shared.js'

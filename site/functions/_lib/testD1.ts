@@ -21,18 +21,49 @@ const load = async <T>(mod: string): Promise<T> => (await import(/* @vite-ignore
 
 interface NodeFs {
   readdirSync(dir: URL): string[]
+  readdirSync(dir: URL, opts: { withFileTypes: true }): { name: string; isDirectory(): boolean }[]
   readFileSync(file: URL, encoding: 'utf8'): string
 }
 
-export const LINEAGES = ['cw'] as const
+/** `site/migrations/`: one directory per D1 lineage, plus `twins.json`. */
+export const MIGRATIONS = new URL('../../migrations/', (import.meta as ImportMeta & { url: string }).url)
+
+/** A D1 migrations lineage: a directory under `site/migrations/`. */
+export type Lineage = string
+
+/** The lineages this branch carries, sorted: every directory under
+ * `site/migrations/` (the base carries `cw`; a deployment branch may add its
+ * own, and every lineage-agnostic D1 test then runs on it too). */
+export const LINEAGES: readonly Lineage[] = (await load<NodeFs>('node:fs'))
+  .readdirSync(MIGRATIONS, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort()
 
 /** The lineage's migration files, sorted (`NNNN_name.sql`). */
-export async function migrations(lineage: typeof LINEAGES[number]): Promise<{ name: string; sql: string }[]> {
+export async function migrations(lineage: Lineage): Promise<{ name: string; sql: string }[]> {
   const { readdirSync, readFileSync } = await load<NodeFs>('node:fs')
-  const dir = new URL(`../../migrations/${lineage}/`, (import.meta as ImportMeta & { url: string }).url)
+  const dir = new URL(`${lineage}/`, MIGRATIONS)
   return readdirSync(dir).filter(f => f.endsWith('.sql')).sort()
     .map(name => ({ name, sql: readFileSync(new URL(name, dir), 'utf8') }))
 }
+
+/** The one migration of `lineage` named `NNNN_<stem>.sql`, whatever its
+ * number there (lineages number the same migration differently). */
+export async function migrationNamed(lineage: Lineage, stem: string): Promise<string> {
+  const hits = (await migrations(lineage)).map(m => m.name).filter(n => n.replace(/^\d+_/, '') === `${stem}.sql`)
+  if (hits.length !== 1) throw new Error(`${lineage}: ${hits.length} migrations named \`${stem}\` (${hits.join(', ')})`)
+  return hits[0]
+}
+
+/** Where the lineages' schemas really differ, as the shared tests need it,
+ * per lineage — the column holding a deletion run's manifest dir
+ * (`deletion_runs.manifest` on cw, `.plan` on gcs's squashed init). A
+ * lineage absent here has cw's shape; `testD1.test.ts` pins each entry
+ * against the schema of every lineage this branch carries. */
+export interface SchemaFork { runDir: string }
+const SCHEMA_FORKS: Record<Lineage, SchemaFork> = {
+  cw: { runDir: 'manifest' },
+  gcs: { runDir: 'plan' },
+}
+export const schemaFork = (lineage: Lineage): SchemaFork => SCHEMA_FORKS[lineage] ?? SCHEMA_FORKS.cw
 
 function d1Of(raw: Sqlite): D1Database {
   const prepare = (sql: string, params: unknown[] = []) => ({
@@ -75,7 +106,7 @@ function d1Of(raw: Sqlite): D1Database {
 /** A fresh in-memory DB with `lineage`'s migrations applied — all of them,
  * or (`before`) only those whose file name sorts before it, so a test can seed
  * rows and then apply a migration over them. */
-export async function sqliteD1(lineage: typeof LINEAGES[number], { before }: { before?: string } = {}): Promise<{ db: D1Database; raw: Sqlite }> {
+export async function sqliteD1(lineage: Lineage, { before }: { before?: string } = {}): Promise<{ db: D1Database; raw: Sqlite }> {
   const { DatabaseSync } = await load<{ DatabaseSync: new (path: string) => Sqlite }>('node:sqlite')
   const raw = new DatabaseSync(':memory:')
   raw.exec('PRAGMA foreign_keys = ON')

@@ -1,4 +1,4 @@
-"""`dt-cloud scan-run backfill`: reconstruct past scan runs (specs/scan-runs-ui.md §Backfill) from what outlives a run.
+"""`dt-cloud scan-run backfill`: reconstruct past scan runs (specs/done/scan-runs-ui.md §Backfill) from what outlives a run.
 
 - The Batch API: every job the profile's kinds match — its uid (the run id), state, start/end, machine, SPOT, tasks.
 - Cloud Logging (`log_days`, 30 by default — the retention): the task log's phase markers (each phase's end is its
