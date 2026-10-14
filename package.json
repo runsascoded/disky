@@ -1,6 +1,6 @@
 {
   "name": "@rdub/treemap",
-  "version": "0.1.0-dist.153ab98",
+  "version": "0.1.0-dist.2b91dbe",
   "description": "SOTA React treemap: SVG + canvas renderers, shared-edge (gapless) tiling, dust-texturing for the long tail, rich per-cell coloring + emphasis rings, hover/pin events, Voronoi variant. Accessor-based, chart-lib-free.",
   "type": "module",
   "main": "./src/index.ts",
@@ -8,6 +8,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./squarify": "./src/squarify.ts",
+    "./parseColor": "./src/parseColor.ts",
+    "./divergingColor": "./src/divergingColor.ts",
     "./styles.css": "./src/styles.css",
     "./voronoi": "./src/voronoi/index.ts"
   },

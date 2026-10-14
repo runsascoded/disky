@@ -1,4 +1,5 @@
 export { Treemap } from './Treemap'
+export { TitleSpaceToggle } from './TitleSpaceToggle'
 export type { CellCtx, CellDims, CellStyle, Tiling, TilingCtx, TreemapProps } from './Treemap'
 export { foldSmall, foldThin, squarifyRemainder, squarify } from './squarify'
 export type { Rect } from './squarify'
