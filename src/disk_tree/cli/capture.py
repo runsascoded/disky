@@ -189,6 +189,14 @@ def capture_space(manifest: dict) -> dict | None:
     return space
 
 
+def started_iso(time: str) -> str:
+    """A manifest's `time` as `meta.started` spells an instant: UTC, milliseconds, a `Z`."""
+    t = datetime.fromisoformat(time.replace('Z', '+00:00'))
+    if t.tzinfo is None:
+        raise ValueError(f'capture time without a timezone: {time!r}')
+    return t.astimezone(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+
+
 @cli.command('capture-meta')
 @option('-c', '--check', help="Existing snapshot meta.json (local path or URL): refuse to replace a different capture in the same scan slot")
 @argument('manifest')
@@ -198,7 +206,7 @@ def capture_meta_cmd(
     manifest: str,
     snapshot: str,
 ) -> None:
-    """Copy MANIFEST's physical disk space into a snapshot's meta.json.
+    """Copy MANIFEST's capture time (`captured_at`, `started`) and physical disk space into a snapshot's meta.json.
 
     Both paths may be local or fsspec URLs. Missing container measurements
     remove a previous annotation rather than leave another scan's space.
@@ -213,6 +221,9 @@ def capture_meta_cmd(
             raise ValueError('scan slot already belongs to a different capture; refusing to replace it')
     meta = json.loads(blobfs.read_text(snapshot))
     meta['captured_at'] = capture['time']
+    # The walk's start, as `path-index` stamps a bucket scan's (`dt_cloud.scan_started`): what the site keys a
+    # date-only scan id by when its day holds another scan.
+    meta['started'] = started_iso(capture['time'])
     if space is None:
         meta.pop('disk_space', None)
     else:

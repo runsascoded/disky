@@ -127,8 +127,8 @@ def test_morning_evening_and_reingest_keep_two_independent_snapshots(pipeline) -
     snapshots = bucket / 'snapshots/laptop'
     assert sorted(p.name for p in snapshots.iterdir()) == ['2026-10-11T1000', '2026-10-11T2200']
     assert [json.loads((snapshots / s / 'meta.json').read_text()) for s in ('2026-10-11T1000', '2026-10-11T2200')] == [
-        {'asof': '2026-10-11T1000', 'total_bytes': 4096, 'captured_at': '2026-10-11T10:00:01Z'},
-        {'asof': '2026-10-11T2200', 'total_bytes': 4096, 'captured_at': '2026-10-11T22:00:02Z'},
+        {'asof': '2026-10-11T1000', 'total_bytes': 4096, 'captured_at': '2026-10-11T10:00:01Z', 'started': '2026-10-11T10:00:01.000Z'},
+        {'asof': '2026-10-11T2200', 'total_bytes': 4096, 'captured_at': '2026-10-11T22:00:02Z', 'started': '2026-10-11T22:00:02.000Z'},
     ]
     syncs = [a for a in map(json.loads, trace.read_text().splitlines()) if a[:2] == ['dt-cloud', 'index-sync']]
     assert [(a[2], a[a.index('-g') + 1], a[a.index('-k') + 1], a[a.index('-s') + 1]) for a in syncs] == [
