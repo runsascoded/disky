@@ -12,7 +12,8 @@ import { withStore } from '../_lib/stores.js'
 import { snapshotsPrefix } from '../_lib/shared.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { dataAllowed, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
-import { genInstant, pathScanGens, pathScans, servedStore, storeReady } from '../_lib/index.js'
+import { pathScans, servedStore, storeReady } from '../_lib/index.js'
+import { scanStarts } from '../_lib/scanTimes.js'
 import { isScanId } from '../../src/scanSlug.js'
 
 // Scan ids are `YYYY-MM-DD`, optionally sub-daily as `YYYY-MM-DDTHHMM` (no
@@ -56,18 +57,15 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
       })
     }
-    // `<store>/scan-times.json` → `{ <scan id>: <instant> }` for the date-only
-    // ids whose index generation is a capture stamp: when in that day the scan
-    // ran, for the picker. Ids without one are left out.
-    if (/^(?:[a-z0-9-]+\/)?scan-times\.json$/.test(rel)) {
-      const times: Record<string, string> = {}
-      if (ctx.env.DB) {
-        for (const r of (await pathScanGens(ctx.env)).results) {
-          const at = genInstant(r.gen)
-          if (at && !r.date.includes('T')) times[r.date] = at
-        }
-      }
-      return new Response(JSON.stringify(times), {
+    // `<store>/scan-times.json` → `{ <date-only scan id>: <started> }`: each date-only scan's start
+    // instant, as its `path` pointer records it (`index_schema.started`; `scanStarts`) — one D1 query
+    // for the picker's times, however many scans share a day. A scan with no recorded start is left
+    // out. Names no path, so a restricted link reads it as it reads `scans.json`.
+    const timesM = /^(?:([a-z0-9-]+)\/)?scan-times\.json$/.exec(rel)
+    if (timesM) {
+      const prefix = timesM[1] ? `snapshots/${timesM[1]}/` : 'snapshots/'
+      if (prefix !== snapshotsPrefix(ctx.env)) return notFound()
+      return new Response(JSON.stringify(await scanStarts(ctx.env)), {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
       })
     }

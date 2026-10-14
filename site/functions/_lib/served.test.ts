@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 
 const A = '2026-10-01'
-const B = '2026-10-01T1200' // shares A's day: A's start is read from its meta
+const B = '2026-10-01T1200' // shares A's day: A's start is its pointer's (`index_schema.started`, D1)
 const OLD = '2026-08-01' // a snapshot dir D1 never indexed: series fills it from its meta
 const dirOf = (d: string) => `listing/${d}/index/g`
 const GCS = 'storage.googleapis.com'
@@ -127,6 +127,7 @@ async function world(served: boolean, extra: Partial<Env> = {}): Promise<World> 
   const variants = { path, bysize }
   const files = { path: { parquet: `${fx}/path-index.parquet`, groups: `${fx}/path-index.groups.json` }, bysize: { parquet: `${fx}/path-index-bysize.parquet`, groups: `${fx}/path-index-bysize.groups.json` } }
   for (const d of [A, B]) seedGeneration(raw, { date: d, gen: 'g', dir: dirOf(d), variants, files })
+  raw.exec(`UPDATE index_schema SET started = '${A}T07:00:00Z' WHERE date = '${A}' AND variant = 'path'`)
   const small = smallFiles()
   const store: string[] = []
   const r2: string[] = []
@@ -163,6 +164,7 @@ async function readAll(w: World) {
     missing: await get(w, `${A}/age.json`),
     registry: await w.mods.identity.loadRegistry(w.env),
     times: await w.mods.scanTimes.scanTimes(w.env, [A, B]),
+    starts: await get(w, 'scan-times.json'),
     provenance: (await w.mods.extras.extrasFor(w.env, A, 'bk'))?.provenance('bk/nest/a/z/q', 'alice'),
   }
 }
@@ -240,6 +242,14 @@ describe('`SERVED_R2`: the small served files from INDEX_R2', () => {
     expect([await get(r2, 'r2/scans.json'), await get(r2, 'scans.json')]).toEqual([[200, [B, A]], [404, 'not found']])
   })
 
+  it('`scan-times.json` is D1 alone (the pointers\' `started`), and another store\'s dir is a 404', async () => {
+    for (const served of [true, false]) {
+      const w = await world(served)
+      expect([await get(w, 'scan-times.json'), await get(w, 'cw/scan-times.json')]).toEqual([[200, { [A]: `${A}T07:00:00Z` }], [404, 'not found']])
+      expect([w.store, w.r2]).toEqual([[], []])
+    }
+  })
+
   it('a view still carries provenance, read from INDEX_R2; the store serves only the path sort', async () => {
     const w = await world(true)
     const v = await w.mods.view.buildView(w.env, { date: A, path: 'bk/nest', w: 800, h: 600, minArea: 0, atten: 1 })
@@ -278,6 +288,7 @@ const EXPECTED = {
   missing: [404, 'not found'],
   registry: { al: { u: 'alice', name: 'Alice' }, alice: { u: 'alice', name: 'Alice' } },
   times: { [A]: '2026-10-01T0700' },
+  starts: [200, { [A]: `${A}T07:00:00Z` }],
   provenance: ['manual', null, 'bk/nest/a/z'],
 }
 

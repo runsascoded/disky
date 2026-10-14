@@ -387,18 +387,14 @@ export function pathScans(env: Env, order: boolean): Promise<{ results: { date: 
     : env.DB!.prepare(`SELECT DISTINCT date FROM index_schema WHERE store = ? AND variant = ?${by}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string }>()
 }
 
-/** `pathScans` with each scan's index generation stamp. */
-export function pathScanGens(env: Env): Promise<{ results: { date: string; gen: string | null }[] }> {
+/** The env's store's date-only scans whose start is known: each `path`
+ * pointer's `index_schema.started` (`dt-cloud index-sync -m`, or the
+ * `index-started` backfill) — the scan picker's times, in one query. */
+export function pathScanStarts(env: Env): Promise<{ results: { date: string; started: string }[] }> {
+  const known = "started IS NOT NULL AND date NOT LIKE '%T%'"
   return isPrimary(env)
-    ? env.DB!.prepare(`SELECT date, gen FROM index_schema WHERE variant = 'path'`).all<{ date: string; gen: string | null }>()
-    : env.DB!.prepare(`SELECT date, gen FROM index_schema WHERE store = ? AND variant = ?`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string; gen: string | null }>()
-}
-
-/** A generation stamp's instant, when it is one: `YYYYMMDDHHMM` (UTC, the m3
- * ingest's capture stamp) → `YYYY-MM-DDTHH:MMZ`; anything else → null. */
-export function genInstant(gen: string | null): string | null {
-  const m = gen ? /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})$/.exec(gen) : null
-  return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}Z` : null
+    ? env.DB!.prepare(`SELECT date, started FROM index_schema WHERE variant = 'path' AND ${known}`).all<{ date: string; started: string }>()
+    : env.DB!.prepare(`SELECT date, started FROM index_schema WHERE store = ? AND variant = ? AND ${known}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string; started: string }>()
 }
 
 function fileFor(env: Env, dir: string, variant: string): FileSlice {

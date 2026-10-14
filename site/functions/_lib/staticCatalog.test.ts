@@ -189,7 +189,8 @@ describe('static dispatch', () => {
     const outside = await staticSummary(ENV, params({ date: '2026-09-02', name: 'foo' }), fixtureStore())
     expect([outside.status, await outside.json()]).toEqual([400, { error: 'This scan is not in the static name index yet. This is not a zero-match result.', code: 'scan-not-indexed' }])
     // With an index to ask: a scan the store has but the static index doesn't is that 400; a slug naming no scan is a 404.
-    const db = (d: string | null) => ({ prepare: () => ({ bind: () => ({ first: async () => ({ d }), all: async () => ({ results: d ? [{ date: d }] : [] }) }) }) }) as unknown as D1Database
+    // (`all()` unbound: the store's recorded scan starts, `scanTimes` — none here.)
+    const db = (d: string | null) => ({ prepare: () => ({ bind: () => ({ first: async () => ({ d }), all: async () => ({ results: d ? [{ date: d }] : [] }) }), all: async () => ({ results: [] }) }) }) as unknown as D1Database
     const unindexed = await staticSummary({ ...ENV, DB: db('2026-09-02') }, params({ date: '2026-09-02', name: 'foo' }), fixtureStore())
     expect([unindexed.status, await unindexed.json()]).toEqual([400, { error: 'This scan is not in the static name index yet. This is not a zero-match result.', code: 'scan-not-indexed' }])
     const miss = await staticSummary({ ...ENV, DB: db(null) }, params({ date: '2026-09-02', name: 'foo' }), fixtureStore())
@@ -199,7 +200,7 @@ describe('static dispatch', () => {
     const storeDb = (scans: string[]) => ({ prepare: (sql: string) => ({ bind: (arg: string) => ({ first: async () => {
       const hits = scans.filter(d => sql.includes('LIKE') ? d.startsWith(arg.slice(0, -1)) : d === arg).sort()
       return { d: hits.at(-1) ?? null }
-    }, all: async () => ({ results: scans.filter(d => d.startsWith(arg.slice(0, -1))).map(date => ({ date })) }) }) }) }) as unknown as D1Database
+    }, all: async () => ({ results: scans.filter(d => d.startsWith(arg.slice(0, -1))).map(date => ({ date })) }) }), all: async () => ({ results: [] }) }) }) as unknown as D1Database
     const sub = { ...fixtureStore(), scans: async () => [...DATES, '2026-09-20T0430'].sort() }
     const db2 = storeDb([...DATES, '2026-09-20T0430', '2026-09-20T1236'])
     const ask = async (date: string) => { const r = await staticSummary({ ...ENV, DB: db2 }, params({ date, name: 'foo' }), sub); return [r.status, r.status === 200 ? (await r.json() as { date: string }).date : await r.json()] }

@@ -125,8 +125,8 @@ describe('blockedForRestricted', () => {
   it('raw-bytes and D1-list routes, by path segment', () => {
     expect([
       '/api/path-index', '/v1/files/listing/x', '/v1', '/api/plans/run', '/api/db/actions', '/api/og/mint',
-      '/api/subtree', '/api/diff', '/api/series', '/data/laptop/scans.json', '/api/ownersx', '/v10',
-    ].map(blockedForRestricted)).toEqual([true, true, true, true, true, true, false, false, false, false, false, false])
+      '/api/subtree', '/api/diff', '/api/series', '/data/laptop/scans.json', '/data/laptop/scan-times.json', '/api/ownersx', '/v10',
+    ].map(blockedForRestricted)).toEqual([true, true, true, true, true, true, false, false, false, false, false, false, false])
   })
 })
 

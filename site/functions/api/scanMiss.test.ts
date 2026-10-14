@@ -11,12 +11,6 @@ vi.mock('../_lib/edgeCache.js', async orig => ({
   // A resolved request answers as a cache hit carrying its key: no store read.
   cacheMatch: vi.fn(async (_env: unknown, key: Request) => new Response(JSON.stringify({ hit: new URL(key.url).pathname }))),
 }))
-// A date-only scan's start (`meta.started`), as the store would answer it: the 10/9 daily run's.
-const STARTS: Record<string, string> = { '2026-10-09': '2026-10-09T04:30:12.345Z' }
-vi.mock('../_lib/scanTimes.js', async orig => {
-  const m = await orig<typeof import('../_lib/scanTimes.js')>()
-  return { ...m, scanTimes: (e: Env, scans: readonly string[]) => m.scanTimes(e, scans, async (_e, id) => STARTS[id] ?? null) }
-})
 vi.mock('../_lib/extras.js', async orig => ({ ...await orig<typeof import('../_lib/extras.js')>(), hasExtras: vi.fn(async () => false) }))
 const { onRequestGet: subtree } = await import('./subtree')
 const { onRequestGet: diff } = await import('./diff')
@@ -75,10 +69,14 @@ describe('a date-only and a timed scan on one day', () => {
   })
 })
 
-describe('a date-only scan sharing its day is keyed by its start (meta.started)', () => {
+describe('a date-only scan sharing its day is keyed by its start (`index_schema.started`)', () => {
   it('its start minute and hour select it; the midnight stays an alias; the day is the latest', async () => {
     const { db } = await sqliteD1('cw')
-    for (const date of ['2026-10-08', '2026-10-09', '2026-10-09T1236']) await db.prepare("INSERT INTO index_schema (date, variant, version, schema_json) VALUES (?, 'path', 2, '[]')").bind(date).run()
+    // The 10/9 daily run's start, as `index-sync -m` records it on the pointer.
+    const started: Record<string, string> = { '2026-10-09': '2026-10-09T04:30:12.345Z' }
+    for (const date of ['2026-10-08', '2026-10-09', '2026-10-09T1236']) {
+      await db.prepare("INSERT INTO index_schema (date, variant, version, schema_json, started) VALUES (?, 'path', 2, '[]', ?)").bind(date, started[date] ?? null).run()
+    }
     const e = { ...STORE, DB: db } as Env
     const qs = ['d=2610090430', 'd=26100904', 'd=2610090000', 'd=261009', 'd=26100905', 'd=2610080000']
     const got = await Promise.all(qs.map(async q => { const r = await scanArg(e, new URLSearchParams(q)); return r instanceof Response ? await answer(r) : r }))

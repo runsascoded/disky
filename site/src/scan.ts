@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { useQueries, useQuery, type UseQueryResult } from '@tanstack/react-query'
+import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { useUrlAlias, useUrlState } from 'use-prms'
 import { canonicalizeSel, decodeSel, encodeScan, encodeSel, exactSlug, latestScan, minPrefix, minSlug, legacyDateParam, legacyFromParam, mergeSel, scanCmp, scanMatches, scanNeighbors, scanParts, selSlug, sortScans, startKey, timesNeeded, type ScanSel, type ScanTimes } from './scanSlug'
 import { storeUrl, type Store } from './stores'
@@ -44,15 +44,15 @@ export function fmtScan(s: string, now = new Date()): string {
     : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')} ${time}`
 }
 
-/** A scan's label, knowing its peers: a timed id, or a date-only id whose day
- * holds other scans and whose start is known (`times`), reads as its local
- * instant ("10/9 12:30a"); a date-only id sharing its day with no known start
- * says so ("10/9 (time unknown)"); a date-only id alone on its day is its date
- * ("10/8"). `scans`: the whole list (any order), not a filtered view of it. */
+/** A scan's label, knowing its peers: a timed id, or a date-only id whose
+ * start is known (`times`), reads as its local instant ("10/9 12:30a"); a
+ * date-only id sharing its day with no known start says so ("10/9 (time
+ * unknown)"); one alone on its day with no known start is its date ("10/8").
+ * `scans`: the whole list (any order), not a filtered view of it. */
 export type ScanLabel = (id: string) => string
 export function scanLabeler(scans: readonly string[], times: ScanTimes = {}, now = new Date()): ScanLabel {
   const shared = new Set(timesNeeded(scans))
-  return id => !shared.has(id) ? fmtScan(id, now) : times[id] ? fmtScan(times[id], now) : `${fmtScan(id, now)} (time unknown)`
+  return id => times[id] ? fmtScan(times[id], now) : shared.has(id) ? `${fmtScan(id, now)} (time unknown)` : fmtScan(id, now)
 }
 
 export { DAY, decodeScan, decodeSel, decodeSpan, encodeScan, encodeSel, encodeSpan, latestScan, nearestScan, resolveScan, scanInstant, scanMatches, scanNeighbors, scanTime, type ScanSel, type ScanTimes } from './scanSlug'
@@ -125,7 +125,7 @@ export interface Scan {
   pending: string[]
   /** Newest first, by time (a date-only scan at its start, when known). */
   scans: string[]
-  /** The known starts of the date-only scans that share a day (`useScanTimes`). */
+  /** The known starts of the date-only scans (`useScanTimes`). */
   times: ScanTimes
   /** Labels a scan among its peers (`scanLabeler`). */
   label: ScanLabel
@@ -217,47 +217,29 @@ export function selectScan(sel: ScanSel | undefined, scans: readonly string[], l
   return { asof: f.scan, miss: null, pending: f.pending }
 }
 
-/** The known start minutes of the store's date-only scans that share a day
- * with another scan (`timesNeeded`; usually none, or one): each read from its
- * `meta.json`'s `started` (`startKey`) — the same query (and cache) as the
- * page's own meta fetch. A meta without `started` (not yet back-stamped) leaves
- * the scan out: its midnight form stands. */
+/** The known start minutes of the store's date-only scans, in one request:
+ * the store's `scan-times.json` (each scan's `path` pointer's
+ * `index_schema.started`), keyed by `startKey`. A scan with no recorded start
+ * is left out: its midnight form stands. */
 export function useScanTimes(store: Store, scans: readonly string[]): ScanTimes {
-  const fileStore = store.scheme.startsWith('file:')
-  const legacy = useQuery<Record<string, string>>({
+  const q = useQuery<Record<string, string>>({
     queryKey: ['scan-times', store.key],
     queryFn: async () => {
       const r = await fetch(storeUrl(`${store.base}/scan-times.json`, store))
       if (!r.ok) throw new Error(`scan-times: ${r.status}`)
       return r.json()
     },
-    enabled: fileStore && scans.some(id => !id.includes('T')),
+    enabled: scans.some(id => id.length === 10),
     refetchInterval: SCANS_POLL_MS,
   })
-  const need = useMemo(() => timesNeeded(scans), [scans])
-  const qs = useQueries({
-    queries: need.map(id => ({
-      queryKey: ['meta', store.key, id],
-      queryFn: async () => {
-        const r = await fetch(storeUrl(`${store.base}/${id}/meta.json`, store))
-        if (!r.ok) throw Object.assign(new Error(`meta ${id}: ${r.status}`), { status: r.status })
-        return r.json() as Promise<{ started?: unknown }>
-      },
-      staleTime: Infinity,
-    })),
-  })
-  const starts = qs.map(q => (q.data as { started?: unknown } | undefined)?.started)
-  const key = need.map((id, i) => `${id}=${String(starts[i] ?? '')}`).join(',') + JSON.stringify(legacy.data ?? {})
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   return useMemo(() => {
     const out: Record<string, string> = {}
-    for (const [id, at] of Object.entries(legacy.data ?? {})) {
-      const k = startKey(id, at)
+    for (const id of scans) {
+      const k = startKey(id, q.data?.[id])
       if (k) out[id] = k
     }
-    need.forEach((id, i) => { const k = startKey(id, starts[i]); if (k) out[id] = k })
     return out
-  }, [key])
+  }, [q.data, scans])
 }
 
 /** The page's scan selection. `indexed`: the covered scans to prefer when `?d=` is absent (a filtered
@@ -268,10 +250,7 @@ export function useScan(store: Store, indexed?: readonly string[] | null | 'load
   const listed = useMemo(() => scansQ.data ?? [], [scansQ.data])
   const times = useScanTimes(store, listed)
   const scans = useMemo(() => sortScans(listed, times), [listed, times])
-  const label = useMemo(() => {
-    const base = scanLabeler(scans, times)
-    return store.scheme.startsWith('file:') ? (id: string) => times[id] ? fmtScan(times[id]) : base(id) : base
-  }, [scans, times, store.scheme])
+  const label = useMemo(() => scanLabeler(scans, times), [scans, times])
   const floating = useMemo(() => floatingScan(scans, indexed), [scans, indexed])
   const picked = useMemo(() => selectScan(sel, scans, scansQ.isSuccess, indexed, times), [sel, scans, scansQ.isSuccess, indexed, times])
   const dP = sel?.d
