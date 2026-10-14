@@ -5,8 +5,11 @@ D1 sync identities, so dropping the time at any pipeline stage loses a scan here
 """
 import json
 import os
+import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -26,6 +29,8 @@ if name == 'nproc':
 elif name == 'time':
     Path(args[2]).write_text('Maximum resident set size (kbytes): 1024\n')
     sys.exit(subprocess.call(args[3:]))
+elif name == 'aws' and args[:2] == ['s3api', 'head-object']:
+    print(os.environ['FAKE_MARKED'])
 elif name == 'aws':
     assert args[:2] == ['s3', 'cp'], args[:2]
     source, dest = args[2:4]
@@ -41,6 +46,11 @@ elif name == 'aws':
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
 elif name == 'dt-cloud':
+    if args[0] == os.environ.get('FAKE_FAIL'):
+        sys.exit(3)
+    if args[0] == 'scan-run':
+        assert os.environ['CLOUDFLARE_API_TOKEN'] == 'fixture-token'
+        sys.exit(int(os.environ.get('FAKE_RECORD_RC', '0')))
     if args[0] == 'path-index':
         out = Path(args[args.index('-o') + 1])
         index = Path(args[args.index('-P') + 1])
@@ -93,10 +103,10 @@ def pipeline(tmp_path: Path):
         'D1_DB_NAME': 'fixture',
         'HOST_STORES': 'nas=nas',
     }
-    for key in ('DATE', 'GEN', 'STORE'):
+    for key in ('DATE', 'GEN', 'STORE', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
         env.pop(key, None)
 
-    def run(stamp: str, host: str = 'm3') -> subprocess.CompletedProcess:
+    def run(stamp: str, host: str = 'm3', **extra: str) -> subprocess.CompletedProcess:
         cap = cloud / 'bucket' / 'captures' / host / 'root' / stamp
         cap.mkdir(parents=True, exist_ok=True)
         (cap / 'shard-00000.parquet').write_bytes(b'listing')
@@ -104,7 +114,7 @@ def pipeline(tmp_path: Path):
             'format': 'disk-tree-capture', 'version': 1,
             'time': stamp.replace('-00-', ':00:').replace('T10-', 'T10:').replace('T22-', 'T22:'),
         }))
-        return subprocess.run(['bash', str(INGEST), f'r2://bucket/captures/{host}/root/{stamp}'], env=env, capture_output=True, text=True)
+        return subprocess.run(['bash', str(INGEST), f'r2://bucket/captures/{host}/root/{stamp}'], env={**env, **extra}, capture_output=True, text=True)
 
     return run, cloud / 'bucket', trace
 
@@ -158,3 +168,99 @@ def test_invalid_capture_stamps_fail_before_any_cloud_operation(pipeline) -> Non
     result = run('not-a-stamp')
     assert (result.returncode, result.stdout, result.stderr) == (2, '', '[ingest] invalid capture stamp: expected %Y-%m-%dT%H-%M-%SZ\n')
     assert trace.exists() is False
+
+
+# ── scan-run recording (SCAN_RUNS_PROFILE) ──────────────────────────────────
+
+RECORD = ['dt-cloud', 'scan-run', 'record', '-c', '/app/infra/aws/scan-runs.json', '-K', 'nas', '-k', 'ingest', '-g', '202610111000']
+CAPTURED = int(datetime(2026, 10, 11, 10, 0, 1, tzinfo=timezone.utc).timestamp())
+MARKED = int(datetime(2026, 10, 11, 10, 12, 30, tzinfo=timezone.utc).timestamp())
+RECORDING = {
+    'SCAN_RUNS_PROFILE': '/app/infra/aws/scan-runs.json',
+    'INGEST_MACHINE': 'fargate-1vcpu-8gib',
+    'INGEST_SPOT': '1',
+    'AWS_REGION': 'us-east-1',
+    'FAKE_MARKED': '2026-10-11T10:12:30+00:00',
+}
+
+
+def records(trace: Path, t0: int, t1: int) -> list[list[str]]:
+    """The `scan-run record` calls, after the shared prefix; a `-t` other than the capture's two fixed times is this
+    run's clock (checked to lie within it) → `<now>`."""
+    out = []
+    for call in map(json.loads, trace.read_text().splitlines()):
+        if call[:3] != RECORD[:3]:
+            continue
+        assert call[:len(RECORD)] == RECORD, call
+        rest = call[len(RECORD):]
+        assert rest[-1] == '2026-10-11T1000', rest
+        rest = rest[:-1]
+        if '-t' in rest:
+            i = rest.index('-t') + 1
+            t = int(rest[i])
+            if t not in (CAPTURED, MARKED):
+                assert t0 <= t <= t1, (t0, t, t1)
+                rest[i] = '<now>'
+            else:
+                rest[i] = t
+        out.append(rest)
+    return out
+
+
+def phase_markers(stdout: str) -> list[str]:
+    return [re.sub(r': \d+s$', ': <s>s', line) for line in stdout.splitlines() if line.startswith('PHASE ')]
+
+
+PHASES = ['fetch', 'path-index', 'capture-meta', 'upload', 'index-sync']
+
+
+def test_recording_sequence_with_phase_times_facts_and_outputs(pipeline) -> None:
+    run, bucket, trace = pipeline
+    t0 = int(time.time())
+    result = run('2026-10-11T10-00-01Z', 'nas', **RECORDING)
+    t1 = int(time.time()) + 1
+    assert result.returncode == 0, result.stderr
+    assert records(trace, t0, t1) == [
+        ['-S', '-t', CAPTURED, '-T', '1', '-m', 'fargate-1vcpu-8gib', '--spot', '-R', 'us-east-1'],
+        ['-P', 'capture', '-t', MARKED, '-o', 'capture=r2://bucket/captures/nas/root/2026-10-11T10-00-01Z/'],
+        ['-P', 'queue', '-t', '<now>'],
+        ['-P', 'fetch', '-t', '<now>'],
+        ['-P', 'path-index', '-t', '<now>'],
+        ['-P', 'capture-meta', '-t', '<now>'],
+        ['-P', 'upload', '-t', '<now>', '-o', 'index=r2://bucket/listing/nas/2026-10-11T1000/index/202610111000/',
+         '-o', 'snapshot=r2://bucket/snapshots/nas/2026-10-11T1000/'],
+        ['-P', 'index-sync', '-t', '<now>'],
+        ['-x', '0'],
+    ]
+    assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
+
+
+def test_a_failed_phase_is_recorded_with_its_name_and_the_ingest_still_fails(pipeline) -> None:
+    run, bucket, trace = pipeline
+    t0 = int(time.time())
+    result = run('2026-10-11T10-00-01Z', 'nas', **RECORDING, FAKE_FAIL='path-index')
+    t1 = int(time.time()) + 1
+    assert result.returncode == 3
+    assert [r[:2] for r in records(trace, t0, t1)] == [['-S', '-t'], ['-P', 'capture'], ['-P', 'queue'], ['-P', 'fetch'], ['-x', '3']]
+    assert records(trace, t0, t1)[-1] == ['-x', '3', '-F', 'path-index']
+    assert phase_markers(result.stdout) == ['PHASE fetch: <s>s']
+    assert list(bucket.glob('snapshots/*/*/meta.json')) == []
+
+
+def test_a_failing_recorder_never_fails_the_ingest(pipeline) -> None:
+    run, bucket, trace = pipeline
+    result = run('2026-10-11T10-00-01Z', 'nas', **RECORDING, FAKE_RECORD_RC='1')
+    assert result.returncode == 0, result.stderr
+    assert sorted(str(p.relative_to(bucket)) for p in bucket.glob('snapshots/*/*/meta.json')) == ['snapshots/nas/2026-10-11T1000/meta.json']
+    assert len([c for c in map(json.loads, trace.read_text().splitlines()) if c[:2] == ['dt-cloud', 'scan-run']]) == 9
+
+
+def test_without_a_profile_nothing_is_recorded(pipeline) -> None:
+    run, _, trace = pipeline
+    result = run('2026-10-11T10-00-01Z', 'nas')
+    assert result.returncode == 0, result.stderr
+    calls = [c[:2] for c in map(json.loads, trace.read_text().splitlines())]
+    assert sorted({tuple(c) for c in calls}) == [
+        ('aws', 's3'), ('disk-tree', 'capture-meta'), ('dt-cloud', 'index-sync'), ('dt-cloud', 'path-index'), ('nproc',), ('time', '-v'),
+    ]
+    assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
