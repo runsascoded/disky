@@ -172,7 +172,7 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
     if ("error" in res) return json(res, 400)
     // Announce the batch in the plan's Slack thread (specs/done/staged-slack.md),
     // after the response — a Slack hiccup never fails the gesture.
-    if (res.staged.length) {
+    if (res.batch_id != null && res.staged.length) {
       const siteUrl = new URL(ctx.request.url).origin
       background(ctx, notifyPlan(ctx.env, db, res.plan_id, siteUrl,
         { stage: { planId: res.plan_id, batchId: res.batch_id, by, prefixes: res.staged, covered: res.covered.length, note, siteUrl } }))

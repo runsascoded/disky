@@ -84,7 +84,8 @@ export async function stageInBatches<T>(
 /** One `/api/plans/stage` answer (`plans.ts` `StageResult`). */
 export interface Staged {
   plan_id: number
-  batch_id: number
+  /** null: nothing new staged, so no batch. */
+  batch_id: number | null
   staged: string[]
   /** The staged items that are exact objects (absent: none). */
   staged_objects?: string[]

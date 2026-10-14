@@ -26,8 +26,11 @@ are incomplete.
 from __future__ import annotations
 
 import json
+import resource
 import shutil
+import sys
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
@@ -51,6 +54,52 @@ SHARD_ROWS = sa.RUN_SHARD_ROWS
 #: and the measurement floor (`roots measure -f`).
 MAX_ROWS = 100_000
 R_ROWS, K_KEPT, FLOOR = 100_000, 256, 10_000
+
+
+# ── Resource peaks: what a job sizing needs, reported by every run ─────────
+
+
+GB = 1 << 30
+
+
+def rss_peak_gb() -> float:
+    """This process's peak RSS so far (`ru_maxrss`: bytes on macOS, KiB on Linux)."""
+    m = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(m / (GB if sys.platform == "darwin" else GB >> 10), 2)
+
+
+class DiskPeak:
+    """Peak bytes used on the work dir's filesystem above its level at start, sampled every `every_s` on a daemon
+    thread (DuckDB's spill and the stages' intermediates land there between samples, so a stage's peak is a lower
+    bound to within one interval). `take()` returns the peak since the previous `take()` (one stage) and resets it.
+    The filesystem is the job's own scratch, so other writers' bytes count too; on a shared disk this over-states."""
+
+    def __init__(self, path: Path, every_s: float = 2.0):
+        self.path, self.every_s = path, every_s
+        self.base = shutil.disk_usage(path).used
+        self.peak = self.total = 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def sample(self) -> None:
+        used = max(0, shutil.disk_usage(self.path).used - self.base)
+        self.peak, self.total = max(self.peak, used), max(self.total, used)
+
+    def run(self) -> None:
+        while not self.stop.wait(self.every_s):
+            self.sample()
+
+    def take(self) -> float:
+        self.sample()
+        peak, self.peak = self.peak, 0
+        return round(peak / GB, 2)
+
+    def close(self) -> float:
+        self.stop.set()
+        self.thread.join()
+        self.sample()
+        return round(self.total / GB, 2)
 
 
 # ── The store: a local dir or an fsspec URL ────────────────────────────────
@@ -167,15 +216,18 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
               max_rows: int = MAX_ROWS, R: int = R_ROWS, K: int = K_KEPT, floor: int = FLOOR, threads: int = 4, mem: str = "4GB") -> dict:
     """A base generation over `scans` (`scans.json`'s doc; their files under `mount`) in `gen_dir`, every stage in turn:
     ranges → coalesced versions → suffix map → shards → sidecar → census → members → cells → short literals → catalog
-    → drill. Returns a summary (rows, files, seconds per stage)."""
-    t0, times = monotonic(), {}
+    → drill. Returns a summary (rows, files, and per stage its seconds, peak work-disk GiB and peak RSS GiB so far)."""
+    t0, times, peaks = monotonic(), {}, {}
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
+    disk = DiskPeak(work)
 
     def done(stage: str, t: float) -> float:
         times[stage] = round(monotonic() - t, 1)
-        err(f"build {gen}: {stage} in {times[stage]}s")
+        peaks[stage] = {"disk_gb": disk.take(), "rss_gb": rss_peak_gb()}
+        err(f"build {gen}: {stage} in {times[stage]}s (work disk peak {peaks[stage]['disk_gb']} GiB, RSS peak {peaks[stage]['rss_gb']} GiB)")
         return monotonic()
 
-    gen_dir.mkdir(parents=True, exist_ok=True)
     tmp = work / "duckdb"
     con = sn.connect(threads, mem, tmp)
     doc = {**{k_: v for k_, v in scans.items() if k_ != "mount"}, **rule_json(rule)}
@@ -224,9 +276,10 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     t = done("catalog", t)
     drill = build_base_drill(con, gen_dir, R=R, K=K, floor=floor, rule=rule)
     done("drill", t)
+    disk.close()
     return {"gen": gen, "scans": len(doc["scans"]), "ranges": k, "suffix_rows": int(sum(side.column("rows").to_pylist())),
             "shards": len(shard_names), "members": members["members"], "cells_rows": meta["cells_rows"], "drill": drill,
-            "s": round(monotonic() - t0, 1), "stages": times}
+            "s": round(monotonic() - t0, 1), "stages": times, "peaks": peaks}
 
 
 def build_base_drill(con, gen_dir: Path, *, R: int, K: int, floor: int, rule) -> dict:
@@ -282,6 +335,7 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     and published (`manifests/<id>.json`): `static_append`'s per-range append over the refolded open versions, the run's
     shards and catalog delta, the drill's run (`static_drill.build_day`), then `publish_run`."""
     t0 = monotonic()
+    disk = DiskPeak(work)
     d = scan["id"]
     store = LocalRunStore(gen_dir, work / "lease", gen)
     base = store.read_json("scans.json")
@@ -317,8 +371,9 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     shutil.rmtree(cat_work, ignore_errors=True)
     drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule)
     manifest = sa.publish_run(store, d, rule, max_level=compact_level)
-    err(f"add {d}: published {len(manifest['runs'])} runs in {monotonic() - t0:.1f}s")
-    return {"scan": d, "drill": drill, "runs": [r["key"] for r in manifest["runs"]], "s": round(monotonic() - t0, 1)}
+    peak = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
+    err(f"add {d}: published {len(manifest['runs'])} runs in {monotonic() - t0:.1f}s (work disk peak {peak['disk_gb']} GiB, RSS peak {peak['rss_gb']} GiB)")
+    return {"scan": d, "drill": drill, "runs": [r["key"] for r in manifest["runs"]], "s": round(monotonic() - t0, 1), "peak": peak}
 
 
 def run_drill(con, gen_dir: Path, run: Path, scan: dict, runs: list[dict], days: list[str], *, gen: str, rule) -> dict:

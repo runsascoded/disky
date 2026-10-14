@@ -229,7 +229,7 @@ describe('POST /api/plans/stage with objects, through to the dispatch snapshots'
       await stage({ objects: ['gs://b/show/'] }),
     ]).toEqual([
       [201, { plan_id: 1, batch_id: 1, staged: ['gs://b/tmp/', CLIP, `${CLIP}.bak`], staged_objects: [CLIP, `${CLIP}.bak`], covered: [], absorbed: [], as_of: '2026-10-09' }],
-      [201, { plan_id: 1, batch_id: 2, staged: [CLIP], staged_objects: [CLIP], covered: [], absorbed: [], as_of: '2026-10-09' }],
+      [201, { plan_id: 1, batch_id: null, staged: [], covered: [], absorbed: [], as_of: '2026-10-09' }],
       [400, { error: 'bad object key "gs://b/show/"' }],
     ])
     expect(raw.prepare('SELECT prefix, kind, batch_id FROM plan_items ORDER BY prefix').all()).toEqual([
@@ -256,7 +256,7 @@ describe('POST /api/plans/stage with objects, through to the dispatch snapshots'
       raw.prepare('SELECT prefix, kind FROM plan_items ORDER BY prefix').all(),
     ]).toEqual([
       [201, { plan_id: 1, batch_id: 2, staged: [SHOW], covered: [], absorbed: [CLIP], as_of: '2026-10-09' }],
-      [201, { plan_id: 1, batch_id: 3, staged: [], covered: [`${CLIP}.bak`], absorbed: [], as_of: '2026-10-09' }],
+      [201, { plan_id: 1, batch_id: null, staged: [], covered: [`${CLIP}.bak`], absorbed: [], as_of: '2026-10-09' }],
       [{ prefix: 'gs://b/other/k', kind: 'object' }, { prefix: SHOW, kind: null }],
     ])
   })

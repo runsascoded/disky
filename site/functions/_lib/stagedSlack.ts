@@ -21,6 +21,7 @@ import { expDay, IMAGE_TTL_DAYS, imagePath, ogKey } from './og/sign.js'
 import { imageParams } from './og/cred.js'
 import { serverToken } from './og/tokens.js'
 import { loadRegistry } from './identity.js'
+import { BATCH_GAP_S } from './batchGroups.js'
 
 export type { RunRow }
 
@@ -314,7 +315,7 @@ export type NotifyEnv = SlackEnv & { GCP_SA_KEY?: string }
 
 /** A stager's stages within this many seconds of their reply's last update
  *  edit that reply instead of posting a new one. */
-export const COALESCE_S = 15 * 60
+export const COALESCE_S = BATCH_GAP_S
 
 /** The parent reaction that closes a thread: the next event starts a new one. */
 export const DONE_REACTION = 'white_check_mark'

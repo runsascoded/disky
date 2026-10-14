@@ -43,7 +43,9 @@ import { RunsSection } from './StagedRuns'
 import { type PrefixSortKey, type PrefixStat, relAgo, sortPrefixRows, usePrefixes } from './prefixes'
 import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, stagedState, type StagedState } from './stagedCompletion'
 import { batchAnchor } from './runHistory'
-import { useLocation } from 'react-router-dom'
+import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGroups'
+import { useLocation, useNavigationType } from 'react-router-dom'
+import { useHashSpy } from './hashSpy'
 import { machineFor } from '../functions/_lib/sweepMachines'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
@@ -94,7 +96,15 @@ function useIsAdmin(): boolean {
 }
 
 type Row = StagedItem & { name: string; to: string; stat?: PrefixStat }
-type Group = { id: number | null; batch?: { created_by: string; created_ts: number; note: string | null }; rows: Row[]; emptied?: EmptiedBatch }
+/** `id` = the lead (oldest) of the stage batches `ids` grouped as one session (`coalesceBatches`). */
+type Group = { id: number | null; ids: number[]; batch?: { created_by: string; created_ts: number; note: string | null }; rows: Row[]; emptied?: EmptiedBatch }
+
+/** A session's permalink (its lead batch); several requests say so on hover. */
+function SessionLink({ g }: { g: Group }) {
+  const a = <a className="batch-permalink" href={`#${batchAnchor(g.id)}`} aria-label={`Link to batch ${g.id}`}>#{g.id}</a>
+  if (g.ids.length < 2) return a
+  return <Tooltip content={`${g.ids.length} stage requests, each within 15 min of the last (${idRanges(g.ids)})`}>{a}</Tooltip>
+}
 
 /** An emptied gesture's fate, as one line: what absorbed it, what was taken
  * back, what was already covered. */
@@ -130,6 +140,11 @@ export function StagedPage() {
   const batches = useMemo(() => staged.data?.batches ?? [], [staged.data])
   const emptied = useMemo(() => staged.data?.emptied ?? [], [staged.data])
   const batchById = useMemo(() => new Map(batches.map(b => [b.id, b])), [batches])
+  // A stager's row-by-row requests are one session (`batchGroups.ts`): each batch id → its group's lead.
+  const sessions = useMemo(() => coalesceBatches(batches), [batches])
+  const leadOf = useMemo(() => batchLeads(sessions), [sessions])
+  const membersOf = useMemo(() => new Map(sessions.map(g => [g[0].id, g.map(b => b.id)])), [sessions])
+  const lead = (id: number) => leadOf.get(id) ?? id
   const runs = useMemo(() => staged.data?.runs ?? [], [staged.data])
   const unstage = useUnstage(plan?.id ?? null)
   const dispatch = useDispatch(plan?.id ?? null)
@@ -198,23 +213,35 @@ export function StagedPage() {
   const shownRows = filtered.rows
   const flat = !!flatP || !!q.trim()
 
-  // Items grouped by gesture (newest first); items staged before batches
-  // existed fall into one "earlier" group. Each group sorts by the table's key.
+  // Items grouped by staging session (newest first; `coalesceBatches`); items
+  // staged before batches existed fall into one "earlier" group. Each group
+  // sorts by the table's key.
   const groups: Group[] = useMemo(() => {
-    if (flat) return [{ id: -1, rows: sortPrefixRows(shownRows, sort.k, sort.asc, r => r.added_ts) }]
+    if (flat) return [{ id: -1, ids: [], rows: sortPrefixRows(shownRows, sort.k, sort.asc, r => r.added_ts) }]
     const byBatch = new Map<number | null, Row[]>()
     for (const r of shownRows) {
-      if (!byBatch.has(r.batch_id)) byBatch.set(r.batch_id, [])
-      byBatch.get(r.batch_id)!.push(r)
+      const k = r.batch_id == null ? null : lead(r.batch_id)
+      if (!byBatch.has(k)) byBatch.set(k, [])
+      byBatch.get(k)!.push(r)
     }
-    const known = new Map(batches.map(b => [b.id, b]))
-    // Gestures whose prefixes all went (absorbed by a later ancestor, taken
-    // back, or covered from the start): one folded line each, in time order.
-    const gone: Group[] = emptied.map(e => ({ id: e.id, batch: e, rows: [], emptied: e }))
+    // Sessions whose prefixes all went (absorbed by a later ancestor, taken
+    // back, covered from the start, or nothing new): one folded line each, its
+    // members' fates summed. A session with live rows drops its emptied members.
+    const gone = new Map<number, EmptiedBatch>()
+    for (const e of emptied) {
+      const k = lead(e.id)
+      if (byBatch.has(k)) continue
+      const g = gone.get(k) ?? { ...(batchById.get(k) ?? e), id: k, staged: 0, covered: 0, absorbed: [], unstaged: 0, deleted: 0 }
+      const absorbed = new Map(g.absorbed.map(a => [a.into, a.n]))
+      for (const a of e.absorbed) if (lead(a.into) !== k) absorbed.set(lead(a.into), (absorbed.get(lead(a.into)) ?? 0) + a.n)
+      gone.set(k, { ...g, staged: g.staged + e.staged, covered: g.covered + e.covered, unstaged: g.unstaged + e.unstaged, deleted: g.deleted + e.deleted, absorbed: [...absorbed].map(([into, n]) => ({ into, n })) })
+    }
+    const ids = (id: number | null) => id == null ? [] : membersOf.get(id) ?? [id]
     return [...[...byBatch.entries()]
-      .map(([id, rs]): Group => ({ id, batch: id != null ? known.get(id) : undefined, rows: sortPrefixRows(rs, sort.k, sort.asc, r => r.added_ts) })), ...gone]
+      .map(([id, rs]): Group => ({ id, ids: ids(id), batch: id != null ? batchById.get(id) : undefined, rows: sortPrefixRows(rs, sort.k, sort.asc, r => r.added_ts) })),
+      ...[...gone.values()].map((e): Group => ({ id: e.id, ids: ids(e.id), batch: e, rows: [], emptied: e }))]
       .sort((a, b) => (b.batch?.created_ts ?? 0) - (a.batch?.created_ts ?? 0))
-  }, [shownRows, batches, emptied, sP, flat]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [shownRows, batchById, leadOf, membersOf, emptied, sP, flat]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const outcomes = new Map(rows.map(r => {
     const execution = rowExecution(r)
@@ -226,24 +253,27 @@ export function StagedPage() {
   // Defaults follow completion, while explicit open/closed choices survive polling.
   const [folds, setFolds] = useState<Record<string, boolean>>({})
   const [pages, setPages] = useState<Record<string, number>>({})
-  const { hash } = useLocation()
+  const location = useLocation()
+  const navType = useNavigationType()
+  const { hash } = location
   useEffect(() => {
     if (!/^#batch-\d+$/.test(hash)) return
     setFlat(false)
     setQ(undefined)
-    const key = hash.slice('#batch-'.length)
+    // Any member's permalink opens its session.
+    const key = String(lead(Number(hash.slice('#batch-'.length))))
     setFolds(f => ({ ...f, [key]: false }))
-    requestAnimationFrame(() => document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' }))
-  }, [hash, batches.length, setFlat, setQ])
+  }, [hash, batches.length, leadOf, setFlat, setQ]) // eslint-disable-line react-hooks/exhaustive-deps
   const gkey = (g: Group) => String(g.id ?? 'none')
   const defaultFoldKey = groups.map(g => `${gkey(g)}:${completion.get(gkey(g))!.settled}`).join(',')
-  const collapsed = useMemo(() => new Set(groups.filter(g => batchIsCollapsed(completion.get(gkey(g))!.settled, folds[gkey(g)], hash === `#${batchAnchor(g.id)}`, flat)).map(gkey)), [groups, defaultFoldKey, folds, hash, flat]) // eslint-disable-line react-hooks/exhaustive-deps
+  const linked = (g: Group) => g.ids.some(id => hash === `#${batchAnchor(id)}`) || hash === `#${batchAnchor(g.id)}`
+  const collapsed = useMemo(() => new Set(groups.filter(g => batchIsCollapsed(completion.get(gkey(g))!.settled, folds[gkey(g)], linked(g), flat)).map(gkey)), [groups, defaultFoldKey, folds, hash, flat]) // eslint-disable-line react-hooks/exhaustive-deps
   // Batches with nothing left staged (all deleted, empty at scan, or absorbed
   // by a later batch) fold into one <details> below the live ones.
   const settled = flat ? [] : groups.filter(g => g.emptied || !g.rows.some(r => activePrefixes.has(r.prefix)))
   const liveGroups = groups.filter(g => !settled.includes(g))
   const [settledOpen, setSettledOpen] = useState(false)
-  useEffect(() => { if (settled.some(g => hash === `#${batchAnchor(g.id)}`)) setSettledOpen(true) }, [hash, settled.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (settled.some(linked)) setSettledOpen(true) }, [hash, settled.length]) // eslint-disable-line react-hooks/exhaustive-deps
   const foldable = liveGroups
   const pageSize = flat ? FLAT_PAGE : PAGE
   const pageOf = (g: Group) => Math.min(pages[gkey(g)] ?? 0, Math.max(0, Math.ceil(g.rows.length / pageSize) - 1))
@@ -307,6 +337,11 @@ export function StagedPage() {
 
   const sizesNote = !date ? null : statsQ.isLoading ? 'sizing…' : stats ? null : 'sizes unavailable'
   const loadingContents = items.length > 0 && (!date || statsQ.isLoading || history.isLoading || progressQs.some(query => query.isLoading))
+  // A batch permalink scrolls its session in, following it while the map and sizes land above it; scrolling
+  // names the session in view in the hash. A member batch's link lands on its session.
+  const sessionAnchors = useMemo(() => groups.filter(g => g.id != null && g.id > 0).map(g => batchAnchor(g.id)), [groups])
+  const memberAnchors = useMemo(() => Object.fromEntries([...leadOf].filter(([id, l]) => id !== l).map(([id, l]) => [batchAnchor(id), batchAnchor(l)])), [leadOf])
+  useHashSpy({ ids: sessionAnchors, location, navType, deps: [batches.length, loadingContents, stats], legacy: memberAnchors })
 
   const renderGroup = (g: Group) => {
     const k = gkey(g)
@@ -340,7 +375,7 @@ export function StagedPage() {
             ? <><UserChip who={g.batch.created_by} size={18} /> staged <Tooltip content={iso(g.batch.created_ts)}><span>{relAgo(g.batch.created_ts)}</span></Tooltip></>
             : <span className="dim">staged earlier</span>}
           <span className="dim">· {g.rows.length} {g.rows.length === 1 ? 'prefix' : 'prefixes'}{status.deleted > 0 && <> · {status.deleted} with logged deletions</>}{status.empty > 0 && <> · {status.empty} empty at scan</>}{stats && t.b > 0 && <> · {fmtBytes(t.b)} at scan</>}</span>
-          {g.id != null && <a className="batch-permalink" href={`#${batchAnchor(g.id)}`} aria-label={`Link to batch ${g.id}`}>#{g.id}</a>}
+          {g.id != null && <SessionLink g={g} />}
           {g.batch?.note && <i className="memo">{g.batch.note}</i>}
         </div>}
         {(open || g.id === -1) && (
