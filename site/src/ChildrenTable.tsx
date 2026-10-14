@@ -1,21 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { MouseEvent } from 'react'
 import { intParam, useUrlState } from 'use-prms'
-import { useCanAssign, useCanStage } from './auth'
+import { useCanStage } from './auth'
 import { FaRegTrashCan } from 'react-icons/fa6'
 import { AGE_BUCKETS, ageBucketColor, dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonthShort } from './colors'
-import type { UserIndexEntry } from './colors'
-import type { OwnerIndex } from './owners'
-import { OwnerBar, ownerShares } from './OwnerBar'
 import { useStore } from './store'
 import { listingTime } from './listingTime'
 import { Tooltip } from './Tooltip'
 import { elideMid } from './CopyName'
-import { AssignSelect } from './AssignSelect'
-import { OwnerFactChip } from './OwnerFactChip'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction'
-import { actionItem, rowTarget } from './objects'
+import { rowTarget } from './objects'
 import type { TreeNode } from './types'
 import { fmtN } from './types'
 import { useUnits } from './units'
@@ -38,7 +33,7 @@ const PAGE_SIZES = [20, 50, 100, 200]
  *  tooltip); ~60 chars fills the column's 480px at 12px mono. */
 const NAME_MAX = 60
 
-export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, filter, rowMatches, brush, onBrush }: {
+export function ChildrenTable({ node, segs, scheme, home, onOpen, onOpenObject, filter, rowMatches, brush, onBrush }: {
   /** The treemap's currently-viewed node. */
   node: TreeNode
   /** Path segments from the tree root to `node` (no scheme, no root). */
@@ -46,11 +41,6 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   scheme: string
   /** The store home, read as `~` in row tooltips (`Store.home`). */
   home?: string[]
-  /** The ownership ledger (`Store.owners`): assignments show as the row's
-   *  owner, and anyone who may assign (`useCanAssign`) does so from the actions column. */
-  ownerIdx?: OwnerIndex | null
-  userIdx?: Map<string, UserIndexEntry>
-  onPickUser?: (u: string) => void
   /** A directory row was opened: drill there (segments from the root). */
   onOpen: (segs: string[]) => void
   /** An object row was opened: show it in the leaf viewer. */
@@ -71,20 +61,17 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
 }) {
   usePerfCommit('table')
   const { fmtBytes } = useUnits()
-  const canAssign = useCanAssign()
   const [sort, setSort] = useState<{ k: SortKey; asc: boolean }>({ k: 'b', asc: false })
   const [page, setPage] = useState(0)
   const [nP, setNP] = useUrlState('n', intParam(20))
   const PAGE = PAGE_SIZES.includes(nP) ? nP : 20
   // A staging store (`Store.staging`): full viewers — not read-only guest
   // links — select + trash (stage for deletion; an admin approves later).
-  // Owner assignment (`Store.owners`) is any signed-in viewer's, alongside. Both are the
-  // subtree's store's flags: a secondary store has neither.
+  // The subtree's store's flag: a secondary store has none.
   const store = useStore()
   const time = listingTime(scheme)
   const staging = store.staging
   const canStage = useCanStage()
-  const assigning = !!ownerIdx && store.owners && canAssign
   // At the store root every row is a whole bucket (on a `*` store, a whole
   // top-level root), which a plan item can't name: no trash there.
   const canTrash = staging && (segs.length > 0 || !!filter)
@@ -93,7 +80,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const staged = useStagedIndex()
   // A filtered view whose matches can't be acted on (a refusal, a rollup, a catalog or approximate answer,
   // `actBlock`): no row offers an action, and nothing selects — a row's whole prefix is never the stand-in.
-  const showSel = filter?.blocked ? false : staging ? canStage && (canTrash || assigning) : assigning
+  const showSel = filter?.blocked ? false : staging && canStage && canTrash
   // One memo for the whole multi-select gesture (stored on the stage batch).
   const [memo, setMemo] = useState('')
 
@@ -115,11 +102,9 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   // A new listing (drill, sort) starts on page 1.
   useEffect(() => setPage(0), [node, sort])
 
-  // Columns the data can't fill are left out (no access logs → no `read`; no
-  // attribution and no ledger → no `owner(s)`): a store without those axes
-  // shouldn't read as a table of dashes.
+  // Columns the data can't fill are left out (no access logs → no `read`): a
+  // store without that axis shouldn't read as a table of dashes.
   const hasRead = kids.some(k => k.a != null)
-  const hasOwners = (!!ownerIdx && store.owners) || kids.some(k => k.us?.length)
 
   // Created-month ink: an age gradient over the listed rows' range, so a
   // column of "May / Jun / Apr" also reads at a glance as older ↔ newer.
@@ -143,7 +128,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const shown = useMemo(() => kids.slice(pg * PAGE, (pg + 1) * PAGE), [kids, pg, PAGE])
   const uriOfKid = (k: TreeNode) => scheme + [...segs, k.n].join('/')
   // Rows select (click / shift / ⌘, checkboxes, j/k) into one set keyed by
-  // uri; the bar above the table stages or assigns the whole selection at once.
+  // uri; the bar above the table stages the whole selection at once.
   // Under a filter a row stands for its matches (resolved on the click), never its whole prefix.
   const acts = (k: TreeNode) => !k.n.startsWith('(')
   const selectable = useMemo(() => shown.filter(acts), [shown])
@@ -166,11 +151,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [selCount, clearSel])
-  // What each selected row acts on: an object's key, a directory's prefix.
-  const kindOf = new Map(kids.map(k => [uriOfKid(k), k.k]))
   const selKids = kids.filter(k => sel.selected.has(uriOfKid(k)))
-  // Unfiltered: each selected row's own prefix. Under a filter: the selected rows' matches, resolved on the click.
-  const selAssign = [...sel.selected].map(u => actionItem(u, kindOf.get(u)))
   const sendDeps = useActDeps()
   const selPaths = selKids.map(k => [...segs, k.n].join('/'))
   const selAct = useMatchAct({
@@ -181,14 +162,12 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const selFocus = useKeepFocus(selAct.state.s)
   const [hovered, setHovered] = useState<string | null>(null)
   const selBytes = selKids.reduce((s, k) => s + k.b, 0)
-  // Everything a row derives from the tree and the ledger — owner shares and
-  // the resolved assignment — computed once per page of rows × ledger, so a
+  // Everything a row derives from the tree, computed once per page of rows, so a
   // selection change (which re-renders the table) rebuilds only the JSX.
   const rowData = useMemo(() => shown.map(k => {
     const synthetic = k.n.startsWith('(')
     const kidSegs = [...segs, k.n]
     const uri = scheme + kidSegs.join('/')
-    const cl = ownerIdx && !synthetic ? ownerIdx.assignmentOf(uri, k.k === 'file' ? 'object' : 'prefix') : null
     // Under a filter a row holding exactly one match shows (and opens) the path down to it, as its treemap
     // tile does (`marin-eu-west4/tomat`); one holding several says how many (`marin-us-east5 · 9 matches`).
     const lab = filter && !synthetic ? rowLabel(k, kidSegs.join('/'), rowMatches?.(kidSegs.join('/')) ?? null) : null
@@ -198,9 +177,9 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
     const label = lab?.label ?? k.n
     const fullSegs = lab ? [...segs, ...lab.segs] : kidSegs
     const mark = staged && !synthetic ? staged.markOf(uri, k.k !== 'file') : null
-    return { k, synthetic, kidSegs, fullSegs, label, count: lab?.count, atLeast: !!lab?.atLeast, uri, to, shares: ownerShares(k), cl, si: selectable.indexOf(k), mark }
+    return { k, synthetic, kidSegs, fullSegs, label, count: lab?.count, atLeast: !!lab?.atLeast, uri, to, si: selectable.indexOf(k), mark }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [shown, path, scheme, ownerIdx, selectable, filter, rowMatches, staged])
+  }), [shown, path, scheme, selectable, filter, rowMatches, staged])
   // Every hook above runs on every render: an empty page (a drill can leave
   // no children) must not shorten the hook list, or React throws "Rendered
   // fewer hooks than expected" on the way in.
@@ -215,7 +194,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const hasAg = shown.some(k => k.ag)
   const hasYr = !hasAg && shown.some(k => k.d != null && createdParts(k.d).length > 1)
   const createdCols = hasAg ? 1 : hasYr ? 3 : 2
-  // Under a filter the selection's trash / assign resolve the selected rows' matches on the click, then turn
+  // Under a filter the selection's trash resolves the selected rows' matches on the click, then turn
   // into the action's progress and accepted state (which outlives the selection it cleared).
   const selBar = showSel && (sel.selected.size > 0 || selAct.state.s !== 'idle') && (
     <span className="sel-bar">
@@ -231,7 +210,6 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                 <button type="button" className="trash" onClick={() => void selAct.start({ kind: 'stage', memo })} aria-label="trash selected"><FaRegTrashCan /> trash</button>
               </Tooltip>
             </>)}
-            {assigning && (filter ? <AssignSelect label={`assign ${sel.selected.size}…`} onPick={(owner, who) => void selAct.start({ kind: 'assign', owner, who })} /> : <AssignSelect items={selAssign} label={`assign ${sel.selected.size}…`} />)}
           </>}
           <ActStatus state={selAct.state} confirmT={selAct.confirmT} act={selAct} fmtBytes={fmtBytes} />
         </span>
@@ -289,13 +267,11 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
               )}
             </th>
             {hasRead && th('a', 'read', false)}
-            {hasOwners && <th>owner(s)</th>}
             {showSel && <th className="actions" aria-label="actions" />}
           </tr>
         </thead>
         <tbody>
-          {rowData.map(({ k, synthetic, kidSegs, fullSegs, label, count, atLeast, uri, to, shares, cl, si, mark }) => {
-            const rowItem = actionItem(uri, k.k)
+          {rowData.map(({ k, synthetic, kidSegs, fullSegs, label, count, atLeast, uri, to, si, mark }) => {
             // A row's hover is intent to act on it (under a filter: its matches are fetched after a short dwell).
             const enter = () => { onBrush?.(k.n); if (filter) setHovered(k.n) }
             const leave = () => { onBrush?.(null); if (filter) setHovered(h => (h === k.n ? null : h)) }
@@ -339,31 +315,14 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                 {hasRead && <td title={k.a != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : undefined}>
                   {k.a != null ? epochDaysToDate(k.a) : '—'}
                 </td>}
-                {/* An assignee, or a single attributed owner, by name; a mix
-                    as a bar (names and shares on hover). */}
-                {hasOwners && (
-                <td className="owners">
-                  {cl ? <OwnerFactChip who={cl.who} assigned={{ by: cl.by, ts: cl.ts, memo: cl.memo }} />
-                    : shares.length === 1 && shares[0][1] >= 0.98 * k.b ? <OwnerFactChip who={shares[0][0]} inferred={k.pv ?? null} />
-                    // Picking a person from a ROW's bar means "this directory,
-                    // theirs only": drill into the row, then apply the lens.
-                    : shares.length ? <OwnerBar node={k} userIdx={userIdx} width={70} onPickUser={onPickUser && to?.kind === 'drill' ? u => { onOpen(kidSegs); onPickUser(u) } : undefined} />
-                    : <span className="none">—</span>}
-                </td>
-                )}
                 {showSel && (
                   <td className="actions">
                     {!synthetic && filter && (
                       <RowActs key={filter.key} path={kidSegs.join('/')} src={filter} intent={hovered === k.n} scheme={scheme}
-                        canTrash={canTrash} assigning={assigning} fmtBytes={fmtBytes} />
+                        canTrash={canTrash} fmtBytes={fmtBytes} />
                     )}
-                    {!synthetic && !filter && (
-                      <>
-                        {canTrash && (
-                          <PrefixStageAction item={tableCoverItem(k, kidSegs.join('/'))} scheme={scheme} fmtBytes={fmtBytes} mark={mark} />
-                        )}
-                        {assigning && <AssignSelect items={rowItem} assigned={cl?.who ?? null} compact />}
-                      </>
+                    {!synthetic && !filter && canTrash && (
+                      <PrefixStageAction item={tableCoverItem(k, kidSegs.join('/'))} scheme={scheme} fmtBytes={fmtBytes} mark={mark} />
                     )}
                   </td>
                 )}
@@ -379,7 +338,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
             <td className="num">{fmtBytes(kids.reduce((s, k) => s + k.b, 0))}</td>
             <td className="num">{node.b ? ((100 * kids.reduce((s, k) => s + k.b, 0)) / node.b).toFixed(1) : 0}%</td>
             <td className="num">{kids.reduce((s, k) => s + k.o, 0).toLocaleString('en-US')}</td>
-            <td colSpan={createdCols + (hasRead ? 1 : 0) + (hasOwners ? 1 : 0) + (showSel ? 1 : 0)} />
+            <td colSpan={createdCols + (hasRead ? 1 : 0) + (showSel ? 1 : 0)} />
           </tr>
         </tfoot>
       </table>

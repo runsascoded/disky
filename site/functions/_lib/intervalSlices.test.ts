@@ -105,59 +105,6 @@ describe('batched root owner history', () => {
     }
     expect(await readRootHistory(perScan, dates, { owner: 'unowned' })).toBeNull()
   })
-  it('applies newer ancestor repainting, release and exact-object assignments on every date', async () => {
-    const ledger = `
-      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
-        (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'),
-        (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob'),
-        (3, 'ops', 3, '${S2}', 'gs://bk/nest/', 1, NULL);
-      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES
-        (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2), (3, 'gs://bk/nest/', NULL, 3);
-      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, kind) VALUES
-        (4, 'ops', 4, '${S2}', 'gs://bk/flat/f00016', 1, 'carol', 'object');
-      INSERT INTO owner_prefixes (action_id, prefix, owner, ts, kind) VALUES
-        (4, 'gs://bk/flat/f00016', 'carol', 4, 'object');
-    `
-    const current = await seed(ledger)
-    for (const scope of [{ lens: { key: 'alice' } }, { lens: { key: 'bob' } }, { lens: { key: 'carol' } }, { owner: 'unowned' as const }, { owner: 'owned' as const }]) {
-      // Warm manifests sequentially: the SQLite D1 fixture uses one connection
-      // and cannot overlap transactions; production D1 serializes its batches.
-      const want = []
-      for (const date of dates) want.push([date, await readRootAgg(current.iv, { date, path: '', ...scope })])
-      expect([...(await readRootHistory(current.iv, dates, scope))!]).toEqual(want)
-    }
-  })
-})
-
-describe('owner totals after a new assignment', () => {
-  const LEDGER = `
-    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
-      (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'), (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob');
-    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2);
-  `
-  const NEXT = `
-    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (3, 'ops', 3, '${S2}', 'gs://bk/nest/', 1, 'carol');
-    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (3, 'gs://bk/nest/', 'carol', 3);
-  `
-  const fold = ({ computed: _, ...body }: Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>) => body
-
-  it('prices only the new prefix, and folds what a cold recompute folds', async () => {
-    for (const env of ['perScan', 'iv'] as const) {
-      vi.resetModules()
-      const { ownerTotals } = await import('./ownerTotals')
-      const before = (await seed(LEDGER))[env]
-      const cold = await ownerTotals(before, S2)
-      expect([cold.head, cold.computed.prefixes]).toEqual([2, 2])
-      for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await before.DB!.prepare(sql).run()
-      const next = await ownerTotals(before, S2)
-      // A fresh module: `ownerTotals` memoizes per (scan, head) in the isolate.
-      vi.resetModules()
-      const { ownerTotals: coldTotals } = await import('./ownerTotals')
-      const full = await coldTotals((await seed(LEDGER + NEXT))[env], S2)
-      expect({ env, head: next.head, prefixes: next.computed.prefixes, fold: fold(next) }).toEqual({ env, head: 3, prefixes: 1, fold: fold(full) })
-      expect(full.computed.prefixes).toBe(3)
-    }
-  })
 })
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
@@ -254,58 +201,6 @@ for (const GEN of ['g2', 'g5'] as const) {
       const sorts = ['slices-bysize-user', 'slices-bytotal', 'slices'].flatMap(x => [`${x}.groups.parquet`, `${x}.parquet`])
       const dirs = [`interval-store/${GEN}/served/`, ...(GEN === 'g5' ? [`interval-store/${GEN}/deltas/${S3}/served/`] : [])]
       expect([...new Set(r2Reads.filter(k => k.startsWith(`interval-store/${GEN}/`) && k.includes('/served/')))].sort()).toEqual(dirs.flatMap(d => sorts.map(x => d + x)).sort())
-    })
-  })
-
-  // A user lens's assigned regions (specs/interval-store.md §2.6): on S2 (`v2-lens`, where bob holds all of
-  // `bk/flat`'s 8,000 files) carol is assigned 26 of them — 24 of 32 KiB, and `f00000` and `f00016` of one
-  // byte. A view reads the largest `REGION_READS` (24) regions and values the rest from the assignments'
-  // totals: two unread regions with no row of their own. The interval store reads the regions from its
-  // folded `bysize` (one exact row per path: a path-first read of the slice sorts selected a run per depth
-  // per dyadic segment, and a big user's root regions were refused as too wide).
-  describe(`interval store ${GEN}: a lens's assigned regions`, () => {
-    const FILES: [string, number][] = [
-      ...Array.from({ length: 24 }, (_, i): [string, number] => [`bk/flat/f${String(16 * i + 15).padStart(5, '0')}`, 32768]),
-      ['bk/flat/f00000', 1],
-      ['bk/flat/f00016', 1],
-    ]
-    const claims = FILES.map(([p, bytes], i) => ({ prefix: `gs://${p}`, kind: 'object', owner: 'carol', ts: 1, action_id: i + 1, bytes, objects: 1, us: { bob: bytes }, uo: { bob: 1 } }))
-    const ledger = [
-      ...claims.map(c => `INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, kind) VALUES (${c.action_id}, 'ann', 1, '${S2}', '${c.prefix}', 1, 'carol', 'object');`),
-      ...claims.map(c => `INSERT INTO owner_prefixes (action_id, prefix, owner, ts, kind) VALUES (${c.action_id}, '${c.prefix}', 'carol', 1, 'object');`),
-      `INSERT INTO owner_totals (scan, head, body, claims) VALUES ('${S2}', ${claims.length}, '{}', '${JSON.stringify(claims)}');`,
-    ].join('\n')
-    let envs: { perScan: Env; iv: Env }
-    // The store's reads from here on (the groups each test decodes are cached for the next).
-    let n0 = 0
-    beforeAll(async () => { envs = await seed(ledger); n0 = r2Reads.length })
-    const lens = { key: 'carol' }
-    type N = { n: string; k: string; b: number; o: number; c?: N[] }
-    const shape = (n: N): unknown => [n.n, n.k, n.b, n.o, ...(n.c ? [n.c.map(shape)] : [])]
-    const byName = (n: N): N => ({ ...n, ...(n.c ? { c: [...n.c].sort((x, y) => (x.n < y.n ? -1 : 1)).map(byName) } : {}) })
-    const tiles = FILES.map(([p, b]) => [p.split('/').pop(), 'file', b, 1]).sort((x, y) => (x[0]! < y[0]! ? -1 : 1))
-
-    it('values an unread region once: its objects from the assignment, never added again to it or its ancestors', async () => {
-      for (const env of [envs.perScan, { ...envs.iv, INTERVAL_STORE_GEN: GEN } as Env]) {
-        const flat = await buildView(env, { ...base, date: S2, path: 'bk/flat', lens, threshold: 1 })
-        expect(shape(byName(flat.tree as N))).toEqual(['flat', 'dir', 24 * 32768 + 2, 26, tiles])
-        const bk = await buildView(env, { ...base, date: S2, path: 'bk', lens, threshold: 1 })
-        expect(shape(byName(bk.tree as N))).toEqual(['bk', 'dir', 24 * 32768 + 2, 26, [['flat', 'dir', 24 * 32768 + 2, 26, tiles]]])
-      }
-    })
-
-    it('draws them from the folded `bysize` on the interval store, as the per-scan reader does', async () => {
-      for (const path of ['', 'bk', 'bk/flat']) {
-        const o = { ...base, date: S2, path, lens }
-        const want = await buildView(envs.perScan, o)
-        const [got, gets] = await perScanGets(() => buildView({ ...envs.iv, INTERVAL_STORE_GEN: GEN } as Env, o))
-        expect({ path, tree: got.tree, index: got.index, gets }).toEqual({ path, tree: storeKinds(want.tree), index: `iv:${GEN}`, gets: [] })
-      }
-      // carol's own rows come from the slice sort, whose footer says she has none: its groups go unread. On g5 the
-      // run (S3's, begun after S2) is not read either: a view reads the runs begun by its scan (`asOfScans`).
-      expect([...new Set(r2Reads.slice(n0).filter(k => k.startsWith(`interval-store/${GEN}/`) && k.endsWith('.parquet') && !k.endsWith('.groups.parquet')))].sort()).toEqual([
-        `interval-store/${GEN}/served/bysize.parquet`,
-      ])
     })
   })
 

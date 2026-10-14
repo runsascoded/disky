@@ -8,14 +8,12 @@ import App from './App'
 import { AuthGate, SignInPage } from './AuthGate'
 import { PrivacyPage } from './PrivacyPage'
 import { FilesRedirect } from './FilesRedirect'
-import { AssignmentsPage } from './AssignmentsPage'
 import { StagedPage } from './StagedPage'
 import { RunPage } from './RunPage'
 import { ScanRunPage, ScansPage } from './ScansPage'
 import { HealthPage } from './HealthPage'
 import { NamePage } from './NamePage'
 import { OgPage } from './OgPage'
-import { UserOgPage, UserPage, UsersOgPage, UsersPage } from './UserPage'
 import { StoreProvider } from './store'
 import { DEFAULT_STORE, STORES } from './stores'
 import { useLoadIdentities } from './identities'
@@ -74,18 +72,9 @@ export default function Root() {
       {DEFAULT_STORE.metaTree && !STORES.some(s => s.path.replace(/\/$/, '') === '/meta') && (
         <Route path="/meta/*" element={<MetaTreeRedirect to={DEFAULT_STORE.metaTree} />} />
       )}
-      {/* The owner pages exist only on an attribution store; elsewhere they go home. */}
-      {DEFAULT_STORE.owners ? (<>
-      <Route path="/assignments" element={<AuthGate><AssignmentsPage /></AuthGate>} />
-      <Route path="/users/og" element={<UsersOgPage />} />
-      <Route path="/user/:id/og" element={<UserOgPage />} />
-      <Route path="/users" element={<AuthGate><UsersPage /></AuthGate>} />
-      <Route path="/user/:id" element={<AuthGate><UserPage /></AuthGate>} />
-      </>) : (
-      // caseSensitive: React Router matches case-insensitively, and a laptop
-      // store's drill paths start `/Users/…`.
+      {/* m3 has no owner pages: `/users` goes home. caseSensitive: React Router matches
+          case-insensitively, and a laptop store's drill paths start `/Users/…`. */}
       <Route path="/users/*" caseSensitive element={<Navigate to="/" replace />} />
-      )}
       {/* The opt-in deletion console: what the trash gesture staged, and its runs. */}
       <Route path="/staged" element={<AuthGate><StagedPage /></AuthGate>} />
       <Route path="/runs/*" element={<AuthGate><RunPage /></AuthGate>} />

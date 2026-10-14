@@ -20,11 +20,6 @@ vi.mock('../_lib/identity.js', async orig => ({
   // An empty registry (no store read): an email resolves to its sanitized handle.
   loadRegistry: vi.fn(async () => ({})),
 }))
-vi.mock('../_lib/ledger.js', async orig => ({
-  ...await orig<typeof import('../_lib/ledger.js')>(),
-  ledgerHead: vi.fn(async () => 7),
-  hasLedger: vi.fn(async () => true),
-}))
 vi.mock('../_lib/extras.js', async orig => ({ ...await orig<typeof import('../_lib/extras.js')>(), hasExtras: vi.fn(async () => false) }))
 vi.mock('../_lib/index.js', async orig => ({
   ...await orig<typeof import('../_lib/index.js')>(),
@@ -32,15 +27,10 @@ vi.mock('../_lib/index.js', async orig => ({
   pathScans: vi.fn(async () => ({ results: [{ date: '2026-10-01' }] })),
 }))
 
-vi.mock('../_lib/ownerTotals.js', () => ({
-  ownerTotals: vi.fn(async () => ({ head: 3, users: { 'alan-turing': { b: 5, mix: { '1': 5 } }, grace: { b: 2, mix: {} } }, assignments: [] })),
-}))
-
 const { onRequestGet: subtree, warmSubtree } = await import('./subtree')
 const { onRequestGet: diff } = await import('./diff')
 const { onRequestGet: series } = await import('./series')
 const { onRequestGet: me } = await import('./me')
-const { onRequestGet: estate } = await import('./estate')
 
 afterEach(() => { keys.length = 0 })
 
@@ -103,13 +93,6 @@ describe('GET /api/me', () => {
   })
 })
 
-describe('GET /api/estate?user=me', () => {
-  it('is the caller\'s estate, under their resolved id', async () => {
-    const r = await estate(at(await envAs('alan@example.test'), '/api/estate?date=2026-10-01&user=me'))
-    expect([r.status, await r.json()]).toEqual([200, { user: 'alan-turing', date: '2026-10-01', head: 3, bytes: 5, objects: 0, mix: { '1': 5 }, assignments: [] }])
-  })
-})
-
 describe('`lens=user:me` keys the cache on the resolved id', () => {
   const S = '/api/subtree?date=2026-10-01&path=marin-a&w=1200&h=700'
   const D = '/api/diff?from=2026-09-01&to=2026-10-01&path=marin-a'
@@ -119,21 +102,21 @@ describe('`lens=user:me` keys the cache on the resolved id', () => {
     await subtree(at(alan, `${S}&lens=user:me`))
     await subtree(at(alan, `${S}&lens=user:alan-turing`))
     await subtree(at(await envAs('grace@example.test'), `${S}&lens=user:me`))
-    const key = (l: string) => `https://subtree.cache/v${CACHE_V}/2026-10-01/marin-a?w=1280&h=768&a=12&t=2&l=${l}&o=&b=&D=&cl=&x=0&F=1&qs=&q=&head=7&g=g1&st=`
+    const key = (l: string) => `https://subtree.cache/v${CACHE_V}/2026-10-01/marin-a?w=1280&h=768&a=12&t=2&l=${l}&o=&b=&D=&cl=&x=0&F=1&qs=&q=&head=0&g=g1&st=`
     expect(keys).toEqual([key('user:alan-turing'), key('user:alan-turing'), key('user:grace')])
   })
   it('/api/diff', async () => {
     const alan = await envAs('alan@example.test')
     await diff(at(alan, `${D}&lens=user:me`))
     await diff(at(alan, `${D}&lens=user:alan-turing`))
-    const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=7&s=0&D=&g=g1&st=`
+    const key = `https://diff.cache/v${CACHE_V}/2026-09-01/2026-10-01/marin-a?w=1280&h=896&a=12&t=2&n=500&l=user:alan-turing&o=&cl=&qs=&q=&head=0&s=0&D=&g=g1&st=`
     expect(keys).toEqual([key, key])
   })
   it('/api/series', async () => {
     const alan = await envAs('alan@example.test')
     await series(at(alan, `${T}&lens=user:me`))
     await series(at(alan, `${T}&lens=user:alan-turing`))
-    const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&qs=&q=&st=&d=2026-10-01&x=&head=7&g=g1&oh=0`
+    const key = `https://series.cache/v${CACHE_V}/marin-a?P=&l=user:alan-turing&o=&cl=&s=&qs=&q=&st=&d=2026-10-01&x=&head=0&g=g1&oh=0`
     expect(keys).toEqual([key, key])
   })
   it('`me` with nobody to resolve (an identity-less cache warm) is a 400, never a cache read', async () => {

@@ -175,7 +175,6 @@ function SiteDialogs() {
 
 function NavMenu({ extra }: { extra?: MenuEntry[] }) {
   const { pathname } = useLocation()
-  const canAssign = useCanAssign()
   const isAdmin = useIsAdmin()
   // Full viewers share with a detailed preview (guest links can't: a token
   // outlives the session that minted it).
@@ -202,8 +201,6 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
           <FloatingFocusManager context={m.context} modal={false}>
             <div className="menu-pop" ref={m.refs.setFloating} style={m.floatingStyles} {...m.getFloatingProps()}>
               {link(store.path, 'Map')}
-              {canAssign && store.owners && link('/users', 'Users')}
-              {canAssign && store.owners && link('/assignments', 'Assignments')}
               {store.staging && link('/staged', 'Staged')}
               {link('/scans', 'Scan runs')}
               {link('/health', 'Health')}

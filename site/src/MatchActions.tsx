@@ -5,10 +5,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { FaRegTrashCan } from 'react-icons/fa6'
-import { getCurrentScan, useOwnerMutations } from './owners'
+import { getCurrentScan } from './owners'
 import { call } from './plans'
 import { Tooltip } from './Tooltip'
-import { AssignSelect } from './AssignSelect'
 import { type Resolved, type Targets, targetsText } from './filterCover'
 import { type ActController, actController, type ActDeps, type ActReq, type ActState, bucketsIn, caveats, ROW_CONFIRM_OVER, targetsOf } from './matchAct'
 import { chunks, ASSIGN_CHUNK, STAGE_CHUNK } from './batches'
@@ -19,12 +18,11 @@ export const ROW_DWELL_MS = 150
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`
 
-/** The app's send paths: the owner ledger's POST (it refreshes the ledger), the plan API (then the plans). */
+/** The app's send paths: the plan API (then the plans). m3 keeps no ownership ledger: nothing assigns. */
 export function useActDeps(): Pick<ActDeps, 'assign' | 'call' | 'asOf' | 'landed'> {
-  const { post } = useOwnerMutations()
   const qc = useQueryClient()
   return {
-    assign: a => post.mutateAsync(a),
+    assign: () => Promise.reject(new Error('m3 keeps no ownership ledger')),
     call,
     asOf: getCurrentScan,
     landed: k => { if (k === 'stage') void qc.invalidateQueries({ queryKey: ['plans'] }) },
@@ -161,13 +159,12 @@ export type Warm = 'cold' | 'warming' | 'ready'
 
 /** A filtered row's controls, drawn: trash and assign while idle (`aria-busy` while its matches prefetch), the
  *  state in their place after a click. */
-export function RowActsView({ state, confirmT, act, warm, canTrash, assigning, fmtBytes, scheme, onIntent, focus }: {
+export function RowActsView({ state, confirmT, act, warm, canTrash, fmtBytes, scheme, onIntent, focus }: {
   state: ActState
   confirmT: Targets | null
   act: Pick<ActController, 'start' | 'confirm' | 'cancel' | 'undo' | 'dismiss' | 'retry'>
   warm: Warm
   canTrash: boolean
-  assigning: boolean
   fmtBytes: (b: number) => string
   scheme: string
   onIntent?: () => void
@@ -182,7 +179,6 @@ export function RowActsView({ state, confirmT, act, warm, canTrash, assigning, f
             <button type="button" className="trash" onClick={() => void act.start({ kind: 'stage' })} aria-label="trash"><FaRegTrashCan /></button>
           </Tooltip>
         )}
-        {assigning && <AssignSelect compact onPick={(owner, who) => void act.start({ kind: 'assign', owner, who })} />}
       </>}
       <ActStatus state={state} confirmT={confirmT} act={act} fmtBytes={fmtBytes} list={{ scheme }} />
     </span>
@@ -192,13 +188,12 @@ export function RowActsView({ state, confirmT, act, warm, canTrash, assigning, f
 /** A filtered row's trash + assign over its matches (`src.resolve(path)`), fetched ahead on intent: the row's
  *  hover (`intent`, after `ROW_DWELL_MS`), or hover / focus of the controls themselves. More than one item
  *  asks first, listing them (`ROW_CONFIRM_OVER`). */
-export function RowActs({ path, src, intent, scheme, canTrash, assigning, fmtBytes }: {
+export function RowActs({ path, src, intent, scheme, canTrash, fmtBytes }: {
   path: string
   src: RowSource
   intent: boolean
   scheme: string
   canTrash: boolean
-  assigning: boolean
   fmtBytes: (b: number) => string
 }) {
   const send = useActDeps()
@@ -219,5 +214,5 @@ export function RowActs({ path, src, intent, scheme, canTrash, assigning, fmtByt
     return () => clearTimeout(t)
   }, [intent, pre])
   const focus = useKeepFocus(act.state.s)
-  return <RowActsView state={act.state} confirmT={act.confirmT} act={act} warm={warm} canTrash={canTrash} assigning={assigning} fmtBytes={fmtBytes} scheme={scheme} onIntent={pre} focus={focus} />
+  return <RowActsView state={act.state} confirmT={act.confirmT} act={act} warm={warm} canTrash={canTrash} fmtBytes={fmtBytes} scheme={scheme} onIntent={pre} focus={focus} />
 }

@@ -2,12 +2,11 @@
  * page meta stamping, and `/og/<kind>.png` rendering with the colo cache. */
 import RESVG from './vendor/resvg.wasm'
 import { type Env, json } from '../auth.js'
-import { ledgerHead } from '../ledger.js'
 import { stampMeta } from '../unfurl.js'
 import { cardSvg, type CardData } from './card.js'
 import { mapCard, type Site } from './data.js'
 import { stagedImageVersion } from '../stagedSlack.js'
-import { assignmentsCard, stagedCard, userCard, usersCard } from './pages.js'
+import { stagedCard } from './pages.js'
 import { ensureWasm, FONT_FILES, svgToPng } from './render.js'
 import { pageView, type OgKind } from './routes.js'
 import { imagePath, ogKey, resolveImage, type OgTier } from './sign.js'
@@ -54,12 +53,11 @@ export async function anonymousPage(env: OgEnv, url: URL): Promise<Response | nu
 }
 
 /** The kinds this build draws; the rest keep their static card. */
-export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'diff', 'staged', 'users', 'user', 'assignments'])
+export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'diff', 'staged'])
 
 /** Kinds whose page Function already stamps its own title and description
- * (`functions/staged.ts`, `users.ts`, `user/[id].ts`, `assignments.ts`): the
- * middleware only swaps their image. */
-const OWN_TITLES: ReadonlySet<OgKind> = new Set(['staged', 'users', 'user', 'assignments'])
+ * (`functions/staged.ts`): the middleware only swaps their image. */
+const OWN_TITLES: ReadonlySet<OgKind> = new Set(['staged'])
 
 export const siteOf = (env: OgEnv): Site => {
   const c = colorModeCodec.decode(env.OG_DEFAULT_COLOR)
@@ -145,9 +143,6 @@ async function cardData(env: OgEnv, kind: string, params: Record<string, string>
     case 'map': return mapCard(env, site, title, params, tier)
     case 'diff': return diffCard(env, site, title, params, tier)
     case 'staged': return stagedCard(env, site, title, params, tier)
-    case 'users': return usersCard(env, site, title, params, tier)
-    case 'user': return userCard(env, site, title, params, tier)
-    case 'assignments': return assignmentsCard(env, site, title, params, tier)
     default: return null
   }
 }
@@ -208,7 +203,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
     throw e
   }
   const renderView = scan ? { ...view, d: r.kind === 'diff' && before ? `${encodeScan(scan)}-${encodeScan(before)}` : scan } : view
-  const head = env.DB ? await ledgerHead(env).catch(() => 0) : 0
+  const head = 0  // m3 keeps no ownership ledger
   // An anonymous render is one per view (+ version), whatever credential the URL named.
   const keyParams = { ...(r.tier === 'full' ? r0.params : { ...view, ...(v ? { v } : {}) }), ...(scan ? { s: scan } : {}), ...(before ? { b: before } : {}), policy, r: RENDER_VERSION }
   const cacheKey = new Request(`${url.origin}${await imagePath(null, r.kind, keyParams, 'anon')}${Object.keys(keyParams).length ? '&' : '?'}tier=${r.tier}&h=${head}`)

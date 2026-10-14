@@ -13,8 +13,6 @@ import { cellAction } from './objects'
 import { canonId, UserChip, ghHandle, shortName } from './UserChip'
 import { dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonth, inkFor, slotColor, userColor } from './colors'
 import type { UserIndexEntry } from './colors'
-import { OwnerControls } from './OwnerControls'
-import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
 import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
@@ -172,7 +170,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, scheme = 'gs://', home, redact, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -190,9 +188,6 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   onClearHl?: () => void
   pricing?: Pricing | null
   lens?: boolean
-  /** The view is filtered to one owner (`?o=<user>`): nodes carry that
-   * person's slice alone, so the owner panel's inferred owner shows no share. */
-  ownerLensed?: boolean
   // URI scheme for cell paths — `gs://` for GCS, `s3://` for CoreWeave.
   scheme?: string
   /** The store home, shown as `~` in the path bar (`Store.home`). */
@@ -200,9 +195,6 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // OG-image mode: hide every text detail (cell labels, crumb/rollup bars, hint)
   // and render just the colored cells. Never set by the live app.
   redact?: boolean
-  // The ownership ledger (`Store.owners`): the owner panel above the map and
-  // in the pinned tooltip, with assignment controls for admins.
-  ownerIdx?: OwnerIndex | null
   // Start drilled here (e.g. CW's lone bucket) — crumbs keep the ancestry.
   initialPath?: TreeNode[]
   // Controlled drill path + change reporting (upstream contract) — lets the
@@ -443,26 +435,17 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     if (redact) return null
     // The rollup follows the ACTIVE color axis: the owner breakdown renders
     // only when the map is colored by user (tree/written/read each key their
-    // own legend). The owner panel is active whenever ownerIdx is, in every
-    // coloring.
+    // own legend).
     const rollup = rollupFor(node)
-    if (!ownerIdx && !rollup.length) return null
-    // Nothing to key here (tree/date/read at a level with no owner panel, no
-    // owner rows) — render no rollup at all, so an empty
+    if (!rollup.length) return null
+    // Nothing to key here (tree/date/read, no owner rows) — render no rollup
+    // at all, so an empty
     // `.dt-treemap-rollup` div doesn't sit as a gap between the crumb bar and
     // the map.
     const rollupRows = rollup.filter(r => r.b >= 0.001 * node.b)
-    if (!hasPanel && rollupRows.length === 0) return null
+    if (rollupRows.length === 0) return null
     return (
       <>
-        {/* A bucket itself isn't assignable (OwnerControls renders nothing
-            there) — no panel for an empty box. */}
-        {hasPanel && (
-          <div className="root-owner">
-            <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser} />
-            {keys}
-          </div>
-        )}
         {rollupRows.map(r => {
           // Real per-user rows (not "(other users)"/"unowned") get a GitHub
           // avatar next to the color swatch.
@@ -556,11 +539,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // in every mode: a map-level preference belongs on the map, not in the nav.
   // The keys (⚙, fullscreen) are the last flex items with `margin-left:
   // auto`: they take the free end of the LIs' last line, or wrap to a line of
-  // their own only when there's no room — never a mostly-empty row. They sit
-  // at the right edge of the owner panel (its head-matter row has the room);
-  // without a panel (bucket level, no ledger) they take the free end of the
-  // legend's last line instead. The core's own ⛶ is hidden.
-  const hasPanel = !!ownerIdx && (path?.length ?? 0) > 2
+  // their own only when there's no room — never a mostly-empty row. The
+  // core's own ⛶ is hidden.
   const keys = (
     <span className="keys">
       <SettingsMenu />
@@ -617,12 +597,6 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         </div>
         {classes}
         {users}
-        {/* interactive only when the tooltip is pinned; CSS hides it on hover */}
-        {ownerIdx && !n.n.startsWith('(') && <OwnerControls uri={uriOf(path)} idx={ownerIdx} node={n} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser} />}
-        {/* The passive preview says where the controls are: any cell, at any
-            depth, assigns from its pinned box (the table below only lists the
-            drilled node's children). Gone once pinned or hovered into. */}
-        {ownerIdx && !n.n.startsWith('(') && <div className="tt-hint tt-pin-hint">{cellAction(n, objects) === 'pin' ? 'click' : '⌥-click'} to pin · assign it here</div>}
       </>
     )
   }
@@ -719,7 +693,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             <Tooltip content={<>Click a directory to drill in · click an object to open it · ⌥-click any cell to pin its details · click the path above (or Backspace) to go up · small children fold into “(other)” · j/k select rows in the table below</>}>
               <span className="info" aria-label="how to use the map" tabIndex={0}>ⓘ</span>
             </Tooltip>
-            {!hasPanel && keys}
+            {keys}
           </div>
         )}
       chrome={!redact}

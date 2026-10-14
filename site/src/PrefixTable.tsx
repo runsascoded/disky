@@ -1,5 +1,5 @@
 // A table of arbitrary prefixes with their numbers at a scan: name, bytes,
-// share, objects, owner(s), created, read — the columns the map's
+// share, objects, created, read — the columns the map's
 // ChildrenTable shows — plus each page's own extra columns (who staged it and
 // when; who assigned it) and a leading / trailing cell (selection, actions).
 // `/staged` renders its items with it; the action log and ChildrenTable are
@@ -8,13 +8,9 @@ import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Tooltip } from './Tooltip'
 import { elideMid, copyText } from './CopyName'
-import { OwnerFactChip } from './OwnerFactChip'
-import { OwnerBar, ownerShares } from './OwnerBar'
 import { useUnits } from './units'
-import { fmtN, type TreeNode } from './types'
+import { fmtN } from './types'
 import { dateColor } from './colors'
-import type { OwnerIndex } from './owners'
-import type { UserIndexEntry } from './colors'
 import { type PrefixSortKey, type PrefixStat, relAgo } from './prefixes'
 import { useStore } from './store'
 import { listingTime } from './listingTime'
@@ -50,15 +46,12 @@ export function TimeCell({ ts, ink, day }: { ts?: number; ink?: string; day?: bo
   )
 }
 
-export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, userIdx, ownerIdx, extra = [], lead, trail, namePrefix, rowProps, loading, emptyLabel = 'empty' }: {
+export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, extra = [], lead, trail, namePrefix, rowProps, loading, emptyLabel = 'empty' }: {
   rows: R[]
   sort: { k: PrefixSortKey; asc: boolean }
   onSort: (k: PrefixSortKey) => void
   /** The bytes a row's share is of (absent: no share column). */
   shareOf?: number
-  userIdx?: Map<string, UserIndexEntry>
-  /** The ownership ledger: an assigned prefix shows its assignee. */
-  ownerIdx?: OwnerIndex | null
   extra?: ExtraCol<R>[]
   /** A leading column (selection): its header cell and each row's cell. */
   lead?: { header: ReactNode; cell: (r: R, i: number) => ReactNode }
@@ -93,7 +86,6 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
           {th('b', 'size')}
           {shareOf != null && <th className="num">share</th>}
           {th('o', 'objects')}
-          <th>owner(s)</th>
           {th('d', time.label)}
           {th('a', 'read')}
           {extra.map(c => c.sort ? th(c.key, c.label, false) : <th key={c.key}>{c.label}</th>)}
@@ -103,9 +95,6 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
       <tbody>
         {rows.map((r, i) => {
           const s = r.stat
-          const cl = ownerIdx?.count ? ownerIdx.assignmentOf(r.name) : null
-          const node: TreeNode | null = s ? { n: r.name, b: s.b, o: s.o, ...(s.us ? { us: s.us } : {}) } : null
-          const shares = node ? ownerShares(node) : []
           const none = loading ? '…' : <span className="dim">{emptyLabel}</span>
           return (
             <tr key={r.name} {...rowProps?.(r, i)}>
@@ -119,12 +108,6 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
               <td className="num">{s ? fmtBytes(s.b) : none}</td>
               {shareOf != null && <td className="num">{s && shareOf > 0 ? `${((100 * s.b) / shareOf).toFixed(1)}%` : ''}</td>}
               <td className="num">{s ? fmtN(s.o) : ''}</td>
-              <td className="owners">
-                {cl ? <OwnerFactChip who={cl.who} assigned={{ by: cl.by, ts: cl.ts, memo: cl.memo }} />
-                  : node && shares.length === 1 && shares[0][1] >= 0.98 * node.b ? <OwnerFactChip who={shares[0][0]} />
-                  : node && shares.length ? <OwnerBar node={node} userIdx={userIdx} width={70} />
-                  : <span className="dim">—</span>}
-              </td>
               <td className="created"><TimeCell day ts={s?.d != null ? s.d * 86400 : undefined} ink={s?.d != null ? ink(s.d) : undefined} /></td>
               <td className="read"><TimeCell day ts={s?.a != null ? s.a * 86400 : undefined} /></td>
               {extra.map(c => <td key={c.key} className={c.className}>{c.cell(r)}</td>)}

@@ -11,8 +11,6 @@ vi.mock('../_lib/edgeCache.js', async orig => ({
   // A resolved request answers as a cache hit carrying its key: no store read.
   cacheMatch: vi.fn(async (_env: unknown, key: Request) => new Response(JSON.stringify({ hit: new URL(key.url).pathname }))),
 }))
-// the ledger routes run on a lineage with the ledger (the cw D1 here has none)
-vi.mock('../_lib/ledger.js', async orig => ({ ...await orig<typeof import('../_lib/ledger.js')>(), hasLedger: vi.fn(async () => true), ledgerHead: vi.fn(async () => 0) }))
 // A date-only scan's start (`meta.started`), as the store would answer it: the 10/9 daily run's.
 const STARTS: Record<string, string> = { '2026-10-09': '2026-10-09T04:30:12.345Z' }
 vi.mock('../_lib/scanTimes.js', async orig => {
@@ -20,11 +18,8 @@ vi.mock('../_lib/scanTimes.js', async orig => {
   return { ...m, scanTimes: (e: Env, scans: readonly string[]) => m.scanTimes(e, scans, async (_e, id) => STARTS[id] ?? null) }
 })
 vi.mock('../_lib/extras.js', async orig => ({ ...await orig<typeof import('../_lib/extras.js')>(), hasExtras: vi.fn(async () => false) }))
-vi.mock('../_lib/ownerTotals.js', () => ({ ownerTotals: vi.fn(async (_env: unknown, date: string) => ({ head: 0, users: {}, assignments: [], date })) }))
 const { onRequestGet: subtree } = await import('./subtree')
 const { onRequestGet: diff } = await import('./diff')
-const { onRequestGet: owners } = await import('./owners')
-const { onRequestGet: assignments } = await import('./assignments')
 
 // Two scans on 10/9 (06:01, 12:36) and a date-only 10/8.
 const SCANS = ['2026-10-08', '2026-10-09T0601', '2026-10-09T1236']
@@ -104,13 +99,5 @@ describe('the APIs answer a miss with 404 {error}', () => {
   it('a slug that matches resolves to its latest scan (subtree keys the cache by the resolved id)', async () => {
     const [status, body] = await answer(await subtree(at(await env(), '/api/subtree?d=261009&path=') as never))
     expect([status, (body as { hit: string }).hit.split('/').slice(-2)]).toEqual([200, ['2026-10-09T1236', '']])
-  })
-  it.each([
-    ['/api/owners?d=26100903', [404, { error: 'no scan matches d=26100903' }]],
-    ['/api/assignments?date=2026-10-07', [404, { error: 'no scan matches date=2026-10-07' }]],
-  ])('%s', async (path, want) => {
-    const handler = path.startsWith('/api/owners') ? owners : assignments
-    const e = await env()
-    expect(await answer(await handler(at(e, path) as never))).toEqual(want)
   })
 })

@@ -2,10 +2,9 @@
 // goes in batches, and lands as exactly the prefixes sent — staging as ONE batch (merged), the ledger as one
 // row per prefix. (Never against a deployment's D1: dev shares prod's.)
 import { describe, expect, it } from 'vitest'
-import { onRequest as actionsRoute } from './actions'
 import { onRequest as plansRoute } from './plans/[[path]]'
-import { GCS_LEDGER, sqliteD1 } from '../_lib/testD1'
-import { assignInBatches, HttpError, stageMany } from '../../src/batches'
+import { sqliteD1 } from '../_lib/testD1'
+import { HttpError, stageMany } from '../../src/batches'
 import { actController, type ActDeps, type ActState } from '../../src/matchAct'
 import type { CoverItem } from '../_lib/cover'
 
@@ -43,20 +42,6 @@ describe('bulk submission against a local D1', () => {
     ])
   })
 
-  it('assigns 1,100 folder prefixes in 3 POSTs (the API takes ≤ 500), one ledger row each', async () => {
-    const { db, raw } = await sqliteD1('cw')
-    raw.exec(GCS_LEDGER)
-    const env = { ...base, DB: db }
-    const prefixes = Array.from({ length: 1100 }, (_, i) => `gs://${B}/d${String(i).padStart(4, '0')}/`)
-    const statuses: number[] = []
-    const n = await assignInBatches(prefixes, pattern => ({ pattern, owner: 'ann', memo: "bulk filter:'tomat'", scan: '2026-10-09' }), async actions => {
-      const r = await actionsRoute({ request: new Request('http://localhost/api/actions', { method: 'POST', body: JSON.stringify(actions) }), env } as never)
-      statuses.push(r.status)
-      if (!r.ok) throw new Error(await r.text())
-    })
-    const rows = (await db.prepare('SELECT prefix, owner FROM owner_prefixes ORDER BY prefix').all<{ prefix: string; owner: string }>()).results
-    expect([n, statuses, rows.length, rows.map(r => r.prefix), [...new Set(rows.map(r => r.owner))]]).toEqual([1100, [200, 200, 200], 1100, prefixes, ['ann']])
-  })
 })
 
 // A filtered row's (or the bulk bar's) action end to end: the click resolves the matches, a large set asks,
@@ -64,10 +49,9 @@ describe('bulk submission against a local D1', () => {
 // real handlers and a local D1.
 describe('a click on the matches → confirm → batches → accepted, against a local D1', () => {
   /** A controller sending through the routes; every state it passes through, as a line. */
-  async function harness(items: CoverItem[], ledger: boolean) {
+  async function harness(items: CoverItem[]) {
     const { db, raw } = await sqliteD1('cw')
     raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-10-09', 'path', 2, '[]')`)
-    if (ledger) raw.exec(GCS_LEDGER)
     const env = { ...base, DB: db }
     const sent: string[] = []
     const ok = async (r: Response) => { const j = await r.json(); if (!r.ok) throw new HttpError(JSON.stringify(j), r.status); return j }
@@ -75,10 +59,7 @@ describe('a click on the matches → confirm → batches → accepted, against a
       scheme: 'gs://',
       resolve: async () => ({ items, complete: true }),
       asOf: () => '2026-10-09',
-      assign: async actions => {
-        sent.push(`POST /api/actions ${actions.length}`)
-        return ok(await actionsRoute({ request: new Request('http://localhost/api/actions', { method: 'POST', body: JSON.stringify(actions) }), env } as never))
-      },
+      assign: async () => { throw new Error('m3 keeps no ownership ledger') },
       call: (async (url: string, method: string, body: unknown) => {
         sent.push(`${method} ${url}`)
         return ok(await plansRoute({ request: new Request(`http://localhost${url}`, { method, body: JSON.stringify(body) }), env } as never))
@@ -95,7 +76,7 @@ describe('a click on the matches → confirm → batches → accepted, against a
   const dirs = Array.from({ length: 1100 }, (_, i) => ({ path: `${B}/d${String(i).padStart(4, '0')}/tomat`, kind: 'dir' as const, b: 10, o: 1, roots: 1 }))
 
   it('stage 1,100 folders: asks, sends 3 POSTs + a merge, lands as one batch; undo takes them back', async () => {
-    const h = await harness(dirs, false)
+    const h = await harness(dirs)
     await h.ctl.start({ kind: 'stage', memo: 'old tomat runs' })
     expect([h.states, h.sent]).toEqual([['resolving', 'confirm'], []])
     await h.ctl.confirm()
@@ -114,19 +95,6 @@ describe('a click on the matches → confirm → batches → accepted, against a
       ['undoing', 'done: unstaged 1,100 items'],
       ['DELETE /api/plans/1/items', 'DELETE /api/plans/1/items', 'DELETE /api/plans/1/items'],
       [],
-    ])
-  })
-
-  it('assign 120 lone files: asks (over the confirm threshold), one POST, one exact-object ledger row each', async () => {
-    const files = Array.from({ length: 120 }, (_, i) => ({ path: `${B}/show/clip${String(i).padStart(3, '0')}.mp3`, kind: 'file' as const, b: 1, o: 1, roots: 1 }))
-    const h = await harness(files, true)
-    await h.ctl.start({ kind: 'assign', owner: 'ann', who: 'ann', memo: "bulk filter:'clip'" })
-    await h.ctl.confirm()
-    const rows = (await h.db.prepare('SELECT p.prefix, p.kind, p.owner, a.memo FROM owner_prefixes p JOIN actions a ON a.id = p.action_id ORDER BY p.prefix').all<{ prefix: string; kind: string | null; owner: string; memo: string }>()).results
-    expect([h.states, h.sent, rows]).toEqual([
-      ['resolving', 'confirm', 'sending 0/1', 'sending 1/1', 'done: assigned 120 files → ann'],
-      ['POST /api/actions 120'],
-      files.map(f => ({ prefix: `gs://${f.path}`, kind: 'object', owner: 'ann', memo: "bulk filter:'clip'" })),
     ])
   })
 })

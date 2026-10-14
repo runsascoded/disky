@@ -7,7 +7,6 @@ import { overTimeDataset } from './overTime'
 import { REQ, Req, reqOf, snapshotsPrefix } from './shared'
 import { LENS_PRIMARY_ONLY, primaryOnly, secondaryStores, storeEnv, storeKey, withStore } from './stores'
 import { sqliteD1 } from './testD1'
-import { onRequestGet as owners } from '../api/owners'
 import { onRequestGet as subtree } from '../api/subtree'
 
 // The multi-store seam (specs/multi-store.md phase 1): no `store=` is the
@@ -202,10 +201,6 @@ describe.each([
 })
 
 describe('handlers', () => {
-  it('the ownership endpoints refuse a secondary store before any work', async () => {
-    const r = await owners({ request: new Request('https://cw-s3.example.test/api/owners?date=2026-09-01&store=meta'), env: PRIMARY })
-    expect([r.status, await r.text()]).toEqual([404, '{"error":"store \'meta\' has no ownership ledger (primary store only)"}\n'])
-  })
   it('a data endpoint 404s an unknown store, and refuses the user lens on a secondary one', async () => {
     const get = async (qs: string) => {
       const r = await subtree({ request: req(qs), env: PRIMARY })

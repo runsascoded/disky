@@ -9,7 +9,6 @@ import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity } from './auth'
-import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { DiskSpace } from './DiskSpace'
@@ -46,10 +45,9 @@ import { LoadFailure, mapSlot } from './LoadFailure'
 import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
 import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
 import { BulkBar } from './BulkBar'
-import { setCurrentScan, useMyUserState, useOwnerIndex, useOwners } from './owners'
-import { ledgerRevOf, ownerScope, ownerScopeReady, pageLedgerKey, scopeKeyOf } from './viewScope'
+import { setCurrentScan, useMyUserState } from './owners'
+import { ownerScope, ownerScopeReady, scopeKeyOf } from './viewScope'
 import { useRegistryLoaded } from './identities'
-import { applyLedger } from './ledgerOverlay'
 import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
@@ -65,7 +63,6 @@ import { knownBucket, storeDefaultColor } from './stores'
 import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { perf } from './perf'
 import { useDocTitle } from './title'
-import { TypedPrefixModal } from './TypedPrefix'
 import type { AgeRow, ColorMode, Meta, Pricing, Rules, TreeNode } from './types'
 import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
 import { SiteKbd } from './SiteKbd'
@@ -158,12 +155,8 @@ function AppContent() {
   const canAssign = useCanAssign()
   const canStage = useCanStage()
   const ident = useIdentity()
-  // The owner axis (`Store.owners`): the ownership ledger overlays the map
-  // and the table for any signed-in viewer; admins assign from it.
+  // The owner axis (`Store.owners`), for any signed-in viewer. (m3 keeps no ownership ledger.)
   const ownersMode = store.owners && !!ident
-  const ownersQ = useOwners(ownersMode)
-  const ownerIdx = useOwnerIndex(ownersQ.data)
-  const [typedOpen, setTypedOpen] = useState(false)
   // Keep the tab title in sync with the store on client-side navigation.
   useDocTitle() // the bare site name (= the store's title) is the home page
   // URL token matches the visible label ("written"), not the internal key
@@ -280,16 +273,8 @@ function AppContent() {
     owner.qs +
     (classSet ? `&cl=${CLASS_AXES.filter(c => classSet.has(c)).join('')}` : '') +
     (fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : '')
-  // A user lens or an owner pool folds the live ledger server-side, so those
-  // views' queries carry its revision: an assignment (or its undo) refetches
-  // them; everything else ignores the ledger. The ledger's first load is not a
-  // change (`pageLedgerKey`): a view fired before `/api/actions` lands keeps its key.
-  const ledgerRev = useMemo(() => {
-    let max = 0
-    for (const r of ownerIdx.owners.values()) max = Math.max(max, r.action_id)
-    return ledgerRevOf(ownerIdx.count, max)
-  }, [ownerIdx])
-  const ledger = pageLedgerKey(ledgerRev, ownersQ.data !== undefined)
+  // m3 keeps no ownership ledger: a ledgered view's key part never moves.
+  const ledger = '0'
   const scopeKey = scopeKeyOf(scopeQs, owner.ledgered, ledger)
   // One-time legacy-param rewrite onto the two axes, so old links (Slack
   // digests, /user pages) work and re-share in the current form:
@@ -547,20 +532,7 @@ function AppContent() {
   // empty the decorations under a map that is still showing.
   const lastTree = useRef<TreeNode | null>(null)
   if (tree) lastTree.current = tree
-  // The live ownership ledger over the scan's attribution (`applyLedger`):
-  // assignments recolor the map and its legend as soon as `/api/actions`
-  // refetches. A pool or user-lens view also re-reads (`ledger` is in its
-  // key) and comes back with the ledger folded in; a user lens is left as served.
-  const heldTree = tree ?? lastTree.current
-  const mapTree = useMemo(
-    () => {
-      if (!heldTree || !ownersMode || ownerMode === 'user') return heldTree
-      // A pool is served with the ledger folded in (bytes assigned since the
-      // scan move in or out of it); this only recolors by assignee.
-      return applyLedger(heldTree, ownerIdx, store.scheme, canonId)
-    },
-    [heldTree, ownersMode, ownerMode, ownerIdx, store.scheme],
-  )
+  const mapTree = tree ?? lastTree.current
   // What the map shows vs. what the page asked for: a held previous tree
   // (`mapStale` — dimmed, with a centered marker), or the asked-for tree with
   // a fetch still in flight (`mapBusy` — the full tree filling in behind the
@@ -1127,7 +1099,7 @@ function AppContent() {
       )}
     </>
   )
-  const menu: MenuEntry[] = ownersMode && canAssign ? [{ key: 'typed', label: 'Assign a typed prefix…', onClick: () => setTypedOpen(true) }] : []
+  const menu: MenuEntry[] = []
   // The bar's first row: where the page is. The map's own crumb strip is
   // hidden (app.scss) — this IS it, kept on screen mid-scroll; the deepest
   // node's totals ride along as the suffix.
@@ -1158,7 +1130,6 @@ function AppContent() {
 
   return (
     <main>
-      {typedOpen && <TypedPrefixModal idx={ownerIdx} onClose={() => setTypedOpen(false)} />}
       {/* The page scope, all of it, in the sticky bar — the same bar at the
           top of the page and mid-scroll, so every section reads against it:
           where (drill path) · when (scan, and the diff window's start while
@@ -1260,7 +1231,6 @@ function AppContent() {
           ))}
         </p>
       )}
-      {ownersQ.error && <p className="tab-note err">Assignments unavailable: {ownersQ.error.message}</p>}
       {meUnmapped && myUserReady && (
         <p className="tab-note">
           Your email isn't mapped to an owner id yet — ping Ryan (or an admin can add you at{' '}
@@ -1296,7 +1266,6 @@ function AppContent() {
             mapStale ? 'stale' : '',
           ].filter(Boolean).join(' ')} aria-busy={mapBusy || undefined}><Treemap
             key={store.key}
-            ownerLensed={ownerMode === 'user'}
             root={mapTree}
             mode={effMode}
             shade={shade}
@@ -1311,7 +1280,6 @@ function AppContent() {
             lens={lens}
             scheme={store.scheme}
             home={store.home}
-            ownerIdx={ownersMode ? ownerIdx : undefined}
             path={mapPath}
             onPathChange={onMapPath}
             objects={objects}
@@ -1361,9 +1329,6 @@ function AppContent() {
               segs={tblSegs}
               scheme={store.scheme}
               home={store.home}
-              ownerIdx={ownersMode ? ownerIdx : undefined}
-              userIdx={userIdx}
-              onPickUser={u => pickUser(u, false)}
               onOpen={openPath}
               onOpenObject={openObject}
               filter={tblFilter}
@@ -1552,7 +1517,6 @@ function AppContent() {
           ...(!lensScoped && (ageQ.isPending || age.length > 0) ? ['age' as const] : []),
           ...(store.lifecycle ? ['lifecycle' as const] : []),
           ...(meta && store.prices ? ['classes' as const] : []),
-          ...(hasAttr && mapTree ? ['ownership' as const] : []),
         ]
         const note = blindNote(!!fq, present)
         return note && <p className="loading filter-blind">{note}</p>
@@ -1625,10 +1589,6 @@ function AppContent() {
           </section>
         )
       })()}
-
-      {/* Static attribution reference — how ownership is inferred + the rule tables.
-          Reference material, so it sits last rather than sandwiched mid-page. */}
-      {blindShown(!!fq) && hasAttr && mapTree && <AttributionRules tree={mapTree} />}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}

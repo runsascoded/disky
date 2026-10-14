@@ -4,15 +4,10 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ActState } from './matchAct'
 import type { Targets } from './filterCover'
 
-// The tooltip's content inline (the real one mounts on hover), the assign select as a marker, the trash glyph
-// as text: what's left is each state's exact markup.
+// The tooltip's content inline (the real one mounts on hover), the trash glyph as text: what's left is each state's exact markup.
 vi.mock('./Tooltip', async () => {
   const { createElement: h } = await import('react')
   return { Tooltip: ({ content, children, placement }: { content: ReactNode; children: ReactNode; placement?: string }) => h('span', { className: 'tt', 'data-placement': placement }, children, h('span', { className: 'tt-tip' }, content)) }
-})
-vi.mock('./AssignSelect', async () => {
-  const { createElement: h } = await import('react')
-  return { AssignSelect: ({ label }: { label?: string }) => h('select', { 'aria-label': 'assign owner' }, label ?? 'assign…') }
 })
 vi.mock('react-icons/fa6', async () => {
   const { createElement: h } = await import('react')
@@ -24,10 +19,10 @@ const nop = () => {}
 const act = { start: async () => {}, confirm: async () => {}, cancel: nop, undo: async () => {}, dismiss: nop, retry: async () => {} }
 const t = (o: Partial<Targets>): Targets => ({ items: [], b: 0, o: 0, folders: 0, files: 0, buckets: 0, unknown: 0, ...o })
 const render = (state: ActState, o: { warm?: 'cold' | 'warming' | 'ready'; confirmT?: Targets } = {}) => renderToStaticMarkup(createElement(RowActsView, {
-  state, confirmT: o.confirmT ?? null, act, warm: o.warm ?? 'cold', canTrash: true, assigning: true, fmtBytes: (b: number) => `${b} B`, scheme: 'gs://',
+  state, confirmT: o.confirmT ?? null, act, warm: o.warm ?? 'cold', canTrash: true, fmtBytes: (b: number) => `${b} B`, scheme: 'gs://',
 }))
 
-const TRASH = '<span class="tt" data-placement="right"><button type="button" class="trash" aria-label="trash"><svg></svg></button><span class="tt-tip">Stage this row’s matches for deletion (not the rest of the row; listed when you click) — an admin approves and dispatches from /staged</span></span><select aria-label="assign owner">assign…</select>'
+const TRASH = '<span class="tt" data-placement="right"><button type="button" class="trash" aria-label="trash"><svg></svg></button><span class="tt-tip">Stage this row’s matches for deletion (not the rest of the row; listed when you click) — an admin approves and dispatches from /staged</span></span>'
 const box = (inner: string, live: string, attrs = '') => `<span class="mact"${attrs} tabindex="-1">${inner}<span class="act-live" role="status" aria-live="polite">${live}</span></span>`
 const X = '<button type="button" class="act x" aria-label="dismiss">×</button>'
 const SPIN = '<span class="spin" aria-hidden="true"></span>'
@@ -35,7 +30,7 @@ const req = { kind: 'stage' as const }
 const OVER = 'Too many matches to act on at once (70,390); narrow the search or open a folder below. Agents can bulk-assign via the API.'
 
 describe('a filtered row\'s controls, per state', () => {
-  it('idle: trash and assign, offered at once (no "list" step); the live region empty', () => {
+  it('idle: trash, offered at once (no "list" step); the live region empty', () => {
     expect(render({ s: 'idle' })).toBe(box(TRASH, ''))
   })
   it('prefetching (hovered): the same controls, busy', () => {

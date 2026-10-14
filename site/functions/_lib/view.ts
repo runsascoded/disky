@@ -30,17 +30,13 @@
  */
 import type { Env } from './auth.js'
 import { asOfScans, folded, type IndexHandle, isStore, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
-import { type FoldedLens, ownerLens, poolLens } from './owners.js'
+import type { FoldedLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
 import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
 import { planNegative, planPositive } from './searchQuery.js'
-import { hasLedger } from './ledger.js'
-import { ownerAssignments } from './ownerTotals.js'
-import { shared } from './shared.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
-import { loadRegistry } from './identity.js'
 import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
 import { scanAt } from './staticNames.js'
 import { FilterRejected, indexedOnly, reject } from './indexedOnly.js'
@@ -566,33 +562,9 @@ export async function readRootHistory(env: Env, dates: string[], scope: { lens?:
   return out
 }
 
-/** The owner lens for a scan: the live assignments folded against it (cached per
- * (scan, ledger head) by the totals machinery) — null when nothing is assigned. */
-const assignerMemo = new Map<string, Promise<Map<string, string>>>()
-/** email → canonical user id (`user_emails`), memoized per isolate — to match
- * an assignment's assigner (`actions.actor`, an email) against a `by=` (canonical). */
-async function assignerMap(env: Env): Promise<Map<string, string>> {
-  return shared(assignerMemo, 'ue', async () => {
-    const m = new Map<string, string>()
-    const ue = await env.DB!.prepare('SELECT email, user FROM user_emails').all<{ email: string; user: string }>()
-    for (const r of ue.results) m.set(r.email.toLowerCase(), r.user)
-    return m
-  }, 10_000)
-}
-async function ownerLensFor(env: Env, date: string, lens: Lens, by?: string): Promise<FoldedLens | null> {
-  let assignments = await ownerAssignments(env, date)
-  if (by) {
-    const emap = await assignerMap(env)
-    assignments = assignments.filter(c => c.who != null && (emap.get(c.who.toLowerCase()) ?? c.who) === by)
-  }
-  return ownerLens(assignments, lens.key, await loadRegistry(env))
-}
-
-/** An owner pool's ledger fold for a scan (null: no pool, or no assignments). */
-async function poolLensFor(env: Env, date: string, owner: OwnerScope | undefined): Promise<FoldedLens | null> {
-  if (!owner || !(await hasLedger(env))) return null
-  return poolLens(await ownerAssignments(env, date), owner, await loadRegistry(env))
-}
+/** m3 keeps no ownership ledger: no assignments fold into a user lens or an owner pool. */
+async function ownerLensFor(_env: Env, _date: string, _lens: Lens, _by?: string): Promise<FoldedLens | null> { return null }
+async function poolLensFor(_env: Env, _date: string, _owner: OwnerScope | undefined): Promise<FoldedLens | null> { return null }
 
 /** A node in an owner pool once assignments apply: the pool's bytes and
  * objects there (`pl.b` / `pl.o`), exactly its in-pool rows when no assignment

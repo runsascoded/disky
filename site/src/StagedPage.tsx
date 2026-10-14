@@ -22,7 +22,6 @@ import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import { UserChip, canonId, shortName } from './UserChip'
-import { ownerShares } from './OwnerBar'
 import { encodeSort, filterStaged, parseSort } from './stagedFilter'
 import { PrefixTable, TimeCell } from './PrefixTable'
 import { useUnits } from './units'
@@ -30,8 +29,6 @@ import { fmtBytesPrecise, fmtN, type Meta, type TreeNode } from './types'
 import { DEFAULT_STORE } from './stores'
 import { buildUserIndex } from './colors'
 import { useCanStage, useIdent } from './auth'
-import { applyLedger } from './ledgerOverlay'
-import { useOwnerIndex, useOwners } from './owners'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { CAPS, useDispatch, useExecJobs, usePrefixHistory, useRunAction, useRunFiles, useStagedPlan, useUnstage } from './plans'
 import type { EmptiedBatch, StagedItem } from './plans'
@@ -175,7 +172,6 @@ export function StagedPage() {
     staleTime: Infinity,
   })
   const userIdx = useMemo(() => buildUserIndex(metaQ.data?.users ?? []), [metaQ.data])
-  const ownerIdx = useOwnerIndex(useOwners(!!store.owners).data)
   const error = unstage.error ?? dispatch.error ?? runAction.error ?? staged.error ?? statsQ.error ?? history.error
 
   const rows: Row[] = useMemo(() => items.map(it => ({ ...it, name: it.prefix, to: `/${prefixToPath(it.prefix)}`, stat: stats?.[it.prefix] })), [items, stats])
@@ -188,13 +184,8 @@ export function StagedPage() {
   const q = qP ?? ''
   const sort = parseSort(sP) as { k: PrefixSortKey; asc: boolean }
   const onSort = (k: PrefixSortKey) => setS(encodeSort({ k, asc: sort.k === k ? !sort.asc : k === 'name' }))
-  // What a row is found by: its prefix, its owners (the ledger's assignee, else
-  // the scan's attribution — what the owner(s) column shows) and its stager.
-  const filtered = useMemo(() => filterStaged(rows, q, r => {
-    const cl = ownerIdx.count ? ownerIdx.assignmentOf(r.prefix, r.kind) : null
-    const owners = cl ? [cl.who] : r.stat ? ownerShares({ n: r.name, b: r.stat.b, o: r.stat.o, ...(r.stat.us ? { us: r.stat.us } : {}) }).map(([u]) => u) : []
-    return { prefix: r.prefix, owners, stagedBy: r.added_by }
-  }, searchName), [rows, q, ownerIdx])
+  // What a row is found by: its prefix and its stager (m3 has no owners).
+  const filtered = useMemo(() => filterStaged(rows, q, r => ({ prefix: r.prefix, owners: [], stagedBy: r.added_by }), searchName), [rows, q])
   const shownRows = filtered.rows
   const flat = !!flatP || !!q.trim()
 
@@ -293,17 +284,10 @@ export function StagedPage() {
   const selRows = rows.filter(r => sel.selected.has(r.prefix))
   const selTotal = total(selRows)
 
-  const overlay = (t: TreeNode) => (ownerIdx.count ? applyLedger(t, ownerIdx, store.scheme) : t)
   const shownPrefixes = useMemo(() => activeShownRows.map(r => r.prefix), [activeShownRows])
-  const tree = useMemo(() => {
-    const t = stats && shownPrefixes.length ? stagedMapTree(shownPrefixes, stats, 'staged') : null
-    return t ? overlay(t) : null
-  }, [shownPrefixes, stats, ownerIdx]) // eslint-disable-line react-hooks/exhaustive-deps
+  const tree = useMemo(() => stats && shownPrefixes.length ? stagedMapTree(shownPrefixes, stats, 'staged') : null, [shownPrefixes, stats])
   const selKey = selected.join('\n')
-  const selTree = useMemo(() => {
-    const t = stats && selected.length ? stagedMapTree(selected, stats, 'selected') : null
-    return t ? overlay(t) : null
-  }, [selKey, stats, ownerIdx]) // eslint-disable-line react-hooks/exhaustive-deps
+  const selTree = useMemo(() => stats && selected.length ? stagedMapTree(selected, stats, 'selected') : null, [selKey, stats]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const sizesNote = !date ? null : statsQ.isLoading ? 'sizing…' : stats ? null : 'sizes unavailable'
   const loadingContents = items.length > 0 && (!date || statsQ.isLoading || history.isLoading || progressQs.some(query => query.isLoading))
@@ -350,8 +334,6 @@ export function StagedPage() {
               sort={sort}
               onSort={onSort}
               shareOf={all.b}
-              userIdx={userIdx}
-              ownerIdx={ownerIdx}
               loading={!stats}
               extra={[{
                 key: 'execution', label: 'execution / recovery', className: 'nb',

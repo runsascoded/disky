@@ -81,9 +81,6 @@ describe('restricted anonymous OG responses', () => {
   it.each([
     '/og/map.png?path=secret/path&f=private&d=missing',
     '/og/staged.png?q=private',
-    '/og/users.png',
-    '/og/user.png?id=private',
-    '/og/assignments.png',
     '/og/diff.png?path=secret&d=missing&sig=bad',
     '/og/map.png?path=nonexistent&sig=bad',
   ])('returns the same generic card without protected reads: %s', async path => {

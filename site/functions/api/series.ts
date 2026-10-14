@@ -17,7 +17,6 @@ import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
-import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, ownerKey, ownerOk, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
 import { indexedOnly, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
@@ -139,8 +138,8 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // Every scan with a synced floor-free index, oldest first.
   const rows = await st.time('scans', pathScans(env, true))
   const dates = rows.results.map(r => r.date)
-  // A user lens or an owner pool applies the live assignments, so its key carries the ledger head.
-  const head = lens || owner && await hasLedger(env) ? await ledgerHead(env) : 0
+  // m3 keeps no ownership ledger: no assignments fold in, so the key's ledger head stays 0.
+  const head = 0
   // Unscoped whole-bucket series only: scans without tiers still have a total in meta.json.
   const extra = path === '' && !paths.length && !query && !lens && !owner && !classes ? await st.time('unindexed', unindexedScans(env, new Set(dates))) : []
   // Two-tier cache (colo + KV, `_lib/edgeCache.ts`), keyed by every input

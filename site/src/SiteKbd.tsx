@@ -3,7 +3,6 @@ import { MdBrightnessAuto, MdDarkMode, MdHelpOutline, MdLightMode } from 'react-
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
 import { SpeedDialTip } from './Tooltip'
-import { useRegistry } from './identities'
 import { hostPair, otherHostUrl } from './hosts'
 import { useHelpPref } from './prefs'
 import { useStore } from './store'
@@ -39,9 +38,6 @@ export function SiteKbd({ extra = [], placeholder }: {
   const { units, suffixB, toggleUnits, toggleSuffixB } = useUnits()
   const [help, setHelp] = useHelpPref()
   const toggleHelp = () => setHelp(help === 'on' ? 'off' : 'on')
-  // Every distinct attribution user in the registry (aliases collapse onto `u`).
-  const reg = useRegistry()
-  const USERS = [...new Set(Object.values(reg).map(i => i.u))].sort()
   // Site-wide pages, in nav order — the omnibar's "Pages" group on every
   // route. The map is the subtree's store's (`/meta` on a secondary store);
   // the other configured stores follow as switches (a single-store build has
@@ -56,7 +52,6 @@ export function SiteKbd({ extra = [], placeholder }: {
   // The ☰ menu's pages, gated as it gates them.
   const PAGES: [string, string][] = [
     [store.path, 'Map (home)'],
-    ...(canAssign && store.owners ? [['/users', 'Users — storage by owner'], ['/assignments', 'Assignments']] as [string, string][] : []),
     ...(store.staging ? [['/staged', 'Staged deletions']] as [string, string][] : []),
     ['/scans', 'Scans — job runs'],
     ['/health', 'Health — the stores\' state'],
@@ -101,12 +96,6 @@ export function SiteKbd({ extra = [], placeholder }: {
       'page:peer': { label: `${store.peer.label} ↗ (${new URL(store.peer.href).host})`, group: 'Pages', handler: () => window.open(store.peer!.href, '_blank', 'noreferrer') },
     } : {}),
     'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(REPO_URL, '_blank', 'noreferrer') },
-    ...Object.fromEntries(
-      USERS.filter(u => pathname !== `/user/${u}`).map(u => [
-        `userpage:${u}`,
-        { label: `${u} — storage breakdown (/user/${u})`, group: 'User pages', handler: () => navigate(`/user/${u}`) },
-      ]),
-    ),
     ...(HOSTS ? {
       'host:toggle': {
         label: location.hostname === HOSTS.dev ? `This page on prod (${HOSTS.prod})` : `This page on dev (${HOSTS.dev})`,

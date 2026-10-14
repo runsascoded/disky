@@ -1,13 +1,12 @@
 /** Card data from the deployment's own reads (specs/done/dogi.md): the same
  * thresholded, depth-capped view the page draws, its selected colours (the
- * scan's attribution with the live ledger applied, as the map does), and the
+ * scan's attribution, as the map does), and the
  * header/footer text. The tier decides only what is *shown* (`card.ts`): the
  * data read is the same. */
 import { FilterRejected } from '../indexedOnly.js'
 import type { Env } from '../auth.js'
 import { pathScans, servedStore, type Lens } from '../index.js'
 import { loadRegistry, canonId } from '../identity.js'
-import { loadLedger } from '../ledger.js'
 import { scanTimes } from '../scanTimes.js'
 import { parseOwner, queryParam, QueryError } from '../scope.js'
 import { snapshotsPrefix } from '../shared.js'
@@ -18,8 +17,6 @@ import { dateColor, HI_CONTRAST, slotColor } from '../../../src/colors.js'
 import { mapColorMode } from '../../../src/colorMode.js'
 import { barControls } from '../../../src/pageBar.js'
 import { listingTime } from '../../../src/listingTime.js'
-import { applyLedger } from '../../../src/ledgerOverlay.js'
-import { ownerIndex } from '../../../src/ownerIndex.js'
 import type { ColorMode, Meta, TreeNode, UserInfo } from '../../../src/types.js'
 import { type CardData, type CardTile, type LegendItem, fmtB } from './card.js'
 import type { OgTier } from './sign.js'
@@ -172,12 +169,6 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
     if (e instanceof NotFound) return { ...base, subtitle, total: '', empty: 'path not found' }
     if (e instanceof FilterRejected) return { ...base, subtitle, total: '', empty: 'search unavailable' }
     return { ...base, subtitle, total: '', empty: 'view unavailable' }
-  }
-  // The live assignments over the scan's attribution, as the map draws them.
-  if (!lens && env.DB) {
-    const { ownerRows } = await loadLedger(env).catch(() => ({ ownerRows: [] }))
-    const idx = ownerIndex({ owners: ownerRows.map(r => ({ ...r, who: r.who ?? '', memo: null })) })
-    if (idx.count) tree = applyLedger(tree, idx, site.scheme + (path ? `${path}/` : ''), u => canonId(u, reg))
   }
   const color = ownerColors(users)
   const name = (u: string) => reg[u]?.name ?? u

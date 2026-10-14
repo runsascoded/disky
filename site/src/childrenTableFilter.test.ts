@@ -5,10 +5,10 @@ import type { TreeNode } from './types'
 import { type CoverItem, type RowMatches, rowMatchesOf } from './filterCover'
 
 // The table's own logic under a filter, with its surroundings stubbed: the selection is preset (`selected`),
-// and the assign / trash controls render what they would send.
+// and the trash controls render what they would send.
 const { selected, staged, acts, planItems } = vi.hoisted(() => ({ selected: new Set<string>(), staged: [] as string[][], acts: [] as { resolve: () => Promise<unknown> }[], planItems: [] as { prefix: string; kind?: 'prefix' | 'object' }[] }))
-vi.mock('./auth', () => ({ useCanAssign: () => true, useCanStage: () => true }))
-vi.mock('./store', () => ({ useStore: () => ({ staging: true, owners: true }) }))
+vi.mock('./auth', () => ({ useCanStage: () => true }))
+vi.mock('./store', () => ({ useStore: () => ({ staging: true }) }))
 vi.mock('./plans', () => ({
   useStage: () => ({ error: null, mutate: (v: { prefixes: string[] }) => staged.push(v.prefixes) }),
   // The open plan (`useStagedIndex`): `planItems`, preset per test.
@@ -29,7 +29,6 @@ vi.mock('./MatchActions', async () => {
     useMatchAct: (deps: { resolve: () => Promise<unknown> }) => { acts.push(deps); return { state: { s: 'idle' }, confirmT: null, start: async () => {} } },
   }
 })
-vi.mock('./AssignSelect', () => ({ AssignSelect: ({ items, label }: { items: unknown; label?: string }) => createElement('i', { 'data-assign': JSON.stringify(items), 'data-label': label ?? '' }) }))
 vi.mock('./rowSelection', () => ({
   useRowSelectionKeys: () => {},
   useRowSelection: <T,>(rows: readonly T[], key: (r: T) => string) => ({
@@ -52,7 +51,6 @@ const items: CoverItem[] = [
   { path: 'marin-eu-west4/tomat', kind: 'dir', b: 50, o: 2, roots: 1 },
   ...[1, 2, 3].map(i => ({ path: `marin-us-central1/show/x${i}.mp3`, kind: 'file' as const, b: 100, o: 1, roots: 1 })),
 ]
-const files = [1, 2, 3].map(i => ({ key: `gs://marin-us-central1/show/x${i}.mp3`, kind: 'object' }))
 /** The filter's row source: `resolve` slices `items` to the row (recording each row asked for). */
 const asked: string[] = []
 const src = (items: CoverItem[]) => ({
@@ -62,12 +60,11 @@ const src = (items: CoverItem[]) => ({
 /** Each row's exact match roots: the response's full list (every root of `items`). */
 const exact = rowMatchesOf(items, 'exact')
 const render = (filter?: ReturnType<typeof src> & { blocked?: string }, rowMatches: ((row: string) => RowMatches | null) | undefined = exact) => renderToStaticMarkup(createElement(ChildrenTable, {
-  node, segs: [], scheme: 'gs://', ownerIdx: { assignmentOf: () => null } as never, onOpen: () => {}, onOpenObject: () => {}, filter, rowMatches,
+  node, segs: [], scheme: 'gs://', onOpen: () => {}, onOpenObject: () => {}, filter, rowMatches,
 }))
 const rows = (html: string) => [...(html.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? '').matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map(([, r]) => r)
 const name = (row: string) => /<td class="prefix">(.*?)<\/td>/.exec(row)![1].replace(/<[^>]+>/g, '')
 const tip = (row: string) => /<td class="prefix"><span data-tip="(.*?)"/.exec(row)?.[1]
-const assigns = (html: string) => [...html.matchAll(/data-assign="([^"]*)" data-label="([^"]*)"/g)].map(([, p, l]) => [JSON.parse(p.replace(/&quot;/g, '"')), l])
 const checkboxes = (html: string) => rows(html).map(r => /<td class="col-sel">(.*?)<\/td>/.exec(r)?.[1] === '' ? 'no box' : 'box')
 const actionsCell = (row: string) => /<td class="actions">(.*)<\/td>$/.exec(row)?.[1] ?? ''
 
@@ -103,7 +100,7 @@ describe('the children table under a filter', () => {
       [['marin-eu-west4', 'K']],
       [['bkt-none', 'K']],
     ])
-    expect([checkboxes(html), assigns(html), html.includes('>list<')]).toEqual([['box', 'box', 'box'], [], false])
+    expect([checkboxes(html), html.includes('>list<')]).toEqual([['box', 'box', 'box'], false])
   })
   it('a view whose matches can\'t be acted on (`blocked`: a refusal, rollup, catalog or approximate answer): no row offers an action, nothing selects', () => {
     selected.add('gs://marin-eu-west4')
@@ -119,11 +116,11 @@ describe('the children table under a filter', () => {
   it('the selection acts on the selected rows\' matches (resolved on the click), never their whole prefixes', async () => {
     selected.add('gs://marin-eu-west4').add('gs://marin-us-central1')
     const html = render(src(items))
-    // The bar: the count, then trash and assign over the rows' matches (no per-match count before the click).
+    // The bar: the count, then trash over the rows' matches (no per-match count before the click).
     expect(/<div class="sel-bar-dock">(.*)<\/div><\/section>$/.exec(html)![1].replace(/<svg.*?<\/svg>/, '<svg/>')).toBe(
       '<span class="sel-bar"><b>2</b> selected · 350 B<span class="acts"><span class="mact sel-acts" tabindex="-1">'
       + '<span data-tip="Optional: one note for this deletion — why these matches go. Stored with the batch, visible to the admin who dispatches."><input class="memo" placeholder="note (optional)" aria-label="deletion note" value=""/></span>'
-      + '<span data-tip=""><button type="button" class="trash" aria-label="trash selected"><svg/> trash</button></span><i data-label="assign 2…"></i><span class="act-live"></span></span>'
+      + '<span data-tip=""><button type="button" class="trash" aria-label="trash selected"><svg/> trash</button></span><span class="act-live"></span></span>'
       + '<button type="button" class="quiet">deselect</button></span></span>')
     const got = await acts.at(-1)!.resolve()
     expect([asked, got]).toEqual([
@@ -131,25 +128,19 @@ describe('the children table under a filter', () => {
       { items: [...items.slice(1), items[0]], complete: true },
     ])
   })
-  it('without a filter every row acts on its own prefix, named as itself', () => {
+  it('without a filter the root\'s rows (whole buckets) offer no action, each named as itself', () => {
     selected.add('gs://bkt-none')
     const html = render()
-    expect(rows(html).map(name)).toEqual(['marin-us-central1', 'marin-eu-west4', 'bkt-none'])
-    const pre = (key: string) => ({ key, kind: 'prefix' })
-    expect(assigns(html)).toEqual([
-      [pre('gs://marin-us-central1/'), ''], [pre('gs://marin-eu-west4/'), ''], [pre('gs://bkt-none/'), ''], [[pre('gs://bkt-none/')], 'assign 1…'],
+    expect([rows(html).map(name), rows(html).map(r => r.includes('class="actions"')), html.includes('class="sel-bar"')]).toEqual([
+      ['marin-us-central1', 'marin-eu-west4', 'bkt-none'], [false, false, false], false,
     ])
   })
   it('without a filter a file row acts on that exact object (never `key/`), a folder row on its prefix', () => {
     const show = (node.c![1].c![0])
     const html = renderToStaticMarkup(createElement(ChildrenTable, {
       node: { ...show, c: [...show.c!, { n: 'sub', k: 'dir', b: 1, o: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
-      ownerIdx: { assignmentOf: () => null } as never, onOpen: () => {}, onOpenObject: () => {},
+      onOpen: () => {}, onOpenObject: () => {},
     }))
-    expect(assigns(html)).toEqual([
-      ...files.map(f => [f, '']),
-      [{ key: 'gs://marin-us-central1/show/sub/', kind: 'prefix' }, ''],
-    ])
     expect(rows(html).map(r => /data-tip="(Stage[^"]*)"/.exec(actionsCell(r))?.[1])).toEqual([
       ...Array(3).fill('Stage this file for deletion (exactly this object) — an admin approves and dispatches from /staged'),
       'Stage this folder for deletion — an admin approves and dispatches from /staged',
@@ -163,7 +154,7 @@ describe('the children table under a filter', () => {
     planItems.push({ prefix: 'gs://marin-us-central1/show/x1.mp3', kind: 'object' }, { prefix: 'gs://marin-us-central1/show/sub/' }, { prefix: 'gs://marin-us-central1/show/keep/deep/' })
     const html = renderToStaticMarkup(createElement(ChildrenTable, {
       node: { ...show, c: [...show.c!, { n: 'sub', k: 'dir', b: 1, o: 1 }, { n: 'keep', k: 'dir', b: 1, o: 1 }] }, segs: ['marin-us-central1', 'show'], scheme: 'gs://',
-      ownerIdx: { assignmentOf: () => null } as never, onOpen: () => {}, onOpenObject: () => {},
+      onOpen: () => {}, onOpenObject: () => {},
     }))
     expect(rows(html).map(r => [name(r), /<a class="staged-chip"[^>]*>([^<]*)<\/a>/.exec(actionsCell(r))?.[1] ?? (/aria-label="trash"/.test(actionsCell(r)) ? 'trash' : '?')])).toEqual([
       ['x1.mp3', 'staged'], ['x2.mp3', 'trash'], ['x3.mp3', 'trash'], ['sub', 'staged'], ['keep · 1 staged', 'trash'],

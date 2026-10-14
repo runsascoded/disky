@@ -14,7 +14,6 @@
 import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
 import { type Env, type Identity, requireViewer } from '../_lib/auth.js'
 import { ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
-import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT } from '../_lib/view.js'
@@ -133,7 +132,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean): Promise<Response> {
     // The static index's hex-run rule: substrings match where they `occur` under it, static or not (`hexRuns.ts`).
     const hx = await hexQuery(ctx.env, query)
     query = hx.query
-    const [head, xtra, g, indexed] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date]), indexedScan(ctx.env, date, true)]))
+    const [head, xtra, g, indexed] = await st.time('pre', Promise.all([Promise.resolve(0), hasExtras(ctx.env, date), pathGens(ctx.env, [date]), indexedScan(ctx.env, date, true)]))
     if (!indexed) return noScan('date', date)
     const cacheKey = cacheKeyFor('subtree', cacheEnvTag(ctx.env, ctx.request),
       `${date}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&l=${lensTag}` +
