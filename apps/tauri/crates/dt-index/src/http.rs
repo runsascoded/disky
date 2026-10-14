@@ -193,6 +193,36 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
                 Err(e) => text(500, &format!("subtree failed: {e}")),
             }
         }
+        "/api/largest" => {
+            let date = get("date").unwrap_or("");
+            let p = get("path").unwrap_or("").trim_end_matches('/').to_string();
+            if !view::is_scan_id(date) {
+                return text(400, "bad date");
+            }
+            if p.contains("..") || p.starts_with('/') {
+                return text(400, "bad path");
+            }
+            let n = match get("n").map(|v| v.parse::<usize>()) {
+                None => 100,
+                Some(Ok(n)) if (1..=500).contains(&n) => n,
+                _ => return text(400, "bad n (want 1..500)"),
+            };
+            let scan = match scans.get(date) {
+                Ok(s) => s,
+                Err(_) => return text(404, "no such scan"),
+            };
+            match view::largest(&scan, &p, n) {
+                Ok(l) => json_resp(
+                    200,
+                    &json!({
+                        "date": date, "path": p, "n": n,
+                        "files": l.files.iter().map(|(path, size, mtime)| json!({"path": path, "size": size, "mtime": mtime})).collect::<Vec<_>>(),
+                        "more": l.more, "groups": l.groups, "rows": l.rows,
+                    }),
+                ),
+                Err(e) => text(500, &format!("largest failed: {e}")),
+            }
+        }
         "/api/diff" => {
             let (from, to) = (get("from").unwrap_or(""), get("to").unwrap_or(""));
             let p = get("path").unwrap_or("").trim_end_matches('/').to_string();

@@ -1254,6 +1254,51 @@ pub fn roots(scan: &Scan) -> io::Result<Vec<(String, i64, i64)>> {
     Ok(scan.rect(&Rect::at(""))?.into_iter().map(|r| (r.path, r.size, r.n_files)).collect())
 }
 
+/// `/api/largest`'s answer: files (never dirs) under a path, size-descending.
+pub struct Largest {
+    /// `(path, size, mtime)`, ties by path.
+    pub files: Vec<(String, i64, Option<i64>)>,
+    /// Files beyond those listed exist, or may (groups left unread).
+    pub more: bool,
+    pub groups: usize,
+    pub rows: usize,
+}
+
+/// The `n` largest files anywhere under `path` (`readLargest`): the `bysize`
+/// sort's groups in waves, largest first, until no unread group can hold a
+/// file at least as big as the `n`th found.
+pub fn largest(scan: &Scan, path: &str, n: usize) -> io::Result<Largest> {
+    let t = &scan.bysize;
+    let under = |p: &str| path.is_empty() || p == path || (p.starts_with(path) && p.as_bytes()[path.len()] == b'/');
+    // Each group's best possible size, over it and every group after it.
+    let mut ceil = vec![i64::MIN; t.groups.len() + 1];
+    for i in (0..t.groups.len()).rev() {
+        ceil[i] = ceil[i + 1].max(t.groups[i].s.1);
+    }
+    let wave = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let (mut found, mut next, mut rows): (Vec<(String, i64, Option<i64>)>, _, _) = (Vec::new(), 0, 0);
+    while next < t.groups.len() {
+        if found.len() >= n {
+            let nth = found[n - 1].1;
+            if ceil[next] < nth {
+                break;
+            }
+        }
+        let gs: Vec<usize> = (next..(next + wave).min(t.groups.len())).collect();
+        next += gs.len();
+        rows += gs.iter().map(|&g| t.groups[g].rows).sum::<usize>();
+        for got in t.par_groups(gs, |g| Ok(t.read(vec![g])?.into_iter().filter(|r| !r.dir && under(&r.path)).collect::<Vec<_>>()))? {
+            found.extend(got.into_iter().map(|r| (r.path, r.size, r.mtime_mean.map(|m| m as i64))));
+        }
+        found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        // One past `n` still says "more".
+        found.truncate(n + 1);
+    }
+    let more = found.len() > n || next < t.groups.len();
+    found.truncate(n);
+    Ok(Largest { files: found, more, groups: next, rows })
+}
+
 /// A scans dir: `<dir>/<scan id>/{path-index*.parquet, meta.json, age.json}`.
 pub struct Scans {
     pub dir: PathBuf,
@@ -1430,6 +1475,24 @@ mod tests {
         r.finish().write_index(&dir).unwrap();
         let scan = Scan::open(&dir).unwrap();
         (dir, scan)
+    }
+
+    #[test]
+    fn largest_files() {
+        let (dir, scan) = store("largest", &[("a/x", 4096), ("a/y", 8192), ("a/deep/f", 2048), ("ab/q", 9000), ("b/z", 16384)]);
+        let t = Some(20728 * 86_400);
+        let got = |p: &str, n| {
+            let l = largest(&scan, p, n).unwrap();
+            (l.files, l.more)
+        };
+        let f = |p: &str, s| (p.to_string(), s, t);
+        // `ab/q` isn't under `a`; dirs never list.
+        assert_eq!(got("a", 2), (vec![f("a/y", 8192), f("a/x", 4096)], true));
+        assert_eq!(got("a", 5), (vec![f("a/y", 8192), f("a/x", 4096), f("a/deep/f", 2048)], false));
+        assert_eq!(got("", 2), (vec![f("b/z", 16384), f("ab/q", 9000)], true));
+        assert_eq!(got("a/y", 5), (vec![f("a/y", 8192)], false));
+        assert_eq!(got("nope", 5), (vec![], false));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// `(p, s, a, b, oa, ob, x)` per row.
