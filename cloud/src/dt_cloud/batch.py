@@ -130,7 +130,7 @@ disk-tree bulk-list "gcs://$b" -o "gs://{listing_dir(data_bucket, date, "$b")}" 
             "location": {"allowedLocations": [f"regions/{region}"]},
         },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
-    }, "listing")
+    }, "listing", scan_id=date)
 
 
 def submit_job(spec: dict, job_id: str | None = None, region: str = REGION) -> str:

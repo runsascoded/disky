@@ -58,8 +58,8 @@ class S3BulkLister:
         # fine, and pagination cost dominates the ~50ms client-init anyway.
         local = getattr(self, "_local", None)
         if local is None:
-            object.__setattr__(self, "_local", threading.local())
-            local = self._local
+            local = threading.local()
+            object.__setattr__(self, "_local", local)
         client = getattr(local, "client", None)
         if client is None:
             import boto3

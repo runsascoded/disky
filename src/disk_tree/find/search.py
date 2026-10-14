@@ -36,6 +36,8 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ..duck import scalar
+
 if TYPE_CHECKING:
     import duckdb
     import pyarrow as pa
@@ -160,9 +162,9 @@ def write_search(
         raise ValueError(f"{path_sort}: has an `id` column (the rows file's key)")
     paths = search_paths(path_sort)
     own = con is None
-    if own:
+    if con is None:
         con = _duckdb.connect()
-    prev_order = con.execute("SELECT current_setting('preserve_insertion_order')").fetchone()[0]
+    prev_order = scalar(con, "SELECT current_setting('preserve_insertion_order')")
     # The data files' row order IS the index ((id, path order), (tri, id)):
     # a parallel COPY without insertion order may write batches out of order.
     con.execute("SET preserve_insertion_order = true")
@@ -177,7 +179,7 @@ def write_search(
               FROM read_parquet('{_q(path_sort)}') GROUP BY 1
             )
         """)
-        n_names = con.execute("SELECT count(*) FROM _search_names").fetchone()[0]
+        n_names = scalar(con, "SELECT count(*) FROM _search_names")
         tri_tmp = paths['trigrams'] + '.tmp'
         con.execute(f"""
             COPY (

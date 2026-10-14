@@ -86,13 +86,17 @@ class ListingFormat:
     #: the v1 column order (None: unknown / v1 file)
     columns: tuple[str, ...] | None = None
 
+    def root(self) -> str:
+        """The scan root, which a v2 listing must carry."""
+        if self.scan_root is None:
+            raise ValueError("a v2 listing needs its scan root")
+        return self.scan_root
+
     def kv(self) -> dict[str, str]:
         """This format's parquet key-value metadata."""
         if self.version < 2:
             return {}
-        if self.scan_root is None:
-            raise ValueError("a v2 listing needs its scan root")
-        kv = {FORMAT_KEY: str(self.version), SCAN_ROOT_KEY: self.scan_root}
+        kv = {FORMAT_KEY: str(self.version), SCAN_ROOT_KEY: self.root()}
         if self.implied:
             kv[IMPLIED_KEY] = json.dumps(self.implied, sort_keys=True, separators=(',', ':'))
         if self.columns is not None:
@@ -188,7 +192,7 @@ def restore(df: "pd.DataFrame", fmt: ListingFormat) -> "pd.DataFrame":
         return df
     add = {}
     if 'uri' not in df.columns and 'path' in df.columns:
-        root = fmt.scan_root
+        root = fmt.root()
         path = df['path']
         add['uri'] = (uri_prefix(root) + path).where(path != '.', root)
     for col, src in fmt.implied.items():

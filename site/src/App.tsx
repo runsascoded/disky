@@ -13,7 +13,7 @@ import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { DiskSpace } from './DiskSpace'
-import { DiskSpaceDiff } from './DiskSpaceDiff'
+import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
@@ -34,6 +34,7 @@ import type { DateRange, Highlight, ShadeMode } from './Treemap'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
 import { HttpError } from './batches'
+import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
@@ -53,7 +54,7 @@ import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, fmtTimestamp, encodeScan, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
+import { DAY, encodeScan, fmtTimestamp, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
 import { scanCmp } from './scanSlug'
 import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
@@ -336,9 +337,11 @@ function AppContent() {
   const fromScan = from && asof ? latestScan(from, earlier, times) : null
   const startMiss = useMemo(() => fromMiss(from, asof, scans, times), [from, asof, scans, times])
   const diffPrev = startMiss ? null : fromScan ?? spanScan ?? prevScan
+  // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
+  // any other store never fetches the earlier scan's meta (`diskDiffScan`).
   const beforeMetaQ = useQuery({
     ...scanQuery<Meta>('meta', diffPrev),
-    enabled: !!diffPrev && !!metaQ.data?.disk_space,
+    enabled: diskDiffScan(metaQ.data?.disk_space, diffPrev) != null,
   })
   // Hour-rounded span back from `to` — the previous scan clears it, anything
   // else round-trips as its own span (nearest-scan resolution recovers it,
@@ -347,7 +350,6 @@ function AppContent() {
     scans[scans.indexOf(to) + 1] === from
       ? undefined
       : Math.max(3600_000, Math.round((scanInstant(to, times) - scanInstant(from, times)) / 3600_000) * 3600_000)
-  const pickBefore = (scan: string) => { if (asof) setSpan(spanTo(asof, scan)) }
   // A brush on the size chart hands back the scan ids its ends sit on (else a
   // prefix, which resolves to the latest scan matching it — never a date-only
   // id read as its whole day), and the pair becomes the page's `?d=` (after + span).
@@ -356,7 +358,7 @@ function AppContent() {
     const toScan = brushScan(to)
     const fromScan = brushScan(from)
     if (!toScan || !fromScan || scanCmp(toScan, fromScan, times) <= 0) return
-    setRange(toScan, spanTo(toScan, fromScan))
+    setRange(toScan, spanTo(toScan, fromScan), fromScan)
   }
   const diffWindow: [string, string] | undefined = diffPrev && asof ? [diffPrev, asof] : undefined
   // Two orthogonal, low-key toggles for the diff window (see scan.ts grammar):
@@ -387,7 +389,7 @@ function AppContent() {
   // and every level of the drilled path gets its own subtree query, grafted
   // in depth order — interactive drills hit each level's cache as they go,
   // and a cold deep link fans the whole chain out in parallel.
-  // The URL's `~` (a store home) expanded: `/~/c` → `Users/ryan/c`.
+  // The URL's `~` (a store home) expanded: `/~/c` → `Users/ryan/c`; each segment decoded once.
   const graftPath = fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length), store.home).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
@@ -402,6 +404,8 @@ function AppContent() {
       queryKey: ['subtree', store.key, asof, p, canW, scopeKey],
       enabled: !!asof && scopeReady,
       staleTime: Infinity,
+      // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
+      refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
       // Retry transient failures, but not the deterministic ones (409: no
       // user index for this scan; 413: view too wide) — those surface as-is.
       retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
@@ -415,7 +419,7 @@ function AppContent() {
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number } }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true }
         pf.decoded()
         return j
       },
@@ -647,7 +651,7 @@ function AppContent() {
   // options stay query params (`?c`, `?mt`, …); the section stays in the `#hash`.
   const storeBase = store.path === '/' ? '' : store.path
   // A store home reads as `~` in the URL (`/~/c`); the path itself is the
-  // expanded one (`Users/ryan/c`), and a home URL spelled out is replaced by
+  // expanded one (`Users/ryan/c`), each name travels encoded (`toUrlPath`), and a home URL spelled out is replaced by
   // its `~` form below.
   const urlPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
   const drillPath = fromUrlPath(urlPath, store.home).join('/')
@@ -804,6 +808,7 @@ function AppContent() {
     // section holds its height and shows something before the detail.
     placeholderData: (prev: DiffData | undefined) => diffL1 ?? prev,
     staleTime: Infinity,
+    refetchInterval: q => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
     retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
     retryDelay: (n: number) => 400 * 2 ** n,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
@@ -1061,6 +1066,7 @@ function AppContent() {
   }
 
   const segs = drillPath.split('/').filter(Boolean)
+  const pathScheme = store.bucketSchemes?.[segs[0]] ?? store.scheme
   const capturedAt = meta?.captured_at ?? meta?.disk_space?.captured_at
   const recordedAt = capturedAt ?? meta?.published
   const scanTip = meta && (
@@ -1129,9 +1135,9 @@ function AppContent() {
   // The deepest crumb is a tap-to-open path card (the full `<scheme>…/` prefix +
   // copy) rather than another drill link — it's where the page already is.
   // A store home (`Users/ryan`) folds to one `~` crumb.
-  const crumbFullPath = pathText(store.scheme, segs, store.home, true)
-  const crumbCopy = pathCopy(store.scheme, segs, true)
-  const disp = pathDisplay(store.scheme, segs, store.home)
+  const crumbFullPath = pathText(pathScheme, segs, store.home, true)
+  const crumbCopy = pathCopy(pathScheme, segs, true)
+  const disp = pathDisplay(pathScheme, segs, store.home)
   const crumbItems: { label: string; segs: string[] }[] = [
     ...(disp.lead === '~' ? [{ label: '~', segs: segs.slice(0, disp.leadSegs) }] : []),
     ...disp.rest.map((sg, i) => ({ label: sg, segs: segs.slice(0, disp.leadSegs + i + 1) })),
@@ -1144,7 +1150,7 @@ function AppContent() {
           <span className="sep">/</span>
           {i === crumbItems.length - 1
             ? <PathPopover label={c.label} fullPath={crumbFullPath} copy={crumbCopy} />
-            : <Tooltip content={<code>{pathText(store.scheme, c.segs, store.home)}</code>}><button type="button" onClick={() => drillTo(c.segs)}>{c.label}</button></Tooltip>}
+            : <Tooltip content={<code>{pathText(pathScheme, c.segs, store.home)}</code>}><button type="button" onClick={() => drillTo(c.segs)}>{c.label}</button></Tooltip>}
         </span>
       ))}
     </span>
@@ -1456,7 +1462,7 @@ function AppContent() {
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
             <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              <ScanCombobox value={diffPrev} scans={earlier} onChange={startPinned ? setFrom : pickBefore} label="Diff from scan" fmt={fmtS} />
+              <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />
             </Explain>
             <Explain text={startPinned
               ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>

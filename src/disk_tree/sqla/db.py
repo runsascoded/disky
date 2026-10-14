@@ -12,7 +12,7 @@ db: Optional[SQLAlchemy] = None
 cache_url = None
 
 
-def init(sqlite_path: str = None) -> SQLAlchemy:
+def init(sqlite_path: str | None = None) -> SQLAlchemy:
     global db
     if db:
         return db

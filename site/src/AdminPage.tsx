@@ -319,7 +319,7 @@ export function AdminPage() {
   const [avatar, setAvatar] = useState<string | null>(draft.avatar || null)
   const [days, setDays] = useState(draft.days ?? '30')
   const [hide, setHide] = useState(draft.hide ?? '')
-  const hidden = hideScopes(hide, DEFAULT_STORE.key, STORES.slice(1).map(s => s.key), DEFAULT_STORE.home ?? [])
+  const { scopes: hidden, unresolved: hideUnresolved } = hideScopes(hide, DEFAULT_STORE.key, STORES.slice(1).map(s => s.key), DEFAULT_STORE.home)
   const [access, setAccess] = useState<Access>(draft.access ?? (draft.readOnly === false ? 'view' : 'read'))
   // Admin is an account's, so it needs an email; without one it reads as Viewer.
   // A path-restricted link is never admin: an account's session isn't restricted.
@@ -467,7 +467,8 @@ export function AdminPage() {
     )
   }
 
-  const canMint = !!(name.trim() || memo.trim())
+  // A `~` line this store can't resolve would mint a link that hides nothing there.
+  const canMint = !!(name.trim() || memo.trim()) && !hideUnresolved.length
 
   const grants = grantsQ.data?.grants ?? []
   const revokedCount = grants.filter(g => g.revokedAt).length
@@ -532,12 +533,13 @@ export function AdminPage() {
         </div>
         <div className="field">
           <label htmlFor="mint-hide">Hide</label>
-          <textarea id="mint-hide" className="hide-paths" rows={2} value={hide} onChange={e => setHide(e.target.value)} placeholder={`~/Downloads/2025 tax returns${STORES.length > 1 ? `\n${STORES[1].key}:…` : ''}`} />
+          <textarea id="mint-hide" className="hide-paths" rows={2} value={hide} onChange={e => setHide(e.target.value)} placeholder={`${DEFAULT_STORE.home ? '~/Downloads/2025 tax returns' : 'path/to/private-dir'}${STORES.length > 1 ? `\n${STORES[1].key}:…` : ''}`} />
           <span className="hint">dirs the link sees only as one total, nothing inside (one per line{STORES.length > 1 && <>; {STORES.slice(1).map((s, i) => <Fragment key={s.key}>{i ? '/' : ''}<code>{s.key}:…</code></Fragment>)} for that store</>}){hidden.length ? ' — the link won’t add the email to the allowlist or be admin' : ''}</span>
+          {hideUnresolved.length > 0 && <span className="err">no home dir for <code>~</code> on this store: {hideUnresolved.map((l, i) => <Fragment key={l}>{i ? ', ' : ''}<code>{l}</code></Fragment>)}</span>}
         </div>
         <div className="field submit">
           <button type="submit" disabled={mint.isPending || !canMint}>Create link</button>
-          {!canMint && <span className="hint">add a name or a memo first</span>}
+          {!canMint && !hideUnresolved.length && <span className="hint">add a name or a memo first</span>}
           {mint.error && <span className="err">{mint.error.message}</span>}
         </div>
       </form>

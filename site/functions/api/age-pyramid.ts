@@ -11,7 +11,7 @@
  * the full range (the planner then picks the coarsest tier that fits), so the
  * FE should pass the chart's actual time domain to get useful granularity.
  */
-import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
+import { hiddenNotFound, isHidden, isHideRoot, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { withStore } from '../_lib/stores.js'
 import { num, openIndex, readPoint, storeReady } from '../_lib/index.js'
@@ -39,7 +39,8 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promis
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
   const restriction = restrictionFor(gated, ctx.env)
-  if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  // …and a hidden dir's own pyramid breaks down its contents by age (more than its one total).
+  if (restriction && (isHidden(path, restriction) || isHideRoot(path, restriction))) return hiddenNotFound()
   // An unindexed id, or a `d=` slug matching no scan: a 404, never another scan.
   const scan = await scanArg(ctx.env, url.searchParams)
   if (scan instanceof Response) return scan

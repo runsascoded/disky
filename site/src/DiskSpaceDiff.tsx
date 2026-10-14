@@ -19,6 +19,11 @@ export function spaceChanges(before?: DiskSpace, after?: DiskSpace): SpaceChange
   ]
 }
 
+/** The earlier scan whose meta a diff needs for `spaceChanges`: only when the current scan has a
+ *  physical reading (a laptop/host capture); bucket stores have none, so no extra fetch and no panel. */
+export const diskDiffScan = (after: DiskSpace | undefined, prev: string | null | undefined): string | null =>
+  after && prev ? prev : null
+
 export function DiskSpaceDiff({ before, after }: { before?: DiskSpace; after?: DiskSpace }) {
   const { fmtBytes } = useUnits()
   const rows = spaceChanges(before, after)

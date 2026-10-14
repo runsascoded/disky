@@ -21,6 +21,18 @@ from utz import err
 from disk_tree.cli.base import cli
 
 
+def _resolve_procs(procs: int | None) -> int:
+    """Default to one process per core: listing is GIL-bound per interpreter,
+    so cores — not the endpoint — set the ceiling (see -P's help for the numbers)."""
+    return procs or os.cpu_count() or 6
+
+
+def _bucket(host: str | None, uri: str) -> str:
+    if not host:
+        raise ValueError(f"bulk-list needs a bucket in the URI; got {uri!r}")
+    return host
+
+
 @cli.command('bulk-list')
 @option('-a', '--adaptive', is_flag=True, help='Adaptive range-splitting: workers bisect their remaining key range whenever peers are idle — no weights or fanout discovery needed (spec: specs/done/adaptive-listing.md)')
 @option('-E', '--endpoint-url', default=None, help='S3-compatible endpoint URL (required for r2://; also usable for MinIO / non-AWS S3)')
@@ -49,9 +61,6 @@ def bulk_list_cmd(
     uri: str,
 ):
     """Bulk-list `URI` (e.g. `gcs://bucket`) to sharded listing parquet at `--out`."""
-    # Default to one process per core: listing is GIL-bound per interpreter, so
-    # cores — not the endpoint — set the ceiling (see -P's help for the numbers).
-    procs = procs or os.cpu_count() or 6
     if adaptive:
         if weights_from:
             raise ValueError("--weights-from is the planned-mode input; adaptive mode warm-starts via --warm-from")
@@ -87,11 +96,13 @@ def bulk_list_adaptive_uri(
 ) -> int:
     """Scheme-dispatched adaptive listing (see `find/bulk_adaptive.py`)."""
     from disk_tree.backends.url import parse_url
-    from disk_tree.find.bulk_adaptive import list_bucket_adaptive, load_warm_ranges
+    from disk_tree.find.bulk_adaptive import PagedLister, list_bucket_adaptive, load_warm_ranges
 
     parsed = parse_url(uri)
+    n_procs = _resolve_procs(procs)
     eff_prefix = prefix if prefix is not None else (parsed.path.strip('/') or None)
     warm_ranges = load_warm_ranges(warm_from) if warm_from else None
+    lister: PagedLister
     if parsed.scheme == 'gcs':
         from disk_tree.find.bulk_gcs import GcsBulkLister
         lister = GcsBulkLister()
@@ -103,8 +114,8 @@ def bulk_list_adaptive_uri(
     else:
         raise ValueError(f"bulk-list requires a cloud URI (gcs://, s3://, r2://); got {uri!r}")
     return list_bucket_adaptive(
-        lister, bucket=parsed.host, out_dir=out_dir,
-        procs=procs, threads=threads, prefix=eff_prefix,
+        lister, bucket=_bucket(parsed.host, uri), out_dir=out_dir,
+        procs=n_procs, threads=threads, prefix=eff_prefix,
         exists=exists, warm_ranges=warm_ranges,
     )
 
@@ -125,13 +136,14 @@ def bulk_list_uri(
     from disk_tree.backends.url import parse_url
 
     parsed = parse_url(uri)
+    n_procs = _resolve_procs(procs)
     eff_prefix = prefix if prefix is not None else (parsed.path.strip('/') or None)
     if parsed.scheme == 'gcs':
         from disk_tree.find.bulk_gcs import list_gcs_bucket_to_parquet
         return list_gcs_bucket_to_parquet(
-            bucket=parsed.host,
+            bucket=_bucket(parsed.host, uri),
             out_dir=out_dir,
-            procs=procs, threads=threads,
+            procs=n_procs, threads=threads,
             prefix=eff_prefix,
             exists=exists, weights_from=weights_from,
         )
@@ -140,9 +152,9 @@ def bulk_list_uri(
             raise ValueError("r2:// requires --endpoint-url (Cloudflare R2's S3-compatible endpoint)")
         from disk_tree.find.bulk_s3 import list_s3_bucket_to_parquet
         return list_s3_bucket_to_parquet(
-            bucket=parsed.host,
+            bucket=_bucket(parsed.host, uri),
             out_dir=out_dir,
-            procs=procs, threads=threads,
+            procs=n_procs, threads=threads,
             prefix=eff_prefix,
             exists=exists, weights_from=weights_from,
             endpoint_url=endpoint_url,

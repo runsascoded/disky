@@ -10,6 +10,8 @@ import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, type DiffRow, NotFound, type View, type ViewNode } from './view'
 import { searchKey } from './search'
+import { resetUpgrades } from './edgeCache'
+import { warmSubtree } from '../api/subtree'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -794,5 +796,96 @@ describe('a heavy literal\'s rollup view nests (the drawn children answered in t
     }
     expect(got).toEqual(want)
     expect(got.length).toBe(10)
+  })
+})
+
+// --- the fleet root of a heavy literal, nested to the plain view's depth (cw 10-13: `?f=.json` drew bucket → top
+// dirs only, its phase 2 cut by the viewer's time budget on a cold isolate, and the cut answer stayed) ------------
+
+describe('a heavy literal at the fleet root nests root → bucket → dir → subdir; a budget-cut answer is upgraded', () => {
+  // The objects (all live from A): `bin` matches the files only. The drill answers `''`, `b1` and `b1/marin` with
+  // rollups (every child kept by name), anything else with its match roots (`b1/iris`: a forest).
+  const OBJECTS: [string, number][] = [
+    ['b1/marin/raw/a/x.bin', 4000], ['b1/marin/raw/b/y.bin', 3000], ['b1/marin/evals/e1.bin', 1500], ['b1/marin/evals/e2.bin', 1000],
+    ['b1/iris/cp1/s1.bin', 2000], ['b1/iris/cp1/s2.bin', 2000], ['b1/iris/cp2/s.bin', 2500],
+    ['b1/tmp/t.bin', 300],
+    ['b2/z.bin', 200],
+  ]
+  const ROLLUPS = new Set(['', 'b1', 'b1/marin'])
+  const open = 4291747200000
+  const under = (p: string, P: string) => P === '' || p.startsWith(`${P}/`)
+  /** Brute force: `[bytes, objects]` of the objects at or under `P`. */
+  const sum = (P: string): [number, number] => OBJECTS.filter(([p]) => p === P || under(p, P)).reduce<[number, number]>((s, [, b]) => [s[0] + b, s[1] + 1], [0, 0])
+  const source = (delayMs = 0, asked: string[] = []): HitSource => ({
+    async hits(_k, u) {
+      asked.push(u)
+      if (delayMs && !['', 'b1'].includes(u)) await new Promise(r => setTimeout(r, delayMs))
+      const objs = OBJECTS.filter(([p]) => under(p, u))
+      if (!objs.length) return null
+      if (ROLLUPS.has(u)) {
+        const kids = [...new Set(objs.map(([p]) => (u === '' ? p : p.slice(u.length + 1)).split('/')[0]))].sort()
+        const cells = kids.map(c => { const [b, o] = sum(u === '' ? c : `${u}/${c}`); return { kind: 1 as const, child: c, vf: scanAt(A), b: BigInt(b), o: BigInt(o) } })
+        return { rollup: { dir: u, kept: kids.length, rows: objs.length, children: kids.length, cells }, io: { from: 'drill' } }
+      }
+      return { hits: objs.map(([path, size]) => ({ path, depth: depthOf(path), usr: '', vf: scanAt(A), vt: open, size: BigInt(size), n: 1n })), io: { from: 'drill' } }
+    },
+  })
+  /** `[name, bytes, objects, 'm'?, children?]` from brute force: the node at `p`, its listed children. */
+  const node = (p: string, kids: unknown[] = []): unknown[] => { const [b, o] = sum(p); return [p.split('/').pop()!, b, o, ...(p.endsWith('.bin') ? ['m'] : []), ...(kids.length ? [kids] : [])] }
+  /** The plain filter view's depth below the root (`FILTER_SUBDIV_LEVELS` = 3): each answered path's children,
+   *  a roots answer's whole forest. `b1/marin/{raw,evals}` (depth 3) are not answered; `b1/tmp`, `b2` hold one object. */
+  const NESTED = [
+    node('b1', [
+      node('b1/iris', [node('b1/iris/cp1', [node('b1/iris/cp1/s1.bin'), node('b1/iris/cp1/s2.bin')]), node('b1/iris/cp2', [node('b1/iris/cp2/s.bin')])]),
+      node('b1/marin', [node('b1/marin/evals'), node('b1/marin/raw')]),
+      node('b1/tmp'),
+    ]),
+    node('b2'),
+  ]
+  /** What the viewer's budget leaves when every answer below the bucket is late: bucket → top dirs. */
+  const CUT = [node('b1', [node('b1/iris'), node('b1/marin'), node('b1/tmp')]), node('b2')]
+
+  it('the root view nests three levels, node for node = brute force; its match roots exact', async () => {
+    const asked: string[] = []
+    const v = await view(envStatic(heavyStore(source(0, asked))), A, '', 'bin', { threshold: 0.5 })
+    expect([v.tier, v.tree.b, v.tree.o, shape(v.tree), matchedRows(v), v.interiors ?? null, asked.sort()]).toEqual([
+      'rollup', ...sum(''), NESTED,
+      OBJECTS.filter(([p]) => p.startsWith('b1/iris/')).map(([p, b]) => [p, b, 1]).sort((x, y) => (x[0] < y[0] ? -1 : 1)),
+      null,
+      // `b1/tmp` and `b2` (one object each) and depth 3 (`b1/marin/*`) are never asked.
+      ['', 'b1', 'b1/iris', 'b1/marin'],
+    ])
+  })
+
+  it('`/api/subtree`: the cold answer is cut (`late`, browser copy `no-store`); the background run replaces it with the nested one', async () => {
+    const held = new Map<string, Response>()
+    const prev = (globalThis as unknown as { caches: unknown }).caches
+    ;(globalThis as unknown as { caches: unknown }).caches = { default: {
+      match: async (k: Request) => held.get(k.url)?.clone(),
+      put: async (k: Request, r: Response) => { held.set(k.url, r) },
+    } }
+    resetUpgrades()
+    const env = envStatic(heavyStore(source(100)))
+    Object.assign(env, { FILTER_PHASE2_MS: '5', DEV_EMAIL: 'dev@example.test', STORE_BUCKET: 'my-data' })
+    const bg: Promise<unknown>[] = []
+    const waitUntil = (p: Promise<unknown>) => { bg.push(p) }
+    const url = `http://localhost/api/subtree?date=${A}&path=&q=bin&full=1&w=${W}&h=${H}&minArea=${MIN_AREA}&atten=${ATTEN}`
+    const said = async (r: Response) => {
+      const j = await r.json() as { budgetCut?: true; interiors?: unknown; tree: ViewNode }
+      return [r.headers.get('x-cache'), r.headers.get('x-cache-partial'), r.headers.get('cache-control'), r.headers.get('x-cache-upgrade'), j.budgetCut ?? null, j.interiors ?? null, shape(j.tree)]
+    }
+    try {
+      const cold = await said(await warmSubtree(env, url, waitUntil))
+      const reload = await said(await warmSubtree(env, url, waitUntil))
+      await Promise.all(bg)
+      const after = await said(await warmSubtree(env, url, waitUntil))
+      expect([cold, reload, after]).toEqual([
+        ['miss', 'ttl=120', 'no-store', 'scheduled', true, { read: 1, skipped: 2, reason: '2 past the time budget', late: 2 }, CUT],
+        ['hit', 'ttl=120', 'no-store', 'in-flight', true, { read: 1, skipped: 2, reason: '2 past the time budget', late: 2 }, CUT],
+        ['hit', null, 'private, max-age=300', null, null, null, NESTED],
+      ])
+    } finally {
+      ;(globalThis as unknown as { caches: unknown }).caches = prev
+    }
   })
 })

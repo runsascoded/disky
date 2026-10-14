@@ -42,8 +42,8 @@ describe('cacheStore', () => {
     const flags = async (r: Response) => [r.headers.get('x-cache'), r.headers.get('x-cache-store')?.replace(/dur=\d+/, 'dur=<ms>') ?? null, r.headers.get('x-cache-partial'), r.headers.get('cache-control'), await r.text()]
     expect([keep, PARTIAL_TTL, await flags(miss), await flags(hit), stored, kv]).toEqual([
       { partialTtl: 120 }, 120,
-      ['miss', 'partial;ttl=120;awaited;dur=<ms>', 'ttl=120', 'private, max-age=120', '{"budgetCut":true}'],
-      ['hit', null, 'ttl=120', 'private, max-age=120', '{"budgetCut":true}'],
+      ['miss', 'partial;ttl=120;awaited;dur=<ms>', 'ttl=120', 'no-store', '{"budgetCut":true}'],
+      ['hit', null, 'ttl=120', 'no-store', '{"budgetCut":true}'],
       [[key.url, 'public, s-maxage=120', 'ttl=120', '{"budgetCut":true}']],
       [],
     ])

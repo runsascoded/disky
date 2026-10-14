@@ -4,7 +4,7 @@
 // (one drilled, one not). Scan 07's job is still running.
 import { describe, expect, it } from 'vitest'
 import {
-  compaction, coverage, coverageTiers, freshness, type HealthRun, healthDoc, type MergeRecord, mergeLine, mergeState, planCarries,
+  compaction, coverage, coverageEvents, freshness, type HealthRun, healthDoc, type MergeRecord, mergeLine, mergeState, planCarries,
   stackTiers, type StackRun, storeHealth, type StoreRead,
 } from './healthModel'
 
@@ -31,6 +31,17 @@ const ST: StoreRead = {
 const NOW = Date.UTC(2026, 9, 8) / 1000
 const PER_SCAN = ['01', '02', '03', '04', '05'].map(D)
 const JOBS = [{ scan: D('06'), status: 'succeeded' }, { scan: D('07'), status: 'running' }]
+
+it('scan availability is a set of instants, with no invented duration between snapshots', () => {
+  const doc = healthDoc([], ['2026-10-13T0221', '2026-10-13T0716'], [], NOW)
+  expect(coverageEvents(doc.coverage, ['path', 'interval'])).toEqual([
+    { column: 'path', events: [
+      { scan: '2026-10-13T0221', time: Date.UTC(2026, 9, 13, 2, 21), status: 'present' },
+      { scan: '2026-10-13T0716', time: Date.UTC(2026, 9, 13, 7, 16), status: 'present' },
+    ] },
+    { column: 'interval', events: [] },
+  ])
+})
 
 describe('planCarries (append_runner.plan_carries)', () => {
   const r = (k: string, level: number, n = 1): StackRun => ({ key: `deltas/${k}`, first: k, last: k, level, scans: Array.from({ length: n }, (_, i) => `${k}.${i}`) })
@@ -200,12 +211,6 @@ describe('stack → shards (CoverTimeline rows)', () => {
       ['L0', [['05', '06', 'present', '1 scan', 'deltas/2026-10-05'], ['06', '07', 'present', '1 scan', 'deltas/2026-10-06']]],
       ['drill', [['01', '03', 'present', 'drill · base', 'sn1 (base)'], ['03', '05', 'present', 'drill · 2 scans', 'deltas/2026-10-03_2026-10-04'], ['05', '06', 'missing', 'drill · 1 scan', 'deltas/2026-10-05'], ['06', '07', 'present', 'drill · 1 scan', 'deltas/2026-10-06']]],
       ['anch', [['01', '03', 'present', 'anchors · base', 'sn1 (base)'], ['03', '05', 'present', 'anchors · 2 scans', 'deltas/2026-10-03_2026-10-04'], ['05', '06', 'present', 'anchors · 1 scan', 'deltas/2026-10-05'], ['06', '07', 'present', 'anchors · 1 scan', 'deltas/2026-10-06']]],
-    ])
-  })
-  it('coverage rows: a shard per scan, `na` left out', () => {
-    const doc = healthDoc([IV], PER_SCAN, JOBS, NOW)
-    expect(coverageTiers(doc.coverage, ['interval'], NOW * 1000).map(r => [r.tier, r.segments.map(s => [s.shardDur.slice(8), s.status])])).toEqual([
-      ['iv', [['01', 'present'], ['02', 'present'], ['03', 'present'], ['04', 'missing'], ['05', 'present'], ['06', 'present'], ['07', 'pending']]],
     ])
   })
 })

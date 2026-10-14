@@ -15,6 +15,13 @@ The scenarios are generic: the bucket, the filter term and the dates are
 resolved from the deployment itself (`resolve_targets`), so the same probe
 runs against any store. Records are one JSON object per run (`-o`, local or
 `gs://`), so a prefix of them is a latency time series.
+
+For a captured page load, repeat `-R/--request` with relative `/api/` URLs to
+replay exactly those requests without discovery. `-S` serializes them;
+otherwise they run concurrently. `-c` changes subtree/diff response-cache
+keys only: it does not flush underlying metadata/row-group caches or the
+series cache. Records retain the complete Server-Timing header and a bounded
+error-body excerpt for HTTP 5xx responses.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ class Resp:
     cache: str | None  # `x-cache`: `hit` (edge cache), `kv`, `miss`; None when absent
     server_ms: int | None  # `total` from `server-timing`
     body: bytes
+    server_timing: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,8 @@ class Result:
     bytes: int
     cache: str | None
     server_ms: int | None
+    server_timing: str | None = None
+    error: str | None = None
 
 
 # Injected in tests: (path) -> Resp.
@@ -75,7 +85,8 @@ def http_fetch(base: str, token: str | None, timeout: int = 120) -> Fetch:
         except Exception:  # noqa: BLE001 — a transport error is a failed request, not a crash
             return Resp(0, round((time.monotonic() - t0) * 1000), 0, None, None, b"")
         ms = round((time.monotonic() - t0) * 1000)
-        return Resp(status, ms, len(body), hd.get("x-cache"), server_total(hd.get("server-timing")), body)
+        timing = hd.get("server-timing")
+        return Resp(status, ms, len(body), hd.get("x-cache"), server_total(timing), body, timing)
 
     return fetch
 
@@ -163,14 +174,56 @@ def cold_min_area(rng: random.Random) -> str:
     return f"12.{rng.randrange(1, 10**6):06d}"
 
 
+def request_paths(paths: tuple[str, ...], cold: str = "") -> list[str]:
+    """Replay exact same-site API GETs; only subtree/diff support a cold key."""
+    out = []
+    for path in paths:
+        url = urllib.parse.urlsplit(path)
+        if url.scheme or url.netloc or url.fragment or not url.path.startswith("/api/") or ".." in url.path:
+            raise ValueError("probe requests must be relative /api/ paths without a fragment")
+        if cold and url.path in ("/api/subtree", "/api/diff"):
+            query = [(k, v) for k, v in urllib.parse.parse_qsl(url.query, keep_blank_values=True) if k != "minArea"]
+            query.append(("minArea", cold))
+            path = urllib.parse.urlunsplit(("", "", url.path, urllib.parse.urlencode(query), ""))
+        out.append(path)
+    return out
+
+
 def run(fetch: Fetch, scens: dict[str, list[str]], *, parallel: bool = True) -> list[Result]:
     """Scenarios in turn; each one's requests concurrently (a page load)."""
     out: list[Result] = []
     for name, paths in scens.items():
         with ThreadPoolExecutor(len(paths) if parallel else 1) as ex:
             for path, r in zip(paths, ex.map(fetch, paths)):
-                out.append(Result(name, path, r.status, r.ms, r.bytes, r.cache, r.server_ms))
+                error = r.body.decode(errors="replace")[:1000] if r.status >= 500 else None
+                out.append(Result(name, path, r.status, r.ms, r.bytes, r.cache, r.server_ms, r.server_timing, error))
     return out
+
+
+def compare_requests(fetch: Fetch, baseline: Fetch, paths: list[str], *, parallel: bool = True) -> tuple[list[Result], list[Result], list[dict[str, object]]]:
+    """Compare complete JSON responses; retain timings, never successful bodies."""
+    def captured(f: Fetch) -> tuple[Fetch, dict[str, Resp]]:
+        responses: dict[str, Resp] = {}
+        def get(path: str) -> Resp:
+            response = f(path)
+            responses[path] = response
+            return response
+        return get, responses
+    first, actual = captured(fetch)
+    second, expected = captured(baseline)
+    results = run(first, {"requests": paths}, parallel=parallel)
+    before = run(second, {"requests": paths}, parallel=parallel)
+    parity = []
+    for path in paths:
+        a, b = actual[path], expected[path]
+        equal = False
+        if a.status == b.status == 200:
+            try:
+                equal = json.loads(a.body) == json.loads(b.body)
+            except (ValueError, UnicodeDecodeError):
+                pass
+        parity.append({"path": path, "equal": equal})
+    return results, before, parity
 
 
 def failed(r: Result) -> bool:

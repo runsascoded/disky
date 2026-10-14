@@ -7,13 +7,25 @@
 import { FloatingPortal } from '@floating-ui/react'
 import { useEffect, useState } from 'react'
 import { useCanAssign } from './auth'
-import { SHARE_DAYS, useShare, type ShareMode } from './sharePreview'
+import { fmtShareDays, SHARE_DAY_CHOICES, SHARE_DAYS, useShare, type ShareMode } from './sharePreview'
+
+type Minted = Exclude<ShareMode, 'plain'>
+
+function Expiry({ days, onChange, label }: { days: number; onChange: (d: number) => void; label: string }) {
+  return (
+    <select className="share-days" aria-label={label} value={days} onChange={e => onChange(Number(e.target.value))}>
+      {SHARE_DAY_CHOICES.map(d => <option key={d} value={d}>{fmtShareDays(d)}</option>)}
+    </select>
+  )
+}
 
 export function ShareDialog({ onClose }: { onClose: () => void }) {
   const canGrant = useCanAssign()
-  const [mode, setMode] = useState<Exclude<ShareMode, 'plain'>>('preview')
+  const [mode, setMode] = useState<Minted>('preview')
+  const [days, setDays] = useState<Record<Minted, number>>({ preview: SHARE_DAYS, access: SHARE_DAYS })
+  const setModeDays = (m: Minted) => (d: number) => setDays(s => ({ ...s, [m]: d }))
   const { share, status, reset } = useShare()
-  useEffect(() => reset(), [mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => reset(), [mode, days]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -32,19 +44,21 @@ export function ShareDialog({ onClose }: { onClose: () => void }) {
         <label className="share-opt">
           <input type="radio" name="share-mode" checked={mode === 'preview'} onChange={() => setMode('preview')} />
           <span>
-            Detailed preview · sign-in required
-            <span className="hint">The card Slack, iMessage etc. show when the link is pasted shows labels, sizes and owners. Opening the page still needs sign-in. Good for this exact view for {SHARE_DAYS} days; admins can revoke it.</span>
+            Detailed preview only · sign-in still required
+            <span className="hint">The card Slack, iMessage etc. show when the link is pasted shows labels, sizes and owners. It grants no access: opening the page still needs the viewer's own sign-in. For this exact view; admins can revoke it.</span>
+            <Expiry days={days.preview} onChange={setModeDays('preview')} label="Detailed preview expiry" />
           </span>
         </label>
         <label className={`share-opt${canGrant ? '' : ' disabled'}`}>
           <input type="radio" name="share-mode" checked={mode === 'access'} disabled={!canGrant} onChange={() => setMode('access')} />
           <span>
-            Anyone with the link can view{!canGrant && <span className="dim"> · admins only for now</span>}
-            <span className="hint">A read-only share link ({SHARE_DAYS} days, revocable on /admin): whoever opens it browses the site without signing in. Its preview is detailed too.</span>
+            Guest access · anyone with this link can browse{!canGrant && <span className="dim"> · admins only for now</span>}
+            <span className="hint">A read-only guest link, revocable on /admin: whoever opens it browses the whole site without signing in, not just this view. Its preview is detailed too.</span>
+            <Expiry days={days.access} onChange={setModeDays('access')} label="Guest access expiry" />
           </span>
         </label>
         <div className="share-actions">
-          <button type="button" className="btn primary" disabled={status.state === 'busy'} onClick={() => void share(mode)}>
+          <button type="button" className="btn primary" disabled={status.state === 'busy'} onClick={() => void share(mode, days[mode])}>
             {status.state === 'busy' ? 'Copying…' : status.state === 'copied' ? 'Copied ✓' : 'Copy link'}
           </button>
           {status.state === 'error' && <span className="err">{status.error}</span>}

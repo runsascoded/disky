@@ -86,7 +86,7 @@ export interface DiskSpace {
 export interface Meta {
   asof: string
   generated: string
-  captured_at?: string  // the capture's timestamp, including remote filesystems
+  captured_at?: string  // capture instant, when supplied by the source
   published?: string  // object lastModified (ISO) — real publish time behind a date-only id
   total_bytes: number
   total_objects: number

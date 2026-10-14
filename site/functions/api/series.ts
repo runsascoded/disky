@@ -21,7 +21,7 @@ import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, ownerKey, ownerOk, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
 import { indexedOnly, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { readRootAgg, readRootRows } from '../_lib/view.js'
+import { readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
 import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
@@ -150,7 +150,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, query)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, query)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&oh=${env.OWNER_HISTORY_BATCH === '1' ? 4 : 0}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
@@ -181,6 +181,17 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   const indexable = !split && !lens && !owner && !classes && !shits
   const lines = indexable ? await st.time('overtime', Promise.all((paths.length ? paths : [path]).map(p => readOverTime(env, p)))) : []
   const ot: OverTime[] | null = lines.length && lines.every(Boolean) ? lines as OverTime[] : null
+  let ownerHistory: Awaited<ReturnType<typeof readRootHistory>> = null
+  if (env.OWNER_HISTORY_BATCH === '1' && !path && !paths.length && !query && !split && !classes && lens && !owner) {
+    try {
+      ownerHistory = await st.time('owner-history', ivRetry(() => readRootHistory(env, dates, { lens, owner })))
+      st.trace('owner-history-points', ownerHistory?.size ?? 0, 'count')
+    } catch (e) {
+      const why = (e as Error).message
+      st.trace('owner-history-fallback', 0, why)
+      console.log(`owner history: canonical fallback: ${why}`)
+    }
+  }
 
   const points: { date: string; b: number; o: number }[] = []
   // split=roots: each scan's depth-1 rows (the total is their sum), and for
@@ -198,6 +209,10 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
       // A scan the static answer doesn't cover: a gap, named — never the current scan's match roots read on
       // it (another scan's roots, or a rollup's few) nor a zero.
       if (shits) { unindexed.push(date); return null }
+      if (ownerHistory?.has(date)) {
+        const value = ownerHistory.get(date)
+        return value ? { date, ...value } : null
+      }
       const covered = ot ? overTimePoint(ot, date) : undefined
       if (covered !== undefined) return covered && { date, ...covered }
       if (split) {

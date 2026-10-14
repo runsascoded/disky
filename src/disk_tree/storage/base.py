@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from os import remove
 from shutil import move
+from typing import Any
 from uuid import uuid4
 
 import pandas as pd
@@ -18,6 +19,11 @@ from .. import blobfs
 # ~40 ms at 1M (measured 2026-08-28, 4.5M-row home scan); footer cost is
 # negligible either way.
 BLOB_ROW_GROUP_SIZE = 65_536
+
+#: A pyarrow `filters` predicate `(column, op, value)`; a list of them is a
+#: conjunction, a list of such lists a disjunction (DNF).
+Filter = tuple[str, str, Any]
+Filters = list[Filter] | list[list[Filter]]
 
 
 def path_prefix_bounds(prefix: str) -> tuple[str, str]:

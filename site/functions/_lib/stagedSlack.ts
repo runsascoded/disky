@@ -65,18 +65,24 @@ export interface Sized {
   scan: string
   b: number
   o: number
-  /** Prefixes with nothing left at `scan`. */
+  /** Prefixes with nothing left at `scan` (`emptyAt`): left out of every
+   *  count, and named apart. */
   empty: number
   owners: { label: string; b: number }[]
 }
 
 const who = (email: string, names?: Names): string => names?.[email.toLowerCase()] ?? email.replace(/@.*$/, '')
 
-/** `51.0 TiB · 179,327,698 objects at scan 2026-10-02 · owners: Grace Hopper 16.0 TiB, hedy 6.0 TiB`. */
+/** A staged prefix with nothing under it at the scan (no bytes, no objects;
+ *  absent from the lookup): `/staged`'s "Empty at scan". Not counted as staged. */
+export const emptyAt = (st: PrefixStat | undefined): boolean => !st || (!st.b && !st.o)
+
+/** `51.0 TiB · 179,327,698 objects at scan 2026-10-02 · owners: Grace Hopper 16.0 TiB, hedy 6.0 TiB`,
+ *  and, on a line of its own, how many staged prefixes were empty at the scan. */
 export function sizeLine(z: Sized): string {
   const owners = z.owners.length ? ` · owners: ${z.owners.map(o => `${o.label} ${fmtBytes(o.b)}`).join(', ')}` : ''
-  const empty = z.empty ? ` · ${fmtN(z.empty)} empty` : ''
-  return `*${fmtBytes(z.b)}* · ${fmtN(z.o)} objects at scan ${z.scan}${empty}${owners}`
+  const empty = z.empty ? `\n+${plural(z.empty, 'staged prefix', 'staged prefixes')} empty at scan, not counted` : ''
+  return `*${fmtBytes(z.b)}* · ${fmtN(z.o)} objects at scan ${z.scan}${owners}${empty}`
 }
 
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
@@ -131,7 +137,7 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
     { type: 'actions', elements: buttons },
     ...(v.image && v.items ? [{ type: 'image', image_url: v.image, alt_text: `Plan #${v.planId}: the staged prefixes as a treemap, coloured by owner` }] : []),
   ]
-  return { text: `Staged for deletion: plan #${v.planId}, ${v.items} prefixes`, blocks }
+  return { text: `Staged for deletion: plan #${v.planId}, ${plural(q.items, 'prefix', 'prefixes')}`, blocks }
 }
 
 /** The old parent once its plan moved to a new thread (`link`: the new parent). */
@@ -233,10 +239,14 @@ export interface ReplyView {
  *  many batches and their size, the largest folders, the latest note. */
 export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
   const n = v.prefixes.length
+  // Sized, the paths empty at the scan are left out of the counts and named apart.
+  const held = v.stats ? v.prefixes.filter(p => !emptyAt(v.stats![p])) : v.prefixes
+  const empty = n - held.length
   let b = 0, o = 0
-  for (const p of v.prefixes) { b += v.stats?.[p]?.b ?? 0; o += v.stats?.[p]?.o ?? 0 }
+  for (const p of held) { b += v.stats?.[p]?.b ?? 0; o += v.stats?.[p]?.o ?? 0 }
   const inBatches = v.batches > 1 ? ` in ${plural(v.batches, 'batch', 'batches')}` : ''
-  const size = v.stats ? ` · *${fmtBytes(b)}* · ${plural(o, 'object')}` : ''
+  const emptyNote = empty ? ` (+${fmtN(empty)} empty at scan)` : ''
+  const size = v.stats ? ` · *${fmtBytes(b)}* · ${plural(o, 'object')}${emptyNote}` : ''
   const note = v.note ? `\n> ${(v.note.length > 140 ? `${v.note.slice(0, 139)}…` : v.note).replace(/\s*\n\s*/g, ' ')}` : ''
   const view = { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'View in www' }, url: `${v.siteUrl}/staged` }
   if (!n) {
@@ -259,10 +269,14 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
       deny: { type: 'plain_text', text: 'Cancel' },
     },
   }
+  if (!held.length) {
+    const head = `${v.by} staged ${plural(n, 'path')}${inBatches} · all empty at scan`
+    return { text: head, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `:wastebasket: *${v.by}* staged ${plural(n, 'path')}${inBatches} · all empty at scan${note}` } }, { type: 'actions', elements: [reject, view] }] }
+  }
   return {
-    text: `${v.by} staged ${plural(n, 'path')}${inBatches}${v.stats ? ` · ${fmtBytes(b)}` : ''}`,
+    text: `${v.by} staged ${plural(held.length, 'path')}${inBatches}${v.stats ? ` · ${fmtBytes(b)}${emptyNote}` : ''}`,
     blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: `:wastebasket: *${v.by}* staged ${plural(n, 'path')}${inBatches}${size}\n${topFolders(v.prefixes, v.stats)}${note}` } },
+      { type: 'section', text: { type: 'mrkdwn', text: `:wastebasket: *${v.by}* staged ${plural(held.length, 'path')}${inBatches}${size}\n${topFolders(held, v.stats)}${note}` } },
       { type: 'actions', elements: [reject, view] },
     ],
   }
@@ -406,7 +420,7 @@ export function sizeOf(at: ScanStats, prefixes: readonly string[], ownerName: (i
   const byOwner = new Map<string, number>()
   for (const p of prefixes) {
     const st = at.stats[p]
-    if (!st || !st.b) { empty++; continue }
+    if (emptyAt(st)) { empty++; continue }
     b += st.b; o += st.o
     for (const [u, ub] of st.us ?? []) byOwner.set(u, (byOwner.get(u) ?? 0) + ub)
   }
@@ -414,21 +428,32 @@ export function sizeOf(at: ScanStats, prefixes: readonly string[], ownerName: (i
   return { scan: at.scan, b, o, empty, owners }
 }
 
-async function loadView(db: D1Database, planId: number, siteUrl: string, actions: boolean): Promise<(ParentView & { slack_ts: string | null; slack_channel: string | null; deleted: Set<string>; prefixes: string[] }) | null> {
+/** A staged item, as the parent counts it. */
+export interface QueuedItem { prefix: string; added_by: string; batch_id: number | null }
+
+/** What the parent title counts: the `live` items (no real run deleted them)
+ *  less those `empty` at the latest scan — their prefixes, batches, stagers. */
+export function queuedOf(live: readonly QueuedItem[], empty: ReadonlySet<string> = new Set()): NonNullable<ParentView['queued']> {
+  const held = live.filter(i => !empty.has(i.prefix))
+  return {
+    items: held.length,
+    batches: new Set(held.map(i => i.batch_id).filter(b => b != null)).size,
+    stagers: [...new Set(held.map(i => i.added_by))].sort(),
+  }
+}
+
+async function loadView(db: D1Database, planId: number, siteUrl: string, actions: boolean): Promise<(ParentView & { slack_ts: string | null; slack_channel: string | null; deleted: Set<string>; prefixes: string[]; live: QueuedItem[] }) | null> {
   const plan = await db.prepare('SELECT id, state, slack_ts, slack_channel FROM plans WHERE id = ?').bind(planId)
     .first<{ id: number; state: string; slack_ts: string | null; slack_channel: string | null }>()
   if (!plan) return null
-  const items = (await db.prepare('SELECT prefix, added_by, batch_id FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string; batch_id: number | null }>()).results
+  const items = (await db.prepare('SELECT prefix, added_by, batch_id FROM plan_items WHERE plan_id = ?').bind(planId).all<QueuedItem>()).results
   const batches = await db.prepare('SELECT count(DISTINCT batch_id) AS n FROM plan_items WHERE plan_id = ? AND batch_id IS NOT NULL').bind(planId).first<{ n: number }>()
   const runs = await planRuns(db, planId)
   const deleted = await deletedItems(db, planId)
   const live = items.filter(i => !deleted.has(i.prefix))
   return {
-    queued: {
-      items: live.length,
-      batches: new Set(live.map(i => i.batch_id).filter(b => b != null)).size,
-      stagers: [...new Set(live.map(i => i.added_by))].sort(),
-    },
+    queued: queuedOf(live),
+    live,
     deleted,
     prefixes: items.map(i => i.prefix),
     planId, siteUrl, actions, runs,
@@ -573,7 +598,9 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     ])
     const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
     const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
-    const parent = renderParent({ ...v, names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+    // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
+    const empty = at ? new Set(queued.filter(p => emptyAt(at.stats[p]))) : undefined
+    const parent = renderParent({ ...v, queued: queuedOf(v.live, empty), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : stage ? undefined : (ev as Event | undefined)

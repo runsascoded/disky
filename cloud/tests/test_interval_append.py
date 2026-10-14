@@ -849,14 +849,16 @@ def test_the_cli_merge_and_append_M(monkeypatch):
 
 def test_jobs_are_the_profiles_and_carry_the_cost_label(monkeypatch):
     monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=t")
+    monkeypatch.setenv("SCAN_RUN_ID", "root-uid")
     f = Fake(["2026-08-03", "2026-08-04", "2026-08-04T1236"])
     f.runner().run("2026-08-04")
     f.runner().run("2026-08-04")  # published: the copy's own job
     f.runner().run("2026-08-04T1236")  # then a carry: the merge job
     (_, ranges), (_, publish), (_, r2), _, _, (merge_name, merge) = f.jobs
-    want = {"app": "disky", "deployment": "t", "component": "interval-store"}
-    for spec in (ranges, publish, r2, merge):
-        assert spec["allocationPolicy"]["labels"] == want
+    want = {"app": "disky", "deployment": "t", "component": "interval-store", "scan_run": "root-uid"}
+    for spec, scan, stage in ((ranges, "2026-08-04", "ranges"), (publish, "2026-08-04", "publish"),
+                             (r2, "2026-08-04", "r2"), (merge, "2026-08-04T1236", "merge")):
+        assert spec["allocationPolicy"]["labels"] == {**want, "scan_id": scan.lower(), "stage": stage}
         assert {k: spec["labels"][k] for k in ("purpose", "component", "gen")} == {"purpose": "interval-store", "component": "interval-store", "gen": "g1"}
     cmd = lambda s: s["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]  # noqa: E731
     assert [s["taskGroups"][0]["taskCount"] for s in (ranges, publish, r2, merge)] == [2, 1, 1, 1]
@@ -866,12 +868,15 @@ def test_jobs_are_the_profiles_and_carry_the_cost_label(monkeypatch):
                        "-d 2026-08-04 -b data -g g1 -R g0 -S scr")
     assert cmd(merge) == ("set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.interval_append carry "
                           "-L 5 -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")
-    assert r2["taskGroups"][0]["taskSpec"]["environment"] == R2_ENV
+    context = {"DISKY_LABELS": "app=disky,deployment=t", "SCAN_RUN_ID": "root-uid"}
+    assert r2["taskGroups"][0]["taskSpec"]["environment"] == {
+        **R2_ENV, "variables": {**R2_ENV["variables"], **context, "SCAN_ID": "2026-08-04"},
+    }
     # the merge job: as the stages' account (the R2 account is the same), with the R2 env for its status record on R2,
     # and its own name (the record's holder)
     assert (merge["allocationPolicy"]["serviceAccount"]["email"], merge["allocationPolicy"]["instances"][0]["policy"]["machineType"],
             merge["taskGroups"][0]["taskSpec"]["environment"]) == (
-        "sa@x", "n2-highmem-16", {**R2_ENV, "variables": {**R2_ENV["variables"], "DT_JOB_NAME": merge_name}})
+        "sa@x", "n2-highmem-16", {**R2_ENV, "variables": {**R2_ENV["variables"], **context, "SCAN_ID": "2026-08-04T1236", "DT_JOB_NAME": merge_name}})
 
 
 def test_the_merge_job_gets_no_r2_env_when_the_r2_account_differs():

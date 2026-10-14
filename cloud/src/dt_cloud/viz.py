@@ -21,6 +21,7 @@ import duckdb
 
 from .index import AGE_COLS, STORE_L2, age_bucket_sql, duckdb_codec, store_columns
 from .scan_started import listing_started
+from .resource_monitor import monitor_resources, resource_stage
 
 err = partial(print, file=sys.stderr)
 
@@ -96,6 +97,7 @@ def write_labels(
 
 
 def _rss(tag: str) -> None:
+    resource_stage(tag)
     """Log peak RSS so OOM autopsies can name the phase (linux: KB, mac: B)."""
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     err(f"[rss] {tag}: peak {peak / (1024**2 if sys.platform == 'linux' else 1024**3):.1f} GB")
@@ -235,6 +237,7 @@ def _cache_hit(con: "duckdb.DuckDBPyConnection", pq_path: Path, cols: tuple[str,
     return True
 
 
+@monitor_resources(prefix="PATH_INDEX_RESOURCE")
 def write_path_index(
     listings: tuple[str, ...],
     out_dir: Path,
@@ -291,6 +294,7 @@ def write_path_index(
     from disk_tree.listing import prepare_listing
 
     attr = bool(attributions)
+    resource_stage("listing-setup")
     con = duckdb.connect()
     # attribution mode is node-scale (34M-dir python-side walk); plain mode
     # stays laptop-safe
@@ -316,6 +320,7 @@ def write_path_index(
         WHERE bucket <> '' OR strpos(name, '/') > 0
     )"""
 
+    resource_stage("dir-rollups")
     # --- layer-2 dir rollups (attribution-independent; cached when dir_cache) ---
     # Everything downstream needs objects only via these two aggregates:
     # `dir_stats` (per-dir sizes/objects/classes/weighted-mtimes) and

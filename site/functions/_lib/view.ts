@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, folded, type IndexHandle, isStore, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -504,7 +504,8 @@ export async function readRootRows(env: Env, date: string): Promise<{ path: stri
   return [...by.values()]
 }
 
-export async function readRootAgg(env0: Env, o: { date: string; path: string; lens?: Lens; owner?: OwnerScope; by?: string; classes?: ClassScope }): Promise<{ b: number; o: number } | null> {
+export async function readRootAgg(env0: Env, o: { date: string; path: string; lens?: Lens; owner?: OwnerScope; by?: string; classes?: ClassScope }, historyRows?: Row[]): Promise<{ b: number; o: number } | null> {
+  if (historyRows && o.path) throw new Error('history rows are for the fleet root only')
   const env = sliced(env0, o)
   const { date, path, lens, owner, classes } = o
   const dP = path === '' ? 0 : path.split('/').length
@@ -524,7 +525,7 @@ export async function readRootAgg(env0: Env, o: { date: string; path: string; le
     return fine ? readRoot(fine, l) : null
   }
   const ol = lens ? await ownerLensFor(env, date, lens, o.by) : null
-  const rows = await rootRows(lens ? await lensSort(env, date) : 'path', lens)
+  const rows = historyRows ? historyRows.filter(r => !lens || r.usr === lens.key) : await rootRows(lens ? await lensSort(env, date) : 'path', lens)
   // No tier at all → null. No rows for an *unlensed* path (its `path`-tier read
   // came back empty) → the path isn't in this scan, so null (a gap on the
   // over-time chart — e.g. a bucket's scans before it joined the scan set),
@@ -544,11 +545,25 @@ export async function readRootAgg(env0: Env, o: { date: string; path: string; le
   if (!ol) return { b: mine.b, o: mine.o }
   let all: Agg | null = null
   if (ol.needsTotal(path)) {
-    const allRows = await rootRows('path')
+    const allRows = historyRows ?? await rootRows('path')
     if (allRows?.length) { all = newAgg(); for (const r of allRows) merge(all, r) }
   }
   const agg = lensAgg(ol, lens!.key, path, all, mine)
   return { b: agg.b, o: agg.o }
+}
+
+/** Held dates' root totals from one version read, with the canonical per-date
+ * ledger fold. No new index, inferred object counts, or snapshot-only owners. */
+export async function readRootHistory(env: Env, dates: string[], scope: { lens?: Lens; owner?: OwnerScope }): Promise<Map<string, { b: number; o: number } | null> | null> {
+  const rows = await readRootHistoryRows(env, dates, scope.lens)
+  if (!rows) return null
+  const out = new Map<string, { b: number; o: number } | null>()
+  const held = [...rows.keys()]
+  for (let i = 0; i < held.length; i += 12) {
+    const points = await Promise.all(held.slice(i, i + 12).map(async date => [date, await readRootAgg(env, { date, path: '', ...scope }, rows.get(date)!)] as const))
+    for (const [date, point] of points) out.set(date, point)
+  }
+  return out
 }
 
 /** The owner lens for a scan: the live assignments folded against it (cached per

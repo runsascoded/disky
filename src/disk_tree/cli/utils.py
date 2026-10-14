@@ -11,14 +11,15 @@ ORDERS_IEC = { 'k': 1e3  , 'm': 1e6  , 'b': 1e9   }
 def parse_int(ctx: Context, param: Parameter, value: str) -> int:
     m = fullmatch(INT_RGX, value.lower())
     if m:
-        n = float(m['base'])
+        base = float(m['base'])
         suffix = m['suffix']
+        order: float
         if suffix.endswith('i'):
             suffix = suffix[:-1]
             order = ORDERS_ISO[suffix]
         else:
             order = ORDERS_IEC[suffix]
-        n = int(n * order)
+        n = int(base * order)
     else:
         n = int(float(value))
     return n

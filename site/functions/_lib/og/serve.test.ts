@@ -6,7 +6,7 @@ import { anonymousPolicy } from './policy'
 
 const mocks = vi.hoisted(() => ({
   data: vi.fn(), scan: vi.fn(), head: vi.fn(), warm: vi.fn(), live: vi.fn(), tier: vi.fn(),
-  stamp: vi.fn(), render: vi.fn(), match: vi.fn(), put: vi.fn(),
+  stamp: vi.fn(), render: vi.fn(), match: vi.fn(), put: vi.fn(), diff: vi.fn(), pair: vi.fn(),
 }))
 vi.mock('./vendor/resvg.wasm', () => ({ default: new Uint8Array() }))
 vi.mock('./render', () => ({ ensureWasm: vi.fn(), FONT_FILES: [], svgToPng: mocks.render }))
@@ -15,6 +15,7 @@ vi.mock('./data', () => ({
   NoScanMatch: class NoScanMatch extends Error {},
 }))
 vi.mock('./pages', () => ({ assignmentsCard: mocks.data, stagedCard: mocks.data, userCard: mocks.data, usersCard: mocks.data }))
+vi.mock('./diff', () => ({ diffCard: mocks.diff, resolveDiffScans: mocks.pair }))
 vi.mock('../ledger', () => ({ ledgerHead: mocks.head }))
 vi.mock('../identity', () => ({ canonId: (s: string) => s, loadRegistry: vi.fn().mockResolvedValue({}) }))
 vi.mock('../../api/subtree', () => ({ warmSubtree: mocks.warm }))
@@ -40,6 +41,8 @@ beforeEach(() => {
   mocks.put.mockResolvedValue(undefined)
   mocks.data.mockResolvedValue(protectedData)
   mocks.scan.mockResolvedValue('2026-10-12T1201')
+  mocks.pair.mockResolvedValue({ from: '2026-10-10T1201', to: '2026-10-12T1201' })
+  mocks.diff.mockResolvedValue(protectedData)
   mocks.head.mockResolvedValue(10)
   mocks.live.mockResolvedValue(false)
   mocks.tier.mockResolvedValue({ tier: 'anon', cred: null })
@@ -48,12 +51,40 @@ beforeEach(() => {
 })
 
 describe('restricted anonymous OG responses', () => {
+  it('diff HTML pins both scans and describes the comparison; the image validates the original view', async () => {
+    mocks.tier.mockResolvedValue({ tier: 'full', day: expDay(Math.floor(Date.now() / 1000), 7), cred: { t: 'DiffTokAAA' } })
+    mocks.live.mockResolvedValue(true)
+    const url = new URL('https://cw.example/bucket?section=diff&d=-7d&og=DiffTokAAA')
+    await stampPage(env({ OG_CARDS: '1' }), url, new Response('shell'))
+    const meta = mocks.stamp.mock.calls[0][1]
+    const image = new URL(meta.image)
+    expect([meta.title, meta.desc, image.pathname, image.searchParams.get('s'), image.searchParams.get('b')])
+      .toEqual(['secret/path', 'scan 2026-10-12T1201 · 99 TiB · 123 objects', '/og/diff.png', '2026-10-12T1201', '2026-10-10T1201'])
+    await serveCard({ request: new Request(image), env: env({ OG_CARDS: '1' }) })
+    expect(mocks.live.mock.calls.map(call => [call[1], call[2], call[3]])).toEqual([
+      ['diff', { d: '-7d', path: 'bucket' }, { t: 'DiffTokAAA' }],
+    ])
+    expect(mocks.diff.mock.calls.map(call => [call[3], call[4], call[5]])).toEqual([
+      [{ path: 'bucket', d: '2610121201-2610101201' }, 'full', true],
+      [{ path: 'bucket', d: '2610121201-2610101201' }, 'full', undefined],
+    ])
+    expect(mocks.pair.mock.calls.length).toBe(1)
+  })
+
+  it('a revoked warmed diff downgrades before any comparison reads', async () => {
+    const key = await ogKey('test-only-secret')
+    const path = await imagePath(key, 'diff', { path: 'secret', d: '-7d', s: '2026-10-12T1201', b: '2026-10-10T1201', t: 'DiffTokAAA' }, 'full', expDay(Math.floor(Date.now() / 1000), 7))
+    const response = await serveCard({ request: request(path), env: env() })
+    expect([textNodes(await response.text()), mocks.pair.mock.calls, mocks.diff.mock.calls])
+      .toEqual([['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''], [], []])
+  })
   it.each([
     '/og/map.png?path=secret/path&f=private&d=missing',
     '/og/staged.png?q=private',
     '/og/users.png',
     '/og/user.png?id=private',
     '/og/assignments.png',
+    '/og/diff.png?path=secret&d=missing&sig=bad',
     '/og/map.png?path=nonexistent&sig=bad',
   ])('returns the same generic card without protected reads: %s', async path => {
     const waitUntil = vi.fn()
@@ -61,7 +92,7 @@ describe('restricted anonymous OG responses', () => {
     expect({ status: response.status, tier: response.headers.get('x-og-tier'), cache: response.headers.get('cache-control') })
       .toEqual({ status: 200, tier: 'anon', cache: 'no-store' })
     expect(textNodes(await response.text())).toEqual(['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''])
-    expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls, mocks.warm.mock.calls, waitUntil.mock.calls]).toEqual([[], [], [], [], []])
+    expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls, mocks.warm.mock.calls, waitUntil.mock.calls, mocks.diff.mock.calls, mocks.pair.mock.calls]).toEqual([[], [], [], [], [], [], []])
   })
 
   it('a revoked, previously cached detailed card downgrades before accessing its cache', async () => {
@@ -71,7 +102,7 @@ describe('restricted anonymous OG responses', () => {
     const response = await serveCard({ request: request(path), env: env() })
     expect(textNodes(await response.text())).toEqual(['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''])
     expect([mocks.live.mock.calls.length, mocks.data.mock.calls, mocks.head.mock.calls]).toEqual([1, [], []])
-    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual(['https://cw.example/og/map.png?policy=generic&r=5'])
+    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual(['https://cw.example/og/map.png?policy=generic&r=6'])
   })
 
   it('valid explicit shares remain detailed and private', async () => {
@@ -90,7 +121,7 @@ describe('restricted anonymous OG responses', () => {
     await stampPage(env(), new URL('https://cw.example/secret/path?f=private'), new Response('shell'))
     expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{
       title: 'CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
-      image: 'https://cw.example/og/map.png?policy=generic&r=5', imageType: 'image/png', page: 'https://cw.example/secret/path',
+      image: 'https://cw.example/og/map.png?policy=generic&r=6', imageType: 'image/png', page: 'https://cw.example/secret/path',
     }])
     expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls]).toEqual([[], [], []])
   })
@@ -105,8 +136,8 @@ describe('restricted anonymous OG responses', () => {
       const image = new URL(call[1].image)
       return [image.searchParams.get('path'), image.searchParams.get('s'), image.searchParams.get('policy'), image.searchParams.get('r')]
     })).toEqual([
-      ['secret', '2026-10-12T1201', 'generic', '5'],
-      ['secret', '2026-10-13T1201', 'generic', '5'],
+      ['secret', '2026-10-12T1201', 'generic', '6'],
+      ['secret', '2026-10-13T1201', 'generic', '6'],
     ])
   })
 
@@ -155,7 +186,7 @@ describe('restricted anonymous OG responses', () => {
     expect([response.headers.get('x-og-tier'), response.headers.get('cache-control'), textNodes(await response.text())])
       .toEqual(['anon', 'public, max-age=0, must-revalidate', ['CW storage', 'secret/path', 'scan 2026-10-12T1201', '99 TiB · 123 objects']])
     expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual([
-      'https://cw.example/og/map.png?policy=shape&r=5&s=2026-10-12T1201&tier=anon&h=0',
+      'https://cw.example/og/map.png?policy=shape&r=6&s=2026-10-12T1201&tier=anon&h=0',
     ])
   })
 
@@ -164,7 +195,7 @@ describe('restricted anonymous OG responses', () => {
     const response = await serveCard({ request: request('/og/map.png?policy=shape&r=2'), env: env({ OG_ANONYMOUS: 'generic' }) })
     expect([textNodes(await response.text()), mocks.match.mock.calls.map(call => call[0].url)]).toEqual([
       ['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''],
-      ['https://cw.example/og/map.png?policy=generic&r=5'],
+      ['https://cw.example/og/map.png?policy=generic&r=6'],
     ])
   })
 
@@ -193,7 +224,7 @@ describe('restricted anonymous OG responses', () => {
     expect(mocks.stamp.mock.calls.map(call => {
       const params = new URL(call[1].image).searchParams
       return [params.get('c'), params.get('r'), params.get('s')]
-    })).toEqual([['t', '5', '2026-10-12T1201'], ['u', '5', '2026-10-12T1201']])
+    })).toEqual([['t', '6', '2026-10-12T1201'], ['u', '6', '2026-10-12T1201']])
     expect(mocks.data.mock.calls.map(call => call[3])).toEqual([
       { c: 't', d: '2026-10-12T1201' }, { c: 'u', d: '2026-10-12T1201' },
     ])
@@ -205,6 +236,6 @@ describe('restricted anonymous OG responses', () => {
     expect([response.headers.get('cache-control'), mocks.stamp.mock.calls.map(call => {
       const image = new URL(call[1].image)
       return [image.origin, image.pathname, Object.fromEntries(image.searchParams)]
-    })]).toEqual(['private, no-store', [['https://public.example', '/og/map.png', { c: 't', policy: 'shape', r: '5', s: '2026-10-12T1201' }]]])
+    })]).toEqual(['private, no-store', [['https://public.example', '/og/map.png', { c: 't', policy: 'shape', r: '6', s: '2026-10-12T1201' }]]])
   })
 })

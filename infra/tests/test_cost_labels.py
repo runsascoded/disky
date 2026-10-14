@@ -2,9 +2,10 @@ from pathlib import Path
 import sys
 
 import pytest
+import pulumi
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gcp"))
-from gcp_jobs import cost_labels, parse_labels, submitter_spec
+from gcp_jobs import Adopt, cost_labels, grant_bucket, parse_labels, submitter_spec
 
 
 def test_cost_labels_from_env():
@@ -36,3 +37,29 @@ def test_submitter_spec_sees_only_pin_and_labels(tmp_path, monkeypatch):
     assert submitter_spec(sub) == {"PIN": "1", "DRY": "1", "DISKY_LABELS": "app=disky", "OTHER": None}
     monkeypatch.delenv("DISKY_LABELS")
     assert submitter_spec(sub) == {"PIN": "1", "DRY": "1", "DISKY_LABELS": None, "OTHER": None}
+
+
+@pulumi.runtime.test
+def test_bucket_grant_accepts_an_output_without_stringifying_it(monkeypatch):
+    class Mocks(pulumi.runtime.Mocks):
+        def new_resource(self, args):
+            return args.name, args.inputs
+
+        def call(self, args):
+            return {}
+
+    pulumi.runtime.set_mocks(Mocks(), project="test", stack="test", preview=False)
+    monkeypatch.setenv("PULUMI_ERROR_OUTPUT_STRING", "1")
+    grant = grant_bucket(
+        "scratch-job",
+        bucket=pulumi.Output.from_input("scratch"),
+        role="roles/storage.objectAdmin",
+        member="serviceAccount:job@test",
+        member_email="job@test",
+        adopt=Adopt(False),
+    )
+
+    def check(values):
+        assert values == ["scratch", "roles/storage.objectAdmin", "serviceAccount:job@test"]
+
+    return pulumi.Output.all(grant.bucket, grant.role, grant.member).apply(check)

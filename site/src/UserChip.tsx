@@ -122,7 +122,7 @@ export function UserChip({ who, size = 18, extra, before }: {
       </span>
       {open && (
         <FloatingPortal>
-          <div className="tooltip-content user-card-pop" ref={refs.setFloating} style={floatingStyles} {...getFloatingProps()}>
+          <div className="tooltip-content user-card-pop" ref={refs.setFloating} style={floatingStyles} {...getFloatingProps({ onClick: e => e.stopPropagation() })}>
             <UserCard who={who} extra={extra} />
           </div>
         </FloatingPortal>

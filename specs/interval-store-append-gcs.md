@@ -1,5 +1,9 @@
 # Interval store: the per-scan append in the gcs job
 
+**Status: implemented and production-enabled (reconciled 2026-10-11).** This is no longer an unapplied patch. `job/run.sh` defaults the append on (`INTERVAL_STORE_APPEND=0` opts out), runs `append -c -w 1800` alongside static names and D1 row staging, then waits before flipping the generation pointers. It passes `INTERVAL_STORE_IMAGE=$JOB_IMAGE`, keeps the 60-minute timeout and failure alert, and records concurrent phases correctly. Production uses `PATH_STORE=intervals`, generation `2026-10-09b`, through Oct 11. Manual T2022 validated the four-scan L2 carry and R2 revision; the Oct 11 cron completed in 2h03, with interval append approximately 11 minutes, D1 row upload approximately 9 minutes and the final pointer flip 19 seconds. Required R2 metadata-copy failures now block visibility rather than publishing a scan with missing files. See [GCS operations](gcs-operations.md). The patch below is historical provenance; do not apply it again.
+
+## Original rollout proposal (superseded)
+
 **For the gcs session.** `cloud` has `dt-cloud interval-store append` (specs/interval-store.md §2.7). This adds it to `job/run.sh`, after the static-names step and before index-sync, off unless `INTERVAL_STORE_APPEND=1`, so it can be enabled on its own. The site keeps reading per-scan stores until the read switch (`PATH_STORE`), which is separate and needs Ryan's go.
 
 - **Non-fatal and bounded:** `timeout ${INTERVAL_STORE_TIMEOUT:-60m}`; a failure or timeout warns, posts to Slack with the resume command, records `phase interval-store "failed (exit N)"`, and the scan publishes as usual.

@@ -2861,6 +2861,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     input { margin-top: 3px; }
     .hint { display: block; font-size: 12px; color: var(--dim, #999); margin-top: 2px; }
     &.disabled { cursor: default; opacity: 0.55; }
+    .share-days { display: block; margin-top: 6px; font: inherit; font-size: 12px; padding: 2px 4px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
   }
   .share-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; .err { color: var(--danger, #e05050); font-size: 12px; } }
   .share-url { display: block; margin-top: 10px; font-size: 11px; word-break: break-all; opacity: 0.8; }

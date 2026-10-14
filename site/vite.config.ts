@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
+import { devChildrenActions } from './devChildrenActions'
 
 // Ports: `devPort` in package.json (vite), `PORT` env overrides (a second dev
 // stack, or when another worktree already holds 3263); wrangler pages dev (the
@@ -132,7 +133,7 @@ export default defineConfig({
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
     'import.meta.env.VITE_BUILD_SHA': JSON.stringify(buildSha()),
   },
-  plugins: [react(), devSeriesIndex, llmsTxt],
+  plugins: [react(), devSeriesIndex, devChildrenActions, llmsTxt],
   server: {
     port: PORT,
     host: true,

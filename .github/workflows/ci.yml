@@ -47,7 +47,6 @@ jobs:
 
       - name: Run mypy
         run: uv run mypy src/disk_tree --ignore-missing-imports
-        continue-on-error: true  # Don't fail build on type errors for now
 
   treemap-widget:
     name: "@rdub/treemap (typecheck + test)"

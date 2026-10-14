@@ -121,19 +121,56 @@ export function withDeltas(run: ScanRun, outputs: readonly ScanRunOutput[], inde
 /** A phase on the run's clock: seconds from the run's start. */
 export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number }
 
+export function phaseStatus(p: Pick<ScanRunPhase, 'status' | 'note'>): ScanRunPhase['status'] {
+  return /(?:^|,\s*)failed\b/i.test(p.note ?? '') ? 'failed' : p.status
+}
+
+export function phaseOutcome(p: Pick<ScanRunPhase, 'status' | 'note'>): string {
+  return phaseStatus(p) === 'failed' && /\bexit\s+124\b|\btimed?\s*out\b/i.test(p.note ?? '') ? 'timed out' : phaseStatus(p)
+}
+
+export const phaseFill = (p: Pick<PhaseSpan, 'phase' | 'status' | 'note'>, color: (phase: string) => string): string =>
+  phaseStatus(p) === 'failed' ? 'var(--danger)' : color(p.phase)
+
+/** Compact charts show the main lane, plus a failure stripe for otherwise hidden overlapping attempts. */
+export const overlappingFailures = (spans: readonly PhaseSpan[]): PhaseSpan[] =>
+  spans.filter(s => s.lane !== 0 && phaseStatus(s) === 'failed')
+
+export interface PhaseRecovery { run: ScanRun; phases: ScanRunPhase[]; secs: number | null }
+export interface PhaseIssue { phase: string; outcome: string; recovery: ScanRun | null }
+
+export function runOutcome(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
+  if (run.status === 'succeeded' && issues.length) return issues.every(i => i.recovery != null) ? 'recovered' : 'partial'
+  return run.status === 'nop' ? 'no-op' : run.status
+}
+
+export function phaseRecoveries(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[], now: number): PhaseRecovery[] {
+  return runs.filter(r => r.parent === run.run_id && r.kind === 'phase-recovery' && r.scan === run.scan && r.store === run.store)
+    .sort(byRunTime).map(r => ({ run: r, phases: phases.filter(p => p.run_id === r.run_id), secs: runSecs(r, now) }))
+}
+
+export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): PhaseIssue[] {
+  return phases.filter(p => p.run_id === run.run_id && phaseStatus(p) === 'failed').map(p => {
+    const retries = phaseRecoveries(run, runs, phases, 0).filter(r => r.run.status === 'succeeded' && r.phases.some(a =>
+      a.phase === p.phase && phaseStatus(a) === 'done' && a.finished_ts != null && p.finished_ts != null && a.finished_ts > p.finished_ts))
+    return { phase: p.phase, outcome: phaseOutcome(p), recovery: retries.at(-1)?.run ?? null }
+  })
+}
+
 /** A run's phases as spans, in order, each on a lane: a phase overlapping the
  * one before it (an overlapped phase, `access-ingest` beside the listing)
  * takes the next free lane. */
-export function phaseSpans(run: Pick<ScanRun, 'started_ts'>, phases: readonly ScanRunPhase[]): PhaseSpan[] {
+export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanRun, 'status'>>, phases: readonly ScanRunPhase[], now?: number): PhaseSpan[] {
   const t0 = run.started_ts
   if (t0 == null) return []
   const laneEnds: number[] = []
   return [...phases].sort((a, b) => a.seq - b.seq).flatMap(p => {
-    if (p.started_ts == null || p.finished_ts == null) return []
-    const start = p.started_ts - t0, end = p.finished_ts - t0
+    const until = p.finished_ts ?? (p.status === 'running' && run.status === 'running' ? now : undefined)
+    if (p.started_ts == null || until == null) return []
+    const start = Math.max(0, p.started_ts - t0), end = Math.max(start, until - t0)
     let lane = laneEnds.findIndex(e => e <= start)
     if (lane < 0) { lane = laneEnds.length; laneEnds.push(end) } else laneEnds[lane] = end
-    return [{ phase: p.phase, start, end, status: p.status, note: p.note, lane }]
+    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane }]
   })
 }
 
@@ -157,6 +194,7 @@ export interface RunSummary {
   downstream: number
   cost_usd: number | null
   failed_at: string | null
+  phase_issues: PhaseIssue[]
 }
 
 export function summarize(runs: readonly ScanRun[], phases: readonly ScanRunPhase[], outputs: readonly ScanRunOutput[], now: number): RunSummary[] {
@@ -173,9 +211,10 @@ export function summarize(runs: readonly ScanRun[], phases: readonly ScanRunPhas
       const ks = kids.get(run.run_id) ?? []
       const costs = [run.cost_usd, ...ks.map(k => k.cost_usd)]
       return {
-        run, secs: runSecs(run, now), spans: phaseSpans(run, byRun.get(run.run_id) ?? []),
+        run, secs: runSecs(run, now), spans: phaseSpans(run, byRun.get(run.run_id) ?? [], now),
         out_bytes: sum(tops.map(o => o.bytes)), delta_bytes: sum(tops.map(o => o.delta_bytes)),
         downstream: ks.length, cost_usd: sum(costs), failed_at: failedAt(run, byRun.get(run.run_id) ?? []),
+        phase_issues: phaseIssues(run, runs, phases),
       }
     })
 }

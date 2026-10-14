@@ -61,7 +61,7 @@ def recompress_cmd(as_json: bool, keep: bool, dry_run: bool, paths: tuple[str, .
     planned = [r for r in results if r.status == 'planned']
     skipped = [r for r in results if r.status == 'skipped']
     old = sum(r.old_size for r in rewritten)
-    new = sum(r.new_size for r in rewritten)
+    new = sum(r.new_size for r in rewritten if r.new_size is not None)
     if as_json:
         echo(json.dumps({
             'results': [r.asdict() for r in results],

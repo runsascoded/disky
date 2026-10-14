@@ -24,6 +24,8 @@ import { PerfOverlay } from './dev/PerfOverlay'
 // The session log's viewer (admin-only): its own chunk, so the main bundle carries none of it.
 const SessionsPage = lazy(() => import('./SessionsPage').then(m => ({ default: m.SessionsPage })))
 const sessions = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><SessionsPage /></Suspense></AuthGate>
+const FederatedScansPreview = import.meta.env.DEV ? lazy(() => import('./dev/FederatedScansPreview')) : null
+const ChildrenTablePreview = import.meta.env.DEV ? lazy(() => import('./dev/ChildrenTablePreview')) : null
 
 // `?perf=1` at load: the time-to-render panel (specs/render-bench.md). The
 // marks themselves are always on (`perf.ts`); only the panel is opt-in.
@@ -54,6 +56,8 @@ export default function Root() {
     <HotkeysProvider config={{ storageKey: 'gcs-usage' }}>
     <HelpProvider>
     <Routes>
+      {FederatedScansPreview && <Route path="/dev/federated-scans" element={<Suspense fallback={<p className="loading">Loading…</p>}><FederatedScansPreview /></Suspense>} />}
+      {ChildrenTablePreview && <Route path="/dev/children-table" element={<Suspense fallback={<p className="loading">Loading…</p>}><ChildrenTablePreview /></Suspense>} />}
       {STORES.map(s => (
         <Route key={s.key} path={`${s.path.replace(/\/$/, '')}/og`} element={<OgPage store={s} />} />
       ))}

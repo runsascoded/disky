@@ -1,0 +1,47 @@
+.federated-picker {
+  display: inline-flex; flex-direction: column; gap: 4px;
+  .fp-label { color: var(--ink-2); font-size: 12px; }
+  .fp-controls { display: flex; }
+}
+.federated-picker button, .fp-pop button {
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 4px; padding: 5px 9px; cursor: pointer;
+  &:hover:not(:disabled) { border-color: var(--s1); }
+  &:disabled { opacity: .4; cursor: default; }
+  &:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+}
+.fp-controls { gap: 3px; }
+.fp-trigger { min-width: 200px; display: flex; justify-content: space-between; gap: 12px; }
+.fp-pop {
+  z-index: var(--z-popover); width: min(490px, calc(100vw - 16px)); max-height: min(640px, calc(100dvh - 16px)); overflow: auto;
+  box-sizing: border-box; padding: 14px; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 24px #0004; font-size: 13px;
+  .fp-pop-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .fp-exact { display: flex; flex-direction: column; gap: 5px; margin: 15px 0; }
+  .fp-exact > div { display: flex; gap: 6px; }
+  input { width: 100%; min-width: 0; box-sizing: border-box; border: 1px solid var(--line); border-radius: 4px; padding: 6px; font: inherit; background: var(--surface); color: var(--ink); }
+  .fp-exact p { margin: 2px 0; color: var(--ink); }
+  .fp-zone { color: var(--ink-3); font-size: 12px; }
+  .fp-days { max-height: 260px; overflow: auto; margin: 8px 0 12px; }
+  h3 { margin: 10px 0 5px; font-size: 12px; color: var(--ink-2); }
+  .fp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .fp-chips button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+  .fp-chips span { font-size: 11px; color: var(--ink-2); }
+  [aria-pressed=true] { border-color: var(--s1); background: color-mix(in srgb, var(--s1) 15%, var(--panel)); }
+  .fp-sources { border-top: 1px solid var(--line); padding-top: 10px; }
+  summary { cursor: pointer; }
+  ul { padding: 0; list-style: none; margin: 8px 0; }
+  li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; }
+  li span { text-align: right; }
+  small { display: block; color: var(--ink-3); }
+  .fp-close { margin-top: 12px; }
+}
+.federated-preview {
+  max-width: 1100px; margin: 32px auto; padding: 0 16px; gap: 12px;
+  > p { color: var(--ink-2); }
+  .fp-main-controls { display: flex; flex-wrap: wrap; gap: 20px; margin: 20px 0; }
+  .fp-preview-totals { margin-bottom: 10px; }
+  .fp-preview-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--ink-2); font-size: 12px; }
+}

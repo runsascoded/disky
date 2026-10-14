@@ -84,7 +84,7 @@ describe('a filtered row\'s controls, per state', () => {
       render({ s: 'done', req, text: 'staged 3 folders', undo: { plan_id: 4, keys: ['gs://b/x/'] } }),
     ]).toEqual([
       box('', `<span class="act-st ok">✓ assigned 1,234 files → you</span>${X}`),
-      box('', `<span class="act-st ok">✓ staged 3 folders</span><button type="button" class="act">undo</button>${X}`),
+      box('', `<span class="act-st ok">✓ staged 3 folders</span><a class="act" href="/staged">review staged</a><button type="button" class="act">undo</button>${X}`),
     ])
   })
   it('over the cap after resolving: the reason, muted, in the controls\' place (no red)', () => {

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from json import dumps
 from typing import Any
 
 # The default Batch region (`$BATCH_REGION`): a job whose buckets name no
@@ -67,9 +68,27 @@ def _post(url: str, body: dict) -> dict:
 def batch_jobs(project: str | None = None, region: str = REGION) -> list[dict]:
     """Recent Batch jobs, newest first."""
     project = project or gcp_project()
-    d = _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs")
-    jobs = d.get("jobs", [])
+    jobs = _pages(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs", "jobs")
     return sorted(jobs, key=lambda j: j.get("createTime", ""), reverse=True)
+
+
+def _pages(url: str, key: str) -> list[dict]:
+    rows: list[dict] = []
+    params: dict[str, str] = {}
+    while True:
+        page = _get(url, **params)
+        rows.extend(page.get(key, []))
+        if not (token := page.get("nextPageToken")):
+            return rows
+        params["pageToken"] = token
+
+
+def batch_tasks(job: dict) -> list[dict]:
+    """Every task, including its retry status events, across a job's groups."""
+    tasks = []
+    for group in job.get("taskGroups", []):
+        tasks.extend(_pages(f"https://batch.googleapis.com/v1/{group['name']}/tasks", "tasks"))
+    return tasks
 
 
 def batch_job(name: str, project: str | None = None, region: str = REGION) -> dict:
@@ -104,7 +123,8 @@ def log_entries(
 def task_log_filter(uid: str, grep: str | None = None) -> str:
     f = f'labels.job_uid="{uid}" log_id("batch_task_logs")'
     if grep:
-        f += f' (textPayload=~"{grep}" OR jsonPayload.message=~"{grep}")'
+        pattern = dumps(grep)
+        f += f' (textPayload=~{pattern} OR jsonPayload.message=~{pattern})'
     return f
 
 

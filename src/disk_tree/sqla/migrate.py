@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from sqlalchemy import inspect
+from sqlalchemy.sql.schema import ScalarElementColumnDefault
 
 from .base import Base
 
@@ -53,7 +54,7 @@ def add_missing_columns(engine: "Engine") -> list[tuple[str, str]]:
             ddl = f'ALTER TABLE "{table_name}" ADD COLUMN "{col_name}" {col.type.compile(dialect)}'
             if not col.nullable:
                 default = col.default
-                if default is None or default.is_callable or not default.is_scalar:
+                if not isinstance(default, ScalarElementColumnDefault):
                     raise RuntimeError(
                         f"{table_name}.{col_name} is NOT NULL with no scalar default: "
                         f"it can't be added to an existing table without a hand-written migration"

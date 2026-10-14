@@ -23,6 +23,8 @@ from copy import deepcopy
 
 ENV = "DISKY_LABELS"
 COMPONENT = "component"
+RUN_ENV = "SCAN_RUN_ID"
+SCAN_ENV = "SCAN_ID"
 
 # GCP label rules: ≤64 labels; keys start with a lowercase letter; keys and values are
 # ≤63 chars of lowercase letters, digits, `_` and `-` (values may be empty).
@@ -68,22 +70,52 @@ def cost_labels(component: str | None = None, environ: dict[str, str] | None = N
     if labels and component:
         check_label(COMPONENT, component)
         labels[COMPONENT] = component
+    if labels:
+        env = os.environ if environ is None else environ
+        for var, key in ((RUN_ENV, "scan_run"), (SCAN_ENV, "scan_id")):
+            if value := env.get(var):
+                value = value.lower()
+                check_label(key, value)
+                labels[key] = value
     return labels
 
 
-def label_batch_spec(spec: dict, component: str, environ: dict[str, str] | None = None) -> dict:
+def label_batch_spec(
+    spec: dict,
+    component: str,
+    environ: dict[str, str] | None = None,
+    *,
+    scan_id: str | None = None,
+) -> dict:
     """A copy of a Batch job spec with the cost labels on the job and its allocation policy.
 
     A spec's own keys (e.g. ``purpose``, ``stage``) are kept; a cost label of the same key overrides
     them. Unset ``$DISKY_LABELS`` returns the spec unchanged.
     """
-    labels = cost_labels(component, environ)
+    env = dict(os.environ if environ is None else environ)
+    if scan_id is not None:
+        from .scan_id import check_scan_id
+
+        env[SCAN_ENV] = check_scan_id(scan_id)
+    labels = cost_labels(component, env)
     if not labels:
         return spec
     out = deepcopy(spec)
     out["labels"] = {**out.get("labels", {}), **labels}
     alloc = out.setdefault("allocationPolicy", {})
     alloc["labels"] = {**alloc.get("labels", {}), **labels}
+    # Explicit context, not the child VM's own BATCH_JOB_UID: a detached job
+    # can submit grandchildren after the root has finished.
+    if "scan_run" in labels or "scan_id" in labels:
+        for group in out.get("taskGroups", []):
+            variables = group.setdefault("taskSpec", {}).setdefault("environment", {}).setdefault("variables", {})
+            variables[ENV] = env[ENV]
+            for var in (RUN_ENV, SCAN_ENV):
+                if env.get(var):
+                    variables[var] = env[var]
+        if stage := out["labels"].get("stage"):
+            check_label("stage", stage)
+            alloc["labels"]["stage"] = stage
     return out
 
 

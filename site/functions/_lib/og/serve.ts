@@ -21,6 +21,8 @@ import { openPlanId, planDigest, planItemLines } from '../plans.js'
 import { NoScanMatch, resolveScan } from './data.js'
 import { warmSubtree } from '../../api/subtree.js'
 import { colorModeCodec } from '../../../src/colorMode.js'
+import { diffCard, resolveDiffScans } from './diff.js'
+import { encodeScan } from '../../../src/scanSlug.js'
 import type { ColorMode } from '../../../src/types.js'
 
 export type OgEnv = Env & PolicyEnv & {
@@ -52,7 +54,7 @@ export async function anonymousPage(env: OgEnv, url: URL): Promise<Response | nu
 }
 
 /** The kinds this build draws; the rest keep their static card. */
-export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'staged', 'users', 'user', 'assignments'])
+export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'diff', 'staged', 'users', 'user', 'assignments'])
 
 /** Kinds whose page Function already stamps its own title and description
  * (`functions/staged.ts`, `users.ts`, `user/[id].ts`, `assignments.ts`): the
@@ -101,9 +103,14 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
   // The image's view: the page's, plus `/staged`'s plan version and, for a
   // full card, the credential it re-checks.
   const v = pv.kind === 'staged' ? await stagedVersion(env) : null
-  const scan = pv.kind === 'staged' ? null : await resolveScan(env, pv.params.d)
-  const params = { ...imageParams(pv.params, v, cred), ...(scan ? { s: scan } : {}), policy: anonymousPolicy(env), r: RENDER_VERSION }
+  const pair = pv.kind === 'diff' ? await resolveDiffScans(env, pv.params.d) : null
+  const scan = pv.kind === 'diff' ? pair?.to : pv.kind === 'staged' ? null : await resolveScan(env, pv.params.d)
+  const params = { ...imageParams(pv.params, v, cred), ...(scan ? { s: scan } : {}), ...(pair?.from ? { b: pair.from } : {}), policy: anonymousPolicy(env), r: RENDER_VERSION }
   const image = url.origin + await imagePath(key, pv.kind, params, tier, day)
+  if (pv.kind === 'diff') {
+    const render = await diffCard(env, siteOf(env), pv.title, { ...pv.params, ...(pair?.from ? { d: `${encodeScan(pair.to)}-${encodeScan(pair.from)}` } : {}) }, tier, true)
+    return uncachedHtml(stampMeta(html, { title: render.title, desc: `${render.subtitle} · ${render.total}`, image, imageType: 'image/png', page: url.href }))
+  }
   if (OWN_TITLES.has(pv.kind)) return uncachedHtml(stampMeta(html, { image, imageType: 'image/png', page: url.href }))
   return uncachedHtml(stampMeta(html, {
     title: pv.title,
@@ -129,12 +136,14 @@ function fonts(env: OgEnv, origin: string): Promise<Uint8Array[]> {
 async function cardData(env: OgEnv, kind: string, params: Record<string, string>, tier: OgTier, url: URL): Promise<CardData | null> {
   const site = siteOf(env)
   // The page's own title, recomputed from the signed view.
-  const page = kind === 'map' ? `/${params.path ?? ''}` : kind === 'user' ? `/user/${params.id ?? ''}` : `/${kind}`
+  const page = kind === 'map' || kind === 'diff' ? `/${params.path ?? ''}` : kind === 'user' ? `/user/${params.id ?? ''}` : `/${kind}`
   const pu = new URL(page, url.origin)
+  if (kind === 'diff') pu.searchParams.set('section', 'diff')
   for (const [k, v] of Object.entries(params)) if (k !== 'path' && k !== 'id') pu.searchParams.set(k, v)
   const title = pageView(pu, site.name)?.title ?? site.name
   switch (kind) {
     case 'map': return mapCard(env, site, title, params, tier)
+    case 'diff': return diffCard(env, site, title, params, tier)
     case 'staged': return stagedCard(env, site, title, params, tier)
     case 'users': return usersCard(env, site, title, params, tier)
     case 'user': return userCard(env, site, title, params, tier)
@@ -169,7 +178,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const t = now()
   const r0 = await resolveImage(keyP ? await keyP : null, url, t)
   if (!r0 || !DRAWN.has(r0.kind as OgKind)) return new Response('not a card', { status: 404 })
-  const { view, v, scan: pinnedScan, cred } = splitImageParams(r0.params)
+  const { view, v, scan: pinnedScan, before: pinnedBefore, cred } = splitImageParams(r0.params)
   const r = r0.tier === 'full' && !(await credLive(env, r0.kind, view, cred, t))
     ? { ...r0, tier: 'anon' as const, why: cred ? 'revoked or expired' : 'no credential' }
     : r0
@@ -189,16 +198,19 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
     return new Response(response.body, { headers })
   }
   let scan: string | null
+  let before = pinnedBefore
   try {
-    scan = r.kind === 'staged' ? null : pinnedScan ?? await resolveScan(env, view.d)
+    const pair = r.kind === 'diff' && !pinnedScan ? await resolveDiffScans(env, view.d) : null
+    scan = r.kind === 'diff' ? pinnedScan ?? pair?.to ?? null : r.kind === 'staged' ? null : pinnedScan ?? await resolveScan(env, view.d)
+    before ??= pair?.from ?? undefined
   } catch (e) {
     if (e instanceof NoScanMatch) return json({ error: e.message }, 404)
     throw e
   }
-  const renderView = scan ? { ...view, d: scan } : view
+  const renderView = scan ? { ...view, d: r.kind === 'diff' && before ? `${encodeScan(scan)}-${encodeScan(before)}` : scan } : view
   const head = env.DB ? await ledgerHead(env).catch(() => 0) : 0
   // An anonymous render is one per view (+ version), whatever credential the URL named.
-  const keyParams = { ...(r.tier === 'full' ? r0.params : { ...view, ...(v ? { v } : {}) }), ...(scan ? { s: scan } : {}), policy, r: RENDER_VERSION }
+  const keyParams = { ...(r.tier === 'full' ? r0.params : { ...view, ...(v ? { v } : {}) }), ...(scan ? { s: scan } : {}), ...(before ? { b: before } : {}), policy, r: RENDER_VERSION }
   const cacheKey = new Request(`${url.origin}${await imagePath(null, r.kind, keyParams, 'anon')}${Object.keys(keyParams).length ? '&' : '?'}tier=${r.tier}&h=${head}`)
   const cache = caches.default
   if (ctx.waitUntil) ctx.waitUntil(warmView(env, url.origin, r.kind, renderView, p => ctx.waitUntil!(p)))

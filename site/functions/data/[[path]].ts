@@ -11,6 +11,7 @@
 import { withStore } from '../_lib/stores.js'
 import { snapshotsPrefix } from '../_lib/shared.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
+import { dataAllowed, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { genInstant, pathScanGens, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { isScanId } from '../../src/scanSlug.js'
 
@@ -34,11 +35,10 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
   if (gated instanceof Response) return gated
   // The served seam (`_lib/index.ts` `servedStore`): `INDEX_R2` under `SERVED_R2`, else the store
   // seam (GCS by default, any S3-compatible store once `STORE_*` is set) — same data, same keys.
-  // A secondary store (`store=`) reads only its own snapshot dir
-  // (`snapshots/<SNAPSHOTS_SUBDIR>/`); the primary, all of `snapshots/`.
-  const own = ctx.env.STORE_KEY ? snapshotsPrefix(ctx.env) : 'snapshots/'
+  const own = snapshotsPrefix(ctx.env)
   const notFound = () => new Response('not found', { status: 404 })
-  const store = servedStore(ctx.env, [own]) // allow-list: only the published snapshots
+  const rulesKey = !ctx.env.STORE_KEY && rel === 'rules.json' ? 'snapshots/rules.json' : null
+  const store = servedStore(ctx.env, rulesKey ? [rulesKey] : [own])
 
   try {
     // `<store>/scans.json` → the store's scans, newest-first: D1's, alone. Every view reads the path
@@ -72,8 +72,13 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
       })
     }
     // rules.json → snapshots/rules.json ; else /data/<date>/<file> → snapshots/<date>/<file>
-    const key = rel === 'rules.json' ? 'snapshots/rules.json' : `snapshots/${rel}`
-    if (!key.startsWith(own)) return notFound()
+    const key = rulesKey ?? `snapshots/${rel}`
+    // A root-level primary must not proxy another store's named subdirectory
+    // without its scope gate. Every snapshot starts with a canonical scan ID.
+    if (!rulesKey && (!key.startsWith(own) || !isScanId(key.slice(own.length).split('/')[0]))) return notFound()
+    // A path-restricted link (specs/path-scopes.md): only the snapshot files that can't name a hidden path.
+    const restriction = restrictionFor(gated, ctx.env)
+    if (restriction && !rulesKey && !dataAllowed(key, own, restriction)) return restrictedForbidden()
     const { bytes, contentType } = await store.get(key)
     // A date-only scan id can't say *when* in that day the scan ran, and the
     // daily GCS job publishes ids without a time — but the object itself knows.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { closedParent, PLAN_SENDER, queueWasEmpty, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
+import { closedParent, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
 import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
@@ -75,12 +75,25 @@ describe('names and sizes (plain text, never a mention)', () => {
     expect((renderParent(v).blocks[0] as { text: { text: string } }).text.text.split('\n')).toEqual([
       `*Staged for deletion* · plan #${base.planId} · ${base.items} prefixes in ${base.batches} batches`,
       'staged by Ann Bee, c.d',
-      '*51.0 TiB* · 179,327,698 objects at scan 2026-10-02 · 5 empty · owners: Grace Hopper 16.0 TiB, hedy-lamarr 6.0 TiB',
+      '*51.0 TiB* · 179,327,698 objects at scan 2026-10-02 · owners: Grace Hopper 16.0 TiB, hedy-lamarr 6.0 TiB',
+      '+5 staged prefixes empty at scan, not counted',
     ])
   })
-  it('sizeOf: totals over every prefix, absent or zero = empty, owners by attributed bytes', () => {
-    const at = { scan: 'S', stats: { 'gs://b/a/': { b: 5, o: 2, us: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { b: 4, o: 1, us: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { b: 0, o: 0 } } }
-    expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 3, empty: 2, owners: [{ label: 'U2', b: 6 }] })
+  it('sizeOf: totals over every prefix, absent or no bytes and no objects = empty (zero-byte objects are not), owners by attributed bytes', () => {
+    const at = { scan: 'S', stats: { 'gs://b/a/': { b: 5, o: 2, us: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { b: 4, o: 1, us: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { b: 0, o: 0 }, 'gs://b/zb/': { b: 0, o: 3 } } }
+    expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/zb/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 6, empty: 2, owners: [{ label: 'U2', b: 6 }] })
+  })
+  it('queuedOf: the title counts prefixes, batches and stagers over what is not empty at the scan', () => {
+    const live = [
+      { prefix: 'gs://b/a/', added_by: 'ann', batch_id: 1 },
+      { prefix: 'gs://b/e1/', added_by: 'ann', batch_id: 1 },
+      { prefix: 'gs://b/e2/', added_by: 'bo', batch_id: 2 },
+      { prefix: 'gs://b/legacy/', added_by: 'cy', batch_id: null },
+    ]
+    expect([queuedOf(live), queuedOf(live, new Set(['gs://b/e1/', 'gs://b/e2/']))]).toEqual([
+      { items: 4, batches: 2, stagers: ['ann', 'bo', 'cy'] },
+      { items: 2, batches: 1, stagers: ['ann', 'cy'] },
+    ])
   })
 })
 

@@ -12,5 +12,5 @@ def _deployment_env(monkeypatch):
     monkeypatch.setenv("SITE_URL", "https://site.example.org")
     monkeypatch.delenv("DISKY_LABELS", raising=False)
     # Deployment config the generic code requires (no defaults): unset unless a test sets it.
-    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN"):
+    for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID"):
         monkeypatch.delenv(v, raising=False)

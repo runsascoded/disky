@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { fmtTimestamp } from './scan'
 
 describe('capture timestamps in the viewer timezone', () => {
-  it('shows the reboot capture in Eastern daylight time', () => {
+  it('shows the capture in Eastern daylight time', () => {
     expect(fmtTimestamp('2026-10-12T10:39:51Z', 'America/New_York')).toBe('Oct 12, 2026, 6:39 AM EDT')
   })
   it('uses standard time in winter', () => {

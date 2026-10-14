@@ -64,6 +64,7 @@ export function openHref(storePath: string, segs: string[], search: string): { p
   const base = storePath === '/' ? '' : storePath
   const dir = segs.slice(0, -1)
   const q = new URLSearchParams(search)
+  // A consumed share key / preview token never rides a navigation.
   q.delete('key')
   q.delete('og')
   q.set('open', segs[segs.length - 1])

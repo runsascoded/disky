@@ -69,3 +69,12 @@
   .tt-status-pending { color: var(--s4); }
   .tt-status-missing { color: var(--danger); }
 }
+// Point observations, separate from the append-only stores' shard-span diagrams.
+.hl-events {
+  margin: 18px 0;
+  .hl-event-row { display: grid; grid-template-columns: 42px 1fr; align-items: center; min-height: 28px; font-size: 11px; }
+  .hl-event-axis { position: relative; height: 24px; margin-right: 6px; border-bottom: 1px solid var(--line); }
+  .hl-event-position { position: absolute; transform: translateX(-50%); top: 0; }
+  .hl-event { display: inline-block; font-size: 16px; line-height: 24px; }
+  .hl-days { display: block; width: 100%; }
+}

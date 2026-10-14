@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Env, Identity } from './auth'
 import { gateFor } from './auth'
 import { shareKeyGrant } from './og/tokens'
-import { blockedForRestricted, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionFor, restrictSubtree, restrictTree } from './restrict'
+import { blockedForRestricted, dataAllowed, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionFor, restrictSubtree, restrictTree } from './restrict'
 import { storeEnv } from './stores'
 import { sqliteD1 } from './testD1'
 import type { ViewNode } from './view'
@@ -10,6 +10,8 @@ import { onRequestGet as subtree } from '../api/subtree'
 import { onRequestGet as diff } from '../api/diff'
 import { onRequestGet as series } from '../api/series'
 import { onRequestPost as prefixes } from '../api/prefixes'
+import { onRequest as data } from '../data/[[path]]'
+import { onRequestGet as agePyramid } from '../api/age-pyramid'
 import { onRequestGet as largest } from '../api/largest'
 
 const ENV = { BASE_SCOPE: 'laptop', SESSION_SECRET: 'test-secret', STORE_BUCKET: 'disk-tree', STORE_ENDPOINT: 'https://r2.example.test', STORE_ACCESS_KEY_ID: 'k', STORE_SECRET_ACCESS_KEY: 's' } as Env
@@ -87,6 +89,10 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
       [],
     ])
   })
+  it('search totals that count hidden hits (`matchCount`) are dropped; the rest of the body is kept as is', () => {
+    const body = { path: 'Users/ryan/Downloads', tree: TREE, q: 'pdf', matches: [], matched: [], matchCount: { n: 3, b: 70, o: 3 }, firstPaint: true }
+    expect(restrictSubtree(body, r)).toEqual({ path: 'Users/ryan/Downloads', tree: restrictTree(TREE, 'Users/ryan/Downloads', r), q: 'pdf', matches: [], matched: [], firstPaint: true })
+  })
   it('diff rows are relative to the diff’s path', () => {
     const rows = [
       { p: '2025 tax returns', s: 'added' },
@@ -105,11 +111,16 @@ describe('restrictTree / restrictSubtree / restrictDiff', () => {
 })
 
 describe('blockedForRestricted', () => {
-  it('blocks the new unfilterable scan, health and search routes for hidden-path grants', () => {
+  it('blocks the unfilterable name-search, bench, cover, health and scan-run routes, by path segment', () => {
     expect([
-      '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/health', '/api/scan-runs/x',
+      '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/health', '/api/scan-runs', '/api/scan-runs/x',
       '/api/name-summary-extra', '/api/filter-covering', '/api/healthcheck', '/api/scan-runs-extra',
-    ].map(blockedForRestricted)).toEqual([true, true, true, true, true, true, false, false, false, false])
+      '/api/largest', '/api/filter-scans', '/api/filter-caps', '/api/me', '/api/whoami', '/api/session-log',
+    ].map(blockedForRestricted)).toEqual([
+      true, true, true, true, true, true, true,
+      false, false, false, false,
+      false, false, false, false, false, false,
+    ])
   })
   it('raw-bytes and D1-list routes, by path segment', () => {
     expect([
@@ -151,6 +162,41 @@ describe('routes, as a restricted link', () => {
     expect([[pre.status, await pre.text()], ...await Promise.all(mw.map(async r => [r!.status, await r!.text()]))]).toEqual([
       [403, body], [403, body], [403, body], [403, body],
     ])
+  })
+  it('age-pyramid: a hidden dir itself is absent too (its pyramid breaks down its contents)', async () => {
+    const { env, key } = await linkEnv(scopes)
+    const res = await agePyramid({ request: bearer(`/api/age-pyramid?date=2026-10-09&path=${encodeURIComponent(HIDE)}`, key), env } as never)
+    expect([res.status, await res.text()]).toEqual([404, 'path not found'])
+  })
+  it('the middleware refuses every newly blocked route to a restricted link, and to it alone', async () => {
+    const restricted = await linkEnv(scopes)
+    const open = await linkEnv(['laptop'])
+    const urls = ['/api/name-summary?q=x', '/api/name-summary-registry', '/api/static-bench?q=x', '/api/filter-cover?q=x', '/api/health', '/api/scan-runs/r1']
+    const got = await Promise.all(urls.map(async u => {
+      const r = await restrictGate(bearer(u, restricted.key), restricted.env)
+      return [r!.status, await r!.text()]
+    }))
+    expect(got).toEqual(urls.map(() => [403, '{"error":"forbidden for a path-restricted link"}\n']))
+    expect(await Promise.all(urls.map(u => restrictGate(bearer(u, open.key), open.env)))).toEqual(urls.map(() => null))
+  })
+  it('`/data`: a restricted link is refused lifecycle.json and other snapshot files, before any store read', async () => {
+    const { env, key } = await linkEnv(scopes)
+    const get = async (rel: string) => {
+      const r = await data({ request: bearer(`/data/${rel}`, key), env } as never)
+      return [r.status, await r.text()]
+    }
+    const forbidden = [403, '{"error":"forbidden for a path-restricted link"}\n']
+    expect([await get('2026-10-09/lifecycle.json'), await get('2026-10-09/listing.parquet')]).toEqual([forbidden, forbidden])
+  })
+  it('`dataAllowed`: meta always; age only while no hide prefix is top-level; nothing else', () => {
+    const deep = { hide: [HIDE] }
+    const top = { hide: ['Users', HIDE] }
+    const keys = ['snapshots/2026-10-09/meta.json', 'snapshots/2026-10-09/age.json', 'snapshots/2026-10-09/lifecycle.json', 'snapshots/2026-10-09/x/meta.json', 'snapshots/nas/2026-10-09/meta.json']
+    expect([keys.map(k => dataAllowed(k, 'snapshots/', deep)), keys.map(k => dataAllowed(k, 'snapshots/', top))]).toEqual([
+      [true, true, false, false, false],
+      [true, false, false, false, false],
+    ])
+    expect(dataAllowed('snapshots/nas/2026-10-09/meta.json', 'snapshots/nas/', deep)).toBe(true)
   })
   it('an unrestricted link, and an unblocked route, pass the gate', async () => {
     const open = await linkEnv(['laptop'])

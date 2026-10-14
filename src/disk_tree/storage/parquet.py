@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from .base import BLOB_ROW_GROUP_SIZE, StorageBackend, PathStats, path_prefix_bounds
+from .base import BLOB_ROW_GROUP_SIZE, Filter, Filters, StorageBackend, PathStats, path_prefix_bounds
 from .. import blobfs, config as _config
 from ..listing_format import write_listing
 
@@ -79,7 +79,8 @@ class ParquetBackend(StorageBackend):
             # Check if parquet has 'depth' column for predicate pushdown
             try:
                 schema = blobfs.read_schema(blob_path)
-                conds = []
+                conds: list[Filter] = []
+                filters: Filters | None
                 if 'depth' in schema.names:
                     if max_depth is not None:
                         conds.append(('depth', '<=', max_depth))

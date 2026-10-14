@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { spaceChanges } from './DiskSpaceDiff'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { DiskSpaceDiff, diskDiffScan, spaceChanges } from './DiskSpaceDiff'
 import type { DiskSpace } from './types'
 
 const before: DiskSpace = { capacity: 500, used: 480, free: 20, device: 'disk3', captured_at: '2026-10-12T10:08Z', vm_used: 32 }
@@ -27,5 +29,15 @@ describe('whole-disk space comparison', () => {
       spaceChanges(before, { ...after, device: 'disk4' }),
       spaceChanges(before, { ...after, capacity: 1000 }),
     ]).toEqual([[], [], [], []])
+  })
+})
+
+describe('a store without disk readings (no `meta.disk_space`) is unchanged', () => {
+  it('fetches no earlier meta and renders nothing', () => {
+    expect([diskDiffScan(undefined, '2026-10-11'), diskDiffScan(after, '2026-10-11'), diskDiffScan(after, null)]).toEqual([null, '2026-10-11', null])
+    expect([
+      renderToStaticMarkup(createElement(DiskSpaceDiff, {})),
+      renderToStaticMarkup(createElement(DiskSpaceDiff, { after })),
+    ]).toEqual(['', ''])
   })
 })

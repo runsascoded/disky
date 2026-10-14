@@ -8,6 +8,7 @@ import { ownerColors, tilesOf } from './data'
 import type { TreeNode } from '../../../src/types'
 import { Resvg } from '@resvg/resvg-wasm'
 import { slotColor } from '../../../src/colors'
+import { diffCardData } from './diff'
 
 // Node's fs, loaded dynamically: the Functions typecheck has no Node types.
 interface Fs { mkdir(p: string, o: { recursive: boolean }): Promise<unknown>; readFile(p: string): Promise<Uint8Array>; writeFile(p: string, d: Uint8Array): Promise<void> }
@@ -44,6 +45,23 @@ describe('svgToPng', () => {
       await writeFile(`tmp/og-sample-${tier}.png`, png)
     }
     expect(dims).toEqual([[1200, 630], [1200, 630]])
+  })
+
+  it('renders a synthetic growth/shrink comparison through the real card renderer', async () => {
+    const { mkdir, writeFile } = await fsp()
+    const data = diffCardData({ name: 'CW diff demo (synthetic)', scheme: 's3://' }, 'checkpoints · changes', { path: 'checkpoints' }, 'full', '2026-09-17T0000', '2026-09-28T1200', {
+      total_a: 100 * T, total_b: 110 * T, objects_a: 10, objects_b: 11, expansions: 0,
+      truncated: false, threshold: 1, tier: 'path', lookups: 0, lookups_capped: false,
+      rows: [
+        { p: 'new-training', d: 1, k: 'dir', s: 'changed', a: 40 * T, b: 70 * T, oa: 4, ob: 7 },
+        { p: 'old-checkpoints', d: 1, k: 'dir', s: 'changed', a: 60 * T, b: 40 * T, oa: 6, ob: 4 },
+      ],
+    })
+    const png = svgToPng(cardSvg(data), fonts)
+    const dims = new DataView(png.buffer, png.byteOffset)
+    expect([dims.getUint32(16), dims.getUint32(20)]).toEqual([1200, 630])
+    await mkdir('tmp', { recursive: true })
+    await writeFile('tmp/og-diff-demo.png', png)
   })
 
   it('renders every fractional tree hue as its intended RGB, not black', () => {

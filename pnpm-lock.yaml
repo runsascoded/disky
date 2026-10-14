@@ -42,6 +42,21 @@ importers:
         specifier: ^4.0.0
         version: 4.147.0(@cloudflare/workers-types@4.20260702.1)(@types/node@24.13.3)
 
+  infra/cf/r2-access:
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: 5.20261012.1
+        version: 5.20261012.1
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@types/node@24.13.3)(jsdom@25.0.1)(vite@7.3.6(@types/node@24.13.3)(sass@1.102.0)(yaml@2.9.1))
+      wrangler:
+        specifier: 4.147.0
+        version: 4.147.0(@cloudflare/workers-types@5.20261012.1)(@types/node@24.13.3)
+
   packages/react:
     dependencies:
       '@rdub/treemap':
@@ -132,7 +147,7 @@ importers:
         version: 0.27.20(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@open-athena/auth':
         specifier: github:Open-Athena/auth#996f05da822081604a2ffc4cbb750d0add9c198a
-        version: https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a(@cloudflare/workers-types@5.20261013.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)
+        version: https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a(@cloudflare/workers-types@5.20261014.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)
       '@rdub/file-tree':
         specifier: https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b
         version: https://codeload.github.com/runsascoded/file-tree/tar.gz/9d9bd749469aa4ae76b860ea9a403c3ab18df80b(@rdub/treemap@packages+treemap)(highlight.js@11.12.0)(hyparquet@1.30.0)(jq-web@0.6.2)(react-dom@19.2.8(react@19.2.8))(react-markdown@10.1.0(@types/react@19.2.18)(react@19.2.8))(react-router-dom@6.30.6(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(remark-gfm@4.0.1)(use-prms@0.5.0(react@19.2.8))(wa-sqlite@1.0.0)(yaml@2.9.1)
@@ -184,7 +199,7 @@ importers:
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^5.20261013.1
-        version: 5.20261013.1
+        version: 5.20261014.1
       '@playwright/test':
         specifier: ^1.56.0
         version: 1.62.1
@@ -220,7 +235,7 @@ importers:
         version: 4.1.11(@types/node@24.13.3)(jsdom@25.0.1)(vite@7.3.6(@types/node@24.13.3)(sass@1.102.0)(yaml@2.9.1))
       wrangler:
         specifier: 4.150.0
-        version: 4.150.0(@cloudflare/workers-types@5.20261013.1)(@types/node@24.13.3)
+        version: 4.150.0(@cloudflare/workers-types@5.20261014.1)(@types/node@24.13.3)
 
 packages:
 
@@ -393,8 +408,11 @@ packages:
   '@cloudflare/workers-types@4.20260702.1':
     resolution: {integrity: sha512-mOhf5TUEB1m2vPrxtqoIGfz0fUC9xyxRDx5gWHy5s+OCo6dcV+g7wI1R7gYCMFohhqF/2y2xeKVwMwCJjfn/WA==}
 
-  '@cloudflare/workers-types@5.20261013.1':
-    resolution: {integrity: sha512-0SfkM/MA+oSIAzFFmjr0wZLH54oeCtugaOn8GpJDBnerQiML+rOPq2W6j6bBGE51o+N4DOd0tvMruLmkAQzlpw==}
+  '@cloudflare/workers-types@5.20261012.1':
+    resolution: {integrity: sha512-5Y0NrKXG9CZaNUZ6Dt3TLRE4UQe2/DGuxIhTEVYHUl0jAlv1TpQtI59YBAszRpSaZAMzbM8nqGc1n9Z2q4TVyA==}
+
+  '@cloudflare/workers-types@5.20261014.1':
+    resolution: {integrity: sha512-eGvDG17vu/BmQPOGWFgG1M7iPnW3c17Ykf2qi80JBkPI9f/GYl+5IC2XnZfrwf/CQXZICFgyX/l0+pc1bLbp+g==}
 
   '@cspotcode/source-map-support@0.8.1':
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
@@ -3436,7 +3454,9 @@ snapshots:
 
   '@cloudflare/workers-types@4.20260702.1': {}
 
-  '@cloudflare/workers-types@5.20261013.1': {}
+  '@cloudflare/workers-types@5.20261012.1': {}
+
+  '@cloudflare/workers-types@5.20261014.1': {}
 
   '@cspotcode/source-map-support@0.8.1':
     dependencies:
@@ -3954,9 +3974,9 @@ snapshots:
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
 
-  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a(@cloudflare/workers-types@5.20261013.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)':
+  '@open-athena/auth@https://codeload.github.com/Open-Athena/auth/tar.gz/996f05da822081604a2ffc4cbb750d0add9c198a(@cloudflare/workers-types@5.20261014.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)':
     optionalDependencies:
-      '@cloudflare/workers-types': 5.20261013.1
+      '@cloudflare/workers-types': 5.20261014.1
       '@tanstack/react-query': 5.101.4(react@19.2.8)
       react: 19.2.8
 
@@ -6127,7 +6147,25 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  wrangler@4.150.0(@cloudflare/workers-types@5.20261013.1)(@types/node@24.13.3):
+  wrangler@4.147.0(@cloudflare/workers-types@5.20261012.1)(@types/node@24.13.3):
+    dependencies:
+      '@cloudflare/kv-asset-handler': 0.5.0
+      '@cloudflare/unenv-preset': 2.16.2(unenv@2.0.0-rc.24)(workerd@1.20261001.1)
+      blake3-wasm: 2.1.5
+      esbuild: 0.28.1
+      miniflare: 5.20261001.0-alpha(@types/node@24.13.3)
+      path-to-regexp: 6.3.0
+      unenv: 2.0.0-rc.24
+      workerd: 1.20261001.1
+    optionalDependencies:
+      '@cloudflare/workers-types': 5.20261012.1
+      fsevents: 2.3.3
+    transitivePeerDependencies:
+      - '@types/node'
+      - bufferutil
+      - utf-8-validate
+
+  wrangler@4.150.0(@cloudflare/workers-types@5.20261014.1)(@types/node@24.13.3):
     dependencies:
       '@cloudflare/kv-asset-handler': 0.5.0
       '@cloudflare/unenv-preset': 2.16.2(unenv@2.0.0-rc.24)(workerd@1.20261006.1)
@@ -6138,7 +6176,7 @@ snapshots:
       unenv: 2.0.0-rc.24
       workerd: 1.20261006.1
     optionalDependencies:
-      '@cloudflare/workers-types': 5.20261013.1
+      '@cloudflare/workers-types': 5.20261014.1
       fsevents: 2.3.3
     transitivePeerDependencies:
       - '@types/node'

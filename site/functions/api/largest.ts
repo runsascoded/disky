@@ -2,7 +2,7 @@
  * list (objects only, never dirs), size-descending, from the store
  * generation's `bysize` sort (`readLargest` in `_lib/index.ts`).
  *
- *   GET /api/largest?date=<scan>&path=<P>[&n=<1..500>][&store=<key>]
+ *   GET /api/largest?date=<scan>|d=<slug>&path=<P>[&n=<1..500>][&store=<key>]
  *
  * → `{ date, path, n, files: [{ path, size, mtime }], more, groups, rows, capped? }`:
  * `path` is the full store path (no scheme), `mtime` epoch seconds (null where
@@ -13,13 +13,18 @@
  *
  * Gated like `/api/subtree` (viewer scope); immutable per (scan, path, n,
  * generation), so edge-cached like it. A version-1 scan (dirs only, no size
- * sort) is a 409.
+ * sort) is a 409. Reads the scan's own (per-scan) size sort, never the interval
+ * store's (`perScan`): `readLargest` pages a per-scan sort's groups, and an
+ * interval store's rows carry validity ranges it doesn't select by — a scan
+ * whose per-scan sort is gone is the same 409, never another scan's files.
  */
 import { filterJson, hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { openIndex, pathGens, readLargest, sizeVariant, storeReady } from '../_lib/index.js'
-import { cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
+import { openIndex, pathGens, perScan, readLargest, sizeVariant, storeReady } from '../_lib/index.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { storeKey, withStore } from '../_lib/stores.js'
+import { scanArg } from '../_lib/scanArg.js'
+import { isScanId } from '../../src/scanSlug.js'
 
 export const LARGEST_DEFAULT = 100
 export const LARGEST_MAX = 500
@@ -36,8 +41,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   }
   const url = new URL(ctx.request.url)
   const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
-  const date = url.searchParams.get('date') ?? ''
-  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{4})?$/.test(date)) return new Response('bad date', { status: 400 })
+  if (!isScanId(url.searchParams.get('date')) && !url.searchParams.has('d')) return new Response('bad date', { status: 400 })
   if (path.includes('..') || path.startsWith('/')) return new Response('bad path', { status: 400 })
   const nRaw = url.searchParams.get('n')
   const n = nRaw == null ? LARGEST_DEFAULT : Number(nRaw)
@@ -54,13 +58,18 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
     restriction ? Promise.resolve(res).then(r => filterJson(r, (b: { files: { path: string }[] }) => ({ ...b, files: b.files.filter(f => !isHidden(f.path, restriction)) }))) : res
 
   try {
-    const g = await st.time('pre', pathGens(ctx.env, [date]))
-    const cacheKey = cacheKeyFor('largest', `${date}/${encodeURIComponent(path)}?n=${n}&g=${g}`, storeKey(ctx.env))
+    // An unindexed id, or a `d=` slug matching no scan: a 404, never another scan.
+    const scan = await scanArg(ctx.env, url.searchParams)
+    if (scan instanceof Response) return scan
+    const date = scan
+    const env = perScan(ctx.env)
+    const g = await st.time('pre', pathGens(env, [date]))
+    const cacheKey = cacheKeyFor('largest', cacheEnvTag(ctx.env, ctx.request), `${date}/${encodeURIComponent(path)}?n=${n}&g=${g}`, storeKey(ctx.env))
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return out(hit)
     let h
     try {
-      h = await openIndex(ctx.env, date, sizeVariant('path'))
+      h = await openIndex(env, date, sizeVariant('path'))
     } catch (e) {
       if (String((e as Error).message).includes('not synced')) return new Response('no size sort for this scan (objects not indexed)', { status: 409 })
       throw e

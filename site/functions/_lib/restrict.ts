@@ -28,7 +28,9 @@ export const restrictTag = (env: Env): string => (isPrimary(env) ? baseScope(env
 export const isPathScope = (scope: string): boolean => /^[a-z0-9-]+:hide:/.test(scope)
 
 /** Routes a path-restricted link can't use at all (`_middleware.ts`): raw
- *  bucket bytes and D1-held path lists can't be filtered per path. */
+ *  bucket bytes, D1-held path lists, and answers naming paths that no route
+ *  filters (name search summaries and covers, the static-index bench, the
+ *  append stores' health, scan-run outputs). */
 export const RESTRICTED_BLOCKED = [
   '/api/path-index', '/v1', '/api/plans', '/api/actions', '/api/db', '/api/owners',
   '/api/estate', '/api/assignments', '/api/sweep', '/api/plan-sweep', '/api/og',
@@ -44,6 +46,20 @@ export async function restrictGate(request: Request, env: Env): Promise<Response
   if (!blockedForRestricted(new URL(request.url).pathname)) return null
   const id = await identify({ request, env } as never)
   return id?.via === 'grant' && id.scopes.some(isPathScope) ? restrictedForbidden() : null
+}
+
+/** Whether a restricted viewer may read snapshot file `key` (`/data`, a key
+ *  under the store's `own` snapshot dir; `rules.json`, the identity roster, is
+ *  checked by the caller): a scan's `meta.json` (totals, owners, classes), and
+ *  its whole-fleet `age.json` (rows per top-level dir) unless a hide prefix is
+ *  itself top-level — its row would break down what the link hides. Anything
+ *  else a scan publishes (`lifecycle.json`'s rule prefixes, and whatever a job
+ *  adds later) is refused: unfiltered, it could name hidden paths. */
+export function dataAllowed(key: string, own: string, r: Restriction): boolean {
+  const file = key.startsWith(own) ? key.slice(own.length).split('/').slice(1).join('/') : ''
+  if (file === 'meta.json') return true
+  if (file === 'age.json') return !r.hide.some(h => !h.includes('/'))
+  return false
 }
 
 /** A prefix as a scope carries it: auth stores a grant's scopes space- and
@@ -74,7 +90,7 @@ export const isHidden = (path: string, r: Restriction): boolean => {
 }
 
 /** Whether `path` is a hidden dir itself (shown, but as a leaf). */
-const isHideRoot = (path: string, r: Restriction): boolean => r.hide.includes(norm(path))
+export const isHideRoot = (path: string, r: Restriction): boolean => r.hide.includes(norm(path))
 
 const join = (a: string, b: string): string => (a ? (b ? `${a}/${b}` : a) : b)
 
@@ -100,6 +116,9 @@ function restrictSearch<T extends object>(body: T, r: Restriction): T {
   if (Array.isArray(b.matches)) out.matches = (b.matches as string[]).filter(p => !isHidden(p, r))
   if (Array.isArray(b.matched)) out.matched = (b.matched as { path: string }[]).filter(m => !isHidden(m.path, r))
   if (Array.isArray(b.excluded)) out.excluded = (b.excluded as string[]).filter(p => !isHidden(p, r))
+  // The search's exact totals (`matchCount`: every match, beyond the listed ones) count hidden hits and
+  // can't be recounted from the body: dropped, as on a view without them.
+  delete out.matchCount
   return out as T
 }
 

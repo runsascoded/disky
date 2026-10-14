@@ -18,6 +18,8 @@ export interface CardTile {
   name: string
   b: number
   color: string
+  /** Displayed value independent of layout weight, e.g. a signed net change. */
+  value?: string
   /** One level of children, drawn inside (unlabelled). */
   kids?: CardTile[]
 }
@@ -153,14 +155,14 @@ export function cardSvg(d: CardData): string {
         const top = full && r.h > 40 ? 22 : inset
         for (const k of squarify(kids, r.x + inset, r.y + top, r.w - 2 * inset, r.h - top - inset, k => k.b)) {
           out.push(`<rect class="kid" x="${r1(k.x)}" y="${r1(k.y)}" width="${r1(k.w)}" height="${r1(k.h)}" fill="${svgColor(k.it.color)}" fill-opacity="0.85" stroke="${BG}" stroke-opacity="0.6" stroke-width="1"/>`)
-          if (d.publicLabels && k.w > 70 && k.h > 30) {
-            const label = clip(`${k.it.name} ${fmtB(k.it.b)}`, k.w - 10, 13)
+          if ((d.publicLabels || t.value !== undefined && full) && k.w > 70 && k.h > 30) {
+            const label = clip(`${k.it.name} ${k.it.value ?? fmtB(k.it.b)}`, k.w - 10, 13)
             if (label) out.push(text(k.x + 6, k.y + 17, label, 13, { fill: inkOn(k.it.color), weight: 600 }))
           }
         }
       }
       if (full && r.w > 70 && r.h > 24) {
-        const label = clip(`${t.name} ${fmtB(t.b)}`, r.w - 10, 15)
+        const label = clip(`${t.name} ${t.value ?? fmtB(t.b)}`, r.w - 10, 15)
         if (label) out.push(text(r.x + 6, r.y + 17, label, 15, { fill: inkOn(t.color), weight: 600 }))
       }
     }

@@ -60,7 +60,7 @@ def labels_of(spec: dict) -> tuple[dict, dict]:
 def test_listing_spec(labeled, monkeypatch):
     monkeypatch.setenv("JOB_SA", "job@p.iam.gserviceaccount.com")
     monkeypatch.setenv("JOB_IMAGE", "img")
-    want = {**DEPLOY, "component": "listing"}
+    want = {**DEPLOY, "component": "listing", "scan_id": "2026-10-09"}
     assert labels_of(listing_job_spec("2026-10-09", ["b1"])) == (want, want)
 
 
@@ -91,3 +91,47 @@ def test_cli(labeled):
 
 def test_cli_unset():
     assert CliRunner().invoke(main, ["cost-labels", "-c", "scan"]).output == "\n"
+
+
+def test_scan_context_reaches_allocations_and_grandchildren():
+    env = {"DISKY_LABELS": "app=disky,deployment=gcs", "SCAN_RUN_ID": "root-1", "SCAN_ID": "2026-10-13T1300"}
+    spec = {"labels": {"stage": "merge"}, "taskGroups": [{"taskSpec": {"environment": {"variables": {"OTHER": "keep"}}}}]}
+    labeled = label_batch_spec(spec, "static-names", env, scan_id="2026-10-12T2006")
+    want = {**DEPLOY, "component": "static-names", "scan_run": "root-1", "scan_id": "2026-10-12t2006", "stage": "merge"}
+    assert labels_of(labeled) == (want, want)
+    variables = labeled["taskGroups"][0]["taskSpec"]["environment"]["variables"]
+    assert variables == {"OTHER": "keep", "DISKY_LABELS": "app=disky,deployment=gcs", "SCAN_RUN_ID": "root-1", "SCAN_ID": "2026-10-12T2006"}
+    # A descendant VM has a different automatic UID, but keeps the root.
+    assert cost_labels("anchors", {**variables, "BATCH_JOB_UID": "child-2"}) == {
+        **DEPLOY, "component": "anchors", "scan_run": "root-1", "scan_id": "2026-10-12t2006",
+    }
+    assert spec == {"labels": {"stage": "merge"}, "taskGroups": [{"taskSpec": {"environment": {"variables": {"OTHER": "keep"}}}}]}
+
+
+def test_context_without_base_labels_stays_opted_out():
+    spec = {"allocationPolicy": {}}
+    assert label_batch_spec(spec, "scan", {"SCAN_RUN_ID": "root-1", "SCAN_ID": "2026-10-13T1300"}) is spec
+
+
+def test_bad_context_refuses():
+    with pytest.raises(ValueError) as e:
+        cost_labels("scan", {"DISKY_LABELS": "app=disky", "SCAN_RUN_ID": "x/y"})
+    assert str(e.value) == "label scan_run='x/y': value must match [a-z0-9_-]{0,63}"
+
+
+def test_append_job_uses_actual_catch_up_scan_not_parent_scan(labeled, monkeypatch):
+    from dt_cloud.static_runner import Runner
+
+    monkeypatch.setenv("SCAN_RUN_ID", "root-uid")
+    monkeypatch.setenv("SCAN_ID", "2026-10-13T1300")
+    cfg = Profile(name="t", gen="g1", project="p", region="us-east1", image="img", sa="sa@p", bucket="data", scratch="scr")
+    runner = Runner(cfg=cfg, exists=lambda _: False, count=lambda *_: 0, read_json=lambda _: {},
+                    published=lambda *_: [], run_job=lambda *_: None, prepare=lambda _: None,
+                    prune=lambda _: None, publish=lambda _: None)
+    _, spec = runner.job("anchors", "2026-10-12T2006", 1, "static_anchors", ["run"])
+    want = {**DEPLOY, "component": "anchors", "scan_run": "root-uid", "scan_id": "2026-10-12t2006", "stage": "anchors"}
+    assert spec["allocationPolicy"]["labels"] == want
+    assert spec["taskGroups"][0]["taskSpec"]["environment"]["variables"] == {
+        "STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr",
+        "DISKY_LABELS": "app=disky, deployment=gcs", "SCAN_RUN_ID": "root-uid", "SCAN_ID": "2026-10-12T2006",
+    }

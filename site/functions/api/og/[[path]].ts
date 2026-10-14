@@ -3,14 +3,15 @@
  * exact view's card from anonymous to labelled.
  *
  *   POST   /api/og/mint {url, days?}  → {url, token, exp_day}: the page URL with
- *                                       `og=<token>`. Full viewers (not read-only
+ *                                       `og=<token>`, good for `days` (0 = never;
+ *                                       default 30). Full viewers (not read-only
  *                                       guest links): a token outlives any session.
  *   GET    /api/og/tokens             → every mint, newest first (admin)
  *   DELETE /api/og/tokens/<token>     → revoke it (admins any; a minter their own)
  */
 import { type Ctx, json, requireAdmin, requireStager } from '../../_lib/auth.js'
 import { deploymentKey, siteOf, type OgEnv } from '../../_lib/og/serve.js'
-import { listTokens, mint, revoke, TOKEN_DAYS_DEFAULT } from '../../_lib/og/tokens.js'
+import { listTokens, mint, revoke, tokenDays } from '../../_lib/og/tokens.js'
 
 const now = () => Math.floor(Date.now() / 1000)
 
@@ -34,7 +35,7 @@ export const onRequest = async (ctx: Ctx & { env: OgEnv }): Promise<Response> =>
     }
     if (page.origin !== url.origin) return json({ error: 'url must be on this site' }, 400)
     try {
-      const m = await mint(env.DB, siteOf(env).name, page, id.email ?? id.name ?? 'unknown', now(), Number(body?.days) || TOKEN_DAYS_DEFAULT)
+      const m = await mint(env.DB, siteOf(env).name, page, id.email ?? id.name ?? 'unknown', now(), tokenDays(body?.days))
       if (!m) return json({ error: 'this page has no card' }, 400)
       return json({ url: m.url, token: m.token, exp_day: m.expDay }, 201)
     } catch (e) {

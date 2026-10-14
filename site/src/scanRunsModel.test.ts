@@ -1,8 +1,8 @@
 // specs/scan-runs-ui.md: the derivations /scans shows from the D1 rows.
 import { describe, expect, it } from 'vitest'
 import {
-  batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, structureOf, summarize, withDeltas,
+  batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
+  type ScanRunPhase, structureOf, summarize, withDeltas, runOutcome, overlappingFailures,
 } from './scanRunsModel'
 
 export const run = (o: Partial<ScanRun> & Pick<ScanRun, 'run_id' | 'scan'>): ScanRun => ({
@@ -82,9 +82,69 @@ describe('runs whose job left `started_ts` NULL (the in-job runs before 6842ed63
 })
 
 describe('phase spans', () => {
+  it('keeps failed overlapping attempts visible in compact charts', () => {
+    const ps = [
+      phase('b', 'listing', 0, 2000, 2300),
+      { ...phase('b', 'names', 1, 2000, 2500), note: 'failed (exit 124)' },
+      phase('b', 'ingest', 2, 2000, 2400),
+    ]
+    expect(overlappingFailures(phaseSpans(RUNS[2], ps))).toEqual([
+      { phase: 'names', start: 0, end: 500, status: 'failed', note: 'failed (exit 124)', lane: 1 },
+    ])
+  })
+  it('does not present nonfatal phase failures as clean success or rewrite a failed Batch job', () => {
+    const issue = { phase: 'names', outcome: 'timed out', recovery: null }
+    expect([
+      runOutcome(RUNS[2], []), runOutcome(RUNS[2], [issue]),
+      runOutcome(RUNS[2], [{ ...issue, recovery: RUNS[2] }]),
+      runOutcome(RUNS[2], [issue, { ...issue, phase: 'iv', recovery: RUNS[2] }]),
+      runOutcome(RUNS[1], [{ ...issue, recovery: RUNS[2] }]), runOutcome({ status: 'nop' }),
+    ]).toEqual(['succeeded', 'partial', 'recovered', 'partial', 'failed', 'no-op'])
+  })
+  it('recognizes historical failure notes and distinguishes timeouts from failures', () => {
+    const ps = [
+      { ...phase('b', 'names', 0, 2000, 2500), note: 'failed (exit 124)' },
+      { ...phase('b', 'iv', 1, 2500, 2600), note: 'wall, failed (exit 1' },
+      { ...phase('b', 'ok', 2, 2500, 2600), note: '0 failed dirs' },
+    ]
+    expect(phaseSpans(RUNS[2], ps).map(p => [p.status, phaseOutcome(p)])).toEqual([
+      ['failed', 'timed out'], ['failed', 'failed'], ['done', 'done'],
+    ])
+  })
+  it('only a later same-scan/store, linked successful phase attempt resolves a failure', () => {
+    const failed = { ...phase('b', 'names', 0, 2000, 2500), note: 'failed (exit 124)' }
+    const good = run({ run_id: 'retry', scan: RUNS[2].scan, kind: 'phase-recovery', parent: 'b', started_ts: 2800, finished_ts: 3000 })
+    const candidates = [
+      good,
+      { ...good, run_id: 'other-scan', scan: '2026-10-08' },
+      { ...good, run_id: 'other-store', store: 'meta' },
+      { ...good, run_id: 'other-parent', parent: 'a' },
+      { ...good, run_id: 'older', started_ts: 2100, finished_ts: 2400 },
+      { ...good, run_id: 'failed-retry', status: 'failed' as const, started_ts: 3100, finished_ts: 3200 },
+    ]
+    const ps = [failed, ...candidates.map(r => phase(r.run_id, 'names', 0, r.started_ts!, r.finished_ts!))]
+    expect(phaseIssues(RUNS[2], [RUNS[2], ...candidates], ps)).toEqual([{ phase: 'names', outcome: 'timed out', recovery: good }])
+    expect(phaseIssues(RUNS[2], candidates.slice(1), ps)).toEqual([{ phase: 'names', outcome: 'timed out', recovery: null }])
+  })
   it('puts an overlapped phase on its own lane, on the run clock', () => {
     expect(phaseSpans(RUNS[2], PHASES.filter(p => p.run_id === 'b')).map(s => [s.phase, s.start, s.end, s.lane])).toEqual([
       ['listing', 0, 300, 0], ['ingest', 0, 310, 1], ['index', 310, 500, 0],
+    ])
+  })
+  it('extends an explicitly started phase to now, retaining its overlap with completed work', () => {
+    const r = run({ run_id: 'live', scan: '2026-10-13T1300', status: 'running', started_ts: 100, finished_ts: null })
+    const ps: ScanRunPhase[] = [
+      phase('live', 'publish-r2', 0, 100, 200),
+      { ...phase('live', 'static-names', 1, 205, 205), finished_ts: null, status: 'running' },
+      phase('live', 'interval-store', 2, 210, 300),
+    ]
+    expect(phaseSpans(r, ps, 400)).toEqual([
+      { phase: 'publish-r2', start: 0, end: 100, status: 'done', note: null, lane: 0 },
+      { phase: 'static-names', start: 105, end: 300, status: 'running', note: null, lane: 0 },
+      { phase: 'interval-store', start: 110, end: 200, status: 'done', note: null, lane: 1 },
+    ])
+    expect(phaseSpans(r, ps, 430).map(s => [s.phase, s.end])).toEqual([
+      ['publish-r2', 100], ['static-names', 330], ['interval-store', 200],
     ])
   })
   it('orders phase names by their mean position', () => {
