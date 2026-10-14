@@ -17,7 +17,9 @@ import pandas as pd
 from disk_tree import blobfs
 
 FILE = 'path-index.parquet'
-_DATE = re.compile(r'\d{4}-\d{2}-\d{2}$')
+# A scan id: `YYYY-MM-DD`, or sub-daily `YYYY-MM-DDTHHMM` (sorts after its day's date-only id).
+_SCAN_ID = r'\d{4}-\d{2}-\d{2}(?:T\d{4})?'
+_DATE = re.compile(_SCAN_ID + '$')
 COLUMNS = ['path', 'depth', 'size', 'kind', 'mtime', 'n_desc']
 
 
@@ -35,7 +37,7 @@ def _ls(d: str) -> list[str]:
 
 def latest_path_index(src: str) -> str:
     """`src` itself if it names a parquet; else the newest generation under a
-    `<date>/index/<gen>/` root (newest date that has one, then newest gen)."""
+    `<scan id>/index/<gen>/` root (newest scan id that has one, then newest gen)."""
     if src.endswith('.parquet'):
         return src
     root = src.rstrip('/')
@@ -49,8 +51,8 @@ def latest_path_index(src: str) -> str:
 
 
 def source_label(path: str) -> str:
-    """`<date>/index/<gen>` for a path under such a root, else the path."""
-    m = re.search(r'(\d{4}-\d{2}-\d{2}/index/[^/]+)/' + re.escape(FILE) + '$', path)
+    """`<scan id>/index/<gen>` for a path under such a root, else the path."""
+    m = re.search('(' + _SCAN_ID + r'/index/[^/]+)/' + re.escape(FILE) + '$', path)
     return m.group(1) if m else path
 
 
