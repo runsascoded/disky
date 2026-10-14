@@ -7,10 +7,13 @@ import json
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
+
+from dt_cloud import scan_runs
 
 from dt_cloud.scan_runs import (
-    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cost, fill, load_profile, measure, measure_after, parse_profile, record,
-    record_sql, recovery_record, write_all,
+    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cli, cost, env_run_id, fill, load_profile, measure, measure_after,
+    parse_profile, record, record_sql, recovery_record, write_all,
 )
 from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, phases_of, reconstruct, task_lines
 
@@ -578,3 +581,106 @@ def test_exit_trap_after_a_nop_keeps_it():
     record(s, PROFILE, "2026-10-08", "uid-6", 20, nop=True)
     record(s, PROFILE, "2026-10-08", "uid-6", 21, exit_code=0)
     assert rows(s, "SELECT status, started_ts, finished_ts FROM scan_runs") == [("nop", 10, 21)]
+
+
+# ── the generic seam: stated job facts, a step's own time, the store, unbilled phases ───────────────────
+
+
+QUEUED = parse_profile({
+    "name": "queued",
+    "store": "primary",
+    "run_id_env": ["JOB_ID", "BATCH_JOB_UID"],
+    "unbilled": ["capture", "queue"],
+    "prices": {"box-1": 0.36},
+    "spot_factor": 0.5,
+})
+
+
+def test_profile_run_id_env_and_unbilled():
+    assert (PROFILE.run_id_env, PROFILE.unbilled) == (("BATCH_JOB_UID",), ())
+    assert (QUEUED.run_id_env, QUEUED.unbilled) == (("JOB_ID", "BATCH_JOB_UID"), ("capture", "queue"))
+    assert [env_run_id(QUEUED, e) for e in ({"JOB_ID": "j1", "BATCH_JOB_UID": "u1"}, {"JOB_ID": " ", "BATCH_JOB_UID": "u1"}, {})] == [
+        "j1", "u1", None,
+    ]
+
+
+def test_record_stated_facts_and_cost_over_billed_time():
+    """A run that starts before its job (the capture it ingests, then the queue): facts stated at the start, each step
+    at its own time, the cost at the finish over the billed time only (here 1000 s of 1600 s)."""
+    s = sink()
+    facts = dict(job_name="ingest-1", region="us-east-1", machine="box-1", spot=True, tasks=None, image="img:abc")
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 1000, start=True, kind="ingest", facts=facts)
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 1400, kind="ingest", phase="capture")
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 1600, kind="ingest", phase="queue")
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 2100, kind="ingest", phase="fetch")
+    done = record(s, QUEUED, "2026-10-14T0600", "job-1", 2600, kind="ingest", phase="index-sync")
+    assert done.run.cost_usd is None
+    fin = record(s, QUEUED, "2026-10-14T0600", "job-1", 2600, kind="ingest", exit_code=0)
+    assert fin.run.cost_usd == 0.05  # 0.36 $/h × 0.5 (spot) × 1000 s
+    assert rows(s, "SELECT run_id, kind, status, store, started_ts, finished_ts, job_name, region, machine, spot, tasks, image, cost_usd FROM scan_runs") == [
+        ("job-1", "ingest", "succeeded", "primary", 1000, 2600, "ingest-1", "us-east-1", "box-1", 1, None, "img:abc", 0.05),
+    ]
+    assert rows(s, "SELECT phase, seq, started_ts, finished_ts, status FROM scan_run_phases ORDER BY seq") == [
+        ("capture", 0, 1000, 1400, "done"),
+        ("queue", 1, 1400, 1600, "done"),
+        ("fetch", 2, 1600, 2100, "done"),
+        ("index-sync", 3, 2100, 2600, "done"),
+    ]
+
+
+def test_record_failed_finish_costs_billed_time_too():
+    s = sink()
+    record(s, QUEUED, "2026-10-14T0600", "job-2", 0, start=True, facts={"machine": "box-1", "spot": False})
+    record(s, QUEUED, "2026-10-14T0600", "job-2", 3000, phase="queue")
+    fin = record(s, QUEUED, "2026-10-14T0600", "job-2", 6600, exit_code=1, failed_phase="fetch")
+    assert (fin.run.status, fin.run.failed_phase, fin.run.error, fin.run.cost_usd) == ("failed", "fetch", "exit 1", 0.36)
+
+
+def test_record_without_a_priced_machine_has_no_cost():
+    s = sink()
+    record(s, QUEUED, "2026-10-14T0600", "job-3", 0, start=True, facts={"machine": "unpriced"})
+    assert record(s, QUEUED, "2026-10-14T0600", "job-3", 3600, exit_code=0).run.cost_usd is None
+    record(s, QUEUED, "2026-10-14T0600", "job-4", 0, start=True)
+    assert record(s, QUEUED, "2026-10-14T0600", "job-4", 3600, exit_code=0).run.cost_usd is None
+
+
+def test_record_refuses_unknown_facts():
+    with pytest.raises(ValueError) as e:
+        record(sink(), QUEUED, "2026-10-14T0600", "job-5", 0, start=True, facts={"zone": "z"})
+    assert str(e.value) == "scan-run: unknown job facts ['zone']"
+
+
+def test_record_cli_store_at_facts_and_run_id_env(tmp_path, monkeypatch):
+    profile = tmp_path / "scan-runs.json"
+    profile.write_text(json.dumps({"store": "primary", "run_id_env": ["JOB_ID"], "unbilled": ["queue"], "prices": {"box-1": 0.36}}))
+    db = tmp_path / "runs.sqlite"
+    SqliteSink(db, ddl=DDL)
+    monkeypatch.setenv("JOB_ID", "job-9")
+    monkeypatch.delenv("BATCH_JOB_UID", raising=False)
+    base = ["record", "-c", str(profile), "-s", str(db), "-M", "-K", "nas", "-k", "ingest"]
+    calls = [
+        ["-S", "-t", "100", "-m", "box-1", "--no-spot", "-T", "1", "-j", "ingest-9", "-R", "us-east-1", "-i", "img:1"],
+        ["-P", "queue", "-t", "200"],
+        ["-P", "fetch", "-t", "3800"],
+        ["-x", "0", "-t", "3800"],
+    ]
+    for c in calls:
+        r = CliRunner().invoke(cli, [*base, *c, "2026-10-14T0600"])
+        assert (r.exit_code, r.exception, r.stdout) == (0, None, "")
+    s = SqliteSink(db)
+    assert rows(s, "SELECT run_id, kind, status, store, started_ts, finished_ts, job_name, region, machine, spot, tasks, image, cost_usd, source FROM scan_runs") == [
+        ("job-9", "ingest", "succeeded", "nas", 100, 3800, "ingest-9", "us-east-1", "box-1", 0, 1, "img:1", 0.36, "job"),
+    ]
+    assert rows(s, "SELECT phase, started_ts, finished_ts FROM scan_run_phases ORDER BY seq") == [("queue", 100, 200), ("fetch", 200, 3800)]
+
+
+def test_record_cli_without_a_run_id_reports_and_exits_zero(tmp_path, monkeypatch):
+    profile = tmp_path / "scan-runs.json"
+    profile.write_text(json.dumps({"run_id_env": ["JOB_ID"]}))
+    monkeypatch.delenv("JOB_ID", raising=False)
+    said: list[str] = []
+    monkeypatch.setattr(scan_runs, "err", said.append)  # `err` writes the stderr bound at import
+    r = CliRunner().invoke(cli, ["record", "-c", str(profile), "-n", "-S", "2026-10-14T0600"])
+    assert (r.exit_code, r.stdout, said) == (
+        0, "", ["scan-run record failed (the scan continues): SystemExit: scan-run: no run id: pass -r or set $JOB_ID"],
+    )
