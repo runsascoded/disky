@@ -28,6 +28,9 @@
   postings groups and `SEARCH_DIR_ROWS` rows per directory group — beside
   layout v1's `path-index.{names,search}.parquet`, kept as committed (the
   writer no longer emits them; their postings are v2's).
+- `v2-mount/`: `v2-search`'s writer over a few objects in one bucket (`mb`)
+  that no other fixture names — the second store of a union view's tests
+  (`unionSubtree.test.ts`), whose roots must not collide with `bk`.
 - `v2-slices/`: a store generation over owner slices (`usr` labels, one row per
   `(path, usr)` as gcs writes them) whose multi-owner dirs have slices under a
   view's threshold while their totals clear it (`m/big` drawn short of a slice,
@@ -323,6 +326,16 @@ def write_v2_search(here: str, name: str = 'v2-search', objects=search_rows) -> 
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
 
 
+def mount_rows() -> dict[str, list[tuple[str, int]]]:
+    """`v2-mount`'s objects: one bucket named apart from every other fixture's
+    (`mb`), so a union view can mount it beside another store's roots."""
+    return {'mb': [('scans/a.parquet', 3 * MiB), ('scans/b.parquet', MiB), ('index/g1/path-index.parquet', 2 * MiB), ('README.md', 100)]}
+
+
+def write_v2_mount(here: str) -> None:
+    write_v2_search(here, 'v2-mount', objects=mount_rows)
+
+
 def write_v1(here: str) -> None:
     parquet = join(here, 'path-index-zstd.parquet')
     write_text(join(here, 'path-index-zstd.d1.json'), json.dumps(d1_json({'path': parquet}), separators=(',', ':')))
@@ -334,6 +347,7 @@ WRITERS = {
     'v2-lens': write_v2_lens,
     'v2-slices': write_v2_slices,
     'v2-search': write_v2_search,
+    'v2-mount': write_v2_mount,
 }
 
 

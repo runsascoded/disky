@@ -49,3 +49,20 @@ it('full-history queries retain the first coarse bin when the first object is la
     plan: { outputBin: '1d', tier: '1d', binBudget: 40 },
   })
 })
+
+it('a path whose rows all sit in one bin is that bin, at the finest tier — no plan over an empty range', async () => {
+  const bin = Date.parse('2026-10-12T18:00:00Z')
+  const age = async (qs: string) => {
+    const r = await onRequestGet({ request: new Request(`https://r2.oa.dev/api/age-pyramid?date=2026-10-12T1809&path=marin-na${qs}`), env: {} as Env })
+    return [r.status, r.status === 200 ? await r.json() : await r.text()]
+  }
+  const one = [200, { records: [{ dt: bin, b: 100, o: 1 }], plan: { outputBin: '1h', tier: '1h', binBudget: 512 } }]
+  const two = [200, { records: [{ dt: bin, b: 100, o: 1 }, { dt: bin, b: 50, o: 3 }], plan: { outputBin: '1h', tier: '1h', binBudget: 512 } }]
+  const at = new Date(bin).toISOString()
+  expect([
+    await (readPoint.mockResolvedValue([{ binstart: bin, b: 100, o: 1 }]), age('')),
+    await (readPoint.mockResolvedValue([{ binstart: bin, b: 100, o: 1 }, { binstart: bin, b: 50, o: 3 }]), age('')),
+    await age(`&from=${at}&to=${at}`),
+    await age(`&from=${new Date(bin + 1).toISOString()}&to=${at}`),
+  ]).toEqual([one, two, two, [400, 'bad range: `from` is after `to`']])
+})

@@ -54,9 +54,24 @@ const ID = /^[a-z0-9][a-z0-9-]*$/
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/
 const compare = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0
 
+/** What selection orders and filters scans by: their capture end, then
+ * publication, then stable ids. A catalog scan is one; so is an in-deployment
+ * store's indexed scan (`functions/_lib/union.ts`), whose D1 rows carry no
+ * digest or totals. */
+export type Observation = Pick<SourceScan, 'id' | 'revision' | 'observed_through' | 'published_at'>
+
 /** Canonical selection order, independent of browser/server locale. */
-export const compareScans = (a: SourceScan, b: SourceScan): number =>
+export const compareScans = (a: Observation, b: Observation): number =>
   compare(a.observed_through, b.observed_through) || compare(a.published_at, b.published_at) || compare(a.id, b.id) || compare(a.revision, b.revision)
+
+/** The scan a source contributes at cutoff `at` (a canonical UTC instant):
+ * the greatest by `compareScans` among those observed through `at`; null =
+ * unknown (no eligible scan), never the first later one. */
+export function latestObserved<T extends Observation>(scans: readonly T[], at: string): T | null {
+  let best: T | null = null
+  for (const s of scans) if (s.observed_through <= at && (!best || compareScans(s, best) > 0)) best = s
+  return best
+}
 
 /** Only explicit UTC instants; reject invalid calendar dates and date-only IDs. */
 export function utcInstant(value: string): string {
@@ -160,8 +175,7 @@ const selection = (c: Pick<SourceCatalog, 'source' | 'mount' | 'scope'>, scan: S
 export function resolveFederation(catalogs: readonly SourceCatalog[], cutoff: string): FederatedView {
   const at = utcInstant(cutoff)
   const sources = sourcesChecked(catalogs).map(c => {
-    const eligible = c.scans.filter(s => s.observed_through <= at).sort(compareScans)
-    return selection(c, eligible.at(-1) ?? null)
+    return selection(c, latestObserved(c.scans, at))
   })
   return { version: 1, at, sources }
 }

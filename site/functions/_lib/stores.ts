@@ -24,6 +24,23 @@
  *
  * `secrets` maps a per-store var to the NAME of a Pages secret holding its
  * value, so no secret sits in the (public) `wrangler.toml`.
+ *
+ * The static name index is per store too: a store with its own sets
+ * `STATIC_GEN` (its generation in the deployment's `INDEX_R2`) and, as its
+ * generation was built, `FILTER_STATIC_HEAVY` / `FILTER_STATIC_ANCHORS`. One
+ * without is `scan-not-indexed` under the deployment's static filter (the
+ * inherited `FILTER_STATIC`), never answered from the primary's generation:
+ *
+ *   STORES_JSON = {"meta": {"vars": {…, "STATIC_GEN": "2026-10-14-meta"}}}
+ *
+ * An entry with `union` is a **union view** (specs/federated-scans.md, "First
+ * live cases" 1), not a store: a read-time union of member stores' roots,
+ * each member read at its own scan for the request's cutoff
+ * (`_lib/union.ts`). `main: true` makes it what a request with no `store=`
+ * reads (the main map); `store=primary` then still names the primary alone,
+ * and `store=<view key>` names the view either way:
+ *
+ *   STORES_JSON = {"meta": {…}, "all": {"union": ["primary", "meta"], "main": true}}
  */
 import type { Env } from './auth.js'
 import { withReq } from './shared.js'
@@ -32,7 +49,15 @@ import { withReq } from './shared.js'
  * migration lineage serves several deploys, each with its own `STORE`). */
 export const PRIMARY_STORE = 'primary'
 
-/** The vars a store config may set; all are cleared for a secondary store. */
+/** The deployment's filter policy a secondary store inherits unless its config sets its own: whether the map's
+ * filter is the static name index's (`FILTER_STATIC`) and whether it is indexed-only (`FILTER_INDEXED_ONLY`). */
+export const INHERITED_VARS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY'] as const
+
+/** The vars a store config may set; all but `INHERITED_VARS` are cleared for a secondary store. The static name
+ * index's are per store (`STATIC_GEN`, `FILTER_STATIC_HEAVY`, `FILTER_STATIC_ANCHORS`): a store reads a static
+ * index only when its own config names a generation (in the deployment's `INDEX_R2`, `static-names/<gen>/`); with
+ * the filter static and none named, it holds no scan (`staticFilter.ts` `UNINDEXED`: `scan-not-indexed`), never
+ * the primary's generation. */
 export const STORE_VARS = [
   'ROOT_LABEL',
   'ROOT_TITLE',
@@ -46,10 +71,18 @@ export const STORE_VARS = [
   'STORE_ACCESS_KEY_ID',
   'STORE_SECRET_ACCESS_KEY',
   'SERVED_R2',
+  'STATIC_GEN',
+  'FILTER_STATIC_HEAVY',
+  'FILTER_STATIC_ANCHORS',
+  ...INHERITED_VARS,
 ] as const
 export type StoreVar = typeof STORE_VARS[number]
-/** Cleared too (never set): the primary's GCS creds fallback (`storeCreds`). */
-const CLEARED = [...STORE_VARS, 'GCS_HMAC_KEY_ID', 'GCS_HMAC_SECRET'] as const
+/** Cleared (the inherited policy kept), plus, never set: the primary's GCS creds fallback (`storeCreds`) and its
+ * name summaries' index (`/api/name-summary` serves the primary only). */
+const CLEARED = [
+  ...STORE_VARS.filter(k => !(INHERITED_VARS as readonly string[]).includes(k)),
+  'GCS_HMAC_KEY_ID', 'GCS_HMAC_SECRET', 'NAME_SUMMARY_STATIC', 'STATIC_MAX_ROWS',
+] as const
 
 export interface StoreConfig {
   /** A scope viewers need on top of the deployment's viewer scope. */
@@ -63,13 +96,31 @@ const KEY_RE = /^[a-z0-9][a-z0-9-]*$/
 
 export class StoreConfigError extends Error {}
 
-let parsed: { raw: string; stores: Record<string, StoreConfig> } | null = null
+/** A union view (`STORES_JSON` entry with `union`): its member stores
+ * (`PRIMARY_STORE` or secondary store keys, in config order), and whether it
+ * is the main (no-`store=`) view. */
+export interface UnionView {
+  key: string
+  members: string[]
+  main: boolean
+}
+
+let parsed: { raw: string; stores: Record<string, StoreConfig>; views: Record<string, UnionView> } | null = null
 
 /** The secondary stores (`STORES_JSON`), validated; `{}` when unset. */
 export function secondaryStores(env: Env): Record<string, StoreConfig> {
+  return parseStores(env).stores
+}
+
+/** The union views (`STORES_JSON` entries with `union`), validated; `{}` when unset. */
+export function unionViews(env: Env): Record<string, UnionView> {
+  return parseStores(env).views
+}
+
+function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Record<string, UnionView> } {
   const raw = env.STORES_JSON ?? ''
-  if (!raw) return {}
-  if (parsed?.raw === raw) return parsed.stores
+  if (!raw) return { stores: {}, views: {} }
+  if (parsed?.raw === raw) return parsed
   let obj: unknown
   try {
     obj = JSON.parse(raw)
@@ -78,9 +129,14 @@ export function secondaryStores(env: Env): Record<string, StoreConfig> {
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new StoreConfigError('STORES_JSON: want an object of store configs')
   const stores: Record<string, StoreConfig> = {}
+  const unions: Record<string, Record<string, unknown>> = {}
   for (const [key, cfg] of Object.entries(obj as Record<string, unknown>)) {
     if (!KEY_RE.test(key) || key === PRIMARY_STORE) throw new StoreConfigError(`STORES_JSON: bad store key '${key}'`)
     if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new StoreConfigError(`STORES_JSON.${key}: want an object`)
+    if ('union' in cfg) {
+      unions[key] = cfg as Record<string, unknown>
+      continue
+    }
     const { scope, vars, secrets, ...rest } = cfg as Record<string, unknown>
     if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')}`)
     if (scope !== undefined && typeof scope !== 'string') throw new StoreConfigError(`STORES_JSON.${key}.scope: want a string`)
@@ -94,8 +150,21 @@ export function secondaryStores(env: Env): Record<string, StoreConfig> {
     }
     stores[key] = cfg as StoreConfig
   }
-  parsed = { raw, stores }
-  return stores
+  const views: Record<string, UnionView> = {}
+  for (const [key, cfg] of Object.entries(unions)) {
+    const { union, main, ...rest } = cfg
+    if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')} (a union view takes union, main)`)
+    if (!Array.isArray(union) || union.length < 2 || union.some(m => typeof m !== 'string')) throw new StoreConfigError(`STORES_JSON.${key}.union: want ≥ 2 store keys`)
+    const members = union as string[]
+    if (new Set(members).size !== members.length) throw new StoreConfigError(`STORES_JSON.${key}.union: a store is named twice`)
+    for (const m of members) if (m !== PRIMARY_STORE && !stores[m]) throw new StoreConfigError(`STORES_JSON.${key}.union: '${m}' is not a store (want '${PRIMARY_STORE}' or a store key)`)
+    if (main !== undefined && typeof main !== 'boolean') throw new StoreConfigError(`STORES_JSON.${key}.main: want a boolean`)
+    views[key] = { key, members, main: main === true }
+  }
+  const mains = Object.values(views).filter(v => v.main).map(v => v.key)
+  if (mains.length > 1) throw new StoreConfigError(`STORES_JSON: more than one main union view (${mains.join(', ')})`)
+  parsed = { raw, stores, views }
+  return parsed
 }
 
 /** The store a (possibly overlaid) env serves: `PRIMARY_STORE` or a key. */

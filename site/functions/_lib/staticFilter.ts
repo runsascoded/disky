@@ -34,6 +34,7 @@ import { AnchoredSource, parseKey, termInPath, termKey } from './staticAnchors.j
 import { type HexRule, hexAffected } from './hexRuns.js'
 import type { Matcher } from './queryAst.js'
 import { compileQuery, type NamePred } from './pathQuery.js'
+import { PRIMARY_STORE } from './stores.js'
 
 export type { Hit } from './staticNames.js'
 export { type Rollup, rollupAt, rollupTotal } from './staticDrill.js'
@@ -244,7 +245,7 @@ export function cacheHits(cache: Cache, prefix: string, version = 'hits-v1'): Hi
   }
 }
 
-export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: string; FILTER_STATIC_ANCHORS?: string; FILTER_INDEXED_ONLY?: string; INDEX_R2?: R2Bucket; STATIC_GEN?: string }
+export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: string; FILTER_STATIC_ANCHORS?: string; FILTER_INDEXED_ONLY?: string; INDEX_R2?: R2Bucket; STATIC_GEN?: string; STORE_KEY?: string }
 
 /** The drilldown over a bucket's generation: the base `drill/` and its `runs`' (`staticDrill.ts`), with the fleet
  *  root from `opts.catalog` (default: the base catalog); `cached`: its indexes in `cache` under `prefix` (the
@@ -260,23 +261,41 @@ export function drillSource(blobs: Blobs, cached?: { cache: Cache; prefix: strin
   return new DrillSource(drill, cache ? cacheHits(cache, pre(null), 'roots-v1') : undefined)
 }
 
-/** A test's store for an env object (in place of the R2 binding's): held on the env under a symbol, so the copies a
- *  request makes of it (`withStore`'s request, `withPathStore`, `slices`, …) carry it too. */
-const INJECTED = Symbol('injected static filter store')
+/** A test's stores for an env object (in place of the R2 binding's), one per store (default the primary): held on
+ *  the env under a symbol, so the copies a request makes of it (`withStore`'s overlay, `withPathStore`, `slices`, …)
+ *  carry them too, and each store's env finds its own. */
+const INJECTED = Symbol('injected static filter stores')
+type Injected = { [INJECTED]?: Map<string, StaticFilterStore> }
 export const injectedStores = {
-  set: (env: object, s: StaticFilterStore): void => { (env as { [INJECTED]?: StaticFilterStore })[INJECTED] = s },
-  get: (env: object): StaticFilterStore | undefined => (env as { [INJECTED]?: StaticFilterStore })[INJECTED],
+  set: (env: object, s: StaticFilterStore, store: string = PRIMARY_STORE): void => {
+    const e = env as Injected
+    e[INJECTED] = new Map(e[INJECTED] ?? []).set(store, s)
+  },
+  get: (env: object): StaticFilterStore | undefined => (env as Injected)[INJECTED]?.get((env as { STORE_KEY?: string }).STORE_KEY ?? PRIMARY_STORE),
 }
 
-let held: { r2: R2Bucket; gen: string; store: StaticFilterStore } | undefined
-/** The isolate's static filter store over the bound bucket; null when the static filter is off. A test
- *  injects its own (`injectedStores`). */
+/** A store under the static filter whose own config names no generation (`stores.ts`): it holds no scan, so every
+ *  literal and compound query is `scan-not-indexed` — never another store's index, never the walk. */
+export const UNINDEXED: StaticFilterStore = {
+  source: { hits: async () => null },
+  scans: async () => [],
+  gen: 'none',
+}
+
+/** The isolate's static filter stores, by generation and knobs (stores sharing a generation may differ in them). */
+const held = new Map<string, { r2: R2Bucket; store: StaticFilterStore }>()
+/** The isolate's static filter store over the bound bucket; null when the static filter is off. A secondary store
+ *  reads its own generation only (`STATIC_GEN` from its `STORES_JSON` vars), none = `UNINDEXED`. A test injects
+ *  its own (`injectedStores`). */
 export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | null {
+  const on = env.FILTER_STATIC === '1' && !!env.INDEX_R2
+  if (on && env.STORE_KEY !== undefined && !env.STATIC_GEN?.trim()) return UNINDEXED
   const injected = injectedStores.get(env)
   if (injected) return injected
-  if (env.FILTER_STATIC !== '1' || !env.INDEX_R2) return null
+  if (!on || !env.INDEX_R2) return null
   const gen = staticGen(env), pre = staticPrefix(gen)
-  if (held?.r2 !== env.INDEX_R2 || held.gen !== gen) {
+  const slot = `${gen}|${env.FILTER_STATIC_HEAVY === '1' ? 'h' : ''}|${env.FILTER_STATIC_ANCHORS === '0' ? '' : 'a'}`
+  if (held.get(slot)?.r2 !== env.INDEX_R2) {
     // The base generation plus its runs (`staticRuns.ts`): each tier's indexes cached under its own prefix.
     const tierPre = (dir: string | null) => dir ? `${pre}/${dir}` : pre
     const t = tiers(r2Blobs(env.INDEX_R2, pre), { indexCache: dir => cacheIndexes(caches.default, tierPre(dir)), catalogCache: dir => cacheIndexes(caches.default, tierPre(dir), 'catalog-v1') })
@@ -295,9 +314,9 @@ export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | nul
         top: dir => cacheIndexes(caches.default, sub(dir, 'anchors'), 'top-v1'),
       },
     })
-    held = { r2: env.INDEX_R2, gen, store: { source: new SuffixHits(t.names, { cache: cacheHits(caches.default, pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: () => t.names.hexRuns() } }
+    held.set(slot, { r2: env.INDEX_R2, store: { source: new SuffixHits(t.names, { cache: cacheHits(caches.default, pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: () => t.names.hexRuns() } })
   }
-  return held.store
+  return held.get(slot)!.store
 }
 
 /** Whether `date` can be answered statically for `ast`: the literal, else null. */
@@ -361,8 +380,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  both sides of a diff; 19: a budget-cut nest flags `budgetCut` for the client to re-ask — cached 18s from a deploy
  *  between the two could serve a cut tree unflagged; 20: a node's `d` is its newest write, not the byte-weighted mean;
  *  21: compound queries — `a b`, `a|b`, `a -b`, `-b` of literals — answered exactly from the static index
- *  (`staticBool.ts`), where they walked the path store, flagged approximate, before). */
-const RESPONSE_V = 21
+ *  (`staticBool.ts`), where they walked the path store, flagged approximate, before; 22: a secondary store reads only
+ *  its own static index (`STORES_JSON` `STATIC_GEN`), never the primary's — a cached 21 body could hold the primary's
+ *  matches under a secondary's root). */
+const RESPONSE_V = 22
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
