@@ -69,15 +69,19 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
 
     // `head` / `exec_head` recorded a ledger position a plan-first run doesn't
     // have (it reads no ledger), so both are 0.
-    await db.prepare(`
-      INSERT INTO deletion_runs (run_id, plan_id, manifest, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest)
-      VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
-    `).bind(jobId, req.planId, runGs, date, req.actor, req.mode, Math.floor(Date.now() / 1000), runGs, digest).run()
+    await db.prepare(PLAN_SWEEP_RUN_INSERT).bind(jobId, req.planId, runGs, date, req.actor, req.mode, Math.floor(Date.now() / 1000), runGs, digest).run()
 
     return { job_id: jobId, extra: { run: runGs } }
   }
   return { prefixes, launch }
 }
+
+/** A plan-sweep run's `deletion_runs` row. It names the cw schema's run-dir column (`manifest`; gcs's lineage calls
+ *  it `plan`, written by `EXECUTOR=sweep`'s `sweep_exec.py`): plan-sweep runs only where that schema is. */
+export const PLAN_SWEEP_RUN_INSERT = `
+  INSERT INTO deletion_runs (run_id, plan_id, manifest, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest)
+  VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
+`
 
 /** The Batch task's script: expand the run dir's `plan.json` into a manifest (`plan-sweep manifest PLAN_PATH`, the
  *  plan positional), then execute it, pinging the site on exit (success or failure) so it reflects the run now. */

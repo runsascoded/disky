@@ -16,9 +16,11 @@ export function ensureWasm(source: WebAssembly.Module | BufferSource): Promise<u
 /** The faces a card uses (Inter, OFL), as the site serves them. */
 export const FONT_FILES = ['/_fonts/Inter-400.ttf', '/_fonts/Inter-600.ttf']
 
-/** `ensureWasm` must have resolved first. */
-export function svgToPng(svg: string, fonts: Uint8Array[]): Uint8Array {
+/** `ensureWasm` must have resolved first. `zoom` scales the raster (a 2×
+ * image of the same layout). */
+export function svgToPng(svg: string, fonts: Uint8Array[], zoom = 1): Uint8Array {
   const resvg = new Resvg(svg, {
+    ...(zoom !== 1 ? { fitTo: { mode: 'zoom' as const, value: zoom } } : {}),
     font: { fontBuffers: fonts, defaultFontFamily: 'Inter', sansSerifFamily: 'Inter', loadSystemFonts: false },
   })
   try {

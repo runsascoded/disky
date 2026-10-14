@@ -165,7 +165,10 @@ describe('the cover is fetched on demand, and retried once on a 5xx', () => {
     const client = new QueryClient()
     const obs = new QueryObserver(client, { ...coverQuery(f, 'primary', { ...args, enabled }), retryDelay: 0 })
     const unsub = obs.subscribe(() => {})
+    // Settled = no fetch in flight and (when wanted) an outcome; a fixed wait raced the retry on a slow CI runner.
+    const settled = () => { const r = obs.getCurrentResult(); return r.fetchStatus === 'idle' && (!enabled || r.status !== 'pending') }
     await new Promise(r => setTimeout(r, 20))
+    for (let i = 0; i < 500 && !settled(); i++) await new Promise(r => setTimeout(r, 10))
     const r = obs.getCurrentResult()
     unsub()
     return [r.status, r.fetchStatus, r.failureCount, r.error ? [r.error.constructor.name, r.error.message] : null, r.data ?? null]

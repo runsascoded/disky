@@ -121,4 +121,13 @@ Code seams requiring adapters: `src/scan.ts` consumes one `scans.json` and retur
 4. Have ctbk, crashes and jc-taxes independently publish the contract. Keep legacy union history as a distinct source/legacy route during validation; never count it together with the same projects' new exports. Retire the centralized daily scanner only after its covered projects have working owner-side publications and readback checks. Preserve old artifacts/history and rollback.
 5. Infrastructure changes and project-side jobs are owner-reviewed handoffs. This design does not authorize changing source bucket exposure, broadening tokens, applying another project's IaC, or deleting the current scanner/history prematurely.
 
+## First live cases (2026-10-14)
+
+Two concrete pairs ride slice 3's reader. Both are "N stores → one virtual root, a one-source drill delegates":
+
+1. **r2 `/meta` beside the main map (in-deployment, the first build).** r2's main scan (marin-na, marin-discord, the cw and gcs index buckets) and its meta scan (its own serving bucket, `oa-r2-usage-index`, `job/r2-scan` `execute_meta`) are two stores of ONE deployment: same D1, same R2, and meta reuses the main scan's id. So the source catalog is local config (two `STORES_JSON` entries + a `union: [main, meta]` view), the cutoff vector is trivially aligned (one id), and nothing crosses an account. The main scan still never measures its own output; the union reader adds meta's root beside main's. This exercises tree/table/drill, diffs, series (step function), the age view and `?f=` (each store's static index answers for its own mount; a store without one is `scan-not-indexed` for that mount, never a walk) with no remote transport.
+2. **cw + HF (cross-deployment).** HF gets its own stack (Storage Buckets via the S3 gateway `s3.hf.co/<namespace>`, repos via a small tree lister; its own D1/index bucket/domain), owned and scheduled on its own. cw's deployment adds it as a **remote source**: the catalog entry names HF's site origin plus a read-only grant token (`/api/token`), and the union reader fans root requests out to HF's API (`/api/subtree`, `/api/series`, …) concurrently with cw's own reads, then delegates HF drills to it with the pinned scan. API-level fan-out first (each stack owns its artifact format and version; no shared bucket credentials); reading HF's published artifacts directly is an optimization if the extra hop shows in latency. "Bytes moving between them" is the per-source step series (cw down, HF up) for free; a per-path "moved" diff needs a declared cw↔HF path mapping and is out of scope here.
+
+Order: (1) first — it proves the reader without auth or transport; (2) reuses it with a remote adapter.
+
 [source catalog contract]: federated-source-catalog.md

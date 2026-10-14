@@ -122,7 +122,7 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
 }
 
 let fontsMemo: Promise<Uint8Array[]> | null = null
-function fonts(env: OgEnv, origin: string): Promise<Uint8Array[]> {
+export function fonts(env: OgEnv, origin: string): Promise<Uint8Array[]> {
   fontsMemo ??= Promise.all(FONT_FILES.map(async f => {
     const r = await env.ASSETS.fetch(new Request(origin + f))
     if (!r.ok) throw new Error(`font ${f}: ${r.status}`)

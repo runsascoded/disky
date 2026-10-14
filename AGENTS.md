@@ -181,6 +181,15 @@ dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the inter
                           # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
                           # prepare → ranges (Batch) → publish (cut, binary-counter merges, manifest) → R2 → prune,
                           # strictly in scan-id order (exit 3: not published / not next; `-c` catches up)
+dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  # The static name index's base generation
+                          # on ONE machine (`static_local.py`): the staged (Batch) path's stages in-process — ranges,
+                          # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/` — over a
+                          # work dir (`-w`), then copied to `<STORE>/static-names/GEN/` (a dir or `r2://`/`s3://` URL;
+                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts
+dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
+                          # catalog delta, drill run, `manifests/<id>.json`), then the binary counter's carries; a URL
+                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
+                          # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for

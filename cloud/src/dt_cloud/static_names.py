@@ -1349,6 +1349,22 @@ def shards_cmd(bucket, gen, index, mount, mem, out, threads, partial, scratch, t
     print(json.dumps(doc))
 
 
+def concat_sidecars(tables: list[pa.Table]) -> pa.Table:
+    """The per-shard sidecars as one `sidecar.parquet` table, sorted `(file, rg)` (which is `s` order); exits if two
+    shards overlap."""
+    side = pa.concat_tables(tables).sort_by([("file", "ascending"), ("rg", "ascending")])
+    mins, maxs = side.column("s_min").to_pylist(), side.column("s_max").to_pylist()
+    for k in range(1, len(mins)):
+        if mins[k] < maxs[k - 1]:
+            raise SystemExit(f"sidecar row {k}: s_min {mins[k]!r} < previous s_max {maxs[k - 1]!r}: shards overlap")
+    return side
+
+
+def write_sidecar(side: pa.Table, where) -> None:
+    """`sidecar.parquet` as the generation's: one 1M-row group per 1M rows, `CODEC`."""
+    pq.write_table(side, where, compression=CODEC, row_group_size=1 << 20)
+
+
 @cli.command("sidecar")
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-g", "--gen", required=True, help="Generation")
@@ -1360,14 +1376,9 @@ def sidecar_cmd(bucket, gen) -> None:
     prefix = f"{PREFIX}/{gen}"
     client = storage.Client()
     b = client.bucket(bucket)
-    tables = [pq.read_table(_download(b, blob.name)) for blob in client.list_blobs(bucket, prefix=f"{prefix}/sidecar/")]
-    side = pa.concat_tables(tables).sort_by([("file", "ascending"), ("rg", "ascending")])
-    mins, maxs = side.column("s_min").to_pylist(), side.column("s_max").to_pylist()
-    for k in range(1, len(mins)):
-        if mins[k] < maxs[k - 1]:
-            raise SystemExit(f"sidecar row {k}: s_min {mins[k]!r} < previous s_max {maxs[k - 1]!r}: shards overlap")
+    side = concat_sidecars([pq.read_table(_download(b, blob.name)) for blob in client.list_blobs(bucket, prefix=f"{prefix}/sidecar/")])
     sink = pa.BufferOutputStream()
-    pq.write_table(side, sink, compression=CODEC, row_group_size=1 << 20)
+    write_sidecar(side, sink)
     blob = b.blob(f"{prefix}/sidecar.parquet")
     blob.upload_from_string(sink.getvalue().to_pybytes(), content_type="application/vnd.apache.parquet")
     files = manifest(bucket, prefix, "sx")

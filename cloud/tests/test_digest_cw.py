@@ -736,3 +736,44 @@ def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
     assert (type(tpl).__name__, tpl.cfg, root_, m, channel, variant) == ("Cw", CFG, str(root), date(2026, 9, 1), "C1", "sender")
     assert (kw["icons_dir"], kw["reply_delay"]) == (icons, 0.0)
     assert callable(kw["deploy_plot"])
+
+
+def test_image_body():
+    # the site draws the OP image: every scan from the lead-in on, the primary's quota, the headline interval's diff
+    assert D.image_body(MONTH, SEP, CFG) == {
+        "title": "S3 usage — September 2026",
+        "note": "cw.example.org · TiB",
+        "month": "2026-09",
+        "points": [
+            {"scan": "2026-08-31T1200", "bytes": 705 * TIB},
+            {"scan": "2026-09-01T0000", "bytes": 710 * TIB},
+            {"scan": "2026-09-01T1200", "bytes": 713 * TIB},
+            {"scan": "2026-09-02T0000", "bytes": 712 * TIB},
+            {"scan": "2026-09-02T1200", "bytes": 715 * TIB},
+        ],
+        "quota": {"bytes": 910 * TIB, "name": "1 PB"},
+        "diff": {"from": "2026-08-31T1200", "to": "2026-09-02T1200", "path": "main-data", "title": "What changed in main-data — 8/31 → 9/2"},
+    }
+
+
+def test_image_body_first_scan():
+    # a month whose only scan is its first (no lead-in): one point, no diff
+    one = D.Month(lead=[], rows=MONTH.rows[:1])
+    assert D.image_body(one, SEP, CFG) == {
+        "title": "S3 usage — September 2026",
+        "note": "cw.example.org · TiB",
+        "month": "2026-09",
+        "points": [{"scan": "2026-09-01T0000", "bytes": 710 * TIB}],
+        "quota": {"bytes": 910 * TIB, "name": "1 PB"},
+    }
+
+
+def test_render_plot_posts_to_site(monkeypatch, tmp_path: Path):
+    from dt_cloud import site
+
+    calls = []
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
+    D.Cw(CFG).render_plot(MONTH, SEP, tmp_path / "op.png")
+    assert calls == [(SITE, "tok", "/api/digest-image", D.image_body(MONTH, SEP, CFG))]
+    assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"

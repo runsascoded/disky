@@ -5,6 +5,11 @@ injected env carries them):
   - ``pushover``: ``PUSHOVER_TOKEN`` (the application's API token) and
     ``PUSHOVER_USER`` (the user or group key)
   - ``discord``: ``DISCORD_NOTIFY_WEBHOOK`` (a channel webhook URL)
+  - ``slack``: ``SLACK_BOT_TOKEN`` (a bot token with ``chat:write``) and
+    ``SLACK_ALERT_CHANNEL`` (the channel id or name it posts to, top-level)
+
+Each value is read with trailing whitespace stripped (a secret pasted with its
+newline must not become a bad header or URL).
 
 ``DISK_TREE_NOTIFY`` (comma-separated, in order) picks and orders them; unset,
 every channel whose credentials are present is used, in the order above.
@@ -22,9 +27,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 PUSHOVER_URL = 'https://api.pushover.net/1/messages.json'
+SLACK_URL = 'https://slack.com/api/chat.postMessage'
 # Discord's edge refuses urllib's default User-Agent (403, error 1010).
 USER_AGENT = 'disk-tree (https://github.com/runsascoded/disky, 1)'
-CHANNELS = ('pushover', 'discord')
+CHANNELS = ('pushover', 'discord', 'slack')
 # Discord message flag: no link previews.
 SUPPRESS_EMBEDS = 1 << 2
 
@@ -51,11 +57,17 @@ def http_post(url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]
         return e.code, e.read().decode(errors='replace')
 
 
+def secret(env: Mapping[str, str], name: str) -> str:
+    """``env[name]`` with trailing whitespace stripped; empty when unset."""
+    return (env.get(name) or '').rstrip()
+
+
 def configured(env: Mapping[str, str] = os.environ) -> list[str]:
     """The channels to use, in order: ``DISK_TREE_NOTIFY``'s, else every one with credentials."""
     has = {
-        'pushover': bool(env.get('PUSHOVER_TOKEN') and env.get('PUSHOVER_USER')),
-        'discord': bool(env.get('DISCORD_NOTIFY_WEBHOOK')),
+        'pushover': bool(secret(env, 'PUSHOVER_TOKEN') and secret(env, 'PUSHOVER_USER')),
+        'discord': bool(secret(env, 'DISCORD_NOTIFY_WEBHOOK')),
+        'slack': bool(secret(env, 'SLACK_BOT_TOKEN') and secret(env, 'SLACK_ALERT_CHANNEL')),
     }
     named = env.get('DISK_TREE_NOTIFY')
     if named is None:
@@ -70,7 +82,7 @@ def configured(env: Mapping[str, str] = os.environ) -> list[str]:
 
 
 def pushover(n: Notice, env: Mapping[str, str], post: Post) -> None:
-    form = {'token': env['PUSHOVER_TOKEN'], 'user': env['PUSHOVER_USER'], 'title': n.title, 'message': n.message, 'priority': str(n.priority)}
+    form = {'token': secret(env, 'PUSHOVER_TOKEN'), 'user': secret(env, 'PUSHOVER_USER'), 'title': n.title, 'message': n.message, 'priority': str(n.priority)}
     if n.url:
         form['url'] = n.url
         if n.url_title:
@@ -89,12 +101,35 @@ def discord(n: Notice, env: Mapping[str, str], post: Post) -> None:
         'allowed_mentions': {'parse': []},
         'flags': SUPPRESS_EMBEDS,
     }
-    status, body = post(env['DISCORD_NOTIFY_WEBHOOK'], json.dumps(payload).encode(), {'Content-Type': 'application/json'})
+    status, body = post(secret(env, 'DISCORD_NOTIFY_WEBHOOK'), json.dumps(payload).encode(), {'Content-Type': 'application/json'})
     if status not in (200, 204):
         raise RuntimeError(f'discord: HTTP {status}: {body[:200]}')
 
 
-SENDERS: dict[str, Callable[[Notice, Mapping[str, str], Post], None]] = {'pushover': pushover, 'discord': discord}
+def slack(n: Notice, env: Mapping[str, str], post: Post) -> None:
+    """``chat.postMessage``, top-level in ``SLACK_ALERT_CHANNEL``. Slack answers HTTP 200 with ``ok: false`` on
+    most failures (``channel_not_found``, ``invalid_auth``), so the body decides."""
+    link = f'\n<{n.url}|{n.url_title}>' if n.url and n.url_title else f'\n<{n.url}>' if n.url else ''
+    payload = {
+        'channel': secret(env, 'SLACK_ALERT_CHANNEL'),
+        'text': f'*{n.title}*\n{n.message}{link}',
+        'unfurl_links': False,
+        'unfurl_media': False,
+    }
+    status, body = post(SLACK_URL, json.dumps(payload).encode(), {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Authorization': f'Bearer {secret(env, "SLACK_BOT_TOKEN")}',
+    })
+    try:
+        res = json.loads(body) if body else {}
+    except ValueError:
+        res = {}
+    if status != 200 or not res.get('ok'):
+        # Slack's error body names the failure (`{"ok":false,"error":"invalid_auth"}`), never the token.
+        raise RuntimeError(f'slack: HTTP {status}: {body[:200]}')
+
+
+SENDERS: dict[str, Callable[[Notice, Mapping[str, str], Post], None]] = {'pushover': pushover, 'discord': discord, 'slack': slack}
 
 
 def send(

@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import type { FoldedLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -536,6 +536,9 @@ export async function readRootAgg(env0: Env, o: { date: string; path: string; le
   // distinct from an owner/class slice that filters an existing path to zero (a
   // real 0, kept — those rows are non-empty). A lens reads a pre-filtered `user`
   // tier where empty can't tell "absent" from "owns nothing", so it's unchanged.
+  // A scan the interval store holds always has its root: no sort to read it from there is a failed read (a
+  // store whose slice sorts went unread, falling back to a per-scan index long retired), never a gap.
+  if (rows == null && (lens || owner) && (await ivHeldDates(env0)).includes(date)) throw new Error(`no owner-scoped sort of ${date} to read`)
   if (rows == null || (!lens && rows.length === 0)) return null
   const mine = newAgg()
   for (const r of rows) if (ownerOk(r.usr, owner)) merge(mine, classRow(r, o.classes))

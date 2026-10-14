@@ -1,5 +1,5 @@
 """`disk-tree notify MESSAGE` — push a notification to a person (Pushover, a
-Discord webhook), configured by env (`disk_tree.notify.push`). The ingest's
+Discord webhook, Slack), configured by env (`disk_tree.notify.push`). The ingest's
 failure trap sends through it."""
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def notify_cmd(channels: str | None, first: bool, url_title: str | None, priorit
         env['DISK_TREE_NOTIFY'] = channels
     chans = push.configured(env)
     if not chans:
-        print('notify: no channel configured (PUSHOVER_TOKEN + PUSHOVER_USER, or DISCORD_NOTIFY_WEBHOOK)', file=sys.stderr)
+        print('notify: no channel configured (PUSHOVER_TOKEN + PUSHOVER_USER, DISCORD_NOTIFY_WEBHOOK, or SLACK_BOT_TOKEN + SLACK_ALERT_CHANNEL)', file=sys.stderr)
         sys.exit(2)
     results = push.send(push.Notice(title, message, url, url_title, priority), chans, first=first, env=env, post=push.http_post)
     for c, e in results:

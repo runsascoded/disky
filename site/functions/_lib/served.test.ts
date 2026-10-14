@@ -228,6 +228,20 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       expect([keys(s.store), s.r2]).toEqual([[...PATH_SORTS, `${GCS} get snapshots/${OLD}/meta.json`, `${GCS} list snapshots/`], []])
     })
 
+    it('series: a point that errors is named in `failed` and the response is not cached', async () => {
+      const w = await world(true)
+      const puts: string[] = []
+      ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async (k: Request) => { puts.push(k.url) } } }
+      const pass = globalThis.fetch
+      vi.stubGlobal('fetch', async (req: RequestInfo, init?: RequestInit) =>
+        (typeof req === 'string' ? req : req.url).includes(dirOf(B)) ? new Response('boom', { status: 403 }) : pass(req, init))
+      const r = await w.mods.series.onRequestGet({ request: new Request('http://localhost/api/series?path='), env: w.env })
+      const body = (await r.json()) as { points: { date: string; b: number }[]; failed?: string[] }
+      expect([r.status, r.headers.get('cache-control'), body.points.map(p => [p.date, p.b]), body.failed, puts]).toEqual([
+        200, 'no-store', [[OLD, 777], [A, 37229948]], [B], [],
+      ])
+    })
+
     it('`scans.json` is D1 alone: no store LIST, no INDEX_R2 read', async () => {
       for (const served of [true, false]) {
         const w = await world(served)

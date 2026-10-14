@@ -2,6 +2,7 @@
 `evictFooters` pass), `adopt`, `dt-cloud footer-evict`, and `retire_d1` /
 `gc_d1` keeping `footer_cache` coherent — against a real SQLite carrying the
 cw lineage's migrations (the D1 schema)."""
+import re
 import sqlite3
 from pathlib import Path
 
@@ -160,6 +161,24 @@ def test_adopt_tracks_pre_lru_sorts_with_a_cold_footer(d1):
         ("2026-09-03", "path", "g1", "hot", 1, 7),
     ]
     assert adopt(base="gs://bk", has_cold=lambda _p: False) == ([], [("2026-09-02", "bysize", "gs://bk/l2/2026-09-02/index/g1/path-index-bysize.groups.parquet")])
+
+
+def test_adopt_sizes_one_sort_per_query(d1):
+    """A deployment's whole `index_row_groups` (gcs: 6.5M rows, ~6 GB) is past what one D1 query may scan: each
+    pointed sort is sized on its own, over its own rows (the `(date, variant, gen, …)` index)."""
+    for date in ("2026-09-01", "2026-09-02"):
+        for v in ("path", "bysize"):
+            _pointer(d1.con, date, v, "g1")
+            _rows(d1.con, date, v, "g1", 2)
+    d1.sent.clear()
+    adopt(base="gs://bk", has_cold=lambda _p: True)
+    scans = [re.sub(r"\s+", " ", q) for q in d1.sent if "FROM index_row_groups" in q]
+    assert [re.search(r"WHERE date = '([^']+)' AND variant = '([^']+)' AND gen = '([^']+)'", q).groups() for q in scans] == [
+        ("2026-09-01", "bysize", "g1"),
+        ("2026-09-01", "path", "g1"),
+        ("2026-09-02", "bysize", "g1"),
+        ("2026-09-02", "path", "g1"),
+    ]
 
 
 def test_footer_evict_cli_one_pass_and_waiting(d1, monkeypatch):

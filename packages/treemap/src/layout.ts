@@ -12,7 +12,7 @@
  * later adopt this as its single source of truth.
  */
 import type { Rect } from './squarify'
-import type { Tiling } from './Treemap'
+import type { Tiling } from './cellTypes'
 
 /** Synthetic node the default fold-small merger returns. */
 export interface FoldedNode<T> {

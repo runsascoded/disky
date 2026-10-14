@@ -1,28 +1,16 @@
 import { Explain } from './Help'
 import { useMemo } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { Treemap as DtTreemap, divergingColor, divergingInk } from '@disk-tree/react'
+import { Treemap as DtTreemap } from '@disk-tree/react'
 import { stringParam, useUrlState } from 'use-prms'
 import { useRenderer, useTiling } from './prefs'
 import { useUnits } from './units'
-import { buildTree } from './diffModel'
+import { deltaColor, diffBorderWidth, diffCellStyle, diffRoot, FIRST_SCANNED, UNCHANGED_GREY } from './diffStyle'
 import { diffCellAction } from './diffRows'
 import type { AreaMode, DiffData, DiffNode } from './diffModel'
 import { usePerfCommit } from './perf'
 
-const { abs, max, min, sign } = Math
-
-// Ported from disk-tree's CompareView (ui/src/components/CompareView.tsx):
-// `divergingColor` is red-positive, so negate on the way in.
-const UNCHANGED_GREY = 'rgba(110, 118, 129, 0.28)'
-const deltaColor = (t: number) => divergingColor(-t)
-// A root the older scan never covered (specs/done/root-geneses.md §3): neither
-// grew nor shrank, so neither green nor red — the site's blue. A first-scanned
-// bucket AND everything under it read blue: its bytes entered the scan, they
-// aren't the interval's writes, so painting its interior green (as "added")
-// would double-count the day's growth. Blue frames a blue interior — never a
-// blue box sitting under green children.
-const FIRST_SCANNED = 'var(--s1)'
+const { abs, min } = Math
 
 /** The diff's derived model: the built tree, the resolved area mode, the root
  *  movement totals, and the unit-aware formatters — computed once and shared by
@@ -72,32 +60,9 @@ export function useDiffModel(data: DiffData | null, atRoot: boolean, label: stri
     // Area mode falls back to `max` when Δ has nothing to show: if the user
     // hasn't pinned a mode and the movement tree is empty (nothing moved between
     // the two scans), draw the sizes in `max` instead of a bare "no changes".
-    const wantMax = dmP === 'max'
-    let mode: AreaMode = wantMax ? 'max' : 'delta'
-    let { cells } = buildTree(data, mode, atRoot)
-    if (!wantMax && cells.length === 0) {
-      const alt = buildTree(data, 'max', atRoot)
-      if (alt.cells.length) { mode = 'max'; cells = alt.cells }
-    }
-    const root: DiffNode = {
-      key: label,
-      label,
-      k: 'dir',
-      weight: cells.reduce((s, c) => s + c.weight, 0),
-      delta: data.total_b - data.total_a,
-      added: cells.reduce((s, c) => s + c.added, 0),
-      removed: cells.reduce((s, c) => s + c.removed, 0),
-      status: 'root',
-      size_old: data.total_a,
-      size_new: data.total_b,
-      n_desc_delta: data.objects_b - data.objects_a,
-      n_old: data.objects_a,
-      n_new: data.objects_b,
-      n_added: cells.reduce((s, c) => s + c.n_added, 0),
-      n_removed: cells.reduce((s, c) => s + c.n_removed, 0),
-      children: cells,
-    }
-    if (!root.children?.length) return null
+    const built = diffRoot(data, dmP === 'max' ? 'max' : 'delta', dmP === 'max', atRoot, label)
+    if (!built) return null
+    const { root, mode } = built
     const { added, removed, n_added, n_removed } = root
     // Roots that entered the scan in this interval: shown apart from the
     // interval's writes (`⊕ first scanned`), so the day's growth stays readable.
@@ -224,14 +189,6 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
   const [tiling] = useTiling()
   const [renderer] = useRenderer()
 
-  // Rect seams like the main map: a fat gutter at the top level, a clear line
-  // one down, hairlines below — so nested cells read as nested, not as one flat
-  // mosaic. Colours: the treemap's contrast half-stroke (blue for first-scanned).
-  const borderWidth = (depth: number, { w, h }: { w: number; h: number }): number => {
-    const base = depth === 0 ? 3 : depth === 1 ? 2 : 1
-    return min(base, max(1, min(w, h) / 16))
-  }
-
   return (
     <div className="diff-tm">
       <DtTreemap<DiffNode>
@@ -260,46 +217,10 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
         collapseChains
         depthFade={1}
         rootFade={1}
-        borderWidth={borderWidth}
+        borderWidth={diffBorderWidth}
         tiling={tiling}
         renderer={renderer}
-        colorForCell={n => {
-          // First-scanned: the bucket and its whole subtree read blue. A
-          // container gets a neutral fill with a blue frame (the borders draw
-          // it), so its blue children aren't sitting inside a blue block; a
-          // leaf takes the blue fill.
-          if (n.fs) {
-            return n.children?.length
-              ? { bg: 'color-mix(in oklab, var(--s1) 28%, var(--panel))', ink: 'var(--ink)', edge: FIRST_SCANNED }
-              : { bg: FIRST_SCANNED, ink: '#fff', edge: FIRST_SCANNED }
-          }
-          // No `edge` below: the treemap's adaptive contrast half-stroke (dark on
-          // light fills, light on dark) draws the seams, as on the main map — a
-          // fill-tinted edge left green-on-green cells without a visible border.
-          if (areaMode === 'max') {
-            if (n.children?.length) {
-              const t = n.weight === 0 ? 0 : n.delta / n.weight
-              const bg = deltaColor(t)
-              return { bg, ink: divergingInk(t) }
-            }
-            const f = n.weight === 0 ? 0 : min(1, abs(n.delta) / n.weight)
-            if (f === 0) return { bg: UNCHANGED_GREY, ink: divergingInk(0) }
-            const pct = `${(f * 100).toFixed(2)}%`
-            const band = deltaColor(sign(n.delta))
-            return {
-              bg: `linear-gradient(to top, ${band} ${pct}, ${UNCHANGED_GREY} ${pct})`,
-              ink: divergingInk(f > 0.85 ? 1 : 0),
-            }
-          }
-          // Δ mode: area already says how much moved; color says how much of the
-          // node that was — a wholly added / removed directory is full green /
-          // red however small, a 5% shrink is a faint red, a net-zero churn is
-          // grey (its tooltip shows the churn).
-          const base = max(n.size_old, n.size_new)
-          const t = base === 0 ? 0 : n.delta / base
-          const bg = deltaColor(t)
-          return { bg, ink: divergingInk(t) }
-        }}
+        colorForCell={n => diffCellStyle(n, areaMode)}
         renderCellExtra={areaMode === 'max' ? (n, _path, { w, h }) => {
           if (n.fs || n.children?.length || w < 56) return null
           const f = n.weight === 0 ? 0 : min(1, abs(n.delta) / n.weight)
