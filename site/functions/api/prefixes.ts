@@ -25,7 +25,7 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const scan = await scanArg(ctx.env, new URLSearchParams(typeof body?.date === 'string' ? { date: body.date } : {}))
   if (scan instanceof Response) return scan
   const date = scan
-  const prefixes = Array.isArray(body?.prefixes) ? body.prefixes.filter((p): p is string => typeof p === 'string' && /^[a-z0-9]+:\/\/[^/]+\//.test(p)) : []
+  const prefixes = Array.isArray(body?.prefixes) ? body.prefixes.filter((p): p is string => typeof p === 'string' && /^[a-z0-9]+:\/\/\/?[^/]+\//.test(p)) : []
   if (!prefixes.length || prefixes.length > MAX_PREFIXES) return json({ error: `expected 1–${MAX_PREFIXES} prefixes` }, 400)
   try {
     const { stats, groups } = await prefixesAt(env, date, prefixes)
