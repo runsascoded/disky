@@ -1,6 +1,7 @@
 """`dispatch --serve` (the laptop drainer) rides out a D1 outage: transient errors back off and retry, others exit."""
 from __future__ import annotations
 
+import errno
 import re
 from email.message import Message
 from socket import gaierror
@@ -26,7 +27,7 @@ def http(code: int) -> HTTPError:
     (URLError(gaierror(8, "nodename nor servname provided, or not known")), True),
     (TimeoutError(60, "Operation timed out"), True),
     (ConnectionResetError(54, "Connection reset by peer"), True),
-    (OSError(65, "No route to host"), True),
+    (OSError(errno.EHOSTUNREACH, "No route to host"), True),
     (PermissionError(1, "Operation not permitted"), False),
     (ValueError("bad"), False),
 ])
