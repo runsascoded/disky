@@ -408,6 +408,8 @@ The 10-10 per-fetch arithmetic (≈ 70 ms × 26K fetches ≈ the loop time) matc
 
 **Checks:** the drill, roots, merge, append and runner tests pass (331). Every run drill the fixture world builds (separate runs, counter and backfill tiers, both configs: 316 files) is byte-identical to the pre-change code, and so is `meta.json` apart from build times (`reads` counts included). Mutations are caught: `has_in` true on empty ranges, the `q`-span bisect off by one, and `insert_rows` dropping a row.
 
+**Later (2026-10-14):** at gcs 10-14's scale, settling was 50 / 39 of the tasks' minutes, mostly a DuckDB range join in `_settle_ctx` (today's roots under each candidate); replaced by an equality match, see `specs/architecture/static-name-search.md`, "Runs: settling's cost (2026-10-14)".
+
 ### R2 layout for the reader (`oa-gcs-usage-index`)
 
 - `static-names/2026-10-08c/drill/…`: the base (unchanged).

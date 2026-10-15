@@ -277,7 +277,7 @@ class Profile:
     jobs: tuple[JobKind, ...] = ()
     outputs: tuple[OutputSpec, ...] = ()
     #: A phase marker in the task log: groups `name` and (optional) `note` (`PHASE <name>: <s>s (<note>)`).
-    phase_marker: str = r"^PHASE (?P<name>[^:]+): \d+s(?: \((?P<note>[^)]*)\))?"
+    phase_marker: str = r"^PHASE (?P<name>[^:]+): -?\d+s(?: \((?P<note>[^)]*)\))?"
     phase_start_marker: str = r"^PHASE-START (?P<name>[^:]+): \d+s"
     #: Markers that are not phases (a final total).
     phase_ignore: tuple[str, ...] = ("total",)
@@ -1108,8 +1108,9 @@ class JobRun:
 
     # the record
 
-    def write(self, **kw) -> Record | None:
-        """One `record` write of this run (never raises: a failure is printed, the job continues)."""
+    def write(self, at: int | None = None, **kw) -> Record | None:
+        """One `record` write of this run, at `at` (epoch s; default now). Never raises: a failure is printed, the job
+        continues."""
         if not self.recording or not self.run_id:
             return None
         try:
@@ -1117,7 +1118,7 @@ class JobRun:
             profile = replace(self.profile, store=st["store"]) if st.get("store") else self.profile
             if kw.get("gen") is None:
                 kw["gen"] = st.get("gen")
-            rec = record(sink_for(self.dry_run, self.sqlite, self.d1), profile, self.scan or "", self.run_id, _now(),
+            rec = record(sink_for(self.dry_run, self.sqlite, self.d1), profile, self.scan or "", self.run_id, _now() if at is None else at,
                          kind=st.get("kind", "scan"), parent=st.get("parent"), **kw)
             report_record(rec, kw.get("phase"))
             return rec
@@ -1209,16 +1210,17 @@ class JobRun:
 
     # the steps
 
-    def clock(self) -> int:
-        """Seconds since `$DT_JOB_START`; exits 2 when it isn't set (a PHASE line never prints another clock)."""
+    def clock(self, at: int | None = None) -> int:
+        """Seconds from `$DT_JOB_START` to `at` (default now; negative for an instant before the job, e.g. a phase that
+        ended before it existed); exits 2 when it isn't set (a PHASE line never prints another clock)."""
         v = (self.env.get(JOB_START_ENV) or "").strip()
         if not v.isdigit():
             err(f"scan-run: ${JOB_START_ENV} is not set: export {JOB_START_ENV}=$(date +%s) at the job's top")
             sys.exit(2)
-        return _now() - int(v)
+        return (_now() if at is None else at) - int(v)
 
     def begin(self, name: str, began: int | None = None, gen: str | None = None) -> None:
-        err(phase_line(name, self.clock(), start=True))
+        err(phase_line(name, self.clock(began), start=True))
         if gen:
             self.save(gen=gen)
         self.write(phase=name, phase_start=True, began=began, gen=gen)
@@ -1235,17 +1237,18 @@ class JobRun:
         measure: bool = True,
         timed_out: str | None = None,
         terminated: int | None = None,
+        at: int | None = None,
     ) -> int:
-        """Close phase `name` with exit code `rc`: the PHASE line, its record, and on a failure its alert. Returns the
-        exit status: `rc` for a fatal failure, else 0."""
-        secs = self.clock()
+        """Close phase `name` with exit code `rc` at `at` (epoch s; default now): the PHASE line, its record, and on a
+        failure its alert. Returns the exit status: `rc` for a fatal failure, else 0."""
+        secs = self.clock(at)
         if rc:
             note = f"failed (exit {rc})" + (f", {note}" if note else "")
         note = self.redact(note) if note else None
         err(phase_line(name, secs, note))
         pairs = [tuple(o.split("=", 1)) for o in outputs]
         # a failed phase's outputs are not measured: what it left is partial
-        self.write(phase=name, note=note, store=AnyStore() if measure and not rc else None, outputs=() if rc else pairs)
+        self.write(at, phase=name, note=note, store=AnyStore() if measure and not rc else None, outputs=() if rc else pairs)
         if not rc:
             return 0
         why = f", timed out after {timed_out}" if timed_out else f", terminated by {signame(terminated)}" if terminated else ""
@@ -1407,10 +1410,11 @@ def _phase_end_opts(f):
 @option("-p", "--parent", default=None, help="The orchestrating run's id")
 @option("-R", "--region", default=None, help="Job fact: the region (or with -J / -B where to look the job up)")
 @option("--spot/--no-spot", default=None, help="Job fact: the run ran on spot capacity")
+@option("-t", "--at", type=int, default=None, help="When the run started (epoch seconds; default now): e.g. its capture's start, before the job")
 @option("-T", "--tasks", type=int, default=None, help="Job fact: the job's task count")
 @_wrapper_opts
 @argument("scan", required=False)
-def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key, machine, parent, region, spot, tasks,
+def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key, machine, parent, region, spot, at, tasks,
               profile_path, d1, dry_run, run_id, sqlite, scan) -> None:
     """Start the job's run of SCAN (default $SCAN_ID): record it running (`record -S`) and keep its scan, kind,
     parent and job facts for the phases and `finish`. Never fails the job."""
@@ -1426,7 +1430,7 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
             report_failure(e)
     facts = dict(job_name=job_name, region=None if (batch_job_name or from_batch) else region, machine=machine, spot=spot,
                  tasks=tasks, image=image)
-    rec = j.write(start=True, job=job, facts=facts)
+    rec = j.write(at, start=True, job=job, facts=facts)
     if rec is not None:
         j.save(region=rec.run.region, job_name=rec.run.job_name)
     j.point_supervisor(profile_path, d1, dry_run, sqlite)
@@ -1445,15 +1449,16 @@ def phase_begin_cmd(began, gen, profile_path, d1, dry_run, run_id, sqlite, name)
 
 @cli.command("phase-end")
 @_phase_end_opts
+@option("-t", "--at", type=int, default=None, help="When the phase ended (epoch seconds; default now): e.g. a phase that ended before the job")
 @option("-x", "--exit", "rc", type=IntRange(0, 255), default=0, help="The phase's exit code (non-zero: it failed)")
 @_wrapper_opts
 @argument("name")
-def phase_end_cmd(msg, no_measure, outputs, note, resume, warn, rc, profile_path, d1, dry_run, run_id, sqlite, name) -> None:
+def phase_end_cmd(msg, no_measure, outputs, note, resume, warn, at, rc, profile_path, d1, dry_run, run_id, sqlite, name) -> None:
     """Phase NAME ended with exit code -x: `PHASE <name>: <N>s (wall[, note])` on stderr, the phase recorded (its
     outputs measured). A failure records the phase failed and alerts: fatal (default) posts `fail`, marks the run
     alerted and exits RC; `-W` posts `warn` and exits 0."""
     j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
-    sys.exit(j.end(name, rc, warn, msg, resume, note, outputs, not no_measure))
+    sys.exit(j.end(name, rc, warn, msg, resume, note, outputs, not no_measure, at=at))
 
 
 @cli.command("phase")

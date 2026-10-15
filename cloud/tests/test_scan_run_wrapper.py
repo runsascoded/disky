@@ -496,3 +496,25 @@ def test_phase_forwards_a_received_term_to_its_session(tmp_path):
         f"alert (suppressed): ❌ cw-s3 {SCAN}: fg failed (exit 143, terminated by SIGTERM)",
     ], True)
     assert gone(int(pidfile.read_text())) == []
+
+
+def test_explicit_times_for_phases_before_the_job(job):
+    """A run that starts before its job (`start -t`: its capture's start) and phases that ended before the job existed
+    (`phase-end -t`): recorded at the stated instants; their PHASE lines count from `$DT_JOB_START`, so negative."""
+    assert job("start", "-t", str(T0 - 300), SCAN, at=T0 + 1) == 0
+    assert job("phase-begin", "-b", str(T0 - 300), "capture", at=T0 + 1) == 0
+    assert job("phase-end", "-M", "-t", str(T0 - 120), "capture", at=T0 + 1) == 0
+    assert job("phase-begin", "-b", str(T0 - 120), "queue", at=T0 + 1) == 0
+    assert job("phase-end", "-M", "-t", str(T0), "queue", at=T0 + 1) == 0
+    assert job("phase-begin", "fetch", at=T0 + 1) == 0
+    assert job("phase-end", "-M", "fetch", at=T0 + 5) == 0
+    assert job("finish", "-x", "0", at=T0 + 6) == 0
+    assert job.rows("SELECT status, started_ts, finished_ts FROM scan_runs") == [("succeeded", T0 - 300, T0 + 6)]
+    assert job.rows("SELECT phase, started_ts, finished_ts, status FROM scan_run_phases ORDER BY seq") == [
+        ("capture", T0 - 300, T0 - 120, "done"),
+        ("queue", T0 - 120, T0, "done"),
+        ("fetch", T0 + 1, T0 + 5, "done"),
+    ]
+    assert [ln for ln in job.take() if ln.startswith("PHASE ")] == [
+        "PHASE capture: -120s (wall)", "PHASE queue: 0s (wall)", "PHASE fetch: 5s (wall)",
+    ]
