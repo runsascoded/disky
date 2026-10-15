@@ -113,6 +113,31 @@ const PROD_HOST = process.env.VITE_PROD_HOST ?? VARS.PROD_HOST ?? ''
 const DEV_HOST = process.env.VITE_DEV_HOST ?? VARS.DEV_HOST ?? ''
 // The source link (src/SiteKbd.tsx); unset = this repo.
 const REPO_URL = process.env.VITE_REPO_URL ?? VARS.REPO_URL ?? ''
+// The deployment's mark (`MARK` under [vars]): a key of `scripts/marks/marks.mjs`'s
+// `STORES` (`gcs`, `cw`, `r2`, `s3`, `hf`, `nas`, `macos`, `local`), built into
+// `public/icons/` by `scripts/marks/build.mjs`. Unset → a favicon of ROOT_LABEL's
+// first letters.
+const MARK = process.env.VITE_MARK ?? VARS.MARK ?? ''
+
+// The favicon + apple-touch icon: the deployment's mark, else its label.
+const markIcons: Plugin = {
+  name: 'mark-icons',
+  transformIndexHtml() {
+    if (MARK) {
+      if (!existsSync(`public/icons/${MARK}.svg`)) throw new Error(`MARK=${MARK}: no public/icons/${MARK}.svg (scripts/marks/build.mjs)`)
+      return [
+        { tag: 'link', attrs: { rel: 'icon', href: `/icons/${MARK}.svg`, type: 'image/svg+xml' }, injectTo: 'head' },
+        { tag: 'link', attrs: { rel: 'icon', href: `/icons/${MARK}.ico`, sizes: '32x32' }, injectTo: 'head' },
+        { tag: 'link', attrs: { rel: 'apple-touch-icon', href: `/icons/${MARK}-180.png` }, injectTo: 'head' },
+      ]
+    }
+    const text = [...(ROOT_LABEL || 'disky').trim()].slice(0, 2).join('')
+    const esc = text.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`)
+    const size = [...text].length > 1 ? 250 : 340
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0D1117"/><text x="256" y="${256 + size * .36}" text-anchor="middle" font-family="system-ui, -apple-system, Helvetica, Arial, sans-serif" font-weight="700" font-size="${size}" fill="#5EEAD4">${esc}</text></svg>`
+    return [{ tag: 'link', attrs: { rel: 'icon', href: `data:image/svg+xml,${encodeURIComponent(svg)}`, type: 'image/svg+xml' }, injectTo: 'head' }]
+  },
+}
 
 // The build's commit (the session log stamps it on every batch, specs/session-log.md): `VITE_BUILD_SHA`, else
 // the checkout's HEAD, else none.
@@ -133,7 +158,7 @@ export default defineConfig({
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
     'import.meta.env.VITE_BUILD_SHA': JSON.stringify(buildSha()),
   },
-  plugins: [react(), devSeriesIndex, devChildrenActions, llmsTxt],
+  plugins: [react(), devSeriesIndex, devChildrenActions, llmsTxt, markIcons],
   server: {
     port: PORT,
     host: true,

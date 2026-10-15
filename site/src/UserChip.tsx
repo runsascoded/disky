@@ -13,6 +13,7 @@ import {
   useRole,
 } from '@floating-ui/react'
 import { createContext, useContext, useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { Ident } from './auth'
 import { Avatar } from './Avatar'
 import { registry } from './identities'

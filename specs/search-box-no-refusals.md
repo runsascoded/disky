@@ -19,7 +19,7 @@ Syntax `plain` (`site/functions/_lib/querySyntax.ts`; `queryParam(…, indexed)`
 | Former code | Now | Commit |
 |---|---|---|
 | `unsupported-glob`, `unsupported-regex` | Gone. `*`, `?`, regex characters and `/…/` are literal text (`plain`), any term length (no `short-term` either: the index answers every literal) | `c475f982` |
-| `unsupported-slash` | Path terms answered exactly (§2.1). Left: a tail under 2 characters (`slash-tail-short`, §3.3) | `e797c8db` |
+| `unsupported-slash` | Path terms answered exactly (§2.1). Left: a tail under 2 characters (`slash-tail-short`, §3.3; an empty one, `x/`, names `x$`) | `e797c8db` |
 | `unsupported-scope` | Owner pools answered (§2.2). Left: a person lens or a class scope (§3.4, §3.5); a heavy literal's rollup under a pool (`owner-too-common`, §3.4) | `b4e0cebd` |
 | `scan-not-indexed` (the publish window) | The r2 ingest lists a scan only after its appends land, as gcs does (§2.3). Left: a failed append; cw's waits (§3.6) | `c9243667` |
 | `anchor-too-short` | Unchanged: `^a`, `ab$` need §3.2 | — |
@@ -66,6 +66,9 @@ gcs's job runs the static append (and the interval append) before `index-sync`'s
 `ckpt/` (empty tail), `ckpt/a` (one character), and a path term whose tail's range is too big under the view (e.g. `run-7/model` at the fleet root, `^model` being common) are refused (`slash-tail-short`, `term-too-common`). Two changes, cheapest first:
 
 1. **Trailing `/`**: `ckpt/` is "a folder whose name ends with `ckpt`, with something in it": its match roots are such a folder's children, whose bytes are the folder's. With the kind bit (`specs/search-extensions.md` §3) the reader answers it as `is:dir ckpt$` with the roots moved one level down (or drawn at the folders: the same bytes). No extra index.
+   - **Why not now, from `ckpt$`'s hits** (decided 2026-10-15, on m3's `^c/disky/` report): the paths holding `x/` are exactly the strict descendants of `x$`'s match roots, so `x/`'s total is Σ over the roots that are folders. The hits carry no kind, and a root's `n` doesn't settle it: an object named `x` and a folder holding one object both have `n = 1` (and on S3 an object `x` beside a folder `x/` is one path, its hit the sum of both). Telling them apart means a path-store lookup per ambiguous root, and the twin can't be split at all, so the rewrite isn't exact without the kind bit. Until then the refusal names the folder term instead: `x/` → "search for the folder itself: “x$”" (`^x/` → `^x$`; `slashTailShort`, `indexedOnly.ts`), which is the same bytes whenever `x` is a folder; a one-character tail (`x/a`) keeps the general wording.
+   - **Without the flag** an empty tail is no static literal the sources answer (`AnchoredSource` declines it `slash-tail-short`), so it walks the path store's thresholded read and says so: `approximate`, `APPROX_UNINDEXED` ("this query can’t use the search index; small matches may be missing"), as every walked filter is. Tests: `staticFilter.test.ts` "a path term ending in `/`" (`fill/`, `^bk/fill/` over the fixture's suffix index and over an anchored-like source: the view and `/api/subtree`, first paint and full, flagged, 500 of brute force's 3000 objects; `fill$` exact), `indexedOnly.test.ts` "an empty tail" (every route, the folder wording; `/` alone the general one).
+   - The m3 report (`^c/disky/` answered `bysize+path`, 1,163,688 of 1,173,429 objects, reported as served under the flag and without `approximate`) didn't reproduce: the gate refuses it before any read (`rejectQuery` on the raw `q`, every route; dev.disk.rbw.sh answers `400 slash-tail-short` since its indexed-only deploy, `be42d512`, 17:03), and the walked answer carries `approximate` here and on r2.rbw.sh (`ctbk/`: `bysize+bysize`, `approximate: true`). Its numbers are the walk's: likely read before the flag reached dev, or on prod (unflagged), with the flag overlooked.
 2. **A pair index** for the rest: per version, rows `s` = each suffix of the parent's name (≥ 1 character) + `/` + the name, sorted `(s, path)` in the suffix shards' layout. A path term's candidates are then the range of its last `x/y` pair (`x` = the part of the term before its last `/`, back to the previous `/`; `y` = the tail, any length): `s` starting with `x/y`, which is exactly the rows whose parent name ends with `x` and name starts with `y`. The range is as selective as the pair, not the tail. Heavy pairs need the drill's roots and rollups over these rows (`static_drill` with `s` from this index). Size: one row per character of the parent's name per version, ≈ the suffix shards again (~13B rows, ~80–135 GB on gcs, ~$15–30 of Batch per base build); per scan, the run's opened versions × their parents' name lengths.
 
 ### 3.4 Owners: rollups and person lenses
@@ -92,7 +95,7 @@ Static hits carry no class split. Add `c2, c3, c4` (bytes in Nearline / Coldline
 
 | Code | When | Closed by |
 |---|---|---|
-| `slash-tail-short` | a path term whose tail is under 2 characters, or empty | §3.3 |
+| `slash-tail-short` | a path term whose tail is under 2 characters, or empty (`x/`: the message names `x$`, the folder, same bytes; unflagged, `x/` walks, flagged `approximate`) | §3.3 (the kind bit for `x/`) |
 | `anchor-too-short` | `^a`, `a$`, `ab$` | §3.2 |
 | `anchor-not-indexed` | `^q`, heavy `q$`, `^q$`, `a/b` on a generation built without anchors (r2 / m3 until rebuilt) | §3.1 (done; rebuild) |
 | `owner-too-common` | a heavy literal under a heavy folder, with an owner pool | §3.4 |

@@ -22,8 +22,12 @@ remote = true
 enabled = true
 
 [vars]
+# The prod ↔ dev host pair (`src/hosts.ts`, read at build time): `g d` / `g D` open this page on the other one.
+PROD_HOST = "r2.rbw.sh"
+DEV_HOST = "dev.r2.rbw.sh"
 STORE = "r2"                     # build-time: the `src/stores.ts` registry key (vite.config.ts)
 AUTH_MODE = "public"             # build-time: no sign-in wall (src/auth.ts)
+MARK = "r2"                      # build-time: favicon + badge, `public/icons/r2.*` (vite.config.ts)
 ROOT_LABEL = "Public R2 Treemap Demo (dev)"
 BASE_SCOPE = "r2"
 OG_CARDS = "1"

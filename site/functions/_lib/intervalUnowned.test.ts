@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { openIndex, slices } from './index'
 import type { OwnerScope } from './scope'
-import { LEDGER_KIND, sqliteD1 } from './testD1'
+import { sqliteD1, withLedger } from './testD1'
 import { type D1Variant, fixture, GETS, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
@@ -70,13 +70,8 @@ async function seed(ledger = LEDGER): Promise<{ perScan: Env; iv: Env }> {
   const search = await readJson<Record<string, D1Variant>>('v2-search/d1.json')
   for (const date of [S1, S3]) seedGeneration(raw, { date, gen: 'g', dir: `listing/${date}/index/g`, variants: v2, files: files('v2') })
   seedGeneration(raw, { date: S2, gen: 'g', dir: `listing/${S2}/index/g`, variants: search, files: files('v2-search') })
-  raw.exec(`
-    CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT);
-    CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
-    ${LEDGER_KIND}
-    CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
-    ${ledger}
-  `)
+  withLedger(raw)
+  if (ledger) raw.exec(ledger)
   const perScan = { DB: db, ROOT_LABEL: 'root', BASE_SCOPE: 'gcs', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
   return { perScan, iv: { ...perScan, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g7', INDEX_R2: r2() } as Env }
 }

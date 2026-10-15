@@ -1,5 +1,10 @@
 # disk-tree
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/public/icons/banner-dark.svg">
+  <img alt="disky: where your disk and bucket space went, mapped" src="site/public/icons/banner-light.svg">
+</picture>
+
 Disk and cloud storage analyzer: a scanning/indexing CLI for local filesystems and S3 / R2 / GCS buckets, and a Cloudflare-hosted treemap site (`site/`) over its indexes.
 
 [![disk-tree treemap of an R2 bucket](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
@@ -91,6 +96,19 @@ disk-tree index /Users/ryan/c/disk-tree
 - **S3**: Caches `aws s3 ls --recursive` output
 - **Depth-based predicate pushdown**: Parquet queries filter by depth for fast loading
 
+### Marks
+
+Each deployment's favicon and badge is a small treemap in its store's colors, with a store glyph in the big tile: `scripts/marks/build.mjs` writes them to `site/public/icons/`, a site deployment picks its favicon with `MARK` in its `wrangler.toml` (unset: a badge of its label's initials), and a union view's sources name theirs as `icon: "/icons/<key>.svg"` (`STORES_JSON`). Glyph credits:
+
+- **NAS / Linux**: Tux, by Larry Ewing with The GIMP; path data from [Simple Icons] (CC0).
+- **Hugging Face**: 🤗 from [Noto Emoji] (Apache 2.0), not Hugging Face's own logo.
+- **Cloudflare R2**: the R2 icon from [Cloudflare's docs][cf-docs] (CC-BY 4.0; the license grants no trademark rights).
+- **Amazon S3**: AWS's S3 service icon (via Simple Icons v9). AWS permits its architecture icons in diagrams and documentation; use as a product badge is a grey area.
+- **CoreWeave**: CoreWeave's mark, used to name the store it scans.
+- **macOS** uses the ⌘ symbol, and **Google Cloud Storage** a generic cloud in Google's four colors; neither uses a vendor logo.
+
+All names and marks belong to their owners; disky is not affiliated with or endorsed by any of them.
+
 ## Development
 
 ```bash
@@ -103,3 +121,7 @@ pnpm install
 cd site
 pnpm dev
 ```
+
+[Simple Icons]: https://simpleicons.org
+[Noto Emoji]: https://github.com/googlefonts/noto-emoji
+[cf-docs]: https://github.com/cloudflare/cloudflare-docs

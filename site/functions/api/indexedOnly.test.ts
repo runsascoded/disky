@@ -217,7 +217,7 @@ describe('D1', () => {
     const enc = (t: string) => `q=${encodeURIComponent(t)}`
     it('this fixture has none: `anchor-not-indexed` on every route, alone or in a compound; a tail too short is `slash-tail-short`', async () => {
       const got = []
-      for (const t of ['data/tomat', 'tomat|data/raw', 'tomat -data/raw', '/tomat/', 'data/t']) {
+      for (const t of ['data/tomat', 'tomat|data/raw', 'tomat -data/raw', 'data/t', 'data/t -x']) {
         got.push(await Promise.all([
           call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true)),
           call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true)),
@@ -227,6 +227,29 @@ describe('D1', () => {
       expect(got).toEqual([
         ...Array(3).fill([refusal('anchor-not-indexed'), refusal('anchor-not-indexed'), refusal('anchor-not-indexed')]),
         ...Array(2).fill([refusal('slash-tail-short'), refusal('slash-tail-short'), refusal('slash-tail-short')]),
+      ])
+    })
+    it('an empty tail (`x/`: what is inside folders ending in x) is `slash-tail-short` on every route, naming the folder term `x$` (its bytes, exact)', async () => {
+      const folder = (term: string) => [400, { error: `A term ending in “/” (what’s inside a folder) isn’t indexed here; search for the folder itself: “${term}”.`, code: 'slash-tail-short' }]
+      const got = []
+      for (const t of ['^data/', 'data/', '/tomat/', 'Data/Raw//', 'tomat|data/']) {
+        got.push(await Promise.all([
+          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true)),
+          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true)),
+          call(series, `path=bk&${enc(t)}`, envOf(true)),
+        ]))
+      }
+      expect(got).toEqual([
+        Array(3).fill(folder('^data$')),
+        Array(3).fill(folder('data$')),
+        Array(3).fill(folder('/tomat$')),
+        Array(3).fill(folder('data/raw$')),
+        Array(3).fill(folder('data$')),
+      ])
+      // Nothing but slashes names no folder: the general wording.
+      expect([rejectQuery('/'), rejectQuery('^//')]).toEqual([
+        { code: 'slash-tail-short', message: REJECT_MESSAGES['slash-tail-short'] },
+        { code: 'slash-tail-short', message: REJECT_MESSAGES['slash-tail-short'] },
       ])
     })
     it('says so in words', () => {

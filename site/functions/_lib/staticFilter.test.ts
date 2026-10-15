@@ -3,15 +3,18 @@ import type { Env } from './auth'
 import { type OwnerScope, parseQuery } from './scope'
 import { type Hit, injectedStores, liveTotal, type HitSource, SuffixHits, staticLiteral, type StaticFilterStore } from './staticFilter'
 import { type Blobs, StaticNames } from './staticNames'
-import { parseAst } from './querySyntax'
+import { parseAst, plain } from './querySyntax'
 import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, capTiles, MATCH_LIST_CAP, matchLists, tileBudget, type ViewNode, type View } from './view'
+import { APPROX_UNINDEXED, buildDiff, buildView, capTiles, MATCH_LIST_CAP, matchLists, tileBudget, type ViewNode, type View } from './view'
 import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
 import { onRequestGet as diffGet } from '../api/diff'
-import type { FilterRejected } from './indexedOnly'
+import { type FilterRejectCode, type FilterRejected, pathTailOk } from './indexedOnly'
+import { parseQuery as parseIn } from './pathQuery'
+import { parseKey } from './staticAnchors'
+import { brute, fixtureObjects, objectsSource } from './testBrute'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -286,6 +289,51 @@ describe('static filter: dispatch', () => {
     expect(hits.map(key).sort()).toEqual([
       `bk/runs/x/ckpt-tomat.pt alice ${Date.UTC(2026, 9, 4)}`, `bk/runs/x/ckpt-tomat.pt alice ${Date.UTC(2026, 9, 5)}`, `bk/runs/x/tomat-tomat.bin  ${Date.UTC(2026, 9, 4)}`,
     ])
+  })
+})
+
+describe('a path term ending in `/` (empty tail), flag unset: the thresholded walk, flagged approximate', () => {
+  // `fill/`'s match roots are `bk/fill`'s 3000 files (1 B – 2 KiB each), most under the walk's threshold: the walk
+  // sees 500 of them, and says so. As the anchored reader does (`staticAnchors.ts`), the static source declines an
+  // empty tail (`slash-tail-short`); the other path terms it answers by brute force. `fill$` (the folder itself) is
+  // the same bytes, exact.
+  const os = objectsSource()
+  const whyNot = new Map<string, FilterRejectCode>()
+  const anchoredLike: HitSource = {
+    async hits(key, under, opts) {
+      const k = parseKey(key)
+      if (k.mode === 'path' && !pathTailOk(k.text, !!k.end)) { whyNot.set(key, 'slash-tail-short'); return null }
+      return os.hits(key, under, opts)
+    },
+    why: key => whyNot.get(key),
+  }
+  const stores: [string, () => StaticFilterStore][] = [
+    ['the fixture\'s suffix index', () => staticStore()],
+    ['an anchored source', () => ({ source: anchoredLike, scans: async () => [...DATES], gen: 'fixture' })],
+  ]
+  const WALK = ['bysize+fine', { n: 500, b: 768000, o: 500 }, true, APPROX_UNINDEXED]
+  for (const [what, st] of stores) {
+    it(`${what}: \`fill/\`, \`^bk/fill/\` (the view and \`/api/subtree\`, first paint and full) vs brute force`, async () => {
+      const got: unknown[] = []
+      for (const t of ['fill/', '^bk/fill/']) {
+        const qq = parseIn(t, plain)!
+        const v = await buildView(envStatic(st()), { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: qq })
+        got.push([t, 'view', v.tier, v.matchCount, v.approximate, v.approximateReason])
+        for (const full of ['', '&full=1']) {
+          const env = envStatic(st())
+          ;(env as unknown as Record<string, string>).STORE_BUCKET = 'my-data'
+          const r = await warmSubtree(env, `http://localhost/api/subtree?date=${A}&path=&q=${encodeURIComponent(t)}${full}`)
+          const j = await r.json() as { tier: string; matchCount: unknown; approximate: unknown; approximateReason: unknown }
+          got.push([t, `route${full}`, j.tier, j.matchCount, j.approximate, j.approximateReason])
+        }
+        got.push([t, 'brute', brute(fixtureObjects(A), qq, '').total])
+      }
+      expect(got).toEqual(['fill/', '^bk/fill/'].flatMap(t => [[t, 'view', ...WALK], [t, 'route', ...WALK], [t, 'route&full=1', ...WALK], [t, 'brute', [1023750, 3000]]]))
+    })
+  }
+  it('`fill$` (the folder): its bytes, exact, from the static source', async () => {
+    const v = await buildView(envStatic(stores[1][1]()), { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: parseIn('fill$', plain)! })
+    expect([v.tier, v.matchCount, v.approximate, matchedRows(v)]).toEqual(['static+path', { n: 1, b: 1023750, o: 3000 }, undefined, [['bk/fill', 1023750, 3000]]])
   })
 })
 

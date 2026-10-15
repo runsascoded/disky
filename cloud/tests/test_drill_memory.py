@@ -29,7 +29,8 @@ def test_bulk_ranges_do_not_populate_python_string_key_cache(bounds, expected):
             assert (lo, hi) == (("member", bounds[0]), ("member", bounds[1]))
             return [{"q_min": "member", "q_max": "member", "k_min": "b/d/a", "k_max": "b/d/c"}], 3
 
-        def group_rows(self, g):
+        def group_rows(self, g, keep=True):
+            assert not keep  # a bulk read: no decoded group kept
             return tab, {"member": run}
 
     tier = SimpleNamespace(group_file=lambda *_: Group(), canon=lambda c, _: c)
