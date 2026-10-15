@@ -260,6 +260,16 @@ def test_recording_sequence_with_phase_times_facts_and_outputs(pipeline) -> None
     ]
 
 
+def test_the_capture_marker_time_reads_as_aws_cli_v1_prints_it(pipeline) -> None:
+    """The image's AWS CLI v1 prints `LastModified` as the header's RFC 1123 date, not ISO 8601."""
+    run, _, trace = pipeline
+    t0 = int(time.time())
+    result = run('2026-10-11T10-00-01Z', 'nas', **{**RECORDING, 'FAKE_MARKED': 'Sun, 11 Oct 2026 10:12:30 GMT'})
+    t1 = int(time.time()) + 1
+    assert result.returncode == 0, result.stderr
+    assert steps(trace, t0, t1)[:5] == [START, *BEFORE_JOB]
+
+
 def test_an_unreadable_capture_marker_still_records_the_queue_from_the_capture_start(pipeline) -> None:
     run, _, trace = pipeline
     t0 = int(time.time())
