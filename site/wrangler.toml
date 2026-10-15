@@ -29,6 +29,8 @@ enabled = true
 STORE = "laptop"
 AUTH_MODE = "app"
 ROOT_LABEL = "m3"
+# The tab icon (`public/icons/`, scripts/marks): the ⌘ mark on the laptop's pages; the NAS store's are its own (`src/stores/nas.ts` `mark`).
+MARK = "macos"
 BASE_SCOPE = "laptop"
 STAFF_DOMAIN = "runsascoded.com"
 ADMIN_EMAILS = "1"                # the `admin_emails` table grants admin (share links can make an account admin)
