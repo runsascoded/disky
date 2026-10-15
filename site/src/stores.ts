@@ -82,6 +82,9 @@ export interface Store {
   buckets: string[]
   /** The sibling deployment the site menu links to (each store is its own host). */
   peer?: { label: string; href: string }
+  /** Fresher bucket totals than the scans (a provider's metrics dashboard): the ☰ menu links it, and so does the
+   *  size-over-time chart, whose newest point is the newest scan's. Unset = no link. */
+  liveTotals?: { label: string; href: string }
   /** The data bucket's `/meta` tree when another deployment serves it (gcs: cw-s3's):
    *  the site menu links there and this host's `/meta` redirects to it. Unset when the
    *  build mounts `/meta` itself (a secondary store) or has none. */

@@ -21,10 +21,10 @@
 # mostly `index_row_groups` (gcs's was 2.6 GB at cutover). sqlite3 streams it.
 # The export is a self-contained dump — `PRAGMA defer_foreign_keys`, then each
 # table's `CREATE TABLE` (possibly multi-line) followed by one `INSERT` per
-# row, then the indexes — and it carries prod's `d1_migrations` rows, so the
-# schema comes from the dump itself (the local D1 is wiped first, so nothing
-# collides) and `./dev` sees the migrations as already applied — exactly what
-# the wrangler import did, minus the size cap.
+# row, then the indexes — so the schema comes from the dump itself (the local
+# D1 is wiped first, so nothing collides; any `d1_migrations` rows it carries
+# are leftovers, unused) — exactly what the wrangler import did, minus the
+# size cap.
 set -euo pipefail
 cd "$(dirname "$0")"
 

@@ -1,6 +1,6 @@
-"""Multi-store index rows (specs/done/multi-store.md phase 1): the primary's SQL is
-unchanged and runs with or without the store migration; a secondary store's
-rows are namespaced (`<store>:<variant>` + the `store` column) and need it."""
+"""Multi-store index rows (specs/done/multi-store.md phase 1): a secondary
+store's rows are namespaced (`<store>:<variant>` + the `store` column) beside
+the primary's."""
 
 from __future__ import annotations
 
@@ -17,15 +17,9 @@ ROWS = [
 ]
 
 
-def _db(monkeypatch, lineage, *, migrated: bool) -> sqlite3.Connection:
-    """A D1 lineage from scratch (FKs ON, as D1), with or without the store
-    migration, wired in as the D1 every `index_footer` query runs against."""
-    con = sqlite3.connect(":memory:")
-    con.execute("PRAGMA foreign_keys = ON")
-    store_mig = lineage.named("store_scoped_index")
-    for f in lineage.migrations():
-        if migrated or f != store_mig:
-            con.executescript(f.read_text())
+def _db(monkeypatch, con: sqlite3.Connection) -> sqlite3.Connection:
+    """`con` (the D1 schema, FKs ON, as D1) wired in as the D1 every
+    `index_footer` query runs against."""
 
     def fake_query(sql, acct, tok, db_id=None):
         cur = con.execute(sql)
@@ -39,9 +33,8 @@ def _db(monkeypatch, lineage, *, migrated: bool) -> sqlite3.Connection:
     return con
 
 
-@pytest.mark.parametrize("migrated", [False, True])
-def test_primary_syncs_and_reads_with_or_without_the_migration(monkeypatch, d1_lineage, migrated):
-    con = _db(monkeypatch, d1_lineage, migrated=migrated)
+def test_primary_syncs_and_reads(monkeypatch, d1_db):
+    con = _db(monkeypatch, d1_db)
     assert sync_d1("2026-09-01", "x.parquet", gen="g1", key="listing/2026-09-01/index/g1") == 2
     assert sync_d1("2026-09-01", "x.parquet", gen="g2", key="listing/2026-09-01/index/g2") == 2
     assert index_dir("2026-09-01") == "listing/2026-09-01/index/g2"
@@ -52,8 +45,8 @@ def test_primary_syncs_and_reads_with_or_without_the_migration(monkeypatch, d1_l
     ]
 
 
-def test_secondary_store_is_namespaced_beside_the_primary(monkeypatch, d1_lineage):
-    con = _db(monkeypatch, d1_lineage, migrated=True)
+def test_secondary_store_is_namespaced_beside_the_primary(monkeypatch, d1_db):
+    con = _db(monkeypatch, d1_db)
     sync_d1("2026-09-01", "x.parquet", gen="g1", key="listing/2026-09-01/index/g1")
     # Same scan id, same run's gen: the namespaced variant keeps every key disjoint.
     sync_d1("2026-09-01", "x.parquet", gen="g1", key="meta-l2/2026-09-01/index/g1", store="meta")
@@ -84,15 +77,7 @@ def test_secondary_store_is_namespaced_beside_the_primary(monkeypatch, d1_lineag
     assert con.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_secondary_store_fails_loudly_without_the_migration(monkeypatch, d1_lineage):
-    _db(monkeypatch, d1_lineage, migrated=False)
-    with pytest.raises(sqlite3.OperationalError, match=r"^no such column: store$"):
-        sync_d1("2026-09-01", "x.parquet", gen="g1", key="k", store="meta")
-    with pytest.raises(sqlite3.OperationalError, match=r"^no such column: store$"):
-        index_dir("2026-09-01", store="meta")
-
-
-def test_bad_store_key_is_refused(monkeypatch, d1_lineage):
-    _db(monkeypatch, d1_lineage, migrated=True)
+def test_bad_store_key_is_refused(monkeypatch, d1_db):
+    _db(monkeypatch, d1_db)
     with pytest.raises(ValueError, match=r"^bad store 'Meta' \(want 'primary' or \[a-z0-9\]\[a-z0-9-\]\*\)$"):
         sync_d1("2026-09-01", "x.parquet", gen="g1", key="k", store="Meta")

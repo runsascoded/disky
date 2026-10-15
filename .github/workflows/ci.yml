@@ -134,11 +134,16 @@ jobs:
       matrix:
         python-version: ["3.12", "3.13"]
     steps:
+      # Full history: a pending D1 recipe (`site/migrations/*.sql`) is checked
+      # against `site/schema.sql` as it was before the recipe landed
+      # (`test_d1_schema.py`, `dt_cloud.d1_schema.pre_image`).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # The suites are deterministic (seeded fixtures): a tree whose inputs
       # already passed on this Python is not re-run. `dt-cloud` keys on the
-      # tracked files' blob ids, minus docs (they read `site/`'s migrations
+      # tracked files' blob ids, minus docs (they read `site/`'s schema
       # and Functions too, so the whole tree counts).
       - name: Test inputs key
         id: key

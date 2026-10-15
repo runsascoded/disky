@@ -21,6 +21,7 @@ import { catalogAnswer, type CatalogIo, type CatalogMeta, type Member } from './
 import { type Answer, type Blobs, cacheIndexes, type Io, r2Blobs, staticGen, staticPrefix, type Totals } from './staticNames.js'
 import { tiers } from './staticRuns.js'
 import { type HexRule, hexAffected } from './hexRuns.js'
+import { Memo, type Req, reqOf } from './shared.js'
 
 export type StaticNameEnv = { NAME_SUMMARY_STATIC?: string; INDEX_R2?: R2Bucket; STATIC_GEN?: string; STATIC_MAX_ROWS?: string; STORE_BUCKETS?: string; STORE?: string; DB?: D1Database }
 export const staticEnabled = (env: StaticNameEnv): boolean => env.NAME_SUMMARY_STATIC === '1' && !!env.INDEX_R2
@@ -35,17 +36,18 @@ const validation = (gen: string) => ({
 })
 
 /** The generation's readers: suffix shards, catalog, `scans.json`'s scan ids (sorted), and a clock for the timings. */
-/** The suffix reader (`StaticNames`, or `TieredNames` over the base and its runs). */
+/** The suffix reader (`StaticNames`, or `TieredNames` over the base and its runs). Every read's `req`: the request
+ *  reading (`reqOf(env)`: what it joins of other requests' reads, and owns of its own, `shared.ts`). */
 export interface NameReader {
-  extent(key: string, io: Io): Promise<{ rows: number } | null>
+  extent(key: string, io: Io, req?: Req): Promise<{ rows: number } | null>
   /** `scans`: the ones the answer is exact on (a tiered reader's stack, cut at a broken tier); absent, all. */
-  answer(key: string, dates: string[], maxRows?: number): Promise<{ io: Io; answer: Answer | null; scans?: string[] }>
+  answer(key: string, dates: string[], maxRows?: number, req?: Req): Promise<{ io: Io; answer: Answer | null; scans?: string[] }>
 }
 /** The catalog (`StaticCatalog`, or `TieredCatalog`). */
-export interface CatalogReader { info(): Promise<CatalogMeta>; lookup(q: string): Promise<{ io: CatalogIo; member: Member | null; scans?: string[] }> }
+export interface CatalogReader { info(req?: Req): Promise<CatalogMeta>; lookup(q: string, opts?: { req?: Req }): Promise<{ io: CatalogIo; member: Member | null; scans?: string[] }> }
 /** `dirOnly`: the scans indexed from a dir-only (v1) source (`staticRuns.ts` `dirOnlyScans`): their totals are
  *  the literal's folder-name matches only. `hexRuns`: the generation's hex-run rule (absent or null: the full index). */
-export interface Store { names: NameReader; catalog: CatalogReader; scans: () => Promise<string[]>; dirOnly?: () => Promise<string[]>; clock: () => Promise<number>; hexRuns?: () => Promise<HexRule | null> }
+export interface Store { names: NameReader; catalog: CatalogReader; scans: (req?: Req) => Promise<string[]>; dirOnly?: (req?: Req) => Promise<string[]>; clock: () => Promise<number>; hexRuns?: (req?: Req) => Promise<HexRule | null> }
 let held: { r2: R2Bucket; gen: string; store: Store } | undefined
 
 // The Workers clock only advances across I/O; a cache miss pins "now" after CPU-bound work (decode).
@@ -58,21 +60,17 @@ export function store(r2: R2Bucket, gen: string): Store {
     // The base generation plus its runs (`staticRuns.ts`), each tier's indexes cached under its own prefix.
     const pre = (dir: string | null) => dir ? `${root}/${dir}` : root
     const t = tiers(blobs, { indexCache: dir => cacheIndexes(caches.default, pre(dir)), catalogCache: dir => cacheIndexes(caches.default, pre(dir), 'catalog-v1'), clock: tick })
-    held = { r2, gen, store: { names: t.names, catalog: t.catalog, scans: t.scans, dirOnly: t.dirOnly, clock: tick, hexRuns: () => t.names.hexRuns() } }
+    held = { r2, gen, store: { names: t.names, catalog: t.catalog, scans: t.scans, dirOnly: t.dirOnly, clock: tick, hexRuns: req => t.names.hexRuns(req) } }
   }
   return held.store
 }
 /** The suffix reader alone (`/api/static-bench`). */
 export const names = (r2: R2Bucket, gen: string): NameReader => store(r2, gen).names
 
-/** `scans.json`'s scan ids, sorted (held once loaded). */
-export function scanIds(blobs: Blobs): () => Promise<string[]> {
-  let ids: Promise<string[]> | undefined
-  return () => {
-    ids ??= blobs.json<{ scans: { id: string }[] }>('scans.json').then(d => d.scans.map(s => s.id).sort())
-    ids.catch(() => { ids = undefined })
-    return ids
-  }
+/** `scans.json`'s scan ids, sorted (held once loaded; a read pending in another request is joined, `shared.ts`). */
+export function scanIds(blobs: Blobs): (req?: Req) => Promise<string[]> {
+  const ids = new Memo<string[]>('static-scan-ids')
+  return req => ids.get('', () => blobs.json<{ scans: { id: string }[] }>('scans.json').then(d => d.scans.map(s => s.id).sort()), req)
 }
 const bucketPaths = (env: StaticNameEnv): string[] => {
   const paths = (env.STORE_BUCKETS ?? '').split(',').map(s => s.trim()).filter(Boolean).sort()
@@ -83,7 +81,8 @@ const logicalStore = (env: StaticNameEnv) => `${env.STORE ?? 'gcs'}_fleet`
 
 /** The registry: which scans exist, the buckets, and the catalog's bound. */
 export async function staticRegistryBody(env: StaticNameEnv, s: Store): Promise<unknown> {
-  const [dates, meta] = await Promise.all([s.scans(), s.catalog.info()])
+  const req = reqOf(env)
+  const [dates, meta] = await Promise.all([s.scans(req), s.catalog.info(req)])
   const body = {
     schema: 'static-name-registry-v1', logical_store: logicalStore(env), generation: staticGen(env), max_rows: meta.membership.max_rows,
     bucket_paths: bucketPaths(env), dates, levels: 1, scope: HOT_SCOPE, capabilities: { ...CAPABILITIES },
@@ -97,13 +96,13 @@ export type Plan = 'catalog' | 'bounded-name-postings'
 export interface KeyAnswer { plan: Plan; answers: Record<string, Totals>; io: { suffix?: Io; catalog?: CatalogIo; ms: Record<string, number> }; scans?: string[] }
 
 /** One literal's per-date bucket totals by the dispatch above. */
-export async function answerKey(s: Store, key: string, days: string[], maxRows = MAX_ROWS): Promise<KeyAnswer> {
-  const V = (await s.catalog.info()).membership.max_rows
+export async function answerKey(s: Store, key: string, days: string[], maxRows = MAX_ROWS, req?: Req): Promise<KeyAnswer> {
+  const V = (await s.catalog.info(req)).membership.max_rows
   const ms: Record<string, number> = {}
   let t = await s.clock()
   const lap = async (name: string) => { const now = await s.clock(); ms[name] = (ms[name] ?? 0) + now - t; t = now }
   const fromCatalog = async (): Promise<KeyAnswer | { catalog: CatalogIo; scans?: string[] }> => {
-    const { io, member, scans } = await s.catalog.lookup(key)
+    const { io, member, scans } = await s.catalog.lookup(key, { req })
     await lap('catalog')
     const sc = scans ? { scans } : {}
     return member ? { plan: 'catalog', answers: catalogAnswer(member, days), io: { catalog: io, ms }, ...sc } : { catalog: io, ...sc }
@@ -113,7 +112,7 @@ export async function answerKey(s: Store, key: string, days: string[], maxRows =
     return 'plan' in c ? c : { plan: 'catalog', answers: Object.fromEntries(days.map(d => [d, {}])), io: { catalog: c.catalog, ms }, ...(c.scans ? { scans: c.scans } : {}) }
   }
   const probe: Io = { shard: null, groups: 0, bytes: 0, rows_read: 0, rows_matching: 0, index: 'none', ms: {} }
-  const ext = await s.names.extent(key, probe)
+  const ext = await s.names.extent(key, probe, req)
   await lap('extent')
   let catalog: CatalogIo | undefined, missed: string[] | undefined
   if (ext && ext.rows > V) {
@@ -122,7 +121,7 @@ export async function answerKey(s: Store, key: string, days: string[], maxRows =
     catalog = c.catalog
     missed = c.scans
   }
-  const { io, answer, scans } = await s.names.answer(key, days, maxRows)
+  const { io, answer, scans } = await s.names.answer(key, days, maxRows, req)
   await lap('suffix')
   if (!answer) throw new Error(`static names: ${JSON.stringify(key)} reads ${io.rows_read} rows, over ${maxRows}`)
   io.index = probe.index
@@ -143,7 +142,8 @@ export async function staticSummary(env: StaticNameEnv, params: URLSearchParams,
     const gen = staticGen(env)
     s ??= store(env.INDEX_R2!, gen)
     const asked = datedNameRequest(params), key = asked.name
-    const [have, meta, rule] = await Promise.all([s.scans(), s.catalog.info(), s.hexRuns?.() ?? null])
+    const req = reqOf(env)
+    const [have, meta, rule] = await Promise.all([s.scans(req), s.catalog.info(req), s.hexRuns?.(req) ?? null])
     // A hex-affected literal on a generation with the hex-run rule: answered as always, and the body says that
     // matches inside long hex ids aren't counted (`hexRuns`, the page's note).
     const hex = rule && hexAffected(key, rule) ? { hexRuns: { min: rule.min, tail: rule.tail } } : {}
@@ -171,10 +171,10 @@ export async function staticSummary(env: StaticNameEnv, params: URLSearchParams,
     const request = { ...asked, date: date!, ...(from === undefined || from === null ? {} : { from }) }
     const days = from ? [from, date!] : [date!]
     // A dir-only (v1) scan's totals are its folder-name matches: flagged (`dirs_only`) alone, refused beside a full scan.
-    const dirs = s.dirOnly ? await s.dirOnly() : []
+    const dirs = s.dirOnly ? await s.dirOnly(req) : []
     const dirsOnly = days.filter(d => dirs.includes(d))
     if (dirsOnly.length && dirsOnly.length < days.length) return dirsSplit()
-    const { plan, answers, io, scans } = await answerKey(s, key, days, Number(env.STATIC_MAX_ROWS ?? MAX_ROWS))
+    const { plan, answers, io, scans } = await answerKey(s, key, days, Number(env.STATIC_MAX_ROWS ?? MAX_ROWS), req)
     // A tier broke during the read: the index answers the scans before it only.
     if (scans && days.some(d => !scans.includes(d))) return notIndexed()
     const paths = bucketPaths(env), store_ = logicalStore(env)

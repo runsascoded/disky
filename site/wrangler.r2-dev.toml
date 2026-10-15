@@ -16,7 +16,6 @@ compatibility_date = "2026-06-01"
 binding = "DB"
 database_name = "disk-tree-demo-db"
 database_id = "261d0c80-8f73-442e-979a-4e25725b2271"
-migrations_dir = "migrations/cw"
 remote = true
 
 [observability]

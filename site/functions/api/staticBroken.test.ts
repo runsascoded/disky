@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1 } from '../_lib/testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from '../_lib/testStore'
 import { searchKey } from '../_lib/search'
 import { REJECT_MESSAGES } from '../_lib/indexedOnly'
@@ -20,7 +20,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // run for scan C, broken each way a publish can leave it: the base's scans answer byte for byte as the base alone
 // does, C is `scan-not-indexed` for the literals its broken files would answer, and the broken key is logged.
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const A = '2026-10-04'
   const B = '2026-10-05'
   const C = '2026-10-06'
@@ -91,7 +91,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     const light = new Map<string, ArrayBuffer>()
     await readTree('static-filter', light)
     for (const [k, v] of light) if (k === 'shards.json' || k === 'scans.json' || k.startsWith('sx/')) gen.set(k, v)
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     // Scan C's path store is B's (the static index is what's under test).
     for (const [date, from] of [[A, A], [B, B], [C, B]]) {
       const v = await readJson<Record<string, D1Variant>>(`static-filter/${from}/d1.json`)

@@ -1,20 +1,19 @@
 """The footer LRU's writer side (specs/done/footer-lru.md): `evict` (the site's
 `evictFooters` pass), `adopt`, `dt-cloud footer-evict`, and `retire_d1` /
 `gc_d1` keeping `footer_cache` coherent — against a real SQLite carrying the
-cw lineage's migrations (the D1 schema)."""
+branch's D1 schema (`site/schema.sql`)."""
 import re
 import sqlite3
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from dt_cloud import cli as C
 from dt_cloud import index_footer as F
+from dt_cloud.d1_schema import replay, schema_file
 from dt_cloud.cli import main
 from dt_cloud.index_footer import Entry, Eviction, adopt, evict, gc_d1, retire_d1
 
-MIGRATIONS = Path(__file__).parents[2] / "site/migrations/cw"
 NOW = 1_790_000_000
 TODAY = NOW // 86400
 
@@ -40,13 +39,8 @@ class D1:
         return self.con.execute("SELECT date, variant, gen, COUNT(*) FROM index_row_groups GROUP BY 1, 2, 3 ORDER BY 1, 2, 3").fetchall()
 
 
-def _db(before: str | None = None) -> sqlite3.Connection:
-    con = sqlite3.connect(":memory:")
-    con.execute("PRAGMA foreign_keys = ON")
-    for f in sorted(MIGRATIONS.glob("*.sql")):
-        if before is None or f.name < before:
-            con.executescript(f.read_text())
-    return con
+def _db() -> sqlite3.Connection:
+    return replay([schema_file().read_text()])
 
 
 @pytest.fixture
@@ -106,10 +100,12 @@ def test_evict_by_bytes_and_dry_run(d1):
 
 
 def test_evict_refuses_without_the_table(monkeypatch):
-    db = D1(_db(before="0022"))
+    con = _db()
+    con.execute("DROP TABLE footer_cache")
+    db = D1(con)
     monkeypatch.setattr(F, "_d1_query", db)
     monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
-    with pytest.raises(RuntimeError, match=r"^no footer_cache table in this D1: apply site/migrations/cw/0022_footer_cache.sql first$"):
+    with pytest.raises(RuntimeError, match=r"^no footer_cache table in this D1: create it as `site/schema.sql` has it$"):
         evict()
 
 

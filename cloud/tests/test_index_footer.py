@@ -189,25 +189,16 @@ def test_sync_d1_packs_inserts_greedily_under_the_byte_limit(tmp_path, monkeypat
     assert [t.split(", ")[3] for stmt in tuples for t in stmt] == [str(i) for i in range(12)]
 
 
-def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch, d1_lineage):
+def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch, d1_db):
     """The gc statement against a real SQLite: rows of the pointer's gen stay,
     every other gen of that date goes, other dates untouched."""
     import re
-    import sqlite3
 
     from dt_cloud.index_footer import gc_d1
 
-    con = sqlite3.connect(":memory:")
-    # The schema from each lineage, whichever shape it has: one squashed
-    # `0001_init.sql` (creates every table itself), or the migration that
-    # introduced `index_row_groups` on top of an earlier `index_schema`.
-    (ddl_path,) = [f for f in d1_lineage.migrations() if "CREATE TABLE index_row_groups" in f.read_text()]
-    ddl = ddl_path.read_text()
-    if "CREATE TABLE index_schema" not in ddl:
-        con.executescript("CREATE TABLE index_schema (date TEXT, variant TEXT, version INTEGER, schema_json TEXT, floor_bytes INTEGER, PRIMARY KEY (date, variant));")
-    con.executescript(ddl)
+    con = d1_db
     row = "(?, ?, ?, ?, 1, 1, 'a', 'b', 1, NULL, NULL, 0, 1, '[]')"
-    con.executemany(f"INSERT INTO index_row_groups VALUES {row}", [
+    con.executemany(f"INSERT INTO index_row_groups (date, variant, gen, rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json) VALUES {row}", [
         ("2026-09-01", "path", "g1", 0), ("2026-09-01", "path", "g1", 1),
         ("2026-09-01", "path", "g2", 0),  # the pointer's gen
         ("2026-09-01", "user", "g1", 0),  # user variant still points at g1
@@ -228,11 +219,13 @@ def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch, d1_lineage
     monkeypatch.setattr(index_footer, "_d1_query", fake_query)
     monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
     assert gc_d1("2026-09-01") == 3
-    assert sent.pop(0) == "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';"
-    assert re.sub(r"\s+", " ", sent[0]) == (
+    assert [re.sub(r"\s+", " ", s) for s in sent] == [
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';",
+        "DELETE FROM footer_cache WHERE date = '2026-09-01' AND gen <> COALESCE("
+        "(SELECT s.gen FROM index_schema s WHERE s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
         "DELETE FROM index_row_groups WHERE date = '2026-09-01' AND gen <> COALESCE("
-        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '') RETURNING 1 AS n;"
-    )
+        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '') RETURNING 1 AS n;",
+    ]
     assert con.execute("SELECT date, variant, gen, rg FROM index_row_groups ORDER BY 1, 2, 3, 4").fetchall() == [
         ("2026-09-01", "path", "g2", 0),
         ("2026-09-01", "user", "g1", 0),

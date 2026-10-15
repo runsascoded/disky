@@ -7,7 +7,7 @@ import { bodySummary, FILTER_DEBOUNCE_MS, FLUSH_MS, install, Logger, type Page, 
 import { LIMITS, type SlogBatch } from '../functions/_lib/sessionLogShape'
 import { onRequest } from '../functions/api/session-log/[[path]]'
 import { gateFor } from '../functions/_lib/auth'
-import { LINEAGES, sqliteD1 } from '../functions/_lib/testD1'
+import { sqliteD1 } from '../functions/_lib/testD1'
 
 const T0 = Date.UTC(2026, 9, 12, 15)
 const UNTIL = T0 + 86_400_000
@@ -276,7 +276,7 @@ describe('install', () => {
   })
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('boot shim', () => {
     /** A fresh page load: `cfg` is the config the server answers, or the page's `fetch`. */
     const boot = async (cfg: unknown) => {
@@ -294,7 +294,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     afterEach(() => { vi.unstubAllGlobals(); vi.doUnmock('./sessionLog') })
 
     it('follows the admin switch at runtime: off → on (through the chosen day) → off → on, then expired', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw' }
       const gate = gateFor(env as never)!
       const tok = async (email: string, scopes: string[]) =>

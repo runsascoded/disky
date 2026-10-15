@@ -10,7 +10,7 @@
  */
 import type { Env } from './auth.js'
 import { schemaRow, servedStore } from './index.js'
-import { shared } from './shared.js'
+import { joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
 
 export type Provenance = [source: string, evidence: string | null, prefix: string]
@@ -61,7 +61,7 @@ async function indexes(env: Env, date: string) {
     const attr = await readJson(env, dir, 'attr.tsv.idx.json')
     if (!attr) return null
     return { dir, attr: attr as BlockIndex | null }
-  }, TTL_MS)
+  }, 30_000, joinOf(env, 'extras'))
   if (!got) missAt.set(key, missAt.get(key) ?? Date.now())
   else missAt.delete(key)
   return got

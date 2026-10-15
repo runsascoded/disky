@@ -3,9 +3,10 @@
 # runsascoded.com. The index tiers + snapshots are written to R2 `disk-tree`
 # by the Batch ingest (`infra/aws/`), footers → D1.
 #
-# Not yet deployed: disk.rbw.sh still serves `ui/` (Pages project `disk-tree`)
-# until Phase 4. The D1 is `infra/cf/`'s (Pulumi): `disk-tree-m3-db`. Migrations:
-#   wrangler d1 migrations apply disk-tree-m3-db --remote
+# The D1 is `infra/cf/`'s (Pulumi): `disk-tree-m3-db`. Its schema is `schema.sql`
+# (specs/done/d1-migrations.md): a pending recipe is applied with
+#   wrangler d1 execute disk-tree-m3-db --remote --file migrations/<slug>.sql
+# and `dt-cloud d1-schema check -d disk-tree-m3-db` confirms the two agree.
 name = "disk-tree"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-01"
@@ -14,7 +15,6 @@ compatibility_date = "2026-06-01"
 binding = "DB"
 database_name = "disk-tree-m3-db"
 database_id = "e5288564-a010-4177-9f3c-77e25fad9f72"
-migrations_dir = "migrations/cw"
 
 # The static name index (`static-names/<STATIC_GEN>/`, written by the Batch ingest's
 # `dt-cloud static-names`): exact `?f=` once FILTER_STATIC is on.

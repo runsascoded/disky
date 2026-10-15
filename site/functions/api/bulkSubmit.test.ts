@@ -13,7 +13,7 @@ const base = { STAGING: '1', STORE_SCHEME: 'gs://', STORE_BUCKETS: B, DEV_EMAIL:
 
 describe('bulk submission against a local D1', () => {
   it('stages 1,100 matching folders in 3 POSTs, merged into one batch', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-10-09', 'path', 2, '[]')`)
     const env = { ...base, DB: db }
     const prefixes = Array.from({ length: 1100 }, (_, i) => `gs://${B}/d${String(i).padStart(4, '0')}/`)
@@ -50,7 +50,7 @@ describe('bulk submission against a local D1', () => {
 describe('a click on the matches → confirm → batches → accepted, against a local D1', () => {
   /** A controller sending through the routes; every state it passes through, as a line. */
   async function harness(items: CoverItem[]) {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-10-09', 'path', 2, '[]')`)
     const env = { ...base, DB: db }
     const sent: string[] = []

@@ -3,7 +3,7 @@
  * purge past retention, and the admin reads. Tables: `session_log` (one row
  * per session) and `session_log_batches` (one row per client flush, events as
  * a JSON array), plus the on/off switch `session_log_switch` (one row) —
- * `migrations/cw/0018_session_log.sql`.
+ * `site/schema.sql`.
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { isErrorEvent, LIMITS, type SessionRow, type SlogBatch, type SlogEvent, type StoredEvent } from './sessionLogShape.js'

@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES } from '../_lib/testD1'
+
 import { A, B, C, unionDeployment, Z } from '../_lib/testUnion'
 import { onRequestGet as subtree } from './subtree'
 
@@ -14,13 +14,13 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 type Node = { n: string; k: string; b: number; o: number; f?: number; c?: Node[]; src?: string; at?: string }
 type Body = { date: string; path: string; threshold: number; tree: Node; union?: unknown; nodes: number }
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
   const puts: string[] = []
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async (k: Request) => { puts.push(k.url) } } }
-    deployment = await unionDeployment(lineage)
+    deployment = await unionDeployment()
   })
 
   const get = async (qs: string, views?: Record<string, unknown>) => {

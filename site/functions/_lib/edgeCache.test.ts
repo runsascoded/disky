@@ -50,7 +50,7 @@ describe('cacheStore', () => {
   })
 
   it('`keepFor`: whole answers (no interiors, or only read-budget skips) are kept in both tiers; a time cut briefly', () => {
-    expect([keepFor({}), keepFor({ interiors: {} }), keepFor({ interiors: { late: 0 } }), keepFor({ interiors: { late: 1 } }), keepFor({ searchLate: true })]).toEqual([true, true, true, { partialTtl: PARTIAL_TTL }, { partialTtl: PARTIAL_TTL }])
+    expect([keepFor({}), keepFor({ interiors: {} }), keepFor({ interiors: { late: 0 } }), keepFor({ interiors: { late: 1 } }), keepFor({ searchLate: true }), keepFor({ lookups_late: true })]).toEqual([true, true, true, { partialTtl: PARTIAL_TTL }, { partialTtl: PARTIAL_TTL }, { partialTtl: PARTIAL_TTL }])
   })
 })
 

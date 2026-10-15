@@ -12,7 +12,6 @@ compatibility_date = "2026-06-01"
 binding = "DB"
 database_name = "disk-tree-m3-db"
 database_id = "e5288564-a010-4177-9f3c-77e25fad9f72"
-migrations_dir = "migrations/cw"
 remote = true
 
 # The static name index (`static-names/<STATIC_GEN>/`, written by the Batch ingest's

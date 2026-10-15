@@ -24,12 +24,13 @@ from functools import partial
 from pathlib import Path
 from typing import Protocol
 
+from .d1_schema import table_ddl
 from .scan_id import check_scan_id
 
 err = partial(print, file=sys.stderr)
 
 PROFILE_ENV = "SCAN_RUNS_PROFILE"
-MIGRATION = "0016_scan_runs.sql"
+TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs")
 STATUSES = ("running", "succeeded", "failed", "nop")
 
 
@@ -180,27 +181,16 @@ class D1Sink:
         return self._q(sql, self._acct, self._tok, self.db_id)
 
 
-def migration_sql(site: Path | None = None) -> str:
-    """The tables' DDL, from the migration file (the one source of the schema)."""
-    if site is None:
-        site = Path(__file__).resolve().parents[3] / "site"  # the repo checkout this module runs from
-        if not site.is_dir():
-            from .index_footer import _site_dir
-
-            site = _site_dir()
-    return (site / "migrations" / "cw" / MIGRATION).read_text()
-
-
 class SqliteSink:
-    """A local SQLite file with foreign keys ON (as D1 enforces them); the tables are created from the migration
-    when absent."""
+    """A local SQLite file with foreign keys ON (as D1 enforces them); the tables are created from the D1 schema
+    (`site/schema.sql`, the one source of it) when absent."""
 
     def __init__(self, path: str | Path, ddl: str | None = None):
         self.con = sqlite3.connect(str(path))
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys = ON")
         if not self.con.execute("SELECT 1 FROM sqlite_master WHERE name = 'scan_runs'").fetchone():
-            self.con.executescript(ddl if ddl is not None else migration_sql())
+            self.con.executescript(ddl if ddl is not None else table_ddl(TABLES))
 
     def execute(self, statements: Sequence[str]) -> None:
         with self.con:
@@ -1077,16 +1067,21 @@ class JobRun:
             return {}
 
     def save(self, fresh: bool = False, **kw: object) -> None:
-        """Merge `kw` (None values skipped) into the state file, atomically (phases in background subshells share it)."""
+        """Merge `kw` (None values skipped) into the state file, atomically and under an exclusive lock: phases in
+        background subshells share it, and an unlocked read-merge-write lets a concurrent one drop another's field (a
+        background phase's `failed_phase` lost to a foreground `phase-end`)."""
+        import fcntl
         import tempfile
 
-        st = {} if fresh else self.state()
-        st.update({k: v for k, v in kw.items() if v is not None})
         self.dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{self.key}.")
-        with os.fdopen(fd, "w") as f:
-            json.dump(st, f)
-        os.replace(tmp, self.state_path)
+        with open(self.dir / f"{self.key}.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            st = {} if fresh else self.state()
+            st.update({k: v for k, v in kw.items() if v is not None})
+            fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{self.key}.")
+            with os.fdopen(fd, "w") as f:
+                json.dump(st, f)
+            os.replace(tmp, self.state_path)
 
     def alerted(self) -> bool:
         return self.alerted_path.exists()
@@ -1096,7 +1091,7 @@ class JobRun:
         self.alerted_path.touch()
 
     def clear(self) -> None:
-        for p in (self.state_path, self.alerted_path):
+        for p in (self.state_path, self.alerted_path, self.dir / f"{self.key}.lock"):
             p.unlink(missing_ok=True)
 
     @property

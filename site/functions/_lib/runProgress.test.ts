@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { onRequestGet } from '../api/plans/progress'
-import { LINEAGES, schemaFork, sqliteD1 } from './testD1'
+import { RUN_DIR, sqliteD1 } from './testD1'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('D1 run-progress history', () => {
     it('returns chronological samples and rejects absent/unknown run IDs', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1)").run()
-      await db.prepare(`INSERT INTO deletion_runs (run_id, ${schemaFork(lineage).runDir}, scan, head, exec_head, actor, mode, started_ts, finished_ts,
+      await db.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts,
       deleted_bytes, deleted_objects, skipped_gone, skipped_overwritten, drift_dirs, log_dir, plan_id)
       VALUES ('r', 'plan', 'scan', 0, 0, 'actor', 'real', 1, NULL, 0, 0, 0, 0, 0, 'dir', 1)`).run()
       const stmt = db.prepare('INSERT OR IGNORE INTO deletion_progress VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')

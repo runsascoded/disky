@@ -17,10 +17,10 @@ from click.testing import CliRunner
 
 from disk_tree.notify import push
 from dt_cloud import scan_runs
+from dt_cloud.d1_schema import table_ddl
 from dt_cloud.scan_runs import SqliteSink, cli, duration, parse_profile, phase_line, redact
 
-SITE = Path(__file__).parents[2] / "site"
-DDL = (SITE / "migrations/cw/0016_scan_runs.sql").read_text()
+DDL = table_ddl(scan_runs.TABLES)  # the tables as `site/schema.sql` has them
 T0 = 1_760_000_000
 SCAN = "2026-10-14T0600"
 PROFILE = {

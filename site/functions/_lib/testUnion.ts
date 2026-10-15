@@ -5,7 +5,7 @@
  * overlapping the primary's) at A. A test mocks the S3 store module with `testStore`'s, as `testStore.ts` says.
  */
 import type { Env } from './auth.js'
-import { type Lineage, sqliteD1 } from './testD1.js'
+import { sqliteD1 } from './testD1.js'
 import { type D1Variant, readJson, seedGeneration } from './testStore.js'
 
 export const Z = '2026-09-30T0001'
@@ -21,8 +21,8 @@ const DUP = { vars: { ROOT_LABEL: 'dup', STORE_BUCKET: 'dup-data' }, secrets: CR
 export const MAIN = { all: { union: ['primary', 'meta'], main: true } }
 
 /** The seeded deployment's env, given its union views (none = a deployment without one). */
-export async function unionDeployment(lineage: Lineage): Promise<(views?: Record<string, unknown>) => Env> {
-  const { db, raw } = await sqliteD1(lineage)
+export async function unionDeployment(): Promise<(views?: Record<string, unknown>) => Env> {
+  const { db, raw } = await sqliteD1()
   const seed = async (fx: string, date: string, store?: string) => {
     const v = await readJson<Record<string, D1Variant>>(`${fx}/d1.json`)
     const files = { path: { parquet: `${fx}/path-index.parquet`, groups: `${fx}/path-index.groups.json` }, bysize: { parquet: `${fx}/path-index-bysize.parquet`, groups: `${fx}/path-index-bysize.groups.json` } }

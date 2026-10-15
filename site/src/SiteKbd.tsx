@@ -103,6 +103,12 @@ export function SiteKbd({ extra = [], placeholder }: {
         defaultBindings: ['g d'],
         handler: () => location.assign(otherHostUrl(location.href, HOSTS)),
       },
+      'host:toggle-tab': {
+        label: location.hostname === HOSTS.dev ? `This page on prod (${HOSTS.prod}), in a new tab` : `This page on dev (${HOSTS.dev}), in a new tab`,
+        group: 'Pages',
+        defaultBindings: ['g shift+d'],
+        handler: () => { window.open(otherHostUrl(location.href, HOSTS), '_blank', 'noopener') },
+      },
     } : {}),
     'theme:cycle': {
       label: `Theme: ${theme} (cycle)`,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { closedParent, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
-import { LINEAGES, sqliteD1 } from './testD1.js'
+import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
   run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@openathena.ai', started_ts: 100,
@@ -163,7 +163,7 @@ describe('senders', () => {
   })
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('the plan card', () => {
     const base = { planId: 7, siteUrl: 'https://site.example.org', items: 3, batches: 2, stagers: [] as string[], digest: 'D1', actions: true, closed: false, runs: [] as RunRow[] }
     const types = (blocks: unknown[]) => blocks.map(b => (b as { type: string }).type)
@@ -177,7 +177,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ])
     })
     it('no card without cards on, nor for a non-https origin (Slack fetches it); with them, a full card backed by a fresh `og_tokens` row (cw `0010`)', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       const off = await stagedCardUrl({ SESSION_SECRET: 's3cret' }, db, 'https://site.example.org', 'abcdef0123456789', 1790000000)
       const local = await stagedCardUrl({ OG_CARDS: '1', SESSION_SECRET: 's3cret' }, db, 'http://localhost:3254', 'abcdef0123456789', 1790000000)
       const on = await stagedCardUrl({ OG_CARDS: '1', SESSION_SECRET: 's3cret' }, db, 'https://site.example.org', 'abcdef0123456789', 1790000000)

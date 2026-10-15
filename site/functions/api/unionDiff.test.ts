@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES } from '../_lib/testD1'
+
 import { A, B, C, unionDeployment, Z } from '../_lib/testUnion'
 import { onRequestGet as diff, unionDiffRows } from './diff'
 import { onRequestGet as subtree } from './subtree'
@@ -15,12 +15,12 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 type Row = { p: string; d: number; k: string; s: string; a: number; b: number; oa: number; ob: number; src?: string }
 type Body = { prev: string; curr: string; rows: Row[]; total_a: number; total_b: number; objects_a: number; objects_b: number; threshold: number; union?: { view: string; sources: unknown[] } }
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-    deployment = await unionDeployment(lineage)
+    deployment = await unionDeployment()
   })
 
   const get = async (qs: string, views?: Record<string, unknown>) => {
@@ -37,6 +37,14 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     total_a: bs.reduce((n, b) => n + b.total_a, 0), total_b: bs.reduce((n, b) => n + b.total_b, 0),
     objects_a: bs.reduce((n, b) => n + b.objects_a, 0), objects_b: bs.reduce((n, b) => n + b.objects_b, 0),
   })
+  /** A member's depth-1 names tagged with its store, as the union lists them; the members' `(other)`s are one row. */
+  const tagged = (b: Body, store: string) => roots(b).filter(([n]) => n !== '(other)').map(([n, , s]) => [n, store, s])
+  const others = (bs: Body[]) => {
+    const o = bs.flatMap(b => b.rows.filter(r => r.d === 1 && r.p === '(other)'))
+    if (!o.length) return []
+    const sum = (k: 'a' | 'b' | 'oa' | 'ob') => o.reduce((n, r) => n + r[k], 0)
+    return [['(other)', null, sum('a') === sum('b') && sum('oa') === sum('ob') ? 'unchanged' : 'changed']]
+  }
   const pick = (b: Body) => ({ total_a: b.total_a, total_b: b.total_b, objects_a: b.objects_a, objects_b: b.objects_b })
   /** Meta's root total at a scan, as its own subtree says. */
   const meta = async (date: string) => {
@@ -54,12 +62,13 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     expect([u.prev, u.curr, u.union, roots(u), pick(u), u.threshold]).toEqual([
       A, C,
       { view: 'all', sources: [{ store: 'primary', from: A, to: C, change: 'changed' }, { store: 'meta', from: A, to: B, change: 'changed' }] },
-      [...roots(p).map(([n, , s]) => [n, 'primary', s]), ...roots(m).map(([n, , s]) => [n, 'meta', s])],
+      [...tagged(p, 'primary'), ...tagged(m, 'meta'), ...others([p, m])],
       totals([p, m]),
       Math.round(Math.max(p.total_a + m.total_a, p.total_b + m.total_b) * 12 / (1280 * 768)),
     ])
-    // The primary's `bk` changed at C (its 30-byte `zz` went, under the floor); meta's content didn't move: no rows.
-    expect([roots(u), roots(m)]).toEqual([[['bk', 'primary', 'changed']], []])
+    // The primary's `bk` changed at C, and its 30-byte `zz` went under the floor (the root's `(other)`, the members'
+    // summed into one untagged row); meta's content didn't move: no rows.
+    expect([roots(u), roots(m)]).toEqual([[['bk', 'primary', 'changed'], ['(other)', null, 'changed']], []])
   })
 
   it('a store that didn’t rescan contributes zero: no rows, its root total on both sides', async () => {
@@ -67,7 +76,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     const [u, p, mb] = await Promise.all([body(`from=${B}&to=${C}&path=`), body(`from=${A}&to=${C}&path=&store=primary`), meta(B)])
     expect([u.union, roots(u), pick(u)]).toEqual([
       { view: 'all', sources: [{ store: 'primary', from: A, to: C, change: 'changed' }, { store: 'meta', from: B, to: B, change: 'unchanged' }] },
-      roots(p).map(([n, , s]) => [n, 'primary', s]),
+      [...tagged(p, 'primary'), ...others([p])],
       { total_a: p.total_a + mb.b, total_b: p.total_b + mb.b, objects_a: p.objects_a + mb.o, objects_b: p.objects_b + mb.o },
     ])
   })

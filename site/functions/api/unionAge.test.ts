@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES } from '../_lib/testD1'
+
 import { A, B, C, unionDeployment, Z } from '../_lib/testUnion'
 import { onRequestGet as age } from './age-pyramid'
 
@@ -54,12 +54,12 @@ vi.mock('../_lib/index.js', async orig => {
   }
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-    deployment = await unionDeployment(lineage)
+    deployment = await unionDeployment()
   })
 
   const get = async (qs: string, views?: Record<string, unknown>) => {

@@ -3,14 +3,14 @@ import { diffCardData, resolveDiffScans } from './diff'
 import type { Diff } from '../view'
 import { mint, fullTier } from './tokens'
 import { pageView } from './routes'
-import { LINEAGES, sqliteD1 } from '../testD1'
+import { sqliteD1 } from '../testD1'
 
 const mocks = vi.hoisted(() => ({ scans: vi.fn() }))
 vi.mock('../index', async importOriginal => ({ ...await importOriginal<typeof import('../index')>(), pathScans: mocks.scans }))
 vi.mock('../scanTimes', () => ({ scanTimes: async () => ({}) }))
 beforeEach(() => mocks.scans.mockResolvedValue({ results: ['2026-09-17T0000', '2026-09-28T1200', '2026-09-30T1200'].map(date => ({ date })) }))
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const syntheticDiff: Diff = {
     total_a: 100, total_b: 110, objects_a: 10, objects_b: 11, expansions: 0,
     truncated: false, threshold: 1, tier: 'path', lookups: 0, lookups_capped: false,
@@ -44,7 +44,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
   })
 
   it('minting a fragment-only diff link scopes it to the comparison, not its snapshot map', async () => {
-    const { db } = await sqliteD1(lineage)
+    const { db } = await sqliteD1()
     const now = Date.UTC(2026, 9, 13) / 1000
     const result = await mint(db, 'Demo', new URL('https://demo.example/bucket?d=26092812-26091700#diff'), 'demo', now, 30, 'DiffTokAAA')
     expect(result?.url).toBe('https://demo.example/bucket?d=26092812-26091700&section=diff&og=DiffTokAAA#diff')

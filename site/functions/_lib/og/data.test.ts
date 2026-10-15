@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { dominant, legendOf, NoScanMatch, ownerColors, resolveScan, scanOfSel, tilesOf, UNOWNED_COLOR } from './data'
 import type { TreeNode } from '../../../src/types'
-import { LINEAGES, sqliteD1 } from '../testD1'
+import { sqliteD1 } from '../testD1'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('scanOfSel: the after scan of a `?d=` selection', () => {
     it('compact and ISO ids; look-back / from suffixes dropped', () => {
       expect(['261002', '261002-1200', '261002-260930', '2026-10-02', '2026-10-02T1200', '261002-7d', '-7d', 'junk', undefined].map(scanOfSel))
@@ -43,7 +43,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   describe('resolveScan: a card draws the scan its ?d= names, or none (a 404)', () => {
     const env = async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       for (const date of ['2026-10-08', '2026-10-09T0601', '2026-10-09T1236']) await db.prepare("INSERT INTO index_schema (date, variant, version, schema_json) VALUES (?, 'path', 2, '[]')").bind(date).run()
       return { DB: db } as unknown as Parameters<typeof resolveScan>[0]
     }

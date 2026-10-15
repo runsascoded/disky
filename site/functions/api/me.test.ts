@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { D1Database } from '@cloudflare/workers-types'
 import type { Env } from '../_lib/auth'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1 } from '../_lib/testD1'
 import { ownerIdFor, resolveUser } from '../_lib/me'
 import { CACHE_V } from '../_lib/edgeCache'
 
@@ -34,11 +34,11 @@ const { onRequestGet: me } = await import('./me')
 
 afterEach(() => { keys.length = 0 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
-  /** A D1 with a `user_emails` table (gcs's init has it; elsewhere it is built
-   * ad hoc, as gcs has it) and one row (alan's sign-in → `alan-turing`). */
+describe('D1', () => {
+  /** A D1 with a `user_emails` table (gcs's schema has it; elsewhere it is
+   * built ad hoc, as gcs has it) and one row (alan's sign-in → `alan-turing`). */
   async function db(): Promise<D1Database> {
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     raw.exec('CREATE TABLE IF NOT EXISTS user_emails (email TEXT PRIMARY KEY, user TEXT NOT NULL, who TEXT NOT NULL, ts INTEGER NOT NULL)')
     await db.prepare('INSERT INTO user_emails (email, user, who, ts) VALUES (?, ?, ?, ?)').bind('alan@example.test', 'alan-turing', 'admin', 0).run()
     // the scans the requests name are indexed (an unindexed one is a 404: `scanArg`)
@@ -59,10 +59,11 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         ownerIdFor(env, 'grace.hopper@example.test'),
       ])).toEqual(['alan-turing', 'alan-turing', 'grace-hopper'])
     })
-    it.skipIf(lineage !== 'cw')('a lineage without `user_emails` (cw), or no DB at all: the registry rule alone', async () => {
-      const { db: cw } = await sqliteD1('cw')
+    it('a D1 without `user_emails` (cloud’s), or no DB at all: the registry rule alone', async () => {
+      const { db: bare, raw } = await sqliteD1()
+      raw.exec('DROP TABLE IF EXISTS user_emails')
       expect(await Promise.all([
-        ownerIdFor({ DB: cw } as Env, 'alan@example.test'),
+        ownerIdFor({ DB: bare } as Env, 'alan@example.test'),
         ownerIdFor({} as Env, 'alan@example.test'),
       ])).toEqual(['alan', 'alan'])
     })

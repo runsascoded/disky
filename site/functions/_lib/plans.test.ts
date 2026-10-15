@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { auditRunControl, bucketOf, canonicalPrefix, covers, emptiedBatches, mergeBatches, planBucket, planDetail, planDigest, PlanSpansBuckets, planStaging, prefixShape, realGate, relPrefix, type RunRow, stageItems, uncovered } from './plans'
-import { LINEAGES, type Sqlite, sqliteD1 } from './testD1'
+import { type Sqlite, sqliteD1 } from './testD1'
 
 // An S3 deployment scanning two buckets, the first its primary.
 const P = 'primary-bucket'
@@ -172,10 +172,10 @@ describe('a `*` bucket list (a filesystem-root store)', () => {
   })
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('auditRunControl — who stopped / undid / purged a run, in `admin_edits`', () => {
     it('appends one row per control', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       await auditRunControl(db, 'stop', 'gcs-sweep-real-20261005-024600z', 'admin@example.org', null)
       await auditRunControl(db, 'undo', 'run-1', 'admin@example.org', 'gcs-undo-20261007-120000z')
       const rows = raw.prepare("SELECT tbl, pk, action, who, old_json, new_json FROM admin_edits ORDER BY id").all()
@@ -198,13 +198,13 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       edits: raw.prepare('SELECT tbl, pk, action FROM admin_edits ORDER BY id').all(),
     })
     it('no open plan yet: nothing is created', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec(boom)
       await expect(stageItems(db, ['gs://b/a/', 'gs://b/b/', 'gs://b/boom/', 'gs://b/c/'], 'ann', 'memo', GS, '2026-10-07')).rejects.toThrow(/boom/)
       expect(dump(raw)).toEqual({ plans: [], batches: [], items: [], edits: [] })
     })
     it('an open plan: its items, batches and audit trail are untouched (absorbed items stay)', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       const first = await stageItems(db, ['gs://b/x/y/'], 'ann', 'first', GS, '2026-10-06')
       const before = dump(raw)
       raw.exec(boom)
@@ -216,7 +216,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ])
     })
     it('a gesture that stages nothing new writes no batch and no audit row', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       await stageItems(db, ['gs://b/x/'], 'ann', null, GS, '2026-10-06')
       const before = dump(raw)
       expect([
@@ -238,7 +238,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       items: raw.prepare('SELECT prefix, batch_id, as_of FROM plan_items ORDER BY prefix').all(),
     })
     it('moves the items, keeps the earliest time, takes the new note, deletes the folded batches', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       await stageItems(db, ['gs://b/r/1/', 'gs://b/r/2/'], 'ann', 'marks (1/3)', GS, '2026-10-06')
       await stageItems(db, ['gs://b/r/3/'], 'ann', 'marks (2/3)', GS, '2026-10-07')
       await stageItems(db, ['gs://b/r/4/'], 'Ann', 'marks (3/3)', GS, '2026-10-07')
@@ -260,7 +260,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       })
     })
     it('refuses mixed stagers, foreign or missing batches, and a closed plan — writing nothing', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       await stageItems(db, ['gs://b/a/'], 'ann', null, GS, null)
       await stageItems(db, ['gs://b/c/'], 'bob', null, GS, null)
       const before = dump(raw)
@@ -278,7 +278,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       expect(dump(raw)).toEqual(before)
     })
     it('emptiedBatches replays the merge: a later ancestor absorbs the merged batch', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       await stageItems(db, ['gs://b/r/1/'], 'ann', null, GS, null)
       await stageItems(db, ['gs://b/r/2/'], 'ann', null, GS, null)
       await mergeBatches(db, 1, 1, [2], null, 'ann')

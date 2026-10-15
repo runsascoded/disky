@@ -297,6 +297,16 @@ from two workspace packages:
 - **`@disk-tree/react`** (`packages/react/`) — `<TimeSeries>`/`<BytesOverTime>` built on the core
   (which it re-exports for back-compat).
 
+### D1 schema (`site/schema.sql`)
+
+One current-state file per branch (spec `done/d1-migrations.md`): new databases are created from it
+(`wrangler d1 execute <db> --remote --file site/schema.sql`) and the tests build from it (`sqliteD1()`,
+`conftest.d1_db`). A change is a recipe `site/migrations/<slug>.sql` plus `schema.sql` regenerated in the
+same commit (`dt-cloud d1-schema dump site/schema.sql site/migrations/<slug>.sql -o site/schema.sql`;
+`dt-cloud d1-schema check -p` verifies, and CI runs it); the recipe is applied to each of the branch's
+databases (`--file site/migrations/<slug>.sql`; `cloud`'s only one is the r2 demo's `disk-tree-demo-db`),
+then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compares a live D1, read-only.
+
 ### Cloud site auth routes (`site/functions/`)
 
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.

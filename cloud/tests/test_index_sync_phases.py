@@ -2,7 +2,7 @@
 stages a generation's row groups (invisible: readers join on the pointer's
 gen), `-p` flips the pointers once every variant's rows match its footer, and
 the default still does both, in that order. Against a real SQLite carrying the
-migrations of each D1 lineage this branch carries (the D1 schema)."""
+branch's D1 schema (`site/schema.sql`)."""
 import json
 import sqlite3
 from pathlib import Path
@@ -19,13 +19,6 @@ from dt_cloud.cli import main
 DATE = "2026-10-10T2022"
 OLD, NEW = "G1", "G2"
 OLD_KEY, NEW_KEY = f"listing/{DATE}/index/{OLD}", f"listing/{DATE}/index/{NEW}"
-
-
-def _db(lineage) -> sqlite3.Connection:
-    con = sqlite3.connect(":memory:")
-    for f in lineage.migrations():
-        con.executescript(f.read_text())
-    return con
 
 
 def _write_sort(path: Path, n_rows: int, group_rows: int) -> None:
@@ -71,8 +64,8 @@ class D1:
 
 
 @pytest.fixture
-def d1(monkeypatch, d1_lineage) -> D1:
-    db = D1(_db(d1_lineage))
+def d1(monkeypatch, d1_db) -> D1:
+    db = D1(d1_db)
     monkeypatch.setattr(F, "_d1_query", db)
     monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
     monkeypatch.setattr(F, "_now", lambda: 1_790_000_000)

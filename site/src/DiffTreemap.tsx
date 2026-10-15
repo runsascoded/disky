@@ -39,6 +39,14 @@ export type DiffModel = {
   fmtCDelta: (d: number) => string
 }
 
+/** A diff cell's size text, longest first (`formatCell` candidates): `+grew −shrank = ±net` when the cell both grew
+ *  and shrank and the sum reads true as printed (its drawn rows' grew − shrank formats as its net: rows folded below
+ *  the threshold leave a residue too small to show), then the net alone — never a sum that reads false. */
+export function diffCellText(n: { added: number; removed: number; delta: number }, fmtBytes: (b: number) => string, fmtDelta: (d: number) => string): string[] {
+  const net = fmtDelta(n.delta)
+  return n.added > 0 && n.removed > 0 && fmtDelta(n.added - n.removed) === net ? [`+${fmtBytes(n.added)} −${fmtBytes(n.removed)} = ${net}`, net] : [net]
+}
+
 export function useDiffModel(data: DiffData | null, atRoot: boolean, label: string): DiffModel | null {
   const { fmtBytes } = useUnits()
   // Area mode is shareable state: `?dm=max` switches to max(old,new) areas; Δ
@@ -210,9 +218,9 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
         getLabel={n => (n.first ? `${n.label} (first scanned)` : n.label)}
         getId={(_n, p) => p.map(x => x.key).join('|')}
         formatSize={n => fmtBytes(n)}
-        // Delta mode: a cell's area is its movement (a dir's: its children's, grew + shrank), its label the signed
-        // net change, so a folder that grew 37 T and shrank 20 T reads "+17 T", not its 57 T of area.
-        formatCell={areaMode === 'max' ? undefined : n => fmtDelta(n.delta)}
+        // Delta mode: a cell's area is its movement (a dir's: its children's, grew + shrank), its label the
+        // movement as the table writes it, `+37.2 T −20.4 T = +16.8 T`, where it fits, else the signed net alone.
+        formatCell={areaMode === 'max' ? undefined : n => diffCellText(n, fmtBytes, fmtDelta)}
         tipMode="dock"
         // Crumb and movement totals both live in the header band above the map
         // now, so the map's own crumb suffix is empty.

@@ -1451,7 +1451,7 @@ function AppContent() {
               a subtree that left the slice (e.g. got assigned to someone else) shows as shrunk even if its bytes didn’t move.
               Both scans are read at one byte floor ({fmtBytes(diff.threshold)}): a directory is named on both sides or folded into
               “(other)” on both, and one that crossed the floor is read exactly from the other scan — so every named cell’s Δ is real.
-              {diff.lookups_capped && <> Some small one-sided names went unread (lookup budget); they may sit in “(other)”.</>}
+              {diff.lookups_capped && <> Some names drawn on one scan only went unread on the other (lookup budget): they’re left in “(other)” on both sides.</>}
               {diff.truncated && <> Largest changes shown — the diff walk was budget-capped, so the smallest movements aren’t enumerated (the totals are exact).</>}
             </>}><span className="info" tabIndex={0} aria-label="how this diff is read"> ⓘ</span></Tooltip>
           )}{diff && fq && (diff.partialReason || diff.approximateReason || diff.dirsOnly || diff.hexRuns) && (

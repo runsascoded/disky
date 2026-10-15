@@ -4,7 +4,7 @@ import { gateFor } from './auth'
 import { shareKeyGrant } from './og/tokens'
 import { blockedForRestricted, dataAllowed, filterJson, hideScope, isHidden, restrictDiff, restrictGate, restrictionFor, restrictSubtree, restrictTree } from './restrict'
 import { storeEnv } from './stores'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 import type { ViewNode } from './view'
 import { onRequestGet as subtree } from '../api/subtree'
 import { onRequestGet as diff } from '../api/diff'
@@ -130,11 +130,11 @@ describe('blockedForRestricted', () => {
   })
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   /** A D1 with the auth tables and a live share link carrying `scopes`; the env
    *  authenticates its key as a Bearer credential, as a link holder's would. */
   async function linkEnv(scopes: string[]): Promise<{ env: Env; key: string }> {
-    const { db } = await sqliteD1(lineage)
+    const { db } = await sqliteD1()
     const env = { ...ENV, DB: db } as Env
     const { token } = await gateFor(env)!.mint({ email: null, scopes, name: 'test link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })
     return { env, key: token }

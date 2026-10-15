@@ -1,12 +1,12 @@
 // The staged plan's Slack thread end to end (`notifyPlan`, `refreshThread`,
-// `/slack/actions`' reject) over an in-memory D1 (each lineage) and a faked
+// `/slack/actions`' reject) over an in-memory D1 (the schema) and a faked
 // Slack Web API: no mentions in automatic posts, a stager's stages coalescing
 // into one reply, rotation when the parent carries a ✅, and the parent sized
 // over the whole queue.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { D1Database } from '@cloudflare/workers-types'
 import { MAX_PREFIXES, type PrefixStat } from './prefixes.js'
-import { LINEAGES, schemaFork, sqliteD1 } from './testD1.js'
+import { RUN_DIR, sqliteD1 } from './testD1.js'
 
 const SCAN = '2026-10-08'
 const TiB = 2 ** 40
@@ -87,11 +87,11 @@ const events = (calls: Call[]): string[] => calls.filter(c => !(c.method === 'ch
 const PARENT_TEXT = (paths: number, batches: number, size: string, objects: string) =>
   `*Staged for deletion* · plan #1 · ${paths.toLocaleString('en-US')} prefixes in ${batches} ${batches === 1 ? 'batch' : 'batches'}\nstaged by Ann Bee\n*${size}* · ${objects} objects at scan ${SCAN} · owners: Ann Bee ${size}`
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   /** Plan 1, its thread already posted; `seed`: an older batch (#100, one
    *  prefix) is still queued, so a stage isn't into an emptied queue. */
   async function planDb({ seed = true } = {}): Promise<{ db: D1Database; raw: Awaited<ReturnType<typeof sqliteD1>>['raw'] }> {
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts, slack_channel, slack_ts) VALUES (1, 'Staged', 'open', ?, 1, ?, ?)").bind(ANN, CH, PARENT).run()
     if (seed) await stage(db, 100, ['gs://b/keep/'])
     return { db, raw }
@@ -212,7 +212,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   describe('`stage_replies` (cw `0015`, gcs `0039`)', () => {
     it('applies FKs on; one open reply per plan and stager is the claim', async () => {
-      const { raw } = await sqliteD1(lineage)
+      const { raw } = await sqliteD1()
       raw.exec("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'a', 1)")
       const claim = (stager: string) => Number(raw.prepare("INSERT OR IGNORE INTO stage_replies (plan_id, stager, channel, thread_ts, open, created_ts, updated_ts) VALUES (1, ?, 'C', '1.0', 1, 1, 1)").run(stager).changes)
       const claims = [claim('a'), claim('a'), claim('b')]
@@ -283,7 +283,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       const calls = fakeSlack()
       const { db, raw } = await planDb()
       await notifyPlan(env, db, 1, SITE, await stage(db, 1, run(1, 2)), { now: 1000 })
-      await db.prepare(`INSERT INTO deletion_runs (run_id, ${schemaFork(lineage).runDir}, scan, head, exec_head, actor, mode, started_ts, finished_ts, deleted_bytes, deleted_objects,
+      await db.prepare(`INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, deleted_bytes, deleted_objects,
       skipped_gone, skipped_overwritten, drift_dirs, log_dir, plan_id, plan_digest) VALUES ('dry-1', 'm', ?, 0, 0, ?, 'dry', 1100, NULL, 0, 0, 0, 0, 0, 'l', 1, 'D')`).bind(SCAN, ANN).run()
       const dry = raw.prepare("SELECT * FROM deletion_runs WHERE run_id = 'dry-1'").all()[0] as never
       await notifyPlan(env, db, 1, SITE, { run: dry, phase: 'dispatched', via: 'www' }, { now: 1100 })

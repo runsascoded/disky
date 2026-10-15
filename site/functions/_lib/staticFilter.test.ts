@@ -54,7 +54,7 @@ beforeAll(async () => {
   const fs = await import(/* @vite-ignore */ 'node:fs' as string) as { readFileSync(path: string): Uint8Array }
   for (const k of KEYS) { const b = fs.readFileSync(fixture(`static-filter/${k}`)); held.set(k, b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer) }
   expected = await readJson<Expected>('static-filter/expected.json')
-  const { db, raw } = await sqliteD1('cw')
+  const { db, raw } = await sqliteD1()
   for (const date of DATES) {
     const v = await readJson<Record<string, D1Variant>>(`static-filter/${date}/d1.json`)
     const files = {

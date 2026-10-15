@@ -37,7 +37,7 @@ import { type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, 
 import type { Env } from './auth.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
-import { inFlight, join, JOIN, type Join, reqOf, shared, STALLED, track } from './shared.js'
+import { inFlight, join, JOIN, type Join, Memo, reqOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
 import { compressors } from './zstd.js'
 
@@ -408,8 +408,10 @@ export function pathScanStarts(env: Env): Promise<{ results: { date: string; sta
 function fileFor(env: Env, dir: string, variant: string): FileSlice {
   const store = makeStore(env)
   const key = indexKey(dir, variant)
-  let size: Promise<number> | null = null
-  const byteLengthP = () => (size ??= store.get(key, { offset: 0, length: 1 }).then(r => {
+  // Held once read; the handle is shared across requests, so a read pending in another is joined (`shared.ts`; no
+  // request at hand here: bounded by the join bound, then read afresh).
+  const size = new Memo<number>('index-size')
+  const byteLengthP = () => size.get('', () => store.get(key, { offset: 0, length: 1 }).then(r => {
     if (!r.totalSize) throw new Error('index size unknown (no Content-Range)')
     return r.totalSize
   }))
@@ -445,7 +447,7 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
     handles.delete(ck)
     handleAt.set(ck, Date.now())
   }
-  return shared(handles, ck, async (): Promise<IndexHandle> => {
+  return ivOwn(env, await shared(handles, ck, async (): Promise<IndexHandle> => {
     if (!env.DB) throw new Error('index reader not configured (DB)')
     const s = await schemaRow<{ version: number; schema_json: string; floor_bytes: number | null; gen: string | null; dir: string | null }>(env, 'version, schema_json, floor_bytes, gen, dir', date, variant)
     if (!s || !s.gen || !s.dir) throw new Error(`index variant '${variant}' not synced for ${date}`)
@@ -475,7 +477,7 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
     const total = footer.groups.at(-1)?.rgEnd ?? 0
     if (p && wantsFill(p) && total <= FILL_MAX_ROWS) queueFill(env, k, () => footerRows(h))
     return h
-  }, 30_000) // a blob open is a ~15 MB fetch + parse
+  }, 30_000, ivJoin(env, 'handle'))) // a blob open is a ~15 MB fetch + parse
 }
 
 // --- the interval store (specs/interval-store.md): every scan of a generation in one set of sorts ---
@@ -503,7 +505,7 @@ export async function withPathStore<C extends { request: Request; env: Env }>(ct
 /** The store's current-generation pointer (`interval_compact.CURRENT`: `{"gen": …}`), moved by a compaction
  *  (`interval-store add`) once the new generation is whole. */
 export const IV_CURRENT = 'interval-store/CURRENT.json'
-const ivCurrents = new Map<string, { at: number; p: Promise<string | null> }>()
+const ivCurrents = new Map<string, { at: number; p: Promise<string | null>; ok?: string | null }>()
 
 /** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (null without one or
  *  without `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the
@@ -514,9 +516,18 @@ export async function ivGen(env: Env): Promise<string | null> {
   if (!env.INDEX_R2) return null
   const k = storeKey(env)
   const cur = ivCurrents.get(k)
-  if (cur && Date.now() - cur.at < IV_STATE_TTL) return cur.p
-  const last = cur?.p
-  const p = (async () => {
+  if (cur && Date.now() - cur.at < IV_STATE_TTL) {
+    if (cur.ok !== undefined) return cur.ok
+    // A read another request started: joined (`shared.ts`), else read afresh here.
+    const got = await join(cur.p, ivJoin(env, 'current'))
+    if (got !== STALLED) return got
+    if (ivCurrents.get(k) === cur) ivCurrents.delete(k)
+    const now = ivCurrents.get(k)
+    if (now && now !== cur) return ivGen(env)
+  }
+  const last = cur?.ok
+  const entry: { at: number; p: Promise<string | null>; ok?: string | null } = { at: Date.now(), p: Promise.resolve(null) }
+  entry.p = (async () => {
     const ck = coloKey(env, IV_CURRENT, 'current=1')
     const hit = await colo().match(ck)
     if (hit) return (await hit.json<{ gen: string | null }>()).gen
@@ -525,14 +536,15 @@ export async function ivGen(env: Env): Promise<string | null> {
     if (gen !== null && (typeof gen !== 'string' || !gen)) throw new Error(`${IV_CURRENT}: bad pointer`)
     await colo().put(ck, new Response(JSON.stringify({ gen }), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
     return gen
-  })().catch(e => {
-    console.error(`${IV_CURRENT}: ${(e as Error).message}; ${last ? 'serving the last pointer' : 'reading per-scan stores'}`)
-    if (last) return last
-    ivCurrents.delete(k)
+  })().then(gen => { entry.ok = gen; return gen }, e => {
+    console.error(`${IV_CURRENT}: ${(e as Error).message}; ${last !== undefined ? 'serving the last pointer' : 'reading per-scan stores'}`)
+    if (last !== undefined) { entry.ok = last; return last }
+    if (ivCurrents.get(k) === entry) ivCurrents.delete(k)
     return null
   })
-  ivCurrents.set(k, { at: Date.now(), p })
-  return p
+  ivCurrents.set(k, entry)
+  track(entry.p, ivJoin(env, 'current'), () => { if (ivCurrents.get(k) === entry) ivCurrents.delete(k) })
+  return entry.p
 }
 /** Which path store answers `env`'s reads of a date the interval store holds: '' (per-scan), else the
  *  generation (folded or sliced). A per-isolate memo of what a date has keys by it, as by `storeKey`:
@@ -1149,8 +1161,10 @@ interface CompactFooter { kv: { key: string; value?: string }[]; groups: [number
  *  on a miss parsed whole and the copy put. */
 async function openIvFooter(env: Env, key: string, src: ByteStore): Promise<FooterIndex> {
   const ck = coloKey(env, key, 'compact=1')
-  let whole: Promise<FooterIndex> | undefined
-  const full = () => (whole ??= openFooter(env, key, src))
+  // Held once read; the footer is shared across requests, so a parse pending in another is joined (`shared.ts`; no
+  // request at hand here: bounded by the join bound, then read afresh).
+  const whole = new Memo<FooterIndex>('footer-full')
+  const full = () => whole.get('', () => openFooter(env, key, src))
   const hit = await colo().match(ck)
   if (hit) {
     const d = await hit.json<CompactFooter>()
@@ -2285,7 +2299,7 @@ async function tierMaxDepth(h: IndexHandle): Promise<number> {
   return shared(maxDepths, k, async () => {
     const r = await h.env.DB!.prepare('SELECT MAX(d_max) AS d FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ?').bind(h.date, d1Variant(h.env, h.variant), h.gen).first<{ d: number | null }>()
     return num(r?.d)
-  }, 10_000)
+  }, 10_000, ivJoin(h.env, 'max-depth'))
 }
 
 /** The lowest per-depth threshold a read over `rects` applies: `thrAt` is

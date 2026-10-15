@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1 } from '../_lib/testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from '../_lib/testStore'
 import { searchKey } from '../_lib/search'
 import { type FilterRejectCode, REJECT_MESSAGES, rejectQuery } from '../_lib/indexedOnly'
@@ -27,7 +27,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // can't answer exactly, `too-broad`); unset, the same requests answer as before. Over the static-filter
 // fixture's two scans (`fixtures/static-filter/`) and its drill (`fixtures/static-drill/`).
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const A = '2026-10-04'
   const B = '2026-10-05'
   const dirOf = (date: string) => `cw-l2/${date}/index/g`
@@ -69,7 +69,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     await readTree('static-drill', drillFiles)
     await readTree('static-filter/sx', filterFiles, 'sx')
     for (const k of ['shards.json', 'scans.json']) { const m = new Map<string, ArrayBuffer>(); await readTree('static-filter', m); filterFiles.set(k, m.get(k)!) }
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     for (const date of [A, B]) {
       const v = await readJson<Record<string, D1Variant>>(`static-filter/${date}/d1.json`)
       const files = {

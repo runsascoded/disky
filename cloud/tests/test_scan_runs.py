@@ -1,15 +1,15 @@
-"""`dt-cloud scan-run`: the record's SQL path (against the real migration, FKs on), output measuring, and the
+"""`dt-cloud scan-run`: the record's SQL path (against the real schema, FKs on), output measuring, and the
 backfill's reconstruction from fake Batch jobs, log lines and a fake store (specs/done/scan-runs-ui.md)."""
 from __future__ import annotations
 
 import datetime as dt
 import json
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from dt_cloud import scan_runs
+from dt_cloud.d1_schema import table_ddl
 
 from dt_cloud.scan_runs import (
     ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cli, cost, env_run_id, fill, load_profile, measure, measure_after,
@@ -17,8 +17,7 @@ from dt_cloud.scan_runs import (
 )
 from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, phases_of, reconstruct, task_lines
 
-SITE = Path(__file__).parents[2] / "site"
-DDL = (SITE / "migrations/cw/0016_scan_runs.sql").read_text()
+DDL = table_ddl(scan_runs.TABLES)  # the tables as `site/schema.sql` has them
 
 
 def ts(s: str) -> int:

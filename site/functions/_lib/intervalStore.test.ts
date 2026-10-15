@@ -6,6 +6,9 @@ import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
 import { type D1Variant, fixture, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, type ViewNode } from './view'
+import { type HitSource, injectedStores } from './staticFilter'
+import { type Hit, scanAt } from './staticNames'
+import { parseQuery } from './scope'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -84,7 +87,7 @@ const TIERS_AT_PLAN_ROWS_0: Record<string, number> = { 'full bysize': 42, 'band 
 
 beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-  const { db } = await sqliteD1('cw')
+  const { db } = await sqliteD1()
   reads = []
   env = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2: r2(reads) } as Env
   cases = await readJson<Case[]>('iv/expected.json')
@@ -311,7 +314,7 @@ describe('interval store', () => {
   it('leaves a per-scan read of a date it holds as it was: one isolate serves both under `PATH_STORE=opt-in`', async () => {
     // A per-scan v1 generation of the store's first scan, with a coarse tier (the fine tier's rows, floor 1).
     const D = '2026-07-30'
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const v1 = await readJson<Record<string, D1Variant>>('path-index-zstd.d1.json')
     const tier = { parquet: 'path-index-zstd.parquet', groups: 'path-index-zstd.groups.json' }
     seedGeneration(raw, { date: D, gen: 'p1', dir: `listing/${D}/index/p1`, variants: { ...v1, coarse20: { ...v1.path, schema: { ...v1.path.schema, floor_bytes: 1 } } }, files: { path: tier, coarse20: tier } })
@@ -360,6 +363,141 @@ describe('interval store', () => {
       }
     }
     expect({ pairs, got }).toEqual({ pairs: 30, got: [] })
+  })
+})
+
+// A heavy literal's rollup view read as of a scan from the interval store: each drawn match root's inside is the
+// unfiltered subtree at its path (every descendant of a root matches), as on a per-scan store (`staticDrill.test.ts`).
+// The static source is synthetic — the literal's rollup at the fleet root, its match roots below, each scan's totals
+// from the store's own unfiltered views — so what is checked is the insides, read from the store.
+describe('interval store: a heavy literal\'s match roots draw their insides', () => {
+  /** `gof`: one folder (`b1/gof`); `e`: folders named `e` at depths 1–3, and the files under them. */
+  const LITS = ['gof', 'e']
+  const W = 40, H = 40, MIN_AREA = 12, ATTEN = 2, T = 0.01
+  const DATES = ['2026-07-30', '2026-07-31', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05']
+  /** The scans whose fleet root holds bytes (the fixture's buckets are empty rows on some: nothing in scope there). */
+  let LIVE: string[] = []
+  const open = 4291747200000
+  const parent = (p: string) => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : ''
+  const depthOf = (p: string) => p === '' ? 0 : p.split('/').length
+  /** Each scan's paths `[bytes, objects]`: every row of its `path` sort as of the scan, owner slices summed. */
+  const scans = new Map<string, Map<string, [number, number]>>()
+  /** A literal's match roots on a scan: the outermost paths whose name holds it. */
+  const rootsOf = (lit: string, date: string): string[] => {
+    const q = parseQuery(lit)!, all = scans.get(date)!
+    return [...all.keys()].filter(p => q(p) && ![...all.keys()].some(a => p.startsWith(`${a}/`) && q(a))).sort()
+  }
+  let envS: Env
+
+  beforeAll(async () => {
+    for (const date of DATES) {
+      const all = new Map<string, [number, number]>()
+      for (const r of await readRows(await openIndex(env, date, 'path'), 1, 1e9, '', '\uffff')) {
+        const [b, o] = all.get(r.path) ?? [0, 0]
+        all.set(r.path, [b + r.size, o + r.n_files])
+      }
+      scans.set(date, all)
+    }
+    LIVE = DATES.filter(d => [...scans.get(d)!].some(([p, [b]]) => !p.includes('/') && b > 0))
+    const vf = (i: number) => scanAt(DATES[i])
+    const source: HitSource = {
+      async hits(lit, u) {
+        if (u === '') {
+          const kids = [...new Set(DATES.flatMap(d => rootsOf(lit, d).map(r => r.split('/')[0])))].sort()
+          const cells = DATES.flatMap((d, i) => kids.map(c => {
+            const all = scans.get(d)!, [b, o] = rootsOf(lit, d).filter(r => r === c || r.startsWith(`${c}/`)).reduce<[number, number]>((x, r) => [x[0] + all.get(r)![0], x[1] + all.get(r)![1]], [0, 0])
+            return { kind: 1 as const, child: c, vf: vf(i), b: BigInt(b), o: BigInt(o) }
+          }))
+          return { rollup: { dir: '', kept: kids.length, rows: null, children: kids.length, cells }, io: { from: 'drill' } }
+        }
+        const hits: Hit[] = DATES.flatMap((d, i) => rootsOf(lit, d).filter(r => r.startsWith(`${u}/`)).map(r => ({
+          path: r, depth: depthOf(r), usr: '', vf: vf(i), vt: i + 1 < DATES.length ? vf(i + 1) : open, size: BigInt(scans.get(d)!.get(r)![0]), n: BigInt(scans.get(d)!.get(r)![1]),
+        })))
+        return { hits, io: { from: 'drill' } }
+      },
+    }
+    envS = { ...env } as Env
+    injectedStores.set(envS, { source, scans: async () => [...DATES], gen: 'iv-test' })
+  })
+
+  /** Every node under `n` but its `(other)` folds: `[path below n, bytes, objects, kind]`, depth first. */
+  const flat = (n: ViewNode, pre = ''): unknown[] => (n.c ?? []).filter(c => c.n !== '(other)')
+    .sort((x, y) => (x.n < y.n ? -1 : 1)).flatMap(c => [[`${pre}${c.n}`, c.b, c.o, c.k], ...flat(c, `${pre}${c.n}/`)])
+  /** A filtered view's drawn match roots: path → node. */
+  const drawnRoots = (v: { tree: ViewNode }): Map<string, ViewNode> => {
+    const out = new Map<string, ViewNode>()
+    const walk = (n: ViewNode, p: string) => { for (const c of n.c ?? []) { const cp = p === '' ? c.n : `${p}/${c.n}`; if (c.m) out.set(cp, c); else walk(c, cp) } }
+    walk(v.tree, '')
+    return out
+  }
+  const subdivides = (n: ViewNode) => n.o > 1 && n.b >= T * 4096 / MIN_AREA
+
+  it('the view: each drawn root it subdivides holds the unfiltered view of its path, `FILTER_SUBDIV_LEVELS` deep', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    let inside = 0
+    for (const lit of LITS) for (const date of LIVE) {
+      const v = await buildView(envS, { date, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, threshold: T, query: parseQuery(lit)! })
+      for (const [R, n] of drawnRoots(v)) {
+        const plain = subdivides(n) ? flat((await buildView(env, { date, path: R, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, threshold: T, maxDepth: 3 })).tree) : []
+        if (plain.length) inside++
+        got.push([lit, date, v.tier, R, flat(n)])
+        want.push([lit, date, 'rollup', R, plain])
+      }
+    }
+    expect([LIVE, got]).toEqual([['2026-07-30', '2026-08-03', '2026-08-04', '2026-08-05'], want])
+    expect(inside).toBe(4)
+  })
+
+  it('the diff: rows inside a root either side subdivides are the unfiltered diff at its path', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    let inside = 0
+    for (const lit of LITS) for (let i = 0; i + 1 < LIVE.length; i++) {
+      const [from, to] = [LIVE[i], LIVE[i + 1]]
+      const d = await buildDiff(envS, { from, to, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, threshold: T, query: parseQuery(lit)! })
+      const subdiv = new Set<string>()
+      for (const date of [from, to]) {
+        for (const [R, n] of drawnRoots(await buildView(envS, { date, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, threshold: T, query: parseQuery(lit)! }))) if (subdivides(n)) subdiv.add(R)
+      }
+      const rows = (rs: { p: string; s: string; a: number; b: number; oa: number; ob: number; x?: boolean }[]) => rs.map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob, !!r.x]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
+      for (const m of d.matched ?? []) {
+        const R = m.path
+        const under = rows(d.rows.filter(r => r.p.startsWith(`${R}/`)).map(r => ({ ...r, p: r.p.slice(R.length + 1) })))
+        const plain = subdiv.has(R) ? rows((await buildDiff(env, { from, to, path: R, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, threshold: T, depth: 3 })).rows) : []
+        if (plain.length) inside++
+        got.push([lit, from, to, d.tier, R, under])
+        want.push([lit, from, to, 'rollup', R, plain])
+      }
+    }
+    expect(got).toEqual(want)
+    expect(inside).toBe(5)
+  })
+
+  it('the diff: rows inside a root are each path\'s true totals on both scans, its lookups cut or not', async () => {
+    // As per scan (`staticDrill.test.ts`): a name the lookup budget leaves unanswered folds into `(other)` on both
+    // sides, never one-sided at zero. The fixture's rows are per path, not sums (a bucket absent on a scan whose
+    // folders aren't; a 0-byte root over a 10-byte child): only paths P and roots each scan holds bytes at.
+    const bad: unknown[] = []
+    let rows = 0, folded = 0
+    for (const lit of LITS) for (const from of LIVE) for (const to of LIVE) if (from < to) for (const T2 of [T, 1, 8, 64]) for (const P of ['', 'b1', 'b2']) {
+      if (P && !(scans.get(from)!.get(P)?.[0] && scans.get(to)!.get(P)?.[0])) continue
+      const o = { from, to, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, threshold: T2, query: parseQuery(lit)! }
+      const full = await buildDiff(envS, o)
+      for (const cut of [{}, { lookupCap: 0 }, { walkMs: 0 }]) {
+        const d = Object.keys(cut).length ? await buildDiff(envS, { ...o, ...cut }) : full
+        const roots = (d.matched ?? []).map(m => m.path).filter(R => scans.get(from)!.get(R)?.[0] && scans.get(to)!.get(R)?.[0])
+        const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
+        rows += drawn.length
+        if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length
+        for (const [p, r] of drawn) {
+          const [a, oa] = scans.get(from)!.get(p) ?? [0, 0], [b, ob] = scans.get(to)!.get(p) ?? [0, 0]
+          if (r.a !== a || r.b !== b || r.oa !== oa || r.ob !== ob) bad.push([lit, from, to, T2, P, cut, r.p, [r.a, r.b, r.oa, r.ob], [a, b, oa, ob]])
+        }
+      }
+    }
+    expect(bad).toEqual([])
+    expect([rows, folded]).toEqual([43, 26])
   })
 })
 

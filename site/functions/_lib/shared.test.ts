@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { inFlight, JOIN, joinBound, Req, resetJoinStats, shared, snapshotsPrefix, track } from './shared'
+import { inFlight, JOIN, joinBound, Memo, Req, resetJoinStats, shared, snapshotsPrefix, track } from './shared'
 
 describe('shared', () => {
   beforeEach(() => vi.useFakeTimers())
@@ -221,6 +221,57 @@ describe('join', () => {
     const p = shared(map, 'k', async () => 1, 10_000, { name: 'handle', req: b })
     await vi.advanceTimersByTimeAsync(500)
     expect([await p, t]).toEqual([1, [['join-handle', 500], ['join-evict', 1, 'handle']]])
+  })
+})
+
+// The class caches' memo (`Memo`): settled values held plainly, pending ones owned and tracked as `inFlight`'s.
+describe('Memo', () => {
+  const join0 = { ...JOIN }
+  beforeEach(() => { vi.useFakeTimers(); resetJoinStats(); Object.assign(JOIN, { k: 2, min: 100, max: 1000, cold: 500, budget: 2000 }) })
+  afterEach(() => { vi.useRealTimers(); Object.assign(JOIN, join0) })
+  const frozen = () => new Promise<number>(() => {})
+  const settledBy = async <T>(p: Promise<T>, ms: number) => {
+    let done = false
+    void p.then(() => { done = true }, () => { done = true })
+    await vi.advanceTimersByTimeAsync(ms)
+    return done
+  }
+
+  it('holds a settled value: later requests take it, never computing again', async () => {
+    const m = new Memo<number>('m')
+    let calls = 0
+    const make = async () => ++calls
+    expect([await m.get('k', make, new Req()), await m.get('k', make, new Req()), calls, m.has('k')]).toEqual([1, 1, 1, true])
+  })
+
+  it('a computation pending in a cancelled request is evicted at its cancel: the next request computes at once', async () => {
+    const m = new Memo<number>('m')
+    const ctl = new AbortController()
+    const pa = m.get('k', frozen, new Req(ctl.signal))
+    ctl.abort()
+    const pb = m.get('k', async () => 4, new Req())
+    expect([await settledBy(pb, 0), await pb, await settledBy(pa, 10_000), m.peek('k')]).toEqual([true, 4, false, 4])
+  })
+
+  it('one pending in a request that ended is joined until its bound, then its owner convicted and the value computed here', async () => {
+    const m = new Memo<number>('m')
+    const a = new Req(), b = new Req()
+    void m.get('k', frozen, a)
+    const pb = m.get('k', async () => 5, b)
+    expect(await settledBy(pb, 499)).toBe(false)
+    expect(await settledBy(pb, 1)).toBe(true)
+    expect([await pb, a.dead, b.waited]).toEqual([5, true, 500])
+  })
+
+  it('a rejection is not held; `keep` declines a value; `max` drops the least recently used', async () => {
+    const m = new Memo<number>('m', 2)
+    await expect(m.get('k', () => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
+    expect(await m.get('k', async () => 1, undefined, v => v > 1)).toBe(1)
+    expect(m.has('k')).toBe(false)
+    for (const [k, v] of [['a', 1], ['b', 2]] as const) await m.get(k, async () => v)
+    m.peek('a')
+    await m.get('c', async () => 3)
+    expect([...m.keys()]).toEqual(['a', 'c'])
   })
 })
 

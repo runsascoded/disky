@@ -7,7 +7,7 @@ import { onRequestPost as undoRoute } from '../api/sweep/undo'
 import { emptiedBatches, stageItems, prefixShape, snapshotPlanBuckets, unstageDeleted } from './plans'
 import type { SweepBatchJob } from './sweepReflect'
 import { runBuckets, undoGate, type UndoRunRow } from './sweepUndo'
-import { LINEAGES, schemaFork, sqliteD1 } from './testD1'
+import { RUN_DIR, sqliteD1 } from './testD1'
 
 const B1 = 'gcs-a'
 const B2 = 'gcs-b'
@@ -44,13 +44,13 @@ describe('undoGate — a finished real run, inside its window, not already undon
   })
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
-  // A D1 (the sweep schema is shared, but for `schemaFork`) with plan 1 and one finished real run of it.
+describe('D1', () => {
+  // A D1 (the sweep schema is shared, but for `RUN_DIR`) with plan 1 and one finished real run of it.
   async function gcsDb({ buckets = B1 as string | null, deadline = NOW + 100 as number | null, mode = 'real' } = {}) {
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1)").run()
     await db.prepare(`
-    INSERT INTO deletion_runs (run_id, ${schemaFork(lineage).runDir}, scan, head, exec_head, actor, mode, started_ts, finished_ts, deleted_bytes, deleted_objects,
+    INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, deleted_bytes, deleted_objects,
       skipped_gone, skipped_overwritten, drift_dirs, undo_deadline, log_dir, buckets, plan_id)
     VALUES (?, 'gs://my-data/sweep/runs/gcs-sweep-real-20260928-120000z', '2026-09-28', 0, 0, 'ann', ?, 100, 200, 3000, 3, 1, 0, 0, ?,
       'gs://my-data/sweep/runs/gcs-sweep-real-20260928-120000z', ?, 1)
@@ -236,7 +236,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     })
 
     it('end to end: two gestures, the second stages the first\'s ancestor; /api/plans/staged carries it', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       const s1 = await stageItems(db, [`gs://${B1}/runs/a/`, `gs://${B1}/runs/b/`], 'ann', 'old runs', SHAPE, '2026-09-27')
       const s2 = await stageItems(db, [`gs://${B1}/runs/`], 'bob', 'all of runs', SHAPE, '2026-09-28')
       expect([s1, s2]).toEqual([
@@ -252,7 +252,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     })
 
     it('POST /api/plans/stage: `as_of` defaults to the latest scan, must name a scan, and a re-stage keeps the first; the snapshot carries it', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES
       ('2026-10-06', 'path', 2, '[]'), ('2026-10-07', 'path', 2, '[]'), ('2026-10-07', 'bysize', 2, '[]')`)
       const env = { DB: db, STAGING: '1', STORE_SCHEME: 'gs://', STORE_BUCKETS: `${B1},${B2}`, DEV_EMAIL: 'ann@example.test' }

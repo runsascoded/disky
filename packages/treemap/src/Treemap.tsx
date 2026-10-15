@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
+import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
 import type { FoldedNode, LayoutConfig } from './layout'
@@ -98,8 +99,9 @@ export interface TreemapProps<T> {
   getId?: (n: T, path: T[]) => string
   /** Format `getSize`'s return value for display. Default: raw number toLocaleString. */
   formatSize?: (n: number) => string
-  /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change, while the area stays `getSize`). */
-  formatCell?: (n: T) => string
+  /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change, while the area stays `getSize`):
+   *  one string, or candidates longest first, each renderer drawing the first that fits the cell (`CellText`). */
+  formatCell?: (n: T) => CellText
 
   /**
    * Cell background + text color + optional hatch overlay. Return `null`
@@ -477,6 +479,13 @@ const STATUS_STYLE: CSSProperties = {
   pointerEvents: 'auto',
 }
 
+/** The DOM labels' font sizes in px (`--dt-treemap-lbl-fs` 0.85rem, `-sm` 0.72rem at a 16px root). */
+const LBL_PX = 13.6
+const LBL_PX_SM = 11.5
+/** A label's width estimate (px) at `px`: ~0.58 em per character (system-ui digits and lowercase), for picking a
+ *  `formatCell` candidate; the label itself still clips with an ellipsis. */
+const estText = (t: string, px: number): number => t.length * px * 0.58
+
 export function Treemap<T>({
   root,
   initialPath,
@@ -578,7 +587,9 @@ export function Treemap<T>({
   const getTitleWidth = useCallback((n: T, labels: string[] | null, w: number, boxW: number): number => {
     if (!titleMetrics || sizeAlign === 'right' || renderCellSubtitle) return boxW
     const name = labels ? (labels.length > 3 ? `${labels[0]}/…/${labels[labels.length - 1]}` : labels.join('/')) : getLabel(n)
-    const sizeText = w > inlineSizeMinWidth ? (formatCell ? formatCell(n) : formatSize(getSize(n))) : ''
+    const sizeText = w > inlineSizeMinWidth
+      ? (formatCell ? fitCandidate(candidates(formatCell(n)), inlineRoom(boxW, 4, 6, estText(name, LBL_PX)), t => estText(t, LBL_PX)) : formatSize(getSize(n)))
+      : ''
     const { ctx, font, sizeFont, canvasFont, padding, tabularNums } = titleMetrics
     const measure = (nameFont: string, valueFont: string) => {
       ctx.font = nameFont
@@ -966,6 +977,11 @@ export function Treemap<T>({
       : chainLabels
         ? (chainLabels.length > 3 ? `${chainLabels[0]}/…/${chainLabels[chainLabels.length - 1]}` : chainLabels.join('/'))
         : getLabel(kid as T)
+    // The size text: `formatCell`'s candidates fitted to this cell (inline beside the name, or a tall leaf's 2nd line).
+    const sizeCands = folded || !formatCell ? [formatSize(kidSize)] : candidates(formatCell(kid as T))
+    const lblPx = r.w < 64 ? LBL_PX_SM : LBL_PX
+    const sizeInline = fitCandidate(sizeCands, inlineRoom(r.w, 4, 6, estText(kidLabel, lblPx)), t => estText(t, lblPx))
+    const sizeSecond = fitCandidate(sizeCands, r.w - 8, t => estText(t, LBL_PX_SM))
     const kidChildren = folded ? undefined : childrenOf(kid as T, kidPath)
     // Drillable even with nothing in hand, when a loader can go get it.
     const kidDrillable = !folded && expandable(kid as T, kidPath)
@@ -1234,7 +1250,7 @@ export function Treemap<T>({
                 first line and isn't crowded by the size. */}
             {(kids.length > 0 || r.h <= 34) && r.w > inlineSizeMinWidth && (
               <span className="sz" style={{ opacity: 0.75, whiteSpace: 'nowrap', flex: 'none', marginLeft: sizeAlign === 'right' ? 'auto' : undefined }}>
-                {folded || !formatCell ? formatSize(kidSize) : formatCell(kid as T)}
+                {sizeInline}
                 {!folded && renderCellSubtitle && (
                   <span style={{ marginLeft: 4 }}>{renderCellSubtitle(kid as T, kidPath, { w: r.w, h: r.h, fade: fadeAt(depth), hasKids: kids.length > 0 })}</span>
                 )}
@@ -1259,7 +1275,7 @@ export function Treemap<T>({
               pointerEvents: 'none',
             }}
           >
-            {folded || !formatCell ? formatSize(kidSize) : formatCell(kid as T)}
+            {sizeSecond}
             {!folded && renderCellSubtitle && (
               <span style={{ marginLeft: 4 }}>{renderCellSubtitle(kid as T, kidPath, { w: r.w, h: r.h, fade: fadeAt(depth), hasKids: kids.length > 0 })}</span>
             )}

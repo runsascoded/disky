@@ -35,6 +35,7 @@ import { subBlobs } from './staticRuns.js'
 import { compressors } from './zstd.js'
 import { type HexRule, occurs, ruleOf } from './hexRuns.js'
 import { isScanId } from '../../src/scanSlug.js'
+import { inFlight, Memo, type Req } from './shared.js'
 
 export const DRILL_DIR = 'drill'
 
@@ -199,17 +200,18 @@ const newIo = (): DrillIo => ({ top: 'isolate', index_reads: 0, index_bytes: 0, 
 
 /** One roots or rollups set of one kind, through its two-level index (`static_roots.GroupFile`). */
 export class GroupFile {
-  private top?: Promise<Top>
-  private optional?: Promise<boolean>
-  constructor(readonly blobs: Blobs, readonly kind: Kind | 'end' | 'exact' | 'start', readonly set: Set_, readonly meta: () => Promise<DrillMeta>, readonly cache?: IndexCache<Top>) {}
+  /** The top and whether `file` is nullable, held once read; a read pending in another request is joined, never
+   *  awaited as is (`shared.ts`). Every read's `req`: the request reading (`reqOf(env)`). */
+  private top = new Memo<Top>('static-drill-top')
+  private optional = new Memo<boolean>('static-drill-optional')
+  constructor(readonly blobs: Blobs, readonly kind: Kind | 'end' | 'exact' | 'start', readonly set: Set_, readonly meta: (req?: Req) => Promise<DrillMeta>, readonly cache?: IndexCache<Top>) {}
 
   get indexFile(): string { return `${this.kind}-${this.set}-index.parquet` }
   get topFile(): string { return `${this.kind}-${this.set}-index.top.parquet` }
 
   /** The top: the isolate's, else the colo cache's, else the file read whole (≤ ~1 MB) and decoded. */
-  private async loadTop(io: DrillIo): Promise<Top> {
-    if (this.top) return this.top
-    const p = (async () => {
+  private async loadTop(io: DrillIo, req?: Req): Promise<Top> {
+    return this.top.get('', async () => {
       const cached = await this.cache?.get(this.topFile)
       if (cached) { io.top = 'cache'; return cached }
       io.top = 'file'
@@ -224,29 +226,24 @@ export class GroupFile {
       }
       await this.cache?.put(this.topFile, top)
       return top
-    })()
-    this.top = p
-    p.catch(() => { if (this.top === p) this.top = undefined })
-    return p
+    }, req)
   }
 
   /** Whether the index file's `file` column is nullable (its footer's schema; isolate-held). */
-  private fileOptional(): Promise<boolean> {
-    this.optional ??= (async () => {
+  private fileOptional(req?: Req): Promise<boolean> {
+    return this.optional.get('', async () => {
       const { buf, size } = await this.blobs.suffix(this.indexFile, 8)
       const len = new DataView(buf).getUint32(0, true)
       const head = await this.blobs.range(this.indexFile, size - 8 - len, Math.min(len, SCHEMA_BYTES))
       const f = footerSchema(head).find(e => e.name === 'file')
       if (!f || (f.repetition !== 0 && f.repetition !== 1)) throw new Error(`static drill: ${this.indexFile} has no file column`)
       return f.repetition === 1
-    })()
-    this.optional.catch(() => { this.optional = undefined })
-    return this.optional
+    }, req)
   }
 
   /** Entries in index row group `g` (every one holds `idx_rg` but the last). */
-  private async entriesIn(g: number, n: number): Promise<number> {
-    const m = await this.meta()
+  private async entriesIn(g: number, n: number, req?: Req): Promise<number> {
+    const m = await this.meta(req)
     const total = (m[`${this.kind}_${this.set}`] as { row_groups?: number } | undefined)?.row_groups
     if (!Number.isSafeInteger(total)) throw new Error(`static drill: meta.json has no ${this.kind}_${this.set}.row_groups`)
     return g < n - 1 ? m.idx_rg : total! - m.idx_rg * (n - 1)
@@ -255,8 +252,8 @@ export class GroupFile {
   /** The data row groups meeting `[lo, hi)` and their rows' sum. With `cap`, when the index row groups strictly
    *  inside the range already hold more than `cap` rows, `groups` is null (the range is at least that big)
    *  and the index file is not read. */
-  async select(lo: Key, hi: Key, io: DrillIo, cap?: number): Promise<{ groups: Entry[] | null; rows: number }> {
-    const top = await this.loadTop(io)
+  async select(lo: Key, hi: Key, io: DrillIo, cap?: number, req?: Req): Promise<{ groups: Entry[] | null; rows: number }> {
+    const top = await this.loadTop(io, req)
     const n = top.qMin.length
     const [a, b] = meet(n, i => [top.qMin[i], top.kMin[i]], i => [top.qMax[i], top.kMax[i]], lo, hi)
     if (a === b) return { groups: [], rows: 0 }
@@ -264,11 +261,11 @@ export class GroupFile {
     for (let i = a + 1; i < b - 1; i++) inner += top.rows[i]
     if (cap != null && inner > cap) return { groups: null, rows: inner }
     const start = top.offset[a], end = top.offset[b - 1] + top.length[b - 1]
-    const [buf, optional] = await Promise.all([this.blobs.range(this.indexFile, start, end - start), this.fileOptional()])
+    const [buf, optional] = await Promise.all([this.blobs.range(this.indexFile, start, end - start), this.fileOptional(req)])
     io.index_reads++
     io.index_bytes += buf.byteLength
     const entries: Entry[] = []
-    for (let g = a; g < b; g++) entries.push(...await decodeIndexGroup(await this.entriesIn(g, n), top.chunks[g], buf, start, optional))
+    for (let g = a; g < b; g++) entries.push(...await decodeIndexGroup(await this.entriesIn(g, n, req), top.chunks[g], buf, start, optional))
     const [x, y] = meet(entries.length, i => [entries[i].qMin, entries[i].kMin], i => [entries[i].qMax, entries[i].kMax], lo, hi)
     const groups = entries.slice(x, y)
     return { groups, rows: groups.reduce((s, e) => s + e.rows, 0) }
@@ -278,8 +275,8 @@ export class GroupFile {
    *  the range by their top `rows`, the two at its edges read (their entries fully inside by `rows`), and the
    *  at most two data groups straddling an edge decoded. A short literal's root count at the fleet root
    *  (`.`: 361M rows) for ~2 small index reads. */
-  async count(lo: Key, hi: Key, io: DrillIo): Promise<number> {
-    const top = await this.loadTop(io)
+  async count(lo: Key, hi: Key, io: DrillIo, req?: Req): Promise<number> {
+    const top = await this.loadTop(io, req)
     const n = top.qMin.length
     const [a, b] = meet(n, i => [top.qMin[i], top.kMin[i]], i => [top.qMax[i], top.kMax[i]], lo, hi)
     if (a === b) return 0
@@ -289,10 +286,10 @@ export class GroupFile {
     const partial: Entry[] = []
     for (const g of b - 1 > a ? [a, b - 1] : [a]) {
       const start = top.offset[g]
-      const [buf, optional] = await Promise.all([this.blobs.range(this.indexFile, start, top.length[g]), this.fileOptional()])
+      const [buf, optional] = await Promise.all([this.blobs.range(this.indexFile, start, top.length[g]), this.fileOptional(req)])
       io.index_reads++
       io.index_bytes += buf.byteLength
-      const entries = await decodeIndexGroup(await this.entriesIn(g, n), top.chunks[g], buf, start, optional)
+      const entries = await decodeIndexGroup(await this.entriesIn(g, n, req), top.chunks[g], buf, start, optional)
       const [x, y] = meet(entries.length, i => [entries[i].qMin, entries[i].kMin], i => [entries[i].qMax, entries[i].kMax], lo, hi)
       for (const e of entries.slice(x, y)) { if (inside(e)) rows += e.rows; else partial.push(e) }
     }
@@ -337,38 +334,35 @@ export interface TierCache { top?: IndexCache<Top>; aliases?: IndexCache<[string
 
 /** One tier's drill: the base generation's `drill/` (`dir` null) or a run's `<dir>/drill/`, in the same layout. */
 export class DrillTier {
-  private meta?: Promise<DrillMeta>
-  private aliasMap?: Promise<Map<string, { c: string; n: number | null }>>
+  /** `meta.json` and the alias map, held once read; one pending in another request is joined (`shared.ts`). */
+  private meta = new Memo<DrillMeta>('static-drill-meta')
+  private aliasMap = new Memo<Map<string, { c: string; n: number | null }>>('static-drill-aliases')
   readonly files: Record<Kind, Record<Set_, GroupFile>>
   constructor(readonly blobs: Blobs, readonly dir: string | null, readonly cache?: TierCache) {
-    const meta = () => this.info()
+    const meta = (req?: Req) => this.info(req)
     const gf = (k: Kind, s: Set_) => new GroupFile(blobs, k, s, meta, cache?.top)
     this.files = { long: { roots: gf('long', 'roots'), rollups: gf('long', 'rollups') }, short: { roots: gf('short', 'roots'), rollups: gf('short', 'rollups') } }
   }
 
-  /** `meta.json` (isolate-held). */
-  info(): Promise<DrillMeta> {
-    this.meta ??= this.blobs.json<DrillMeta>('meta.json').then(m => {
+  /** `meta.json` (isolate-held). `req`: the request asking (`reqOf(env)`). */
+  info(req?: Req): Promise<DrillMeta> {
+    return this.meta.get('', () => this.blobs.json<DrillMeta>('meta.json').then(m => {
       for (const k of ['R', 'K', 'rg', 'idx_rg', 'dispatch_rows'] as const) if (!Number.isSafeInteger(m[k]) || m[k] < 1) throw new Error(`static drill: bad meta.json ${k}`)
       return m
-    })
-    this.meta.catch(() => { this.meta = undefined })
-    return this.meta
+    }), req)
   }
 
   /** Every long member of the tier → its canonical (itself, or the member whose root set it shares there) and,
    *  where the tier records it (the base), its root rows. */
-  aliases(): Promise<Map<string, { c: string; n: number | null }>> {
-    this.aliasMap ??= (async () => {
+  aliases(req?: Req): Promise<Map<string, { c: string; n: number | null }>> {
+    return this.aliasMap.get('', async () => {
       const cached = await this.cache?.aliases?.get('aliases.parquet')
       if (cached) return new Map(cached[0].map((q, i) => [q, { c: cached[1][i] || q, n: cached[2][i] < 0 ? null : cached[2][i] }]))
       const rows = await parquetReadObjects({ file: await this.blobs.range('aliases.parquet', 0), compressors }) as { q: string; canonical: string; n?: bigint }[]
       const m = new Map(rows.map(r => [r.q, { c: r.canonical, n: r.n == null ? null : num(r.n) }]))
       await this.cache?.aliases?.put('aliases.parquet', [[...m.keys()], [...m].map(([q, a]) => a.c === q ? '' : a.c), [...m.values()].map(a => a.n ?? -1)])
       return m
-    })()
-    this.aliasMap.catch(() => { this.aliasMap = undefined })
-    return this.aliasMap
+    }, req)
   }
 }
 
@@ -456,7 +450,7 @@ export interface DrillOver { source: 'over'; upper: number }
 
 /** The catalog's per-member lookup (the fleet root's rollup): the base's, or the base's and its runs' (`scans`: the
  *  ones its cells are exact on, when its own stack was cut at a broken tier). */
-export interface CatalogLookup { lookup(q: string): Promise<{ member: Member | null; scans?: string[] }>; info?(): Promise<CatalogMeta> }
+export interface CatalogLookup { lookup(q: string, opts?: { req?: Req }): Promise<{ member: Member | null; scans?: string[] }>; info?(req?: Req): Promise<CatalogMeta> }
 
 /** The live tiers: the base and the runs whose drill is there, oldest first, up to the first broken one; the scans
  *  they cover; and a version naming the newest tier (`base`, or its run's directory; `none` with no usable tier),
@@ -467,7 +461,7 @@ export interface DrillOpts {
   /** The generation's runs (their directories, oldest first: the light index's tiers past the base,
    *  `staticRuns.ts`). A run is a drill tier iff its `drill/meta.json` exists (written last); the tiers are the
    *  base and the runs up to the first one without it. Absent: the base alone. */
-  runs?: () => Promise<string[]>
+  runs?: (req?: Req) => Promise<string[]>
   /** A tier's colo caches (`dir` null: the base). */
   cache?: (dir: string | null) => TierCache | undefined
   rules?: DrillRules
@@ -485,10 +479,15 @@ export class Drill {
   private held = new Map<string, DrillTier>()
   private live = new Set<string>()
   private broken = new Map<string, number>()
+  /** The last good state (`ok`, built at `at` over the runs `runsAt`; `cut` at a broken tier) and the refresh in
+   *  flight, shared across requests as an owned, tracked entry (`shared.ts` `inFlight`; keyed by the runs). `epoch`:
+   *  bumped by `broke`, so a refresh started before it neither is joined nor lands. */
+  private ok?: DrillState
   private at = -Infinity
   private cut = false
   private runsAt = ''
-  private cur?: Promise<DrillState>
+  private epoch = 0
+  private refreshing = new Map<string, Promise<DrillState>>()
   readonly rules: DrillRules
   constructor(readonly blobs: Blobs, readonly catalog: CatalogLookup | null, readonly opts: DrillOpts = {}) {
     this.rules = opts.rules ?? DRILL_RULES
@@ -525,17 +524,19 @@ export class Drill {
   /** A read of tier `dir` failed: the next `state()` is cut at it. */
   broke(dir: string | null, error: unknown): void {
     this.mark(dir, error)
-    this.cur = undefined
+    this.ok = undefined
     this.at = -Infinity
+    this.epoch++
+    this.refreshing.clear()
   }
 
   /** Whether `x` is usable at `t`: not broken within `brokenTtlMs`, and its `meta.json` loads (a run's listing its
    *  scans, returned). */
-  private async usable(x: DrillTier, t: number): Promise<string[] | null> {
+  private async usable(x: DrillTier, t: number, req?: Req): Promise<string[] | null> {
     const b = this.broken.get(x.dir ?? '')
     if (b != null && t - b < (this.opts.brokenTtlMs ?? 30_000)) return null
     try {
-      const m = await x.info()
+      const m = await x.info(req)
       if (x.dir != null && (!Array.isArray(m.scans) || !m.scans.length)) throw new Error(`static drill: ${x.dir}/${DRILL_DIR}/meta.json lists no scans`)
       this.broken.delete(x.dir ?? '')
       return x.dir == null ? [] : m.scans as string[]
@@ -545,19 +546,29 @@ export class Drill {
     }
   }
 
-  async state(): Promise<DrillState> {
-    const dirs = await (this.opts.runs?.() ?? [])
+  /** The live tiers, re-listed once `ttlMs` old (`brokenTtlMs` when cut) or the runs changed. A refresh another
+   *  request has in flight is joined; a failed one is the caller's error, and the next call refreshes again. `req`:
+   *  the request asking (`reqOf(env)`). */
+  async state(req?: Req): Promise<DrillState> {
+    const dirs = await (this.opts.runs?.(req) ?? [])
     const runsAt = dirs.join('\n')
     const t = this.now()
     const ttl = this.opts.ttlMs ?? 300_000
-    if (this.cur && runsAt === this.runsAt && t - this.at < (this.cut ? Math.min(ttl, this.opts.brokenTtlMs ?? 30_000) : ttl)) return this.cur
-    const prev = this.cur
-    this.at = t
-    this.runsAt = runsAt
-    const p = (async (): Promise<DrillState> => {
+    if (this.ok && runsAt === this.runsAt && t - this.at < (this.cut ? Math.min(ttl, this.opts.brokenTtlMs ?? 30_000) : ttl)) return this.ok
+    const epoch = this.epoch
+    return inFlight(this.refreshing, runsAt, async () => {
+      const { st, cut } = await this.load(dirs, t, req)
+      if (this.epoch === epoch) { this.ok = st; this.at = t; this.cut = cut; this.runsAt = runsAt }
+      return st
+    }, { name: 'static-drill-state', req })
+  }
+
+  /** The state over the runs `dirs` as of `t`: the base and the live runs, cut at the first unusable one (`cut`). */
+  private async load(dirs: string[], t: number, req?: Req): Promise<{ st: DrillState; cut: boolean }> {
+    let cut = true
+    const st = await (async (): Promise<DrillState> => {
       const none: DrillState = { version: 'none', scans: [], tiers: [] }
-      this.cut = true
-      if (!await this.usable(this.tier(null), t)) return none
+      if (!await this.usable(this.tier(null), t, req)) return none
       let scans: string[]
       try {
         scans = (await this.blobs.json<{ scans: { id: string }[] }>('scans.json')).scans.map(s => s.id)
@@ -568,66 +579,63 @@ export class Drill {
       const live = await Promise.all(dirs.map(d => this.isLive(d)))
       const n = live.indexOf(false)
       const cands = (n < 0 ? dirs : dirs.slice(0, n)).map(d => this.tier(d))
-      const got = await Promise.all(cands.map(r => this.usable(r, t)))
+      const got = await Promise.all(cands.map(r => this.usable(r, t, req)))
       const k = got.indexOf(null)
       const runs = k < 0 ? cands : cands.slice(0, k)
-      this.cut = k >= 0
+      cut = k >= 0
       for (let i = 0; i < runs.length; i++) scans.push(...got[i]!)
       const bad = scans.find(s => !isScanId(s))
       if (bad != null) throw new Error(`static drill: bad scan id ${JSON.stringify(bad)}`)
       return { version: runs.length ? runs[runs.length - 1].dir! : 'base', scans: scans.sort(), tiers: [this.tier(null), ...runs] }
     })()
-    this.cur = p
-    // A failed refresh keeps serving the last good state (and retries on the next call).
-    p.catch(() => { if (this.cur === p) { this.cur = prev; this.at = -Infinity } })
-    return p
+    return { st, cut }
   }
 
   /** The base tier's `meta.json`. */
-  info(): Promise<DrillMeta> { return this.tier(null).info() }
+  info(req?: Req): Promise<DrillMeta> { return this.tier(null).info(req) }
   /** The base tier's alias map. */
-  aliases(): Promise<Map<string, { c: string; n: number | null }>> { return this.tier(null).aliases() }
+  aliases(req?: Req): Promise<Map<string, { c: string; n: number | null }>> { return this.tier(null).aliases(req) }
 
   /** The generation's hex-run rule (`hexRuns.ts`): the catalog's `meta.json` `hex_runs` (null without a catalog
    *  `info`, or on a generation without the rule). */
-  async hexRuns(): Promise<HexRule | null> {
-    return this.catalog?.info ? ruleOf((await this.catalog.info()).hex_runs) : null
+  async hexRuns(req?: Req): Promise<HexRule | null> {
+    return this.catalog?.info ? ruleOf((await this.catalog.info(req)).hex_runs) : null
   }
 
   /** `t`'s match root at exactly `path` on the tiers of `state` (every version of every owner slice; none when
    *  `path` is no root of `t`), any scan: one key range `[(c_i, path), (c_i, path + U+0000))` of each tier's roots,
    *  combined as `view`'s are. Null: a long literal that is no member. */
-  async rootAt(t: string, path: string, state?: DrillState): Promise<Hit[] | null> {
-    const st = state ?? await this.state()
+  async rootAt(t: string, path: string, state?: DrillState, req?: Req): Promise<Hit[] | null> {
+    const st = state ?? await this.state(req)
     const { tiers } = st
     const kind: Kind = [...t].length <= 2 ? 'short' : 'long'
     let cs = tiers.map(() => t)
     if (kind === 'long') {
-      const maps = await perTier(tiers, x => x.aliases())
+      const maps = await perTier(tiers, x => x.aliases(req))
       if (!maps[maps.length - 1].has(t)) return null
       cs = tiers.map((_, i) => this.rules.canon(maps, i, t))
     }
     const io = newIo()
     const lo = (c: string): Key => [c, path], hi = (c: string): Key => [c, path + '\0']
-    const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io))
+    const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, undefined, req))
     const parts = await perTier(tiers, async (x, i) => sels[i].groups?.length ? x.files[kind].roots.read<Hit>(lo(cs[i]), hi(cs[i]), sels[i].groups!, io, hitOf) : [])
     return this.rules.combine(parts)
   }
 
   /** `t`'s (lowercase) view at `P`, on any scan of `state` (default: the current one). */
-  view(t: string, P: string, state?: DrillState): Promise<DrillAnswer> { return this.bounded(t, P, state) as Promise<DrillAnswer> }
+  view(t: string, P: string, state?: DrillState, req?: Req): Promise<DrillAnswer> { return this.bounded(t, P, state, undefined, req) as Promise<DrillAnswer> }
 
   /** `view`, except roots bounded past `maxRows` are not read (`over`). */
-  async bounded(t: string, P: string, state?: DrillState, maxRows?: number): Promise<DrillAnswer | DrillOver> {
-    if (occurs(t, P.toLowerCase(), await this.hexRuns())) return { source: 'plain' }
-    const st = state ?? await this.state()
+  async bounded(t: string, P: string, state?: DrillState, maxRows?: number, req?: Req): Promise<DrillAnswer | DrillOver> {
+    if (occurs(t, P.toLowerCase(), await this.hexRuns(req))) return { source: 'plain' }
+    const st = state ?? await this.state(req)
     const { tiers } = st
     const kind: Kind = [...t].length <= 2 ? 'short' : 'long'
     const R = this.rules
     let cs = tiers.map(() => t)
     let all: number | null = null
     if (kind === 'long') {
-      const maps = await perTier(tiers, x => x.aliases())
+      const maps = await perTier(tiers, x => x.aliases(req))
       // A member iff the newest tier's map holds it (each run's map lists every member as of its scan).
       if (!maps[maps.length - 1].has(t)) return { source: 'none' }
       cs = tiers.map((_, i) => R.canon(maps, i, t))
@@ -635,13 +643,13 @@ export class Drill {
       const b = maps[0].get(t)
       all = b ? b.n : 0
     }
-    const metas = await perTier(tiers, x => x.info())
+    const metas = await perTier(tiers, x => x.info(req))
     const thr = R.bound(metas)
     const io = newIo()
     // The fleet root: the whole member, `[(c, ''), (c + U+0000, ''))`.
     const lo = (c: string): Key => P === '' ? [c, ''] : [c, P + '/']
     const hi = (c: string): Key => P === '' ? [c + '\0', ''] : [c, P + '0']
-    const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, thr))
+    const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, thr, req))
     const upper = sels.reduce((s, x) => s + x.rows, 0)
     if (sels.every(s => s.groups) && upper <= thr) {
       if (maxRows != null && upper > maxRows) return { source: 'over', upper }
@@ -652,13 +660,13 @@ export class Drill {
     }
     if (P === '') {
       // No rollup at the fleet root (heavy directories are depth ≥ 1): the catalog's per-bucket cells.
-      const got = await this.catalog?.lookup(t)
+      const got = await this.catalog?.lookup(t, { req })
       if (!got?.member) throw new Error(`static drill: ${JSON.stringify(t)} has ${upper} root rows but no catalog cells`)
       const cells: RollupCell[] = got.member.cells.map(x => ({ kind: 1, child: x.bucket, vf: Number(x.vf) * 1000, b: x.b, o: x.o }))
       const buckets = new Set(cells.map(x => x.child)).size
       // Root rows, every date: a long member's base alias entry (else, and a short one's, counted from the base's
       // roots index), plus each run's stored rows (opens and close records: an upper bound).
-      const counts = await perTier(tiers, async (x, i) => i === 0 && all != null ? all : x.files[kind].roots.count(lo(cs[i]), hi(cs[i]), io))
+      const counts = await perTier(tiers, async (x, i) => i === 0 && all != null ? all : x.files[kind].roots.count(lo(cs[i]), hi(cs[i]), io, req))
       const rows = counts.reduce((s, x) => s + x, 0)
       // The catalog's own stack cut at a broken tier: its cells answer only the scans it still covers.
       const narrow = got.scans && st.scans.some(d => !got.scans!.includes(d)) ? { scans: st.scans.filter(d => got.scans!.includes(d)) } : {}
@@ -666,7 +674,7 @@ export class Drill {
     }
     const parts = await perTier(tiers, async (x, i) => {
       const rlo: Key = [cs[i], P], rhi: Key = [cs[i], P + '\0']
-      const rs = await x.files[kind].rollups.select(rlo, rhi, io)
+      const rs = await x.files[kind].rollups.select(rlo, rhi, io, undefined, req)
       return rs.groups?.length ? x.files[kind].rollups.read(rlo, rhi, rs.groups, io) : []
     })
     const got = R.stack(parts)
@@ -691,7 +699,9 @@ const HELD = 400_000
 /** The filter's heavy source over a drill: a view's match roots, or its rollup, exact on the live tiers' scans
  *  (`Found.scans`). Plain views and non-members decline (null): the caller reads as before. */
 export class DrillSource implements HitSource {
-  private held = new Map<string, Promise<DrillAnswer | DrillOver>>()
+  /** Answers held per isolate (an `over` one never), their sizes; one pending in another request is joined
+   *  (`shared.ts`). */
+  private held = new Memo<DrillAnswer | DrillOver>('static-drill-answer')
   private sizes = new Map<string, number>()
   /** `cache`: roots answers across isolates (the colo's Cache API) — decoding a member's ~80K roots from the
    *  drill's parquet is seconds of an edge isolate's CPU, each new isolate again. */
@@ -704,34 +714,33 @@ export class DrillSource implements HitSource {
 
   /** `t`'s view at `P` on the tiers of `st` (isolate-held; `maxRows`: one not held yet whose roots are bounded past
    *  it is `over`, and not held). */
-  answer(t: string, P: string, st: DrillState, maxRows?: number): Promise<DrillAnswer | DrillOver> {
+  async answer(t: string, P: string, st: DrillState, maxRows?: number, req?: Req): Promise<DrillAnswer | DrillOver> {
     const k = DrillSource.key(t, P, st)
-    let p = this.held.get(k)
-    if (p) { this.held.delete(k); this.held.set(k, p); return p }
-    p = this.drill.bounded(t, P, st, maxRows)
-    this.held.set(k, p)
-    p.then(a => {
-      this.sizes.set(k, a.source === 'roots' ? a.hits.length : 'rollup' in a ? a.rollup.cells.length : 0)
-      if (a.source === 'over') { this.held.delete(k); this.sizes.delete(k) }
-      let n = [...this.sizes.values()].reduce((s, x) => s + x, 0)
-      for (const old of this.held.keys()) {
-        if (n <= HELD || old === k) break
-        n -= this.sizes.get(old) ?? 0
-        this.held.delete(old); this.sizes.delete(old)
-      }
-    }, () => { this.held.delete(k) })
-    return p
+    const a = await this.held.get(k, () => this.drill.bounded(t, P, st, maxRows, req), req, x => x.source !== 'over')
+    if (this.held.has(k) && !this.sizes.has(k)) this.hold(k, a.source === 'roots' ? a.hits.length : 'rollup' in a ? a.rollup.cells.length : 0)
+    return a
+  }
+
+  /** `k`'s answer is held, `n` hits + cells: the oldest dropped past `HELD`. */
+  private hold(k: string, n: number): void {
+    this.sizes.set(k, n)
+    let sum = [...this.sizes.values()].reduce((s, x) => s + x, 0)
+    for (const old of [...this.held.keys()]) {
+      if (sum <= HELD || old === k) break
+      sum -= this.sizes.get(old) ?? 0
+      this.held.delete(old); this.sizes.delete(old)
+    }
   }
 
   /** `key`'s view under `under`, exact on the live tiers' scans. A tier that fails to load is cut (`Drill.broke`)
    *  and the view asked again over the tiers before it; no usable tier at all declines (null). */
-  async hits(key: string, under: string, opts?: HitOpts): Promise<Found | null> {
+  async hits(key: string, under: string, opts?: HitOpts, req?: Req): Promise<Found | null> {
     const t0 = Date.now()
     for (let tries = 0; ; tries++) {
-      const st = await this.drill.state()
+      const st = await this.drill.state(req)
       if (!st.tiers.length) return null
       try {
-        return await this.hitsOn(key, under, st, t0, opts)
+        return await this.hitsOn(key, under, st, t0, opts, req)
       } catch (e) {
         if (!(e instanceof TierError) || tries > st.tiers.length) throw e
         this.drill.broke(e.dir, e)
@@ -741,13 +750,13 @@ export class DrillSource implements HitSource {
 
   /** `key`'s root at exactly `path` (its hits; empty when `path` is none of its roots), exact on the live tiers'
    *  scans; null: no usable tier, or a long literal that is no member. */
-  async at(key: string, path: string): Promise<Found | null> {
+  async at(key: string, path: string, req?: Req): Promise<Found | null> {
     const t0 = Date.now()
     for (let tries = 0; ; tries++) {
-      const st = await this.drill.state()
+      const st = await this.drill.state(req)
       if (!st.tiers.length) return null
       try {
-        const hits = await this.drill.rootAt(key, path, st)
+        const hits = await this.drill.rootAt(key, path, st, req)
         return hits && { hits, io: { from: 'drill', source: 'at', tiers: st.tiers.length, ms: Date.now() - t0 }, scans: st.scans }
       } catch (e) {
         if (!(e instanceof TierError) || tries > st.tiers.length) throw e
@@ -756,26 +765,26 @@ export class DrillSource implements HitSource {
     }
   }
 
-  private async hitsOn(key: string, under: string, st: DrillState, t0: number, opts?: HitOpts): Promise<Found | null> {
+  private async hitsOn(key: string, under: string, st: DrillState, t0: number, opts?: HitOpts, req?: Req): Promise<Found | null> {
     const k = DrillSource.key(key, under, st)
-    if (this.cache && !this.held.has(k)) {
+    if (this.cache && !this.held.held(k)) {
       const hits = await this.cache.get(k)
       if (hits) {
         if (opts?.maxRows != null && hits.length > opts.maxRows) { opts.over = true; return null }
         const kind: Kind = [...key].length <= 2 ? 'short' : 'long'
-        const p = Promise.resolve<DrillAnswer>({ source: 'roots', kind, c: key, upper: hits.length, hits, io: newIo() })
-        this.held.set(k, p); this.sizes.set(k, hits.length)
+        this.held.set(k, { source: 'roots', kind, c: key, upper: hits.length, hits, io: newIo() })
+        this.hold(k, hits.length)
         return { hits, io: { from: 'drill', source: 'roots', cache: 'colo', tiers: st.tiers.length, ms: Date.now() - t0 }, scans: st.scans }
       }
     }
-    const fresh = !this.held.has(k)
-    const a = await this.answer(key, under, st, opts?.maxRows)
+    const fresh = !this.held.held(k)
+    const a = await this.answer(key, under, st, opts?.maxRows, req)
     // Over the caller's rows: bounded so before the read, or held with that many roots.
     if (a.source === 'over' || (a.source === 'roots' && opts?.maxRows != null && a.hits.length > opts.maxRows)) { opts!.over = true; return null }
     if (fresh && a.source === 'roots' && this.cache) await this.cache.put(k, a.hits).catch(() => {})
     if (a.source === 'plain' || a.source === 'none') return null
     // An answer narrowed by the catalog's broken tier is not held: once that tier loads, the view widens again.
-    if ('scans' in a && a.scans) this.held.delete(k)
+    if ('scans' in a && a.scans) { this.held.delete(k); this.sizes.delete(k) }
     const io = { from: 'drill', source: a.source, kind: a.kind, c: a.c, upper: a.upper, tiers: st.tiers.length, ...a.io, ms: Date.now() - t0 }
     return a.source === 'roots' ? { hits: a.hits, io, scans: st.scans } : { rollup: a.rollup, io, scans: a.scans ?? st.scans }
   }

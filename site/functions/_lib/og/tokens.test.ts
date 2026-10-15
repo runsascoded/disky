@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { hashToken } from '@open-athena/auth'
-import { LINEAGES, sqliteD1 } from '../testD1'
+import { sqliteD1 } from '../testD1'
 import { DAY_S, EPOCH, expDay } from './sign'
 import { fullTier, listTokens, mint, NEVER_DAY, revoke, shareKeyLive, tokenDays, TOKEN_DAYS_DEFAULT } from './tokens'
 import { pageView } from './routes'
@@ -10,10 +10,10 @@ const NOW = EPOCH + 274 * 86400 + 12 * 3600
 const page = (p: string) => new URL(`https://site.example.org${p}`)
 const VIEW = { path: 'marin-a/ckpt', d: '261002' }
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('og_tokens: the row is the whole truth (foreign keys on)', () => {
     it('a mint is good for exactly its view until its expiry day ends; revoking one mint leaves the others', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       const m = await mint(db, 'marin GCS', page('/marin-a/ckpt?d=261002&n=50&og=stale'), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
       const m2 = await mint(db, 'marin GCS', page('/marin-a/ckpt?d=261002'), 'bo@example.org', NOW + 60, 30, 'TokBBBBBBB')
       expect([m, m2]).toEqual([
@@ -41,7 +41,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ])
     })
     it('a non-admin revokes only their own mints', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       await mint(db, 'marin GCS', page('/marin-a'), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
       await mint(db, 'marin GCS', page('/marin-a'), 'bo@example.org', NOW, 30, 'TokBBBBBBB')
       expect([
@@ -52,20 +52,20 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ]).toEqual([0, 1, null, { day: 304 }])
     })
     it('each mint is a fresh random token', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       const a = await mint(db, 'marin GCS', page('/marin-a'), 'ann@example.org', NOW)
       const b = await mint(db, 'marin GCS', page('/marin-a'), 'ann@example.org', NOW)
       expect([a!.token.length, b!.token.length, a!.token === b!.token]).toEqual([10, 10, false])
     })
     it('pages without a card mint nothing', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       expect(await mint(db, 'marin GCS', page('/api/subtree'), 'ann@example.org', NOW)).toBe(null)
     })
   })
 
   describe('shareKeyLive: a `key=` share link earns the full card iff its bearer would get in', () => {
     it('the gate\'s presented-token rule (a used-up redeem cap still serves a bearer); a viewer scope; nothing redeemed or touched', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       const K = (s: string) => `${s}-share-link-key-000000`
       const grant = async (name: string, cols: Record<string, string | number> = {}) => {
         const row: Record<string, string | number> = { id: name, token_hash: await hashToken(K(name)), scopes: 'gcs:read', created_at: 1, created_by: 'admin@example.org', ...cols }
@@ -92,7 +92,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     const now = Date.UTC(2026, 9, 13) / 1000
 
     async function minted(days: number, token: string) {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       const m = (await mint(db, 'Demo', new URL('https://demo.example/bucket'), 'demo', now, days, token))!
       const view = pageView(new URL(m.url), 'Demo')!
       return { m, valid: (t: number) => fullTier(db, view.kind, view.params, m.token, t) }

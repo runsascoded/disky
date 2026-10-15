@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES } from '../_lib/testD1'
+
 import { unionDeployment } from '../_lib/testUnion'
 import { onRequestGet as unionScans } from './union-scans'
 
@@ -9,9 +9,9 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // `/api/union-scans`: the scan picker's sources on a union view — each member's mark and its indexed scans at
 // their instants; `{union: null}` wherever a request reads one store. The deployment: `_lib/testUnion.ts`.
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
-  beforeAll(async () => { deployment = await unionDeployment(lineage) })
+  beforeAll(async () => { deployment = await unionDeployment() })
   const get = async (qs: string, views?: Record<string, unknown>) => {
     const r = await unionScans({ request: new Request(`http://localhost/api/union-scans?${qs}`), env: deployment(views) } as never)
     return { status: r.status, body: await r.json() }

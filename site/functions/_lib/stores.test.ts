@@ -6,7 +6,7 @@ import { indexDir, openIndex, pathScans, storeTarget, storeCreds } from './index
 import { overTimeDataset } from './overTime'
 import { REQ, Req, reqOf, snapshotsPrefix } from './shared'
 import { LENS_PRIMARY_ONLY, primaryOnly, secondaryStores, storeEnv, storeKey, withStore } from './stores'
-import { LINEAGES, migrationNamed, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 import { onRequestGet as subtree } from '../api/subtree'
 
 // The multi-store seam (specs/done/multi-store.md phase 1): no `store=` is the
@@ -173,21 +173,9 @@ const META_ROWS = (d: string, d2: string) => `
 const envs = (db: Env['DB']) => ({ primary: { ...PRIMARY, DB: db } as Env, meta: storeEnv({ ...PRIMARY, DB: db } as Env, 'meta', META) })
 const d = '2026-07-01', d2 = '2026-07-02'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
-  it('primary reads work on the un-migrated schema (their SQL predates stores); a secondary store refuses loudly', async () => {
-    const { db, raw } = await sqliteD1(lineage, { before: await migrationNamed(lineage, 'store_scoped_index') })
-    raw.exec(PRIMARY_ROWS(d))
-    const { primary, meta } = envs(db)
-    const h = await openIndex(primary, d)
-    expect([await indexDir(primary, d), (await pathScans(primary, true)).results, h.mode, h.gen, h.version]).toEqual([
-      `cw-l2/${d}/index/g1`, [{ date: d }], 'd1', 'g1', 1,
-    ])
-    await expect(indexDir(meta, d)).rejects.toThrow(/^no such column: store/)
-    await expect(pathScans(meta, true)).rejects.toThrow(/^no such column: store/)
-  })
-
-  it('migrated: one scan id (and gen) in both stores; each env reads only its own pointer, rows and scans', async () => {
-    const { db, raw } = await sqliteD1(lineage)
+describe('D1', () => {
+  it('one scan id (and gen) in both stores; each env reads only its own pointer, rows and scans', async () => {
+    const { db, raw } = await sqliteD1()
     raw.exec(PRIMARY_ROWS(`${d}T0001`) + META_ROWS(`${d}T0001`, `${d2}T0001`))
     const { primary, meta } = envs(db)
     expect(await Promise.all([indexDir(primary, `${d}T0001`), indexDir(meta, `${d}T0001`), indexDir(primary, `${d2}T0001`), indexDir(meta, `${d2}T0001`)])).toEqual([

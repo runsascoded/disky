@@ -24,13 +24,13 @@ compatibility_date = "2026-06-01"
 
 # The deployment's D1: the index footer (`index_schema`, `index_row_groups`), plus
 # auth, grants, plans and the ownership ledger where enabled. Created by
-# `CfnDashboard`; schema from `migrations_dir`:
-#   wrangler d1 migrations apply <database_name> --remote
+# `CfnDashboard`; its schema from the branch's schema file, then each pending
+# recipe in `migrations/` the same way (specs/done/d1-migrations.md):
+#   wrangler d1 execute <database_name> --remote --file schema.sql
 [[d1_databases]]
 binding = "DB"
 database_name = "my-deployment-db"
 database_id = "00000000-0000-0000-0000-000000000000"
-migrations_dir = "migrations/<deployment>"
 remote = true
 
 # Optional: a global second cache tier behind each colo's cache (`_lib/edgeCache.ts`).
@@ -82,7 +82,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 #   `public/_routes.json`; elsewhere the catch-all serves index.html, the mark falls back to its label, and
 #   `/api/union-scans` lists it under `warnings`). A union page's cutoff that no one scan id says is `?at=<instant>`.
 
-# --- Session log (specs/session-log.md; tables: migrations/<lineage>/…_session_log.sql; on/off: the switch at /admin) ---
+# --- Session log (specs/session-log.md; tables: `session_log*` in schema.sql; on/off: the switch at /admin) ---
 # SESSION_LOG_RETAIN_DAYS = "30"             # days a session's log is kept (default 30)
 
 # --- Plans and deletion (_lib/plans.ts, _lib/dispatch.ts) ---

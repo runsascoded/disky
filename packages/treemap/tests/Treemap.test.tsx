@@ -200,6 +200,38 @@ describe('<Treemap>', () => {
     }
   })
 
+  it('formatCell candidates: a wide cell draws the long one, a narrow cell the short one (inline and 2nd line)', () => {
+    const texts: Record<string, string[]> = {
+      foo: ['+37.2 T −20.4 T = +16.8 T', '+16.8 T'],
+      bar: ['+9.1 T −1.2 T = +7.9 T', '+7.9 T'],
+    }
+    const shapeAt = (w: number) => {
+      const restore = withLayout(w, 300)
+      try {
+        const { container, unmount } = render(
+          <Treemap root={tree} {...accessors} formatSize={n => `${n} B`} formatCell={n => texts[n.n] ?? `${n.size}`} minCellArea={null} />,
+        )
+        const out = [...container.querySelectorAll('.dt-treemap-map > .dt-treemap-cell')].map(el => [
+          el.querySelector(':scope > .dt-treemap-lbl')?.textContent,
+          el.querySelector(':scope > .dt-treemap-lbl2')?.textContent ?? null,
+        ])
+        unmount()
+        return out
+      } finally {
+        restore()
+      }
+    }
+    // `foo` (a branch) carries its size inline in its title bar; `bar` (a tall leaf) on its 2nd line.
+    expect(shapeAt(800)).toEqual([
+      ['foo+37.2 T −20.4 T = +16.8 T', null],
+      ['bar', '+9.1 T −1.2 T = +7.9 T'],
+    ])
+    expect(shapeAt(120)).toEqual([
+      ['foo+16.8 T', null],
+      ['bar', '+7.9 T'],
+    ])
+  })
+
   it('sizeAlign: the inline size sits after the name by default, at the far edge on "right"', () => {
     const restore = withLayout()
     try {

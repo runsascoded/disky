@@ -128,10 +128,15 @@ class Store:
         return sorted(k for k in self.listing(d) if k.startswith(prefix))
 
     def exists(self, key: str) -> bool:
+        """Whether `key` is a file. Not found (or a directory) is False; any other failure raises — fsspec's `isfile`
+        reads a refused credential (403) as False, and a `build` vs `add` decided on that rebuilds over a live store."""
         if not self.url:
             return (Path(self.root) / key).is_file()
         self.fs.invalidate_cache(self._p(key))
-        return self.fs.isfile(self._p(key))
+        try:
+            return self.fs.info(self._p(key)).get("type", "file") == "file"
+        except FileNotFoundError:
+            return False
 
     def open(self, key: str):
         """`key` opened for reading (binary)."""

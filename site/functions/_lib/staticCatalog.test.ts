@@ -7,6 +7,7 @@ import { catalogAnswer, catalogGroups, catalogIndex, type CatalogMeta, StaticCat
 import { type Blobs, StaticNames } from './staticNames.js'
 import { compressors } from './zstd.js'
 import { fixture } from './testStore.js'
+import { abandoned, BOUND, hangFirst } from './testHang.js'
 
 /** `gen.py`'s `TERMS` (`members.json`: each one's catalog membership, its range rows or −1 when short). */
 const KEYS = ['shards.json', 'scans.json', 'expected.json', 'members.json', 'sx/s0000.parquet', 'sx/s0001.parquet', 'catalog/cells.parquet', 'catalog/index.parquet', 'catalog/meta.json']
@@ -86,6 +87,20 @@ describe('static catalog', () => {
     expect(log).toEqual(['catalog/meta.json', 'catalog/index.parquet@0+' + bytes('catalog/index.parquet').byteLength, span('foo'), span('quet'), span('zq')])
     expect([a.io.index, b.io.index, c.io.index, c.member]).toEqual(['file', 'isolate', 'isolate', null])
     expect([a.member!.cells.length, a.io.groups]).toEqual([5, catalogGroups(idx, 'foo')[1] - catalogGroups(idx, 'foo')[0]])
+  })
+
+  // `shared.ts`: a read request A started and then abandoned (its I/O frozen) is never awaited by the next request.
+  const window = (how: 'cancel' | 'end') => how === 'cancel' ? BOUND / 2 : 5 * BOUND
+  it.each(['cancel', 'end'] as const)('`meta.json` request A was reading when it %sed: request B reads it in its own context', async how => {
+    const blobs = hangFirst(files(), (method, key) => method === 'json' && key === 'catalog/meta.json')
+    const cat = new StaticCatalog(blobs)
+    expect(await abandoned(req => cat.info(req), blobs.hung, how, window(how))).toEqual(JSON.parse(new TextDecoder().decode(bytes('catalog/meta.json'))))
+  })
+  it.each(['cancel', 'end'] as const)('the index request A was reading when it %sed: request B reads it in its own context', async how => {
+    const want = (await new StaticCatalog(files()).lookup('foo')).member
+    const blobs = hangFirst(files(), (method, key) => method === 'range' && key === 'catalog/index.parquet')
+    const cat = new StaticCatalog(blobs)
+    expect(await abandoned(req => cat.lookup('foo', { req }).then(l => l.member), blobs.hung, how, window(how))).toEqual(want)
   })
 })
 

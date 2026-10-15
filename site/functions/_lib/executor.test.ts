@@ -56,7 +56,7 @@ function fake(kind: ExecutorKind, db: D1Database, calls: string[]): Executor & {
 }
 
 async function setup(env: Partial<ExecEnv> = {}) {
-  const { db } = await sqliteD1('cw')
+  const { db } = await sqliteD1()
   await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
   for (const p of [A, B]) {
     await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'ann@openathena.ai', 1)").bind(p).run()

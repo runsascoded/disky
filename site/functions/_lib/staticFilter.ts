@@ -23,7 +23,7 @@
  *  `drill/` is live, up to the first run without one, so a heavy literal on a later scan is not covered (`covers`)
  *  and the view is refused (`scan-not-indexed`) — never the thresholded walk's "no matches". */
 import type { QueryAst } from './queryAst.js'
-import { shared } from './shared.js'
+import { Memo, type Req, reqOf } from './shared.js'
 import { StaticCatalog } from './staticCatalog.js'
 import { type CatalogLookup, Drill, DRILL_DIR, DrillSource, type Rollup, type RollupCell } from './staticDrill.js'
 import { type Blobs, cacheIndexes, type FirstHits, type Hit, type Io, r2Blobs, scanAt, staticGen, staticPrefix } from './staticNames.js'
@@ -78,8 +78,10 @@ export interface HitOpts {
   over?: boolean
 }
 
+/** Every read's `req`: the request reading (`reqOf(env)`): what it joins of other requests' reads, and owns of its own
+ *  (`shared.ts`). A store's request-bound view (`staticFilterStore`) passes it. */
 export interface HitSource {
-  hits(key: string, under: string, opts?: HitOpts): Promise<Found | null>
+  hits(key: string, under: string, opts?: HitOpts, req?: Req): Promise<Found | null>
   /** Why `hits` last declined `key`, when the source knows better than "not indexed" (an anchored prefix too
    *  common to read: `term-too-common`). */
   why?(key: string): FilterRejectCode | undefined
@@ -92,13 +94,13 @@ export interface HitSource {
   /** `key`'s match root at exactly `path` — its hits (every version of every owner slice), empty when `path` is no
    *  root of `key` — any date: a heavy directory's kept child that is a root itself, whose own rows its rollup
    *  doesn't list (`staticBool.ts`'s exclusions). Absent / null: can't say. */
-  at?(key: string, path: string): Promise<Found | null>
+  at?(key: string, path: string, req?: Req): Promise<Found | null>
 }
 
 /** The generation's scans (ids). `dirOnly`: those of them indexed from a dir-only (v1) source — held, but blind
  *  to every file name, so a literal's total there is not the scan's (`/api/series` leaves them as gaps). `hexRuns`:
  *  its hex-run rule (`hexRuns.ts`; absent or null = the full index). */
-export interface StaticFilterStore { source: HitSource; scans: () => Promise<string[]>; dirOnly?: () => Promise<string[]>; gen: string; hexRuns?: () => Promise<HexRule | null> }
+export interface StaticFilterStore { source: HitSource; scans: (req?: Req) => Promise<string[]>; dirOnly?: (req?: Req) => Promise<string[]>; gen: string; hexRuns?: (req?: Req) => Promise<HexRule | null> }
 
 /** A suffix range read whole above this many rows (row-group granular) is declined: V = 100K (the
  *  catalog's membership bound, so every non-member fits) plus two 8K-row groups of slack. */
@@ -115,19 +117,20 @@ const under = (p: string, root: string): boolean => root === '' || p.startsWith(
  *  `scans`): a tier that fails mid-read cuts the stack, and that answer is exact on the remaining scans only. A
  *  single generation is `StaticNames` (no `snapshot`: 'base', every scan of the store). */
 export interface HitReader {
-  read(key: string, maxRows?: number): Promise<{ io: Io; fold: FirstHits | null; version?: string; scans?: string[] }>
-  snapshot?(): Promise<{ version: string; scans: string[] }>
-  defaultMaxRows?(key: string, baseMaxRows: number): Promise<number>
+  read(key: string, maxRows?: number, opts?: { req?: Req }): Promise<{ io: Io; fold: FirstHits | null; version?: string; scans?: string[] }>
+  snapshot?(req?: Req): Promise<{ version: string; scans: string[] }>
+  defaultMaxRows?(key: string, baseMaxRows: number, req?: Req): Promise<number>
 }
 
 /** The light source: the literal's suffix range from the shards, folded to its first hits once (per
  *  isolate, and per colo through `cache`), then cut to `under`. Literals over `maxRows` go to `heavy`. */
 export class SuffixHits implements HitSource {
-  private held = new Map<string, Promise<{ hits: Hit[]; io: Record<string, unknown>; scans?: string[] } | null>>()
+  /** Each literal's first hits, held per isolate; a read pending in another request is joined (`shared.ts`). */
+  private held = new Memo<{ hits: Hit[]; io: Record<string, unknown>; scans?: string[] } | null>('static-suffix-hits')
   private cut = new WeakMap<Hit[], Map<string, Hit[]>>()
   constructor(
     readonly names: HitReader,
-    readonly opts: { maxRows?: number; heavy?: HitSource | null; catalog?: CatalogLookup | null; cache?: HitCache | null; waitMs?: number; anchored?: HitSource | null } = {},
+    readonly opts: { maxRows?: number; heavy?: HitSource | null; catalog?: CatalogLookup | null; cache?: HitCache | null; anchored?: HitSource | null } = {},
   ) {}
 
   /** An anchored or path key with no anchored source (`FILTER_STATIC_ANCHORS=0`) has no name index to read:
@@ -136,33 +139,33 @@ export class SuffixHits implements HitSource {
 
   /** Every first hit of `key` (null: over `maxRows`, the heavy source's business), and the scans they are exact
    *  on (absent: every scan of the store). */
-  async all(key: string): Promise<{ hits: Hit[]; io: Record<string, unknown>; scans?: string[] } | null> {
-    const snap = await this.names.snapshot?.()
+  async all(key: string, req?: Req): Promise<{ hits: Hit[]; io: Record<string, unknown>; scans?: string[] } | null> {
+    const snap = await this.names.snapshot?.(req)
     const version = snap?.version ?? 'base'
     // The base generation's entries keep their keys; a day's runs version theirs.
     const vkey = version === 'base' ? key : `${key}@${version}`
-    const p = shared(this.held, vkey, async () => {
+    const fresh = !this.held.has(vkey)
+    const got = await this.held.get(vkey, async () => {
       const cached = await this.opts.cache?.get(vkey)
       if (cached) return { hits: cached, io: { from: 'cache', version }, scans: snap?.scans }
-      const maxRows = this.opts.maxRows ?? await this.names.defaultMaxRows?.(key, MAX_ROWS) ?? MAX_ROWS
-      const { io, fold, version: read = 'base', scans } = await this.names.read(key, maxRows)
+      const maxRows = this.opts.maxRows ?? await this.names.defaultMaxRows?.(key, MAX_ROWS, req) ?? MAX_ROWS
+      const { io, fold, version: read = 'base', scans } = await this.names.read(key, maxRows, { req })
       if (!fold) return null
       // A stack cut mid-read (a broken tier) is another version's answer: never cached (or held) under this one.
       if (read === version) await this.opts.cache?.put(vkey, fold.hits)
       return { hits: fold.hits, io: { from: 'shards', version: read, shard: io.shard, groups: io.groups, bytes: io.bytes, rows_read: io.rows_read, tiers: io.tiers ?? 1, ms: io.ms }, scans }
-    }, this.opts.waitMs ?? 20_000)
-    // Bound what the isolate holds: drop the oldest literals past `HELD_HITS` hits; a cut read is dropped at once.
-    void p.then(got => { if (got && got.io.version !== version) this.held.delete(vkey); return this.trim() }, () => {})
-    return p
+    }, req, g => !g || g.io.version === version)
+    if (fresh) this.trim()
+    return got
   }
 
-  private async trim(): Promise<void> {
+  /** Bound what the isolate holds: the oldest literals past `HELD_HITS` hits are dropped (never the newest). */
+  private trim(): void {
     let n = 0
-    const keys = [...this.held.keys()].reverse()
-    for (const k of keys) {
-      const got = await this.held.get(k)?.catch(() => null)
+    const held = [...this.held.entries()].reverse()
+    for (const [k, got] of held) {
       n += got?.hits.length ?? 0
-      if (n > HELD_HITS && k !== keys[0]) this.held.delete(k)
+      if (n > HELD_HITS && k !== held[0][0]) this.held.delete(k)
     }
   }
 
@@ -173,9 +176,9 @@ export class SuffixHits implements HitSource {
 
   /** A literal the light reader declines: the heavy source's; without one, the catalog's buckets at the fleet
    *  root (`catalogRoot`), and nothing below it (`declined`: `term-too-common`). */
-  private async heavyHits(key: string, root: string, opts?: HitOpts): Promise<Found | null> {
-    if (!this.opts.heavy) return root === '' && this.opts.catalog ? catalogRoot(this.opts.catalog, key) : null
-    const got = await this.opts.heavy.hits(key, root, opts)
+  private async heavyHits(key: string, root: string, opts?: HitOpts, req?: Req): Promise<Found | null> {
+    if (!this.opts.heavy) return root === '' && this.opts.catalog ? catalogRoot(this.opts.catalog, key, req) : null
+    const got = await this.opts.heavy.hits(key, root, opts, req)
     if (got) this.declinedHeavy.delete(key)
     else if (!opts?.over) {
       this.declinedHeavy.add(key)
@@ -184,19 +187,19 @@ export class SuffixHits implements HitSource {
     return got
   }
 
-  async at(key: string, path: string): Promise<Found | null> {
+  async at(key: string, path: string, req?: Req): Promise<Found | null> {
     if (parseKey(key).mode) return null
-    const got = shortLiteral(key) ? null : await this.all(key)
-    if (!got) return this.opts.heavy?.at ? this.opts.heavy.at(key, path) : null
+    const got = shortLiteral(key) ? null : await this.all(key, req)
+    if (!got) return this.opts.heavy?.at ? this.opts.heavy.at(key, path, req) : null
     return { hits: got.hits.filter(h => h.path === path), io: got.io, ...(got.scans ? { scans: got.scans } : {}) }
   }
 
-  async hits(key: string, root: string, opts?: HitOpts): Promise<Found | null> {
+  async hits(key: string, root: string, opts?: HitOpts, req?: Req): Promise<Found | null> {
     // Anchored keys (`^q`, `q$`, `^q$`): the anchored source's (`staticAnchors.ts`), else nobody's.
-    if (parseKey(key).mode) return this.opts.anchored ? this.opts.anchored.hits(key, root, opts) : null
-    if (shortLiteral(key)) return this.heavyHits(key, root, opts)
-    const got = await this.all(key)
-    if (!got) return this.heavyHits(key, root, opts)
+    if (parseKey(key).mode) return this.opts.anchored ? this.opts.anchored.hits(key, root, opts, req) : null
+    if (shortLiteral(key)) return this.heavyHits(key, root, opts, req)
+    const got = await this.all(key, req)
+    if (!got) return this.heavyHits(key, root, opts, req)
     const scans = got.scans ? { scans: got.scans } : {}
     if (root === '') return { hits: got.hits, io: got.io, ...scans }
     // One array per (literal, root) while the literal is held: the view's per-isolate phase 1 is keyed by it.
@@ -215,8 +218,8 @@ export class SuffixHits implements HitSource {
  *  `/api/name-summary`'s numbers — as a rollup of the buckets, exact in bytes and objects, its root rows unknown
  *  (`rows` null) and nothing below a bucket (`bucketsOnly`). A one- or two-character miss is zero everywhere (no
  *  cells); a longer non-member declines (null). `scans`: the catalog's stack, when it reports one. */
-export async function catalogRoot(catalog: CatalogLookup, key: string): Promise<Found | null> {
-  const got = await catalog.lookup(key)
+export async function catalogRoot(catalog: CatalogLookup, key: string, req?: Req): Promise<Found | null> {
+  const got = await catalog.lookup(key, { req })
   if (!got.member && !shortLiteral(key)) return null
   const cells: RollupCell[] = (got.member?.cells ?? []).map(x => ({ kind: 1, child: x.bucket, vf: Number(x.vf) * 1000, b: x.b, o: x.o }))
   const buckets = new Set(cells.map(x => x.child)).size
@@ -248,7 +251,7 @@ export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: st
 /** The drilldown over a bucket's generation: the base `drill/` and its `runs`' (`staticDrill.ts`), with the fleet
  *  root from `opts.catalog` (default: the base catalog); `cached`: its indexes in `cache` under `prefix` (the
  *  generation's `staticPrefix`). */
-export function drillSource(blobs: Blobs, cached?: { cache: Cache; prefix: string }, opts: { runs?: () => Promise<string[]>; catalog?: CatalogLookup } = {}): DrillSource {
+export function drillSource(blobs: Blobs, cached?: { cache: Cache; prefix: string }, opts: { runs?: (req?: Req) => Promise<string[]>; catalog?: CatalogLookup } = {}): DrillSource {
   const { cache, prefix } = cached ?? {}
   const pre = (dir: string | null) => `${prefix}/${dir ? `${dir}/` : ''}${DRILL_DIR}`
   const catalog = opts.catalog ?? new StaticCatalog(blobs, cache ? cacheIndexes(cache, prefix!, 'catalog-v1') : undefined)
@@ -289,7 +292,7 @@ export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | nul
   const on = env.FILTER_STATIC === '1' && !!env.INDEX_R2
   if (on && env.STORE_KEY !== undefined && !env.STATIC_GEN?.trim()) return UNINDEXED
   const injected = injectedStores.get(env)
-  if (injected) return injected
+  if (injected) return boundTo(injected, reqOf(env))
   if (!on || !env.INDEX_R2) return null
   const gen = staticGen(env), pre = staticPrefix(gen)
   const slot = `${gen}|${env.FILTER_STATIC_HEAVY === '1' ? 'h' : ''}|${env.FILTER_STATIC_ANCHORS === '0' ? '' : 'a'}`
@@ -298,7 +301,7 @@ export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | nul
     const tierPre = (dir: string | null) => dir ? `${pre}/${dir}` : pre
     const t = tiers(r2Blobs(env.INDEX_R2, pre), { indexCache: dir => cacheIndexes(caches.default, tierPre(dir)), catalogCache: dir => cacheIndexes(caches.default, tierPre(dir), 'catalog-v1') })
     // Heavy literals (`FILTER_STATIC_HEAVY=1`): the drilldown over the base and the runs (the fleet root from the tiers' catalog).
-    const runs = async () => (await t.tiers.state()).tiers.flatMap(x => x.dir ? [x.dir] : [])
+    const runs = async (req?: Req) => (await t.tiers.state(req)).tiers.flatMap(x => x.dir ? [x.dir] : [])
     const heavy = env.FILTER_STATIC_HEAVY === '1' ? drillSource(r2Blobs(env.INDEX_R2, pre), { cache: caches.default, prefix: pre }, { runs, catalog: t.catalog }) : null
     // Without it, a heavy literal's fleet root from the catalog's buckets (`catalogRoot`).
     // Anchored terms (`^q`, `q$`, `^q$`; `staticAnchors.ts`): on unless `FILTER_STATIC_ANCHORS=0`; a generation
@@ -312,9 +315,37 @@ export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | nul
         top: dir => cacheIndexes(caches.default, sub(dir, 'anchors'), 'top-v1'),
       },
     })
-    held.set(slot, { r2: env.INDEX_R2, store: { source: new SuffixHits(t.names, { cache: cacheHits(caches.default, pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: () => t.names.hexRuns() } })
+    held.set(slot, { r2: env.INDEX_R2, store: { source: new SuffixHits(t.names, { cache: cacheHits(caches.default, pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: req => t.names.hexRuns(req) } })
   }
-  return held.get(slot)!.store
+  return boundTo(held.get(slot)!.store, reqOf(env))
+}
+
+/** Each request's views of the isolate's stores (`boundTo`). */
+const views = new WeakMap<Req, Map<StaticFilterStore, StaticFilterStore>>()
+/** `s` as request `req` reads it: every read passes `req` (`shared.ts`: what it joins of other requests' reads, and
+ *  owns of its own), so its callers needn't. Without a request (a test's, or a caller outside one), `s` itself. */
+export function boundTo(s: StaticFilterStore, req: Req | undefined): StaticFilterStore {
+  if (!req) return s
+  let mine = views.get(req)
+  if (!mine) views.set(req, (mine = new Map()))
+  let v = mine.get(s)
+  if (!v) {
+    const src = s.source
+    const source: HitSource = {
+      hits: (key, under, opts) => src.hits(key, under, opts, req),
+      ...(src.why ? { why: (key: string) => src.why!(key) } : {}),
+      ...(src.heavy !== undefined ? { heavy: src.heavy } : {}),
+      ...(src.heavyDeclined ? { heavyDeclined: (key: string) => src.heavyDeclined!(key) } : {}),
+      ...(src.at ? { at: (key: string, path: string) => src.at!(key, path, req) } : {}),
+    }
+    v = {
+      source, gen: s.gen, scans: () => s.scans(req),
+      ...(s.dirOnly ? { dirOnly: () => s.dirOnly!(req) } : {}),
+      ...(s.hexRuns ? { hexRuns: () => s.hexRuns!(req) } : {}),
+    }
+    mine.set(s, v)
+  }
+  return v
 }
 
 /** Whether `date` can be answered statically for `ast`: the literal, else null. */
@@ -381,8 +412,13 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  (`staticBool.ts`), where they walked the path store, flagged approximate, before; 22: a secondary store reads only
  *  its own static index (`STORES_JSON` `STATIC_GEN`), never the primary's — a cached 21 body could hold the primary's
  *  matches under a secondary's root; 23: path terms (`a/b`) from the name index, where they walked (flagged approximate) or
- *  were refused before, and an owner pool's series over static hits folds the ledger per root). */
-const RESPONSE_V = 23
+ *  were refused before, and an owner pool's series over static hits folds the ledger per root; 24: a heavy literal's
+ *  rollup view draws its match roots' insides (the unfiltered subtree, as the light path's phase 2), where each was one
+ *  tile — in the view and both sides of a diff); 25: a match root's interior is read under an unfiltered view's bound
+ *  (`FILTER_PHASE2_GROUPS`/`ROWS` 64 / 512K, the interval store planned as the plain view plans it), where 16 / 160K left a
+ *  big root on an interval-store deployment one tile ("over the read budget")); 26: a diff's name whose lookup the walk's
+ *  budget left unanswered folds into `(other)` on both sides, where it read as added / removed at zero. */
+const RESPONSE_V = 26
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>

@@ -1,6 +1,6 @@
 /**
- * Test-only: an in-memory D1 over `node:sqlite`, with a migrations lineage
- * (`site/migrations/<lineage>/*.sql`, in order) applied and foreign keys ON
+ * Test-only: an in-memory D1 over `node:sqlite`, holding the branch's D1
+ * schema (`site/schema.sql`, specs/done/d1-migrations.md) with foreign keys ON
  * (as D1 enforces them). Covers the D1 surface the Functions use:
  * `prepare(sql).bind(...).first/all/run`. Node-only modules are imported
  * dynamically so the Workers-typed `tsc -p functions` never resolves them;
@@ -19,51 +19,27 @@ export interface Sqlite {
 
 const load = async <T>(mod: string): Promise<T> => (await import(/* @vite-ignore */ mod)) as T
 
-interface NodeFs {
-  readdirSync(dir: URL): string[]
-  readdirSync(dir: URL, opts: { withFileTypes: true }): { name: string; isDirectory(): boolean }[]
-  readFileSync(file: URL, encoding: 'utf8'): string
+/** `site/schema.sql`: the branch's D1 schema, its current state. */
+export const SCHEMA = new URL('../../schema.sql', (import.meta as ImportMeta & { url: string }).url)
+const SCHEMA_SQL = (await load<{ readFileSync(file: URL, encoding: 'utf8'): string }>('node:fs')).readFileSync(SCHEMA, 'utf8')
+
+async function rawDb(): Promise<Sqlite> {
+  const { DatabaseSync } = await load<{ DatabaseSync: new (path: string) => Sqlite }>('node:sqlite')
+  const raw = new DatabaseSync(':memory:')
+  raw.exec('PRAGMA foreign_keys = ON')
+  raw.exec(SCHEMA_SQL)
+  return raw
 }
 
-/** `site/migrations/`: one directory per D1 lineage, plus `twins.json`. */
-export const MIGRATIONS = new URL('../../migrations/', (import.meta as ImportMeta & { url: string }).url)
-
-/** A D1 migrations lineage: a directory under `site/migrations/`. */
-export type Lineage = string
-
-/** The lineages this branch carries, sorted: every directory under
- * `site/migrations/` (the base carries `cw`; a deployment branch may add its
- * own, and every lineage-agnostic D1 test then runs on it too). */
-export const LINEAGES: readonly Lineage[] = (await load<NodeFs>('node:fs'))
-  .readdirSync(MIGRATIONS, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name).sort()
-
-/** The lineage's migration files, sorted (`NNNN_name.sql`). */
-export async function migrations(lineage: Lineage): Promise<{ name: string; sql: string }[]> {
-  const { readdirSync, readFileSync } = await load<NodeFs>('node:fs')
-  const dir = new URL(`${lineage}/`, MIGRATIONS)
-  return readdirSync(dir).filter(f => f.endsWith('.sql')).sort()
-    .map(name => ({ name, sql: readFileSync(new URL(name, dir), 'utf8') }))
-}
-
-/** The one migration of `lineage` named `NNNN_<stem>.sql`, whatever its
- * number there (lineages number the same migration differently). */
-export async function migrationNamed(lineage: Lineage, stem: string): Promise<string> {
-  const hits = (await migrations(lineage)).map(m => m.name).filter(n => n.replace(/^\d+_/, '') === `${stem}.sql`)
-  if (hits.length !== 1) throw new Error(`${lineage}: ${hits.length} migrations named \`${stem}\` (${hits.join(', ')})`)
+/** The `deletion_runs` column holding a run's manifest dir, as this branch's
+ * schema names it (`manifest` in cloud's; gcs's squashed init calls it `plan`),
+ * so the sweep tests run on either. */
+export const RUN_DIR: string = await (async () => {
+  const cols = (await rawDb()).prepare("SELECT name FROM pragma_table_info('deletion_runs')").all().map(r => r.name)
+  const hits = ['manifest', 'plan'].filter(c => cols.includes(c))
+  if (hits.length !== 1) throw new Error(`deletion_runs: want one of manifest | plan, got [${cols.join(', ')}]`)
   return hits[0]
-}
-
-/** Where the lineages' schemas really differ, as the shared tests need it,
- * per lineage — the column holding a deletion run's manifest dir
- * (`deletion_runs.manifest` on cw, `.plan` on gcs's squashed init). A
- * lineage absent here has cw's shape; `testD1.test.ts` pins each entry
- * against the schema of every lineage this branch carries. */
-export interface SchemaFork { runDir: string }
-const SCHEMA_FORKS: Record<Lineage, SchemaFork> = {
-  cw: { runDir: 'manifest' },
-  gcs: { runDir: 'plan' },
-}
-export const schemaFork = (lineage: Lineage): SchemaFork => SCHEMA_FORKS[lineage] ?? SCHEMA_FORKS.cw
+})()
 
 function d1Of(raw: Sqlite): D1Database {
   const prepare = (sql: string, params: unknown[] = []) => ({
@@ -103,28 +79,21 @@ function d1Of(raw: Sqlite): D1Database {
   return { prepare: (sql: string) => prepare(sql), batch } as unknown as D1Database
 }
 
-/** A fresh in-memory DB with `lineage`'s migrations applied — all of them,
- * or (`before`) only those whose file name sorts before it, so a test can seed
- * rows and then apply a migration over them. */
-export async function sqliteD1(lineage: Lineage, { before }: { before?: string } = {}): Promise<{ db: D1Database; raw: Sqlite }> {
-  const { DatabaseSync } = await load<{ DatabaseSync: new (path: string) => Sqlite }>('node:sqlite')
-  const raw = new DatabaseSync(':memory:')
-  raw.exec('PRAGMA foreign_keys = ON')
-  for (const m of await migrations(lineage)) if (before === undefined || m.name < before) raw.exec(m.sql)
+/** A fresh in-memory D1 holding the schema. */
+export async function sqliteD1(): Promise<{ db: D1Database; raw: Sqlite }> {
+  const raw = await rawDb()
   return { db: d1Of(raw), raw }
 }
 
-/** The gcs lineage's `kind` migration, ledger half (specs/file-assign.md): what
- * `migrations/gcs/` adds beside cw's `0017_plan_items_kind.sql` (whose
- * `plan_items` statement it repeats). `cloud` carries no gcs migrations, so
- * tests that build the gcs ledger tables ad hoc append this to them. */
+/** The gcs ledger's `kind` columns (specs/file-assign.md), added in place.
+ * `cloud`'s schema has no ownership ledger, so tests that build gcs's ledger
+ * tables ad hoc append this to them. */
 export const LEDGER_KIND = `
   ALTER TABLE actions ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'object');
   ALTER TABLE owner_prefixes ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'object');
 `
 
-/** The gcs ledger tables as `migrations/gcs/0001_init.sql` has them (keep
- * columns dropped by 0028), with `LEDGER_KIND` applied. */
+/** The gcs ledger tables as gcs's schema has them, with `LEDGER_KIND` applied. */
 export const GCS_LEDGER = `
   CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, memo TEXT);
   CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));

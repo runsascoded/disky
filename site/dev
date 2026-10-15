@@ -13,9 +13,8 @@
 # stage / grant gesture writes REAL prod rows. Prefer `--local-db` for anything
 # that WRITES (auth grants, marks, staging, sweeps): it reads/writes a throwaway
 # local copy, so prod stays untouched — the way to test stack-spanning changes
-# (auth + D1) off-prod. First `--local-db` with no prior seed applies this
-# deployment's migrations (`migrations_dir` in wrangler.toml) into an empty
-# local D1; `--refresh` mirrors the real prod ledger in (see ./refresh-db —
+# (auth + D1) off-prod. First `--local-db` with no prior seed creates the
+# branch's schema (`schema.sql`) in an empty local D1; `--refresh` mirrors the real prod ledger in (see ./refresh-db —
 # needs a live `wrangler login` + `sqlite3`; it loads the export straight into
 # the miniflare sqlite file, so a multi-GB prod export is fine). (`pnpm dev`
 # alone runs only vite → blank treemap, since /api + /data aren't served.)
@@ -84,10 +83,10 @@ fi
 if [ "$REFRESH" = 1 ]; then
   ./refresh-db
 elif [ "$LOCALDB" = 1 ] && [ ! -d .wrangler/state/v3/d1 ]; then
-  # No local D1 yet and not refreshing: apply the migrations so the auth gate
-  # has its schema (empty ledger). `--refresh` instead mirrors prod's rows in.
-  echo "→ no local D1 yet — applying migrations (empty ledger; use --refresh to seed from prod)" >&2
-  pnpm exec wrangler d1 migrations apply "$DB" --local
+  # No local D1 yet and not refreshing: create the schema so the auth gate has
+  # its tables (empty ledger). `--refresh` instead mirrors prod's rows in.
+  echo "→ no local D1 yet — creating schema.sql (empty ledger; use --refresh to seed from prod)" >&2
+  pnpm exec wrangler d1 execute "$DB" --local --file schema.sql
 fi
 
 # Boot wrangler in the background. Local mode has no tunnel and needs no auth, so

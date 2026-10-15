@@ -361,7 +361,7 @@ def _q(v) -> str:  # nullable string literal for SQL
 
 # Multi-store deploys (specs/done/multi-store.md). The primary store's SQL is
 # exactly what it was before stores existed, so it runs on a D1 with or
-# without the store migration (site/migrations/{cw/0006,gcs/0030}). A
+# without the store migration (`store_scoped_index`, cw 0006 / gcs 0030). A
 # secondary store's rows are namespaced twice: their `variant` is
 # `<store>:<variant>` (so no primary query, which always names a bare variant,
 # can see them; and the row-group PK (date, variant, gen, rg) stays disjoint),
@@ -852,7 +852,7 @@ def row_bytes(r: dict) -> int:
 
 
 def footer_cache_present(acct: str, tok: str, db_id: str = D1_DB_ID) -> bool:
-    """Whether this D1 has the footer LRU's table (`site/migrations/cw/0022_footer_cache.sql`)."""
+    """Whether this D1 has the footer LRU's table (`footer_cache`, in `site/schema.sql`)."""
     return bool(_d1_query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';", acct, tok, db_id))
 
 
@@ -910,7 +910,7 @@ def evict(
     of every entry demoted at least ``grace`` seconds ago. ``dry_run``: report, write nothing."""
     tok, acct = _creds()
     if not footer_cache_present(acct, tok, db_id):
-        raise RuntimeError("no footer_cache table in this D1: apply site/migrations/cw/0022_footer_cache.sql first")
+        raise RuntimeError("no footer_cache table in this D1: create it as `site/schema.sql` has it")
     now = _now() if now is None else now
     cols = "date, variant, gen, rows, bytes, last_access_day"
     order = "ORDER BY last_access_day, date, variant, gen"

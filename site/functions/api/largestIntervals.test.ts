@@ -56,7 +56,7 @@ const ivEnv = (gen: string): Env => ({ ...perScan, PATH_STORE: 'intervals', INTE
 
 beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-  const { db, raw } = await sqliteD1('cw')
+  const { db, raw } = await sqliteD1()
   const slicesD1 = await readJson<Record<string, D1Variant>>('v2-slices/d1.json')
   const lensD1 = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
   for (const date of [S1, S3]) seedGeneration(raw, { date, gen: 'g', dir: `listing/${date}/index/g`, variants: slicesD1, files: files('v2-slices', { path: 'path-index', bysize: 'path-index-bysize' }) })
