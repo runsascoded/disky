@@ -221,7 +221,7 @@ def dump_cmd(out: Path | None, sources: tuple[Path, ...]) -> None:
 
 
 @cli.command("check")
-@option("-c", "--config", type=ClickPath(dir_okay=False, path_type=Path), default=None, help="With -d: the deployment's wrangler config (e.g. `wrangler.r2.toml`), relative to site/")
+@option("-c", "--config", type=ClickPath(dir_okay=False, path_type=Path), default=None, help="With -d: the deployment's wrangler config (e.g. `site/wrangler.r2.toml`): a path from here, else one relative to site/")
 @option("-d", "--d1", "d1", default=None, help="Compare with this live D1's schema (read-only `wrangler d1 execute --remote`, run from site/)")
 @option("-p", "--pending", "with_pending", is_flag=True, help="Compare with the pre-image of the pending recipes (`site/migrations/*.sql`, from git history) plus the recipes, in order")
 @option("-s", "--schema", type=ClickPath(exists=True, dir_okay=False, path_type=Path), default=None, help="The schema file (default site/schema.sql)")
@@ -242,6 +242,9 @@ def check_cmd(config: Path | None, d1: str | None, with_pending: bool, schema: P
     if sources:
         other, name = dump(load(sources)), " + ".join(map(str, sources))
     elif d1 is not None:
+        # wrangler runs in site/: a config given from here is passed absolute (else it is taken as site-relative)
+        if config is not None and not config.is_absolute() and config.exists():
+            config = config.resolve()
         other, name = dump(from_rows(live_rows(d1, config=config, site=schema_file().parent))), f"D1 {d1}"
     elif with_pending:
         recipes = pending(site)

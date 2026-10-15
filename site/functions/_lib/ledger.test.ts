@@ -1,20 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { Env } from './auth'
 import { ledgerHead, loadLedger } from './ledger'
-import { LEDGER_KIND, sqliteD1 } from './testD1'
-
-// The ledger tables as gcs's schema has them; cloud's schema (`site/schema.sql`)
-// has no ledger.
-const LEDGER = `
-  CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, memo TEXT);
-  CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
-  ${LEDGER_KIND}
-`
+import { sqliteD1, withLedger } from './testD1'
 
 describe('the ledger head', () => {
   it('moves on a retraction (a tombstoned row), not only on a new action', async () => {
     const { db, raw } = await sqliteD1()
-    raw.exec(LEDGER)
+    withLedger(raw)
     const env = { DB: db } as Env
     const assign = (id: number, prefix: string, owner: string) => raw.exec(
       `INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (${id}, 'a', ${id}, 's', '${prefix}', 1, '${owner}');` +

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { DispatchReq, ExecEnv, Executor } from './dispatch'
 import { dispatchPlan, EXECUTORS, executorOf, type ExecutorKind, planFirstKind } from './executor'
 import type { FinishedRun, RunRow } from './plans'
-import { sqliteD1 } from './testD1'
+import { RUN_DIR, sqliteD1 } from './testD1'
 
 const A = 's3://primary-bucket/a/'
 const B = 's3://primary-bucket/b/'
@@ -34,7 +34,7 @@ function fake(kind: ExecutorKind, db: D1Database, calls: string[]): Executor & {
           const jobId = `${kind}-${req.mode}-${++n}`
           calls.push(`${kind}:launch:${jobId}:${date}:${digest}`)
           await db.prepare(`
-            INSERT INTO deletion_runs (run_id, plan_id, manifest, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest)
+            INSERT INTO deletion_runs (run_id, plan_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, log_dir, plan_digest)
             VALUES (?, ?, 'm', ?, 0, 0, ?, ?, ?, 'l', ?)
           `).bind(jobId, req.planId, date, req.actor, req.mode, 1000 + n, digest).run()
           return { job_id: jobId, extra: { run: `gs://runs/${jobId}` } }

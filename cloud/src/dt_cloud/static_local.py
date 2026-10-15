@@ -523,7 +523,14 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     cat_work = work / "catalog-work"
     sa.catalog_delta(con, tiers, sc.BaseShards(str(gen_dir), side), deltas, V, run / "catalog", cat_work, rule)
     shutil.rmtree(cat_work, ignore_errors=True)
-    drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule)
+
+    def step(name: str, t: float, **counts: int) -> float:
+        """A drill sub-step's line (`drill/<step>/<kind>`, as `build_gen`'s): its seconds, work-disk and RSS peaks, and counts."""
+        n = "".join(f", {k} {v:,}" for k, v in counts.items())
+        err(f"add {d}: {name} in {round(monotonic() - t, 1)}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        return monotonic()
+
+    drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule, step=step)
     anchors = run_anchors(con, gen_dir, run, d, runs, rule=rule) if (gen_dir / an.ANCHORS / "meta.json").exists() else None
     manifest = sa.publish_run(store, d, rule, max_level=compact_level)
     peak = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
@@ -547,8 +554,9 @@ def run_anchors(con, gen_dir: Path, run: Path, d: str, runs: list[dict], *, rule
     return {k: v["rows"] for k, v in doc["sets"].items()}
 
 
-def run_drill(con, gen_dir: Path, run: Path, scan: dict, runs: list[dict], days: list[str], *, gen: str, rule) -> dict:
-    """The run's `drill/` over the base's and the live runs' drills (`static-names drill build`'s inputs, from `gen_dir`)."""
+def run_drill(con, gen_dir: Path, run: Path, scan: dict, runs: list[dict], days: list[str], *, gen: str, rule, step=_nop_step) -> dict:
+    """The run's `drill/` over the base's and the live runs' drills (`static-names drill build`'s inputs, from `gen_dir`);
+    `step` reports its sub-steps (`static_drill.build_day`'s)."""
     prior = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(gen_dir / r["key"] / "drill", r["key"]) for r in runs)]
     for t in prior[1:]:
         if t.meta.get("last") != t.name.split("/")[-1].split("_")[-1]:
@@ -569,7 +577,7 @@ def run_drill(con, gen_dir: Path, run: Path, scan: dict, runs: list[dict], days:
     d = scan["id"]
     meta = sd.build_day(con, prior, run / "drill", D=sn.scan_epoch(d), R=base_meta["R"], K=base_meta["K"], floor=base_meta.get("floor", FLOOR),
                         sx_files=sx, cdelta_files=cdelta, new_members=new_members, history=history, meas=meas, rg=sd.RUN_RG,
-                        rule=rule, tier={"gen": gen, "first": d, "last": d, "level": 0, "scans": [d], "prior": [t.name for t in prior]})
+                        rule=rule, tier={"gen": gen, "first": d, "last": d, "level": 0, "scans": [d], "prior": [t.name for t in prior]}, step=step)
     con.execute("DROP TABLE IF EXISTS pnew")
     return {"new_members": len(new_members), "rows": {k: v for k, v in meta.items() if k.endswith("_rows")}}
 

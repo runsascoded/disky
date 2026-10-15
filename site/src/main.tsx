@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { exchangeKeyParam } from '@open-athena/auth/react'
 import Root from './Root'
+import { SelfProvider } from './SelfProvider'
 import { TooltipGroup } from './Tooltip'
 import { UnitsProvider } from './units'
 import { withoutOg } from './sharePreview'
@@ -44,9 +45,11 @@ async function start() {
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <UnitsProvider>
-            <TooltipGroup>
-              <Root />
-            </TooltipGroup>
+            <SelfProvider>
+              <TooltipGroup>
+                <Root />
+              </TooltipGroup>
+            </SelfProvider>
           </UnitsProvider>
         </BrowserRouter>
       </QueryClientProvider>

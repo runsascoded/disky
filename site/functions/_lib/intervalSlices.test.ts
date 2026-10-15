@@ -3,7 +3,7 @@ import type { Env } from './auth'
 import { IV_JOIN, openIndex, readRootHistoryRows, slices } from './index'
 import { type Req, reqOf, withReq } from './shared'
 import type { OwnerScope } from './scope'
-import { LEDGER_KIND, sqliteD1 } from './testD1'
+import { sqliteD1, withLedger } from './testD1'
 import { type D1Variant, fixture, GETS, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
@@ -62,13 +62,8 @@ async function seed(ledger = ''): Promise<{ perScan: Env; iv: Env }> {
   const slicesD1 = await readJson<Record<string, D1Variant>>('v2-slices/d1.json')
   const lensD1 = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
   for (const date of [S1, S3]) seedGeneration(raw, { date, gen: 'g', dir: `listing/${date}/index/g`, variants: slicesD1, files: files('v2-slices', { path: 'path-index', bysize: 'path-index-bysize' }) })
-  raw.exec(`
-    CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT);
-    CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
-    ${LEDGER_KIND}
-    CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
-    ${ledger}
-  `)
+  withLedger(raw)
+  if (ledger) raw.exec(ledger)
   seedGeneration(raw, { date: S2, gen: 'g', dir: `listing/${S2}/index/g`, variants: lensD1, files: files('v2-lens', { path: 'path-index', bysize: 'path-index-bysize', 'bysize-user': 'path-index-bysize-by-user' }) })
   const perScan = { DB: db, ROOT_LABEL: 'root', BASE_SCOPE: 'gcs', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
   return { perScan, iv: { ...perScan, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g2', INDEX_R2: r2() } as Env }
@@ -399,7 +394,7 @@ for (const GEN of ['g2', 'g5'] as const) {
     const ledger = [
       ...claims.map(c => `INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, kind) VALUES (${c.action_id}, 'ann', 1, '${S2}', '${c.prefix}', 1, 'carol', 'object');`),
       ...claims.map(c => `INSERT INTO owner_prefixes (action_id, prefix, owner, ts, kind) VALUES (${c.action_id}, '${c.prefix}', 'carol', 1, 'object');`),
-      `INSERT INTO owner_totals (scan, head, body, claims) VALUES ('${S2}', ${claims.length}, '{}', '${JSON.stringify(claims)}');`,
+      `INSERT INTO owner_totals (scan, head, body, claims, computed_ts) VALUES ('${S2}', ${claims.length}, '{}', '${JSON.stringify(claims)}', 1);`,
     ].join('\n')
     let envs: { perScan: Env; iv: Env }
     // The store's reads from here on (the groups each test decodes are cached for the next).

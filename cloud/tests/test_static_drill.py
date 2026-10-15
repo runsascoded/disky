@@ -504,6 +504,40 @@ def test_prefetch_writes_the_same_bytes(world, run_rg, tmp_path, i):
     assert _tree(world["runs"][i].root, drop={"s", "reads"}) == _tree(tmp_path / "serial", drop={"s", "reads"})
 
 
+def test_a_run_holds_no_bulk_read_groups(world, run_rg, tmp_path, monkeypatch):
+    """The newly heavy directories' prior roots (a bulk read: each group read once) leave no decoded group nor prefetched
+    group bytes behind, and each kind's reads of the prior tiers are released when it is done, so what the reads hold
+    doesn't grow with those roots nor carry into the next kind (m3's 2026-10-15T2210 add: 19.2M prior roots, OOM at 8 GiB)."""
+    seen, released = [], []
+    newly_heavy, build_day = sd.newly_heavy_rollups, sd.build_day
+
+    def held(reads: sd.TierReads) -> tuple[int, int]:
+        """Decoded groups, and prefetched bytes of data groups (not index row groups), the reads' group files hold."""
+        gfs = [gf for _, gf in reads.items if gf is not None]
+        raw = sum(len(v) for (gf, f, _), v in reads.raw._d.items() if f != gf.index_file) if reads.raw else 0
+        return sum(len(gf._groups) for gf in gfs), raw
+
+    def nh(con, reads, kind, K, **kw):
+        before, groups = held(reads), sum(gf.io["groups_read"] for _, gf in reads.items if gf is not None)
+        n = newly_heavy(con, reads, kind, K, **kw)
+        seen.append((n, sum(gf.io["groups_read"] for _, gf in reads.items if gf is not None) - groups, before, held(reads)))
+        return n
+
+    def bd(con, prior, *args, **kw):
+        meta = build_day(con, prior, *args, **kw)
+        released.append([sorted(t._gf) for t in prior])
+        return meta
+
+    monkeypatch.setattr(sd, "newly_heavy_rollups", nh)
+    monkeypatch.setattr(sd, "build_day", bd)
+    for i, rebuild in enumerate(world["rebuilds"]):
+        rebuild(tmp_path / f"run{i}")
+    assert [after for _, _, before, after in seen] == [before for _, _, before, _ in seen]
+    assert any(n and read for n, read, _, _ in seen)  # some newly heavy directory read prior roots, decoding groups
+    assert released == [[[] for _ in r] for r in released]
+    assert len(released) == len(world["rebuilds"])
+
+
 @pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
 def test_prefetch_plan_covers_the_reads(world, run_rg, tmp_path, monkeypatch, i):
     """Each loop's plan holds every group it decodes, so after the prefetch nothing is fetched in the loops (index row
@@ -519,10 +553,10 @@ def test_prefetch_plan_covers_the_reads(world, run_rg, tmp_path, monkeypatch, i)
             yield a, b
         stage["any"] = self.stats["any"] - stage["any"]
 
-    def rec_group_rows(self, g):
+    def rec_group_rows(self, g, keep=True):
         if stages:
             stages[-1]["read"].add((id(self), g["file"], g["rg"]))
-        return group_rows(self, g)
+        return group_rows(self, g, keep)
 
     monkeypatch.setattr(sd.TierReads, "windows", rec_windows)
     monkeypatch.setattr(sd.CachedGroupFile, "group_rows", rec_group_rows)

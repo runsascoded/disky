@@ -1,18 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { Env } from './auth'
 import { actionLog } from './actionLog'
-import { LEDGER_KIND, sqliteD1 } from './testD1'
-
-const LEDGER = `
-  CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, memo TEXT);
-  CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
-  ${LEDGER_KIND}
-`
+import { sqliteD1, withLedger } from './testD1'
 
 describe('actionLog: every owner action, newest first, with what became of it', () => {
   it('live, superseded, overridden by an ancestor, retracted — and `_` is not a wildcard', async () => {
     const { db, raw } = await sqliteD1()
-    raw.exec(LEDGER)
+    withLedger(raw)
     const act = (id: number, prefix: string, owner: string | null, memo: string | null = null) => raw.exec(
       `INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, memo) VALUES (${id}, 'u${id}@x', ${100 + id}, 's', '${prefix}', 1, ${owner ? `'${owner}'` : 'NULL'}, ${memo ? `'${memo}'` : 'NULL'});` +
       `INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (${id}, '${prefix}', ${owner ? `'${owner}'` : 'NULL'}, ${100 + id});`,

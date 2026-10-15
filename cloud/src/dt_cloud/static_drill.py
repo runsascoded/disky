@@ -99,6 +99,11 @@ class ByteCache:
             self._d.move_to_end(key)
         return data
 
+    def pop(self, key) -> None:
+        data = self._d.pop(key, None)
+        if data is not None:
+            self.size -= len(data)
+
     def put(self, key, data: bytes) -> None:
         if key in self._d:
             self.size -= len(self._d.pop(key))
@@ -234,10 +239,11 @@ class CachedGroupFile(sr.GroupFile):
         sel = self._sel(a, b, lo, hi)
         return sel, sum(g["rows"] for g in sel)
 
-    def group_rows(self, g: dict) -> tuple[pa.Table, dict[str, list]]:
+    def group_rows(self, g: dict, keep: bool = True) -> tuple[pa.Table, dict[str, list]]:
         """Group `g` decoded (cached): its rows as a table, and per `q` its rows' span `[s, e)` (the group is sorted on
         `(q, key)`) with their keys, listed when first bisected. Rows become Python dicts only when a range of them is returned
-        (`rows_in`): converting whole groups was most of the probes' and settling's time."""
+        (`rows_in`): converting whole groups was most of the probes' and settling's time. `keep=False` (a bulk read, each
+        group read once): a group not cached is decoded without caching it, and its prefetched bytes are dropped."""
         import numpy as np
 
         k = (g["file"], g["rg"])
@@ -246,13 +252,18 @@ class CachedGroupFile(sr.GroupFile):
             self.fetch_io["group_hits"] += 1
             return self._groups[k]
         data = self._get(g["file"], g["offset"], g["offset"] + g["length"])
+        if not keep and self.raw is not None:
+            self.raw.pop((self, g["file"], g["offset"]))
         self.io["groups_read"] += 1
         self.io["group_bytes"] += len(data)
         t = self._read_table(g["file"], g["offset"], data, g["rg"])
         d = t.column("q").combine_chunks().dictionary_encode()  # sorted: the dictionary is in order, the indices ascending
         idx, n = d.indices.to_numpy(), len(d.dictionary)
         starts, ends = np.searchsorted(idx, np.arange(n), "left"), np.searchsorted(idx, np.arange(n), "right")
-        self._groups[k] = (t, {v: [int(s), int(e), None] for v, s, e in zip(d.dictionary.to_pylist(), starts, ends)})
+        out = (t, {v: [int(s), int(e), None] for v, s, e in zip(d.dictionary.to_pylist(), starts, ends)})
+        if not keep:
+            return out
+        self._groups[k] = out
         if len(self._groups) > self.cap_groups:
             self._groups.popitem(last=False)
         return self._groups[k]
@@ -363,6 +374,12 @@ class Tier:
             self._gf[(kind, sub)] = CachedGroupFile(None, self.fetch, self.size_of, top=self.table(top), index_file=f"{kind}-{sub}-index.parquet",
                                                     key="path" if sub == "roots" else "dir") if self.exists(top) else None
         return self._gf[(kind, sub)]
+
+    def release(self, kind: str) -> None:
+        """Drop `kind`'s group files (their decoded groups, index entries and byte cache): a run's build reads one kind at a
+        time, and the tiers outlive it."""
+        for k in [k for k in self._gf if k[0] == kind]:
+            del self._gf[k]
 
     def files(self, kind: str, sub: str) -> list[str]:
         return [self.local(f) for f in self.listdir(f"{kind}/{sub}")]
@@ -480,7 +497,7 @@ class TierReads:
                 groups, _ = gf.select((ci, lo), (ci, hi))
                 for a, b in self.windows([[(gf, g)] for g in groups]):
                     for g in groups[a:b]:
-                        tab, runs = gf.group_rows(g)
+                        tab, runs = gf.group_rows(g, keep=False)
                         run = runs.get(ci)
                         if run is not None:
                             s, e, _ = run
@@ -492,6 +509,20 @@ class TierReads:
                                 matched = part.filter(and_(greater_equal(keys, lo), less(keys, hi)))
                                 if matched.num_rows:
                                     yield matched
+
+    def close(self) -> None:
+        """Free what the reads hold: the byte cache (whose keys hold the group files: a cycle), each group file's decoded
+        groups and index entries."""
+        if self.raw is not None:
+            self.raw._d.clear()
+            self.raw.size = 0
+        for _, gf in self.items:
+            if gf is not None:
+                gf.raw = None
+                gf._groups.clear()
+                gf._entries.clear()
+                gf._peeked.clear()
+                gf._spans.clear()
 
     def io(self) -> dict:
         out: Counter = Counter(self.stats)
@@ -899,14 +930,19 @@ def _explode(where: str = "") -> str:
             FROM dr WHERE depth >= 2 {where})"""
 
 
+def _nop_step(name: str, t: float, **counts: int) -> float:
+    return monotonic()
+
+
 def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, floor: int, reads: TierReads, log=err,
-                ck: Checkpoint | None = None) -> dict:
+                ck: Checkpoint | None = None, step=_nop_step) -> dict:
     """A run's rollups and `dcount` for one kind at scan `D` (epoch s), from tables `dr` (the scan's delta roots per class
     canonical; a new member's whole history), `newq` (new members), `pnew (depth, path)` (paths opened at the scan with
     no earlier version), `meas (q, dir, rows)` (the base's root rows per directory, those with ≥ `floor`) and the prior
     tiers' rollups and `dcount`s. Writes tables `rup` (rollup rows) and `dcnt` (`DCOUNT_SCHEMA`); returns counts. `ck`: each
     step that reads the prior tiers (probes, settling, base counts, newly heavy directories) saves its output, and is
-    skipped (its output restored) when saved; the SQL between them reruns (deterministic, over the same tables)."""
+    skipped (its output restored) when saved; the SQL between them reruns (deterministic, over the same tables).
+    `step(name, t, **counts)` reports the sub-steps (`drill/rollups/<kind>`: up to the newly heavy directories; `drill/newly-heavy/<kind>`)."""
     t0 = monotonic()
     doc: Counter = Counter()
     _cmap(con, prior, kind)
@@ -1019,9 +1055,12 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     con.execute(f"""CREATE OR REPLACE TABLE newh AS SELECT nh.q, nh.dir, nh.k FROM nh LEFT JOIN bx USING (q, dir)
         WHERE coalesce(nh.base, bx.rows) + nh.runs + nh.today > {R}""")
     doc["heavy_new"] = con.execute("SELECT count(*) FROM newh").fetchone()[0]
+    t2 = step(f"drill/rollups/{kind}", t0, heavy_touched=doc["heavy_touched"], affected=doc["affected"], restated=doc["restated"])
+    count = 0
     if doc["heavy_new"]:
         count = newly_heavy_rollups(con, reads, kind, K, log=log, ck=ck)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
+    step(f"drill/newly-heavy/{kind}", t2, directories=doc["heavy_new"], prior_roots=count)
     con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir)")
     for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "dc", "nh", "bx", "newh", "cmap"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
@@ -1509,14 +1548,16 @@ def base_meta(R: int, K: int, rg: int | None = None) -> dict:
 def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floor: int, sx_files: list[str], cdelta_files: list[str],
               new_members: list[str], history: pa.Table | None, meas: dict[str, str], tier: dict, chunk_rows: int = 1 << 24,
               file_rows: int = FILE_ROWS, rg: int | None = None, kinds: tuple[str, ...] = KINDS, log=err, rule=None,
-              threads: int = FETCH_THREADS, cache_bytes: int | None = None, checkpoint: Checkpoint | None = None) -> dict:
+              threads: int = FETCH_THREADS, cache_bytes: int | None = None, checkpoint: Checkpoint | None = None, step=_nop_step) -> dict:
     """A scan's `drill/` in `out`: each kind's delta roots, rollups, indexes and `dcount` (long: and the run's alias map), and
     with both kinds `meta.json` last (one kind: its part, `meta.<kind>.json`; `join_meta` makes `meta.json` of the two). Needs
     table `pnew (depth, path)`; `meas[kind]` is a query of the base's `(q, dir, rows)` at ≥ `floor` rows. `threads`,
     `cache_bytes`: the prior tiers' reads' prefetch (`TierReads`); the output is the same without it. `checkpoint`: each
     kind's steps are saved under its `<kind>/` (`roots`: the delta roots and classes; the long kind's `digests`; then
     `day_rollups`' steps; `written`: a kind's files, when another kind follows it here), and a rerun resumes after the last
-    one saved; the files are the same (`meta`'s times and `reads` counts are the rerun's)."""
+    one saved; the files are the same (`meta`'s times and `reads` counts are the rerun's). Each kind's reads of the prior
+    tiers are released when it is done (`Tier.release`). `step(name, t, **counts)` reports each kind's sub-steps
+    (`drill/roots/<kind>`, `day_rollups`', `drill/write/<kind>`)."""
     t0 = monotonic()
     out.mkdir(parents=True, exist_ok=True)
     meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor}
@@ -1540,15 +1581,22 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
                 ck.save(con, "roots", ("dr", "newq", "cls") if kind == "long" else ("dr", "newq"), km)
         if kind == "long":
             write_aliases(con, out)
+        t = step(f"drill/roots/{kind}", t1, roots=con.execute("SELECT count(*) FROM dr").fetchone()[0])
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
         reads = TierReads(prior, kind, threads, cache_bytes)
         resource_stage(f"{kind}: rollups")
-        km[f"{kind}_day"] = day_rollups(con, prior, kind, D, R=R, K=K, floor=floor, reads=reads, log=log, ck=ck)
+        km[f"{kind}_day"] = day_rollups(con, prior, kind, D, R=R, K=K, floor=floor, reads=reads, log=log, ck=ck, step=step)
         km[f"{kind}_day"]["reads"] = reads.io()
         log(f"drill {kind}: requests {reads.requests()}")
+        reads.close()
+        del reads
+        for tr in prior:
+            tr.release(kind)
+        t = monotonic()
         resource_stage(f"{kind}: write")
         km.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
         write_state(con, out, kind)
+        step(f"drill/write/{kind}", t, roots=km[f"{kind}_roots"]["rows"], rup=km[f"{kind}_rollups"]["rows"])
         km[f"{kind}_day"]["s"] = round(monotonic() - t1, 1)
         meta.update(km)
         for t in ("dr", "rup", "dcnt", "meas", "newq"):

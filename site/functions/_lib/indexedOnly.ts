@@ -83,6 +83,17 @@ export const PATH_TAIL_MIN = { prefix: 2, exact: 1 } as const
 /** Whether a path term's tail is long enough to read (`PATH_TAIL_MIN`). */
 export const pathTailOk = (text: string, end: boolean): boolean => [...pathTail(text)].length >= (end ? PATH_TAIL_MIN.exact : PATH_TAIL_MIN.prefix)
 
+/** `slash-tail-short`, worded for the term. An empty tail (`x/`: what is inside folders ending in x) names the folder
+ *  term instead, `x$`: a folder's bytes and objects are its contents'. Its rewrite isn't served for it: the static
+ *  index's hits carry no kind, so a match of `x$` that is an object (no contents) can't be told from a folder holding
+ *  one (specs/search-box-no-refusals.md §3.3). */
+export function slashTailShort(text: string, start: boolean): FilterReject {
+  const folder = pathTail(text) === '' ? text.replace(/\/+$/, '') : ''
+  return folder
+    ? { code: 'slash-tail-short', message: `A term ending in “/” (what’s inside a folder) isn’t indexed here; search for the folder itself: “${start ? '^' : ''}${folder}$”.` }
+    : reject('slash-tail-short')
+}
+
 /** Why a parsed query isn't indexed literals (`staticBool.ts` `boolPlan`'s shape); null when it is. Each term,
  *  positive or negative, is checked alike. */
 export function rejectAst(ast: QueryAst): FilterReject | null {
@@ -91,7 +102,7 @@ export function rejectAst(ast: QueryAst): FilterReject | null {
   if (all.some(m => m.kind !== 'sub')) throw new Error(`indexed-only: a ${all.find(m => m.kind !== 'sub')!.kind} matcher (only \`plain\` literals)`)
   for (const m of all) {
     // A path term (its text holds `/`): read from its tail's name-index range, which needs the tail (`staticAnchors.ts`).
-    if (m.kind === 'sub' && m.text.includes('/')) { if (!pathTailOk(m.text, !!m.end)) return reject('slash-tail-short'); continue }
+    if (m.kind === 'sub' && m.text.includes('/')) { if (!pathTailOk(m.text, !!m.end)) return slashTailShort(m.text, !!m.start); continue }
     if (m.kind !== 'sub' || !(m.start || m.end)) continue
     const need = m.start && m.end ? ANCHOR_MIN.exact : m.start ? ANCHOR_MIN.start : ANCHOR_MIN.end
     if ([...m.text].length < need) return anchorTooShort(m.start && m.end ? 'exact' : m.start ? 'start' : 'end')

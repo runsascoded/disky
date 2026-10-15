@@ -313,6 +313,47 @@ def test_add_drills_each_run(appended):
     assert json.loads((gen / sa.run_key(ids[-K], ids[-1]) / "drill" / "meta.json").read_text())["scans"] == ids[-K:]
 
 
+def _stored_rows(con, tier: Path, kind: str, alias: dict[str, str]) -> dict[tuple[str, str], int]:
+    """A drill tier's stored root rows per `(q, dir)` (each ancestor directory of each root), `q` the base's canonical."""
+    files = [str(f) for f in sorted((tier / kind / "roots").glob("*.parquet"))]
+    rows = con.execute(f"SELECT q, path FROM read_parquet({files})").fetchall() if files else []
+    out: dict[tuple[str, str], int] = {}
+    for qq, path in rows:
+        segs = path.split("/")
+        for k in range(1, len(segs)):
+            key = (alias.get(qq, qq), "/".join(segs[:k]))
+            out[key] = out.get(key, 0) + 1
+    return out
+
+
+def _full_headers(con, tier: Path, kind: str, alias: dict[str, str]) -> set[tuple[str, str]]:
+    files = [str(f) for f in sorted((tier / kind / "rollups").glob("*.parquet"))]
+    return {(alias.get(qq, qq), d) for qq, d in con.execute(f"SELECT q, dir FROM read_parquet({files}) WHERE kind = 0").fetchall()} if files else set()
+
+
+def test_first_add_agrees_with_the_base_on_heaviness(appended):
+    """The first run over a fresh base makes heavy exactly the `(q, dir)`s its stored rows push over R: not heavy in the
+    base, base rows + the run's rows > R (the heavy rule counts stored rows, close records included). Nothing heavy in the
+    base turns heavy again: the base's rollups, `roots-measure/` and the run's `dcount` agree on what is already heavy."""
+    import duckdb
+
+    ids = scan_ids(appended["scans"])
+    gen = appended["gen"]
+    base, run = gen / "drill", gen / sa.run_key(ids[-K], ids[-K]) / "drill"
+    alias = {r["q"]: r["canonical"] for r in pq.read_table(base / "aliases.parquet").to_pylist()}
+    con = duckdb.connect()
+    crossed = 0
+    for kind in ("long", "short"):
+        a = alias if kind == "long" else {}
+        heavy = _full_headers(con, base, kind, a)
+        before, today = _stored_rows(con, base, kind, a), _stored_rows(con, run, kind, a)
+        want = {k for k, n in today.items() if k not in heavy and before.get(k, 0) + n > R}
+        assert _full_headers(con, run, kind, a) - heavy == want, kind
+        assert {k for k in want if before.get(k, 0) > R} == set(), kind
+        crossed += len(want)
+    assert crossed > 0
+
+
 @pytest.mark.parametrize("stack", ["level0", "merged"])
 def test_add_anchored_views_equal_brute_force(appended, stack):
     """Base ⊕ the level-0 runs (each with `names/`, `anchors/` and `anchors/start/`), and base ⊕ the carry's merged run:

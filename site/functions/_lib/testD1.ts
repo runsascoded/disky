@@ -85,17 +85,29 @@ export async function sqliteD1(): Promise<{ db: D1Database; raw: Sqlite }> {
   return { db: d1Of(raw), raw }
 }
 
-/** The gcs ledger's `kind` columns (specs/file-assign.md), added in place.
- * `cloud`'s schema has no ownership ledger, so tests that build gcs's ledger
- * tables ad hoc append this to them. */
-export const LEDGER_KIND = `
-  ALTER TABLE actions ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'object');
-  ALTER TABLE owner_prefixes ADD COLUMN kind TEXT CHECK (kind IS NULL OR kind = 'object');
+/** The ownership ledger's tables (specs/file-assign.md), exactly as gcs's schema has them. */
+const LEDGER_TABLES = ['actions', 'owner_prefixes', 'owner_totals', 'claims'] as const
+const LEDGER_DDL = `
+  CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, set_keep INTEGER NOT NULL DEFAULT 0, keep TEXT, memo TEXT, kind TEXT CHECK (kind IS NULL OR kind = 'object'), CHECK (set_owner OR set_keep));
+  CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, kind TEXT CHECK (kind IS NULL OR kind = 'object'), PRIMARY KEY (prefix, action_id));
+  CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER NOT NULL, ms INTEGER, PRIMARY KEY (scan, head));
+  CREATE TABLE claims (prefix TEXT PRIMARY KEY, who TEXT NOT NULL, ts INTEGER NOT NULL);
 `
 
-/** The gcs ledger tables as gcs's schema has them, with `LEDGER_KIND` applied. */
-export const GCS_LEDGER = `
-  CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, memo TEXT);
-  CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
-  ${LEDGER_KIND}
-`
+const tables = (raw: Sqlite): string[] => raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(r => String(r.name))
+
+/** The ownership ledger, for tests of the code that reads or writes it: gcs's
+ * schema has it (nothing to do); `cloud`'s has none, so it's created here as
+ * gcs's schema has it. */
+export function withLedger(raw: Sqlite): void {
+  const have = tables(raw).filter(t => (LEDGER_TABLES as readonly string[]).includes(t))
+  if (have.length === LEDGER_TABLES.length) return
+  if (have.length) throw new Error(`a partial ledger: [${have.join(', ')}]`)
+  raw.exec(LEDGER_DDL)
+}
+
+/** No ownership ledger, for tests of a deployment without one (cw's schema),
+ * whichever branch's schema the database was built from. */
+export function withoutLedger(raw: Sqlite): void {
+  for (const t of ['owner_prefixes', 'owner_totals', 'claims', 'actions']) raw.exec(`DROP TABLE IF EXISTS ${t}`)
+}

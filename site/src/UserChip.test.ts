@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { setRegistry } from './identities'
 import { buildRegistry } from './identityRegistry'
-import { canonId, ghHandle, shortName, shortUserKey } from './UserChip'
+import { canonId, ghHandle, selfAvatar, shortName, shortUserKey } from './UserChip'
 
 describe('the runtime registry', () => {
   beforeEach(() => setRegistry(buildRegistry([
@@ -27,5 +27,21 @@ describe('the runtime registry', () => {
 describe('no registry (a store that publishes no rules)', () => {
   it('ids stand as they are', () => {
     expect([canonId('jd'), shortName('jane-doe'), ghHandle('jane-doe')]).toEqual(['jd', 'Jane', undefined])
+  })
+})
+
+describe("the signed-in user's own photo", () => {
+  const PIC = 'https://lh3.googleusercontent.com/a/pic'
+  it("is their chips' avatar, matched by canonical id, and no one else's", () => {
+    const me = { email: 'ryan@runsascoded.com', avatar: PIC }
+    expect([
+      selfAvatar('ryan@runsascoded.com', me),
+      selfAvatar('Ryan@RunsAsCoded.com', me),
+      selfAvatar('ryan', me),
+      selfAvatar('jane@example.org', me),
+      selfAvatar('ryan', { email: 'ryan@runsascoded.com' }),
+      selfAvatar('ryan', { ...me, guest: true }),
+      selfAvatar('ryan', null),
+    ]).toEqual([PIC, PIC, PIC, undefined, undefined, undefined, undefined])
   })
 })

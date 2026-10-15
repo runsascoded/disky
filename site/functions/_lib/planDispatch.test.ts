@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { PLAN_SWEEP_RUN_INSERT, planSweepScript } from './planDispatch'
-import { sqliteD1 } from './testD1'
+import { RUN_DIR, sqliteD1 } from './testD1'
 
 describe('plan-sweep dispatch script', () => {
   // `dt-cloud plan-sweep manifest` takes the plan as its positional PLAN_PATH (no `--plan` option: the job exited 2).
@@ -17,7 +17,7 @@ describe('plan-sweep dispatch script', () => {
 
 describe('plan-sweep run row', () => {
   // plan-sweep runs where the cw schema is (`deletion_runs.manifest`); gcs's lineage names that column `plan`.
-  it('lands in the cw schema, its run dir as `manifest`', async () => {
+  it.skipIf(RUN_DIR !== 'manifest')('lands in the cw schema, its run dir as `manifest`', async () => {
     const { db, raw } = await sqliteD1()
     raw.exec(`INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (7, 'Staged', 'open', 'ann@example.test', 1)`)
     await db.prepare(PLAN_SWEEP_RUN_INSERT).bind('j1', 7, 'gs://d/sweep/cw/runs/j1', '2026-10-14', 'ann@example.test', 'dry', 100, 'gs://d/sweep/cw/runs/j1', 'dg').run()

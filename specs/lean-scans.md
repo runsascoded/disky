@@ -241,6 +241,14 @@ It lacks three things:
 
 **Recommendation: (d)**, with P1 built and tested before any deployment drops a listing older than 30 days. (b) is the path if exact object history becomes a product requirement.
 
+### 3.1 Object versions live in the interval store (Ryan, 2026-10-15)
+
+The one thing an open plan needs from a raw listing is each object's identity at the plan's scan, so a reviewed deletion never resolves to a replacement at the same path (`sweep_manifest.load_holds` / `apply_hold`: same `generation`, else `created` within 1 s). The interval store answers that instead, so raw listings can follow (d)'s window even with plans open:
+
+- **Default: `mtime` (created) is the version.** Every lister already records it, the interval store already carries it per object, and the executor's fallback rule already treats "same name, `created` within 1 s" as the same object. GCS objects are immutable (a replacement is a new creation), S3/R2/CW `LastModified` is per second, so only a same-size overwrite inside one second would pass — not worth more machinery by default.
+- **Opt-in per deployment: the store's native version** — GCS `generation`, S3/R2/CW `ETag` (in every `ListObjectsV2` page; `aws s3 ls` just doesn't print it), HF the LFS `oid` / blob id. One nullable column in the listing (`generation` exists for GCS since 2026-10-07; the S3 lister would add `etag`), carried by the interval store's versions like `mtime`, and used by the hold (and a guarded delete: GCS `ifGenerationMatch`) where present.
+- Until that lands, the raw-listing window must cover open plans (as in (d)).
+
 ## 4. Rollout
 
 **Prerequisites (root, `[cloud]`), in order:**
