@@ -12,7 +12,8 @@ import {
   useInteractions,
   useRole,
 } from '@floating-ui/react'
-import { useState } from 'react'
+import { createContext, useContext, useState } from 'react'
+import type { Ident } from './auth'
 import { Avatar } from './Avatar'
 import { registry } from './identities'
 import { canonIn, defaultName } from './identityRegistry'
@@ -51,6 +52,15 @@ export const shortName = (who: string): string => {
 /** Explicit GitHub handle for the real avatar, or undefined (never guessed). */
 export const ghHandle = (who: string): string | undefined => registry()[canonId(who)]?.github
 
+/** The signed-in user's own photo (their session's `subject.avatar`, e.g. Google's) for a chip naming them, so the
+ *  header's avatar and their chips show one face; undefined for anyone else, or a guest (a share link's subject is not
+ *  a registry user). */
+/** The signed-in identity, for `selfAvatar` (`SelfProvider` fills it from the session; null: nobody, or a test). */
+export const SelfContext = createContext<Ident | null>(null)
+
+export const selfAvatar = (who: string, ident: Ident | null): string | undefined =>
+  ident && !ident.guest && ident.avatar && canonId(who) === canonId(ident.email) ? ident.avatar : undefined
+
 /** All known users (canonical id + short name), sorted by name — for pickers. */
 export const allUsers = (): { id: string; name: string }[] =>
   Object.entries(registry())
@@ -59,6 +69,8 @@ export const allUsers = (): { id: string; name: string }[] =>
 
 /** The GitHub-style identity card shown on hover — avatar, name, links. */
 export function UserCard({ who, avatar, extra }: { who: string; avatar?: string; extra?: React.ReactNode }) {
+  const self = useContext(SelfContext)
+  avatar ??= selfAvatar(who, self)
   const id = canonId(who)
   const name = shortName(who)
   const gh = ghHandle(who)
@@ -92,6 +104,7 @@ export function UserChip({ who, size = 18, extra, before }: {
   before?: React.ReactNode
 }) {
   const [open, setOpen] = useState(false)
+  const avatar = selfAvatar(who, useContext(SelfContext))
   const { refs, floatingStyles, context } = useFloating({
     open,
     onOpenChange: setOpen,
@@ -115,13 +128,13 @@ export function UserChip({ who, size = 18, extra, before }: {
     <>
       <span className="user-chip" ref={refs.setReference} tabIndex={0} {...getReferenceProps()}>
         {before}
-        <Avatar github={ghHandle(who)} name={shortName(who)} size={size} />
+        <Avatar src={avatar} github={ghHandle(who)} name={shortName(who)} size={size} />
         {shortName(who)}
       </span>
       {open && (
         <FloatingPortal>
           <div className="tooltip-content user-card-pop" ref={refs.setFloating} style={floatingStyles} {...getFloatingProps({ onClick: e => e.stopPropagation() })}>
-            <UserCard who={who} extra={extra} />
+            <UserCard who={who} avatar={avatar} extra={extra} />
           </div>
         </FloatingPortal>
       )}
