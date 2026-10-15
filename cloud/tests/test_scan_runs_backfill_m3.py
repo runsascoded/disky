@@ -7,6 +7,8 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
+from dt_cloud import scan_runs
+from dt_cloud.d1_schema import table_ddl
 from dt_cloud.scan_runs import Output, Phase, Record, Run, SqliteSink, load_profile
 
 REPO = Path(__file__).resolve().parents[2]
@@ -16,7 +18,7 @@ sys.modules[spec.name] = bf  # its dataclasses resolve annotations through it
 spec.loader.exec_module(bf)
 
 PROFILE = load_profile(REPO / "infra/aws/scan-runs.json")
-DDL = (REPO / "site/migrations/cw/0016_scan_runs.sql").read_text()
+DDL = table_ddl(scan_runs.TABLES)  # the tables as `site/schema.sql` has them
 ARN = "arn:aws:batch:us-east-1:111:job-definition/disk-tree-m3-ingest"
 
 
