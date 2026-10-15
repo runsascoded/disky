@@ -47,7 +47,7 @@ HOME = "Users/ryan"               # paths under it read as `~/…` (site/src/pat
 # same bucket and keys as the primary, its own `snapshots/nas/` + D1 rows (store `nas`).
 # The static name index's generation (the job env's STATIC_GEN, infra/aws/Pulumi.rac.yaml; a test pins
 # them equal). The NAS (a secondary store) has none: its literals answer `scan-not-indexed`.
-STATIC_GEN = "2026-10-14"
+STATIC_GEN = "2026-10-15"
 FILTER_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
 STORES_EXTRA = "nas"
