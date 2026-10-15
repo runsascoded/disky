@@ -83,3 +83,15 @@ export function labelMark(label) {
   const size = [...text].length > 1 ? 250 : 340
   return svg(`<rect width="512" height="512" rx="112" fill="#0D1117"/><text x="256" y="${256 + size * .36}" text-anchor="middle" font-family="system-ui, -apple-system, Helvetica, Arial, sans-serif" font-weight="700" font-size="${size}" fill="#5EEAD4">${esc}</text>`)
 }
+
+// "disky" (Fredoka SemiBold) and the tagline (IBM Plex Sans), both OFL, as outlines: a README's SVG can't load fonts.
+const TEXT = JSON.parse(readFileSync(new URL('./text.json', import.meta.url), 'utf8'))
+// The README banner (1200 × 400): disky's mark, the wordmark, and every store's mark. `dark`: the dark banner carries
+// the light family, the light banner the dark family, so every mark contrasts with the banner it sits on.
+export function banner(dark) {
+  const bg = dark ? '#0D1117' : '#F2F7F6', fg = dark ? '#E6F4F1' : '#0F2A27', mut = dark ? '#8FB3AC' : '#3E6660'
+  const theme = dark ? 'light' : 'dark'
+  const lineup = STORE_KEYS.map((k, i) => `<g transform="translate(${470 + i * 92} 258) scale(.14)">${inner(mark(k, { theme }))}</g>`).join('')
+  return svg(`<rect width="1200" height="400" rx="28" fill="${bg}"/><g transform="translate(64 64) scale(.53)">${inner(mark('local', { theme }))}</g>`
+    + `<path transform="translate(466 168)" d="${TEXT.wordmark.d}" fill="${fg}"/><path transform="translate(470 222)" d="${TEXT.tagline.d}" fill="${mut}"/>${lineup}`, '0 0 1200 400')
+}

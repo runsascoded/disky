@@ -6,11 +6,12 @@
 //   <key>-32.png     small raster badge
 //   <key>-180.png    apple-touch icon (full-bleed square)
 //   <key>-512.png    large raster (PWA manifests, chat avatars)
+// and the README banners, `banner-light.svg` / `banner-dark.svg` (+ 2400 px `.png`s).
 // Rasters need `rsvg-convert` and ImageMagick's `magick` on PATH.
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { STORES, mark } from './marks.mjs'
+import { STORES, banner, mark } from './marks.mjs'
 
 const out = resolve(process.argv[2] ?? new URL('../../site/public/icons', import.meta.url).pathname)
 mkdirSync(out, { recursive: true })
@@ -27,4 +28,10 @@ for (const key of Object.keys(STORES)) {
   execFileSync('magick', [icoParts[0], `${base}-32.png`, icoParts[1], `${base}.ico`])
   for (const p of [bleed, ...icoParts]) rmSync(p)
   console.log(key)
+}
+for (const theme of ['light', 'dark']) {
+  const base = join(out, `banner-${theme}`)
+  writeFileSync(`${base}.svg`, banner(theme === 'dark') + '\n')
+  execFileSync('rsvg-convert', ['-w', '2400', '-o', `${base}.png`, `${base}.svg`])
+  console.log(`banner-${theme}`)
 }
