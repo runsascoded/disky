@@ -43,9 +43,10 @@ HOME = "Users/ryan"               # paths under it read as `~/…` (site/src/pat
 # The NAS (specs/multi-store.md): a secondary store at `/nas` (`src/stores/nas.ts`),
 # same bucket and keys as the primary, its own `snapshots/nas/` + D1 rows (store `nas`).
 # The static name index's generation (the job env's STATIC_GEN, infra/aws/Pulumi.rac.yaml; a test pins
-# them equal). FILTER_STATIC stays off until the index is checked against the path store, and per-store
-# indexes land for the NAS (a secondary store would read the laptop's).
+# them equal). The NAS (a secondary store) has none: its literals answer `scan-not-indexed`.
 STATIC_GEN = "2026-10-14"
+FILTER_STATIC = "1"
+FILTER_STATIC_HEAVY = "1"
 STORES_EXTRA = "nas"
 STORES_JSON = '{"nas": {"vars": {"ROOT_LABEL": "nas", "SNAPSHOTS_SUBDIR": "nas", "STORE_SCHEME": "file:///", "STORE_BUCKETS": "*", "STORE_BUCKET": "disk-tree", "STORE_REGION": "auto"}, "secrets": {"STORE_ENDPOINT": "STORE_ENDPOINT", "STORE_ACCESS_KEY_ID": "STORE_ACCESS_KEY_ID", "STORE_SECRET_ACCESS_KEY": "STORE_SECRET_ACCESS_KEY"}}}'
 # Secrets (Pages secrets, per project): STORE_ENDPOINT, STORE_ACCESS_KEY_ID,
