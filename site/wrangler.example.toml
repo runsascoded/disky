@@ -51,6 +51,7 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
 #                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
+# MARK = "gcs"                                # favicon/badge: a `public/icons/` key (gcs cw r2 s3 hf nas macos local); unset = ROOT_LABEL's initials
 
 # --- Who may see it (_lib/auth.ts) ---
 BASE_SCOPE = "my"                           # the scope every viewer needs
