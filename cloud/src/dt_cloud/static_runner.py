@@ -4,7 +4,8 @@ in Python, so a deployment's scan job calls it directly (no `gcloud`: GCS and Ba
     [backfill: each listed run's missing drill / anchors, oldest first] →
     prepare → append (key ranges on Batch) → shards ∥ catalog → [drill (long ∥ short)] ∥ [anchors] → publish (local:
       `manifests/<id>.json`, the run at level 0) → R2 (each run the manifest lists, its `drill/meta.json` last; then a check
-      that every served file of those runs is on R2; then the manifest, last) [→ verify] → prune
+      that every served file of those runs is on R2; then the manifest, last; then the runs a carry folded, off R2) [→ verify]
+      → prune (the open-version states; GCS's folded runs, each keeping `static_merge.FOLDED_RETAIN`)
     then, once after the scans: merge (the newest manifest's due carries, `static_merge`, one Batch job waited on up to
       `-w` s; then R2 for the revision it publishes) — non-fatal: the store is servable whatever becomes of it
 
@@ -55,6 +56,7 @@ from .append_runner import (  # noqa: F401 — the shared names, as this module 
     pending_scans,
     task_command,
 )
+from .static_merge import FOLDED_RETAIN
 from .static_names import PREFIX, err
 from .static_profile import Profile, level_arg, profile
 
@@ -311,6 +313,8 @@ class Runner(ar.Runner):
                 cmds.append(self.command("static_names", ["r2-copy", "-g", f"{self.cfg.gen}/{r}", "-o", m], mount=False))
         cmds.append(self.command("static_names", ["r2-verify", "-g", self.cfg.gen, "-m", stem], mount=False))
         cmds.append(self.command("static_names", ["r2-copy", "-g", self.cfg.gen, "-o", f"manifests/{stem}.json"], mount=False))
+        # then, the manifest on R2, the runs a carry folded (planned by R2's own manifests)
+        cmds.append(self.command("static_merge", ["prune", "-g", self.cfg.gen, "-r"], mount=False))
         name = self.job_name("r2", d)
         spec = self.spec(name, 1, cmds, stage="r2", scratch=False, r2=True, machine="n2-highmem-4", ssd_gb=375)
         spec = ar.label_batch_spec(spec, "static-names", scan_id=d)
@@ -344,6 +348,9 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         k = read_json(f"gs://{cfg.bucket}/{PREFIX}/{cfg.gen}/ranges.json")["k"]
         doc = sa.prune_state(client, cfg.gen, d, k, bucket=cfg.bucket, scratch=cfg.scratch, dry_run=dry_run)
         err(json.dumps(doc))
+        folded = ar.prune_folded(ar.GcsRunStore(cfg.bucket, None, cfg.gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN,
+                                 dry_run=dry_run, where=" gcs")
+        err(json.dumps({k_: v for k_, v in folded.items() if k_ != "keys"}))
 
     return Runner(
         cfg=cfg,

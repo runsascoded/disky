@@ -383,6 +383,11 @@ def discordify(text: str, emoji: dict[str, str]) -> str:
 # ---- templates ------------------------------------------------------------------
 
 
+class PlotUnavailable(Exception):
+    """A template can't draw its plot here (e.g. the site draws it, and there is no site token): fatal to a post,
+    a note in a dry run, whose text needs no image."""
+
+
 class Template(Protocol):
     """A digest style over one deployment's :class:`DigestConfig`.
 
@@ -430,13 +435,13 @@ def _err(*a) -> None:
 
 def list_scans(root: str) -> list[str]:
     """The scan ids under ``root`` (one ``<id>/meta.json`` per published scan),
-    sorted — ids sort chronologically."""
-    import fsspec
+    sorted — ids sort chronologically. ``root``: a local dir or any URL
+    `blobfs` resolves (`gs://`, `r2://`, `s3://`)."""
+    from disk_tree import blobfs
 
-    fs, _, _ = fsspec.get_fs_token_paths(root)
     return sorted(
         m.group(1)
-        for p in fs.glob(f"{root.split('://', 1)[-1]}/*/meta.json")
+        for p in blobfs.glob(blobfs.join(root.rstrip("/"), "*/meta.json"))
         if (m := META_PATH.search(p))
     )
 
@@ -446,7 +451,7 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     month's scans, and ``lead`` = every scan of the last calendar day before it
     (the first delta's baseline; empty for the first month ever). None if the
     month has no scans. ``scans``: ``list_scans(root)``, if already listed."""
-    import fsspec
+    from disk_tree import blobfs
 
     scans = list_scans(root) if scans is None else scans
     pfx = f"{month:%Y-%m}-"
@@ -457,8 +462,7 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     lead = [s for s in before if s[:10] == before[-1][:10]] if before else []
 
     def read(s: str) -> tuple[str, dict]:
-        with fsspec.open(f"{root}/{s}/meta.json", "rt") as f:
-            return s, json.load(f)
+        return s, json.loads(blobfs.read_text(f"{root.rstrip('/')}/{s}/meta.json"))
 
     return [read(s) for s in lead], [read(s) for s in in_month]
 
@@ -471,20 +475,22 @@ def state_path(root: str, month: dt.date, state_dir: str) -> str:
 
 
 def load_state(path: str) -> dict:
-    import fsspec
+    """A month's converge state (a local path or a `blobfs` URL); `{}` before
+    the first converge."""
+    from disk_tree import blobfs
 
     try:
-        with fsspec.open(path, "rt") as f:
-            return json.load(f)
+        return json.loads(blobfs.read_text(path))
     except (FileNotFoundError, OSError):
         return {}
 
 
 def save_state(path: str, state: dict) -> None:
-    import fsspec
+    from disk_tree import blobfs
 
-    with fsspec.open(path, "wt", auto_mkdir=True) as f:
-        json.dump(state, f, indent=2)
+    if not blobfs.is_url(path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    blobfs.write_text(path, json.dumps(state, indent=2))
 
 
 def _wait_reachable(url: str, timeout: float = 90, interval: float = 3) -> None:
@@ -786,8 +792,8 @@ def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, 
 
 
 def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None, plot_dir=None) -> str:
-    """Render the plot (into ``plot_dir``, default the temp dir) and return the
-    OP + every reply (+ the open day's provisional reply, last) as text;
+    """Render the plot (into ``plot_dir``, default the temp dir; skipped with a note when the template can't draw it
+    here, `PlotUnavailable`) and return the OP + every reply (+ the open day's provisional reply, last) as text;
     posts and hosts nothing."""
     import tempfile
 
@@ -796,8 +802,11 @@ def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None
     if not data:
         raise SystemExit(f"digest: no scans for {month:%Y-%m}")
     out = Path(plot_dir or tempfile.gettempdir()) / f"{tpl.cfg.slug}-{month:%Y%m}.png"
-    tpl.render_plot(data, month, out, root)
-    _err(f"rendered plot → {out}")
+    try:
+        tpl.render_plot(data, month, out, root)
+        _err(f"rendered plot → {out}")
+    except PlotUnavailable as e:
+        _err(f"plot not rendered: {e}")
     lines = [tpl.op_body(data, month, "<plot-url>"), "", f"--- replies ({variant}: username | body | icon) ---"]
     open_ = tpl.provisional(data, variant) if tpl.cfg.provisional else None
     for u in tpl.units(data, variant) + ([open_] if open_ else []):

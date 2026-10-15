@@ -2,6 +2,11 @@
 merged-run build plugged into the shared runner's carries (`append_runner`: `plan_carries`, `merge_pending`,
 `publish_revision`, the lease, revision manifests `manifests/<id>.m<NNN>.json`).
 
+Once a revision is published, the runs it folded are deleted (`append_runner.prune_folded`: a run listed by
+no manifest but the newest and those superseded less than `GRACE_S`, 1 h, ago): on GCS by the merge job (`carry`) and the chain's prune stage,
+each folded run keeping `FOLDED_RETAIN` (what later appends refold), and on R2 by the R2 job (`prune -r`), after the
+manifest's copy.
+
 A scan's `publish` only adds its own level-0 run and writes `manifests/<id>.json`. The binary counter's carries run apart
 (`dt-cloud static-names runs merge`, or the `merge` stage `runs add` submits after R2, non-fatal): each merged run is
 built here (`build_merged_run`: shards, catalog, drill, names + anchors, each tier in its own process), and published as a
@@ -48,6 +53,10 @@ MEM_FRACTION = 0.75
 STREAM_RESERVE = 4 << 30
 #: Tiers merged by DuckDB (each gets a memory limit and threads); the others stream through `pyrmts.runs`.
 DUCKDB_TIERS = ("drill", "anchors")
+#: What a folded run keeps where scans are appended (GCS, `static-names add`'s store; `append_runner.plan_prune`'s
+#: `retain`): every later scan's append refolds the open versions, and cuts its catalog delta and drill, from every
+#: earlier scan's `cdelta/` (`rebuild_open`, `catalog_delta`, `pnew_sql`). R2 keeps none of it (nothing appends there).
+FOLDED_RETAIN = ("cdelta/", "scans.json")
 
 
 def gcs_store(bucket: str, scratch: str | None, gen: str, client=None) -> ar.GcsRunStore:
@@ -281,7 +290,29 @@ def carry_cmd(bucket, gen, jobs, compact_level, mount, max_merges, dry_run, scra
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
     doc = merge_pending(store, Path(mount) / PREFIX / gen, tmp=Path(tmp), rule=gen_rule_at(bucket, gen), jobs=jobs, dry_run=dry_run,
                         max_merges=max_merges, max_level=compact_level, status=status)
+    doc["prune"] = _summary(ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs"))
     print(json.dumps(doc, indent=1))
+
+
+def _summary(doc: dict) -> dict:
+    return {k: v for k, v in doc.items() if k != "keys"}
+
+
+@cli.command("prune")
+@option("-b", "--bucket", default=data_bucket, help="Data bucket")
+@option("-g", "--gen", required=True, help="Base generation")
+@option("-G", "--grace-s", default=ar.GRACE_S, type=IntRange(min=ar.MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {ar.GRACE_S}, at least {ar.MIN_GRACE_S})")
+@option("-n", "--dry-run", is_flag=True, help="Report what would be deleted; delete nothing")
+@option("-r", "--r2", is_flag=True, help="Prune the R2 copy (`R2_ENDPOINT`, `R2_BUCKET`, keys from the env), planned by R2's own manifests; default: GCS")
+def prune_cmd(bucket, gen, grace_s, dry_run, r2) -> None:
+    """Delete the runs a carry folded (`append_runner.prune_folded`): every run dir listed by no manifest but the newest
+    and those superseded less than `-G` s ago, inside one of the newest's runs. On GCS a folded run keeps `FOLDED_RETAIN` (later appends read it);
+    on R2, nothing. Run after a publish to that store (the merge job and the R2 job do)."""
+    if r2:
+        doc = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), grace_s=grace_s, dry_run=dry_run, where=" r2")
+    else:
+        doc = ar.prune_folded(gcs_store(bucket, None, gen), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")
+    print(json.dumps({"gen": gen, "store": "r2" if r2 else "gcs", **_summary(doc)}, indent=1))
 
 
 @cli.command("tier")

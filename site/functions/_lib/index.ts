@@ -522,6 +522,11 @@ const IV_SORTS = new Set(['path', 'bysize', 'reads'])
 /** Under `slices(env)`: each per-scan variant a sliced read opens → the store's owner-slice sort (`bysize`'s
  *  keyed on each path's total, as the per-scan store's is: `keyedOnTotal`). */
 const IV_SLICE_SORTS = new Map([['path', 'slices'], ['bysize', 'slices-bytotal'], ['bysize-user', 'slices-bysize-user']])
+/** Under `slices(env)` on a generation without the owner axis (`scans.json` `"slices": false`: no scan names an owner, so
+ *  none is built): each variant → the folded sort holding its rows. A path's one slice there is its whole row, owner
+ *  NULL: `path` and `bysize` are its `slices` and `slices-bytotal`, and `bysize` (all owners NULL, first) its
+ *  `slices-bysize-user` — no owners, as the per-scan reader reads a scan without `usr`. */
+const IV_UNSLICED_SORTS = new Map([['path', 'path'], ['bysize', 'bysize'], ['bysize-user', 'bysize']])
 /** Generations found without slice sorts (their sliced reads go per-scan), held a minute. */
 const ivNoSlices = new Map<string, number>()
 /** The sort a read of each sort also opens (its footer is prefetched with it). */
@@ -565,8 +570,8 @@ export function r2Bytes(r2: R2Bucket): ByteStore {
 interface IvRun { key: string; first: string; last: string; level: number; scans: string[] }
 interface IvManifest { gen: string; date: string; scans: string[]; stamps: Record<string, number>; runs: IvRun[] }
 /** The store's scans (id → epoch), the base's alone, and the usable runs (oldest first). `cut`: a broken run cut the
- *  stack. */
-interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean }
+ *  stack. `slices`: the generation has the owner axis (its slice sorts). */
+interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; slices: boolean }
 /** How long a state stands before the manifests are listed again (a new scan's run shows up within it). */
 export const IV_STATE_TTL = 60_000
 /** How long a broken run stays cut out (then it is tried again: a publish caught mid-copy heals). */
@@ -638,20 +643,22 @@ async function ivManifest(env: Env): Promise<IvManifest | null> {
   return m
 }
 
-/** The generation's `scans.json` and newest manifest, as one document. */
-interface IvStateDoc { scans: { id: string; ts: number }[]; manifest: IvManifest | null }
+/** The generation's `scans.json` (its scans, and `slices`: false when the generation has no owner axis; a generation
+ *  from before the flag has it) and newest manifest, as one document. */
+interface IvStateDoc { scans: { id: string; ts: number }[]; slices: boolean; manifest: IvManifest | null }
 
 /** `IvStateDoc` through the colo cache for `IV_STATE_TTL`: a new isolate's first read starts from it instead of
  *  three R2 operations in series (`scans.json`, the manifests' `list`, the newest's `get`). A new scan's run
  *  shows up within the colo's TTL plus the isolate's. */
 async function ivStateDoc(env: Env): Promise<IvStateDoc> {
   const gen = env.INTERVAL_STORE_GEN!
-  const ck = coloKey(env, ivKey(env, `${IV_PREFIX}/${gen}/scans.json`), 'state=1')
+  const ck = coloKey(env, ivKey(env, `${IV_PREFIX}/${gen}/scans.json`), 'state=2')
   const hit = await colo().match(ck)
   if (hit) return hit.json<IvStateDoc>()
   const [o, manifest] = await Promise.all([env.INDEX_R2!.get(`${IV_PREFIX}/${gen}/scans.json`), ivManifest(env)])
   if (!o) throw new Error(`interval store ${gen}: no scans.json`)
-  const doc: IvStateDoc = { scans: (await o.json<{ scans: { id: string; ts: number }[] }>()).scans, manifest }
+  const j = await o.json<{ scans: { id: string; ts: number }[]; slices?: boolean }>()
+  const doc: IvStateDoc = { scans: j.scans, slices: j.slices !== false, manifest }
   await colo().put(ck, new Response(JSON.stringify(doc), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
   return doc
 }
@@ -670,7 +677,7 @@ async function loadIvState(env: Env): Promise<IvState> {
     runs.push(r)
     r.scans.forEach((x, i) => scans.set(x, ts[i]))
   }
-  return { scans, base, runs, cut }
+  return { scans, base, runs, cut, slices: doc.slices !== false }
 }
 
 /** The store's state, re-read once it is `IV_STATE_TTL` old (`IV_BROKEN_TTL` when cut); a failed re-read keeps
@@ -728,19 +735,26 @@ function ivOwn(env: Env, h: IndexHandle): IndexHandle {
  *  `.groups.parquet`, bytes from `INDEX_R2`); null when the store doesn't hold that date or sort. Under
  *  `slices(env)` the variant reads its owner-slice sort (`IV_SLICE_SORTS`; the handle keeps the variant's
  *  name, so lens-sorted logic holds); a held date's other variants (a v1 `user` sort) are refused, so a
- *  sliced read of a held date never mixes in per-scan rows. A generation without slice sorts: null. */
+ *  sliced read of a held date never mixes in per-scan rows. A generation without the owner axis (`IvState.slices`)
+ *  answers a sliced read from its folded sorts (`IV_UNSLICED_SORTS`: no owners). A generation found without its
+ *  slice sorts: null. */
 export async function openInterval(env: Env, date: string, variant: string, retried = false): Promise<IndexHandle | null> {
-  const sliced = isSliced(env)
-  const file0 = sliced ? IV_SLICE_SORTS.get(variant) : IV_SORTS.has(variant) ? variant : undefined
+  const wants = isSliced(env)
+  const sortOf = (sl: boolean) => (sl ? IV_SLICE_SORTS.get(variant) : wants ? IV_UNSLICED_SORTS.get(variant) : IV_SORTS.has(variant) ? variant : undefined)
   // The sort's footer (and its sibling's: a view reads P's row from `path`, then `bysize`, and a diff
-  // both) starts loading now, beside `scans.json`, not after it.
-  if (file0 && !(sliced && ivNoSlices.has(env.INTERVAL_STORE_GEN!))) for (const f of [file0, IV_SIBLING.get(file0)]) if (f) ivFooter(env, f).catch(() => {})
-  if (sliced && !file0 && (variant === 'user' || variant.startsWith('coarse'))) {
+  // both) starts loading now, beside `scans.json`, not after it: for a sliced read, the sort the isolate's
+  // state names (a slice sort until it is known).
+  const pre = sortOf(wants && ivStates.get(ivGenKey(env))?.ok?.slices !== false)
+  if (pre && !(wants && ivNoSlices.has(env.INTERVAL_STORE_GEN!))) for (const f of [pre, IV_SIBLING.get(pre)]) if (f) ivFooter(env, f).catch(() => {})
+  if (wants && !sortOf(true) && (variant === 'user' || variant.startsWith('coarse'))) {
     const held = (await ivScans(env)).has(date)
     if (held && !ivNoSlices.has(env.INTERVAL_STORE_GEN!)) throw new Error(`index variant '${variant}' not synced for ${date}`)
   }
-  if (!file0) return null
+  if (!sortOf(wants)) return null
   const st = await ivState(env)
+  const sliced = wants && st.slices
+  const file0 = sortOf(sliced)
+  if (!file0) return null
   const asOf = st.scans.get(date)
   if (asOf == null) return null
   // The standalone `reads` sort has no runs: it answers the base's scans only.

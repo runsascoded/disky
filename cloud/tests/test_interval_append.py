@@ -736,10 +736,11 @@ def test_the_chain_appends_strictly_in_scan_id_order():
     assert f.manifests() == ["manifests/2026-08-04.json", "manifests/2026-08-04T1236.json", "manifests/2026-08-04T1236.m001.json"]
     assert [f.stack(n.removeprefix("manifests/")) for n in f.manifests()] == [
         _stack(_l0("2026-08-04")), _stack(_l0("2026-08-04", "2026-08-04T1236")), [("deltas/2026-08-04_2026-08-04T1236", 1)]]
-    # Done: a rerun only re-copies and prunes, then copies the revision the detached merge published.
+    # Done: a rerun only re-copies the newest manifest (the revision the detached merge published: the scan's own lists runs
+    # it folded, which a prune may have deleted) and prunes; the merge stage doesn't copy it again.
     f.jobs.clear()
     assert f.runner().run("2026-08-04T1236") == []
-    assert f.calls() == [_r2("2026-08-04T1236"), _r2("2026-08-04T1236", "2026-08-04T1236.m001")]
+    assert f.calls() == [_r2("2026-08-04T1236", "2026-08-04T1236.m001")]
 
 
 def _stack(runs: list[dict]) -> list[tuple[str, int]]:
@@ -828,7 +829,7 @@ def test_the_cli_merge_and_append_M(monkeypatch):
     f.runner(merge=False).run(SCANS[1], catch_up=True)
     seen, errs = [], []
     monkeypatch.setattr(ia, "ready", lambda profile: _cfg())
-    monkeypatch.setattr(ia, "gcs_runner", lambda cfg, **kw: seen.append(kw) or f.runner(**{k: v for k, v in kw.items() if k != "dry_run"}))
+    monkeypatch.setattr(ia, "store_runner", lambda cfg, **kw: seen.append(kw) or f.runner(**{k: v for k, v in kw.items() if k != "dry_run"}))
     monkeypatch.setattr(ia, "err", errs.append)
     f.fail, f.jobs = ("merge",), []
     r = CliRunner().invoke(ia.merge_cmd, [])
@@ -839,7 +840,7 @@ def test_the_cli_merge_and_append_M(monkeypatch):
     assert json.loads(r.output) == {"gen": "g1", "manifest": f"{G1}/manifests/{SCANS[1]}.m001.json", "dry_run": False}
     f.jobs = []
     r = CliRunner().invoke(ia.append_cmd, ["-M", SCANS[1]])
-    assert (r.exit_code, f.calls()) == (0, [_r2(SCANS[1])])
+    assert (r.exit_code, f.calls()) == (0, [_r2(SCANS[1], f"{SCANS[1]}.m001")])
     assert seen == [{"dry_run": False, "merge_wait": None}, {"dry_run": False, "merge_wait": 600.0},
                     {"dry_run": False, "merge": False, "merge_wait": 0}]
     errs.clear()
@@ -969,28 +970,18 @@ def test_a_ranges_cost_is_its_open_rows_from_the_previous_scans_docs():
     assert ia.open_counts({k: v for k, v in docs.items() if k != "r0001"}, 3) is None
     assert ia.open_counts({**docs, "r0002": {"pvl": {"open": 1}}}, 3) is None
 
-    class Blob:
-        def __init__(self, name):
-            self.name = name
 
-        def download_as_bytes(self):
-            return json.dumps(docs[Path(self.name).stem]).encode()
-
-    class Gcs:
-        listed: list[tuple[str, str]] = []
-
-        def list_blobs(self, bucket, prefix):
-            self.listed.append((bucket, prefix))
-            return [Blob(f"{prefix}{n}.json") for n in reversed(sorted(docs))]
-
-        def bucket(self, name):
-            assert name == "data"
-            return type("B", (), {"blob": lambda _, n: Blob(n)})()
-
-    g = Gcs()
-    assert ia.prev_open_counts(g, "data", "interval-store/g1", "2026-08-04T1236", 3) == [6, 60, 600]
-    assert g.listed == [("data", "interval-store/g1/deltas/2026-08-04T1236/ranges/")]
-    assert ia.prev_open_counts(g, "data", "interval-store/g1", "2026-08-04T1236", 4) is None
+def test_prev_open_counts_reads_the_previous_runs_range_docs(tmp_path):
+    """`prev_open_counts`: the previous scan's `ranges/r####.json` from the store (`blobstore.Store`), or None while any
+    range lacks its doc."""
+    doc = lambda n: {t: {"opened": 0, "closed": 0, "delta": 0, "open": n * (j + 1)} for j, t in enumerate(ia.TABLES)}  # noqa: E731
+    store = ia.Store(str(tmp_path))
+    for name, n in (("r0000", 1), ("r0001", 10), ("r0002", 100)):
+        store.write_text(f"interval-store/g1/deltas/2026-08-04T1236/ranges/{name}.json", json.dumps(doc(n)))
+    store.write_text("interval-store/g1/deltas/2026-08-04T1236/ranges/notes.txt", "not a range doc")
+    assert ia.prev_open_counts(store, "interval-store/g1", "2026-08-04T1236", 3) == [6, 60, 600]
+    assert ia.prev_open_counts(store, "interval-store/g1", "2026-08-04T1236", 4) is None
+    assert ia.prev_open_counts(store, "interval-store/g1", "2026-08-05", 3) is None
 
 
 class PruneGcs:

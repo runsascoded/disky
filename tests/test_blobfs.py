@@ -147,3 +147,47 @@ def test_remote_write_read_list_put_remove(tmp_path: Path):
     blobfs.remove(p)
     assert blobfs.exists(p) is False
     assert blobfs.list_parquets(d) == ['y.parquet']
+
+
+@pytest.mark.parametrize('kind', ['dir', 'url'])
+def test_glob_find_remove_many_dataset_put(tmp_path: Path, kind: str):
+    """The tree helpers the archive-reading commands use, the same over a
+    local dir and a URL: `glob` answers in the pattern's own form, `find`
+    walks relative paths with sizes, `remove_many` batches deletes, `dataset`
+    scans a parquet in place, `put` copies a local file to either."""
+    d = str(tmp_path / 'root') if kind == 'dir' else f'memory://{uuid4()}'
+    src = tmp_path / 'src.parquet'
+    pd.DataFrame({'path': ['.', 'a'], 'size': [3, 2]}).to_parquet(src, index=False)
+    for rel in ('s1/meta.json', 's2/meta.json', 's2/sub/x.parquet'):
+        blobfs.put(str(src), blobfs.join(d, rel))
+    assert blobfs.glob(blobfs.join(d, '*/meta.json')) == [blobfs.join(d, 's1/meta.json'), blobfs.join(d, 's2/meta.json')]
+    n = src.stat().st_size
+    assert [(k, s) for k, s, _ in blobfs.find(blobfs.join(d, 's2'))] == [('meta.json', n), ('sub/x.parquet', n)]
+    assert blobfs.find(blobfs.join(d, 'absent')) == []
+    assert blobfs.dataset(blobfs.join(d, 's2/sub/x.parquet')).to_table(columns=['path']).column('path').to_pylist() == ['.', 'a']
+    blobfs.remove_many(d, ['s1/meta.json', 's2/meta.json'])
+    assert [k for k, _, _ in blobfs.find(d)] == ['s2/sub/x.parquet']
+
+
+def test_r2_is_an_fsspec_protocol_with_per_bucket_endpoint_and_profile(monkeypatch, tmp_path: Path):
+    """Plain fsspec resolves `r2://` (no network: the filesystem is only built): each bucket's `buckets.yml`
+    endpoint and profile, `defaults` for the rest."""
+    pytest.importorskip('s3fs')
+    import fsspec
+    from disk_tree.r2fs import R2FileSystem
+
+    monkeypatch.delenv(blobfs.R2_ENDPOINT_VAR, raising=False)
+    monkeypatch.setattr(config, 'ROOT_DIR', str(tmp_path))
+    (tmp_path / 'buckets.yml').write_text(
+        'defaults: {endpoint_url: "https://dflt.example", profile: dflt}\n'
+        'buckets:\n'
+        '  - {uri: "r2://own", endpoint_url: "https://own.example", profile: own-ro}\n'
+    )
+    got = []
+    for url in ('r2://own/a/b.parquet', 'r2://other/c'):
+        fs, path = fsspec.core.url_to_fs(url)
+        got.append((type(fs) is R2FileSystem, fs.client_kwargs, fs.kwargs.get('profile'), fs.fixed_upload_size, path))
+    assert got == [
+        (True, {'endpoint_url': 'https://own.example'}, 'own-ro', True, 'own/a/b.parquet'),
+        (True, {'endpoint_url': 'https://dflt.example'}, 'dflt', True, 'other/c'),
+    ]

@@ -220,7 +220,10 @@ def _metadata(bucket: str, key: str, mount: str | None) -> "pq.FileMetaData":
 
 
 def _src(bucket: str, key: str, mount: str | None) -> str:
-    return f"{mount}/{key}" if mount else f"gs://{bucket}/{key}"
+    """A scan's `path` sort: under `mount`, else in `bucket` (a GCS bucket's name, or a store URL / dir)."""
+    if mount:
+        return f"{mount}/{key}"
+    return f"{bucket.rstrip('/')}/{key}" if "://" in bucket or "/" in bucket else f"gs://{bucket}/{key}"
 
 
 # ── Interval kernel ────────────────────────────────────────────────────────
@@ -859,6 +862,15 @@ def gcs_reader(bucket: str, prefix: str, rule: HexRule | None = None) -> Reader:
     return Reader(fetch, size_of, side, rule)
 
 
+def store_reader(root: str, prefix: str, rule: HexRule | None = None) -> Reader:
+    """`gcs_reader` over any store (`blobstore.Store`: `r2://`, `s3://`, `gs://`, a dir): ranged reads of the shards."""
+    from .blobstore import Store
+
+    s = Store(root)
+    return Reader(lambda file, lo, hi: s.read_range(f"{prefix}/{file}", lo, hi), lambda file: s.size(f"{prefix}/{file}"),
+                  pq.read_table(pa.BufferReader(s.read_bytes(f"{prefix}/sidecar.parquet"))), rule)
+
+
 def _download(bucket, key: str) -> pa.BufferReader:
     return pa.BufferReader(bucket.blob(key).download_as_bytes())
 
@@ -1487,14 +1499,19 @@ def r2_copy_cmd(bucket, gen, dry_run, only, workers, exclude) -> None:
 
 
 @cli.command("query")
-@option("-b", "--bucket", default=data_bucket, help="Bucket")
+@option("-b", "--bucket", default=data_bucket, help="The store: a GCS bucket name, or a URL (`r2://…`, `s3://…`) or dir")
 @option("-d", "--date", "dates", multiple=True, required=True, help="Scan date; repeat")
 @option("-g", "--gen", required=True, help="Generation")
 @argument("terms", nargs=-1, required=True)
 def query_cmd(bucket, dates, gen, terms) -> None:
-    """Answer literals from the suffix shards on GCS (sidecar → one range per file): one JSON line per
+    """Answer literals from the base generation's suffix shards (sidecar → one range per file): one JSON line per
     term with its I/O and per-date `{bucket: [bytes, objects]}`."""
-    r = gcs_reader(bucket, f"{PREFIX}/{gen}", gen_rule(read_json(f"gs://{bucket}/{PREFIX}/{gen}/scans.json")))
+    from .blobstore import Store, gs_bucket, store_url
+
+    root = store_url(bucket)
+    prefix = f"{PREFIX}/{gen}"
+    rule = gen_rule(Store(root).read_json(f"{prefix}/scans.json"))
+    r = gcs_reader(gcs, prefix, rule) if (gcs := gs_bucket(root)) else store_reader(root, prefix, rule)
     for t in terms:
         t0 = monotonic()
         out = r.answer(t, list(dates))

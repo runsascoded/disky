@@ -6,7 +6,10 @@
 # disk-tree-demo → publish footers to the D1 the Map reads → append the scan to
 # the static name index (`dt-cloud static-names add`: exact `?f=` literals;
 # the generation is the site's `STATIC_GEN`, built once by `static-names build`
-# when it doesn't exist yet). Idempotent per date (a fresh generation flips the
+# when it doesn't exist yet) → append it to the interval store (`dt-cloud
+# interval-store add`: every scan's tree as versioned intervals, the Map's path
+# store under `PATH_STORE`; the generation is the site's `INTERVAL_STORE_GEN`,
+# built once by `interval-store build`). Idempotent per date (a fresh generation flips the
 # pointer; a date the static index already holds is not re-appended). Run it by
 # hand anytime via "Run workflow" (workflow_dispatch).
 #
@@ -107,6 +110,25 @@ jobs:
           echo "static-names $cmd -g $gen"
           cd cloud && uv run dt-cloud static-names "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
             -w "$RUNNER_TEMP/static-names" -p 4 -M 10GB $([ "$cmd" = build ] && echo "-x off")
+      - name: Interval store — append the scan (or build the generation)
+        timeout-minutes: 60
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+          DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          # One source of truth: the generation the site reads (`site/wrangler.r2.toml`).
+          gen=$(sed -nE 's/^INTERVAL_STORE_GEN *= *"([^"]+)".*/\1/p' site/wrangler.r2.toml)
+          if [ -z "$gen" ]; then echo "no INTERVAL_STORE_GEN in site/wrangler.r2.toml: no interval store"; exit 0; fi
+          L='listing/{id}/index/{gen}/path-index.parquet'
+          cmd=add
+          if ! aws s3 ls "s3://$BUCKET/interval-store/$gen/scans.json" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
+            cmd=build  # the first run: the base generation over every scan so far
+          fi
+          echo "interval-store $cmd -g $gen"
+          cd cloud && uv run dt-cloud interval-store "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
+            -w "$RUNNER_TEMP/interval-store" -p 4 -M 10GB
       - name: Smoke — the new generation serves
         run: |
           set -euo pipefail

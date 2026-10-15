@@ -103,12 +103,13 @@ def test_carry_clis_parse_the_level(monkeypatch, args, level):
     seen = []
     monkeypatch.setattr(sm, "merge_pending", lambda *a, **kw: seen.append(kw["max_level"]) or {})
     monkeypatch.setattr(sm, "gcs_store", lambda *a: None)
+    monkeypatch.setattr(ar, "prune_folded", lambda *a, **kw: {"keys": [], "bytes": 0, "runs": [], "grace": []})
     monkeypatch.setattr("dt_cloud.static_names.gen_rule_at", lambda bucket, gen: None)
     r = CliRunner().invoke(sm.cli, ["carry", "-b", "b", "-S", "s", "-g", "g", "-m", "/m", *args])
     assert (r.exit_code, seen) == (0, [level])
     monkeypatch.setattr(ar, "merge_pending", lambda *a, **kw: seen.append(kw["max_level"]) or {})
-    monkeypatch.setattr(ia, "GcsRunStore", lambda *a, **kw: None)
-    monkeypatch.setattr(ia, "read_json", lambda url: {"k": 4})
+    monkeypatch.setattr(ia, "run_store", lambda *a, **kw: None)
+    monkeypatch.setattr(ia, "Store", lambda root: type("S", (), {"read_json": lambda self, key: {"k": 4}})())
     r = CliRunner().invoke(ia.cli, ["carry", "-b", "b", "-g", "g", "-R", "g", "-S", "s", "-m", "/m", *args])
     assert (r.exit_code, seen) == (0, [level, level])
 

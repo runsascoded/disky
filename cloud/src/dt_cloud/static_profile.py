@@ -51,6 +51,9 @@ class Profile:
     machine: str = "n2-highmem-16"
     ssd_gb: int = 750
     spot: bool = True
+    #: Stages (a Batch job's `stage` label: `anchors`, `drill`, `append`, …) that run STANDARD even when `spot`: a long
+    #: single-task stage restarts from zero on each preemption, so spot's discount can cost more than it saves.
+    standard_stages: tuple[str, ...] = ()
     append_tasks: int = 16
     #: Whether each run also gets the heavy-term drilldown (`drill/`, `static_drill`): needs the base generation's `drill/`.
     drill: bool = False
@@ -104,6 +107,7 @@ ENV = {
     "gen": "STATIC_NAMES_GEN", "r2_bucket": "R2_BUCKET", "r2_secrets": "STATIC_NAMES_R2_SECRETS", "r2_endpoint": "R2_ENDPOINT",
     "project": "GCP_PROJECT", "region": "STATIC_NAMES_REGION", "image": "STATIC_NAMES_IMAGE", "sa": "STATIC_NAMES_SA",
     "r2_sa": "STATIC_NAMES_R2_SA", "machine": "STATIC_NAMES_MACHINE", "ssd_gb": "STATIC_NAMES_SSD", "spot": "STATIC_NAMES_SPOT",
+    "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL",
 }
@@ -128,7 +132,7 @@ def level_arg(level: int | None) -> str:
 
 
 def _parse(name: str, raw: str):
-    if name in ("layouts", "src"):
+    if name in ("layouts", "src", "standard_stages"):
         return tuple(s.strip() for s in raw.split(",") if s.strip())
     if name == "r2_secrets":
         out = {}
@@ -153,7 +157,7 @@ def from_mapping(d: Mapping) -> Profile:
     if bad := sorted(set(d) - known):
         raise SystemExit(f"static names profile: unknown fields {bad}")
     d = dict(d)
-    for k in ("layouts", "src"):
+    for k in ("layouts", "src", "standard_stages"):
         if k in d:
             d[k] = tuple(d[k])
     return Profile(**d)

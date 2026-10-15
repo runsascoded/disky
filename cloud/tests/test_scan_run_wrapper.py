@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -336,3 +337,162 @@ def test_one_alert_across_processes(tmp_path, body, rc, alerts, run):
     s = SqliteSink(db)
     assert [tuple(r.values()) for r in s.query("SELECT status, failed_phase, error FROM scan_runs")] == [run]
     assert sorted(p.name for p in (tmp_path / "dt-scan-run").iterdir()) == []
+
+
+SUPERVISED_HEAD = SCRIPT_HEAD.replace("sr start", "trap 'exit 143' TERM\ntrap 'exit 130' INT\nsr start")
+
+
+class Supervised:
+    """`dt-cloud scan-run supervise [-G grace] -- bash job.sh`, a real process tree over a SQLite record."""
+
+    def __init__(self, tmp: Path, script: str, grace: str = "5"):
+        self.tmp = tmp
+        (tmp / "scan-runs.json").write_text(json.dumps(PROFILE))
+        self.db = tmp / "runs.sqlite"
+        SqliteSink(self.db, ddl=DDL)
+        (tmp / "job.sh").write_text(script)
+        env = {k: v for k, v in os.environ.items() if k not in NOTIFY_ENV}
+        env.update(PATH=f"{DT_CLOUD.parent}:{env['PATH']}", TMPDIR=str(tmp), JOB_ID="u-sv", SCAN=SCAN, DB=str(self.db),
+                   SCAN_RUNS_PROFILE=str(tmp / "scan-runs.json"), DT_ALERTS="stderr", T=str(tmp))
+        self.p = subprocess.Popen([str(DT_CLOUD), "scan-run", "supervise", "-G", grace, "--", "bash", str(tmp / "job.sh")],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def pid(self, name: str, timeout: float = 30) -> int:
+        """The pid a job process wrote to `$T/<name>` (waiting for it)."""
+        f = self.tmp / name
+        deadline = time.monotonic() + timeout
+        while not (f.exists() and f.read_text().strip()):
+            assert (self.p.poll(), time.monotonic() < deadline) == (None, True), f"no {name} pid"
+            time.sleep(0.05)
+        return int(f.read_text())
+
+    def end(self, sig: int | None = None) -> tuple[int, str, list[str]]:
+        if sig:
+            self.p.send_signal(sig)
+        out, stderr = self.p.communicate(timeout=60)
+        return self.p.returncode, out, stderr.splitlines()
+
+    def run_row(self) -> list[tuple]:
+        return [tuple(r.values()) for r in SqliteSink(self.db).query("SELECT status, failed_phase, error FROM scan_runs")]
+
+    def leftovers(self) -> list[str]:
+        return sorted(p.name for p in (self.tmp / "dt-scan-run").iterdir())
+
+
+def gone(*pids: int, timeout: float = 5) -> list[int]:
+    """Which of `pids` still exist after `timeout` (orphans are reaped by init/launchd shortly after they die)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except ProcessLookupError:
+                pass
+        if not alive or time.monotonic() > deadline:
+            return alive
+        time.sleep(0.05)
+
+
+def statuses(lines: list[str]) -> list[str]:
+    """The record's own progress lines (`scan-run: <scan> <run> <status>[ · phase P]`)."""
+    return [ln for ln in lines if ln.startswith("scan-run")]
+
+
+def alerts(lines: list[str]) -> list[str]:
+    return [ln for ln in lines if ln.startswith("alert")]
+
+
+def test_supervise_term_fails_the_run_once_and_empties_the_tree(tmp_path):
+    """(a) The platform TERMs the entrypoint mid-phase: the whole group gets it at once, the phase ends failed and
+    alerts, the script's traps finish 143, and `supervise`'s record (`terminated`) is the run's; nothing survives."""
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + 'echo $$ > "$T/job"\nsr phase -M fg -- sh -c \'echo $$ > "$T/child"; exec sleep 60\'\n')
+    job, child = sv.pid("job"), sv.pid("child")
+    rc, out, lines = sv.end(signal.SIGTERM)
+    assert (rc, out, alerts(lines)) == (143, "", [f"alert (suppressed): ❌ cw-s3 {SCAN}: fg failed (exit 143, terminated by SIGTERM)"])
+    assert sv.run_row() == [("failed", "fg", "terminated (SIGTERM)")]
+    assert statuses(lines) == [
+        f"scan-run: {SCAN} u-sv running",
+        f"scan-run: {SCAN} u-sv running · phase fg",
+        f"scan-run: {SCAN} u-sv running · phase fg",
+        f"scan-run: {SCAN} u-sv failed",  # the script's EXIT trap (`exit 143` from its TERM trap)
+        f"scan-run: {SCAN} u-sv failed",  # `supervise`'s
+    ]
+    assert (gone(job, child), sv.leftovers()) == ([], [])
+
+
+def test_supervise_kills_what_ignores_term_after_the_grace(tmp_path):
+    """(b) The phase's command ignores TERM: after `-G` the group is KILLed (no trap runs), and `supervise` records the
+    run failed and posts the one alert."""
+    cmd = 'trap "" TERM; sleep 60 & echo $! > "$T/child"; wait'
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + f"sr phase -M fg -- bash -c '{cmd}'\n", grace="0.5")
+    child = sv.pid("child")
+    t = time.monotonic()
+    rc, out, lines = sv.end(signal.SIGTERM)
+    assert (rc, out, alerts(lines), time.monotonic() - t < 10) == (137, "", [
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 143): terminated (SIGTERM); killed after the 0.5s grace",
+    ], True)
+    assert sv.run_row() == [("failed", None, "terminated (SIGTERM); killed after the 0.5s grace")]
+    assert [tuple(r.values()) for r in SqliteSink(sv.db).query("SELECT phase, status, note FROM scan_run_phases")] == [
+        ("fg", "failed", "failed (exit 143)"),
+    ]
+    assert (gone(child), sv.leftovers()) == ([], [])
+
+
+def test_supervise_termination_overrides_a_recorded_success(tmp_path):
+    """(c) The observed m3 bug: the script's EXIT trap records success (`$?` was 0) as the platform terminates it.
+    `supervise` re-records the run failed, and alerts once (the trap's `finish -x 0` posted nothing)."""
+    head = SCRIPT_HEAD.replace("sr finish -x $? ${SR_ERR:+-e \"$SR_ERR\"}", "sr finish -x 0")
+    sv = Supervised(tmp_path, head + 'sh -c \'echo $$ > "$T/child"; exec sleep 60\'\n')
+    child = sv.pid("child")
+    rc, out, lines = sv.end(signal.SIGTERM)
+    assert (rc, out, alerts(lines)) == (143, "", [f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 143): terminated (SIGTERM)"])
+    assert statuses(lines) == [
+        f"scan-run: {SCAN} u-sv running",
+        f"scan-run: {SCAN} u-sv succeeded",
+        f"scan-run: {SCAN} u-sv failed",
+    ]
+    assert sv.run_row() == [("failed", None, "terminated (SIGTERM)")]
+    assert (gone(child), sv.leftovers()) == ([], [])
+
+
+@pytest.mark.parametrize("body, status", [
+    pytest.param("sr phase -M fg -- true\n", "succeeded", id="clean"),
+    pytest.param("sr nop\n", "nop", id="nop"),
+])
+def test_supervise_clean_run_passes_through_untouched(tmp_path, body, status):
+    """(d) No signal, exit 0: the script's own record stands, `supervise` writes nothing more and clears the state."""
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + body)
+    rc, out, lines = sv.end()
+    assert (rc, out, alerts(lines)) == (0, "", [])
+    expected = [f"scan-run: {SCAN} u-sv running"]
+    expected += [f"scan-run: {SCAN} u-sv running · phase fg"] * 2 if "phase" in body else [f"scan-run: {SCAN} u-sv nop"]
+    assert statuses(lines) == expected + [f"scan-run: {SCAN} u-sv {status}"]
+    assert (sv.run_row(), sv.leftovers()) == ([(status, None, None)], [])
+
+
+def test_phase_forwards_a_received_term_to_its_session(tmp_path):
+    """Without `supervise`, a TERM sent to `phase -T` itself reaches CMD's own process group at once; the phase ends
+    failed with 143."""
+    (tmp_path / "scan-runs.json").write_text(json.dumps(PROFILE))
+    env = {k: v for k, v in os.environ.items() if k not in NOTIFY_ENV}
+    env.update(TMPDIR=str(tmp_path), DT_JOB_START=str(int(time.time())), DT_ALERTS="stderr", SCAN_ID=SCAN,
+               SCAN_RUNS_PROFILE=str(tmp_path / "scan-runs.json"))
+    pidfile = tmp_path / "child"
+    p = subprocess.Popen([str(DT_CLOUD), "scan-run", "phase", "-M", "-T", "1h", "fg", "--", "sh", "-c",
+                          f"echo $$ > {pidfile}; exec sleep 60"], env=env, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 30
+    while not (pidfile.exists() and pidfile.read_text().strip()):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    t = time.monotonic()
+    p.send_signal(signal.SIGTERM)
+    _, stderr = p.communicate(timeout=30)
+    lines = [re.sub(r": \d+s ", ": <N>s ", ln) for ln in stderr.splitlines()]
+    assert (p.returncode, lines, time.monotonic() - t < 5) == (143, [
+        "PHASE-START fg: <N>s (wall)",
+        "PHASE fg: <N>s (wall, failed (exit 143))",
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: fg failed (exit 143, terminated by SIGTERM)",
+    ], True)
+    assert gone(int(pidfile.read_text())) == []

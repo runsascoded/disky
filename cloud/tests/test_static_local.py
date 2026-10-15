@@ -30,16 +30,17 @@ def _layout(scans: dict) -> str:
     return s["src"].replace(s["id"], "{id}")
 
 
-def _build(root: Path, scans: dict, store: Path | str, work: Path, gen: str = "g", through: str | None = None):
+def _build(root: Path, scans: dict, store: Path | str, work: Path, gen: str = "g", through: str | None = None, extra: tuple[str, ...] = ()):
     args = ["-g", gen, "-L", _layout(scans), "-s", str(root), "-o", str(store), "-x", "off", "-w", str(work), "-k", "2", "-n", "60",
-            "-V", str(V), "-R", str(R), "-K", str(KEEP), "-f", str(FLOOR), "-p", "2", "-M", "1GB", *(["-t", through] if through else [])]
+            "-V", str(V), "-R", str(R), "-K", str(KEEP), "-f", str(FLOOR), "-p", "2", "-M", "1GB", *(["-t", through] if through else []), *extra]
     res = CliRunner().invoke(sl.build_cmd, args, catch_exceptions=False)
     assert res.exit_code == 0, res.output
     return json.loads(res.stdout)
 
 
-def _add(root: Path, scans: dict, store: Path, work: Path, gen: str = "g"):
-    res = CliRunner().invoke(sl.add_cmd, ["-g", gen, "-L", _layout(scans), "-s", str(root), "-o", str(store), "-w", str(work), "-p", "2", "-M", "1GB"],
+def _add(root: Path, scans: dict, store: Path, work: Path, gen: str = "g", through: str | None = None, grace_s: int | None = None):
+    res = CliRunner().invoke(sl.add_cmd, ["-g", gen, "-L", _layout(scans), "-s", str(root), "-o", str(store), "-w", str(work), "-p", "2", "-M", "1GB",
+                                          *(["-t", through] if through else []), *(["-G", str(grace_s)] if grace_s else [])],
                              catch_exceptions=False)
     assert res.exit_code == 0, res.output
     return json.loads(res.stdout)
@@ -93,6 +94,33 @@ def test_build_drill_is_the_reference_drill(built):
     for sub, kind in (("dirs", "long"), ("short/dirs", "short")):
         got_meas = pq.read_table(gen / "roots-measure" / sub / "s0000.parquet").to_pylist()
         assert got_meas == sorted(pq.read_table(meas[kind]).to_pylist(), key=lambda r: (r["q"], r["k"], r["dir"])), kind
+
+
+def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
+    """`-c 1`: each member loop chunk one suffix row group, each short piece about one root, each measurement / rollup range
+    one literal: the same `drill/` and `roots-measure/`, byte for byte, as the default's one chunk per shard, one piece per
+    coalesced-versions file and one range per kind."""
+    root, scans, gen = built["root"], built["scans"], built["gen"]
+    rg, sn.SX_RG = sn.SX_RG, 5
+    try:
+        summary = _build(root, scans, tmp_path / "store", tmp_path / "work", extra=("-c", "1"))
+    finally:
+        sn.SX_RG = rg
+    chunked = tmp_path / "store" / sn.PREFIX / "g"
+    for sub in ("drill", "roots-measure"):
+        assert _files(chunked / sub) == _files(gen / sub), sub
+    shard = dict(zip(*pq.read_table(gen / "catalog" / "members.parquet", columns=["q", "shard"]).to_pydict().values()))
+    held = sorted(set(shard.values()))
+    long_qs = set(pq.read_table(gen / "drill" / "long" / "roots", columns=["q"]).column("q").to_pylist())
+    short_qs = set(pq.read_table(gen / "drill" / "short" / "roots", columns=["q"]).column("q").to_pylist())
+    files = len(list((gen / "cintervals").glob("*.parquet")))
+    assert len(held) > 1 and len(long_qs) > 1
+    assert {k: built["summary"]["drill"][k] for k in ("chunks", "pieces", "groups")} == {"chunks": len(held), "pieces": files,
+                                                                                       "groups": {"long": 1, "short": 1}}
+    assert {k: summary["drill"][k] for k in ("chunks", "groups")} == {
+        "chunks": sum(pq.ParquetFile(gen / "sx" / f"s{i:04d}.parquet").metadata.num_row_groups for i in held),
+        "groups": {"long": len(long_qs), "short": len(short_qs)}}
+    assert summary["drill"]["pieces"] > files
 
 
 def test_build_refuses_an_existing_generation(built, tmp_path):
@@ -163,8 +191,84 @@ def test_add_drills_each_run(appended):
 def test_add_with_nothing_pending_is_a_nop(appended):
     before = _files(appended["gen"])
     out = _add(appended["root"], appended["scans"], appended["tmp"] / "store", appended["tmp"] / "work-nop")
-    assert out == {"gen": "g", "after": scan_ids(appended["scans"])[-1], "added": [], "merge": None, "files": 0}
+    a, b = scan_ids(appended["scans"])[-2:]
+    # the carry's revision is the newest manifest; the ones it and `b`'s superseded seconds ago are in the grace: nothing pruned
+    prune = {"manifest": f"manifests/{b}.m001.json", "grace": [f"manifests/{a}.json", f"manifests/{b}.json"], "runs": [], "objects": 0,
+             "bytes": 0, "deleted": 0}
+    assert out == {"gen": "g", "after": b, "added": [], "merge": None, "files": 0, "prune": prune}
     assert _files(appended["gen"]) == before
+
+
+def test_add_prunes_the_folded_runs_after_the_grace(appended, tmp_path):
+    """Four scans appended one `add` at a time (one work dir throughout), as if `AGE` s apart (each `add` first ages the
+    store's manifests by that much, rather than sleeping), the grace `-G 600`: the 2nd's carry folds the first two runs
+    into one; the 3rd's `add` deletes them from the store (the manifests listing them superseded `AGE` s ago; the
+    revision, superseded by the 3rd's own, is in the grace), all but their `cdelta/` and `scans.json`, which the 4th's
+    append still refolds; the 4th's carry folds everything into one run, its inputs kept for the grace. Base ⊕ the newest
+    manifest's runs, and base ⊕ the 4th's own manifest's, read as the rebuild."""
+    import os
+
+    root, scans = appended["root"], appended["scans"]
+    ids = scan_ids(scans)
+    a, b, c, d = ids[-4:]
+    store, work = tmp_path / "store", tmp_path / "work"
+    rg, sn.SX_RG = sn.SX_RG, 5
+    try:
+        _build(root, scans, store, tmp_path / "work-build", through=ids[-5])
+    finally:
+        sn.SX_RG = rg
+    gen = store / sn.PREFIX / "g"
+    AGE, GRACE = 700, 600
+
+    def add(s: str) -> dict:
+        for p in (gen / "manifests").glob("*.json"):
+            t = p.stat().st_mtime - AGE
+            os.utime(p, (t, t))
+        return _add(root, scans, store, work, through=s, grace_s=GRACE)
+
+    outs = {s: add(s) for s in (a, b)}
+    before_c = _files(gen)
+    retained = ("cdelta/", "scans.json")
+    folded = {r: {k: v for k, v in before_c.items() if k.startswith(f"{r}/") and not k.removeprefix(f"{r}/").startswith(retained)}
+              for r in (sa.run_key(a, a), sa.run_key(b, b))}
+    outs |= {s: add(s) for s in (c, d)}
+    nothing = lambda m, *g: {"manifest": f"manifests/{m}.json", "grace": [f"manifests/{x}.json" for x in g], "runs": [],  # noqa: E731
+                             "objects": 0, "bytes": 0, "deleted": 0}
+    n = sum(len(f) for f in folded.values())
+    size = sum(len(v) for f in folded.values() for v in f.values())
+    assert [outs[s]["prune"] for s in (a, b, c, d)] == [
+        nothing(a),
+        nothing(f"{b}.m001", a, b),  # `a`'s superseded by `b`'s, `b`'s by the revision, both this `add`
+        {"manifest": f"manifests/{c}.json", "grace": [f"manifests/{b}.m001.json"],
+         "runs": [{"key": r, "objects": len(f), "bytes": sum(len(v) for v in f.values())} for r, f in folded.items()],
+         "objects": n, "bytes": size, "deleted": n},
+        nothing(f"{d}.m001", c, d),
+    ]
+    assert sorted(p.name for p in (gen / "manifests").iterdir()) == [f"{a}.json", f"{b}.json", f"{b}.m001.json", f"{c}.json", f"{d}.json", f"{d}.m001.json"]
+    newest, grace = (json.loads((gen / "manifests" / f"{m}.json").read_text())["runs"] for m in (f"{d}.m001", d))
+    assert [r["key"] for r in newest] == [sa.run_key(a, d)]
+    assert [r["key"] for r in grace] == [sa.run_key(a, b), sa.run_key(c, c), sa.run_key(d, d)]
+    assert sorted(p.name for p in (gen / "deltas").iterdir()) == sorted(
+        sa.run_key(*x).removeprefix("deltas/") for x in ((a, a), (b, b), (a, b), (c, c), (d, d), (a, d)))
+    # the folded runs keep only what later appends refold; the work dir's mirror lost the rest too (never uploaded again)
+    for r in folded:
+        assert sorted(_files(gen / r)) == ["cdelta/r0000.parquet", "cdelta/r0001.parquet", "scans.json"]
+    assert sorted(_files(work / "store" / sn.PREFIX / "g")) == sorted(_files(gen))
+    # every reader file of the newest and the grace manifests' runs is there
+    from dt_cloud.static_merge import missing
+    assert missing(sl.LocalRunStore(gen, tmp_path / "lease"), [*newest, *grace]) == []
+    full = appended["full"]
+    oracle = _oracle(appended["merged"])
+    for runs in (newest, grace):
+        tiers = [gen / r["key"] for r in runs]
+        assert _combine(_sx([gen, *tiers])) == _sx([full])
+        tiered = sa.TieredReader([_reader(gen, pq.read_table(gen / "sidecar.parquet")), *(_reader(t, pq.read_table(t / "sidecar.parquet")) for t in tiers)])
+        for term in TERMS:
+            if len(term) >= 3:
+                assert tiered.answer(term, ids)["answers"] == {x: _brute_answer(oracle, term, x) for x in ids}, term
+        tiered_cat = sa.TieredCatalog([_catalog(gen / "catalog"), *(_catalog(t / "catalog") for t in tiers)])
+        for term in TERMS:
+            assert tiered_cat.answer(term, ids) == _catalog(full / "catalog").answer(term, ids), term
 
 
 def test_url_store_matches_a_local_one(built, tmp_path):
@@ -202,3 +306,16 @@ def test_disk_peak_per_stage(monkeypatch, tmp_path):
     disk.sample()
     assert disk.close() == 3.0
     assert disk.peak == 2 * sl.GB
+
+
+def test_query_reads_a_non_gcs_store(built):
+    """`static-names query -b <dir>` (as `r2://…`): the base generation's answers through `blobstore.Store`, each the
+    brute force's over the scans."""
+    ids = scan_ids(built["scans"])
+    oracle = _oracle(built["merged"])
+    terms = [t for t in TERMS if len(t) >= 3]
+    res = CliRunner().invoke(sn.cli, ["query", "-b", str(built["tmp"] / "store"), "-g", "g", *(x for d in ids for x in ("-d", d)), *terms],
+                             catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    got = [json.loads(ln) for ln in res.stdout.splitlines()]
+    assert [o["answers"] for o in got] == [{d: _brute_answer(oracle, t, d) for d in ids} for t in terms]

@@ -185,11 +185,26 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
                           # on ONE machine (`static_local.py`): the staged (Batch) path's stages in-process — ranges,
                           # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/` — over a
                           # work dir (`-w`), then copied to `<STORE>/static-names/GEN/` (a dir or `r2://`/`s3://` URL;
-                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts
+                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts.
+                          # The drill is chunked as the staged path (`-c` rows, default 4M: suffix rows per member-loop
+                          # chunk, roots per short piece and per measured / rolled-up q range; roots spill as parquet),
+                          # so its working set is `-c`-bound, not the corpus's; byte-identical at any `-c`. Logs a
+                          # `build GEN: drill/<step>` line per sub-step (seconds, disk / RSS peaks, row counts)
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
                           # catalog delta, drill run, `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+dt-cloud interval-store build -g GEN -L LAYOUT -s SCANS -o STORE  # The interval store's base generation on ONE machine
+                          # (`interval_local.py`, spec `interval-store.md` §2.8): ranges, path/read versions, fold,
+                          # owner slices, every served sort — the staged stages in-process over `-w` — then copied to
+                          # `<STORE>/interval-store/GEN/` (a dir or `gs://`/`r2://`/`s3://` URL; `scans.json` last;
+                          # never over a generation). The staged per-range Batch stage is `interval-store build-ranges`
+dt-cloud interval-store add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (per-range
+                          # append over the open versions refolded from base + runs, run cut, `manifests/<id>.json`),
+                          # then the due carries; a URL store mirrors into `-w`, uploads data → `meta.json`s → manifests.
+                          # Reports peak work-disk/RSS per stage and scan. Every interval-store key goes through
+                          # `blobstore.Store` (a profile's bare bucket name = `gs://`); `r2`/`r2-copy` are no-ops when the
+                          # store is the serving R2 bucket
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for

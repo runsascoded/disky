@@ -301,6 +301,16 @@ def test_cw_dry_run(monkeypatch, tmp_path: Path, variant: str, site_image: list)
     golden(f"cw-dry-run-{variant}.txt", _dry_run(monkeypatch, tmp_path, ["cw-digest", "-C", str(config_file(CW_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-09", "-V", variant]))
 
 
+def test_cw_dry_run_without_site_token(monkeypatch, tmp_path: Path):
+    # the site draws the cw image: with no token a dry run skips it (a note on stderr), its text unchanged
+    monkeypatch.delenv("SITE_TOKEN", raising=False)
+    monkeypatch.delenv("GCS_USAGE_TOKEN", raising=False)
+    root = cw_root(tmp_path)
+    out = _dry_run(monkeypatch, tmp_path, ["cw-digest", "-C", str(config_file(CW_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-09", "-V", "sender"])
+    assert out == (GOLDEN / "cw-dry-run-sender.txt").read_text()
+    assert sorted((tmp_path / "plots").iterdir()) == []  # no image written
+
+
 @pytest.mark.parametrize("variant", ["sender", "body"])
 def test_cw_dry_run_provisional(monkeypatch, tmp_path: Path, variant: str, site_image: list):
     # `provisional: true` adds the open day's (9/8: only its 00:01Z scan so far) provisional reply to `sender`; `body` is unchanged

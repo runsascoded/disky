@@ -793,20 +793,20 @@ def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers:
 
 
 @main.command("over-time-groups")
-@option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket the D1 `path` dirs resolve against; default $DATA_BUCKET")
+@option("-b", "--bucket", envvar="DATA_BUCKET", default=None, help="Data bucket whose Batch mount (/gcs/<bucket>) is the default -p; default $DATA_BUCKET")
 @option("-g", "--gen", required=True, help="Generation id for the published index dirs (the run's, e.g. the job's $GEN)")
 @option("-K", "--group-size", default=None, type=int, help="Scans per sealed group (default: dt_cloud.overtime.OVER_TIME_GROUP_SIZE)")
 @option("-l", "--layer2-prefix", default=None, help="Layer-2 dir template with `{scan}` (default $LAYER2_PREFIX; one of the two is required)")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
 @option("-n", "--dry-run", is_flag=True, help="Print the groups that would be built; write nothing")
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Work dir for the group builds")
-@option("-p", "--publish-root", default=None, help="Where the published dirs live (default /gcs/<bucket>, the Batch mount); groups land at <root>/<layer2>/index/<gen>/")
-@option("-r", "--data-root", default=None, help="Root the D1 `path` pointer dirs resolve against (default: the publish root)")
+@option("-p", "--publish-root", default=None, help="Where the published dirs live: a local/mounted dir or an fsspec URL (`r2://<bucket>`, `s3://…`, `gs://…`; default /gcs/<bucket>, the Batch mount); groups land at <root>/<layer2>/index/<gen>/")
+@option("-r", "--data-root", default=None, help="Root the D1 `path` pointer dirs resolve against, a dir or URL like -p (default: the publish root)")
 @option("-s", "--store", default="primary", help="The store these index rows belong to (specs/done/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-t", "--threads", default=8, type=int, help="DuckDB threads")
 @option("-T", "--tmp", "tmp_dir", type=Path, default=None, help="DuckDB spill dir (default: <out>/.duckdb-tmp)")
 def over_time_groups(
-    bucket: str,
+    bucket: str | None,
     gen: str,
     group_size: int | None,
     layer2_prefix: str | None,
@@ -828,17 +828,25 @@ def over_time_groups(
     the `pyramid_multiscans` row the site routes by. Idempotent: sealed groups
     never change, so a re-run only appends. Prints `{"groups": [<gid>, …]}` for
     the caller to `publish-r2` each new group's scan dir. The < K tail is served
-    by `/api/series`'s per-scan fallback."""
-    import shutil
+    by `/api/series`'s per-scan fallback.
+
+    Both roots may be URLs (`blobfs`): the scans' sorts are read in place
+    (streamed through a registered `pyarrow` dataset, so `r2://` takes its
+    endpoint and profile from `blobfs`, not a DuckDB secret), and each group
+    is uploaded beside its last scan's layer 2."""
     import time
+
+    from disk_tree import blobfs
 
     from .index_footer import index_dir, sync_d1, synced_variants
     from .overtime import OVER_TIME_GROUP_SIZE, multiscan_row, sealed_groups, sync_manifest, synced_groups, write_over_time_index
 
     K = group_size or OVER_TIME_GROUP_SIZE
     l2 = resolve_layer2(layer2_prefix, "-l/--layer2-prefix")
-    root = publish_root or f"/gcs/{bucket}"
-    data = data_root or root
+    if publish_root is None and bucket is None:
+        raise UsageError("need -p (the publish root) or -b/$DATA_BUCKET (its Batch mount)")
+    root = (publish_root or f"/gcs/{bucket}").rstrip("/")
+    data = (data_root or root).rstrip("/")
     dates = sorted({d for d, v in synced_variants(store=store) if v == "path"})
     done = synced_groups(store=store)
     todo = [g for g in sealed_groups(dates, K) if g[-1] not in done]
@@ -859,11 +867,10 @@ def over_time_groups(
             pairs.append((d, f"{data}/{dir_}/path-index.parquet"))
         summ = write_over_time_index(pairs, out_dir / gid, mem=mem, threads=threads, tmp_dir=tmp_dir)
         key = f"{l2.format(scan=gid).rstrip('/')}/index/{gen}"
-        dest = Path(root) / key
-        dest.mkdir(parents=True, exist_ok=True)
+        dest = f"{root}/{key}"
         for f in (summ["file"], summ["scans_file"]):
-            shutil.copy2(f, dest / Path(f).name)
-        n = sync_d1(gid, str(dest / Path(summ["file"]).name), variant="over-time", gen=gen, key=key, store=store)
+            blobfs.put(f, f"{dest}/{Path(f).name}")
+        n = sync_d1(gid, f"{dest}/{Path(summ['file']).name}", variant="over-time", gen=gen, key=key, store=store)
         sync_manifest(multiscan_row(g, written_at_ms=int(time.time() * 1000), store=store))
         err(f"over-time-groups: sealed {gid} ({g[0]}..{gid}, {len(g)} scans, {summ['rows']:,} intervals, {n} row groups) → {key}")
         built.append(gid)
@@ -908,8 +915,8 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 
 @main.command("index-sync")
 @option("-A", "--age-only", is_flag=True, help="Only the age-pyramid variants (a ladder-only backfill; the other variants keep their pointer)")
-@option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket holding the index tiers; default $DATA_BUCKET")
-@option("-d", "--dir", "listing_dir", default=None, help="Local/mounted dir holding the parquets (default: <bucket>/<key>)")
+@option("-b", "--bucket", envvar="DATA_BUCKET", default=None, help="Root holding the index tiers, when -d is absent: an fsspec URL (`r2://<bucket>`, `s3://…`, `gs://…`), a local/mounted dir, or a bare name (a GCS bucket); default $DATA_BUCKET")
+@option("-d", "--dir", "listing_dir", default=None, help="Dir holding the parquets: local/mounted, or an fsspec URL (`r2://<bucket>/<key>`, `gs://…`); default <bucket>/<key>")
 @option("-F", "--sorts-only", is_flag=True, help="Only the store's sorts (path, bysize, and their by-user copies where written)")
 @option("-g", "--gen", required=True, help="Generation stamp these files belong to (the run's GEN; `legacy` for a pre-generation layout)")
 @option("-k", "--key", required=True, help="Bucket-relative dir the parquets live under — what the site reads (the deployment's layout, e.g. `<layer-2>/index/<gen>`)")
@@ -923,7 +930,7 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 @argument("date", callback=scan_id_option)
 def index_sync(
     age_only: bool,
-    bucket: str,
+    bucket: str | None,
     listing_dir: str | None,
     sorts_only: bool,
     gen: str,
@@ -965,12 +972,14 @@ def index_sync(
     passing `-M` needs no separate backfill; `index-started` prints one)."""
     from disk_tree import blobfs
 
-    from .index_footer import SORT_VARIANTS, IncompleteGeneration, check_flip, check_store, exists, fill_starts, flip_d1, meta_started, sync_d1
+    from .index_footer import SORT_VARIANTS, IncompleteGeneration, bucket_base, check_flip, check_store, exists, fill_starts, flip_d1, meta_started, sync_d1
 
     try:
         check_store(store)
     except ValueError as e:
         raise UsageError(str(e)) from None
+    if listing_dir is None and bucket is None:
+        raise UsageError("need -d (the generation dir) or -b/$DATA_BUCKET (its root)")
     if rows_only and pointer_only:
         raise UsageError("-r and -p are the two halves of one sync: pass at most one (neither = both, rows then pointer)")
     if local and (rows_only or pointer_only):
@@ -984,7 +993,7 @@ def index_sync(
         meta = own if blobfs.exists(own) else None
     started = meta_started(meta) if meta else None
 
-    base = listing_dir or f"gs://{bucket}/{key}"
+    base = listing_dir or f"{bucket_base(bucket).rstrip('/')}/{key}"
     todo = variants or tuple(INDEX_VARIANTS)
     if sorts_only:
         todo = tuple(v for v in todo if v in SORT_VARIANTS)
@@ -1055,7 +1064,7 @@ def index_started(store: str, snapshots: str) -> None:
 
 @main.command("index-gc")
 @option("-b", "--base", envvar="DATA_BUCKET", default=None, help="Where the pointers' dirs live, for -r's cold-footer check: the data bucket (default $DATA_BUCKET), a mounted dir, or an fsspec URL (`r2://bucket`)")
-@option("-F", "--files", "targets", multiple=True, help="Also delete the files of generation dirs no pointer names (repeatable): `gs://<bucket>` (the scan store), `r2` (the R2 serving bucket: `$R2_BUCKET`, via publish-r2's `R2_*` env) or `r2://<bucket>`. Only under scans with a `path` pointer; never a pointed dir; never one younger than -m")
+@option("-F", "--files", "targets", multiple=True, help="Also delete the files of generation dirs no pointer names (repeatable): `gs://<bucket>` (the scan store), `r2` (the R2 serving bucket: `$R2_BUCKET`, via publish-r2's `R2_*` env), `r2://<bucket>` (same creds), another fsspec URL (`s3://<bucket>`) or a local/mounted dir (`/…`, `./…`). Only under scans with a `path` pointer; never a pointed dir; never one younger than -m")
 @option("-m", "--min-age", default="2d", help="-F's grace period: a generation whose newest object is younger is kept, so an in-flight reindex is never raced; e.g. 36h, 2d (default)")
 @option("-n", "--dry-run", is_flag=True, help="Print what would go (D1 rows counted; generation dirs per store with bytes, and totals); delete nothing")
 @option("-r", "--retain", type=int, default=None, help="Retention: also retire the store sorts' row groups of every scan older than the newest N whose `.groups.parquet` exists (their pointers stay; the reader range-reads that cold footer instead). A variant without one keeps its rows (warned): backfill it with `index-blob`")
@@ -1336,7 +1345,7 @@ def index_extras(attributions: tuple[str, ...], identities_path: str, out_dir: P
 @option("-d", "--date", help="Scan to warm (default: latest under --root)")
 @option("-j", "--jobs", default=4, type=int, help="Concurrent requests (default 4)")
 @option("-n", "--dry-run", is_flag=True, help="Print the request paths; fetch nothing")
-@option("-r", "--root", help="Snapshots root (default gs://$DATA_BUCKET/snapshots)")
+@option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`); default gs://$DATA_BUCKET/snapshots[/$SNAPSHOTS_SUBDIR]")
 @option("-t", "--token", help="Site read token (default $SITE_TOKEN)")
 @option("-u", "--url", "site_url", default=None, help="Site base (default $SITE_URL)")
 @option("-W", "--widths", default="512,1280,1536,1792,1920", help="Canvas widths to warm (the client sends ceil(innerWidth/128)*128; default = phone + common laptops)")
@@ -2761,7 +2770,7 @@ def _digest_options(template_default: str):
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
         option("-P", "--platform", type=Choice(["slack", "discord"]), default="slack", help="Which thread to converge (default slack)"),
-        option("-r", "--root", help="Snapshots root (default the config's: gs://$DATA_BUCKET/snapshots[/cw])"),
+        option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`; the month's state lives beside it); default the config's `root` (presets: gs://$DATA_BUCKET/snapshots)"),
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack; dry-run unless --for-real)"),
         option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)"),
         option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per scan, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
@@ -3058,7 +3067,10 @@ main.add_command(_static_names)
 
 from .interval_store import cli as _interval_store  # noqa: E402
 from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
+from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build  # noqa: E402
 
+_interval_store.add_command(_interval_local_build)
+_interval_store.add_command(_interval_local_add)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)

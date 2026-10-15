@@ -999,6 +999,10 @@ JOB_START_ENV = "DT_JOB_START"
 ALERTS_ENV = "DT_ALERTS"
 #: `off` (or `0`): record nothing (a scratch / gate run); markers and alerts are unaffected.
 RECORD_ENV = "DT_RECORD"
+#: Set by `supervise` for its job: where `start` says which run it started (`finish` then leaves the state to it).
+SUPERVISE_ENV = "DT_SUPERVISE"
+#: Set by `supervise`: the most a `phase -T` group gets after a received TERM/INT before KILL (inside the supervisor's).
+TERM_GRACE_ENV = "DT_TERM_GRACE"
 
 
 def phase_line(name: str, secs: int, note: str | None = None, start: bool = False) -> str:
@@ -1161,6 +1165,48 @@ class JobRun:
         except Exception as e:  # noqa: BLE001
             err(self.redact(f"alert failed (the job continues): {type(e).__name__}: {e}"))
 
+    def finish(self, rc: int, error: str | None = None) -> None:
+        """Record the run finished with `rc` (`error` its one-line reason), and on a failure post the `fail` alert
+        unless one was already posted (a phase's, or an earlier `finish`'s)."""
+        error = self.redact(error) if error else None
+        failed_phase = self.state().get("failed_phase")
+        self.write(exit_code=rc, error=error, failed_phase=failed_phase)
+        if rc and not self.alerted():
+            self.mark_alerted()
+            self.alert("fail", f"run failed (exit {rc}){f' in {failed_phase}' if failed_phase else ''}{f': {error}' if error else ''}")
+
+    # under `supervise`
+
+    @property
+    def supervised(self) -> bool:
+        return bool((self.env.get(SUPERVISE_ENV) or "").strip())
+
+    def point_supervisor(self, profile_path: str | None, d1: str | None, dry_run: bool, sqlite: str | None) -> None:
+        """Tell an enclosing `supervise` which run this job started, and how it is recorded, so it can finish it."""
+        path = (self.env.get(SUPERVISE_ENV) or "").strip()
+        if not path:
+            return
+        ptr = dict(run_id=self.run_id, recording=self.recording, profile=profile_path or self.env.get(PROFILE_ENV),
+                   d1=d1, dry_run=dry_run, sqlite=str(Path(sqlite).absolute()) if sqlite else None, dir=str(self.dir),
+                   key=self.key, env={k: self.env[k] for k in (ALERTS_ENV, "SCAN_ID") if k in self.env})
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(json.dumps(ptr))
+        except OSError as e:
+            err(f"scan-run: can't tell the supervisor the run ({path}): {e}")
+
+    @classmethod
+    def pointed(cls, path: Path) -> JobRun | None:
+        """The run a supervised job's `start` pointed at (None: it started none)."""
+        try:
+            ptr = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        env = {k: v for k, v in os.environ.items() if k != SUPERVISE_ENV} | ptr["env"]
+        j = cls(ptr["profile"], ptr["d1"], ptr["dry_run"], ptr["run_id"], ptr["sqlite"], env=env)
+        j.recording, j.dir, j.key = ptr["recording"], Path(ptr["dir"]), ptr["key"]
+        return j
+
     # the steps
 
     def clock(self) -> int:
@@ -1188,6 +1234,7 @@ class JobRun:
         outputs: Sequence[str] = (),
         measure: bool = True,
         timed_out: str | None = None,
+        terminated: int | None = None,
     ) -> int:
         """Close phase `name` with exit code `rc`: the PHASE line, its record, and on a failure its alert. Returns the
         exit status: `rc` for a fatal failure, else 0."""
@@ -1201,7 +1248,8 @@ class JobRun:
         self.write(phase=name, note=note, store=AnyStore() if measure and not rc else None, outputs=() if rc else pairs)
         if not rc:
             return 0
-        text = f"{name} failed (exit {rc}{f', timed out after {timed_out}' if timed_out else ''})"
+        why = f", timed out after {timed_out}" if timed_out else f", terminated by {signame(terminated)}" if terminated else ""
+        text = f"{name} failed (exit {rc}{why})"
         if msg:
             text += f": {msg}"
         if resume:
@@ -1215,50 +1263,109 @@ class JobRun:
         return rc
 
 
-def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float) -> tuple[int, bool]:
-    """Run `cmd`; with `timeout`, in its own session, and past it TERM its whole process group, wait `grace` for the
-    group to empty, then KILL what's left (coreutils `timeout -k`, but group-wide: multiprocessing spawn workers and
-    Batch submitters must not outlive it). Returns `(rc, timed_out)`; a timeout is rc 124, a missing CMD 127."""
+@dataclass(frozen=True)
+class Ran:
+    """How a supervised command ended: `rc` (a signal death as 128+N; a timeout 124), whether `-T` timed it out, the
+    first SIGTERM/SIGINT this process received (and forwarded), and whether its group was KILLed after the grace."""
+
+    rc: int
+    timed_out: bool = False
+    signal: int | None = None
+    killed: bool = False
+    died_of: int | None = None  # the signal that ended CMD itself, if one did
+
+
+def signame(sig: int) -> str:
+    import signal
+
+    return signal.Signals(sig).name
+
+
+def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float, session: bool | None = None,
+                signal_grace: float | None = None) -> Ran:
+    """Run `cmd`, in its own session when `session` (default: with `timeout`). Past `timeout`, TERM its whole process
+    group, wait `grace` for the group to empty, then KILL what's left (coreutils `timeout -k`, but group-wide:
+    multiprocessing spawn workers and Batch submitters must not outlive it); a timeout is rc 124, a missing CMD 127.
+
+    A SIGTERM / SIGINT this process receives is forwarded at once: to CMD's group when it has its own session (nothing
+    else can reach it), else to CMD (whose group the sender is presumably signalling already). With its own session,
+    the group is then given `signal_grace` (default `grace`) and KILLed; without one, the sender owns escalation."""
     import signal
     import subprocess
     import time
 
-    try:
-        p = subprocess.Popen(list(cmd), start_new_session=timeout is not None)
-    except OSError as e:
-        err(f"scan-run phase: {cmd[0]}: {e.strerror or e}")
-        return 127, False
-    if timeout is None:
-        return p.wait(), False
-    try:
-        return p.wait(timeout=timeout), False
-    except subprocess.TimeoutExpired:
-        pass
+    session = timeout is not None if session is None else session
+    p: subprocess.Popen | None = None
+    got: list[int] = []
 
-    def alive() -> bool:
-        p.poll()  # reap the leader, or its zombie keeps the group "alive"
+    def send(sig: int) -> None:
+        if p is None:
+            return
         try:
-            os.killpg(p.pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-
-    def signal_group(sig: int) -> None:
-        try:
-            os.killpg(p.pid, sig)
-        except ProcessLookupError:
+            if session:
+                os.killpg(p.pid, sig)
+            else:
+                p.send_signal(sig)
+        except (ProcessLookupError, PermissionError):
             pass
 
-    signal_group(signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    while alive() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    if alive():
-        signal_group(signal.SIGKILL)
-    p.wait()
-    return 124, True
+    def handle(sig: int, _frame) -> None:
+        got.append(sig)
+        send(sig)
+
+    prev = {s: signal.signal(s, handle) for s in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        try:
+            p = subprocess.Popen(list(cmd), start_new_session=session)
+        except OSError as e:
+            err(f"scan-run: {cmd[0]}: {e.strerror or e}")
+            return Ran(127, signal=got[0] if got else None)
+        if got:  # arrived before CMD existed
+            send(got[0])
+
+        def group_alive() -> bool:
+            try:
+                os.killpg(p.pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+
+        stop_at = time.monotonic() + timeout if timeout is not None else None
+        kill_at: float | None = None
+        timed_out = killed = False
+        while True:
+            now = time.monotonic()
+            if got and kill_at is None and session:
+                kill_at = now + (grace if signal_grace is None else min(grace, signal_grace))
+            if stop_at is not None and not timed_out and not got and now >= stop_at:
+                timed_out = True
+                send(signal.SIGTERM)
+                kill_at = now + grace
+            rc = p.poll()  # reaps the leader, or its zombie keeps the group "alive"
+            stopping = session and (timed_out or bool(got))
+            if rc is not None and not (stopping and group_alive()):
+                break
+            if kill_at is not None and now >= kill_at and not killed:
+                killed = True
+                if session:
+                    send(signal.SIGKILL)
+                else:
+                    p.kill()
+            if rc is None and stop_at is None and kill_at is None:
+                try:
+                    p.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    pass
+            else:
+                time.sleep(0.05)
+        raw = p.returncode
+        rc = 124 if timed_out else (128 - raw if raw < 0 else raw)
+        return Ran(rc, timed_out, got[0] if got else None, killed, -raw if raw < 0 else None)
+    finally:
+        for s, h in prev.items():
+            signal.signal(s, h)
 
 
 def _wrapper_opts(f):
@@ -1322,6 +1429,7 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
     rec = j.write(start=True, job=job, facts=facts)
     if rec is not None:
         j.save(region=rec.run.region, job_name=rec.run.job_name)
+    j.point_supervisor(profile_path, d1, dry_run, sqlite)
 
 
 @cli.command("phase-begin")
@@ -1351,14 +1459,15 @@ def phase_end_cmd(msg, no_measure, outputs, note, resume, warn, rc, profile_path
 @cli.command("phase")
 @_phase_end_opts
 @option("-g", "--gen", default=None, help="The index generation the run writes, from here on")
-@option("-G", "--grace", default="30s", help="With -T: how long the group has after TERM before KILL (default 30s)")
+@option("-G", "--grace", default="30s", help=f"With -T: how long the group has after TERM before KILL (default 30s; after a received TERM/INT at most ${TERM_GRACE_ENV})")
 @option("-T", "--timeout", default=None, help="Run CMD in its own session; past this (N[s|m|h|d]) TERM then KILL its process group, exit 124")
 @_wrapper_opts
 @argument("name")
 @argument("cmd", nargs=-1, required=True)
 def phase_cmd(msg, no_measure, outputs, note, resume, warn, gen, grace, timeout, profile_path, d1, dry_run, run_id, sqlite, name, cmd) -> None:
     """`phase-begin NAME`, run CMD (after `--`), `phase-end NAME -x <its exit code>` with the same options; exits as
-    `phase-end` does."""
+    `phase-end` does. A SIGTERM / SIGINT it receives goes on to CMD (to its process group, under -T, which is then
+    KILLed after the grace), and the phase ends failed with CMD's status (a signal death as 128+N)."""
     j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
     try:
         limit = duration(timeout) if timeout is not None else None
@@ -1367,8 +1476,10 @@ def phase_cmd(msg, no_measure, outputs, note, resume, warn, gen, grace, timeout,
         err(f"scan-run phase: {e}")
         sys.exit(2)
     j.begin(name, gen=gen)
-    rc, timed_out = run_grouped(cmd, limit, grace_s)
-    sys.exit(j.end(name, rc, warn, msg, resume, note, outputs, not no_measure, timeout if timed_out else None))
+    sig_grace = j.env.get(TERM_GRACE_ENV)
+    ran = run_grouped(cmd, limit, grace_s, signal_grace=float(sig_grace) if sig_grace else None)
+    sys.exit(j.end(name, ran.rc, warn, msg, resume, note, outputs, not no_measure, timeout if ran.timed_out else None,
+                   ran.signal if ran.rc else None))
 
 
 @cli.command("nop")
@@ -1385,11 +1496,57 @@ def nop_cmd(profile_path, d1, dry_run, run_id, sqlite) -> None:
 @_wrapper_opts
 def finish_cmd(error, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
     """The job's EXIT trap: record the run finished (`record -x`; ERR as `scan_runs.error`), and on a non-zero RC
-    post the `fail` alert unless a phase already did. Never fails the job."""
+    post the `fail` alert unless a phase already did. Never fails the job. Under `supervise`, the state and the
+    alerted marker are left for it."""
     j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
-    error = j.redact(error) if error else None
-    failed_phase = j.state().get("failed_phase")
-    j.write(exit_code=rc, error=error, failed_phase=failed_phase)
-    if rc and not j.alerted():
-        j.alert("fail", f"run failed (exit {rc}){f' in {failed_phase}' if failed_phase else ''}{f': {error}' if error else ''}")
+    j.finish(rc, error)
+    if j.supervised:
+        j.save(finished=rc)  # `supervise` reads it (and clears the state) once the job has exited
+    else:
+        j.clear()
+
+
+@cli.command("supervise")
+@option("-G", "--grace", default="20s", help="After a TERM/INT: how long CMD's group has before KILL (default 20s, under the usual 30s platform stop timeout)")
+@argument("cmd", nargs=-1, required=True)
+def supervise_cmd(grace, cmd) -> None:
+    """The job's entrypoint (`supervise -- bash job.sh`): run CMD in its own session and exit with its status (a
+    signal death as 128+N). A SIGTERM / SIGINT goes to CMD's whole process group at once (bash, as PID 1, would defer
+    it until its foreground child exits, and the platform signals only PID 1), and what's left after the grace is
+    KILLed.
+
+    If CMD then exits non-zero, the run its `start` began is recorded failed (exit 143, or 130 for INT; error
+    `terminated (SIGTERM)`) over whatever its own EXIT trap recorded: a termination wins, even over a recorded success.
+    The `fail` alert posts unless one already did. CMD exiting 0 despite the signal had finished: its record
+    (`succeeded`, or `nop`) stands. Without a signal, a non-zero exit that never reached `finish` (an OOM kill, no
+    trap) is recorded failed too."""
+    try:
+        grace_s = duration(grace)
+    except ValueError as e:
+        err(f"scan-run supervise: {e}")
+        sys.exit(2)
+    ptr = Path(os.environ.get("TMPDIR") or "/tmp") / "dt-scan-run" / f"supervise-{os.getpid()}.json"
+    ptr.unlink(missing_ok=True)
+    os.environ[SUPERVISE_ENV] = str(ptr)
+    os.environ[TERM_GRACE_ENV] = f"{grace_s / 2:g}"
+    ran = run_grouped(cmd, None, grace_s, session=True)
+    try:
+        supervised_finish(ptr, ran, grace_s)
+    except Exception as e:  # noqa: BLE001 — the job's own status passes through regardless
+        report_failure(e)
+    sys.exit(ran.rc)
+
+
+def supervised_finish(ptr: Path, ran: Ran, grace: float) -> None:
+    """`supervise`'s end: record the run failed when CMD was terminated (or died without `finish`); clear its state."""
+    j = JobRun.pointed(ptr)
+    ptr.unlink(missing_ok=True)
+    if j is None:
+        return
+    finished = j.state().get("finished")
+    if ran.rc and ran.signal:
+        why = f"terminated ({signame(ran.signal)})" + (f"; killed after the {grace:g}s grace" if ran.killed else "")
+        j.finish(128 + ran.signal, why)
+    elif ran.rc and finished is None:
+        j.finish(ran.rc, f"killed ({signame(ran.died_of)})" if ran.died_of else f"exit {ran.rc}, without `finish`")
     j.clear()
