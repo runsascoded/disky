@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ADMIN_SCOPE, allowedRow, baseScope, type Ctx, type Env, identify, isAdmin, requireScope, scopesFor } from './auth'
-import { LINEAGES, migrationNamed, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 
 // A non-localhost request, so identify() doesn't take the dev short-circuit
 // (which would return a full-scope admin regardless of PUBLIC_READ).
@@ -115,10 +115,11 @@ describe('identify — without a gate there is no identity', () => {
   })
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
-  describe('allowedRow — a D1 without the `read_only` migration', () => {
-    it('still admits an allowlisted email, as a full viewer (sign-in never breaks on a dropped migration)', async () => {
-      const { db, raw } = await sqliteD1(lineage, { before: await migrationNamed(lineage, 'allowlist_read_only') })
+describe('D1', () => {
+  describe('allowedRow — a D1 without `allowed_emails.read_only`', () => {
+    it('still admits an allowlisted email, as a full viewer (sign-in never breaks on a missing column)', async () => {
+      const { db, raw } = await sqliteD1()
+      raw.exec('ALTER TABLE allowed_emails DROP COLUMN read_only')
       raw.exec("INSERT INTO allowed_emails (email, note, who, ts) VALUES ('guest@example.org', NULL, 'admin', 1)")
       expect([await allowedRow(db, 'guest@example.org'), await allowedRow(db, 'nobody@example.org')]).toEqual([{ read_only: 0 }, null])
       const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'openathena.ai' } as Env
@@ -126,7 +127,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     })
 
     it('a `read_only` row is the read-only tier alone — no assign', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec("INSERT INTO allowed_emails (email, note, who, ts, read_only) VALUES ('ro@example.org', NULL, 'admin', 1, 1)")
       const env = { DB: db, BASE_SCOPE: 'cw', STAFF_DOMAIN: 'openathena.ai' } as Env
       expect(await scopesFor(env)('ro@example.org')).toEqual(['cw:read'])

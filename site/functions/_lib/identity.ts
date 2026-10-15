@@ -6,7 +6,7 @@ import { type Registry, buildRegistry, canonIn } from '../../src/identityRegistr
 import type { Rules } from '../../src/types.js'
 import type { Env } from './auth.js'
 import { servedStore, storeReady } from './index.js'
-import { shared } from './shared.js'
+import { joinOf, shared } from './shared.js'
 
 export { whoToHandle } from '../../src/identityRegistry.js'
 
@@ -32,5 +32,5 @@ export async function loadRegistry(env: Env): Promise<Registry> {
       if ((e as Error).name === 'NotFoundError') return {}
       throw e
     }
-  }, 10_000)
+  }, 10_000, joinOf(env, 'registry'))
 }

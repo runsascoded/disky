@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { runDir } from './sweepDispatch'
 import { reflectSweepRuns, type SweepBatchJob } from './sweepReflect'
-import { LINEAGES, schemaFork, sqliteD1 } from './testD1'
+import { RUN_DIR, sqliteD1 } from './testD1'
 
 const CFG = { dataBucket: 'my-data' }
 
@@ -11,13 +11,13 @@ const job = (id: string, state: string, digest?: string): SweepBatchJob => ({
   taskGroups: [{ taskSpec: { environment: { variables: { SWEEP_DATE: '2026-09-28', ...(digest ? { PLAN_DIGEST: digest } : {}) } } } }],
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('reflectSweepRuns — gcs: the digest lands once the executor recorded the end', () => {
     it('copies PLAN_DIGEST onto finished rows, closes rows whose job died, leaves the rest; idempotent', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()
       const row = async (runId: string, jobId: string, finished: number | null) => db.prepare(`
-      INSERT INTO deletion_runs (run_id, ${schemaFork(lineage).runDir}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
+      INSERT INTO deletion_runs (run_id, ${RUN_DIR}, scan, head, exec_head, actor, mode, started_ts, finished_ts, log_dir, plan_id)
       VALUES (?, ?, '2026-09-28', 0, 0, 'ann@openathena.ai', 'dry', 100, ?, ?, 1)
     `).bind(runId, runDir(CFG, jobId), finished, runDir(CFG, jobId)).run()
       await row('2026-09-28-p1/a', 'gcs-sweep-dry-a', 500)   // executor recorded the end

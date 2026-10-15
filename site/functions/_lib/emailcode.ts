@@ -2,7 +2,7 @@
  * Shared config for the email-code sign-in Functions (`/auth/email/*`) — the
  * ZT One-Time-PIN replacement, alongside Google OIDC. Reuses the same gate /
  * D1 policy / session as every other identity path; the only new pieces are
- * the `pending_auth` store (migrations/cw 0015–0016) and a Resend sender.
+ * the `pending_auth` store (`site/schema.sql`) and a Resend sender.
  * Dormant until RESEND_API_KEY + MAIL_FROM are set. See
  * specs/done/oidc-cutover-cw.md.
  */

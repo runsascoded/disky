@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES } from '../_lib/testD1'
+
 import { A, B, C, unionDeployment } from '../_lib/testUnion'
 import { type Hit, injectedStores, type StaticFilterStore } from '../_lib/staticFilter'
 import { REJECT_MESSAGES } from '../_lib/indexedOnly'
@@ -39,12 +39,12 @@ const NOT_INDEXED = { code: 'scan-not-indexed', error: REJECT_MESSAGES['scan-not
 type Node = { n: string; k: string; b: number; o: number; c?: Node[]; src?: string; at?: string; m?: number }
 type Body = Record<string, unknown> & { tree: Node; nodes: number; tier: string; index: string; matched?: unknown; matches?: unknown; matchCount?: unknown }
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async (k: Request) => { puts.push(k.url) } } }
-    deployment = await unionDeployment(lineage)
+    deployment = await unionDeployment()
   })
   const puts: string[] = []
   /** The subtree reads cached since `puts` was cleared: each one's store and union threshold (`&T=`, absent: its own). */

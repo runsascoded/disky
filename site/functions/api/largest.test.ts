@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
 import { openIndex, readLargest } from '../_lib/index'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1 } from '../_lib/testD1'
 import { type D1Variant, readJson, seedGeneration } from '../_lib/testStore'
 import { onRequestGet as largest } from './largest'
 
@@ -19,7 +19,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // Served three ways: groups in D1, retired to the `.groups.json` blob, and
 // retired with cold `.groups.parquet` footers.
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const D1 = '2026-09-30T0001'
   const BLOB = '2026-09-30T0002'
   const PQ = '2026-09-30T0005'
@@ -29,7 +29,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
     const files = { path: { parquet: 'v2/path-index.parquet', groups: 'v2/path-index.groups.json' }, bysize: { parquet: 'v2/path-index-bysize.parquet', groups: 'v2/path-index-bysize.groups.json' } }
     const pqFiles = { path: { ...files.path, footer: 'v2/path-index.groups.parquet' }, bysize: { ...files.bysize, footer: 'v2/path-index-bysize.groups.parquet' } }

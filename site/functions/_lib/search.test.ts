@@ -41,7 +41,7 @@ let env: Env
 
 beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-  const { db, raw } = await sqliteD1('cw')
+  const { db, raw } = await sqliteD1()
   const v = await readJson<Record<string, D1Variant>>('v2-search/d1.json')
   for (const date of [SEARCH, PLAIN, SEARCH_V1]) seedGeneration(raw, { date, gen: 'g', dir: dirOf(date), variants: v, files })
   // Retired from D1: the `path` groups' metadata comes from the blob.
@@ -223,7 +223,7 @@ describe('budgets: a cut search is flagged, heaviest names kept, roots still out
 describe('I/O', () => {
   it('v2 reads a query’s rows groups as merged range reads', async () => {
     // A generation of its own: nothing decoded yet in this isolate.
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const date = '2026-10-01T0101'
     seedGeneration(raw, { date, gen: 'g', dir: dirOf(date), variants: await readJson<Record<string, D1Variant>>('v2-search/d1.json'), files })
     for (const role of V2_FILES) FILES.set(searchKey(dirOf(date), role), fixture(`v2-search/${SEARCH_FILES[role]}`))

@@ -4,16 +4,16 @@
 import { emailSub, hashToken, sessionCookie, signSession } from '@open-athena/auth'
 import { describe, expect, it } from 'vitest'
 import { type Env, requireViewer } from '../auth'
-import { LINEAGES, sqliteD1 } from '../testD1'
+import { sqliteD1 } from '../testD1'
 import { EPOCH } from './sign'
 
 const SECRET = 'test-session-secret-0123456789abcdef'
 const KEY = 'live-share-link-key-0123456789'
 const OG = 'TokAAAAAAA'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   async function envWith(): Promise<Env> {
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     raw.prepare("INSERT INTO allowed_emails (email, who, ts) VALUES ('viewer@example.org', 'admin@example.org', 1)").run()
     raw.prepare('INSERT INTO grants (id, token_hash, scopes, created_at, created_by) VALUES (?, ?, ?, ?, ?)').run('g1', await hashToken(KEY), 'gcs:read', 1, 'admin@example.org')
     // A live preview token for the requested view, so `og=` is a real one.

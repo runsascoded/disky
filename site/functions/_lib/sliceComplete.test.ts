@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { keyedOnTotal, openIndex, planSizeRects, readRects, readSizeRects, type Rect, type Row } from './index'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
 import { buildView, type ViewNode } from './view'
 
@@ -16,14 +16,14 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./te
 //   s/       carol alone (4 × 200 KiB)
 //   m/f0000…m/f2499  unowned 1 KiB objects: `m`'s children band spans both 2048-row groups.
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const DATE = '2026-10-09'
   const KiB = 1024
   let env: Env
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     const variants = await readJson<Record<string, D1Variant>>('v2-slices/d1.json')
     const files = {
       path: { parquet: 'v2-slices/path-index.parquet', groups: 'v2-slices/path-index.groups.json' },

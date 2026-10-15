@@ -57,13 +57,13 @@ That makes the Pages project, the custom domain and its CNAME, and the D1 databa
 
 **2. The site's config.** Copy `site/wrangler.example.toml` to `site/wrangler.toml` and fill it in: the Pages project, the D1 id from step 1, the index bucket (`STORE_*`), and the vars for the features you want. Each key has a one-line comment; optional ones stay commented out. Add a matching entry to the store registry in `site/src/stores.ts`, under the key `STORE` names.
 
-**3. The database schema.** Apply the migrations your features need:
+**3. The database schema.** Create it from the branch's schema file, `site/schema.sql` (its current state: the index footer plus the sign-in, grant, plan and log tables, which a deployment without those features leaves empty):
 
 ```bash
-cd site && pnpm exec wrangler d1 migrations apply <d1Name> --remote
+cd site && pnpm exec wrangler d1 execute <d1Name> --remote --file schema.sql
 ```
 
-`migrations_dir` in `wrangler.toml` picks the lineage. r2.rbw.sh (public, index only) uses `migrations/cw`. A deployment with sign-in, plans or the ownership ledger needs those tables too; today they live in the gcs and cw lineages on their branches.
+A later schema change arrives as a recipe in `site/migrations/<slug>.sql`: apply it the same way (`--file migrations/<slug>.sql`) to each of the branch's databases, then `git rm` it ([`specs/done/d1-migrations.md`](../specs/done/d1-migrations.md)).
 
 **4. Secrets.** Set each `# secret` line of `wrangler.example.toml` that applies, for example:
 

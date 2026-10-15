@@ -8,8 +8,8 @@ import { onRequestGet as owners } from './owners'
 import { sqliteD1 } from '../_lib/testD1'
 
 describe('ownership reads without a ledger', () => {
-  it('/api/assignments, /api/estate and /api/owners are a 404 on the cw lineage', async () => {
-    const { db } = await sqliteD1('cw')
+  it('/api/assignments, /api/estate and /api/owners are a 404 on a schema without the ledger (cloud’s)', async () => {
+    const { db } = await sqliteD1()
     const env = { DB: db }
     const at = (path: string) => ({ request: new Request(`http://localhost${path}`), env }) as never
     const answer = async (r: Response) => [r.status, await r.json()]

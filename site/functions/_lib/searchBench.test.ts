@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parseQuery } from './scope'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 import { type D1Variant, FILES, GETS, seedGeneration } from './testStore'
 import { buildView } from './view'
 
@@ -54,7 +54,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => {
   }
 })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const DATE = '2026-10-02'
   const env = { ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
 
@@ -62,7 +62,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     beforeAll(async () => {
       ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: () => slot(CACHE_MS, async () => undefined), put: () => slot(CACHE_MS, async () => {}) } }
       const { readFileSync } = (await import(/* @vite-ignore */ 'node:' + 'fs')) as { readFileSync(p: string, enc?: string): Uint8Array & string }
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       const v = JSON.parse(readFileSync(`${DIR}/d1.json`, 'utf8')) as Record<string, D1Variant>
       const files = { path: { parquet: `${DIR}/path-index.parquet`, groups: `${DIR}/path-index.groups.json` }, bysize: { parquet: `${DIR}/path-index-bysize.parquet`, groups: `${DIR}/path-index-bysize.groups.json` } }
       seedGeneration(raw, { date: DATE, gen: 'g', dir: 'listing/b/index/g', variants: v, files })

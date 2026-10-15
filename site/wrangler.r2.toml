@@ -15,18 +15,18 @@ name = "disk-tree-demo"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-01"
 
-# D1 holds only the index footer (index_schema + index_row_groups) for this
-# public deploy — no marks/auth/grants tables (marks:false, PUBLIC_READ).
-# Created with `wrangler d1 create disk-tree-demo-db`. Apply the migrations:
-#   wrangler d1 migrations apply disk-tree-demo-db --remote
-# (needs CLOUDFLARE_ACCOUNT_ID + a D1-scoped token). The index-footer migration
-# lives in the cw lineage today; the merged lineage is mgu's convergence work
-# (specs/disk-tree-as-base.md → convergence.md seam 3).
+# D1: this public deploy reads only the index footer (index_schema +
+# index_row_groups); its other tables (auth, grants, plans) stay empty
+# (PUBLIC_READ). Created with `wrangler d1 create disk-tree-demo-db`, its schema
+# from the branch's schema file (specs/done/d1-migrations.md):
+#   wrangler d1 execute disk-tree-demo-db --remote --file schema.sql
+# and each pending recipe likewise (`--file migrations/<slug>.sql`), then
+# `git rm` the recipe (this is `cloud`'s only database; wrangler.r2-dev.toml
+# binds the same one). Needs CLOUDFLARE_ACCOUNT_ID + a D1-scoped token.
 [[d1_databases]]
 binding = "DB"
 database_name = "disk-tree-demo-db"
 database_id = "261d0c80-8f73-442e-979a-4e25725b2271"
-migrations_dir = "migrations/cw"
 remote = true
 
 # The static name index lives beside the tiers, in the same bucket (the Worker reads it through the binding).

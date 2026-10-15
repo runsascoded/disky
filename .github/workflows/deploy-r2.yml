@@ -22,14 +22,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    # `cloud` → disk-tree-demo (r2.rbw.sh); `dev` → disk-tree-demo-dev (dev.r2.rbw.sh).
-    # Both read the same public index; dev is the pre-prod staging mirror.
-    name: deploy
+  # CI runs overlap (each push starts one) and finish out of order, so a slower run for an older commit would
+  # deploy over a newer one. Deploy only the branch's current tip: an older commit's run is skipped, as the tip's
+  # own run deploys it (or already has).
+  tip:
     if: >-
       github.repository == 'runsascoded/disky'
       && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      current: ${{ steps.t.outputs.current }}
+    steps:
+      - id: t
+        env:
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          tip=$(git ls-remote "https://github.com/${{ github.repository }}" "refs/heads/$BRANCH" | cut -f1)
+          if [ "$tip" = "$SHA" ]; then echo "current=true" >> "$GITHUB_OUTPUT"
+          else echo "current=false" >> "$GITHUB_OUTPUT"; echo "$SHA is not $BRANCH's tip ($tip): not deployed"; fi
+  deploy:
+    needs: tip
+    # `cloud` → disk-tree-demo (r2.rbw.sh); `dev` → disk-tree-demo-dev (dev.r2.rbw.sh).
+    # Both read the same public index; dev is the pre-prod staging mirror.
+    name: deploy
+    if: needs.tip.outputs.current == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

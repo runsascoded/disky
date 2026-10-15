@@ -1,13 +1,13 @@
 // specs/done/health-page.md: /api/health over a fake `INDEX_R2` (both stores' `scans.json`, manifests and run files) and the
-// cw lineage's D1 (`index_schema` path rows, `scan_runs`). The interval store never got scan 04; the static index's
+// D1 schema (`index_schema` path rows, `scan_runs`). The interval store never got scan 04; the static index's
 // run for 05 has no `drill/`; scan 07's job is running.
 import { describe, expect, it } from 'vitest'
 import { onRequestGet as route } from '../api/health'
 import { IV_RUN_FILES } from './health'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 import type { HealthDoc } from '../../src/healthModel'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const D = (d: string) => `2026-10-${d}`
   const UPLOADED = new Date(Date.UTC(2026, 9, 7, 6))
 
@@ -60,7 +60,7 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
 
   describe('GET /api/health', () => {
     it('reads both stores and D1: stacks, coverage gaps, freshness inputs', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec(SEED)
       const { status, cache, doc } = await get({ DB: db, INDEX_R2: r2(OBJECTS), INTERVAL_STORE_GEN: 'iv1', STATIC_GEN: 'sn1' })
       expect([status, cache, doc.scans]).toEqual([200, 'miss', ['01', '02', '03', '04', '05', '06', '07'].map(D)])

@@ -1,5 +1,6 @@
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import { CONTAINER_BG, parseColor } from './colors'
+import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { colorResolver } from './cssColor'
 import { drawDust } from './DustHatch'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
@@ -45,7 +46,7 @@ export interface TreemapCanvasProps<T> {
   getLabel: (n: T) => string
   formatSize: (n: number) => string
   /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change, while the area stays `getSize`). */
-  formatCell?: (n: T) => string
+  formatCell?: (n: T) => CellText
   /** Inline-size placement on a cell's first line (see `TreemapProps.sizeAlign`). */
   sizeAlign: 'left' | 'right'
   /** Min cell width for the inline size (see `TreemapProps.inlineSizeMinWidth`). */
@@ -82,7 +83,7 @@ export interface PaintOpts<T> {
   getLabel: (n: T) => string
   formatSize: (n: number) => string
   /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change, while the area stays `getSize`). */
-  formatCell?: (n: T) => string
+  formatCell?: (n: T) => CellText
   sizeAlign: 'left' | 'right'
   /** Min cell width for the inline size (see `TreemapProps.inlineSizeMinWidth`). */
   inlineSizeMinWidth: number
@@ -517,14 +518,14 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     ctx.clip()
     const pad = 4
     const kidSize = folded ? (cell.node as FoldedNode<T>).size : getSize(cell.node as T)
-    const sizeText = folded || !formatCell ? formatSize(kidSize) : formatCell(cell.node as T)
+    const cands = folded || !formatCell ? [formatSize(kidSize)] : candidates(formatCell(cell.node as T))
     // Same rule as the DOM label: inline size on branch bars / short leaves
     // wider than the consumer's threshold.
     const inlineSize = (hasKids || h <= 34) && w > inlineSizeMinWidth
     // Same 6px name↔size gap as the DOM label's flex `gap`.
     const gap = 6
     let nameMax = cw - 2 * pad
-    const szText = inlineSize ? sizeText : ''
+    const szText = inlineSize ? fitCandidate(cands, inlineRoom(cw, pad, gap, ctx.measureText(label).width), t => ctx.measureText(t).width) : ''
     const szW = inlineSize ? ctx.measureText(szText).width : 0
     if (inlineSize) nameMax -= szW + gap
     const name = fit(ctx, label, Math.max(0, nameMax))
@@ -543,7 +544,7 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     if (!hasKids && h > 34) {
       ctx.globalAlpha = 0.75
       ctx.font = `${lblFsSm}px system-ui, -apple-system, sans-serif`
-      ctx.fillText(fit(ctx, sizeText, cw - 2 * pad), x + pad, y + 2 + fs + 3)
+      ctx.fillText(fit(ctx, fitCandidate(cands, cw - 2 * pad, t => ctx.measureText(t).width), cw - 2 * pad), x + pad, y + 2 + fs + 3)
       ctx.globalAlpha = 1
     }
     ctx.restore()

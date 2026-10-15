@@ -106,9 +106,10 @@ export const PARTIAL_TTL = 120
  * `{ partialTtl }` the colo tier only, for that many seconds (a budget-cut answer, `PARTIAL_TTL`). */
 export type Keep = boolean | { partialTtl: number }
 
-/** What a filter view or diff keeps: one cut by a time budget — phase 2's (`interiors.late`) or the search's
- *  (`searchLate`) — briefly, else all. A read budget's cut is deterministic, so kept like a whole answer. */
-export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true }): Keep => a.interiors?.late || a.searchLate ? { partialTtl: PARTIAL_TTL } : true
+/** What a filter view or diff keeps: one cut by a time budget — phase 2's (`interiors.late`), the search's
+ *  (`searchLate`) or a filtered diff's lookups (`lookups_late`: unanswered names folded into `(other)`) — briefly,
+ *  else all. A read budget's cut is deterministic, so kept like a whole answer. */
+export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true; lookups_late?: true }): Keep => a.interiors?.late || a.searchLate || a.lookups_late ? { partialTtl: PARTIAL_TTL } : true
 
 /** Store `body` (already-serialized JSON) per `keep` and return the client response. With ``waitUntil``
  * (the Pages `EventContext`'s) the writes run after the response is sent — a KV put is hundreds of ms the
@@ -152,6 +153,8 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
 export const UPGRADE_PHASE2_MS = 10_000
 /** …and its search's time budget (`SearchLimits.wallMs`), in place of the viewer-facing one. */
 export const UPGRADE_SEARCH_LIMITS: SearchLimits = { ...SEARCH_LIMITS, wallMs: 10_000 }
+/** …and a filtered diff's lookup walk (`DiffOpts.walkMs`), in place of `FILTER_WALK_MS`. */
+export const UPGRADE_WALK_MS = 5_000
 
 /** Per isolate: keys with a background full run in flight (one each: concurrent partial hits don't
  *  stampede), and keys whose run was cut short too — not retried until the partial they'd replace expires

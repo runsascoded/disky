@@ -6,9 +6,9 @@ import { covers, drillSource, type Found, type HitSource, injectedStores, liveTo
 import { catalogAnswer, StaticCatalog } from './staticCatalog'
 import { FilterRejected, REJECT_MESSAGES } from './indexedOnly'
 import { type Blobs, type Hit, scanAt, StaticNames } from './staticNames'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, type DiffRow, NotFound, type View, type ViewNode } from './view'
+import { buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, type ViewNode } from './view'
 import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
@@ -21,7 +21,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./te
 // files, aliases; short members), checked against brute force from the objects (`expected.json`) — the
 // reader alone, then the map's views served from it (the static-filter fixture's store generations).
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const A = '2026-10-04'
   const B = '2026-10-05'
   const DATES = [A, B]
@@ -81,7 +81,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       filterFiles.set(k, b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer)
     }
     expected = await readJson<Expected>('static-drill/expected.json')
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     for (const date of DATES) {
       const v = await readJson<Record<string, D1Variant>>(`static-filter/${date}/d1.json`)
       const files = {
@@ -622,20 +622,48 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     }
     type N = [string, number, number, ...unknown[]]
     const known = new Set([...named.values()].flat())
+    const kept = new Set<string>()
+    const keep = (dir: string) => { for (const k of named.get(dir) ?? []) if ((o.maxDepth == null || depthOf(k) <= dP + o.maxDepth) && m.get(k)![0] >= thr(depthOf(k))) { kept.add(k); keep(k) } }
+    keep(P)
+    // The match roots' insides (the light path's phase 2): a drawn root of more than one object and at least 64² px
+    // (above `maxDepth`), and every root in `force` this scan holds, reads the unfiltered rows under it, three levels
+    // deep (and within `maxDepth`), at its own threshold `T·2^(d−dR−1)`; a row is drawn under a drawn parent. A
+    // forced root this scan doesn't hold is answered empty. With no rows left (`noRoots`) none is read.
+    const rows = scanRows.get(date)!
+    const subdiv = (r: string) => m.get(r)![1] > 1 && m.get(r)![0] >= T * 4096 / MIN_AREA
+    const above = (r: string) => o.maxDepth == null || depthOf(r) < dP + o.maxDepth
+    const want = [...known].filter(r => roots.has(r) && kept.has(r) && subdiv(r) && above(r))
+    const forced = [...o.force ?? []].filter(p => q(t)(p) && !want.includes(p))
+    for (const p of forced) if (!roots.has(p)) nested.add(p)
+    /** The rows read under the roots: `[bytes, objects]`. */
+    const read = new Map<string, [number, number]>()
+    for (const R of [...forced.filter(p => roots.has(p) && above(p)), ...want]) {
+      if (o.noRoots) { left++; continue }
+      nested.add(R)
+      const dR = depthOf(R)
+      const hi = Math.min(dR + 3, o.maxDepth == null ? Infinity : dP + o.maxDepth)
+      const under = [...rows].filter(([p, [b]]) => p.startsWith(`${R}/`) && depthOf(p) <= hi && b >= T * ATTEN ** Math.max(0, depthOf(p) - dR - 1))
+      for (const [p, v] of under.sort(([x], [y]) => depthOf(x) - depthOf(y) || (x < y ? -1 : 1))) {
+        read.set(p, v)
+        named.set(parent(p), [...(named.get(parent(p)) ?? []), p])
+        if (kept.has(parent(p))) kept.add(p)
+      }
+    }
+    const val = (p: string) => m.get(p) ?? read.get(p)!
     const build = (dir: string): N[] => {
-      const ks = (named.get(dir) ?? []).filter(k => (o.maxDepth == null || depthOf(k) <= dP + o.maxDepth) && m.get(k)![0] >= thr(depthOf(k)))
+      const ks = (named.get(dir) ?? []).filter(k => kept.has(k))
       if (!ks.length) return []
-      const out: N[] = ks.map(k => { const [b, ob] = m.get(k)!; const c = build(k); return [k.split('/').pop()!, b, ob, ...(roots.has(k) ? ['m'] : []), ...(c.length ? [c] : [])] as N })
-      const [tb, to] = dir === P ? [...m].filter(([p]) => parent(p) === P).reduce((s, [, [b, ob]]) => [s[0] + b, s[1] + ob], [0, 0]) : m.get(dir)!
+      const out: N[] = ks.map(k => { const [b, ob] = val(k); const c = build(k); return [k.split('/').pop()!, b, ob, ...(roots.has(k) ? ['m'] : []), ...(c.length ? [c] : [])] as N })
+      const [tb, to] = dir === P ? [...m].filter(([p]) => parent(p) === P).reduce((s, [, [b, ob]]) => [s[0] + b, s[1] + ob], [0, 0]) : val(dir)
       const rest = [tb - out.reduce((s, x) => s + x[1], 0), to - out.reduce((s, x) => s + x[2], 0)]
       if (rest[0] > thr(depthOf(ks[0]))) out.push(['(other)', rest[0], rest[1]])
       return out.sort((x, y) => (x[0] < y[0] ? -1 : 1))
     }
     const matched = [...known].filter(p => roots.has(p)).map(p => [p, ...m.get(p)!]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
-    const kept = new Set<string>()
-    const keep = (dir: string) => { for (const k of named.get(dir) ?? []) if ((o.maxDepth == null || depthOf(k) <= dP + o.maxDepth) && m.get(k)![0] >= thr(depthOf(k))) { kept.add(k); keep(k) } }
-    keep(P)
-    return { tree: build(P), matched, nested, left, m, kept }
+    // Every path's total, the roots' insides whole (what a lookup inside a root finds).
+    const all = new Map(m)
+    for (const [p, v] of rows) if ([...roots].some(r => p.startsWith(`${r}/`))) all.set(p, v)
+    return { tree: build(P), matched, nested, left, m: all, kept, read, roots }
   }
 
   /** A view's tree as `bruteNest` spells it: per child `[name, bytes, objects, 'm'?, children?]`, by name. */
@@ -665,6 +693,60 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       }
       expect(got).toEqual(want)
       expect([got.length, nestedAny]).toEqual([52, 44])
+    })
+
+    it('a drawn match root\'s inside is the unfiltered view of its path (every descendant matches), `FILTER_SUBDIV_LEVELS` deep', async () => {
+      /** Every node under `n` but its `(other)` folds: `[path below n, bytes, objects, kind]`, depth first. */
+      const flat = (n: ViewNode, pre = ''): unknown[] => (n.c ?? []).filter(c => c.n !== '(other)')
+        .sort((x, y) => (x.n < y.n ? -1 : 1)).flatMap(c => [[`${pre}${c.n}`, c.b, c.o, c.k], ...flat(c, `${pre}${c.n}/`)])
+      const got: unknown[] = []
+      const want: unknown[] = []
+      let inside = 0
+      for (const [t, P] of await rollupViews()) for (const d of DATES) for (const T of [0.5, 40]) {
+        const v = await view(envStatic(), d, P, t, { threshold: T })
+        const roots: [string, ViewNode][] = []
+        const walk = (n: ViewNode, p: string) => { for (const c of n.c ?? []) { const cp = p === '' ? c.n : `${p}/${c.n}`; if (c.m) roots.push([cp, c]); else walk(c, cp) } }
+        walk(v.tree, P)
+        for (const [R, n] of roots) {
+          // The plain view's rule for subdividing a root: more than one object, a tile of at least 64² px.
+          const subdiv = n.o > 1 && n.b >= T * 4096 / MIN_AREA
+          const plain = subdiv ? flat((await buildView(base, { date: d, path: R, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, threshold: T, maxDepth: 3 })).tree) : []
+          if (plain.length) inside++
+          got.push([t, P, d, T, R, flat(n)])
+          want.push([t, P, d, T, R, plain])
+        }
+      }
+      expect(got).toEqual(want)
+      expect(inside).toBe(10)
+    })
+
+    it('…and the diff\'s rows inside a match root are the unfiltered diff at its path (both sides read it when either subdivides it)', async () => {
+      const got: unknown[] = []
+      const want: unknown[] = []
+      let inside = 0
+      for (const [t, P] of await rollupViews()) for (const T of [0.5, 40]) {
+        const d = await buildDiff(envStatic(), { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t), threshold: T })
+        // A root subdivides on a side whose view draws it with more than one object and a tile of at least 64² px.
+        const subdiv = new Set<string>()
+        for (const date of DATES) {
+          const walk = (n: ViewNode, p: string) => { for (const c of n.c ?? []) { const cp = p === '' ? c.n : `${p}/${c.n}`; if (c.m) { if (c.o > 1 && c.b >= T * 4096 / MIN_AREA) subdiv.add(cp) } else walk(c, cp) } }
+          walk((await view(envStatic(), date, P, t, { threshold: T })).tree, P)
+        }
+        const rel = (p: string) => P === '' ? p : p.slice(P.length + 1)
+        for (const m of d.matched ?? []) {
+          const R = rel(m.path)
+          const under = d.rows.filter(r => r.p.startsWith(`${R}/`)).map(r => [r.p.slice(R.length + 1), r.s, r.a, r.b, r.oa, r.ob, !!r.x]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
+          const plain = subdiv.has(m.path)
+            ? (await buildDiff(base, { from: A, to: B, path: m.path, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, threshold: T, depth: 3 })).rows
+              .map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob, !!r.x]).sort((x, y) => (x[0] < y[0] ? -1 : 1))
+            : []
+          if (plain.length) inside++
+          got.push([t, P, T, m.path, under])
+          want.push([t, P, T, m.path, plain])
+        }
+      }
+      expect(got).toEqual(want)
+      expect(inside).toBe(7)
     })
 
     it('spelled out: `0` at the fleet root draws the bucket, its `fill` and the K = 3 heaviest files there', async () => {
@@ -741,13 +823,19 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         const st = (x: [number, number] | null, y: [number, number] | null): DiffRow['s'] => !x ? 'added' : !y ? 'removed' : x[0] !== y[0] || x[1] !== y[1] ? 'changed' : 'unchanged'
         const rows: unknown[][] = []
         const rel = (p: string) => P === '' ? p : p.slice(P.length + 1)
-        const walk = (p: string) => {
+        // At or inside a match root a side's undrawn name is no known zero: it reads the side's read rows, else a
+        // lookup (one per name the side's own roots hold) — flagged `l` (the first side that took one).
+        const inMatch = (p: string) => { for (let a = p; a.length > P.length; a = parent(a)) { if (q(t)(a)) return true; if (a === '') break } return false }
+        const inRoots = (s: typeof sa, c: string) => [...s.roots].some(r => c.startsWith(`${r}/`))
+        let lookups = 0
+        const walk = (p: string, l?: 1 | 2) => {
           const x = at(sa, p), y = at(sb, p)
           const names = [...new Set([...sa.kept, ...sb.kept])].filter(c => parent(c) === p).sort()
           const expand = !!(x || y) && st(x, y) !== 'unchanged' && names.length > 0
-          if (p !== P) rows.push([rel(p), st(x, y), x?.[0] ?? 0, y?.[0] ?? 0, x?.[1] ?? 0, y?.[1] ?? 0, expand])
+          if (p !== P) rows.push([rel(p), st(x, y), x?.[0] ?? 0, y?.[0] ?? 0, x?.[1] ?? 0, y?.[1] ?? 0, expand, ...(l ? [l] : [])])
           if (!expand) return
-          for (const c of names) walk(c)
+          for (const s of [sa, sb]) lookups += names.filter(c => !s.kept.has(c) && !s.read.has(c) && inRoots(s, c)).length
+          for (const c of names) walk(c, at(sa, c) && !sa.kept.has(c) && inMatch(p) ? 1 : at(sb, c) && !sb.kept.has(c) && inMatch(p) ? 2 : undefined)
           const sum = (s: typeof sa) => names.reduce<[number, number]>((r, c) => { const v = at(s, c); return v ? [r[0] + v[0], r[1] + v[1]] : r }, [0, 0])
           const ra: [number, number] = [(x?.[0] ?? 0) - sum(sa)[0], (x?.[1] ?? 0) - sum(sa)[1]], rb: [number, number] = [(y?.[0] ?? 0) - sum(sb)[0], (y?.[1] ?? 0) - sum(sb)[1]]
           if (ra[0] > 0 || rb[0] > 0) rows.push([p === P ? '(other)' : `${rel(p)}/(other)`, st(ra[0] > 0 ? ra : null, rb[0] > 0 ? rb : null), Math.max(0, ra[0]), Math.max(0, rb[0]), ra[0] > 0 ? ra[1] : 0, rb[0] > 0 ? rb[1] : 0, false])
@@ -756,10 +844,13 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         if (rows.some(r => (r[0] as string).includes('/'))) deep++
         const byPath = (rs: unknown[][]) => rs.sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
         got.push([t, P, T, d.total_a, d.total_b, d.objects_a, d.objects_b, d.lookups, byPath(d.rows.map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob, !!r.x, ...(r.l ? [r.l] : [])]))])
-        want.push([t, P, T, top(sa)[0], top(sb)[0], top(sa)[1], top(sb)[1], 0, byPath(rows.filter(r => r[6] || r[1] !== 'unchanged'))])
+        want.push([t, P, T, top(sa)[0], top(sb)[0], top(sa)[1], top(sb)[1], lookups, byPath(rows.filter(r => r[6] || r[1] !== 'unchanged'))])
       }
       expect(got).toEqual(want)
-      expect([got.length, deep, forced]).toEqual([52, 21, 8])
+      // Inside the roots: some names a side didn't draw come from its read rows, some from lookups.
+      const looked = got.filter(g => (g as unknown[])[7] as number > 0).length
+      const flagged = got.flatMap(g => (g as unknown[][])[8]).filter(r => (r as unknown[]).length === 8).length
+      expect([got.length, deep, forced, looked, flagged]).toEqual([52, 24, 16, 11, 0])
     })
 
     it('inside a roots answer a folder drawn on one side only takes the other side\'s total from the answer, not a lookup', async () => {
@@ -797,6 +888,36 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       }
       expect(got).toEqual(want)
       expect(got.length).toBe(10)
+    })
+
+    it('a filtered diff\'s rows inside a match root are each path\'s true totals on both scans, its lookups cut or not', async () => {
+      // A name one side drew inside a root (over its interior threshold there, under it or unread on the other side)
+      // takes the other side's total from a lookup; one the lookup budget leaves unanswered (`lookupCap`, the walk's
+      // time) is folded into its parent's `(other)` on both sides, never drawn as added / removed at zero (cw 10-15:
+      // `q=feuer`, the walk past `FILTER_WALK_MS`, a 2.5 GB dir read as "added").
+      const bad: unknown[] = []
+      let rows = 0, folded = 0, lateCases = 0, looked = 0
+      for (const [env, src] of [[envStatic(), 'static'], [base, 'search']] as const) for (const t of [...TERMS, 'bk']) for (const P of ['', 'bk', 'bk/data']) for (const T of [0.5, 40, 300, 2000, 2300]) {
+        const o = { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t), threshold: T }
+        // A query the static source refuses here (`FilterRejected`), or a path a scan lacks: no diff to check.
+        const full = await buildDiff(env, o).catch(e => { if (e instanceof FilterRejected || e instanceof NotFound) return null; throw e })
+        if (!full) continue
+        for (const cut of [{}, { lookupCap: 0 }, { walkMs: 0 }]) {
+          const d: Diff = Object.keys(cut).length ? await buildDiff(env, { ...o, ...cut }) : full
+          if (d.lookups_late) lateCases++
+          const roots = (d.matched ?? []).map(m => m.path)
+          const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
+          rows += drawn.length; looked += drawn.filter(([, r]) => r.l).length
+          if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length
+          for (const [p, r] of drawn) {
+            const [a, oa] = scanRows.get(A)!.get(p) ?? [0, 0], [b, ob] = scanRows.get(B)!.get(p) ?? [0, 0]
+            const s = !a && !oa ? 'added' : !b && !ob ? 'removed' : a !== b || oa !== ob ? 'changed' : 'unchanged'
+            if (r.a !== a || r.b !== b || r.oa !== oa || r.ob !== ob || r.s !== s) bad.push([src, t, P, T, cut, r.p, [r.s, r.a, r.b, r.oa, r.ob], [s, a, b, oa, ob]])
+          }
+        }
+      }
+      expect(bad).toEqual([])
+      expect([rows, looked, folded, lateCases]).toEqual([229, 1, 416, 100])
     })
   })
 

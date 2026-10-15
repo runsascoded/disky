@@ -58,7 +58,7 @@ const files = (dir: string, sorts: Record<string, string>) =>
 /** The per-scan stores and the interval store over the same scans, on one D1 with the gcs ledger's tables
  *  and `ledger` (SQL) in them. */
 async function seed(ledger = ''): Promise<{ perScan: Env; iv: Env }> {
-  const { db, raw } = await sqliteD1('cw')
+  const { db, raw } = await sqliteD1()
   const slicesD1 = await readJson<Record<string, D1Variant>>('v2-slices/d1.json')
   const lensD1 = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
   for (const date of [S1, S3]) seedGeneration(raw, { date, gen: 'g', dir: `listing/${date}/index/g`, variants: slicesD1, files: files('v2-slices', { path: 'path-index', bysize: 'path-index-bysize' }) })

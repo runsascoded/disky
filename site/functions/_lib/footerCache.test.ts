@@ -58,7 +58,7 @@ afterEach(async () => {
 
 describe('a miss', () => {
   it('serves from the cold footer, and the drained fill makes the entry hot: D1 serves it after the handle expires', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     seedRetired(raw, 'miss')
     const env = envOf(db)
     const cold = await openIndex(env, 'miss', 'path')
@@ -84,7 +84,7 @@ describe('a miss', () => {
   })
 
   it('a secondary store fills its namespaced variant, `store` set', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     seedGeneration(raw, { date: 'sec', gen: 'g1', dir: 'meta-l2/sec/index/g1', variants: v2, files: v2Files, retired: ['path', 'bysize'], store: 'meta' })
     const env = { ...envOf(db), STORE_KEY: 'meta' } as Env
     expect((await openIndex(env, 'sec', 'bysize')).mode).toBe('pq')
@@ -97,7 +97,7 @@ describe('a miss', () => {
 
 describe('a partial fill', () => {
   it('is not trusted: a fresh `filling` entry with some rows serves cold and queues nothing', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     seedRetired(raw, 'part')
     insertRows(raw, 'part', 'path', syncRows('path').slice(0, 2))
     raw.prepare("INSERT INTO footer_cache (date, variant, gen, state, started_ts) VALUES ('part', 'path', 'g1', 'filling', ?)").run(S0 - 60)
@@ -110,7 +110,7 @@ describe('a partial fill', () => {
   })
 
   it('a stale claim is taken over by the next miss, which completes the fill', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     seedRetired(raw, 'stale')
     insertRows(raw, 'stale', 'path', syncRows('path').slice(0, 2))
     raw.prepare("INSERT INTO footer_cache (date, variant, gen, state, started_ts) VALUES ('stale', 'path', 'g1', 'filling', ?)").run(S0 - FILL_STALE_S - 1)
@@ -121,7 +121,7 @@ describe('a partial fill', () => {
   })
 
   it('stops landing rows once its claim is gone (an eviction mid-fill), and never turns hot', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const rows = syncRows('path') as FooterRow[]
     const k = { date: 'mid', variant: 'path', gen: 'g1' }
     async function* groups(): AsyncIterable<FooterRow[]> {
@@ -135,7 +135,7 @@ describe('a partial fill', () => {
   })
 
   it('two fills at once: one claims, the other is `busy`; an evicting entry is never claimed', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const rows = syncRows('path') as FooterRow[]
     const k = { date: 'two', variant: 'path', gen: 'g1' }
     let release!: () => void
@@ -154,7 +154,7 @@ describe('a partial fill', () => {
 
 describe('access', () => {
   it('is written once per day: not again the same day, again the next', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     seedSynced(raw, 'acc')
     raw.prepare("INSERT INTO footer_cache (date, variant, gen, state, rows, bytes, started_ts, filled_ts, last_access_day) VALUES ('acc', 'path', 'g1', 'hot', 4, 1, 0, 0, ?)").run(DAY0 - 3)
     const env = envOf(db)
@@ -182,7 +182,7 @@ describe('access', () => {
   })
 
   it('an untracked synced generation is trusted as before, and stamps nothing', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     seedSynced(raw, 'unt')
     expect((await openIndex(envOf(db), 'unt', 'path')).mode).toBe('d1')
     await footerCacheDrain()
@@ -193,7 +193,7 @@ describe('access', () => {
 describe('eviction', () => {
   /** Hot entries `[date, rows, bytes, last_access_day]`, each with `rows` fake row groups in D1. */
   async function seeded(es: [string, number, number, number][]) {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     for (const [date, n, bytes, d] of es) {
       raw.prepare("INSERT INTO footer_cache (date, variant, gen, state, rows, bytes, started_ts, filled_ts, last_access_day) VALUES (?, 'path', 'g1', 'hot', ?, ?, 0, 0, ?)").run(date, n, bytes, d)
       for (let rg = 0; rg < n; rg++) raw.prepare("INSERT INTO index_row_groups (date, variant, gen, rg, d_min, d_max, p_min, p_max, b_max, row_start, row_end, rg_json) VALUES (?, 'path', 'g1', ?, 0, 0, '', '', 0, 0, 0, '[]')").run(date, rg)
@@ -242,7 +242,7 @@ describe('eviction', () => {
   })
 
   it('an evicting entry serves cold and is not refilled', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     seedSynced(raw, 'ev')
     raw.prepare("INSERT INTO footer_cache (date, variant, gen, state, rows, bytes, started_ts, last_access_day) VALUES ('ev', 'path', 'g1', 'evicting', 4, 1, ?, 0)").run(S0)
     expect((await openIndex(envOf(db), 'ev', 'path')).mode).toBe('pq')
@@ -251,9 +251,10 @@ describe('eviction', () => {
   })
 })
 
-describe('without the `footer_cache` table (migration not applied)', () => {
+describe('without the `footer_cache` table', () => {
   it('reads exactly as before: rows → D1, none → cold; nothing filled, no error', async () => {
-    const { db, raw } = await sqliteD1('cw', { before: '0022' })
+    const { db, raw } = await sqliteD1()
+    raw.exec('DROP TABLE footer_cache')
     seedRetired(raw, 'old')
     seedSynced(raw, 'old2')
     const sqls: string[] = []

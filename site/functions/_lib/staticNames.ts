@@ -25,6 +25,7 @@ import { type FileMetaData, parquetRead, type RowGroup } from 'hyparquet'
 import { isScanId, scanTime } from '../../src/scanSlug.js'
 import { compressors } from './zstd.js'
 import { firstOccurrence, type HexRule, occurs } from './hexRuns.js'
+import { Memo, type Req } from './shared.js'
 
 /** A generation's key prefix in the deployment's `INDEX_R2` bucket. */
 export const staticPrefix = (gen: string): string => `static-names/${gen}`
@@ -392,28 +393,33 @@ export interface IndexCache<T = GroupIndex> { get(file: string): Promise<T | nul
 
 /** How `StaticNames.read` selects and folds a key's rows: `exact` — the rows with `s == key` (else every `s`
  *  starting with it); `under` — only the groups whose path keys meet the paths under it (rows outside are dropped by
- *  `fold`); `fold` — the first-hit rule (default `FirstHits`, the contains literal's). */
-export interface ReadOpts { exact?: boolean; under?: string; fold?: (key: string) => FirstHits; rule?: HexRule | null }
+ *  `fold`); `fold` — the first-hit rule (default `FirstHits`, the contains literal's); `req` — the request reading
+ *  (`reqOf(env)`: what it joins of other requests' reads, and owns of its own, `shared.ts`). */
+export interface ReadOpts { exact?: boolean; under?: string; fold?: (key: string) => FirstHits; rule?: HexRule | null; req?: Req }
 
 export class StaticNames {
-  private shards?: Promise<Shard[]>
-  private indexes = new Map<string, Promise<GroupIndex>>()
-  private pathKeyMap = new Map<string, Promise<PathKeys>>()
+  /** `shards.json`, the shards' group indexes and path keys, held once read (the indexes and keys: the newest
+   *  `maxIndexes`); a read pending in another request is joined, never awaited as is (`shared.ts`). */
+  private shards = new Memo<Shard[]>('static-shards')
+  private indexes: Memo<GroupIndex>
+  private pathKeyMap: Memo<PathKeys>
   constructor(readonly blobs: Blobs, readonly cache?: IndexCache, readonly clock: () => Promise<number> = async () => Date.now(), readonly maxIndexes = 8,
-    readonly keysCache?: IndexCache<PathKeys>) {}
+    readonly keysCache?: IndexCache<PathKeys>) {
+    this.indexes = new Memo('static-shard-index', maxIndexes)
+    this.pathKeyMap = new Memo('static-shard-keys', maxIndexes)
+  }
 
-  plan(): Promise<Shard[]> {
-    this.shards ??= this.blobs.json<{ shards: Shard[] }>('shards.json').then(d => d.shards).catch(e => { this.shards = undefined; throw e })
-    return this.shards
+  /** `req`: the request asking (`reqOf(env)`), here and in every read (`ReadOpts.req`). */
+  plan(req?: Req): Promise<Shard[]> {
+    return this.shards.get('', () => this.blobs.json<{ shards: Shard[] }>('shards.json').then(d => d.shards), req)
   }
 
   /** A shard's group index: the isolate's, else the colo cache's, else cut from the footer (one suffix GET
    *  sized from the shard's row count, a second only if the footer is bigger than guessed). */
-  private async index(shard: Shard, io: Io): Promise<GroupIndex> {
+  private async index(shard: Shard, io: Io, req?: Req): Promise<GroupIndex> {
     const file = shardFile(shard.i)
-    const held = this.indexes.get(file)
-    if (held) { this.indexes.delete(file); this.indexes.set(file, held); io.index = 'isolate'; return held }
-    const p = (async () => {
+    if (this.indexes.held(file)) io.index = 'isolate'
+    return this.indexes.get(file, async () => {
       const cached = await this.cache?.get(file)
       if (cached) { io.index = 'cache'; return cached }
       io.index = 'footer'
@@ -421,11 +427,7 @@ export class StaticNames {
       const idx = groupIndex(footer, size)
       await this.cache?.put(file, idx)
       return idx
-    })()
-    this.indexes.set(file, p)
-    p.catch(() => this.indexes.delete(file))
-    while (this.indexes.size > this.maxIndexes) this.indexes.delete(this.indexes.keys().next().value!)
-    return p
+    }, req)
   }
 
   /** A shard's footer (the FileMetaData thrift): one suffix GET sized from its row count, a second only if the footer
@@ -442,34 +444,28 @@ export class StaticNames {
 
   /** A shard's path keys (`pathKeys`): the isolate's, else the colo cache's, else cut from the footer. Only the
    *  anchored readers' scoped reads need them, so they are kept apart from the group index. */
-  private async keys(shard: Shard, io: Io): Promise<PathKeys> {
+  private async keys(shard: Shard, io: Io, req?: Req): Promise<PathKeys> {
     const file = shardFile(shard.i)
-    const held = this.pathKeyMap.get(file)
-    if (held) { this.pathKeyMap.delete(file); this.pathKeyMap.set(file, held); return held }
-    const p = (async () => {
+    return this.pathKeyMap.get(file, async () => {
       const cached = await this.keysCache?.get(file)
       if (cached) return cached
       const keys = pathKeys((await this.footer(shard, io)).footer)
       await this.keysCache?.put(file, keys)
       return keys
-    })()
-    this.pathKeyMap.set(file, p)
-    p.catch(() => this.pathKeyMap.delete(file))
-    while (this.pathKeyMap.size > this.maxIndexes) this.pathKeyMap.delete(this.pathKeyMap.keys().next().value!)
-    return p
+    }, req)
   }
 
   /** The groups a read of `key` touches (`ReadOpts`: `exact`, `under`) and the rows they hold — an upper bound on the
    *  matching rows, before any data is read. */
   async select(key: string, io: Io, opts: ReadOpts = {}): Promise<{ shard: Shard; idx: GroupIndex; groups: number[]; rows: number } | null> {
-    const shard = shardFor(await this.plan(), key)
+    const shard = shardFor(await this.plan(opts.req), key)
     io.shard = shard?.i ?? null
     if (!shard) return null
-    const idx = await this.index(shard, io)
+    const idx = await this.index(shard, io, opts.req)
     const [a, b] = selectGroups(idx, key, opts.exact)
     let groups: number[]
     if (opts.under == null || opts.under === '' || a === b) groups = Array.from({ length: b - a }, (_, k) => a + k)
-    else groups = groupsUnder(await this.keys(shard, io), a, b, ...underRange(opts.under))
+    else groups = groupsUnder(await this.keys(shard, io, opts.req), a, b, ...underRange(opts.under))
     let rows = 0
     for (const g of groups) rows += idx.rows[g]
     return { shard, idx, groups, rows }
@@ -477,11 +473,11 @@ export class StaticNames {
 
   /** How many suffix rows (row-group granular, an upper bound on the matching rows) `key`'s range holds:
    *  the dispatch's bound, before any data is read. */
-  async extent(key: string, io: Io): Promise<{ shard: Shard; idx: GroupIndex; a: number; b: number; rows: number } | null> {
-    const shard = shardFor(await this.plan(), key)
+  async extent(key: string, io: Io, req?: Req): Promise<{ shard: Shard; idx: GroupIndex; a: number; b: number; rows: number } | null> {
+    const shard = shardFor(await this.plan(req), key)
     io.shard = shard?.i ?? null
     if (!shard) return null
-    const idx = await this.index(shard, io)
+    const idx = await this.index(shard, io, req)
     const [a, b] = selectGroups(idx, key)
     let rows = 0
     for (let g = a; g < b; g++) rows += idx.rows[g]
@@ -529,8 +525,8 @@ export class StaticNames {
 
   /** Answer `key` (lowercased, ≥ 3 characters) on each date; `maxRows` refuses (null) a range above it
    *  before any data is fetched. */
-  async answer(key: string, dates: string[], maxRows = Infinity, rule: HexRule | null = null): Promise<{ io: Io; answer: Answer | null }> {
-    const { io, fold } = await this.read(key, maxRows, { rule })
+  async answer(key: string, dates: string[], maxRows = Infinity, req?: Req, rule: HexRule | null = null): Promise<{ io: Io; answer: Answer | null }> {
+    const { io, fold } = await this.read(key, maxRows, { rule, req })
     if (!fold) return { io, answer: null }
     const t = await this.clock()
     const answer = fold.answer(dates)

@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1 } from '../_lib/testD1'
 import { type D1Variant, readJson, seedGeneration } from '../_lib/testStore'
 import { onRequestGet as subtree } from './subtree'
 
@@ -10,13 +10,13 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // tier but label the store root differently (`ROOT_LABEL`). The root's answer
 // carries that label, so neither may be served the other's cached copy.
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const A = '2026-10-01T0001'
   let base: Env
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     const dir = 'v2-search'
     const v = await readJson<Record<string, D1Variant>>(`${dir}/d1.json`)
     const files = { path: { parquet: `${dir}/path-index.parquet`, groups: `${dir}/path-index.groups.json` }, bysize: { parquet: `${dir}/path-index-bysize.parquet`, groups: `${dir}/path-index-bysize.groups.json` } }

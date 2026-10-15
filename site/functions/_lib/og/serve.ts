@@ -17,6 +17,7 @@ import { warmUrls } from './warm.js'
 import { anonymousPolicy, genericCard, genericImagePath, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
 
 import { canonId, loadRegistry } from '../identity.js'
+import { Memo, reqOf, withReq } from '../shared.js'
 import { openPlanId, planDigest, planItemLines } from '../plans.js'
 import { NoScanMatch, resolveScan } from './data.js'
 import { warmSubtree } from '../../api/subtree.js'
@@ -123,14 +124,14 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
   }))
 }
 
-let fontsMemo: Promise<Uint8Array[]> | null = null
+/** The card fonts, held per isolate once fetched; a fetch pending in another request is joined (`shared.ts`). */
+const fontsMemo = new Memo<Uint8Array[]>('og-fonts')
 export function fonts(env: OgEnv, origin: string): Promise<Uint8Array[]> {
-  fontsMemo ??= Promise.all(FONT_FILES.map(async f => {
+  return fontsMemo.get('', () => Promise.all(FONT_FILES.map(async f => {
     const r = await env.ASSETS.fetch(new Request(origin + f))
     if (!r.ok) throw new Error(`font ${f}: ${r.status}`)
     return new Uint8Array(await r.arrayBuffer())
-  })).catch(e => { fontsMemo = null; throw e })
-  return fontsMemo
+  })), reqOf(env))
 }
 
 async function cardData(env: OgEnv, kind: string, params: Record<string, string>, tier: OgTier, url: URL): Promise<CardData | null> {
@@ -172,7 +173,9 @@ async function warmView(env: OgEnv, origin: string, kind: string, params: Record
  * view (+ credential) + the ledger head (an assignment recolours a card
  * within the URL's lifetime). */
 export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> {
-  const { request, env } = ctx
+  const { request } = ctx
+  // The env carries the request (`withReq`): its shared reads are owned by it, and its cancel evicts them.
+  const env = withReq(ctx.env, request.signal)
   const url = new URL(request.url)
   const keyP = deploymentKey(env)
   const t = now()

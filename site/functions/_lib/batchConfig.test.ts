@@ -12,9 +12,9 @@ import { onRequestGet as sJobs } from '../api/sweep/jobs'
 import { onRequestPost as sStop } from '../api/sweep/stop'
 import { batchConfig } from './batchConfig'
 import { batchRegionFor, batchRegions } from './gcp'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   describe('batchConfig', () => {
     it('reads every key; the project falls back to the SA key\'s, the region to the default', () => {
       expect(batchConfig({
@@ -52,7 +52,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
   }
   const post = (path: string, body: unknown) => new Request(`http://localhost${path}`, { method: 'POST', body: JSON.stringify(body) })
   const without = async (key: string) => {
-    const { db } = await sqliteD1(lineage)
+    const { db } = await sqliteD1()
     const env: Record<string, unknown> = { ...FULL, DB: db }
     delete env[key]
     return env as never
@@ -96,13 +96,13 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ])
     })
     it('a sweep cut may name only scanned buckets', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       const env = { ...FULL, DB: db } as never
       expect(await sDispatch({ request: post('/api/sweep/dispatch', { ...dispatch, buckets: ['b9'] }), env } as never).then(answer))
         .toEqual([400, 'bad bucket name'])
     })
     it('a sweep run names a known machine, and dispatch needs the D1 its runs record to', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       expect(await Promise.all([
         sDispatch({ request: post('/api/sweep/dispatch', { ...dispatch, machine: 'n2-highmem-96' }), env: { ...FULL, DB: db } } as never).then(answer),
         sDispatch({ request: post('/api/sweep/dispatch', dispatch), env: await without('D1_DB_ID') } as never).then(answer),

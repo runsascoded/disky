@@ -79,6 +79,10 @@ export const reqOf = (env: object): Req | undefined => (env as { [REQ]?: Req })[
 /** `env` carrying a request (`signal`: its client disconnect); one already carrying one is returned as is. */
 export const withReq = <E extends object>(env: E, signal?: AbortSignal | null): E => (reqOf(env) ? env : { ...env, [REQ]: new Req(signal) })
 
+/** `env`'s request's join of kind `name` (what a memo passes `shared` / `inFlight`: `env`'s request owns what it
+ *  starts and joins what another holds). */
+export const joinOf = (env: object, name: string): Join => ({ name, req: reqOf(env) })
+
 /** Trace `env`'s request's joins to `trace` (`join-<memo>` ms, `join-evict` per conviction). */
 export const traceJoins = (env: object, trace: Trace): void => {
   const r = reqOf(env)
@@ -225,6 +229,60 @@ export async function inFlight<T>(map: Map<string, Promise<T>>, key: string, mak
     return await p
   } finally {
     evict()
+  }
+}
+
+/** An isolate's memo of settled values whose pending computations are shared across requests only as owned, tracked
+ *  entries (`inFlight`): a caller finding `key` settled takes the value; finding it pending in another request, joins
+ *  it (`join`: bounded, and once it is evicted — its owner cancelled or convicted — computes it in its own context). A
+ *  rejection is never held. `max`: settled values kept, the least recently used dropped past it. For a class's
+ *  isolate-lived caches, each call passing the request at hand (`reqOf(env)`). */
+export class Memo<T> {
+  private vals = new Map<string, T>()
+  private pending = new Map<string, Promise<T>>()
+  constructor(readonly name: string, readonly max = Infinity) {}
+
+  /** Whether `key` is settled here. */
+  has(key: string): boolean { return this.vals.has(key) }
+  /** Whether `key` is settled or pending here. */
+  held(key: string): boolean { return this.vals.has(key) || this.pending.has(key) }
+  /** `key`'s settled value (now the most recently used), if any. */
+  peek(key: string): T | undefined {
+    if (!this.vals.has(key)) return undefined
+    const v = this.vals.get(key)!
+    this.vals.delete(key)
+    this.vals.set(key, v)
+    return v
+  }
+  set(key: string, v: T): void {
+    this.vals.delete(key)
+    this.vals.set(key, v)
+    while (this.vals.size > this.max) this.vals.delete(this.vals.keys().next().value!)
+  }
+  /** Forget `key`'s settled value (a computation pending for it still settles here). */
+  delete(key: string): void { this.vals.delete(key) }
+  /** The settled keys, least recently used first. */
+  keys(): IterableIterator<string> { return this.vals.keys() }
+  /** The settled entries, least recently used first (none touched). */
+  entries(): IterableIterator<[string, T]> { return this.vals.entries() }
+  /** Forget every settled value, and stop sharing the pending computations (they still settle for their owners, and
+   *  here unless `keep` says otherwise). */
+  clear(): void {
+    this.vals.clear()
+    this.pending.clear()
+  }
+
+  /** `key`'s value: settled here, else `make`'s — this request's own, or joined from the one computing it. `keep`: whether
+   *  a settled value is held (default: every one). */
+  get(key: string, make: () => Promise<T>, req?: Req, keep?: (v: T) => boolean): Promise<T> {
+    if (this.vals.has(key)) return Promise.resolve(this.peek(key)!)
+    return inFlight(this.pending, key, async () => {
+      // Settled by another request while this one waited on an entry that was then evicted.
+      if (this.vals.has(key)) return this.peek(key)!
+      const v = await make()
+      if (!keep || keep(v)) this.set(key, v)
+      return v
+    }, { name: this.name, req })
   }
 }
 

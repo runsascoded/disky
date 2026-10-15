@@ -54,6 +54,7 @@ import { combineFolds, subBlobs, type Tiers, type TierState } from './staticRuns
 import { type FilterRejectCode, pathTail, pathTailOk } from './indexedOnly.js'
 import { dropped, type HexRule, occurs, ruleOf, sameRule, segmentOccurs } from './hexRuns.js'
 import { matcherTest } from './pathQuery.js'
+import { Memo, type Req } from './shared.js'
 
 export const NAMES_DIR = 'names'
 export const ANCHORS_DIR = 'anchors'
@@ -213,39 +214,37 @@ export interface AnchorsMeta extends DrillMeta { scans?: string[]; hex_runs?: un
 
 /** One tier's anchored readers: its name index, rollups and starts-with catalog (the base: `dir` null). */
 class AnchorTier {
-  private meta?: Promise<AnchorsMeta>
-  private startMeta?: Promise<AnchorsMeta>
+  /** `anchors/meta.json` and `anchors/start/meta.json`, held once read; one pending in another request is joined
+   *  (`shared.ts`). */
+  private meta = new Memo<AnchorsMeta>('static-anchors-meta')
+  private startMeta = new Memo<AnchorsMeta>('static-anchors-start-meta')
   readonly names: StaticNames
   readonly rollups: Record<'end' | 'exact', GroupFile>
   readonly start: GroupFile
   constructor(readonly blobs: Blobs, readonly dir: string | null, caches: AnchorCaches) {
     this.names = new StaticNames(subBlobs(blobs, NAMES_DIR), caches.index?.(dir, NAMES_DIR), undefined, 8, caches.keys?.(dir, NAMES_DIR))
     const anchors = subBlobs(blobs, ANCHORS_DIR)
-    const meta = () => this.info()
+    const meta = (req?: Req) => this.info(req)
     this.rollups = {
       end: new GroupFile(anchors, 'end', 'rollups', meta, caches.top?.(dir)),
       exact: new GroupFile(anchors, 'exact', 'rollups', meta, caches.top?.(dir)),
     }
-    this.start = new GroupFile(subBlobs(anchors, START_DIR), 'start', 'rollups', () => this.startInfo(), caches.top?.(dir == null ? START_DIR : `${dir}/${START_DIR}`))
+    this.start = new GroupFile(subBlobs(anchors, START_DIR), 'start', 'rollups', req => this.startInfo(req), caches.top?.(dir == null ? START_DIR : `${dir}/${START_DIR}`))
   }
 
   /** `anchors/start/meta.json`: the starts-with catalog's liveness marker. */
-  startInfo(): Promise<AnchorsMeta> {
-    this.startMeta ??= this.blobs.json<AnchorsMeta>(`${ANCHORS_DIR}/${START_DIR}/meta.json`).then(m => {
+  startInfo(req?: Req): Promise<AnchorsMeta> {
+    return this.startMeta.get('', () => this.blobs.json<AnchorsMeta>(`${ANCHORS_DIR}/${START_DIR}/meta.json`).then(m => {
       for (const k of ['R', 'K', 'idx_rg'] as const) if (!Number.isSafeInteger(m[k]) || m[k] < 1) throw new Error(`static anchors: bad ${this.dir ?? 'base'} start meta.json ${k}`)
       return m
-    })
-    this.startMeta.catch(() => { this.startMeta = undefined })
-    return this.startMeta
+    }), req)
   }
 
-  info(): Promise<AnchorsMeta> {
-    this.meta ??= this.blobs.json<AnchorsMeta>(`${ANCHORS_DIR}/meta.json`).then(m => {
+  info(req?: Req): Promise<AnchorsMeta> {
+    return this.meta.get('', () => this.blobs.json<AnchorsMeta>(`${ANCHORS_DIR}/meta.json`).then(m => {
       for (const k of ['R', 'K', 'rg', 'idx_rg'] as const) if (!Number.isSafeInteger(m[k]) || m[k] < 1) throw new Error(`static anchors: bad ${this.dir ?? 'base'} meta.json ${k}`)
       return m
-    })
-    this.meta.catch(() => { this.meta = undefined })
-    return this.meta
+    }), req)
   }
 }
 
@@ -268,7 +267,8 @@ const HELD = 400_000
 export class AnchoredSource implements HitSource {
   private tiers = new Map<string, AnchorTier>()
   private live = new Set<string>()
-  private held = new Map<string, Promise<Found | null>>()
+  /** Scoped answers held per isolate, their sizes; one pending in another request is joined (`shared.ts`). */
+  private held = new Memo<Found | null>('static-anchors-scoped')
   private sizes = new Map<string, number>()
   private whyNot = new Map<string, FilterRejectCode>()
   readonly heavy = true
@@ -295,13 +295,14 @@ export class AnchoredSource implements HitSource {
     return yes
   }
 
-  /** The anchored stack over the light index's current state. */
-  async state(): Promise<AnchorState> {
-    const light = await this.light.state()
+  /** The anchored stack over the light index's current state. `req`, here and in every read: the request asking
+   *  (`reqOf(env)`; `shared.ts`). */
+  async state(req?: Req): Promise<AnchorState> {
+    const light = await this.light.state(req)
     const none = { version: 'none', scans: [], tiers: [], light, start: { tiers: [], scans: [] } }
     if (!light.tiers.length) return none
     let meta: AnchorsMeta
-    try { meta = await this.tier(null).info() } catch { return none }
+    try { meta = await this.tier(null).info(req) } catch { return none }
     // Built under another hex-run rule than the generation's (`static_anchors.py` records the one it read): its
     // `q$` rollups would answer another predicate, so the anchored tiers decline (`q$` still reads the light index).
     if (!sameRule(ruleOf(meta.hex_runs), light.hexRuns)) return none
@@ -310,7 +311,7 @@ export class AnchoredSource implements HitSource {
     const kept = await prefix(runs)
     const scansOf = (dirs: string[]) => { const dropped = new Set((light.manifest?.runs ?? []).filter(r => !dirs.includes(r.key)).flatMap(r => r.scans)); return light.scans.filter(s => !dropped.has(s)) }
     // The starts-with catalog: the base's, then each run's up to the first without one (none at all without the base's).
-    const baseStart = await this.tier(null).startInfo().then(() => true, () => false)
+    const baseStart = await this.tier(null).startInfo(req).then(() => true, () => false)
     const startRuns = baseStart ? await prefix(kept, `${ANCHORS_DIR}/${START_DIR}/meta.json`) : []
     return {
       version: kept.length ? `${light.version}~${kept[kept.length - 1]}` : `${light.version}~base`,
@@ -325,64 +326,59 @@ export class AnchoredSource implements HitSource {
 
   /** Whether the light index is there but the generation has no anchored tiers to read: no `anchors/meta.json`
    *  (a profile built without anchors), or one built under another hex-run rule (`state`). */
-  private async anchorless(): Promise<boolean> {
-    const st = await this.state()
+  private async anchorless(req?: Req): Promise<boolean> {
+    const st = await this.state(req)
     return !st.tiers.length && st.light.tiers.length > 0
   }
 
-  async hits(key: string, under: string, opts: HitOpts = {}): Promise<Found | null> {
+  async hits(key: string, under: string, opts: HitOpts = {}, req?: Req): Promise<Found | null> {
     const k = parseKey(key)
     // A path term whose tail is too short to name a range of the name index (`ckpt/`, `ckpt/a`).
     if (k.mode === 'path' && !pathTailOk(k.text, !!k.end)) { this.whyNot.set(key, 'slash-tail-short'); return null }
-    const f = await this.read(key, under, opts)
+    const f = await this.read(key, under, opts, req)
     // `^q`, `^q$` and a heavy `q$` need the anchored tiers: without them it is `anchor-not-indexed` (the term's
     // form, not the scan, is the reason), never the approximate walk. A light `q$` answers from the light index.
-    if (!f && parseKey(key).text && await this.anchorless()) this.whyNot.set(key, 'anchor-not-indexed')
+    if (!f && parseKey(key).text && await this.anchorless(req)) this.whyNot.set(key, 'anchor-not-indexed')
     return f
   }
 
-  private async read(key: string, under: string, opts: HitOpts): Promise<Found | null> {
+  private async read(key: string, under: string, opts: HitOpts, req?: Req): Promise<Found | null> {
     const { text, mode } = parseKey(key)
     if (!mode || !text) return null
     const t0 = Date.now()
     // A first paint of `^q`'s fleet root while its range is unread: the catalog now (a member's per-bucket totals),
     // the full read after (the view's other request starts it).
-    if (opts.firstPaint && mode === 'start' && under === '' && !(await this.wholeSettled(key))) {
-      const st = await this.state()
-      const f = await this.startScoped(key, '', st)
+    if (opts.firstPaint && mode === 'start' && under === '' && !(await this.wholeSettled(key, req))) {
+      const st = await this.state(req)
+      const f = await this.startScoped(key, '', st, req)
       if (f) return { ...f, io: { ...f.io, firstPaint: true, ms: Date.now() - t0 } }
     }
-    const whole = await this.whole(key, mode)
+    const whole = await this.whole(key, mode, req)
     if (whole === null) return null
     if (whole !== 'heavy') {
       const hits = under === '' ? whole.hits : whole.hits.filter(h => h.path.startsWith(under + '/'))
       return { hits, io: { ...whole.io, ms: Date.now() - t0 }, scans: whole.scans }
     }
-    const st = await this.state()
+    const st = await this.state(req)
     if (!st.tiers.length) return null
     // Keyed by the starts-with catalog's tiers too: a run's catalog can go live after its `anchors/meta.json`.
     const k = `${key}\0${under}@${st.version}#${st.start.tiers.length}`
-    let p = this.held.get(k)
-    if (p) { this.held.delete(k); this.held.set(k, p) } else {
-      p = mode === 'start' ? this.startScoped(key, under, st) : mode === 'path' ? this.pathScoped(key, under, st) : this.scoped(key, mode, under, st)
-      this.held.set(k, p)
-      p.then(f => this.trim(k, f), () => this.held.delete(k))
-    }
-    const f = await p
+    const f = await this.held.get(k, () => mode === 'start' ? this.startScoped(key, under, st, req) : mode === 'path' ? this.pathScoped(key, under, st, req) : this.scoped(key, mode, under, st, req), req)
+    if (!this.sizes.has(k) && this.held.has(k)) this.trim(k, f)
     if (!f && (mode === 'start' || mode === 'path')) this.whyNot.set(key, 'term-too-common')
     return f && { ...f, io: { ...f.io, ms: Date.now() - t0 } }
   }
 
   /** `^q` past its whole-range bound under `under`: the fleet root from the starts-with catalog, a view path from the
    *  groups of the prefix's range whose path bounds meet it (≤ `startMaxRows` rows), else null (`term-too-common`). */
-  private async startScoped(key: string, under: string, st: AnchorState): Promise<Found | null> {
+  private async startScoped(key: string, under: string, st: AnchorState, req?: Req): Promise<Found | null> {
     const k = `/${parseKey(key).text}`
     if (under === '') {
       if (!st.start.tiers.length) return null
       const lo: [string, string] = [k, ''], hi: [string, string] = [k, '\0']
       const io = { top: 'isolate' as const, index_reads: 0, index_bytes: 0, groups: 0, bytes: 0, rows_read: 0 }
       const parts = await Promise.all(st.start.tiers.map(async t => {
-        const sel = await t.start.select(lo, hi, io)
+        const sel = await t.start.select(lo, hi, io, undefined, req)
         return sel.groups?.length ? t.start.read(lo, hi, sel.groups, io) : []
       }))
       const got = DRILL_RULES.stack(parts)
@@ -391,11 +387,11 @@ export class AnchoredSource implements HitSource {
       return { rollup, io: { from: 'anchors', source: 'catalog', ...io, tiers: st.start.tiers.length }, scans: st.start.scans }
     }
     const readers = st.tiers.map(t => t.names)
-    const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { under })))
+    const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { under, req })))
     const upper = sels.reduce((n, s) => n + (s?.rows ?? 0), 0)
     if (upper > this.startMaxRows) return null
     const fold = () => new AnchoredHits(key, under, this.startMaxHits, st.light.hexRuns)
-    const got = await Promise.all(readers.map(r => r.read(k, Infinity, { under, fold })))
+    const got = await Promise.all(readers.map(r => r.read(k, Infinity, { under, fold, req })))
     const hits = cappedHits(key, got.map(g => g.fold as AnchoredHits), this.startMaxHits)
     if (!hits) return null
     return { hits, io: { from: 'anchors', source: 'scoped', upper, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), bytes: got.reduce((n, g) => n + g.io.bytes, 0), tiers: readers.length }, scans: st.scans }
@@ -403,15 +399,15 @@ export class AnchoredSource implements HitSource {
 
   /** A path term past its whole-range bound under `under`: the groups of its tail's range whose path bounds meet
    *  `under` (≤ `startMaxRows` rows), folded by the path test; else null (`term-too-common`). */
-  private async pathScoped(key: string, under: string, st: AnchorState): Promise<Found | null> {
+  private async pathScoped(key: string, under: string, st: AnchorState, req?: Req): Promise<Found | null> {
     const { text, end } = parseKey(key)
     const k = `/${pathTail(text)}`, exact = !!end
     const readers = st.tiers.map(t => t.names)
-    const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact, under })))
+    const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact, under, req })))
     const upper = sels.reduce((n, s) => n + (s?.rows ?? 0), 0)
     if (upper > this.startMaxRows) return null
     const fold = () => new PathTermHits(key, under, this.startMaxHits)
-    const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact, under, fold })))
+    const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact, under, fold, req })))
     const hits = cappedHits(key, got.map(g => g.fold as PathTermHits), this.startMaxHits)
     if (!hits) return null
     return { hits, io: { from: 'anchors', source: 'path', upper, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), bytes: got.reduce((n, g) => n + g.io.bytes, 0), tiers: readers.length }, scans: st.scans }
@@ -420,38 +416,35 @@ export class AnchoredSource implements HitSource {
   private trim(k: string, f: Found | null): void {
     this.sizes.set(k, f?.hits?.length ?? f?.rollup?.cells.length ?? 0)
     let n = [...this.sizes.values()].reduce((s, x) => s + x, 0)
-    for (const old of this.held.keys()) {
+    for (const old of [...this.held.keys()]) {
       if (n <= HELD || old === k) break
       n -= this.sizes.get(old) ?? 0
       this.held.delete(old); this.sizes.delete(old)
     }
   }
 
-  private wholeHeld = new Map<string, Promise<Whole | 'heavy'>>()
-  private settled = new WeakSet<Promise<Whole | 'heavy'>>()
+  /** Whole-range reads held per isolate (the newest 64); one pending in another request is joined (`shared.ts`). */
+  private wholeHeld = new Memo<Whole | 'heavy'>('static-anchors-whole', 64)
 
   /** Whether `key`'s whole-range read is held and done (per isolate, at the current stack version). */
-  private async wholeSettled(key: string): Promise<boolean> {
-    const p = this.wholeHeld.get(`${key}@${(await this.state()).version}`)
-    return !!p && this.settled.has(p)
+  private async wholeSettled(key: string, req?: Req): Promise<boolean> {
+    return this.wholeHeld.has(`${key}@${(await this.state(req)).version}`)
   }
 
   /** Step 1: the key's whole range when it is light — `q$` over every light tier, the name index's keys over the
    *  anchored tiers — held per stack version (and per colo through `cache`); `'heavy'` past `maxRows`, null when no
    *  tier is there to read. */
-  private async whole(key: string, mode: Mode): Promise<Whole | 'heavy' | null> {
+  private async whole(key: string, mode: Mode, req?: Req): Promise<Whole | 'heavy' | null> {
     // `^q` and a path term (its tail's range) read up to `startMaxRows`.
     const wide = mode === 'start' || mode === 'path'
     const maxRows = wide ? this.startMaxRows : this.opts.maxRows ?? MAX_ROWS
-    const st = mode === 'end' ? null : await this.state()
-    const light = st?.light ?? await this.light.state()
+    const st = mode === 'end' ? null : await this.state(req)
+    const light = st?.light ?? await this.light.state(req)
     const version = st ? st.version : light.version
     const scans = st ? st.scans : light.scans
     if (!(st ? st.tiers.length : light.tiers.length)) return null
     const vkey = `${key}@${version}`
-    let p = this.wholeHeld.get(vkey)
-    if (!p) {
-      p = (async () => {
+    return this.wholeHeld.get(vkey, async () => {
         const cached = await this.opts.cache?.get(vkey)
         if (cached) return { hits: cached, io: { from: 'cache', version }, scans }
         const { text, end } = parseKey(key)
@@ -460,36 +453,30 @@ export class AnchoredSource implements HitSource {
         const fold = () => mode === 'path' ? new PathTermHits(key, undefined, cap) : new AnchoredHits(key, undefined, cap, light.hexRuns)
         const exact = mode === 'path' ? !!end : mode !== 'start'
         const readers = st ? st.tiers.map(t => t.names) : light.tiers.map(t => t.names)
-        const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact })))
+        const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact, req })))
         const rows = sels.reduce((n, s) => n + (s?.rows ?? 0), 0)
         if (rows > maxRows) return 'heavy' as const
-        const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact, fold })))
+        const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact, fold, req })))
         const hits = cappedHits(key, got.map(g => g.fold as AnchoredHits | PathTermHits), cap)
         if (!hits) return 'heavy' as const
         await this.opts.cache?.put(vkey, hits)
         return { hits, io: { from: mode === 'end' ? 'shards' : 'names', version, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), bytes: got.reduce((n, g) => n + g.io.bytes, 0), tiers: readers.length }, scans }
-      })()
-      this.wholeHeld.set(vkey, p)
-      const held = p
-      p.then(() => this.settled.add(held), () => this.wholeHeld.delete(vkey))
-      while (this.wholeHeld.size > 64) this.wholeHeld.delete(this.wholeHeld.keys().next().value!)
-    }
-    return p
+    }, req)
   }
 
   /** Steps 2–3 for `q$` / `^q$` under `under` over the anchored tiers. */
-  private async scoped(key: string, mode: 'end' | 'exact', under: string, st: AnchorState): Promise<Found | null> {
+  private async scoped(key: string, mode: 'end' | 'exact', under: string, st: AnchorState, req?: Req): Promise<Found | null> {
     const text = parseKey(key).text
     const k = mode === 'end' ? text : `/${text}`
     // `q$` reads each tier's suffix shards (the light index's readers, same tiers), `^q$` its name index.
     const readers = mode === 'end' ? st.light.tiers.slice(0, st.tiers.length).map(t => t.names) : st.tiers.map(t => t.names)
-    const metas = await Promise.all(st.tiers.map(t => t.info()))
+    const metas = await Promise.all(st.tiers.map(t => t.info(req)))
     const bound = metas[0].R + 4 * metas.reduce((n, m) => n + m.rg, 0)
-    const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact: true, under })))
+    const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact: true, under, req })))
     const upper = sels.reduce((n, s) => n + (s?.rows ?? 0), 0)
     if (upper <= bound) {
       const fold = () => new AnchoredHits(key, under, Infinity, st.light.hexRuns)
-      const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact: true, under, fold })))
+      const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact: true, under, fold, req })))
       const hits = combineFolds(key, got.map(g => g.fold!)).hits
       return { hits, io: { from: 'anchors', source: 'roots', upper, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), tiers: readers.length }, scans: st.scans }
     }
@@ -497,7 +484,7 @@ export class AnchoredSource implements HitSource {
     const io = { top: 'isolate' as const, index_reads: 0, index_bytes: 0, groups: 0, bytes: 0, rows_read: 0 }
     const parts = await Promise.all(st.tiers.map(async t => {
       const gf = t.rollups[mode]
-      const sel = await gf.select(lo, hi, io)
+      const sel = await gf.select(lo, hi, io, undefined, req)
       return sel.groups?.length ? gf.read(lo, hi, sel.groups, io) : []
     }))
     const got = DRILL_RULES.stack(parts)

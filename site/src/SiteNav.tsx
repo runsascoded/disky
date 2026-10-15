@@ -232,6 +232,7 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
               ))}
               <hr />
               {DEFAULT_STORE.peer && <a role="menuitem" className="mi" href={DEFAULT_STORE.peer.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.peer.label} ↗</a>}
+              {DEFAULT_STORE.liveTotals && <a role="menuitem" className="mi" href={DEFAULT_STORE.liveTotals.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.liveTotals.label} ↗</a>}
               <a role="menuitem" className="mi" href={REPO_URL} target="_blank" rel="noreferrer"><FaGithub aria-hidden /> Source on GitHub ↗</a>
             </div>
           </FloatingFocusManager>

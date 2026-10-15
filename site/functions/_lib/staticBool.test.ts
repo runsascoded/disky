@@ -76,7 +76,7 @@ beforeAll(async () => {
     const b = fs.readFileSync(fixture(`static-filter/${k}`))
     filterFiles.set(k, b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer)
   }
-  const { db, raw } = await sqliteD1('cw')
+  const { db, raw } = await sqliteD1()
   for (const date of SCANS) {
     const v = await readJson<Record<string, D1Variant>>(`static-filter/${date}/d1.json`)
     const files = {

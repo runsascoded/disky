@@ -16,7 +16,7 @@ import type { Env } from './auth.js'
 import { columnsFor, ivHeldDates, openIndex, slices, readAsks, type Ask, type Row } from './index.js'
 import { fillHist, histAggs } from './ownerHist.js'
 import { loadLedger } from './ledger.js'
-import { shared } from './shared.js'
+import { joinOf, shared } from './shared.js'
 import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type AssignmentRow, type OwnerRow, type OwnerTotals, type PathAgg } from './ownerBands.js'
 
 /** The `Row` fields a total needs; `columnsFor` names them per generation. */
@@ -132,7 +132,7 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
  * after an owner change reads and writes nothing per scan), memoized per (scan, head) in the isolate. */
 export async function ownerTotals(env: Env, date: string): Promise<OwnerTotalsBody> {
   const { ownerRows, head } = await loadLedger(env)
-  return shared(memo, `${date}:${head}`, () => compute(env, date, foldLatest(ownerRows), head), MEMO_WAIT)
+  return shared(memo, `${date}:${head}`, () => compute(env, date, foldLatest(ownerRows), head), MEMO_WAIT, joinOf(env, 'owner-totals'))
 }
 
 /** The live assignments priced against `date` — what a user lens folds. */

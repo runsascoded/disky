@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { D1Database } from '@cloudflare/workers-types'
 import type { Env } from '../_lib/auth'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1 } from '../_lib/testD1'
 import { indexedScan, scanArg } from '../_lib/scanArg'
 
 // A scan id or `d=` slug naming no indexed scan is a 404 `{error}` on every
@@ -20,11 +20,11 @@ const { onRequestGet: diff } = await import('./diff')
 const { onRequestGet: owners } = await import('./owners')
 const { onRequestGet: assignments } = await import('./assignments')
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   // Two scans on 10/9 (06:01, 12:36) and a date-only 10/8.
   const SCANS = ['2026-10-08', '2026-10-09T0601', '2026-10-09T1236']
   async function db(): Promise<D1Database> {
-    const { db } = await sqliteD1(lineage)
+    const { db } = await sqliteD1()
     for (const date of SCANS) await db.prepare("INSERT INTO index_schema (date, variant, version, schema_json) VALUES (?, 'path', 2, '[]')").bind(date).run()
     return db
   }
@@ -67,7 +67,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   describe('a date-only and a timed scan on one day', () => {
     it('the day slug is the latest; each scan by its exact slug', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       for (const date of ['2026-10-09', '2026-10-09T1236']) await db.prepare("INSERT INTO index_schema (date, variant, version, schema_json) VALUES (?, 'path', 2, '[]')").bind(date).run()
       const e = { ...STORE, DB: db } as Env
       expect(await Promise.all(['d=261009', 'd=2610090000', 'd=2610091236', 'date=2026-10-09', 'date=2026-10-09T1236'].map(qs => scanArg(e, new URLSearchParams(qs)))))
@@ -77,7 +77,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   describe('a date-only scan sharing its day is keyed by its start (`index_schema.started`)', () => {
     it('its start minute and hour select it; the midnight stays an alias; the day is the latest', async () => {
-      const { db } = await sqliteD1(lineage)
+      const { db } = await sqliteD1()
       // The 10/9 daily run's start, as `index-sync -m` records it on the pointer.
       const started: Record<string, string> = { '2026-10-09': '2026-10-09T04:30:12.345Z' }
       for (const date of ['2026-10-08', '2026-10-09', '2026-10-09T1236']) {

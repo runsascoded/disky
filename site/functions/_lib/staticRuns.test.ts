@@ -5,6 +5,7 @@ import { liveTotal, MAX_ROWS, SuffixHits } from './staticFilter.js'
 import type { Blobs } from './staticNames.js'
 import { latestManifest, tiers } from './staticRuns.js'
 import { fixture } from './testStore.js'
+import { abandoned, BOUND, hangFirst } from './testHang.js'
 
 // The daily runs' reader (`staticRuns.ts`) over `fixtures/static-runs/` (`gen.py`): a base through 2026-09-01 and
 // a run per scan — 2026-10-01, 2026-10-02 (date ids), then two scans on one day, 2026-10-03T0600 and 2026-10-03T1800
@@ -192,6 +193,25 @@ describe('static runs', () => {
     now = 1000
     expect(await t.scans()).toEqual(DATES.slice(0, 4))
     expect(await total()).toEqual({ b: 30 + 31 + 32 + 33 + 34, o: 5, roots: 5 })
+  })
+})
+
+describe('a refresh abandoned by its request (its read frozen) is never awaited by the next one (`shared.ts`)', () => {
+  it.each(['cancel', 'end'] as const)('request A\'s refresh hangs and A %ss: request B refreshes in its own context and answers', async how => {
+    const blobs = hangFirst(files(), method => method === 'list')
+    const t = tiers(blobs)
+    const got = await abandoned(req => t.scans(req), blobs.hung, how, how === 'cancel' ? BOUND / 2 : 5 * BOUND)
+    expect(got).toEqual(DATES)
+  })
+  it('a warm isolate\'s TTL refresh, likewise: B does not wait on A\'s', async () => {
+    let now = 0
+    let hang = false
+    const blobs = hangFirst(files(), method => hang && method === 'list')
+    const t = tiers(blobs, { ttlMs: 1000, now: () => now })
+    expect(await t.scans()).toEqual(DATES)
+    now = 1000
+    hang = true
+    expect(await abandoned(req => t.scans(req), blobs.hung, 'cancel', BOUND / 2)).toEqual(DATES)
   })
 })
 

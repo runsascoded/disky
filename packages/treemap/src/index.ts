@@ -58,3 +58,5 @@ export type {
   DiffTableRow,
   DiffTableProps,
 } from './diff'
+export { candidates, fitCandidate, inlineRoom, NAME_MIN_PX } from './cellText'
+export type { CellText } from './cellText'

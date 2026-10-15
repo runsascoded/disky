@@ -26,6 +26,7 @@ import type { Env } from './auth.js'
 import { bufferSlice, cacheGet, cachePut, cachedRange, chunkSpan, decodeColumns, type IndexHandle, mapLimit, num, planRuns, readAsks, readFooterBytes, readGroupsAt, reviveRowGroup, type Row, RUN_READS, runsInOrder, str, toRow } from './index.js'
 import type { NamePred } from './scope.js'
 import { type Formula, or, type SearchPlan } from './searchQuery.js'
+import { Memo, reqOf } from './shared.js'
 import { storeKey } from './stores.js'
 import { compressors } from './zstd.js'
 
@@ -93,18 +94,20 @@ interface SearchIndex {
 
 const DIR_COLS = ['file', 'rg', 'row_start', 'row_end', 'k_min', 'k_max', 'rg_json']
 const MISS_TTL = 60_000
-const opened = new Map<string, { at: number; idx: Promise<SearchIndex | null> }>()
+/** Each generation's search directory (or none), and when it was opened; an open pending in another request is
+ *  joined (`shared.ts`). */
+const opened = new Memo<{ at: number; idx: SearchIndex | null }>('search-open')
 
 /** A generation's search directory — v2's, else v1's — or null when it
  * has neither (a generation written without `-S`, every v1 index), or the
  * deployment builds none (`SEARCH_SIDECARS` unset: nothing to probe).
  * Remembered per isolate (a miss for `MISS_TTL`). */
-export function openSearch(env: Env, dir: string): Promise<SearchIndex | null> {
-  if (!env.SEARCH_SIDECARS) return Promise.resolve(null)
+export async function openSearch(env: Env, dir: string): Promise<SearchIndex | null> {
+  if (!env.SEARCH_SIDECARS) return null
   const ck = `${storeKey(env)}|${dir}|search`
-  const hit = opened.get(ck)
-  if (hit && Date.now() - hit.at < MISS_TTL) return hit.idx
-  const idx = (async (): Promise<SearchIndex | null> => {
+  const hit = opened.peek(ck)
+  if (hit && Date.now() - hit.at >= MISS_TTL) opened.delete(ck)
+  return (await opened.get(ck, async () => ({ at: Date.now(), idx: await (async (): Promise<SearchIndex | null> => {
     for (const [v, role] of [[2, 'rowsSearch'], [1, 'search']] as const) {
       const key = searchKey(dir, role)
       let buf: ArrayBuffer
@@ -132,10 +135,7 @@ export function openSearch(env: Env, dir: string): Promise<SearchIndex | null> {
       }
     }
     return null
-  })()
-  opened.set(ck, { at: Date.now(), idx })
-  idx.catch(() => opened.delete(ck))
-  return idx
+  })() }), reqOf(env))).idx
 }
 
 /** Directory groups, each decoded once per isolate: the misses as merged

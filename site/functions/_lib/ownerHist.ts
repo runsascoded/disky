@@ -6,7 +6,7 @@
 import type { Env } from './auth.js'
 import { ivHeldDates, ivHorizon, readAsksHistory, type Ask, type Row } from './index.js'
 import { addAgg, newAgg, type PathAgg } from './ownerBands.js'
-import { shared } from './shared.js'
+import { joinOf, shared } from './shared.js'
 
 /** A prefix's aggregate over scan ordinals `[vf, vt)`. */
 export type Version = [number, number, PathAgg]
@@ -80,7 +80,7 @@ async function load(env: Env, tag: string, refresh = false): Promise<Map<string,
     tables.set(tag, t)
     refreshing.delete(tag)
     return t.rows
-  }, WAIT)
+  }, WAIT, joinOf(env, 'owner-hist'))
 }
 
 /** `want` (path → depth) not priced through scan ordinal `d` (and the roots, if they aren't). */
@@ -117,7 +117,7 @@ async function price(env: Env, tag: string, rows: Map<string, Hist>, keys: Map<s
     for (let i = 0; i < stmts.length; i += 100) await env.DB!.batch(stmts.slice(i, i + 100))
     for (const [k, h] of put) rows.set(k, h)
     return { groups: got.groups, hz: got.hz }
-  }, WAIT)
+  }, WAIT, joinOf(env, 'owner-hist-price'))
 }
 
 /** Prefixes a fold prices over the history in its own request; more (a first fill) fold per scan meanwhile. */

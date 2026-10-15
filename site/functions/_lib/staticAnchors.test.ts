@@ -7,6 +7,7 @@ import { type Blobs, type Hit } from './staticNames'
 import { tiers } from './staticRuns'
 import { parseAst } from './querySyntax'
 import { fixture, readJson } from './testStore'
+import { abandoned, BOUND, hangFirst } from './testHang'
 
 // Anchored search (`staticAnchors.ts`) over `fixtures/static-anchors/` (`gen.py`): a base generation of four scans and
 // two runs, built by `dt_cloud.static_anchors` (R = 3, K = 2; 4-row name groups, 5-row suffix groups, 4-row rollup
@@ -380,6 +381,24 @@ describe('the anchored stack', () => {
     const blobs = blobsOf({ hide: [...files.keys()] })
     const s = new AnchoredSource(tiers(blobs).tiers, blobs, { maxRows: 0 })
     expect([await s.hits('/tomat', ''), s.why('/tomat')]).toEqual([null, undefined])
+  })
+})
+
+describe('a read abandoned by its request (its I/O frozen) is never awaited by the next one (`shared.ts`)', () => {
+  const each = it.each(['cancel', 'end'] as const)
+  const window = (how: 'cancel' | 'end') => how === 'cancel' ? BOUND / 2 : 5 * BOUND
+  each('a whole range (`^q`, light) request A was reading when it %sed: request B reads it in its own context', async how => {
+    const want = (await source('run2').hits('/tr', ''))!.hits
+    const blobs = hangFirst(blobsOf(), method => method === 'range')
+    const s = new AnchoredSource(tiers(blobs).tiers, blobs)
+    expect(await abandoned(req => s.hits('/tr', '', {}, req).then(f => f?.hits), blobs.hung, how, window(how))).toEqual(want)
+  })
+  each('a scoped answer (`q$` past its bound) request A was reading when it %sed: request B reads it in its own context', async how => {
+    const f = (await source('run2', 0).hits('.json/', ''))!
+    const blobs = hangFirst(blobsOf(), method => method === 'range')
+    const s = new AnchoredSource(tiers(blobs).tiers, blobs, { maxRows: 0 })
+    const got = await abandoned(req => s.hits('.json/', '', {}, req).then(g => [g?.io.source, g?.hits ?? g?.rollup]), blobs.hung, how, window(how))
+    expect(got).toEqual([f.io.source, f.hits ?? f.rollup])
   })
 })
 

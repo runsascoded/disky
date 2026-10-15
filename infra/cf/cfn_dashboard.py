@@ -19,8 +19,9 @@ Pages project's *deployment_configs* — env vars, D1/KV bindings, secrets — f
 `wrangler.toml` on every deploy. This component must not fight that, so the
 `PagesProject` carries `ignore_changes=["deployment_configs"]`: **the component
 owns the container, wrangler fills it.** Secret VALUES never enter code or state.
-D1 *migrations* stay with the app (`wrangler d1 migrations apply`); only the
-database resource is modeled here.
+The D1 *schema* stays with the app (`site/schema.sql`, recipes in
+`site/migrations/`, applied with `wrangler d1 execute`); only the database
+resource is modeled here.
 
 The data-plane job (a scan/snapshot pipeline) is deliberately NOT here — it's
 per-cloud (GCP Batch, or a Lambda/Cloud Run elsewhere) and belongs in its own
@@ -216,7 +217,7 @@ class CfnDashboard(pulumi.ComponentResource):
                 opts=child(f"domain:{alias.branch}", depends_on=[cname]),
             )
 
-        # D1 database (container only; migrations stay with the app).
+        # D1 database (container only; its schema stays with the app).
         self.d1 = cloudflare.D1Database(
             f"{name}-d1",
             account_id=account_id,

@@ -20,7 +20,7 @@ import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
@@ -140,8 +140,8 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     }
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
-    const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; trace?: typeof st.trace } = {}) => {
-      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
+    const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; walkMs?: number; trace?: typeof st.trace } = {}) => {
+      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
       // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
       const keep = keepFor(diff)
       const body = JSON.stringify({
@@ -159,7 +159,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     }
     // A partial answer schedules the full one in the background (`upgradePartial`, as subtree.ts).
     const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
+      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS }), ctx.waitUntil?.bind(ctx)))
       return res
     }
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))

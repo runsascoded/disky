@@ -1,12 +1,12 @@
 // `/api/session-log` (specs/session-log.md): the admin switch (gate, default /
 // cap / expiry, the per-isolate cache, the audit row), auth, validation and
-// size limits, storage writes, retention and the admin reads — over the cw
-// lineage's migrations (`0018_session_log.sql`) and the real gate (Bearer
+// size limits, storage writes, retention and the admin reads — over the D1
+// schema (`session_log*` in `site/schema.sql`) and the real gate (Bearer
 // grants minted in the same in-memory D1).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { onRequest, purgeState } from './session-log/[[path]]'
 import { gateFor } from '../_lib/auth'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1 } from '../_lib/testD1'
 import { purge } from '../_lib/sessionLog'
 import { LIMITS, parseUntil, switchState, validateBatch } from '../_lib/sessionLogShape'
 
@@ -16,13 +16,13 @@ const HOST = 'https://site.example.test'
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW); purgeState.last = 0 })
 afterEach(() => { vi.useRealTimers() })
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const TTL = 60_000
 
   /** A fresh deployment (switch off), or with the switch on through `on` (`PUT` by the admin; its audit row
    *  dropped). Each setup's D1 has its own switch cache, as each isolate does. */
   async function setup(vars: Record<string, string> = {}, on: string | null = '2026-10-17') {
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', ...vars }
     const gate = gateFor(env as never)!
     const tok = async (email: string, scopes: string[]) =>

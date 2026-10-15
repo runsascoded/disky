@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { onRequest as authApi } from '../api/auth/[[path]]'
 import { type Env, gateFor, scopesFor } from './auth'
 import { siteAllowlist } from './allowlist'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const ORIGIN = 'https://disk.example'
   const STAFF = 'ops@runsascoded.com'
 
   async function setup() {
-    const { db } = await sqliteD1(lineage)
+    const { db } = await sqliteD1()
     const env: Env = { DB: db, SESSION_SECRET: 'test-secret', BASE_SCOPE: 'laptop', STAFF_DOMAIN: 'runsascoded.com' }
     return { db, env, store: siteAllowlist(env) }
   }

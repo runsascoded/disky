@@ -36,7 +36,7 @@ export interface Env {
    *  `allowed_emails` row — what the Access policy's email-domain include did
    *  (cw-s3: `coreweave.com`). Unset = allowlist only. */
   VIEWER_DOMAINS?: string
-  /** Set where the `admin_emails` table exists (cw-s3, `migrations/cw/0001_init.sql`):
+  /** Set where the `admin_emails` table exists (cw-s3; `site/schema.sql`):
    *  its rows get `admin` on top of the base scope. Unset (gcs) = staff only. */
   ADMIN_EMAILS?: string
   /** Local dev only (`.dev.vars`): email the localhost dev identity acts as.
@@ -254,7 +254,7 @@ export interface Identity {
 const withAdmin = (id: Omit<Identity, 'admin'>): Identity => ({ ...id, admin: id.scopes.includes(ADMIN_SCOPE) || id.scopes.includes('*') })
 
 /** Staff (by domain) or an `admin_emails` row (the deployment's own admin
- *  list, `admin_emails` in `site/migrations/cw/0001_init.sql`, where `ADMIN_EMAILS` says it exists). */
+ *  list, `admin_emails` in `site/schema.sql`, where `ADMIN_EMAILS` says it exists). */
 export async function isAdmin(env: Env, email: string): Promise<boolean> {
   if (isStaff(env, email)) return true
   return adminRow(env, email.toLowerCase())

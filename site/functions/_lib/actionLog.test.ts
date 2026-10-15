@@ -11,7 +11,7 @@ const LEDGER = `
 
 describe('actionLog: every owner action, newest first, with what became of it', () => {
   it('live, superseded, overridden by an ancestor, retracted — and `_` is not a wildcard', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     raw.exec(LEDGER)
     const act = (id: number, prefix: string, owner: string | null, memo: string | null = null) => raw.exec(
       `INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, memo) VALUES (${id}, 'u${id}@x', ${100 + id}, 's', '${prefix}', 1, ${owner ? `'${owner}'` : 'NULL'}, ${memo ? `'${memo}'` : 'NULL'});` +

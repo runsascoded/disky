@@ -7,9 +7,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const A = '2026-10-01'
   const B = '2026-10-01T1200' // shares A's day: A's start is its pointer's (`index_schema.started`, D1)
   const OLD = '2026-08-01' // a snapshot dir D1 never indexed: series fills it from its meta
@@ -122,7 +122,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
   async function world(served: boolean, extra: Partial<Env> = {}): Promise<World> {
     vi.resetModules()
     const { FILES, readJson, seedGeneration } = await import('./testStore')
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     const fx = 'v2-lens' // owned rows (alice, bob): provenance has someone to explain
     const { path, bysize } = await readJson<Record<string, import('./testStore').D1Variant>>(`${fx}/d1.json`)
     const variants = { path, bysize }

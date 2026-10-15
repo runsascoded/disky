@@ -383,6 +383,12 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             style={{ background: 'none', border: 'none', cursor: 'pointer', font: 'inherit', color: 'inherit', opacity: gearOpen ? 1 : 0.55, padding: '0 2px' }}
           >⚙</button>
         </Explain>
+        {store.liveTotals && (
+          <a className="over-time-live" href={store.liveTotals.href} target="_blank" rel="noreferrer"
+             style={{ marginLeft: 'auto', fontSize: '0.6em', fontWeight: 'normal', opacity: 0.8 }}>
+            {store.liveTotals.label} ↗
+          </a>
+        )}
       </h2>
       {gearOpen && (
         <div className="over-time-config" style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', margin: '0 0 6px', fontSize: '0.85em', opacity: 0.92 }}>

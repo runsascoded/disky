@@ -1,9 +1,9 @@
-// specs/done/scan-runs-ui.md: /api/scan-runs over the cw lineage's migration (FKs on).
+// specs/done/scan-runs-ui.md: /api/scan-runs over the D1 schema (FKs on).
 import { describe, expect, it, vi } from 'vitest'
 import { onRequestGet as route } from '../api/scan-runs/[[path]]'
-import { LINEAGES, migrationNamed, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const SEED = `
 INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_ts, job_name, region, cost_usd, source, updated_ts, store) VALUES
   ('a', '2026-10-07', 'scan', NULL, 'succeeded', 100, 400, 'job-a', 'r1', 1.5, 'backfill', 0, 'primary'),
@@ -23,7 +23,7 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
     it('returns active overlapping spans to the same request clock on detail and list', async () => {
       const clock = vi.spyOn(Date, 'now').mockReturnValue(400_000)
       try {
-        const { db, raw } = await sqliteD1(lineage)
+        const { db, raw } = await sqliteD1()
         raw.exec(SEED)
         raw.exec(`
         UPDATE scan_runs SET status = 'running', finished_ts = NULL WHERE run_id = 'a';
@@ -40,7 +40,7 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
       }
     })
     it('preserves a historical timeout and exposes its linked recovery separately', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec(SEED)
       raw.exec(`
       UPDATE scan_run_phases SET note = 'failed (exit 124)' WHERE run_id = 'a' AND phase = 'index';
@@ -63,7 +63,7 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
       ])
     })
     it('lists the store\'s orchestrating runs with their totals and links', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec(SEED)
       const r = await get(db, '')
       const body = (await r.json()) as { configured: boolean; project: string; meta: string; runs: { run: { run_id: string }; out_bytes: number; delta_bytes: number | null; downstream: number; cost_usd: number; failed_at: string | null }[] }
@@ -74,7 +74,7 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
       ])
     })
     it('one run: phases, outputs with deltas, downstream jobs; 404 for an unknown id', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec(SEED)
       const r = await get(db, 'a')
       const body = (await r.json()) as { run: { run_id: string }; phases: { phase: string }[]; outputs: { key: string; delta_bytes: number | null }[]; downstream: { run_id: string }[]; siblings: unknown[]; prev_scan: string | null; next_scan: string | null }
@@ -85,7 +85,7 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
       expect([missing.status, await missing.json()]).toEqual([404, { error: 'no scan run nope' }])
     })
     it('`store=<key>` reads that secondary store\'s runs; an unknown store is a 404', async () => {
-      const { db, raw } = await sqliteD1(lineage)
+      const { db, raw } = await sqliteD1()
       raw.exec(SEED)
       const env = { STORES_JSON: JSON.stringify({ meta: {} }) }
       const primary = await (await get(db, '', env)).json() as import('./scanRuns').ScanRunsList
@@ -99,7 +99,8 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
       expect([unknown.status, await unknown.json()]).toEqual([404, { error: 'unknown store \'nope\'' }])
     })
     it('a D1 without the tables answers configured: false', async () => {
-      const { db } = await sqliteD1(lineage, { before: await migrationNamed(lineage, 'scan_runs') })
+      const { db, raw } = await sqliteD1()
+      raw.exec('DROP TABLE scan_run_outputs; DROP TABLE scan_run_phases; DROP TABLE scan_runs')
       const r = await get(db, '')
       expect([r.status, await r.json()]).toEqual([200, { configured: false, runs: [], project: 'proj', meta: 'https://h.test/meta' }])
     })

@@ -11,6 +11,7 @@
  * fitted with a caller-supplied `measure`, since there's no canvas to ask.
  */
 import { CONTAINER_BG, DEFAULT_PALETTE, parseColor, slotColor } from './colors'
+import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { resolveCellStyle, resolveRing, type StyleOpts } from './cellStyle'
 import { flattenPlaced, isFolded, layoutCells, type FoldedNode, type LayoutConfig, type PlacedCell } from './layout'
 import { foldSmall, foldThin, squarify } from './squarify'
@@ -78,8 +79,8 @@ export interface SvgPaintOpts<T> {
   getSize: (n: T) => number
   getLabel: (n: T) => string
   formatSize: (n: number) => string
-  /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change). */
-  formatCell?: (n: T) => string
+  /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change; candidates longest first: `CellText`). */
+  formatCell?: (n: T) => CellText
   colorForCell?: StyleOpts<T>['colorForCell']
   /** Text width in px of `text` at `px` font size (the SVG's font). */
   measure: (text: string, px: number) => number
@@ -201,8 +202,8 @@ export function treemapSvg<T>(cells: PlacedCell<T>[], o: SvgPaintOpts<T>): strin
       const gap = 6
       const kidSize = folded ? (cell.node as FoldedNode<T>).size : o.getSize(cell.node as T)
       const inlineSize = (hasKids || h <= 34) && w > inlineMin
-      const sizeText = folded || !o.formatCell ? o.formatSize(kidSize) : o.formatCell(cell.node as T)
-      const szText = inlineSize ? sizeText : ''
+      const cands = folded || !o.formatCell ? [o.formatSize(kidSize)] : candidates(o.formatCell(cell.node as T))
+      const szText = inlineSize ? fitCandidate(cands, inlineRoom(cw, pad, gap, o.measure(label, px)), t => o.measure(t, px)) : ''
       const szW = inlineSize ? o.measure(szText, px) : 0
       const nameMax = cw - 2 * pad - (inlineSize ? szW + gap : 0)
       const name = fitText(label, Math.max(0, nameMax), px, o.measure)
@@ -214,7 +215,7 @@ export function treemapSvg<T>(cells: PlacedCell<T>[], o: SvgPaintOpts<T>): strin
         }
       }
       if (!hasKids && h > 34 && ch >= 2 + px + 3 + fsSm) {
-        const second = fitText(sizeText, cw - 2 * pad, fsSm, o.measure)
+        const second = fitText(fitCandidate(cands, cw - 2 * pad, t => o.measure(t, fsSm)), cw - 2 * pad, fsSm, o.measure)
         if (second) out.push(text(x + pad, y + 2 + px + 3, second, fsSm, ink, 0.75))
       }
     }

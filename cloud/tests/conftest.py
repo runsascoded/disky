@@ -4,41 +4,19 @@ case removes them with `monkeypatch.delenv`. The layer-2 template and the
 static-names profile start unset. No cost labels (`DISKY_LABELS`)
 leak in from the shell: a test that wants them sets them.
 
-A test against the D1 schema takes `d1_lineage`: it runs once per migrations
-lineage this branch carries (each directory under `site/migrations/`)."""
-import re
-from dataclasses import dataclass
+A test against the D1 schema takes `d1_db`: a fresh SQLite holding the branch's
+schema (`site/schema.sql`), foreign keys ON (as D1 enforces them)."""
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-MIGRATIONS = Path(__file__).resolve().parents[2] / "site/migrations"
-LINEAGES = sorted(d.name for d in MIGRATIONS.iterdir() if d.is_dir())
+from dt_cloud.d1_schema import replay, schema_file
 
 
-@dataclass(frozen=True)
-class D1Lineage:
-    """One D1 migrations lineage: `site/migrations/<name>/NNNN_<stem>.sql`."""
-    name: str
-
-    @property
-    def dir(self) -> Path:
-        return MIGRATIONS / self.name
-
-    def migrations(self) -> list[Path]:
-        return sorted(self.dir.glob("*.sql"))
-
-    def named(self, stem: str) -> Path:
-        """The one migration named `NNNN_<stem>.sql`, whatever its number here."""
-        hits = [f for f in self.migrations() if re.sub(r"^\d+_", "", f.name) == f"{stem}.sql"]
-        if len(hits) != 1:
-            raise LookupError(f"{self.name}: {len(hits)} migrations named `{stem}`: {[f.name for f in hits]}")
-        return hits[0]
-
-
-@pytest.fixture(params=LINEAGES)
-def d1_lineage(request) -> D1Lineage:
-    return D1Lineage(request.param)
+@pytest.fixture
+def d1_db() -> sqlite3.Connection:
+    return replay([schema_file().read_text()])
 
 
 @pytest.fixture(autouse=True)

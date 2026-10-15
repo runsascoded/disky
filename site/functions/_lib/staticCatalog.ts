@@ -21,6 +21,7 @@ import { parquetReadObjects } from 'hyparquet'
 import { type Blobs, cmp, decodeFlat, type FlatSchema, type IndexCache, scanAt, type Totals } from './staticNames.js'
 import { compressors } from './zstd.js'
 import { ruleOf } from './hexRuns.js'
+import { Memo, type Req } from './shared.js'
 
 export const CELLS = 'catalog/cells.parquet'
 export const CELL_SCHEMA: FlatSchema = { columns: ['q', 'bucket', 'vf', 'b', 'o'], types: ['BYTE_ARRAY', 'BYTE_ARRAY', 'INT64', 'INT64', 'INT64'] }
@@ -70,44 +71,41 @@ export function catalogAnswer(member: Member, dates: string[]): Record<string, T
 }
 
 export class StaticCatalog {
-  private meta?: Promise<CatalogMeta>
-  private idx?: Promise<CatalogIndex>
+  /** `meta.json` and the decoded index, held once read; a read pending in another request is joined, never awaited
+   *  as is (`shared.ts`: that request may be gone, its I/O frozen). */
+  private meta = new Memo<CatalogMeta>('static-catalog-meta')
+  private idx = new Memo<CatalogIndex>('static-catalog-index')
   constructor(readonly blobs: Blobs, readonly cache?: IndexCache<CatalogIndex>) {}
 
-  /** `meta.json` (isolate-held). */
-  info(): Promise<CatalogMeta> {
-    this.meta ??= this.blobs.json<CatalogMeta>('catalog/meta.json').then(m => {
+  /** `meta.json` (isolate-held). `req`: the request asking (`reqOf(env)`). */
+  info(req?: Req): Promise<CatalogMeta> {
+    return this.meta.get('', () => this.blobs.json<CatalogMeta>('catalog/meta.json').then(m => {
       if (!Number.isSafeInteger(m.membership?.max_rows) || m.membership.max_rows < 1 || !Number.isSafeInteger(m.bytes)) throw new Error('static catalog: bad meta.json')
       ruleOf(m.hex_runs)
       return m
-    })
-    this.meta.catch(() => { this.meta = undefined })
-    return this.meta
+    }), req)
   }
 
   /** The index: the isolate's, else the colo cache's, else `index.parquet` decoded (and cached). */
-  private async index(io: CatalogIo): Promise<CatalogIndex> {
-    if (this.idx) { io.index = 'isolate'; return this.idx }
-    const p = (async () => {
+  private async index(io: CatalogIo, req?: Req): Promise<CatalogIndex> {
+    if (this.idx.held('')) io.index = 'isolate'
+    return this.idx.get('', async () => {
       const cached = await this.cache?.get('catalog/index.parquet')
       if (cached) { io.index = 'cache'; return cached }
       io.index = 'file'
-      const [meta, buf] = await Promise.all([this.info(), this.blobs.range('catalog/index.parquet', 0)])
+      const [meta, buf] = await Promise.all([this.info(req), this.blobs.range('catalog/index.parquet', 0)])
       const idx = await catalogIndex(buf, meta)
       await this.cache?.put('catalog/index.parquet', idx)
       return idx
-    })()
-    this.idx = p
-    p.catch(() => { if (this.idx === p) this.idx = undefined })
-    return p
+    }, req)
   }
 
   /** `q`'s cells, or null when it is not a member. `partial`: this file is one tier of several (the base and its runs,
    *  `staticRuns.ts`): its cells are a part, and the header's count (`n`) covers every tier, so it is returned,
-   *  not checked here. */
-  async lookup(q: string, opts: { partial?: boolean } = {}): Promise<{ io: CatalogIo; member: Member | null }> {
+   *  not checked here. `req`: the request asking (`reqOf(env)`). */
+  async lookup(q: string, opts: { partial?: boolean; req?: Req } = {}): Promise<{ io: CatalogIo; member: Member | null }> {
     const io: CatalogIo = { groups: 0, bytes: 0, rows_read: 0, index: 'isolate' }
-    const idx = await this.index(io)
+    const idx = await this.index(io, opts.req)
     const [a, b] = catalogGroups(idx, q)
     if (a === b) return { io, member: null }
     io.groups = b - a

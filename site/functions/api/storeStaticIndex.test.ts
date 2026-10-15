@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES } from '../_lib/testD1'
+
 import { A, unionDeployment } from '../_lib/testUnion'
 import { type Hit, injectedStores, type StaticFilterStore } from '../_lib/staticFilter'
 import { REJECT_MESSAGES } from '../_lib/indexedOnly'
@@ -35,12 +35,12 @@ const META = { vars: { ROOT_LABEL: 'our storage', SNAPSHOTS_SUBDIR: 'meta', STOR
 
 type Body = { q?: string; matches?: string[]; matched?: { path: string; b: number; o: number }[]; matchCount?: { n: number; b: number; o: number }; tree: { b: number } }
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-    deployment = await unionDeployment(lineage)
+    deployment = await unionDeployment()
   })
 
   /** The deployment with the static filter on (the primary's index), no union view; `meta` as configured. */

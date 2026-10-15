@@ -3,7 +3,7 @@
  * (specs/done/view-serving.md §2). */
 import type { Env } from './auth.js'
 import type { OwnerRow } from './ownerBands.js'
-import { shared } from './shared.js'
+import { joinOf, Memo, reqOf, shared } from './shared.js'
 
 export interface Ledger {
   ownerRows: OwnerRow[]
@@ -21,7 +21,7 @@ export async function loadLedger(env: Env): Promise<Ledger> {
   const head = await ledgerHead(env)
   const key = String(head)
   for (const k of rowsMemo.keys()) if (k !== key) rowsMemo.delete(k) // one head at a time
-  return shared(rowsMemo, key, () => loadRows(env, head), 15_000)
+  return shared(rowsMemo, key, () => loadRows(env, head), 15_000, joinOf(env, 'ledger'))
 }
 
 async function loadRows(env: Env, head: number): Promise<Ledger> {
@@ -35,16 +35,14 @@ async function loadRows(env: Env, head: number): Promise<Ledger> {
 /** Does this deployment keep an ownership ledger? The gcs lineage does; cw's
  * D1 has no ledger tables and a secondary store no ledger at all, so their
  * owner pools stay the scan's attribution. Checked once per isolate and database. */
-const ledgerTables = new WeakMap<object, Promise<boolean>>()
+const ledgerTables = new WeakMap<object, Memo<boolean>>()
 export function hasLedger(env: Env): Promise<boolean> {
   if (!env.DB || env.STORE_KEY) return Promise.resolve(false)
-  let has = ledgerTables.get(env.DB)
-  if (!has) {
-    has = env.DB.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('actions', 'owner_prefixes')")
-      .first<{ n: number }>().then(r => r?.n === 2)
-    ledgerTables.set(env.DB, has)
-  }
-  return has
+  const db = env.DB
+  let has = ledgerTables.get(db)
+  if (!has) ledgerTables.set(db, (has = new Memo('ledger-tables')))
+  return has.get('', () => db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name IN ('actions', 'owner_prefixes')")
+    .first<{ n: number }>().then(r => r?.n === 2), reqOf(env))
 }
 
 /** Just the head (one tiny query) — for cache keys before deciding whether a

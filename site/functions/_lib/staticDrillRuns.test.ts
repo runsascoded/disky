@@ -5,6 +5,8 @@ import { covers, drillSource, fromDrill } from './staticFilter'
 import { type Blobs, type Hit } from './staticNames'
 import { tiers } from './staticRuns'
 import { fixture, readJson } from './testStore'
+import { abandoned, BOUND, hangFirst } from './testHang'
+import { JOIN, Req } from './shared'
 
 // The drilldown's runs (`staticDrill.ts` over base ⊕ runs) on `fixtures/static-drill-runs/` (`gen.py`): a base
 // generation's `drill/` over three scans and two runs' `deltas/<scan>/drill/` on one day (`2026-08-04T0600`,
@@ -50,13 +52,14 @@ function blobsOf(opts: { hide?: string[]; corrupt?: string[]; reads?: string[] }
   }
 }
 
-/** The drill as the site wires it: the runs and the fleet root's catalog from the light index's tiers. */
-function wired(opts: { hide?: string[]; corrupt?: string[]; reads?: string[]; rules?: DrillRules } = {}): Drill {
+/** The drill as the site wires it: the runs and the fleet root's catalog from the light index's tiers. `now`: the
+ *  drill's and the tiers' clock (a broken tier's cut lasts `brokenTtlMs` of it). */
+function wired(opts: { hide?: string[]; corrupt?: string[]; reads?: string[]; rules?: DrillRules; now?: () => number } = {}): Drill {
   const blobs = blobsOf(opts)
-  const t = tiers(blobs)
+  const t = tiers(blobs, { now: opts.now })
   const runs = async () => (await t.tiers.state()).tiers.flatMap(x => x.dir ? [x.dir] : [])
-  if (!opts.rules) return (drillSource(blobs, undefined, { runs, catalog: t.catalog }) as unknown as { drill: Drill }).drill
-  return new Drill(blobs, t.catalog, { runs, rules: opts.rules })
+  if (!opts.rules && !opts.now) return (drillSource(blobs, undefined, { runs, catalog: t.catalog }) as unknown as { drill: Drill }).drill
+  return new Drill(blobs, t.catalog, { runs, rules: opts.rules, now: opts.now })
 }
 
 async function readTree(dir: string, rel = ''): Promise<void> {
@@ -221,16 +224,36 @@ describe('a broken drill tier: cut there, the scans before it answer exactly, ne
     ['its index files missing (its `meta.json` there)', { hide: tops(RUN2) }, `no fixture ${RUN2}/drill/long-roots-index.top.parquet`],
     ['its index files corrupt', { corrupt: tops(RUN2) }, 'parquet file invalid (footer != PAR1)'],
   ])('run 2\'s drill with %s: the first view that reads it cuts the tiers at it', async (_, damage, error) => {
-    const drill = wired(damage)
+    // The drill's own clock: the views below read the cut state however long they take in real time (a loaded
+    // machine took past its 30 s `brokenTtlMs`, and the direct `view`s, which don't retry, met run 2 again).
+    const drill = wired({ ...damage, now: () => 0 })
     const src = new DrillSource(drill)
     expect((await drill.state()).tiers.map(x => x.dir)).toEqual([null, RUN1, RUN2])
     const found = await src.hits('ckpt', 'b1/runs')
     const st = await drill.state()
     expect([found!.scans, st.version, st.tiers.map(x => x.dir), st.scans, logged]).toEqual([THROUGH_RUN1(), RUN1, [null, RUN1], THROUGH_RUN1(), [drillMsg(RUN2, error)]])
-    // Every view on the scans through run 1 = brute force (as if run 2's drill weren't there yet).
-    const { got, want } = await check(drill, THROUGH_RUN1(), E.members1)
-    expect(got).toEqual(want)
+    // Every view on the scans through run 1 = brute force (as if run 2's drill weren't there yet), with the wall
+    // clock past the cut's life by then.
+    const t1 = Date.now() + 31_000
+    const slow = vi.spyOn(Date, 'now').mockImplementation(() => t1)
+    try {
+      const { got, want } = await check(drill, THROUGH_RUN1(), E.members1)
+      expect(got).toEqual(want)
+    } finally { slow.mockRestore() }
   }, 60_000)
+
+  it('run 2\'s drill index files missing, the cut\'s life over: the next answer re-checks run 2, cuts it again (logged again), and answers through run 1', async () => {
+    let clock = 0
+    const drill = wired({ hide: tops(RUN2), now: () => clock })
+    const src = new DrillSource(drill)
+    const first = await src.hits('ckpt', 'b1/runs')
+    clock = 30_000
+    const relisted = (await drill.state()).tiers.map(x => x.dir)
+    const again = await src.hits('ckpt', 'b1/runs')
+    const st = await drill.state()
+    const msg = drillMsg(RUN2, `no fixture ${RUN2}/drill/long-roots-index.top.parquet`)
+    expect([first!.scans, relisted, again!.scans, st.tiers.map(x => x.dir), logged]).toEqual([THROUGH_RUN1(), [null, RUN1, RUN2], THROUGH_RUN1(), [null, RUN1], [msg, msg]])
+  })
 
   it('run 1\'s drill `meta.json` corrupt: the base alone, logged', async () => {
     const drill = wired({ corrupt: [`${RUN1}/drill/meta.json`] })
@@ -266,6 +289,64 @@ describe('a broken drill tier: cut there, the scans before it answer exactly, ne
     expect([found!.io.source, found!.scans, rows]).toEqual(['catalog', THROUGH_RUN1(), THROUGH_RUN1().map(d => [d, total(brute(t, '', d))])])
     expect(logged.map(m => m.split(' is broken')[0])).toEqual([`static tiers: ${RUN2}`])
   })
+})
+
+describe('a refresh abandoned by its request (its I/O frozen) is never awaited by the next one (`shared.ts`)', () => {
+  it.each(['cancel', 'end'] as const)('request A\'s drill state hangs on `meta.json` and A %ss: request B builds its own', async how => {
+    const fresh = await wired().state()
+    const blobs = hangFirst(blobsOf(), (method, key) => method === 'json' && key === 'drill/meta.json')
+    const t = tiers(blobs)
+    const drill = new Drill(blobs, t.catalog, { runs: async req => (await t.tiers.state(req)).tiers.flatMap(x => x.dir ? [x.dir] : []) })
+    const got = await abandoned(req => drill.state(req).then(s => [s.version, s.scans]), blobs.hung, how, how === 'cancel' ? BOUND / 2 : 5 * BOUND)
+    expect(got).toEqual([fresh.version, fresh.scans])
+    expect(fresh.version).toBe(RUN2)
+  })
+})
+
+describe('requests sharing the isolate\'s memos while every read outlasts the join bound (`shared.ts`)', () => {
+  it('concurrent requests, some cancelled mid-read, joining and convicting each other\'s reads: every view = the lone reader\'s', async () => {
+    const lone = wired()
+    const terms = [...E.long.slice(0, 12), ...E.short.slice(0, 4), ...NONMEMBERS]
+    const want: unknown[] = []
+    // `io.top` says where a group index came from (this isolate's memo or its file): under concurrency that is the race's
+    // outcome, not the answer, so it is left out of the comparison.
+    const answer = (x: unknown): unknown => Array.isArray(x) ? x.map(answer)
+      : x && Object.getPrototypeOf(x) === Object.prototype ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, k === 'io' && v && typeof v === 'object' ? { ...v, top: undefined } : answer(v)]))
+      : x
+    for (const t of terms) for (const P of E.paths) { const a = answer(await lone.view(t, P)); want.push([t, P, a], [t, P, a], [t, P, a]) }
+    // Each read settles after 1–4 ms (in a fixed order), past the 1 ms join bound: joiners convict owners at every turn.
+    const b = blobsOf()
+    let i = 0
+    const later = <T>(go: () => Promise<T>) => new Promise<T>((ok, no) => setTimeout(() => go().then(ok, no), 1 + (i++ % 4)))
+    const slow: Blobs = {
+      range: (k, o, l) => later(() => b.range(k, o, l)), suffix: (k, n) => later(() => b.suffix(k, n)),
+      json: <T>(k: string) => later(() => b.json<T>(k)), list: p => later(() => b.list!(p)),
+    }
+    const t = tiers(slow)
+    const drill = new Drill(slow, t.catalog, { runs: async req => (await t.tiers.state(req)).tiers.flatMap(x => x.dir ? [x.dir] : []) })
+    const src = new DrillSource(drill)
+    const join0 = { ...JOIN }
+    Object.assign(JOIN, { min: 1, max: 1, cold: 1, budget: 4 })
+    try {
+      const got: unknown[] = []
+      let joins = 0, evicts = 0
+      for (const term of terms) for (const P of E.paths) {
+        // Four requests at once: two run to the end, one is cancelled mid-read, one carries no request.
+        const ctl = new AbortController()
+        const reqs = [new Req(), new Req(), new Req(ctl.signal), undefined]
+        for (const r of reqs) if (r) r.trace = name => { if (name === 'join-evict') evicts++; else if (name.startsWith('join-')) joins++ }
+        const views = reqs.map(async r => src.answer(term, P, await drill.state(r), undefined, r))
+        setTimeout(() => ctl.abort(), 2)
+        const [a, b2, , d] = (await Promise.allSettled(views)).map(x => x.status === 'fulfilled' ? x.value : x.reason)
+        got.push([term, P, answer(a)], [term, P, answer(b2)], [term, P, answer(d)])
+      }
+      expect(got).toEqual(want)
+      // The setup did what it says: requests joined others' reads, and convicted their owners.
+      expect([joins > 0, evicts > 0]).toEqual([true, true])
+    } finally {
+      Object.assign(JOIN, join0)
+    }
+  }, 60_000)
 })
 
 describe('mutations: each reader rule, broken, makes the views wrong', () => {
