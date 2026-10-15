@@ -17,8 +17,8 @@ config:
     - infra/aws/Dockerfile
     - infra/aws/ingest.sh
     - infra/aws/scan-runs.json
-  disk-tree-m3:vcpu: "1"
-  disk-tree-m3:memory_mib: "8192"
+  disk-tree-m3:vcpu: "2"
+  disk-tree-m3:memory_mib: "16384"
   disk-tree-m3:ephemeral_gib: "120"
   disk-tree-m3:env:
     R2_ENDPOINT_URL: https://0dcad5654e9744de6616f74b8df4af63.r2.cloudflarestorage.com
@@ -33,7 +33,7 @@ config:
     # INGEST_MACHINE / INGEST_SPOT describe this job def (vcpu/memory_mib above, the FARGATE_SPOT queue,
     # ARM64): the profile prices that machine.
     SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
-    INGEST_MACHINE: fargate-arm64-1vcpu-8gib
+    INGEST_MACHINE: fargate-arm64-2vcpu-16gib
     INGEST_SPOT: "1"
     # The static name index's generation: the site's STATIC_GEN (site/wrangler.toml); ingest.sh builds
     # it on its first run, then appends each laptop scan.

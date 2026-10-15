@@ -1,10 +1,10 @@
 {
   "name": "m3",
-  "comment": "dt-cloud scan-run profile of m3's capture ingest (infra/aws/ingest.sh; SCAN_RUNS_PROFILE in Pulumi.rac.yaml). Runs are AWS Batch jobs: the run id is $AWS_BATCH_JOB_ID; ingest.sh states the job facts and passes its outputs (-o: the paths depend on the capture's store) and each run's store (-K). A run starts at its capture's start: the capture and queue phases bill nothing here. prices: Fargate ARM64 us-east-1 list, 1 vCPU ($0.03238/h) + 8 GiB ($0.00356/GiB-h) + 10 GiB ephemeral over the free 20 ($0.000111/GiB-h); spot_factor approximates Fargate Spot's discount (it floats).",
+  "comment": "dt-cloud scan-run profile of m3's capture ingest (infra/aws/ingest.sh; SCAN_RUNS_PROFILE in Pulumi.rac.yaml). Runs are AWS Batch jobs: the run id is $AWS_BATCH_JOB_ID; ingest.sh states the job facts and passes its outputs (-o: the paths depend on the capture's store) and each run's store (-K). A run starts at its capture's start: the capture and queue phases bill nothing here. prices: Fargate ARM64 us-east-1 list, per vCPU ($0.03238/h) + per GiB ($0.00356/GiB-h) + ephemeral over the free 20 GiB ($0.000111/GiB-h): 1 vCPU / 8 GiB with 30 GiB ephemeral (until 2026-10-14), 2 vCPU / 16 GiB with 120 GiB (since 2026-10-15: the static name index's appends peak ~12 GiB); spot_factor approximates Fargate Spot's discount (it floats).",
   "store": "primary",
   "run_id_env": ["AWS_BATCH_JOB_ID"],
   "unbilled": ["capture", "queue"],
-  "prices": {"fargate-arm64-1vcpu-8gib": 0.06197},
+  "prices": {"fargate-arm64-1vcpu-8gib": 0.06197, "fargate-arm64-2vcpu-16gib": 0.13282},
   "spot_factor": 0.3,
   "log_days": 30,
   "phase_ignore": ["total", "capture", "queue"],
