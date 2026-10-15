@@ -15,7 +15,8 @@ import { HealthPage } from './HealthPage'
 import { NamePage } from './NamePage'
 import { OgPage } from './OgPage'
 import { StoreProvider } from './store'
-import { DEFAULT_STORE, STORES } from './stores'
+import { DEFAULT_STORE, STORES, storeForPath } from './stores'
+import { useStoreMark } from './marks'
 import { useLoadIdentities } from './identities'
 import { PerfOverlay } from './dev/PerfOverlay'
 
@@ -50,6 +51,7 @@ function MetaTreeRedirect({ to }: { to: string }) {
 
 export default function Root() {
   useLoadIdentities()
+  useStoreMark(storeForPath(useLocation().pathname))
   return (
     <HotkeysProvider config={{ storageKey: 'gcs-usage' }}>
     <HelpProvider>

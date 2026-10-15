@@ -38,6 +38,9 @@ export interface Store {
   desc: string     // meta description / unfurl description
   path: string     // app route
   scheme: string   // URI scheme for treemap paths/tooltips
+  /** Its tab icon while its routes are open: a `public/icons/` key (`scripts/marks/build.mjs`; `marks.ts`). Unset:
+   *  the deployment's `MARK`, built into `index.html`. */
+  mark?: string
   /** A file store's home dir as segments under the root (`['Users', 'ryan']`):
    *  paths at or below it read as `~/…` (`pathDisplay`). From the deployment's
    *  `HOME` var; unset = no fold, and the share console's Hide field refuses
