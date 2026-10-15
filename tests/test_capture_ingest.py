@@ -189,9 +189,8 @@ def test_invalid_capture_stamps_fail_before_any_cloud_operation(pipeline) -> Non
     assert trace.exists() is False
 
 
-# ── scan-run recording (SCAN_RUNS_PROFILE) ──────────────────────────────────
+# ── scan-run recording (SCAN_RUNS_PROFILE; specs/scan-job-wrapper.md) ─────────
 
-RECORD = ['dt-cloud', 'scan-run', 'record', '-c', '/app/infra/aws/scan-runs.json', '-K', 'nas', '-k', 'ingest', '-g', '202610111000']
 CAPTURED = int(datetime(2026, 10, 11, 10, 0, 1, tzinfo=timezone.utc).timestamp())
 MARKED = int(datetime(2026, 10, 11, 10, 12, 30, tzinfo=timezone.utc).timestamp())
 RECORDING = {
@@ -203,34 +202,42 @@ RECORDING = {
 }
 
 
-def records(trace: Path, t0: int, t1: int) -> list[list[str]]:
-    """The `scan-run record` calls, after the shared prefix; a `-t` other than the capture's two fixed times is this
-    run's clock (checked to lie within it) → `<now>`."""
-    out = []
+def steps(trace: Path, t0: int, t1: int) -> list[list[str | int]]:
+    """The `dt-cloud scan-run` calls, after `scan-run`; a time other than the capture's two fixed ones is this run's
+    clock (checked to lie within it) → `<now>`, and the ERR trap's `-e` loses its line number."""
+    out: list[list[str | int]] = []
     for call in map(json.loads, trace.read_text().splitlines()):
-        if call[:3] != RECORD[:3]:
+        if call[:2] != ['dt-cloud', 'scan-run']:
             continue
-        assert call[:len(RECORD)] == RECORD, call
-        rest = call[len(RECORD):]
-        assert rest[-1] == '2026-10-11T1000', rest
-        rest = rest[:-1]
-        if '-t' in rest:
-            i = rest.index('-t') + 1
-            t = int(rest[i])
-            if t not in (CAPTURED, MARKED):
-                assert t0 <= t <= t1, (t0, t, t1)
-                rest[i] = '<now>'
-            else:
-                rest[i] = t
+        rest: list[str | int] = call[2:]
+        for flag in ('-t', '-b'):
+            if flag in rest:
+                i = rest.index(flag) + 1
+                t = int(rest[i])
+                if t in (CAPTURED, MARKED):
+                    rest[i] = t
+                else:
+                    assert t0 <= t <= t1, (t0, t, t1)
+                    rest[i] = '<now>'
+        if '-e' in rest:
+            i = rest.index('-e') + 1
+            rest[i] = re.sub(r'\(ingest\.sh:\d+\)$', '(ingest.sh:<line>)', str(rest[i]))
         out.append(rest)
     return out
 
 
-def phase_markers(stdout: str) -> list[str]:
-    return [re.sub(r': \d+s$', ': <s>s', line) for line in stdout.splitlines() if line.startswith('PHASE ')]
+def phases(*names: str) -> list[list[str | int]]:
+    return [step for n in names for step in (['phase-begin', n], ['phase-end', n])]
 
 
-PHASES = ['fetch', 'path-index', 'capture-meta', 'upload', 'index-sync']
+START = ['start', '-k', 'ingest', '-K', 'nas', '-g', '202610111000', '-t', CAPTURED, '-T', '1',
+         '-m', 'fargate-1vcpu-8gib', '--spot', '-R', 'us-east-1', '2026-10-11T1000']
+BEFORE_JOB = [
+    ['phase-begin', 'capture', '-b', CAPTURED],
+    ['phase-end', 'capture', '-t', MARKED, '-o', 'capture=r2://bucket/captures/nas/root/2026-10-11T10-00-01Z/'],
+    ['phase-begin', 'queue', '-b', MARKED],
+    ['phase-end', 'queue', '-t', '<now>'],
+]
 
 
 def test_recording_sequence_with_phase_times_facts_and_outputs(pipeline) -> None:
@@ -239,30 +246,27 @@ def test_recording_sequence_with_phase_times_facts_and_outputs(pipeline) -> None
     result = run('2026-10-11T10-00-01Z', 'nas', **RECORDING)
     t1 = int(time.time()) + 1
     assert result.returncode == 0, result.stderr
-    assert records(trace, t0, t1) == [
-        ['-S', '-t', CAPTURED, '-T', '1', '-m', 'fargate-1vcpu-8gib', '--spot', '-R', 'us-east-1'],
-        ['-P', 'capture', '-t', MARKED, '-o', 'capture=r2://bucket/captures/nas/root/2026-10-11T10-00-01Z/'],
-        ['-P', 'queue', '-t', '<now>'],
-        ['-P', 'fetch', '-t', '<now>'],
-        ['-P', 'path-index', '-t', '<now>'],
-        ['-P', 'capture-meta', '-t', '<now>'],
-        ['-P', 'upload', '-t', '<now>', '-o', 'index=r2://bucket/listing/nas/2026-10-11T1000/index/202610111000/',
+    assert steps(trace, t0, t1) == [
+        START, *BEFORE_JOB,
+        *phases('fetch', 'path-index', 'capture-meta'),
+        ['phase-begin', 'upload'],
+        ['phase-end', 'upload', '-o', 'index=r2://bucket/listing/nas/2026-10-11T1000/index/202610111000/',
          '-o', 'snapshot=r2://bucket/snapshots/nas/2026-10-11T1000/'],
-        ['-P', 'index-sync', '-t', '<now>'],
-        ['-x', '0'],
+        *phases('index-sync'),
+        ['finish', '-x', '0'],
     ]
-    assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
 
 
-def test_a_failed_phase_is_recorded_with_its_name_and_the_ingest_still_fails(pipeline) -> None:
+def test_a_failed_phase_is_recorded_by_finish_with_the_failing_command(pipeline) -> None:
     run, bucket, trace = pipeline
     t0 = int(time.time())
     result = run('2026-10-11T10-00-01Z', 'nas', **RECORDING, FAKE_FAIL='path-index')
     t1 = int(time.time()) + 1
     assert result.returncode == 3
-    assert [r[:2] for r in records(trace, t0, t1)] == [['-S', '-t'], ['-P', 'capture'], ['-P', 'queue'], ['-P', 'fetch'], ['-x', '3']]
-    assert records(trace, t0, t1)[-1] == ['-x', '3', '-F', 'path-index']
-    assert phase_markers(result.stdout) == ['PHASE fetch: <s>s']
+    assert steps(trace, t0, t1) == [
+        START, *BEFORE_JOB, *phases('fetch'), ['phase-begin', 'path-index'],
+        ['finish', '-x', '3', '-e', 'exit 3: ( cd "$app/cloud" && "$time_bin" -v -o "$work/time.txt" "$app/.venv/bin/dt-cloud" path-index -g -d "$date" -l "$work/listing/*.parquet" -P "$work/index/path-index.parquet" -o "$work/snap" ) (ingest.sh:<line>)'],
+    ]
     assert list(bucket.glob('snapshots/*/*/meta.json')) == []
 
 
@@ -271,7 +275,7 @@ def test_a_failing_recorder_never_fails_the_ingest(pipeline) -> None:
     result = run('2026-10-11T10-00-01Z', 'nas', **RECORDING, FAKE_RECORD_RC='1')
     assert result.returncode == 0, result.stderr
     assert sorted(str(p.relative_to(bucket)) for p in bucket.glob('snapshots/*/*/meta.json')) == ['snapshots/nas/2026-10-11T1000/meta.json']
-    assert len([c for c in map(json.loads, trace.read_text().splitlines()) if c[:2] == ['dt-cloud', 'scan-run']]) == 9
+    assert len([c for c in map(json.loads, trace.read_text().splitlines()) if c[:2] == ['dt-cloud', 'scan-run']]) == 16
 
 
 def test_without_a_profile_nothing_is_recorded(pipeline) -> None:
@@ -283,35 +287,6 @@ def test_without_a_profile_nothing_is_recorded(pipeline) -> None:
         ('aws', 's3'), ('disk-tree', 'capture-meta'), ('dt-cloud', 'index-sync'), ('dt-cloud', 'path-index'),
         ('index-sync-meta', '2026-10-11T10:00:01.000Z'), ('nproc',), ('time', '-v'),
     ]
-    assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
-
-
-# ── failure notifications (`disk-tree notify`) ──────────────────────────────
-
-def notifies(trace: Path) -> list[list[str]]:
-    return [c[1:] for c in map(json.loads, trace.read_text().splitlines()) if c[:2] == ['disk-tree', 'notify']]
-
-
-def test_a_failure_notifies_with_the_phase_and_a_link_to_the_run(pipeline) -> None:
-    run, _, trace = pipeline
-    site = {'INGEST_SITE_URL': 'https://disk.example', 'AWS_BATCH_JOB_ID': 'job-1'}
-    nas = run('2026-10-11T10-00-01Z', 'nas', **site, FAKE_FAIL='path-index')
-    laptop = run('2026-10-11T22-00-02Z', 'm3', **site, FAKE_FAIL='index-sync')
-    assert (nas.returncode, laptop.returncode) == (3, 3)
-    assert notifies(trace) == [
-        ['notify', '-p', '1', '-t', 'disky: nas ingest failed', '-u', 'https://disk.example/scans/job-1?store=nas', '-l', 'run',
-         'scan 2026-10-11T1000 failed in path-index (exit 3)'],
-        ['notify', '-p', '1', '-t', 'disky: laptop ingest failed', '-u', 'https://disk.example/scans/job-1', '-l', 'run',
-         'scan 2026-10-11T2200 failed in index-sync (exit 3)'],
-    ]
-
-
-def test_success_never_notifies_and_a_failing_notifier_keeps_the_exit_code(pipeline) -> None:
-    run, _, trace = pipeline
-    ok = run('2026-10-11T10-00-01Z')
-    failed = run('2026-10-11T22-00-02Z', FAKE_FAIL='path-index', FAKE_NOTIFY_RC='2')
-    assert (ok.returncode, failed.returncode) == (0, 3)
-    assert notifies(trace) == [['notify', '-p', '1', '-t', 'disky: laptop ingest failed', 'scan 2026-10-11T2200 failed in path-index (exit 3)']]
 
 
 def static_calls(trace: Path) -> list[list[str]]:
@@ -336,13 +311,11 @@ def test_static_names_builds_the_generation_once_then_appends_primary_scans_only
 
 def test_static_names_failure_fails_the_ingest_in_its_phase(pipeline) -> None:
     run, _, trace = pipeline
-    result = run('2026-10-14T06-00-01Z', STATIC_GEN='2026-10-14', STATIC_BUILD='1', FAKE_FAIL='static-names')
+    result = run('2026-10-14T06-00-01Z', STATIC_GEN='2026-10-14', STATIC_BUILD='1', FAKE_FAIL='static-names', SCAN_RUNS_PROFILE='/app/p.json')
     assert result.returncode == 3
-    assert phase_markers(result.stdout) == [f'PHASE {p}: <s>s' for p in PHASES]
-    assert notifies(trace) == [[
-        'notify', '-p', '1', '-t', 'disky: laptop ingest failed', 'scan 2026-10-14T0600 failed in static-names (exit 3)',
-    ]]
-
+    begun = [s[1] for s in steps(trace, 0, 2 ** 40) if s[0] == 'phase-begin']
+    finished = [s[:3] for s in steps(trace, 0, 2 ** 40) if s[0] == 'finish']
+    assert (begun[-1], finished) == ('static-names', [['finish', '-x', '3']])
 
 
 def test_a_scheduled_ingest_never_builds_the_generation(pipeline) -> None:
