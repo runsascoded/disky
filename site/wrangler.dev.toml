@@ -46,6 +46,9 @@ HOME = "Users/ryan"               # paths under it read as `~/…` (site/src/pat
 STATIC_GEN = "2026-10-15"
 FILTER_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
+# Search from the static name index only: one plain syntax, never a path-store scan (an unindexed form is a 400
+# `{ error, code }`, `_lib/indexedOnly.ts`).
+FILTER_INDEXED_ONLY = "1"
 STORES_EXTRA = "nas"
 STORES_JSON = '{"nas": {"vars": {"ROOT_LABEL": "nas", "SNAPSHOTS_SUBDIR": "nas", "STORE_SCHEME": "file:///", "STORE_BUCKETS": "*", "STORE_BUCKET": "disk-tree", "STORE_REGION": "auto"}, "secrets": {"STORE_ENDPOINT": "STORE_ENDPOINT", "STORE_ACCESS_KEY_ID": "STORE_ACCESS_KEY_ID", "STORE_SECRET_ACCESS_KEY": "STORE_SECRET_ACCESS_KEY"}}}'
 # Secrets (Pages secrets, per project): STORE_ENDPOINT, STORE_ACCESS_KEY_ID,
