@@ -89,14 +89,18 @@ if [[ -n ${SCAN_RUNS_PROFILE:-} ]]; then
   t_capture=$(epoch "$captured")
   sr start -k ingest -K "$d1_store" -g "$gen" -t "$t_capture" -T 1 ${facts[@]+"${facts[@]}"} "$date"
   marked=$(aws s3api head-object --bucket "$bucket" --key "$key/_SUCCESS.json" --endpoint-url "$R2_ENDPOINT_URL" \
-    --query LastModified --output text 2>/dev/null) || marked=
+    --query LastModified --output text 2>&1) || true
   if [[ $marked =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})[T\ ]([0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
     t_marked=$(epoch "${BASH_REMATCH[1]}T${BASH_REMATCH[2]}")
     sr phase-begin capture -b "$t_capture"
     sr phase-end capture -t "$t_marked" -o "capture=r2://$bucket/$key/"
-    sr phase-begin queue -b "$t_marked"
-    sr phase-end queue -t "$job_t0"
+  else
+    # Without the marker's time, capture and queue are one span: the queue phase from the capture's start.
+    echo "[ingest] capture marker time unreadable: ${marked:0:300}"
+    t_marked=$t_capture
   fi
+  sr phase-begin queue -b "$t_marked"
+  sr phase-end queue -t "$job_t0"
 fi
 
 begin fetch

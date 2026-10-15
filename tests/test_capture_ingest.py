@@ -31,7 +31,10 @@ elif name == 'time':
     sys.exit(subprocess.call(args[3:]))
 elif name == 'aws' and args[:2] == ['s3api', 'head-object']:
     key = args[args.index('--key') + 1]
-    if key.endswith('/_SUCCESS.json'):
+    if key.endswith('/_SUCCESS.json') and 'FAKE_HEAD_ERROR' in os.environ:
+        print(os.environ['FAKE_HEAD_ERROR'], file=sys.stderr)
+        sys.exit(254)
+    elif key.endswith('/_SUCCESS.json'):
         print(os.environ['FAKE_MARKED'])
     elif not (root / args[args.index('--bucket') + 1] / key).exists():
         sys.exit(254)
@@ -254,6 +257,19 @@ def test_recording_sequence_with_phase_times_facts_and_outputs(pipeline) -> None
          '-o', 'snapshot=r2://bucket/snapshots/nas/2026-10-11T1000/'],
         *phases('index-sync'),
         ['finish', '-x', '0'],
+    ]
+
+
+def test_an_unreadable_capture_marker_still_records_the_queue_from_the_capture_start(pipeline) -> None:
+    run, _, trace = pipeline
+    t0 = int(time.time())
+    recording = {k: v for k, v in RECORDING.items() if k != 'FAKE_MARKED'}
+    result = run('2026-10-11T10-00-01Z', 'nas', **recording, FAKE_HEAD_ERROR='An error occurred (403) when calling the HeadObject operation: Forbidden')
+    t1 = int(time.time()) + 1
+    assert result.returncode == 0, result.stderr
+    assert steps(trace, t0, t1)[:3] == [START, ['phase-begin', 'queue', '-b', CAPTURED], ['phase-end', 'queue', '-t', '<now>']]
+    assert [line for line in result.stdout.splitlines() if 'marker' in line] == [
+        '[ingest] capture marker time unreadable: An error occurred (403) when calling the HeadObject operation: Forbidden',
     ]
 
 
