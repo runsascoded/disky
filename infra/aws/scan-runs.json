@@ -6,5 +6,8 @@
   "unbilled": ["capture", "queue"],
   "prices": {"fargate-arm64-1vcpu-8gib": 0.06197},
   "spot_factor": 0.3,
-  "log_days": 30
+  "log_days": 30,
+  "phase_ignore": ["total", "capture", "queue"],
+  "alerts": {"label": "disky m3", "logs_url": "https://disk.rbw.sh/scans/{job_uid}"},
+  "secrets": ["AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN", "PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK"]
 }
