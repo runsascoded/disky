@@ -83,14 +83,16 @@ export const KIND_ERROR = '“is:file” and “is:dir” aren’t supported yet
 export const simple: QuerySyntax = makeSimple()
 
 /** `simple` with another minimum term length (`minTerm: 1` exercises the
- * search engine's short-needle paths in tests; the registry's has 3). */
-export function makeSimple({ minTerm = MIN_TERM }: { minTerm?: number } = {}): QuerySyntax {
+ * search engine's short-needle paths in tests; the registry's has 3), or
+ * `literal`: `*` is the character itself and a `/…/` query is text, never a
+ * glob or a regex (`plain`). */
+export function makeSimple({ minTerm = MIN_TERM, literal = false }: { minTerm?: number; literal?: boolean } = {}): QuerySyntax {
   return {
-    id: 'simple',
+    id: literal ? 'plain' : 'simple',
     parse(q: string): ParseResult {
       const raw = q.trim()
       if (!raw) return { ast: null }
-      if (raw.length > 2 && raw.startsWith('/') && raw.endsWith('/')) {
+      if (!literal && raw.length > 2 && raw.startsWith('/') && raw.endsWith('/')) {
         const source = raw.slice(1, -1)
         return regexError(source) ?? { ast: { alts: [[{ kind: 'regex', source }]], neg: [] } }
       }
@@ -120,7 +122,7 @@ export function makeSimple({ minTerm = MIN_TERM }: { minTerm?: number } = {}): Q
           // Unquoted `\^`, `\$`, `\\`: the character itself (never an anchor); any other `\` is literal.
           if (ch === '\\' && !quoted && i < s.length && ESCAPABLE.includes(s[i])) pieces[pieces.length - 1] += s[i++]
           else if (ch === '"') { quoted = !quoted; quotedAny = true }
-          else if (ch === '*' && !quoted) pieces.push('')
+          else if (ch === '*' && !quoted && !literal) pieces.push('')
           else pieces[pieces.length - 1] += ch
         }
         if (end) pieces[pieces.length - 1] = pieces[pieces.length - 1].slice(0, -1)
@@ -195,6 +197,12 @@ export const regex: QuerySyntax = {
     notes: ['No exclusion; the search index never serves a regex, so big views read slower.'],
   }),
 }
+
+/** `plain`: the search box's syntax on an indexed-only deployment (`FILTER_INDEXED_ONLY`, `indexedOnly.ts`) —
+ * `simple`'s terms, anchors, quotes, AND / OR / NOT, every one a literal: `*`, `?`, `.`, `(`, `[`, `+` … and a
+ * `/…/` query are the characters themselves (no glob, no regex), and a term of any length is a term (the static
+ * name index answers every literal exactly). `qs=` doesn't apply there: this is the box's one syntax. */
+export const plain: QuerySyntax = makeSimple({ minTerm: 1, literal: true })
 
 /** Every syntax, the default first. */
 export const SYNTAXES: readonly QuerySyntax[] = [simple, regex]

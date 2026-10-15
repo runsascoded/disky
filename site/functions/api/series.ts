@@ -18,11 +18,13 @@ import { type Ctx, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
-import { classKey, ownerKey, ownerOk, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
+import { classKey, ownerKey, ownerOk, type OwnerScope, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
 import { type BoolAnswer, boolPlan, compound } from '../_lib/staticBool.js'
 import { indexedOnly, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
+import { poolLensFor, readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
+import type { FoldedLens } from '../_lib/owners.js'
+import { type Hit, scanAt } from '../_lib/staticNames.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
 import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
@@ -152,7 +154,7 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = withPathStore(ctx1)
+  const ctx = await withPathStore(ctx1)
   const { env, request } = ctx
   if (!env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)
@@ -191,17 +193,17 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // matches is matched whole: its plain series.
   let qp: ReturnType<typeof queryParam>
   try {
-    qp = queryParam(url.searchParams, env.QUERY_SYNTAX)
+    qp = queryParam(url.searchParams, env.QUERY_SYNTAX, indexedOnly(env))
   } catch (e) {
     // Indexed-only: a form it refuses is refused as such (`a b` is "one term", not "too short").
-    const r = e instanceof QueryError && indexedOnly(env) ? rejectQuery(url.searchParams.get('q'), url.searchParams.get('qs'), env.QUERY_SYNTAX) : null
+    const r = e instanceof QueryError && indexedOnly(env) ? rejectQuery(url.searchParams.get('q')) : null
     if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof QueryError) return json({ error: `bad query: ${e.message}` }, 400)
     throw e
   }
-  // An indexed-only deployment: one literal, unscoped (`_lib/indexedOnly.ts`).
+  // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`).
   const strict = !!qp.query && indexedOnly(env)
-  const refused = strict ? rejectQuery(url.searchParams.get('q'), url.searchParams.get('qs'), env.QUERY_SYNTAX) ?? rejectScope(!!(lens || owner || classes)) : null
+  const refused = strict ? rejectQuery(url.searchParams.get('q')) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
   // The static index's hex-run rule: substrings match where they `occur` under it, static or not (`hexRuns.ts`).
   const hx = await hexQuery(env, qp.query)
@@ -262,7 +264,9 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // An anchored term with no anchors build is `anchor-not-indexed`, indexed-only or not; else, indexed-only, no
   // answer is `scan-not-indexed` (never the client's roots read per scan).
   const unanchored = query && skey && !found && sfs!.source.why?.(skey) === 'anchor-not-indexed'
-  if (unanchored || (keyed && strict && !shits && !sbool)) return new Response(rejectBody(bgot && 'reject' in bgot ? bgot.reject : reject(unanchored ? 'anchor-not-indexed' : 'scan-not-indexed')), { status: 400, headers: { 'content-type': 'application/json' } })
+  // A heavy literal's rollup under an owner pool (rollups carry no owners): `owner-too-common`.
+  const ownerless = !!(found?.rollup && owner)
+  if (unanchored || (keyed && strict && !shits && !sbool)) return new Response(rejectBody(bgot && 'reject' in bgot ? bgot.reject : reject(unanchored ? 'anchor-not-indexed' : ownerless ? 'owner-too-common' : 'scan-not-indexed')), { status: 400, headers: { 'content-type': 'application/json' } })
   if (query && !shits && !sbool && !paths.length) return json({ error: 'a filtered series needs its match roots (paths=)' }, 400)
   /** The scans a static answer doesn't cover: gaps in the series, named (indexed-only or not). */
   const unindexed: string[] = []
@@ -293,13 +297,14 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   const point = async (date: string, tries = 2): Promise<{ date: string; b: number; o: number } | null> => {
     try {
       if (shits && sscans!.has(date)) {
-        const t = shits.rollup ? rollupTotal(shits.rollup, date) : liveTotal(shits.hits, date, u => ownerOk(u, owner))
+        const t = shits.rollup ? rollupTotal(shits.rollup, date) : owner ? pooledTotal(shits.hits, date, owner, await poolLensFor(env, date, owner)) : liveTotal(shits.hits, date)
         return { date, b: t.b, o: t.o }
       }
       if (sbool && sscans!.has(date)) {
         if (sbool.none) return { date, b: 0, o: 0 }
-        const keep = (u: string | null) => ownerOk(u, owner)
-        const r = liveTotal(sbool.roots, date, keep), e = liveTotal(sbool.excl, date, keep)
+        const pl = owner ? await poolLensFor(env, date, owner) : null
+        const tot = (hits: Hit[]) => owner ? pooledTotal(hits, date, owner, pl) : liveTotal(hits, date)
+        const r = tot(sbool.roots), e = tot(sbool.excl)
         if (!sbool.whole) return { date, b: r.b - e.b, o: r.o - e.o }
         const covered = ot ? overTimePoint(ot, date) : undefined
         const all = covered !== undefined ? covered : await ivRetry(() => readRootAgg(env, { date, path, lens, owner, classes }))
@@ -363,4 +368,27 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // A series missing points to errors is served (gaps beat no chart) but never cached: the next request retries them.
   if (failed.length) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
+}
+
+/** An owner pool's bytes and objects over static hits on `date` — the filtered view's numbers (`view.ts` `poolAgg` per
+ *  match root): per path (a root, or an excluded path: none nests in another) its live slices' total and in-pool part,
+ *  folded through the ledger's assignments since the scan (`pl`; null: none, the in-pool slices alone). */
+export function pooledTotal(hits: Hit[], date: string, owner: OwnerScope, pl: FoldedLens | null): { b: number; o: number } {
+  if (!pl) { const t = liveTotal(hits, date, u => ownerOk(u, owner)); return { b: t.b, o: t.o } }
+  const D = scanAt(date)
+  const per = new Map<string, [number, number, number, number]>()
+  for (const h of hits) {
+    if (!(h.vf <= D && D < h.vt)) continue
+    const size = Number(h.size), n = Number(h.n)
+    let t = per.get(h.path)
+    if (!t) per.set(h.path, (t = [0, 0, 0, 0]))
+    t[0] += size; t[1] += n
+    if (ownerOk(h.usr === '' ? null : h.usr, owner)) { t[2] += size; t[3] += n }
+  }
+  let b = 0, o = 0
+  for (const [p, [ab, ao, mb, mo]] of per) {
+    b += Math.max(0, pl.value(p, ab, mb))
+    o += Math.max(0, Math.round(pl.o.value(p, ao, mo)))
+  }
+  return { b, o }
 }

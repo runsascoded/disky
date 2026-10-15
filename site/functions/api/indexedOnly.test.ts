@@ -94,29 +94,24 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   /** Every rejected form, its code. */
   const FORMS: [string, string, FilterRejectCode][] = [
-    ['regex syntax', 'q=ckpt.*pt&qs=regex', 'unsupported-regex'],
-    ['a /…/ regex', `q=${encodeURIComponent('/ckpt.*pt/')}`, 'unsupported-regex'],
-    ['a glob', `q=${encodeURIComponent('tom*t')}`, 'unsupported-glob'],
-    ['a glob in an exclusion', `q=${encodeURIComponent('tomat -tom*t')}`, 'unsupported-glob'],
-    ['a `/`', `q=${encodeURIComponent('data/tomat')}`, 'unsupported-slash'],
-    ['a `/` in an alternative', `q=${encodeURIComponent('tomat|data/x')}`, 'unsupported-slash'],
     ['`is:file`', `q=${encodeURIComponent('tomat is:file')}`, 'unsupported-kind'],
-    ['an owner pool', 'q=tomat&o=owned', 'unsupported-scope'],
     ['a user lens', 'q=tomat&lens=user:alice', 'unsupported-scope'],
     ['a class scope', 'q=tomat&cl=s', 'unsupported-scope'],
   ]
 
   describe('rejectQuery: what an indexed-only deployment refuses', () => {
-    it('literals (any length, quoted spaces too) and AND / OR / NOT of them pass; every other form has its code', () => {
-      const code = (q: string, qs?: string) => rejectQuery(q, qs)?.code ?? null
+    it('literals (any length, quoted spaces too) and AND / OR / NOT of them pass — `*`, `?` and regex characters are text; every other form has its code', () => {
+      const code = (q: string) => rejectQuery(q)?.code ?? null
       expect([
         code('tomat'), code('TOMAT'), code('.'), code('ab'), code('"final ckpt"'), code(''), code('  '),
         code('tomat -bin'), code('-ttl'), code('a b'), code('a|b'), code('a b|c -d'), code('"is:file" x'),
-        code('ckpt.*pt', 'regex'), code('/ckpt/'), code('tom*t'), code('a -b*c'), code('data/tomat'), code('a|b/c'), code('is:file'), code('-is:dir x'), code('*'),
+        code('ckpt.*pt'), code('tom*t'), code('a -b*c'), code('*'), code('a?b'), code('(x)+[y]'),
+        code('/ckpt/'), code('data/tomat'), code('a|b/c'), code('a/bc$|x'), code('is:file'), code('-is:dir x'),
       ]).toEqual([
         null, null, null, null, null, null, null,
         null, null, null, null, null, null,
-        'unsupported-regex', 'unsupported-regex', 'unsupported-glob', 'unsupported-glob', 'unsupported-slash', 'unsupported-slash', 'unsupported-kind', 'unsupported-kind', 'unsupported-glob',
+        null, null, null, null, null, null,
+        'slash-tail-short', null, 'slash-tail-short', null, 'unsupported-kind', 'unsupported-kind',
       ])
     })
     it('one anchored literal passes (`^q` from 2 characters, `q$` from 3, `^q$` from 1); shorter ones, globs and slashes don\'t', () => {
@@ -128,7 +123,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ]).toEqual([
         null, null, null, null, null, null, null, null,
         null, null, null,
-        'anchor-too-short', 'anchor-too-short', 'unsupported-glob', 'unsupported-slash', 'anchor-too-short', 'anchor-too-short',
+        'anchor-too-short', 'anchor-too-short', null, 'slash-tail-short', 'anchor-too-short', 'anchor-too-short',
       ])
     })
   })
@@ -141,7 +136,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         code('^a\\$'), code('^a'), code('a$'), code('\\^a*b'), code('\\^a -b'),
       ]).toEqual([
         null, null, null, null, null, null, null, null,
-        null, 'anchor-too-short', 'anchor-too-short', 'unsupported-glob', null,
+        null, 'anchor-too-short', 'anchor-too-short', null, null,
       ])
     })
     it('the map routes, flag set: subtree, diff and series answer them', async () => {
@@ -155,6 +150,90 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         ]))
       }
       expect(got).toEqual(Array(3).fill([[200, 'ok'], [200, 'ok'], [200, 'ok']]))
+    })
+  })
+
+  describe('`plain`: every character is text, `qs=` doesn\'t apply', () => {
+    /** A subtree body, its timing-free fields. */
+    const body = async (qs: string) => {
+      const r = await subtree({ request: new Request(`http://localhost/api/x?${qs}`), env: envOf(true) })
+      return [r.status, await r.json()]
+    }
+    it('`*`, `?` and regex characters search those characters (nothing here holds them): an empty view, no refusal', async () => {
+      const got = await Promise.all(['tom*t', 'tomat?', '(tomat)'].map(async q => {
+        const [status, j] = await body(`date=${A}&path=bk&q=${encodeURIComponent(q)}`) as [number, { tier: string; tree: { b: number }; matches: string[] }]
+        return [q, status, j.tier, j.tree.b, j.matches]
+      }))
+      expect(got).toEqual([
+        ['tom*t', 200, 'none', 0, []],
+        ['tomat?', 200, 'none', 0, []],
+        ['(tomat)', 200, 'none', 0, []],
+      ])
+    })
+    it('`qs=regex` / `qs=simple` are ignored: the same body as none', async () => {
+      const q = `date=${A}&path=bk&q=tomat`
+      const [plain, regex, simple] = await Promise.all([body(q), body(`${q}&qs=regex`), body(`${q}&qs=simple`)])
+      expect([regex, simple]).toEqual([plain, plain])
+    })
+  })
+
+  describe('owner pools (`o=`): the static hits are owner slices, so a pool applies; a rollup has none', () => {
+    const enc = (t: string) => `q=${encodeURIComponent(t)}`
+    const POOLS: [string, (u: string | null) => boolean][] = [['owned', u => u != null], ['unowned', u => u == null], ['!alice', u => u != null && u !== 'alice']]
+    const bodyOf = async (route: Route, qs: string, env: Env) => {
+      const r = await route({ request: new Request(`http://localhost/api/x?${qs}`), env })
+      return [r.status, await r.json()]
+    }
+    it('flag set: subtree and diff answer exactly what the static view answers unflagged', async () => {
+      const cases: [Route, string][] = []
+      for (const [o] of POOLS) for (const t of ['tomat', 'tomat -bin']) for (const path of ['', 'bk']) {
+        cases.push([subtree, `date=${A}&path=${path}&o=${o}&${enc(t)}`], [diff, `from=${A}&to=${B}&path=${path}&o=${o}&${enc(t)}`])
+      }
+      const [set, unset] = await Promise.all([true, false].map(flag => Promise.all(cases.map(([r, qs]) => bodyOf(r, qs, envOf(flag))))))
+      expect(set.map(b => b[0])).toEqual(cases.map(() => 200))
+      expect(set).toEqual(unset)
+    })
+    it('flag set: the series is each scan\'s in-pool matched total, as brute force', async () => {
+      const cases: [string, string, string][] = []
+      for (const [o] of POOLS) for (const t of ['tomat', 'tomat -bin']) cases.push([o, t, 'bk'])
+      const got = await Promise.all(cases.map(async ([o, t, root]) => {
+        const r = await series({ request: new Request(`http://localhost/api/series?path=${root}&o=${o}&${enc(t)}`), env: envOf(true) })
+        const j = await r.json() as { points: { date: string; b: number; o: number }[] }
+        return [r.status, j.points.map(p => [p.date, p.b, p.o])]
+      }))
+      expect(got).toEqual(cases.map(([o, t, root]) => [200, SCANS.map(d => [d, ...brute(fixtureObjects(d), parseQuery(t)!, root, POOLS.find(p => p[0] === o)![1]).total])]))
+    })
+    it('a heavy literal\'s rollup (`f00` under `bk/fill`) under a pool: `owner-too-common` on every route', async () => {
+      expect(refusal('owner-too-common')).toEqual([400, { error: 'This term is too common in this folder to split by owner here; open a folder, or clear the owner scope.', code: 'owner-too-common' }])
+      expect(await Promise.all([
+        call(subtree, `date=${A}&path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
+        call(diff, `from=${A}&to=${B}&path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
+        call(series, `path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
+      ])).toEqual([refusal('owner-too-common'), refusal('owner-too-common'), refusal('owner-too-common')])
+    })
+  })
+
+  describe('path terms (`a/b`): read from the name index (`staticAnchors.ts`)', () => {
+    const enc = (t: string) => `q=${encodeURIComponent(t)}`
+    it('this fixture has none: `anchor-not-indexed` on every route, alone or in a compound; a tail too short is `slash-tail-short`', async () => {
+      const got = []
+      for (const t of ['data/tomat', 'tomat|data/raw', 'tomat -data/raw', '/tomat/', 'data/t']) {
+        got.push(await Promise.all([
+          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true)),
+          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true)),
+          call(series, `path=bk&${enc(t)}`, envOf(true)),
+        ]))
+      }
+      expect(got).toEqual([
+        ...Array(3).fill([refusal('anchor-not-indexed'), refusal('anchor-not-indexed'), refusal('anchor-not-indexed')]),
+        ...Array(2).fill([refusal('slash-tail-short'), refusal('slash-tail-short'), refusal('slash-tail-short')]),
+      ])
+    })
+    it('says so in words', () => {
+      expect([refusal('slash-tail-short'), refusal('anchor-not-indexed')]).toEqual([
+        [400, { error: 'After a term’s last “/”, type at least 2 characters of the name (e.g. “ckpt/mo”), or end it with “$” (“ckpt/m$”).', code: 'slash-tail-short' }],
+        [400, { error: 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }],
+      ])
     })
   })
 
@@ -367,7 +446,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     }
     const q = (term: string) => `q=${encodeURIComponent(term)}`
     it('says so in words', () => {
-      expect(refusal('anchor-not-indexed')).toEqual([400, { error: 'Starts-with (^) and ends-with ($) search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }])
+      expect(refusal('anchor-not-indexed')).toEqual([400, { error: 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }])
     })
     it.each([[false], [true]])('`^q`, `^q$` and a heavy `q$` are `anchor-not-indexed` on subtree, diff and series (flag %s), never the walk', async flag => {
       const env = envOf(flag, anchorless(0))

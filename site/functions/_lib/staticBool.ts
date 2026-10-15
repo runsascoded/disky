@@ -40,22 +40,24 @@ import type { Rollup } from './staticDrill.js'
 import type { Hit } from './staticNames.js'
 import { type HexRule } from './hexRuns.js'
 import { termInPath, termKey } from './staticAnchors.js'
-import { ANCHOR_MIN } from './indexedOnly.js'
+import { ANCHOR_MIN, pathTailOk } from './indexedOnly.js'
 
 /** A query the static index can answer: AND-groups of literal keys (OR between them; `[]` = everything) and
  *  the query's negative keys, as `termKey` writes them (`q`, `/q`, `q/`, `/q/`). */
 export interface BoolPlan { alts: string[][]; neg: string[] }
 
-/** A matcher's static key: a non-empty substring without `/`, anchored ones at least `ANCHOR_MIN` long; else null. */
+/** A matcher's static key: a non-empty substring, anchored ones at least `ANCHOR_MIN` long, one holding `/` (a path
+ *  term) with a tail `pathTailOk` reads; else null. */
 export function literalKey(m: Matcher): string | null {
-  if (m.kind !== 'sub' || !m.text || m.text.includes('/')) return null
+  if (m.kind !== 'sub' || !m.text) return null
   const start = !!m.start, end = !!m.end
+  if (m.text.includes('/')) return pathTailOk(m.text, end) ? termKey({ text: m.text, start, end }) : null
   if ((start || end) && [...m.text].length < (start && end ? ANCHOR_MIN.exact : start ? ANCHOR_MIN.start : ANCHOR_MIN.end)) return null
   return termKey({ text: m.text, start, end })
 }
 
-/** The query as AND-groups and negatives of static keys, else null (a glob, a regex, a `/`, an anchor too
- *  short). Each group's terms deduplicated, a group holding every term of another dropped (it matches a subset
+/** The query as AND-groups and negatives of static keys, else null (a glob, a regex, a path term's tail or an
+ *  anchor too short). Each group's terms deduplicated, a group holding every term of another dropped (it matches a subset
  *  of it), duplicate groups and negatives dropped. */
 export function boolPlan(ast: QueryAst | undefined): BoolPlan | null {
   if (!ast) return null

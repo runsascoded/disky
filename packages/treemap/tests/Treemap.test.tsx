@@ -176,6 +176,30 @@ describe('<Treemap>', () => {
     }
   })
 
+  it('formatCell overrides each cell\'s size text (inline and 2nd line); the area stays getSize', () => {
+    const restore = withLayout()
+    try {
+      const { container } = render(
+        <Treemap root={tree} {...accessors} formatSize={n => `${n} B`} formatCell={n => `Δ${n.n}`} minCellArea={null} />,
+      )
+      const cells = [...container.querySelectorAll('.dt-treemap-map > .dt-treemap-cell')]
+      const shape = cells.map(el => [
+        el.querySelector(':scope > .dt-treemap-lbl')?.textContent,
+        el.querySelector(':scope > .dt-treemap-lbl2')?.textContent ?? null,
+      ])
+      expect(shape).toEqual([
+        ['fooΔfoo', null],
+        ['bar', 'Δbar'],
+      ])
+      // Same geometry as without the override: only the text changed.
+      const plain = render(<Treemap root={tree} {...accessors} formatSize={n => `${n} B`} minCellArea={null} />).container
+      const widths = (c: Element) => [...c.querySelectorAll('.dt-treemap-map > .dt-treemap-cell')].map(el => (el as HTMLElement).style.width)
+      expect(widths(container)).toEqual(widths(plain))
+    } finally {
+      restore()
+    }
+  })
+
   it('sizeAlign: the inline size sits after the name by default, at the far edge on "right"', () => {
     const restore = withLayout()
     try {

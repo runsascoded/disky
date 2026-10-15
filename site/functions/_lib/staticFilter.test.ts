@@ -138,10 +138,10 @@ const FOLDED: unknown[] = [
 ]
 
 describe('staticLiteral: the queries the static index answers exactly', () => {
-  it('one positive substring without `/` (one and two characters too: the drilldown\'s); nothing else', () => {
+  it('one positive substring (one and two characters too: the drilldown\'s; with `/`, a path term\'s key); nothing else', () => {
     const lit = (s: string) => staticLiteral(parseAst(s)!)
     expect(['tomat', 'TOMAT', 'x.bin', 'ab', 'A', '.', 'abc def', 'tom*at', '/tomat', 'tomat -xyz', 'abc|bcd', '"ttl=7d"', '/ttl/'].map(lit))
-      .toEqual(['tomat', 'tomat', 'x.bin', 'ab', 'a', '.', null, null, null, null, null, 'ttl=7d', null])
+      .toEqual(['tomat', 'tomat', 'x.bin', 'ab', 'a', '.', null, null, '//00/tomat', null, null, 'ttl=7d', null])
   })
 })
 

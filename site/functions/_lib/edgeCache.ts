@@ -19,6 +19,7 @@
  * SHA-256 of the cache key URL (KV keys are capped at 512 bytes). */
 
 import { PRIMARY_STORE } from './stores.js'
+import { SEARCH_LIMITS, type SearchLimits } from './search.js'
 
 const TTL = 86400
 const KV_TTL = 30 * 86400
@@ -105,8 +106,9 @@ export const PARTIAL_TTL = 120
  * `{ partialTtl }` the colo tier only, for that many seconds (a budget-cut answer, `PARTIAL_TTL`). */
 export type Keep = boolean | { partialTtl: number }
 
-/** What a filter view or diff keeps: a phase 2 cut by its time budget (`interiors.late`) briefly, else all. */
-export const keepFor = (interiors?: { late?: number }): Keep => interiors?.late ? { partialTtl: PARTIAL_TTL } : true
+/** What a filter view or diff keeps: one cut by a time budget — phase 2's (`interiors.late`) or the search's
+ *  (`searchLate`) — briefly, else all. A read budget's cut is deterministic, so kept like a whole answer. */
+export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true }): Keep => a.interiors?.late || a.searchLate ? { partialTtl: PARTIAL_TTL } : true
 
 /** Store `body` (already-serialized JSON) per `keep` and return the client response. With ``waitUntil``
  * (the Pages `EventContext`'s) the writes run after the response is sent — a KV put is hundreds of ms the
@@ -148,6 +150,8 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
  *  30 s past the response, and phase 2 stops decoding at its budget, so a diff (both sides at once, then its
  *  walk) stays well inside. */
 export const UPGRADE_PHASE2_MS = 10_000
+/** …and its search's time budget (`SearchLimits.wallMs`), in place of the viewer-facing one. */
+export const UPGRADE_SEARCH_LIMITS: SearchLimits = { ...SEARCH_LIMITS, wallMs: 10_000 }
 
 /** Per isolate: keys with a background full run in flight (one each: concurrent partial hits don't
  *  stampede), and keys whose run was cut short too — not retried until the partial they'd replace expires

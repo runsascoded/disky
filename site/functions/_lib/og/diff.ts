@@ -2,6 +2,7 @@ import { divergingColor } from '@rdub/treemap/divergingColor'
 import type { Env } from '../auth.js'
 import { pathScans, type Lens } from '../index.js'
 import { canonId, loadRegistry } from '../identity.js'
+import { indexedOnly } from '../indexedOnly.js'
 import { scanTimes } from '../scanTimes.js'
 import { parseClasses, parseOwner, queryParam } from '../scope.js'
 import { hexQuery } from '../staticFilter.js'
@@ -62,7 +63,7 @@ export async function diffCard(env: Env, site: Site, title: string, params: Reco
   const empty = { tier, site: site.name, title, subtitle: '', total: '', tiles: [], empty: scans ? 'no earlier scan' : 'no scans yet' }
   if (!scans?.from) return empty
   if (params.o === 'me') return { ...empty, empty: 'choose a named owner before sharing' }
-  const query = (await hexQuery(env, queryParam(new URLSearchParams({ q: params.f ?? '', ...(params.qs ? { qs: params.qs } : {}) }), env.QUERY_SYNTAX).query)).query
+  const query = (await hexQuery(env, queryParam(new URLSearchParams({ q: params.f ?? '', ...(params.qs ? { qs: params.qs } : {}) }), env.QUERY_SYNTAX, indexedOnly(env)).query)).query
   const owner = parseOwner(params.o ?? null)
   const registry = await loadRegistry(env)
   const lens: Lens | undefined = !owner && params.o ? { key: canonId(params.o, registry) } : undefined

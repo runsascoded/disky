@@ -378,16 +378,32 @@ def list_hf(
     lfs_files: bool = False,
     commit_dates: bool = True,
     threads: int = 4,
+    progress_s: float = 60,
 ) -> "Iterator[tuple[list, UnitTotals]]":
     """``(rows, totals)`` per bucket / repo, units fetched ``threads`` at a time
-    (the client still bounds requests in flight), yielded in (kind, name) order."""
+    (the client still bounds requests in flight), yielded in (kind, name) order.
+    A progress line at most every ``progress_s`` seconds: a rate-bound listing
+    otherwise says nothing for its whole run."""
     units = enumerate_units(client, target)
     err(f"hf://{target.namespace}/{target.prefix}: {len(units)} buckets/repos")
+    lock = threading.Lock()
+    done, last = 0, time.monotonic()
 
-    def one(u: Unit):
+    def listed(u: Unit):
         if u.kind == "buckets":
             return list_bucket(client, target.namespace, u.name, u.private, u.size)
         return list_repo(client, u.kind, target.namespace, u.name, lfs_files=lfs_files, commit_dates=commit_dates)
+
+    def one(u: Unit):
+        nonlocal done, last
+        res = listed(u)
+        with lock:
+            done += 1
+            now = time.monotonic()
+            if done < len(units) and now - last >= progress_s:
+                err(f"hf: {done}/{len(units)} buckets/repos, {client.requests:,} requests, waited {client.waited:.0f}s")
+                last = now
+        return res
 
     with ThreadPoolExecutor(max(threads, 1)) as ex:
         yield from ex.map(one, units)

@@ -3067,10 +3067,11 @@ main.add_command(_static_names)
 
 from .interval_store import cli as _interval_store  # noqa: E402
 from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
-from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build  # noqa: E402
+from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
+_interval_store.add_command(_interval_local_current)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)

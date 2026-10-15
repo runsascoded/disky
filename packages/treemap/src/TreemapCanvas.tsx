@@ -44,6 +44,8 @@ export interface TreemapCanvasProps<T> {
   getSize: (n: T) => number
   getLabel: (n: T) => string
   formatSize: (n: number) => string
+  /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change, while the area stays `getSize`). */
+  formatCell?: (n: T) => string
   /** Inline-size placement on a cell's first line (see `TreemapProps.sizeAlign`). */
   sizeAlign: 'left' | 'right'
   /** Min cell width for the inline size (see `TreemapProps.inlineSizeMinWidth`). */
@@ -79,6 +81,8 @@ export interface PaintOpts<T> {
   getSize: (n: T) => number
   getLabel: (n: T) => string
   formatSize: (n: number) => string
+  /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change, while the area stays `getSize`). */
+  formatCell?: (n: T) => string
   sizeAlign: 'left' | 'right'
   /** Min cell width for the inline size (see `TreemapProps.inlineSizeMinWidth`). */
   inlineSizeMinWidth: number
@@ -122,6 +126,7 @@ export function TreemapCanvas<T>({
   getSize,
   getLabel,
   formatSize,
+  formatCell,
   sizeAlign,
   inlineSizeMinWidth,
   idFor,
@@ -179,7 +184,7 @@ export function TreemapCanvas<T>({
     // label sizes track the consumer's current stylesheet.
     resolveVar = colorResolver(cv)
     readLabelSizes(cv)
-    const opts: PaintOpts<T> = { styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture }
+    const opts: PaintOpts<T> = { styleOpts, getSize, getLabel, formatSize, formatCell, sizeAlign, inlineSizeMinWidth, dustTexture }
     let i = 0
     let raf = 0
     // Paint until `budgetMs` elapses (clock read every 256 cells to keep it
@@ -200,7 +205,7 @@ export function TreemapCanvas<T>({
     }
     if (i < flat.length) raf = requestAnimationFrame(step)
     return () => { if (raf) cancelAnimationFrame(raf) }
-  }, [flat, width, height, styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture])
+  }, [flat, width, height, styleOpts, getSize, getLabel, formatSize, formatCell, sizeAlign, inlineSizeMinWidth, dustTexture])
 
   /** Squarify a folded tile's children over its box, to resolve a dust hover. */
   const dustChildAt = (
@@ -405,7 +410,7 @@ export function renderMapToCanvas<T>(
  * Standalone so the progressive loop can call it per cell across frames.
  */
 function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: PaintOpts<T>): void {
-  const { styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture } = o
+  const { styleOpts, getSize, getLabel, formatSize, formatCell, sizeAlign, inlineSizeMinWidth, dustTexture } = o
   const { x, y, w, h, depth, mode, edge, dust, folded, showLbl, hasKids } = cell
   const shared = mode === 'shared'
   // Cell box: gaps leaves a 2px (1px dust) gutter to the container ground;
@@ -512,13 +517,14 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     ctx.clip()
     const pad = 4
     const kidSize = folded ? (cell.node as FoldedNode<T>).size : getSize(cell.node as T)
+    const sizeText = folded || !formatCell ? formatSize(kidSize) : formatCell(cell.node as T)
     // Same rule as the DOM label: inline size on branch bars / short leaves
     // wider than the consumer's threshold.
     const inlineSize = (hasKids || h <= 34) && w > inlineSizeMinWidth
     // Same 6px name↔size gap as the DOM label's flex `gap`.
     const gap = 6
     let nameMax = cw - 2 * pad
-    const szText = inlineSize ? formatSize(kidSize) : ''
+    const szText = inlineSize ? sizeText : ''
     const szW = inlineSize ? ctx.measureText(szText).width : 0
     if (inlineSize) nameMax -= szW + gap
     const name = fit(ctx, label, Math.max(0, nameMax))
@@ -537,7 +543,7 @@ function paintCell<T>(ctx: CanvasRenderingContext2D, cell: PlacedCell<T>, o: Pai
     if (!hasKids && h > 34) {
       ctx.globalAlpha = 0.75
       ctx.font = `${lblFsSm}px system-ui, -apple-system, sans-serif`
-      ctx.fillText(fit(ctx, formatSize(kidSize), cw - 2 * pad), x + pad, y + 2 + fs + 3)
+      ctx.fillText(fit(ctx, sizeText, cw - 2 * pad), x + pad, y + 2 + fs + 3)
       ctx.globalAlpha = 1
     }
     ctx.restore()

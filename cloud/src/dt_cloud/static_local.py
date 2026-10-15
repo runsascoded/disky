@@ -9,14 +9,18 @@ minutes. The stages are the staged path's own functions (`static_names`, `static
   `{gen}` the store generation; a scan's newest wins), as a deployment profile's `layouts`.
 
 `build` writes a base generation (never over one): `scans.json`, `ranges.json`, the coalesced versions (`cintervals/`,
-`chist/`), the suffix shards (`shards.json`, `sx/`, `sidecar/`, `sidecar.parquet`), the catalog (`catalog/`), and the
-heavy-term drilldown (`drill/`, `roots-measure/`). Anchored search (`names/`, `anchors/`) is not built: readers decline
-anchored terms on a generation without `anchors/meta.json`.
+`chist/`), the suffix shards (`shards.json`, `sx/`, `sidecar/`, `sidecar.parquet`), the catalog (`catalog/`), the
+heavy-term drilldown (`drill/`, `roots-measure/`), and anchored search (`static_anchors`: the name index `names/`, the
+`q$` / `^q$` rollups and the starts-with catalog under `anchors/`, at the drill's R and K) unless `-A` — without it the
+readers decline `^q`, `^q$`, a heavy `q$` and path terms (`anchor-not-indexed`).
 
 `add` appends every scan published after the generation's newest (base + runs), oldest first, each as a run
-(`deltas/<id>/`: `static_append`'s per-scan append, shards, catalog delta and the drill's run), publishes its manifest
+(`deltas/<id>/`: `static_append`'s per-scan append, shards, catalog delta, the drill's run and, when the base has
+`anchors/meta.json`, the run's `names/` + `anchors/`), publishes its manifest
 (`manifests/<id>.json`, written last), then the binary counter's due carries (`static_merge`; revisions
-`manifests/<id>.m<NNN>.json`). The open-version state is refolded from the base's `cintervals/` and the runs' `cdelta/`
+`manifests/<id>.m<NNN>.json`; a merged run gets `names/` + `anchors/` when its inputs carry them). An anchorless
+generation (built with `-A`, or before anchors were built here) keeps appending without them: a rebuild into a new
+generation is how it gets them. The open-version state is refolded from the base's `cintervals/` and the runs' `cdelta/`
 (`static_append.rebuild_open`), so nothing beyond the published runs is kept between invocations.
 
 With a URL store, the generation's files are mirrored into the work dir first; afterwards the new files go up, every
@@ -40,6 +44,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 from click import IntRange, command, option
 
+from . import static_anchors as an
 from . import static_append as sa
 from . import static_catalog as sc
 from . import static_drill as sd
@@ -138,14 +143,16 @@ class GenStore:
 
 
 def publish_order(keys: list[str]) -> list[str]:
-    """The upload order: data files first, then liveness markers (`meta.json`, the drill's last: a run is a drill tier iff
-    its `drill/meta.json` exists), then the manifests (each lists runs that must be whole), in key order within each."""
+    """The upload order: data files first, then liveness markers (`meta.json`; the drill's and `anchors/meta.json` last: a
+    run is a drill tier iff its `drill/meta.json` exists, an anchored one iff its `anchors/meta.json` does, which follows
+    its `anchors/start/meta.json` as on the staged path), then the manifests (each lists runs that must be whole), in key
+    order within each."""
     def rank(k: str) -> tuple:
         if k.split("/", 1)[0] == "manifests":
             return (3, k)
         name = k.rsplit("/", 1)[-1]
         if name == "meta.json":
-            return (2 if k.endswith("drill/meta.json") else 1, k)
+            return (2 if k.endswith(("drill/meta.json", f"{an.ANCHORS}/meta.json")) else 1, k)
         return (0, k)
     return sorted(keys, key=rank)
 
@@ -193,10 +200,11 @@ def find_scans(root: str, layouts: list[str], local: Path, *, start: str | None 
 
 def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, rule, k: int = RANGES, shard_rows: int = SHARD_ROWS,
               max_rows: int = MAX_ROWS, R: int = R_ROWS, K: int = K_KEPT, floor: int = FLOOR, chunk_rows: int = CHUNK_ROWS, threads: int = 4,
-              mem: str = "4GB") -> dict:
+              mem: str = "4GB", with_anchors: bool = True) -> dict:
     """A base generation over `scans` (`scans.json`'s doc; their files under `mount`) in `gen_dir`, every stage in turn:
     ranges → coalesced versions → suffix map → shards → sidecar → census → members → cells → short literals → catalog
-    → drill. Returns a summary (rows, files, and per stage its seconds, peak work-disk GiB and peak RSS GiB so far)."""
+    → drill → anchored search (`with_anchors`: `names/` + `anchors/`). Returns a summary (rows, files, and per stage its
+    seconds, peak work-disk GiB and peak RSS GiB so far)."""
     t0, times, peaks = monotonic(), {}, {}
     gen_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
@@ -264,11 +272,27 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     (cat / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     t = done("catalog", t)
     drill = build_base_drill(con, gen_dir, work / "drill", R=R, K=K, floor=floor, rule=rule, chunk_rows=chunk_rows, step=step)
-    done("drill", t)
+    t = done("drill", t)
+    anchors = None
+    if with_anchors:
+        anchors = build_base_anchors(con, gen_dir, R=R, K=K, scans=[s["id"] for s in doc["scans"]], rule=rule)
+        done("anchors", t)
     disk.close()
     return {"gen": gen, "scans": len(doc["scans"]), "ranges": k, "suffix_rows": int(sum(side.column("rows").to_pylist())),
             "shards": len(shard_names), "members": members["members"], "cells_rows": meta["cells_rows"], "drill": drill,
-            "s": round(monotonic() - t0, 1), "stages": times, "steps": steps, "peaks": peaks}
+            "anchors": anchors, "s": round(monotonic() - t0, 1), "stages": times, "steps": steps, "peaks": peaks}
+
+
+def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], rule) -> dict:
+    """The base generation's anchored search (`static_anchors`; `^q`, `q$`, `^q$` and path terms): the name index
+    (`names/`, from the coalesced versions, as `static-names anchors names`), then `anchors/` — the `q$` rollups over the
+    suffix shards, the `^q$` ones over the name index and the starts-with catalog `anchors/start/` (`build_tier_local`,
+    each `meta.json` written last), at the drill's R and K."""
+    cint = sorted(str(f) for f in (gen_dir / "cintervals").glob("*.parquet"))
+    names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES)
+    tier = an.Tier(gen_dir)
+    doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule)
+    return {"names": {k: names[k] for k in ("rows", "shards")}, **{k: v["rows"] for k, v in doc["sets"].items()}}
 
 
 def _nop_step(name: str, t: float, **counts: int) -> float:
@@ -500,10 +524,27 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     sa.catalog_delta(con, tiers, sc.BaseShards(str(gen_dir), side), deltas, V, run / "catalog", cat_work, rule)
     shutil.rmtree(cat_work, ignore_errors=True)
     drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule)
+    anchors = run_anchors(con, gen_dir, run, d, runs, rule=rule) if (gen_dir / an.ANCHORS / "meta.json").exists() else None
     manifest = sa.publish_run(store, d, rule, max_level=compact_level)
     peak = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
     err(f"add {d}: published {len(manifest['runs'])} runs in {monotonic() - t0:.1f}s (work disk peak {peak['disk_gb']} GiB, RSS peak {peak['rss_gb']} GiB)")
-    return {"scan": d, "drill": drill, "runs": [r["key"] for r in manifest["runs"]], "s": round(monotonic() - t0, 1), "peak": peak}
+    return {"scan": d, "drill": drill, "anchors": anchors, "runs": [r["key"] for r in manifest["runs"]], "s": round(monotonic() - t0, 1), "peak": peak}
+
+
+def run_anchors(con, gen_dir: Path, run: Path, d: str, runs: list[dict], *, rule) -> dict:
+    """The run's `names/` (from its `cdelta/`) and `anchors/` (+ `anchors/start/`; `static_anchors.build_run_local`, as
+    `static-names anchors run`) over the base's and the live runs' (`runs`: the manifest before it), at the base's R and K.
+    Every earlier tier must carry them: the readers cut the anchored stack at the first run without `anchors/meta.json`,
+    so a run built over a gap would never be read."""
+    prior = [an.Tier(gen_dir), *(an.Tier(gen_dir / r["key"]) for r in runs)]
+    missing = [r["key"] for r in runs if not (gen_dir / r["key"] / an.ANCHORS / "meta.json").exists()]
+    if missing:
+        raise SystemExit(f"{missing[0]}: no {an.ANCHORS}/meta.json under a base that has one; rebuild into a new generation")
+    meta = json.loads((gen_dir / an.ANCHORS / "meta.json").read_text())
+    cdelta = sorted(str(f) for f in (run / "cdelta").glob("*.parquet"))
+    doc = an.build_run_local(con, prior, an.Tier(run), sn.scan_epoch(d), meta["R"], meta["K"], [d],
+                             versions_sql=an.files_sql(cdelta, an.VERSION_COLS), rule=rule)
+    return {k: v["rows"] for k, v in doc["sets"].items()}
 
 
 def run_drill(con, gen_dir: Path, run: Path, scan: dict, runs: list[dict], days: list[str], *, gen: str, rule) -> dict:
@@ -568,26 +609,27 @@ def _check_gen(gen: str) -> None:
 
 
 @command("build")
+@option("-A", "--no-anchors", is_flag=True, help="Skip anchored search (`names/`, `anchors/`): readers then decline `^q`, `^q$`, a heavy `q$` and path terms, and `add` appends runs without them")
 @option("-c", "--chunk-rows", default=CHUNK_ROWS, type=IntRange(min=1), help="The drill's chunks: suffix rows per member-loop chunk, roots per measurement / rollup q range (bounds its working set)")
 @option("-f", "--floor", default=FLOOR, type=IntRange(min=1), help="The drill's measurement floor (root rows under a directory)")
 @option("-g", "--gen", required=True, help="The generation to write: `<store>/static-names/GEN/` (never over an existing one)")
 @option("-k", "--ranges", "k", default=RANGES, type=IntRange(min=1), help="Key ranges (each one DuckDB pass over every scan)")
-@option("-K", "--keep", "K", default=K_KEPT, type=IntRange(min=1), help="The drill's kept children per heavy directory")
+@option("-K", "--keep", "K", default=K_KEPT, type=IntRange(min=1), help="The drill's and the anchors' kept children per heavy directory")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s (`{id}` the scan id, `{gen}` the store generation); repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-n", "--shard-rows", default=SHARD_ROWS, type=IntRange(min=1), help="Suffix rows per shard file")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`), the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
-@option("-R", "--read-rows", "R", default=R_ROWS, type=IntRange(min=1), help="The drill's heavy bound: more root rows under a directory")
+@option("-R", "--read-rows", "R", default=R_ROWS, type=IntRange(min=1), help="The drill's and the anchors' heavy bound: more root rows under a directory")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id (inclusive; default: the newest)")
 @option("-V", "--max-rows", default=MAX_ROWS, type=IntRange(min=1), help="The catalog's membership bound V (range rows)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after)")
 @option("-x", "--hex-runs", required=True, help="The hex-run rule the generation is built with: `MIN,TAIL` (e.g. `16,8`) or `off`")
-def build_cmd(chunk_rows, floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, R, scans_root, through, max_rows, work, hex_runs) -> None:
+def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, R, scans_root, through, max_rows, work, hex_runs) -> None:
     """Build a base generation of the static name index on this machine, every stage in-process: the staged (Batch)
     path's stages over a local work dir, then the generation copied into the store (data files first, `meta.json`s last).
-    Prints a JSON summary."""
+    Anchored search (`names/`, `anchors/`) is built unless `-A`. Prints a JSON summary."""
     _check_gen(gen)
     rule = parse_rule(hex_runs)
     store = Store(store_root)
@@ -602,7 +644,7 @@ def build_cmd(chunk_rows, floor, gen, k, K, layouts, mem, shard_rows, store_root
         if gen_dir.exists():
             shutil.rmtree(gen_dir)
         summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, rule=rule, k=k, shard_rows=shard_rows, max_rows=max_rows,
-                            R=R, K=K, floor=floor, chunk_rows=chunk_rows, threads=threads, mem=mem)
+                            R=R, K=K, floor=floor, chunk_rows=chunk_rows, threads=threads, mem=mem, with_anchors=not no_anchors)
         summary["files"] = len(upload_new(store, gen_dir, prefix, {}))
     print(json.dumps(summary, indent=1))
 
@@ -636,6 +678,8 @@ def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, 
             raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
         base = json.loads((gen_dir / "scans.json").read_text())
         rule = sn.gen_rule(base)
+        if not (gen_dir / an.ANCHORS / "meta.json").exists():
+            err(f"{prefix}: no {an.ANCHORS}/meta.json: runs are appended without anchored search (a generation rebuilt without -A has it)")
         lstore = LocalRunStore(gen_dir, w / "lease", gen)
         newest = latest_key(lstore.keys("manifests/"))
         have = scans_of(base, lstore.read_json(newest)["runs"] if newest else [])

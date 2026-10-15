@@ -98,6 +98,8 @@ export interface TreemapProps<T> {
   getId?: (n: T, path: T[]) => string
   /** Format `getSize`'s return value for display. Default: raw number toLocaleString. */
   formatSize?: (n: number) => string
+  /** A cell's size text, overriding `formatSize(getSize(n))` (e.g. a signed change, while the area stays `getSize`). */
+  formatCell?: (n: T) => string
 
   /**
    * Cell background + text color + optional hatch overlay. Return `null`
@@ -489,6 +491,7 @@ export function Treemap<T>({
   getLabel,
   getId,
   formatSize = defaultFormat,
+  formatCell,
   collapseChains = false,
   reclaimTitleSpace = false,
   branchOutline,
@@ -575,7 +578,7 @@ export function Treemap<T>({
   const getTitleWidth = useCallback((n: T, labels: string[] | null, w: number, boxW: number): number => {
     if (!titleMetrics || sizeAlign === 'right' || renderCellSubtitle) return boxW
     const name = labels ? (labels.length > 3 ? `${labels[0]}/…/${labels[labels.length - 1]}` : labels.join('/')) : getLabel(n)
-    const sizeText = w > inlineSizeMinWidth ? formatSize(getSize(n)) : ''
+    const sizeText = w > inlineSizeMinWidth ? (formatCell ? formatCell(n) : formatSize(getSize(n))) : ''
     const { ctx, font, sizeFont, canvasFont, padding, tabularNums } = titleMetrics
     const measure = (nameFont: string, valueFont: string) => {
       ctx.font = nameFont
@@ -590,7 +593,7 @@ export function Treemap<T>({
       return nameWidth + (sizeText ? 6 + sizeWidth : 0)
     }
     return Math.min(boxW, padding + Math.max(measure(font, sizeFont), measure(canvasFont, canvasFont)))
-  }, [titleMetrics, sizeAlign, renderCellSubtitle, getLabel, inlineSizeMinWidth, formatSize, getSize])
+  }, [titleMetrics, sizeAlign, renderCellSubtitle, getLabel, inlineSizeMinWidth, formatSize, formatCell, getSize])
   const tipRef = useRef<HTMLDivElement>(null)
   // The live map `<canvas>` (canvas renderer only), so image export can read
   // its pixels directly (`exportable`).
@@ -1231,7 +1234,7 @@ export function Treemap<T>({
                 first line and isn't crowded by the size. */}
             {(kids.length > 0 || r.h <= 34) && r.w > inlineSizeMinWidth && (
               <span className="sz" style={{ opacity: 0.75, whiteSpace: 'nowrap', flex: 'none', marginLeft: sizeAlign === 'right' ? 'auto' : undefined }}>
-                {formatSize(kidSize)}
+                {folded || !formatCell ? formatSize(kidSize) : formatCell(kid as T)}
                 {!folded && renderCellSubtitle && (
                   <span style={{ marginLeft: 4 }}>{renderCellSubtitle(kid as T, kidPath, { w: r.w, h: r.h, fade: fadeAt(depth), hasKids: kids.length > 0 })}</span>
                 )}
@@ -1256,7 +1259,7 @@ export function Treemap<T>({
               pointerEvents: 'none',
             }}
           >
-            {formatSize(kidSize)}
+            {folded || !formatCell ? formatSize(kidSize) : formatCell(kid as T)}
             {!folded && renderCellSubtitle && (
               <span style={{ marginLeft: 4 }}>{renderCellSubtitle(kid as T, kidPath, { w: r.w, h: r.h, fade: fadeAt(depth), hasKids: kids.length > 0 })}</span>
             )}
@@ -1313,7 +1316,7 @@ export function Treemap<T>({
         const off = document.createElement('canvas')
         renderMapToCanvas(
           off, cells, size.w, size.h,
-          { styleOpts, getSize, getLabel, formatSize, sizeAlign, inlineSizeMinWidth, dustTexture },
+          { styleOpts, getSize, getLabel, formatSize, formatCell, sizeAlign, inlineSizeMinWidth, dustTexture },
           mapRef.current,
         )
         src = off
@@ -1527,6 +1530,7 @@ export function Treemap<T>({
                 getSize={getSize}
                 getLabel={getLabel}
                 formatSize={formatSize}
+                formatCell={formatCell}
                 sizeAlign={sizeAlign}
                 idFor={idFor}
                 expandable={expandable}

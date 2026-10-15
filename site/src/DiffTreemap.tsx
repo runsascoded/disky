@@ -210,6 +210,9 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
         getLabel={n => (n.first ? `${n.label} (first scanned)` : n.label)}
         getId={(_n, p) => p.map(x => x.key).join('|')}
         formatSize={n => fmtBytes(n)}
+        // Delta mode: a cell's area is its movement (a dir's: its children's, grew + shrank), its label the signed
+        // net change, so a folder that grew 37 T and shrank 20 T reads "+17 T", not its 57 T of area.
+        formatCell={areaMode === 'max' ? undefined : n => fmtDelta(n.delta)}
         tipMode="dock"
         // Crumb and movement totals both live in the header band above the map
         // now, so the map's own crumb suffix is empty.

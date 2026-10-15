@@ -89,12 +89,12 @@ export const vectorOf = (r: Resolved): { view: string; at: string; sources: { st
 
 /** Each member's context for `request` (`withStore` + `withPathStore`, as a
  * single-store handler builds its own). */
-export function memberCtxs(ctx: Ctx, view: UnionView): Ctx[] | Response {
+export async function memberCtxs(ctx: Ctx, view: UnionView): Promise<Ctx[] | Response> {
   const out: Ctx[] = []
   for (const store of view.members) {
     const c = withStore({ ...ctx, request: memberRequest(ctx.request, store) })
     if (c instanceof Response) return c
-    out.push(withPathStore(c))
+    out.push(await withPathStore(c))
   }
   return out
 }
@@ -128,7 +128,7 @@ export interface Cutoff { date: string; at: string }
  * scans as observations.
  */
 export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promise<Union | Response> {
-  const ctxs = memberCtxs(ctx, view)
+  const ctxs = await memberCtxs(ctx, view)
   if (ctxs instanceof Response) return ctxs
   for (const c of ctxs) {
     if (!c.env.DB) return json({ error: 'index backend not configured (DB)' }, 503)

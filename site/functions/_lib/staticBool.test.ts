@@ -242,6 +242,24 @@ describe('anchored terms in a compound (`^q`, `q$`, `^q$`): the same rules, each
   })
 })
 
+describe('path terms in a compound (`a/b`): the same rules, each term held along the path', () => {
+  // Path keys from brute force over the objects (`objectsSource`; the fixture's index has no name index), plain ones
+  // from the suffix index.
+  const mixedPaths = (): HitSource => {
+    const light = source('light'), byPath = objectsSource()
+    return { hits: (k, u, o) => (parseKey(k).mode ? byPath : light).hits(k, u, o) }
+  }
+  const QS = ['data/tomat', '/tomat', 'bk/data', 'data/tomat bin', 'raw/tomat -inner', 'tomat -data/raw', 'bk/runs|data/raw', '^tomat-1/x.bin$', 'x/ckpt -2.pt', 'tomato/a.bin|ttl=7d/z.', '-tomat-1/to']
+  it('= brute force at every root, both scans', async () => {
+    expect(await sweepAnswers(mixedPaths(), QS)).toEqual({ served: QS.length * ROOTS.length * SCANS.length, declined: {} })
+  })
+  it('keys: a path term with a readable tail is a key of its own; a tail too short is no plan', () => {
+    expect(['data/tomat bin', 'a/bc -x', 'a/b x', 'x -a/', 'a/b$ x'].map(plan)).toEqual([
+      { alts: [['//00data/tomat', 'bin']], neg: [] }, { alts: [['//00a/bc']], neg: ['x'] }, null, null, { alts: [['//01a/b', 'x']], neg: [] },
+    ])
+  })
+})
+
 describe('the budget: a combination past it declines (`too-broad`), never a guess', () => {
   it('the reads past each term\'s own at P, and the hits held, each bound it', async () => {
     const src = source('mixed')

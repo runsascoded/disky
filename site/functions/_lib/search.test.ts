@@ -8,6 +8,7 @@ import { makeSimple, regex } from './querySyntax'
 import { planPositive } from './searchQuery'
 import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, GETS, readJson, seedGeneration } from './testStore'
+import { keepFor, PARTIAL_TTL } from './edgeCache'
 import { APPROX_EXCL_NO_INDEX, APPROX_NO_INDEX, APPROX_UNINDEXED, buildDiff, buildView, type View } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
@@ -66,7 +67,7 @@ async function find(h: IndexHandle, pred: NamePred, root: string, limits?: Searc
   return plan ? searchRoots(env, h, pred, plan, root, limits) : null
 }
 /** A view without its coverage flags, and the flags' reasons. */
-const bare = ({ partial: _p, partialReason: _pr, approximate: _a, approximateReason: _ar, ...v }: View) => v
+const bare = ({ partial: _p, partialReason: _pr, approximate: _a, approximateReason: _ar, searchLate: _sl, ...v }: View) => v
 const coverage = (v: View) => ({ partial: v.partialReason, approximate: v.approximateReason })
 const byPath = (rows: Row[]) => [...rows].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.usr! < b.usr! ? -1 : 1))
 
@@ -328,6 +329,19 @@ describe('the filter view', () => {
     ] as const) {
       const a = await buildView(env, { ...o, date, searchLimits: { ...SEARCH_LIMITS, ...limits } })
       expect([date, why, bare(a), coverage(a), a.tier]).toEqual([date, why, bare(b), { partial: `the search stopped before finding a match (${why}); showing a thresholded read` }, 'path+path'])
+    }
+  })
+
+  it('a search cut by its time budget is kept briefly (and recomputed); one cut by a read budget, whole', async () => {
+    // A read budget's cut is the same on every run; the wall clock's may not be — caching it whole kept a
+    // cold isolate's 1.5 s cut for a day (r2.oa.dev `?f=nemotron_cc_v2`).
+    const o = { ...base, path: '', threshold: 0, query: parseQuery('ttl')! }
+    const brief = { partialTtl: PARTIAL_TTL }
+    for (const [limits, keep] of [[{}, true], [{ rowsRgs: 0 }, true], [{ wallMs: 0 }, brief]] as const) {
+      const searchLimits = { ...SEARCH_LIMITS, ...limits }
+      const v = await buildView(env, { ...o, date: SEARCH, searchLimits })
+      const d = await buildDiff(env, { ...o, from: PLAIN, to: SEARCH, top: 100, searchLimits })
+      expect([limits, keepFor(v), keepFor(d)]).toEqual([limits, keep, keep])
     }
   })
 

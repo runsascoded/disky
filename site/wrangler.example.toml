@@ -118,7 +118,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # FILTER_DETAILS_MS = "300"                # with FILTER_STATIC: ms a filtered view waits past phase 2 for its roots' kind/ages/classes (unset: until they land)
 # FILTER_PHASE2_MS = "1500"                # ms a filtered view's phase 2 (its match roots' insides) may take; reads still running then are dropped and those roots drawn whole (`interiors` in the response; default 1500)
 # PATH_STORE = "intervals"                 # read the dates INTERVAL_STORE_GEN holds from the change-interval path store on INDEX_R2 (`_lib/index.ts` `openInterval`, specs/interval-store.md); lenses and owner pools still read per-scan stores. `opt-in`: only requests with `ps=iv`
-# INTERVAL_STORE_GEN = "2026-10-09"         # with PATH_STORE: the generation, `interval-store/<gen>/` on INDEX_R2
+# INTERVAL_STORE_GEN = "2026-10-09"         # with PATH_STORE: pin the generation, `interval-store/<gen>/` on INDEX_R2; unset = the store's current one (`interval-store/CURRENT.json`, moved by `interval-store add`'s compactions)
 # INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
 # OWNER_HISTORY_BATCH = "1"                # prototype (specs/root-owner-history.md; off): a fleet-root owner series from one bounded interval-store version read, the canonical per-scan reader as fallback
 # FOOTER_CACHE_MAX_ROWS = "1000000"        # the footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most `index_row_groups` rows its hot entries keep; evicted by `POST /api/footer-cache` / `dt-cloud footer-evict`. Default 1,000,000

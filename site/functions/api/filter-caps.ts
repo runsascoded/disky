@@ -22,7 +22,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   const u = unionFor(ctx0.request, ctx0.env)
   if (u instanceof Response) return u
   if (u) {
-    const members = memberCtxs(ctx0, u)
+    const members = await memberCtxs(ctx0, u)
     if (members instanceof Response) return members
     return caps(ctx0.env, members.some(m => indexedOnly(m.env)))
   }

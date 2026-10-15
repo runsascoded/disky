@@ -92,14 +92,15 @@ export interface Env {
   /** `1`: the scans' generations carry the filter's search sidecars (`path-index -S`): a filter the
    *  static index doesn't answer reads them (`_lib/search.ts`). Unset = none are built, never probed. */
   SEARCH_SIDECARS?: string
-  /** `intervals`: the dates `INTERVAL_STORE_GEN` holds read their path store from the change-interval
+  /** `intervals`: the dates the interval store's generation holds read their path store from the change-interval
    *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
    *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */
   PATH_STORE?: string
   /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
    *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
-  /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`). */
+  /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`), a pin; unset: the store's current one,
+   *  `interval-store/CURRENT.json` (`index.ts` `ivGen`), which a compaction moves. */
   INTERVAL_STORE_GEN?: string
   /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
   INTERVAL_STORE_REV?: string

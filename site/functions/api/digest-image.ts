@@ -33,7 +33,7 @@ interface Body {
 const bad = (msg: string) => new Response(msg, { status: 400 })
 
 export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Promise<Response> => {
-  const ctx = withPathStore(ctx0 as { request: Request; env: Env }) as { request: Request; env: OgEnv }
+  const ctx = (await withPathStore(ctx0 as { request: Request; env: Env })) as { request: Request; env: OgEnv }
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
   const b = (await ctx.request.json().catch(() => null)) as Body | null

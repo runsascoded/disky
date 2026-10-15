@@ -516,8 +516,8 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       expect([got.length, got.filter(g => (g as unknown[])[3] === 'not found').length]).toEqual([222, 9])
     })
 
-    it('the root under an owner pool (the catalog knows no owners): `unsupported-scope`, not the walk', async () => {
-      expect(await outcome(view(envStatic(noDrill()), A, '', '0', { owner: 'unowned' }))).toEqual({ code: 'unsupported-scope', message: REJECT_MESSAGES['unsupported-scope'] })
+    it('the root under an owner pool (the catalog knows no owners): `owner-too-common`, not the walk', async () => {
+      expect(await outcome(view(envStatic(noDrill()), A, '', '0', { owner: 'unowned' }))).toEqual({ code: 'owner-too-common', message: REJECT_MESSAGES['owner-too-common'] })
     })
 
     it('a view the literal matches is the plain view, as before', async () => {

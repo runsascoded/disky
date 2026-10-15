@@ -4,6 +4,7 @@
 // `HEALTH_TTL` s (keyed by the store and its generations), so a page's polling costs one read a minute per colo.
 import { type Env, json, requireViewer } from '../_lib/auth.js'
 import { health } from '../_lib/health.js'
+import { ivGen } from '../_lib/index.js'
 import { storeKey } from '../_lib/stores.js'
 
 /** How long a computed document stands (s). */
@@ -14,7 +15,8 @@ const colo = (): Cache | null => (typeof caches === 'undefined' ? null : (caches
 export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
-  const { env } = ctx
+  // The interval store's generation: the pin, else the store's current one (`ivGen`), fixed for the document.
+  const env: Env = ctx.env.PATH_STORE ? { ...ctx.env, INTERVAL_STORE_GEN: (await ivGen(ctx.env)) ?? undefined } : ctx.env
   const headers = { 'cache-control': 'private, max-age=30' }
   const fresh = new URL(ctx.request.url).searchParams.has('fresh')
   const key = new Request(`https://health.cache/${encodeURIComponent(storeKey(env))}/${encodeURIComponent(env.INTERVAL_STORE_GEN ?? '-')}/${encodeURIComponent(env.STATIC_GEN ?? '-')}`)

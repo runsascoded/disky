@@ -204,6 +204,16 @@ def plan_carries(runs: list[dict], drilled: Collection[str] = frozenset(), max_l
     return [r for r, _ in stack], [(ins, r) for r, ins in stack if len(ins) > 1]
 
 
+def compaction_due(runs: list[dict], max_level: int | None, drilled: Collection[str] = frozenset()) -> bool:
+    """Whether `runs` (a manifest's, oldest first), once their due carries are made (`plan_carries`), hold two runs at
+    level `max_level` − 1: the carry between them would reach the compaction level, so the base and every run are due to
+    fold into a new base generation instead (every 2^`max_level` scans past the base). Never when unbounded (None)."""
+    if max_level is None:
+        return False
+    after, _ = plan_carries(runs, drilled, max_level)
+    return any(a["level"] == b["level"] == max_level - 1 for a, b in zip(after, after[1:]))
+
+
 def rebase(runs: list[dict], inputs: list[str], out: dict) -> list[dict] | None:
     """`runs` with the consecutive runs keyed `inputs` replaced by `out`; None when `out` is already listed. Raises
     `Superseded` when they aren't there consecutively."""
@@ -1259,8 +1269,9 @@ class Runner:
                 return
             m = self.read_json(keys[-1])
             top = self.p.compact_level
-            after, merges = plan_carries(m["runs"], self.drilled(m["runs"]), top)
-            compact = top is not None and any(a["level"] == b["level"] == top - 1 for a, b in zip(after, after[1:]))
+            drilled = self.drilled(m["runs"])
+            _, merges = plan_carries(m["runs"], drilled, top)
+            compact = compaction_due(m["runs"], top, drilled)
             if compact:
                 self.log(f"merge: level {top} is due: compact into a new base generation (carries stop below it)")
             if merges:

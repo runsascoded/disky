@@ -1047,3 +1047,29 @@ def test_prune_deletes_the_earlier_states_in_parallel():
     with pytest.raises(ia.StateIncomplete, match="no manifest"):
         ia.prune_state(g, "g1", "2026-08-05", 4, bucket="data", scratch="scr", workers=4)
     assert g.deleted == []
+
+
+def test_prune_cmd_gcs_builds_the_gcs_run_store(monkeypatch):
+    """`interval-store prune` on a GCS store prunes over `append_runner.GcsRunStore` (10-15: a bare `GcsRunStore` raised
+    `NameError` in the chain's prune stage)."""
+    from click.testing import CliRunner
+
+    calls = []
+
+    class FakeStore:
+        def __init__(self, bucket, scratch, gen, *, prefix, client=None):
+            calls.append(("store", bucket, scratch, gen, prefix))
+
+    def fake_prune(store, *, grace_s=None, retain=None, dry_run, where):
+        calls.append(("prune", type(store).__name__, retain, dry_run, where))
+        return {"keys": ["k"], "deleted": 1}
+
+    monkeypatch.setattr(ar, "GcsRunStore", FakeStore)
+    monkeypatch.setattr(ar, "prune_folded", fake_prune)
+    r = CliRunner().invoke(ia.prune_cmd, ["-b", "b", "-g", "G", "-R", "G", "-S", "s", "-n"])
+    assert r.exception is None, r.output
+    assert calls == [
+        ("store", "b", None, "G", ia.PREFIX),
+        ("prune", "FakeStore", ia.FOLDED_RETAIN, True, " gcs"),
+    ]
+    assert json.loads(r.output) == {"gen": "G", "store": "gcs", "deleted": 1}

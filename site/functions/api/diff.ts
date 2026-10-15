@@ -20,7 +20,8 @@ import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
+import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
@@ -51,7 +52,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = withPathStore(ctx1)
+  const ctx = await withPathStore(ctx1)
   const st = serverTiming()
   traceJoins(ctx.env, st.trace)
   if (!storeReady(ctx.env)) {
@@ -88,17 +89,17 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
   // whose text the filter box shows under itself.
   let qp: ReturnType<typeof queryParam>
   try {
-    qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX)
+    qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX, indexedOnly(ctx.env))
   } catch (e) {
     // Indexed-only: a form it refuses is refused as such (`a b` is "one term", not "too short").
-    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(url.searchParams.get('q'), url.searchParams.get('qs'), ctx.env.QUERY_SYNTAX) : null
+    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(url.searchParams.get('q')) : null
     if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
     throw e
   }
   let query = qp.query
-  // An indexed-only deployment: one literal, unscoped (`_lib/indexedOnly.ts`), before auth or any read.
-  const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw, url.searchParams.get('qs'), ctx.env.QUERY_SYNTAX) ?? rejectScope(!!(lens || owner || classes)) : null
+  // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`), before auth or any read.
+  const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
 
   const gated = member ? member.id : await st.time('auth', requireViewer(ctx as never))
@@ -139,8 +140,10 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     }
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
-    const render = async (o: { phase2Ms?: number; trace?: typeof st.trace } = {}) => {
-      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
+    const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; trace?: typeof st.trace } = {}) => {
+      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
+      // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
+      const keep = keepFor(diff)
       const body = JSON.stringify({
         prev: from,
         curr: to,
@@ -150,13 +153,13 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
         ...(query ? { q: qRaw, ...hexNote(hx.hexRuns, query.ast) } : {}),
         ...diff,
         threshold: Math.round(diff.threshold),
-        ...(diff.interiors?.late ? { budgetCut: true } : {}),
+        ...(keep !== true ? { budgetCut: true } : {}),
       })
-      return { body, keep: keepFor(diff.interiors) }
+      return { body, keep }
     }
     // A partial answer schedules the full one in the background (`upgradePartial`, as subtree.ts).
     const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS }), ctx.waitUntil?.bind(ctx)))
+      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
       return res
     }
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
