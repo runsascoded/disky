@@ -90,8 +90,16 @@ if [[ -n ${SCAN_RUNS_PROFILE:-} ]]; then
   sr start -k ingest -K "$d1_store" -g "$gen" -t "$t_capture" -T 1 ${facts[@]+"${facts[@]}"} "$date"
   marked=$(aws s3api head-object --bucket "$bucket" --key "$key/_SUCCESS.json" --endpoint-url "$R2_ENDPOINT_URL" \
     --query LastModified --output text 2>&1) || true
-  if [[ $marked =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})[T\ ]([0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
-    t_marked=$(epoch "${BASH_REMATCH[1]}T${BASH_REMATCH[2]}")
+  # The image's AWS CLI v1 prints the header's RFC 1123 date (`Wed, 14 Oct 2026 22:11:39 GMT`), v2 ISO 8601:
+  # GNU date reads either; BSD date (a laptop's tests) only the ISO form, through `epoch`.
+  t_marked=
+  if [[ -n $marked ]]; then
+    t_marked=$(date -u -d "$marked" +%s 2>/dev/null) || t_marked=
+    if [[ -z $t_marked && $marked =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})[T\ ]([0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
+      t_marked=$(epoch "${BASH_REMATCH[1]}T${BASH_REMATCH[2]}")
+    fi
+  fi
+  if [[ -n $t_marked ]]; then
     sr phase-begin capture -b "$t_capture"
     sr phase-end capture -t "$t_marked" -o "capture=r2://$bucket/$key/"
   else
