@@ -1,7 +1,8 @@
 import { useEffect, useMemo } from 'react'
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
-import { useUrlAlias, useUrlState } from 'use-prms'
-import { canonicalizeSel, decodeSel, encodeScan, encodeSel, exactSlug, latestScan, minPrefix, minSlug, legacyDateParam, legacyFromParam, mergeSel, scanCmp, scanMatches, scanNeighbors, scanParts, selSlug, sortScans, startKey, timesNeeded, type ScanSel, type ScanTimes } from './scanSlug'
+import { useUrlAlias, useUrlState, useUrlStates } from 'use-prms'
+import { encodeCutoff, parseCutoff } from './federatedScans'
+import { canonicalizeSel, decodeSel, encodeScan, encodeSel, exactSlug, latestScan, minPrefix, minSlug, legacyDateParam, legacyFromParam, mergeSel, scanCmp, scanInstant, scanMatches, scanNeighbors, scanParts, selSlug, sortScans, startKey, timesNeeded, type ScanSel, type ScanTimes } from './scanSlug'
 import { storeUrl, type Store } from './stores'
 import { pickScanSelection } from './scanSelection'
 
@@ -58,6 +59,21 @@ export function scanLabeler(scans: readonly string[], times: ScanTimes = {}, now
 export { DAY, decodeScan, decodeSel, decodeSpan, encodeScan, encodeSel, encodeSpan, latestScan, nearestScan, resolveScan, scanInstant, scanMatches, scanNeighbors, scanTime, type ScanSel, type ScanTimes } from './scanSlug'
 
 const selParam = { encode: encodeSel, decode: (e: string | undefined) => decodeSel(e) }
+
+/** `?at=` / `?atf=`: a union view's cutoff instants — the page's end, the diff's start — when no one scan id says
+ *  them (`pickCutoff`, specs/federated-scans.md "Case 1 status"). Compact UTC in the URL (`20261013T1935Z`,
+ *  `encodeCutoff`; ISO reads too), the canonical ISO instant in the page; an unparseable value reads as absent. */
+export const cutoffParam = {
+  encode: (v: string | undefined) => (v ? encodeCutoff(v) : undefined),
+  decode: (e: string | undefined) => parseCutoff(e) ?? undefined,
+}
+
+/** The page's scan at a cutoff instant: the newest of `scans` at or before it (a date-only id at its known
+ *  start, else its midnight). Null: none by then. */
+export function scanAtInstant(scans: readonly string[], at: string, times?: ScanTimes): string | null {
+  const t = Date.parse(at)
+  return sortScans(scans, times).find(s => scanInstant(s, times) <= t) ?? null
+}
 
 /** The page's scan selection (`?d=`), read through use-prms's alias hook so a
  * legacy `?date=<id>` / `?from=<id>` (or an ISO `?d=2026-10-06`) folds into
@@ -146,6 +162,13 @@ export interface Scan {
   setEndPin: (pin: boolean) => void
   /** Pin + look-back in one URL write (a chart brush sets both). */
   setRange: (d: string | undefined, ms: number | undefined, before?: string) => void
+  /** `?at=`: the end as a cutoff instant (a union view's pick no one scan id says); `asof` is then the newest
+   *  scan at or before it (`scanAtInstant`). Any other end pick clears it. */
+  at: string | undefined
+  setAt: (at: string) => void
+  /** `?atf=`: the diff's start as a cutoff instant; a start scan pin or span clears it. */
+  atFrom: string | undefined
+  setFromAt: (at: string) => void
   scansQ: UseQueryResult<string[]>
 }
 
@@ -245,24 +268,36 @@ export function useScanTimes(store: Store, scans: readonly string[]): ScanTimes 
 /** The page's scan selection. `indexed`: the covered scans to prefer when `?d=` is absent (a filtered
  * view on an indexed-only deployment; see `floatingScan`). An explicit `?d=` resolves as always. */
 export function useScan(store: Store, indexed?: readonly string[] | null | 'loading'): Scan {
-  const [sel, setSel] = useScanSel()
+  const [sel] = useScanSel()
+  // One writer for the end/start selection and the cutoff instants, so a pick is one history entry.
+  const { values: cuts, setValues } = useUrlStates({ d: selParam, at: cutoffParam, atf: cutoffParam }, true)
+  const { at, atf: atFrom } = cuts
   const scansQ = useScans(store)
   const listed = useMemo(() => scansQ.data ?? [], [scansQ.data])
   const times = useScanTimes(store, listed)
   const scans = useMemo(() => sortScans(listed, times), [listed, times])
   const label = useMemo(() => scanLabeler(scans, times), [scans, times])
   const floating = useMemo(() => floatingScan(scans, indexed), [scans, indexed])
-  const picked = useMemo(() => selectScan(sel, scans, scansQ.isSuccess, indexed, times), [sel, scans, scansQ.isSuccess, indexed, times])
+  // `?at=` names the end exactly; the page's scan is the newest at or before it.
+  const picked = useMemo(
+    () => (at ? { asof: scansQ.isSuccess ? scanAtInstant(scans, at, times) : null, miss: null, pending: [] } : selectScan(sel, scans, scansQ.isSuccess, indexed, times)),
+    [at, sel, scans, scansQ.isSuccess, indexed, times],
+  )
   const dP = sel?.d
   const span = sel?.span
   const from = sel?.from
   const dMatches = useMemo(() => scanMatches(dP, scans, times), [dP, scans, times])
   const { asof, miss, pending } = picked
-  // Write the {end, before} pair verbatim; start pins and spans are exclusive.
-  const write = (d: string | undefined, span0: number | undefined, from0: string | undefined) =>
-    setSel(d || span0 || from0
-      ? { ...(d ? { d } : {}), ...(span0 ? { span: span0 } : {}), ...(from0 ? { from: from0 } : {}) }
-      : undefined)
+  // Write the {end, before} pair verbatim; start pins and spans are exclusive (with each other and with `atf`),
+  // as an end slug is with `at`.
+  const write = (d: string | undefined, span0: number | undefined, from0: string | undefined, at0: string | undefined, atf0: string | undefined) =>
+    setValues({
+      d: d || span0 || from0
+        ? { ...(d ? { d } : {}), ...(span0 ? { span: span0 } : {}), ...(from0 ? { from: from0 } : {}) }
+        : undefined,
+      at: at0,
+      atf: atf0,
+    })
   useCanonicalSel(sel, scans, scansQ.isSuccess, times)
   // Setters take scan ids (a picker's choice) and write each as its canonical
   // prefix (`minPrefix`): the shortest of its day, hour and minute that names it
@@ -270,14 +305,16 @@ export function useScan(store: Store, indexed?: readonly string[] | null | 'load
   const exact = (v: string | undefined) => (v ? minPrefix(v, scans, times) : undefined)
   const pick = (v: string | undefined, ms: number | undefined, before?: string) => {
     const next = pickScanSelection(sel, v, floating.scan, ms, before)
-    write(next?.d === dP ? dP : exact(next?.d), next?.span, next?.from === from ? from : exact(next?.from))
+    write(next?.d === dP ? dP : exact(next?.d), next?.span, next?.from === from ? from : exact(next?.from), undefined, next?.from || next?.span ? undefined : atFrom)
   }
   const setRange = (v: string | undefined, ms: number | undefined, before?: string) => pick(v, ms, before)
   const setDP = (v: string | undefined) => pick(v, span)
-  const setSpan = (ms: number | undefined) => write(dP, ms, undefined)
-  const setFrom = (v: string | undefined) => write(dP, undefined, exact(v))
-  const setEndPin = (pin: boolean) => write(pin ? exact(asof ?? undefined) : undefined, span, from)
-  return { asof, miss, pending, scans, times, label, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, scansQ }
+  const setSpan = (ms: number | undefined) => write(dP, ms, undefined, at, undefined)
+  const setFrom = (v: string | undefined) => write(dP, undefined, exact(v), at, undefined)
+  const setEndPin = (pin: boolean) => write(pin ? exact(asof ?? undefined) : undefined, span, from, undefined, atFrom)
+  const setAt = (t: string) => write(undefined, span, from, t, atFrom)
+  const setFromAt = (t: string) => write(dP, undefined, undefined, at, t)
+  return { asof, miss, pending, scans, times, label, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ }
 }
 
 /** `<optgroup>` rows for a scan picker: scans grouped by their displayed

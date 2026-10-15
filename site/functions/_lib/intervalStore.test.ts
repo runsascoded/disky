@@ -285,6 +285,36 @@ describe('interval store', () => {
     const b = cases.find(c => c.date === '2026-08-05' && c.path === 'b2/e' && c.w === 8 && c.depth == null)!
     expect([d.total_a, d.total_b]).toEqual([a.tiles[''].b, b.tiles[''].b])
   })
+
+  it('diffs a dir-only (v1) scan against a full (v2) one as the per-scan stores do: its objects fold into `(other)`', async () => {
+    // The store's sorts are one format whatever each scan's source was (`isStore` is true at every scan); a scan's
+    // format is its rows' (a v1 version never knew its children: `n_children` null). Across formats the objects have
+    // no counterpart, so they fold into `(other)` on the full side, as `buildDiff` does per-scan. Read as rows, each
+    // was "added", and on r2 their lookups at the v1 scan spent `LOOKUP_CAP`, so dirs the v1 scan holds read as added
+    // too (09-20 → 10-15, `ctbk/gbfs/status/2026-09-21`). (The fixture's random trees don't sum, so the fold's bytes
+    // aren't checked here; `test_interval_store.py` compares the folded diffs with the per-scan reference.)
+    const V = Object.fromEntries(cases.map(c => [c.date, c.v]))
+    const dates = Object.keys(V).sort()
+    const got: { pair: string; path: string; files: string[] }[] = []
+    let pairs = 0
+    for (const from of dates) {
+      for (const to of dates) {
+        if (V[from] === V[to]) continue
+        for (const path of ['', 'b1', 'b2/e']) {
+          const d = await buildDiff(env, { from, to, path, w: 8, h: 6, minArea: 12, atten: 2, top: 100 })
+          // A side without P (the fixture's paths come and go) draws the other alone, objects too, as per-scan.
+          if (!d.total_a || !d.total_b) continue
+          pairs++
+          // An object read as added (or removed) across the cutover: the dir-only side never had it. (The fixture's v1
+          // scans hold rows at paths its v2 scans have objects at, as no real v1 index does: those compare.)
+          const thin = V[from] === 1 ? 'a' : 'b'
+          const files = d.rows.filter(r => r.k === 'file' && !r[thin] && !r[thin === 'a' ? 'oa' : 'ob']).map(r => r.p)
+          if (files.length) got.push({ pair: `${from}→${to}`, path, files })
+        }
+      }
+    }
+    expect({ pairs, got }).toEqual({ pairs: 30, got: [] })
+  })
 })
 
 // Base + per-scan runs (specs/interval-store.md §2.7, `interval_append`): `g3`, `g4` and `g6` hold `g1`'s six scans as a

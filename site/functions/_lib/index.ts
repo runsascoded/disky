@@ -348,6 +348,12 @@ export function schemaRow<T>(env: Env, cols: string, date: string, variant: stri
     : env.DB!.prepare(`SELECT ${cols} FROM index_schema WHERE store = ? AND date = ? AND variant = ?`).bind(storeKey(env), date, d1Variant(env, variant)).first<T>()
 }
 
+/** Bumped when the interval store's answer for the same inputs changes (a rule only its reads take): its dates' cache
+ *  keys move (`pathGens`), the per-scan stores' don't (`edgeCache.CACHE_V` moves every key). 2 (2026-10-14): a diff
+ *  across a dir-only (v1) scan and a full one folds the objects into `(other)`, as per-scan (`listsObjects`): read as
+ *  rows, each was "added", and their lookups spent the walk's budget, so dirs the v1 scan held read as added too. */
+export const IV_ANSWER_V = 2
+
 /** The `path` pointer's generation for each of `dates`, folded into one short
  * token (FNV-1a over `date=gen` in date order; '' without a D1). An edge-cache
  * key carries it, so re-syncing a date (a new generation, e.g. a store
@@ -369,10 +375,10 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
     for (const r of results) gens.set(r.date, `${gens.get(r.date) ?? ''}${r.variant}:${r.gen ?? ''},`)
   }
   let h = 0x811c9dc5
-  // The interval store's dates: their answers are the store's generation's, keyed apart.
+  // The interval store's dates: their answers are the store's generation's (and its reader's, `IV_ANSWER_V`), keyed apart.
   if (intervalsOn(env)) {
     const held = await ivScans(env)
-    for (const d of uniq) if (held.has(d)) gens.set(d, `iv:${env.INTERVAL_STORE_GEN}${ivRev(env)}`)
+    for (const d of uniq) if (held.has(d)) gens.set(d, `iv:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
   }
   for (const d of [...uniq].sort()) {
     for (const ch of `${d}=${gens.get(d) ?? ''};`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193)

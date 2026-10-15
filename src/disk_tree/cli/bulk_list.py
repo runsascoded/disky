@@ -35,21 +35,25 @@ def _bucket(host: str | None, uri: str) -> str:
 
 @cli.command('bulk-list')
 @option('-a', '--adaptive', is_flag=True, help='Adaptive range-splitting: workers bisect their remaining key range whenever peers are idle — no weights or fanout discovery needed (spec: specs/done/adaptive-listing.md)')
+@option('-D', '--no-commit-dates', is_flag=True, help="hf:// only: date repo files by the repo's `lastModified` instead of each file's last commit (tree pages of 1000 entries instead of 50)")
 @option('-E', '--endpoint-url', default=None, help='S3-compatible endpoint URL (required for r2://; also usable for MinIO / non-AWS S3)')
 @option('-f', '--profile', default=None, help='AWS credential profile to authenticate with (for a cross-account source/target); default: ambient credentials')
+@option('-L', '--lfs-files', is_flag=True, help='hf:// only: list old versions per LFS object (`@history/<file>/<oid>`) via `lfs-files`, which needs a token with write access; default: one `@history/@unlisted` row per repo for the bytes `usedStorage` bills beyond the current tree')
 @option('-o', '--out', 'out_dir', required=True, help='Output dir for listing shards (local path or fsspec URL such as `gs://...`)')
 @option('-p', '--prefix', default=None, help='Restrict listing to this bucket-relative prefix')
 @option('-P', '--procs', default=None, type=int, help='Worker processes (default: os.cpu_count()). LIST throughput is GIL-bound, not endpoint-bound: a single process saturates at ~8K keys/s no matter how many threads it runs, while processes scale ~linearly (measured on CoreWeave: 1/2/4/8/16 procs -> 8.3K/17.1K/34.5K/68.1K/89.8K keys/s). Scale this with cores, not -w.')
 @option('-r', '--region', default=None, help='AWS region name (S3 backend only)')
-@option('-w', '--threads', default=3, help='Threads per worker (default 3). Only enough to hide per-request latency (~0.1s) while the GIL is released on network I/O; beyond that threads contend for the GIL with parquet/pandas work on the same process and add nothing.')
+@option('-w', '--threads', default=3, help='Threads per worker (default 3; for hf://, the requests in flight — the Hub drew 429s at 8). Only enough to hide per-request latency (~0.1s) while the GIL is released on network I/O; beyond that threads contend for the GIL with parquet/pandas work on the same process and add nothing.')
 @option('-W', '--weights-from', default=None, help='Glob to a prior listing parquet used to bin-pack + range-split hot prefixes (planned mode only)')
 @option('-x', '--exists', type=Choice(['error', 'clear', 'reuse']), default='error', help='Behavior when --out already has shards: error/clear/reuse')
 @option('--warm-from', default=None, help="Prior adaptive listing dir whose _SUCCESS.json range boundaries seed this run (adaptive mode only)")
 @argument('uri')
 def bulk_list_cmd(
     adaptive: bool,
+    no_commit_dates: bool,
     endpoint_url: str | None,
     profile: str | None,
+    lfs_files: bool,
     out_dir: str,
     prefix: str | None,
     procs: int | None,
@@ -60,7 +64,19 @@ def bulk_list_cmd(
     warm_from: str | None,
     uri: str,
 ):
-    """Bulk-list `URI` (e.g. `gcs://bucket`) to sharded listing parquet at `--out`."""
+    """Bulk-list `URI` (e.g. `gcs://bucket`, `hf://<namespace>`) to sharded listing parquet at `--out`."""
+    if uri.startswith('hf://'):
+        if adaptive or weights_from or warm_from or prefix or procs or endpoint_url or profile or region:
+            raise ValueError("hf:// takes only -w, -x, -L and -D (narrow with the URI: hf://<ns>/<kind>/<name>)")
+        from disk_tree.find.bulk_hf import list_hf_to_parquet
+        total = list_hf_to_parquet(
+            uri, out_dir=out_dir, threads=threads, exists=exists,
+            lfs_files=lfs_files, commit_dates=not no_commit_dates,
+        )
+        err(f"listed {total:,} objects to {out_dir}")
+        return
+    if lfs_files or no_commit_dates:
+        raise ValueError("-L/--lfs-files and -D/--no-commit-dates apply to hf:// only")
     if adaptive:
         if weights_from:
             raise ValueError("--weights-from is the planned-mode input; adaptive mode warm-starts via --warm-from")
@@ -112,7 +128,7 @@ def bulk_list_adaptive_uri(
         from disk_tree.find.bulk_s3 import S3BulkLister
         lister = S3BulkLister(scheme=parsed.scheme, endpoint_url=endpoint_url, region_name=region, profile=profile)
     else:
-        raise ValueError(f"bulk-list requires a cloud URI (gcs://, s3://, r2://); got {uri!r}")
+        raise ValueError(f"bulk-list requires a cloud URI (gcs://, s3://, r2://, hf://); got {uri!r}")
     return list_bucket_adaptive(
         lister, bucket=_bucket(parsed.host, uri), out_dir=out_dir,
         procs=n_procs, threads=threads, prefix=eff_prefix,
@@ -162,4 +178,4 @@ def bulk_list_uri(
             scheme=parsed.scheme,
             profile=profile,
         )
-    raise ValueError(f"bulk-list requires a cloud URI (gcs://, s3://, r2://); got {uri!r}")
+    raise ValueError(f"bulk-list requires a cloud URI (gcs://, s3://, r2://, hf://); got {uri!r}")

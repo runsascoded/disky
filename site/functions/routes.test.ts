@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { excludedFromFunctions, FUNCTIONS_EXCLUDED } from './_lib/routes'
 
 // The stamp itself (wasm-backed) is out of scope: any call to it fails the test.
 const stampPage = vi.fn(async () => { throw new Error('stamped a non-HTML response') })
@@ -20,12 +21,19 @@ const readPublic = async (name: string): Promise<string> => {
 }
 
 describe('static assets that never reach a Function', () => {
-  it('`_routes.json` excludes the fonts, the cards and `/llms.txt` (not the bundle: see `assetMiss`)', async () => {
-    expect(JSON.parse(await readPublic('_routes.json'))).toEqual({
+  it('`_routes.json` excludes the fonts, the union marks’ icons, the cards and `/llms.txt` (not the bundle: see `assetMiss`); `FUNCTIONS_EXCLUDED` mirrors it', async () => {
+    const routes = JSON.parse(await readPublic('_routes.json')) as { exclude: string[] }
+    expect(routes).toEqual({
       version: 1,
       include: ['/*'],
-      exclude: ['/_fonts/*', '/og.jpg', '/gcs.png', '/favicon.svg', '/llms.txt'],
+      exclude: ['/_fonts/*', '/icons/*', '/og.jpg', '/gcs.png', '/favicon.svg', '/llms.txt'],
     })
+    expect(FUNCTIONS_EXCLUDED).toEqual(routes.exclude)
+  })
+  it('an icon path under `/icons/` is a static asset; one elsewhere would reach the catch-all (the SPA’s `index.html`)', () => {
+    expect(['/icons/meta.svg', '/icons/a/b.png', '/favicon.svg', '/meta.svg', '/iconsx/meta.svg', '/api/icon'].map(p => excludedFromFunctions(p))).toEqual([
+      true, true, true, false, false, false,
+    ])
   })
   it('`_redirects` is the SPA fallback alone (Pages drops a `404` rule, and a redirect would shadow real assets)', async () => {
     const rules = (await readPublic('_redirects')).split('\n').filter(l => l.trim() && !l.startsWith('#'))

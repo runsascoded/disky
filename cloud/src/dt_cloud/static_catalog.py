@@ -376,11 +376,13 @@ def append(con, *, prev: Path, base: BaseShards, deltas: list[list[str]], V: int
     # every delta's opened suffix rows: who could cross V
     all_files = [f for d in deltas for f in d]
     con.execute(f"CREATE OR REPLACE TABLE xo AS SELECT s, t0 FROM ({expand_sql(delta_versions_sql(all_files, point=False), rule)})")
+    # The last scan's stamp; None when its delta opens and closes nothing (a scan identical to the one before it).
     D = con.execute(f"SELECT max(CASE WHEN op = 1 THEN vf ELSE vt END) FROM read_parquet([{', '.join(q(f) for f in last)}])").fetchone()[0]
+    last_rows = "0" if D is None else f"count(*) FILTER (WHERE t0 = {D})"
     cand: list[tuple[str, int, int]] = []  # (q, rows over all deltas, rows of the last)
     L = 3
     while True:
-        lvl = con.execute(f"""SELECT left(s, {L}) AS q, count(*), count(*) FILTER (WHERE t0 = {D}) FROM xo WHERE length(s) >= {L}
+        lvl = con.execute(f"""SELECT left(s, {L}) AS q, count(*), {last_rows} FROM xo WHERE length(s) >= {L}
             GROUP BY q""").fetchall()
         keep = [(k, n, nl) for k, n, nl in lvl if base.upper(k) + n > V]
         if not keep:
@@ -427,7 +429,7 @@ def append(con, *, prev: Path, base: BaseShards, deltas: list[list[str]], V: int
     out.mkdir(parents=True, exist_ok=True)
     rows, index = write_cells(_batches(con, f"SELECT * FROM ({cells_sql('aev', 'amem')}) ORDER BY q, bucket, vf"), out / "cells.parquet")
     pq.write_table(index, out / "index.parquet", compression=CODEC)
-    doc = {"scan": int(D), "cells_rows": rows, "candidates": len(cand), "new_members": len(new_members),
+    doc = {"scan": None if D is None else int(D), "cells_rows": rows, "candidates": len(cand), "new_members": len(new_members),
            "members": con.execute("SELECT count(*) FROM amem").fetchone()[0], "s": round(monotonic() - t0, 1)}
     for t in ("pc", "pmem", "pev", "xo", "ck", "nmem", "lmem", "lev", "nev", "amem", "aev", "ev", "sev"):
         con.execute(f"DROP TABLE IF EXISTS {t}")

@@ -96,6 +96,16 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     expect(await get(`from=${A}&to=${C}&path=nope`)).toEqual({ status: 404, text: 'path not found in either scan' })
   })
 
+  it('`from_at=`/`to_at=`: each side an instant, each store at its own newest scan by then', async () => {
+    // from: just after A (both at A); to: between B and C (primary A, meta B): only meta changed.
+    const [i, d] = await Promise.all([body('from_at=20261001T1200Z&to_at=2026-10-02T12:00Z&path='), body(`from=${A}&to=${B}&path=`)])
+    expect(i).toEqual(d)
+    expect(i.union).toEqual({ view: 'all', sources: [{ store: 'primary', from: A, to: A, change: 'unchanged' }, { store: 'meta', from: A, to: B, change: 'changed' }] })
+    // Mixed: a scan id on one side, an instant on the other; a drill delegates to the path's store.
+    expect(await body(`from=${A}&to_at=20261003T1200Z&path=`)).toEqual(await body(`from=${A}&to=${C}&path=`))
+    expect((await get('from_at=20261001T1200Z&to_at=20261002T1200Z&path=mb')).text).toBe((await get(`from=${A}&to=${B}&path=mb&store=meta`)).text)
+  })
+
   it('cutoffs out of order, unindexed, or a scoped root are refused', async () => {
     expect([await get(`from=${C}&to=${A}&path=`), await get(`from=${A}&to=2026-10-09T0001&path=`), await get(`from=${A}&to=${C}&path=&o=unowned`)]).toEqual([
       { status: 400, text: 'from must precede to' },
@@ -106,7 +116,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 })
 
 describe('unionDiffRows', () => {
-  const view = { key: 'all', members: ['primary', 'meta'], main: true }
+  const view = { key: 'all', members: ['primary', 'meta'], main: true, sources: {} }
   const row = (p: string, d: number, a: number, b: number, s = a === b ? 'unchanged' : 'changed') => ({ p, d, k: 'dir' as const, s: s as 'changed', a, b, oa: 1, ob: 1 })
   it('tags depth-1 rows, keeps deeper ones, sums the `(other)` folds (restating their status)', () => {
     expect(unionDiffRows(view, [

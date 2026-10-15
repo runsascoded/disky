@@ -19,6 +19,7 @@ import { SERIES_MAX_PATHS } from '../functions/_lib/seriesLimits'
 import { ApiError, apiError } from './filterCaps'
 import { LoadFailure } from './LoadFailure'
 import { SeriesEmpty } from './SeriesEmpty'
+import { SeriesMissingNote } from './UnionNotes'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -26,7 +27,7 @@ import { SeriesEmpty } from './SeriesEmpty'
 // precomputed per prefix and nothing is floored.
 
 interface Pt { x: number; y: number; y0?: number }
-interface Series { path: string; points: { date: string; b: number; o: number }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
+interface Series { path: string; points: { date: string; b: number; o: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
 
 // Default prominence-suppression radius for the local-extrema callouts, in days
 // (≈6 scans at the 12-hourly cadence): peaks/dips within this of a more
@@ -440,6 +441,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
         <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />
       )}
       {gaps.note && !tooMany && <p className="gap-note">{gaps.note}</p>}
+      {/* A union's points before some member's first scan: partial totals, named — never a zero for it. */}
+      {!tooMany && <SeriesMissingNote points={seriesQ.data?.points} />}
       {roots.length > 0 && (
         <div className="legend roots-legend">
           {roots.map(r => (

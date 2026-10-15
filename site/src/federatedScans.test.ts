@@ -60,6 +60,15 @@ describe('project scan catalog', () => {
     const c = catalog('awair', [scan(8, 100)])
     expect(() => parseSourceCatalog({ ...c, scans: [{ ...c.scans[0], ...extra }] })).toThrow(error)
   })
+  it('an optional icon: a URL or a site path, kept as given; anything else refused', () => {
+    const base = { version: 1, source: 'awair', label: 'Awair', mount: 'awair', scope: { store: 'r2:rac/awair', prefix: '' }, scans: [] }
+    const icon = (v: unknown) => { try { return parseSourceCatalog({ ...base, icon: v }).icon } catch (e) { return (e as Error).message } }
+    expect([icon('/icons/awair.svg'), icon('https://example.com/a.png'), icon('icons/a.svg'), icon('javascript:x'), icon('//x.test/a.png'), parseSourceCatalog(base).icon]).toEqual([
+      '/icons/awair.svg', 'https://example.com/a.png',
+      'expected an icon URL or site path', 'expected an icon URL or site path', 'expected an icon URL or site path',
+      undefined,
+    ])
+  })
   it('rejects duplicate scan revisions rather than depending on catalog order', () => {
     expect(() => catalog('awair', [scan(8, 100), scan(8, 200)])).toThrow('duplicate scan revision')
   })

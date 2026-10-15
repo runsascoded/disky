@@ -19,7 +19,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 
 from . import interval_read as ir
-from .static_names import q, read_json
+from .static_names import V2_OPTIONAL, q, read_json
 
 err = partial(print, file=sys.stderr, flush=True)
 
@@ -51,9 +51,14 @@ class Scan:
     def __init__(self, con, file: str, version: int, key: str = ""):
         self.con, self.file, self.v, self.key = con, file, version, key
         self.src = f"read_parquet({q(file)})"
-        if "usr" not in {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}:
-            # A scan without the owner column (no owner axis) names no owner.
-            self.src = f"(SELECT *, NULL::VARCHAR AS usr FROM {self.src})"
+        have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}
+        # Columns the scan lacks read as NULL, as the builder reads them (`static_names.V2_OPTIONAL`): no owner
+        # axis names no owner, and an absent storage-class pivot holds no bytes (cw's sorts carry only class 1).
+        missing = ["NULL::VARCHAR AS usr"] if "usr" not in have else []
+        if version == 2:
+            missing += [f"NULL::BIGINT AS {c}" for c in V2_OPTIONAL.values() if c not in have and c != "usr"]
+        if missing:
+            self.src = f"(SELECT *, {', '.join(missing)} FROM {self.src})"
 
     def _aggs(self, where: str, having: str = "") -> list[dict]:
         cur = self.con.execute(f"SELECT depth, path, {agg_sql(self.v)} FROM {self.src} WHERE {where} GROUP BY depth, path {having}")
@@ -341,32 +346,35 @@ def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, 
             + (f" — {diffs[:3]}" if diffs else ""))
     if prev:
         pscan, pdate, pts = prev
-        if pscan.v == scan.v:
-            for c in [x for x in cases if "max_depth" not in x][:4]:
-                path = c["path"]
-                ra, rb = pscan.root_b(path), scan.root_b(path)
-                if ra <= 0 or rb <= 0:
-                    continue
-                # `buildDiff`: one floor for both sides, from the larger root.
-                thr = max(ra, rb) * ir.MIN_AREA / (W * H)
-                wa, wb = pscan.view(path, threshold=thr), scan.view(path, threshold=thr)
-                want = ir.diff(wa, wb, pscan.lookup, scan.lookup)
-                ga, gb = store.view(pts, path, W, H, threshold=thr), store.view(ts, path, W, H, threshold=thr)
-                cost = ir.Cost()
-                got = ir.diff(ga, gb, lambda p: store.lookup(pts, p, cost), lambda p: store.lookup(ts, p, cost))
-                ch_cost = ir.Cost()
-                n_changed = store.changes(pts, ts, path, ch_cost)
-                eq = got == want
-                rec = {"kind": "diff", "from": pdate, "to": date, "path": path, "eq": eq, "rows": len(want),
-                       "changed": sum(1 for r in want if r[2] != "unchanged"),
-                       "mismatch": [list(x) for x in sorted(set(got) ^ set(want))][:20],
-                       "iv_cost": {"views": [ga["cost"], gb["cost"]], "lookups": cost.total()},
-                       "changes": {"versions": n_changed, "cost": ch_cost.total()}}
-                out.write(json.dumps(rec) + "\n")
-                out.flush()
-                summary["diffs"] += 1
-                summary["diff_eq"] += eq
-                err(f"  diff {pdate}→{date} {path!r}: eq={eq} rows={len(want)} changed={rec['changed']}")
+        for c in [x for x in cases if "max_depth" not in x][:4]:
+            path = c["path"]
+            ra, rb = pscan.root_b(path), scan.root_b(path)
+            if ra <= 0 or rb <= 0:
+                continue
+            # `buildDiff`: one floor for both sides, from the larger root.
+            thr = max(ra, rb) * ir.MIN_AREA / (W * H)
+            wa, wb = pscan.view(path, threshold=thr), scan.view(path, threshold=thr)
+            # Across the v1 → v2 cutover the objects fold (`ir.diff`'s `fold`): the per-scan side knows each scan's
+            # format from its source, the store from its rows (`Store.view`'s `objects`, what `buildDiff` tests).
+            fold = pscan.v != scan.v
+            want = ir.diff(wa, wb, pscan.lookup, scan.lookup, fold=fold)
+            ga, gb = store.view(pts, path, W, H, threshold=thr), store.view(ts, path, W, H, threshold=thr)
+            cost = ir.Cost()
+            got_fold = ga["objects"] != gb["objects"]
+            got = ir.diff(ga, gb, lambda p: store.lookup(pts, p, cost), lambda p: store.lookup(ts, p, cost), fold=got_fold)
+            ch_cost = ir.Cost()
+            n_changed = store.changes(pts, ts, path, ch_cost)
+            eq = got == want and got_fold == fold
+            rec = {"kind": "diff", "from": pdate, "to": date, "path": path, "eq": eq, "rows": len(want), "fold": [got_fold, fold],
+                   "changed": sum(1 for r in want if r[2] != "unchanged"),
+                   "mismatch": [list(x) for x in sorted(set(got) ^ set(want))][:20],
+                   "iv_cost": {"views": [ga["cost"], gb["cost"]], "lookups": cost.total()},
+                   "changes": {"versions": n_changed, "cost": ch_cost.total()}}
+            out.write(json.dumps(rec) + "\n")
+            out.flush()
+            summary["diffs"] += 1
+            summary["diff_eq"] += eq
+            err(f"  diff {pdate}→{date} {path!r}: eq={eq} rows={len(want)} changed={rec['changed']}")
     return summary
 
 
@@ -380,10 +388,11 @@ def _footers(src, key: str, version: int) -> dict[str, Footer]:
     return out
 
 
-def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None) -> list[dict]:
+def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
+                runs: list[str] = ()) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
     each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
-    a URL, a dir, or a bare GCS bucket name)."""
+    a URL, a dir, or a bare GCS bucket name). `runs`: the newest manifest's runs' served dirs, read beside the base."""
     import duckdb
 
     from .blobstore import Store, store_url
@@ -392,7 +401,7 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     per = math.ceil(len(sampled) / tasks)
     mine = sampled[max(0, task * per - 1):(task + 1) * per]  # the one before this task's share: its diffs' `from`
     first_own = sampled[task * per] if task * per < len(sampled) else None
-    store = ir.Store(served)
+    store = ir.Store(served, runs)
     con = duckdb.connect()
     con.execute(f"SET threads=16; SET memory_limit='80GB'; SET temp_directory={q(str(tmp / 'spill'))}")
     src = Store(store_url(scans["bucket"]))

@@ -41,6 +41,15 @@
  * and `store=<view key>` names the view either way:
  *
  *   STORES_JSON = {"meta": {…}, "all": {"union": ["primary", "meta"], "main": true}}
+ *
+ * A view may say how the scan picker and the map mark each member (`sources`, keyed by member): a `label`
+ * (default: the member's `ROOT_LABEL`, else its key) and an `icon` — an absolute `http(s)://` URL or a path the
+ * site serves (`/…`). Each deployment sets its own; none is assumed. A site path must be a static asset the
+ * Functions never see: under `/icons/` (excluded in `public/_routes.json`; anywhere else the catch-all answers it
+ * with the SPA's `index.html` and the mark silently falls back to its label — `/api/union-scans` warns of one):
+ *
+ *   "all": {"union": ["primary", "meta"], "main": true,
+ *           "sources": {"primary": {"label": "Buckets", "icon": "/icons/buckets.svg"}, "meta": {"icon": "https://example.com/meta.png"}}}
  */
 import type { Env } from './auth.js'
 import { withReq } from './shared.js'
@@ -103,7 +112,14 @@ export interface UnionView {
   key: string
   members: string[]
   main: boolean
+  /** How each member is marked (`sources` in its config): only the members it names. */
+  sources: Record<string, SourceDisplay>
 }
+
+/** A union member's mark in the picker and on the map: its `label` and an optional `icon` (a URL or a site path). */
+export interface SourceDisplay { label?: string; icon?: string }
+
+const ICON_RE = /^(https?:\/\/[^\s]+|\/[^\s/][^\s]*)$/
 
 let parsed: { raw: string; stores: Record<string, StoreConfig>; views: Record<string, UnionView> } | null = null
 
@@ -152,19 +168,36 @@ function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Re
   }
   const views: Record<string, UnionView> = {}
   for (const [key, cfg] of Object.entries(unions)) {
-    const { union, main, ...rest } = cfg
-    if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')} (a union view takes union, main)`)
+    const { union, main, sources, ...rest } = cfg
+    if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')} (a union view takes union, main, sources)`)
     if (!Array.isArray(union) || union.length < 2 || union.some(m => typeof m !== 'string')) throw new StoreConfigError(`STORES_JSON.${key}.union: want ≥ 2 store keys`)
     const members = union as string[]
     if (new Set(members).size !== members.length) throw new StoreConfigError(`STORES_JSON.${key}.union: a store is named twice`)
     for (const m of members) if (m !== PRIMARY_STORE && !stores[m]) throw new StoreConfigError(`STORES_JSON.${key}.union: '${m}' is not a store (want '${PRIMARY_STORE}' or a store key)`)
     if (main !== undefined && typeof main !== 'boolean') throw new StoreConfigError(`STORES_JSON.${key}.main: want a boolean`)
-    views[key] = { key, members, main: main === true }
+    views[key] = { key, members, main: main === true, sources: sourceDisplays(key, members, sources) }
   }
   const mains = Object.values(views).filter(v => v.main).map(v => v.key)
   if (mains.length > 1) throw new StoreConfigError(`STORES_JSON: more than one main union view (${mains.join(', ')})`)
   parsed = { raw, stores, views }
   return parsed
+}
+
+/** A union view's `sources` (each member's `label` / `icon`), validated: keys are members, values strings. */
+function sourceDisplays(key: string, members: readonly string[], raw: unknown): Record<string, SourceDisplay> {
+  if (raw === undefined) return {}
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new StoreConfigError(`STORES_JSON.${key}.sources: want an object of member → {label, icon}`)
+  const out: Record<string, SourceDisplay> = {}
+  for (const [m, d] of Object.entries(raw as Record<string, unknown>)) {
+    if (!members.includes(m)) throw new StoreConfigError(`STORES_JSON.${key}.sources: '${m}' is not a member`)
+    if (!d || typeof d !== 'object' || Array.isArray(d)) throw new StoreConfigError(`STORES_JSON.${key}.sources.${m}: want an object`)
+    const { label, icon, ...rest } = d as Record<string, unknown>
+    if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}.sources.${m}: unknown field(s) ${Object.keys(rest).join(', ')} (want label, icon)`)
+    if (label !== undefined && (typeof label !== 'string' || !label.trim())) throw new StoreConfigError(`STORES_JSON.${key}.sources.${m}.label: want a nonempty string`)
+    if (icon !== undefined && (typeof icon !== 'string' || !ICON_RE.test(icon))) throw new StoreConfigError(`STORES_JSON.${key}.sources.${m}.icon: want an http(s) URL or a site path (/…)`)
+    out[m] = { ...(label !== undefined ? { label: label as string } : {}), ...(icon !== undefined ? { icon: icon as string } : {}) }
+  }
+  return out
 }
 
 /** The store a (possibly overlaid) env serves: `PRIMARY_STORE` or a key. */

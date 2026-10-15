@@ -45,6 +45,10 @@ import { type BlindPanel, blindNote, blindShown } from './filterBlind'
 import { LoadFailure, mapSlot } from './LoadFailure'
 import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
 import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
+import { UnionScanPicker } from './UnionScanPicker'
+import { UnionMissingNote, UnionRefusals } from './UnionNotes'
+import { cutoffOfScan, marksOf, scopedPath, UnionMarks, useUnionSources, type UnionVector } from './unionSources'
+import { encodeCutoff } from './federatedScans'
 import { BulkBar } from './BulkBar'
 import { setCurrentScan, useMyUserState } from './owners'
 import { ownerScope, ownerScopeReady, scopeKeyOf } from './viewScope'
@@ -53,7 +57,7 @@ import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, encodeScan, fmtTimestamp, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
+import { DAY, encodeScan, fmtTimestamp, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanAtInstant, scanInstant, useScan } from './scan'
 import { scanCmp } from './scanSlug'
 import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
@@ -142,6 +146,9 @@ function AppContent() {
   const store = useStore()
   const time = listingTime(store.scheme)
   const sfetch = useStoreFetch()
+  // A union view (`STORES_JSON` `union`): its members' scans drive the picker, their marks the map's provenance.
+  const union = useUnionSources(store)
+  const unionMarks = useMemo(() => marksOf(union), [union])
   // Legacy `?path=<prefix>` links (cw-s3 drilled by query param until the
   // union): forward to the URL-path form, keeping the other params.
   useEffect(() => {
@@ -178,7 +185,7 @@ function AppContent() {
   const { indexedOnly: indexedOnly0 } = useFilterCaps()
   const [fFloat] = useUrlState('f', stringParam())
   const indexedScans = useIndexedScans(indexedOnly0 && !!fFloat)
-  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, scansQ } = useScan(store, indexedOnly0 && fFloat ? indexedScans : undefined)
+  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ } = useScan(store, indexedOnly0 && fFloat ? indexedScans : undefined)
   const rulesQ = useRules()
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
@@ -324,7 +331,16 @@ function AppContent() {
   // and draws nothing, never the nearest scan instead.
   const fromScan = from && asof ? latestScan(from, earlier, times) : null
   const startMiss = useMemo(() => fromMiss(from, asof, scans, times), [from, asof, scans, times])
-  const diffPrev = startMiss ? null : fromScan ?? spanScan ?? prevScan
+  // `?atf=`: the start as a cutoff instant; the page's scan for it is the newest earlier one at or before it.
+  const diffPrev = startMiss ? null : atFrom ? scanAtInstant(earlier, atFrom, times) : fromScan ?? spanScan ?? prevScan
+  // A union view's cutoffs as instants (`?at=`/`?atf=`, `pickCutoff`): its endpoints read them exactly (each member
+  // at its newest scan by then). A single store reads the page's scans for them (`scanAtInstant`), as ever.
+  const endAt = union && at ? encodeCutoff(at) : null
+  const startAt = union && atFrom ? encodeCutoff(atFrom) : null
+  const cutQs = endAt ? `at=${endAt}` : `date=${asof}`
+  const cutKey = endAt ?? asof
+  const diffQs = `${startAt ? `from_at=${startAt}` : `from=${diffPrev}`}&${endAt ? `to_at=${endAt}` : `to=${asof}`}`
+  const diffKey = `${startAt ?? diffPrev}→${endAt ?? asof}`
   // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
   // any other store never fetches the earlier scan's meta (`diskDiffScan`).
   const beforeMetaQ = useQuery({
@@ -389,7 +405,7 @@ function AppContent() {
   }, [graftPath])
   const subtreeQs = useQueries({
     queries: subtreePaths.map(p => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeKey],
+      queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey],
       enabled: !!asof && scopeReady,
       staleTime: Infinity,
       // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
@@ -403,11 +419,11 @@ function AppContent() {
       queryFn: async ({ signal }: { signal?: AbortSignal }) => {
         const pf = perf.start('treemap', viewKey(p, asof, fq ? '|full' : ''), ['table'])
         const r = await pf.track(sfetch(
-          `/api/subtree?cv=${API_CV}&date=${asof}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
+          `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true; union?: UnionVector }
         pf.decoded()
         return j
       },
@@ -422,7 +438,7 @@ function AppContent() {
   // so a scope change never downgrades a held full tree to a coarse one.
   const coarseQs = useQueries({
     queries: subtreePaths.map((p, i) => ({
-      queryKey: ['subtree', store.key, asof, p, canW, scopeKey, 'depth1'],
+      queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey, 'depth1'],
       // Deepest path only — see `dataFor`; ancestors use it only under a filter, where it is the
       // exact forest of match roots (cheap from the static name index).
       enabled: !!asof && scopeReady && (i === subtreePaths.length - 1 || !!fq),
@@ -434,11 +450,11 @@ function AppContent() {
       queryFn: async ({ signal }: { signal?: AbortSignal }) => {
         const pf = perf.start('treemap', viewKey(p, asof, fq ? '|coarse' : '|d1'), ['table'])
         const r = await pf.track(sfetch(
-          `/api/subtree?cv=${API_CV}&date=${asof}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${fq ? '' : '&depth=1'}${scopeQs}`,
+          `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${fq ? '' : '&depth=1'}${scopeQs}`,
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw new Error(`${r.status}`) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number } }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; union?: UnionVector }
         pf.decoded()
         return j
       },
@@ -559,7 +575,7 @@ function AppContent() {
   // by a click, per scan, path and filter: a cold cover costs seconds, and most filtered page loads never act.
   // The page only observes the cache (`enabled: false`); `prefetchCover` / `fetchCover` fill it, deduped.
   const qc = useQueryClient()
-  const coverArgs = useMemo(() => ({ date: asof ?? null, path: graftPath, q: fq, qs: syntax.id }), [asof, graftPath, fq, syntax.id])
+  const coverArgs = useMemo(() => ({ date: asof ?? null, at: endAt, path: graftPath, q: fq, qs: syntax.id }), [asof, endAt, graftPath, fq, syntax.id])
   const coverKey = JSON.stringify([store.key, coverArgs])
   const coverQ = useFilterCover(sfetch, store.key, { ...coverArgs, enabled: false })
   const coverOk = !!fq && !!coverArgs.date && (canAssignHere || canStageHere)
@@ -635,6 +651,14 @@ function AppContent() {
   useEffect(() => {
     if (urlPath.replace(/\/+$/, '') !== canonUrlPath) navigate({ pathname: `${storeBase}/${canonUrlPath}`, search, hash: window.location.hash }, { replace: true })
   }, [urlPath, canonUrlPath]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The series' and the diff's path: at a filtered union root whose matches sit under one root (which the map
+  // opens inside), that root — its member answers, where the union root refuses `q=` (`scopedPath`; undefined:
+  // the root's answer isn't here yet).
+  const scoped = { union: !!union, filtered: !!fq, tree: subtreeQs[0]?.data?.tree ?? coarseQs[0]?.data?.tree }
+  const seriesPath = scopedPath(drillPath, scoped)
+  const diffPathOf = scopedPath(graftPath, scoped)
+  const diffPath = diffPathOf ?? graftPath
+  const diffSegs = diffPath.split('/').filter(Boolean)
   // Per-path created-time strata for `AgeChart`, keyed on the drilled prefix so
   // it follows the drill exactly instead of showing the whole fleet at every
   // depth (specs/done/age-index.md). Root (`drillPath === ''`, depth 0) is the fleet
@@ -647,10 +671,10 @@ function AppContent() {
   // desktop. The FE then re-buckets to the chosen day/week/month granularity.
   const ageBudget = Math.max(64, Math.min(1024, Math.round(canW / 2)))
   const ageQ = useQuery({
-    queryKey: ['age', store.key, asof, drillPath, ageBudget],
+    queryKey: ['age', store.key, cutKey, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${asof}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${asof}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?${cutQs}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       // No rows (no age tier for this deploy, or a prefix below the index
@@ -668,10 +692,10 @@ function AppContent() {
   // Same path, at the diff window's "before" scan — powers AgeChart's diff mode
   // (per-vintage grew/shrank). Only fetched when a diff window exists.
   const ageBaseQ = useQuery({
-    queryKey: ['age', store.key, diffPrev, drillPath, ageBudget],
+    queryKey: ['age', store.key, startAt ?? diffPrev, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${diffPrev}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${diffPrev}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?${startAt ? `at=${startAt}` : `date=${diffPrev}`}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       if (j.records.length) pf.decoded(); else pf.empty()
@@ -753,14 +777,14 @@ function AppContent() {
   // (`depth` only caps what's drawn), so without a search index the "first"
   // paint costs as much as the full walk (gcs 2026-10-02: 9.3 s vs 4.5 s).
   const diffQ1 = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'l1'],
-    enabled: !!asof && !!diffPrev && scopeReady && !fq,
+    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, 'l1'],
+    enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined && !fq,
     staleTime: Infinity,
     retry: false,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const pf = perf.start('dtm', viewKey(graftPath, `${diffPrev}→${asof}`, '|d1'), ['dtable'])
       const r = await pf.track(sfetch(
-        `/api/diff?cv=${API_CV}&from=${diffPrev}&to=${asof}&path=${encodeURIComponent(graftPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&depth=1`,
+        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&depth=1`,
         { credentials: 'include', signal },
       ))
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
@@ -776,8 +800,8 @@ function AppContent() {
   const diffSlotRef = useRef<HTMLDivElement>(null)
   const diffSlotH = useRef(0)
   const diffQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey],
-    enabled: !!asof && !!diffPrev && scopeReady,
+    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey],
+    enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined,
     // While the full walk aligns: the bucket-level diff of the SAME pair once
     // it lands, else the last pair's diff — drawn dimmed either way, so the
     // section holds its height and shows something before the detail.
@@ -789,7 +813,7 @@ function AppContent() {
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const pf = perf.start('dtm', viewKey(graftPath, `${diffPrev}→${asof}`), ['dtable'])
       const r = await pf.track(sfetch(
-        `/api/diff?cv=${API_CV}&from=${diffPrev}&to=${asof}&path=${encodeURIComponent(graftPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}`,
+        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}`,
         { credentials: 'include', signal },
       ))
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
@@ -802,13 +826,13 @@ function AppContent() {
   // The headline first: the same pair's totals without the row walk land in
   // a second or two, so the +X / Δobjects line shows while the rows align.
   const diffSumQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffPrev, asof, graftPath, canW, scopeKey, 'summary'],
-    enabled: !!asof && !!diffPrev && scopeReady,
+    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, 'summary'],
+    enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined,
     staleTime: Infinity,
     retry: false,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const r = await sfetch(
-        `/api/diff?cv=${API_CV}&from=${diffPrev}&to=${asof}&path=${encodeURIComponent(graftPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&summary=1`,
+        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&summary=1`,
         { credentials: 'include', signal },
       )
       if (!r.ok) throw apiError(r.status, await r.text())
@@ -854,7 +878,7 @@ function AppContent() {
   // Diff model (built tree + movement totals + formatters), shared by the diff
   // header band and the diff map. Built here so the header stays mounted while a
   // diff is loading/errored (the map isn't rendered then).
-  const diffModel = useDiffModel(diff, !drillPath, scopeDesc)
+  const diffModel = useDiffModel(diff, !diffPath, scopeDesc)
   // Controlled treemap drill path, resolved against the (possibly filtered/
   // scoped) tree each render: `?p=` survives scope toggles, filters, and scan
   // switches by re-walking the new tree; a vanished path truncates to its
@@ -1136,6 +1160,7 @@ function AppContent() {
   )
 
   return (
+    <UnionMarks.Provider value={unionMarks}>
     <main>
       {/* The page scope, all of it, in the sticky bar — the same bar at the
           top of the page and mid-scroll, so every section reads against it:
@@ -1145,7 +1170,10 @@ function AppContent() {
       <SiteNav menu={menu} crumbs={crumbs}>
         {asof && scans.length > 1 && (
           <span className="tb-scan">
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />
+            {union
+              ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Scan date" compact
+                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />} />
+              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />}
           </span>
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
@@ -1217,6 +1245,7 @@ function AppContent() {
               ? <QueryHelpTip syntaxes={[INDEXED_SYNTAX]} active={INDEXED_SYNTAX} />
               : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
             <FilterNote error={fErr} matched={fq && fHere ? matchedNote(fHere.b, !!graftPath, fmtBytes) : null} coverage={fCoverage}>
+              {fq && !fErr && <UnionRefusals union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}
               <Explain text="Clear the path filter"><button type="button" onClick={() => { setFqDraft(null); setFq(undefined) }}>✕</button></Explain>
             </FilterNote>
           </span>
@@ -1230,6 +1259,7 @@ function AppContent() {
       {/* Ambiguous `?d`: render the newest match (a best guess beats a dead
           end) with a strip listing every candidate to pin one. */}
       {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending)}</p>}
+      {union && <UnionMissingNote union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}
       {dMatches.length > 1 && (
         <p className="disambig">
           <code>?d={encodeScan(dP) ?? dP}</code> matches {dMatches.length} scans — showing the newest; pin one:
@@ -1398,11 +1428,11 @@ function AppContent() {
         queryOnly={fRollup}
         filterLabel={fq ?? undefined}
         filterQs={fq ? `&q=${encodeURIComponent(fq)}&qs=${syntax.id}` : undefined}
-        scans={scans} times={times} fmt={fmtS} prefix={drillPath}
+        scans={scans} times={times} fmt={fmtS} prefix={seriesPath ?? drillPath}
         user={ownerUser}
         pool={ownerMode === 'unowned' ? 'unowned' : ownerMode === 'owned' ? 'owned' : null}
         ledgerRev={ledger}
-        scopeReady={scopeReady}
+        scopeReady={scopeReady && seriesPath !== undefined}
         onPickDate={setDP}
         onBrush={brushRange}
         window={diffWindow}
@@ -1436,7 +1466,10 @@ function AppContent() {
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
             <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />
+              {union && diffPrev
+                ? <UnionScanPicker sources={union.sources} value={diffPrev} at={atFrom} scans={earlier} onChange={setFrom} onAt={setFromAt} label="Diff from scan" before={at ?? (asof ? cutoffOfScan(union.sources, asof) : null)} compact
+                    fallback={<ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />} />
+                : <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />}
             </Explain>
             <Explain text={startPinned
               ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>
@@ -1449,7 +1482,10 @@ function AppContent() {
               </button>
             </Explain>
             <span className="arrow"> → </span>
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />
+            {union && asof
+              ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Diff to scan (the page's scan)" compact
+                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
+              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
             {endIsLatest && (
               <Explain text={endPinned
                 ? <>End is <b>pinned</b> to this scan. Click to follow the latest scan as new ones arrive.</>
@@ -1500,10 +1536,10 @@ function AppContent() {
               {/* A drill in the diff drills the page: the map, the table and
                   the chart follow, and the diff itself re-reads at the new
                   prefix (its rows are relative to the drilled path). */}
-              <DiffTreemap model={diffModel} onDrill={rel => drillTo([...segs, ...rel])} onOpen={rel => openObject([...segs, ...rel])} />
+              <DiffTreemap model={diffModel} onDrill={rel => drillTo([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell (and scrolls the maps up). */}
-              <DiffTable model={diffModel} scheme={store.scheme} home={store.home} segs={segs} onDrill={rel => openPath([...segs, ...rel])} onOpen={rel => openObject([...segs, ...rel])} />
+              <DiffTable model={diffModel} scheme={store.scheme} home={store.home} segs={diffSegs} onDrill={rel => openPath([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
               {diffStaleOther
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
@@ -1604,6 +1640,7 @@ function AppContent() {
         extra={[{ key: 'lens', label: `Class lens: ${lens ? 'on' : 'off'} (s)`, icon: <MdLayers />, onClick: () => setLens(v => !v) }]}
       />
     </main>
+    </UnionMarks.Provider>
   )
 }
 

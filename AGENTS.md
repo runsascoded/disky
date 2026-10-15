@@ -75,7 +75,8 @@ Key goals:
 ### Python Backend (`src/disk_tree/`)
 
 **Listing** (`find/bulk*.py`): `bulk-list` shards a bucket's object listing (`gcs://`, `s3://`,
-`r2://` via its S3 endpoint) across worker processes into layer-1 listing parquet shards. The
+`r2://` via its S3 endpoint) across worker processes into layer-1 listing parquet shards
+(`hf://<namespace>`: a Hugging Face org's buckets + repos over the Hub API, one rate-limited process). The
 canonical columns are `bucket, name, size_bytes, created, storage_class_id, generation`; generation
 is the exact GCS object identity (nullable for S3/R2 and old listings), retained so a reviewed
 deletion manifest can never resolve to a replacement object at the same path.
@@ -142,6 +143,19 @@ disk-tree scans register SRC  # Import `*.scan.json` manifests (one file, or a d
                           # so they resolve
 
 disk-tree scans           # List cached scans (JSON)
+
+disk-tree bulk-list URI    # Shard URI's object listing (gcs:// | s3:// | r2:// with `-E <endpoint>`) into
+                          # layer-1 parquet shards at `-o` (`-a` adaptive range-splitting, `-P` procs).
+                          # `hf://<ns>[/<kind>[/<name>]]` (`find/bulk_hf.py`, `HF_TOKEN`) lists a Hugging Face
+                          # namespace as bucket `<ns>`: `buckets/<b>/…`, `{models,datasets,spaces}/<repo>/…`
+                          # (current tree; LFS deduped by oid) + `<repo>/@history/@unlisted` (what
+                          # `usedStorage` bills beyond it), so non-`git` bytes sum to the billing page;
+                          # `storage_class_id` public 1 / private 5 / unbilled git 6 (`import -s hf -p
+                          # storage_class_id`). `-L` per-object history via `lfs-files` (write token), `-D`
+                          # repo-level dates (50→1000 entries/page); `-w` = requests in flight (429s at 8)
+disk-tree import -l GLOB…  # Aggregate listing(s) into a canonical layer-2 per bucket (`-b`; default every
+                          # bucket in the listings): `-e pandas|duckdb|stream`, `-p` pivot sums, `-m`
+                          # mtime_mean, `-i` also cut the path-store tiers, `-w/--to` write dir or URL
 
 disk-tree recompress PATH…  # Rewrite v1 layer-2 listings as v2 in place, lossless (spec `listing-slim.md`
                           # phase 2): files, dirs (recursive `*.parquet`, sidecars skipped) or fsspec URLs

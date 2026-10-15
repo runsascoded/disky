@@ -54,13 +54,15 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       tree: {
         n: 'Fleet', k: 'dir', b: total, o: p.tree.o + m.tree.o,
         c: [
-          ...top(p.tree).map(c => ({ ...c, src: 'primary', at: A })),
-          ...top(m.tree).map(c => ({ ...c, src: 'meta', at: A })),
+          ...top(p.tree).filter(c => c.n !== '(other)').map(c => ({ ...c, src: 'primary', at: A })),
+          ...top(m.tree).filter(c => c.n !== '(other)').map(c => ({ ...c, src: 'meta', at: A })),
+          { n: 'zz', b: 30, o: 2, src: 'primary', at: A },
         ].sort((x, y) => y.b - x.b),
       },
     })
-    // `zz` (30 bytes) is under the union's threshold: not drawn, as a single store leaves it (the totals count it).
-    expect(top(u.tree).map(c => [c.n, c.src])).toEqual([['bk', 'primary'], ['mb', 'meta']])
+    // `zz` (30 bytes) is under the union's threshold: the treemap's read folds it, but the root lists every
+    // store's every root (its bucket table), so it is out of the fold, with no `(other)` left.
+    expect(top(u.tree).map(c => [c.n, c.src, c.b])).toEqual([['bk', 'primary', 29339201], ['mb', 'meta', 6291556], ['zz', 'primary', 30]])
   })
 
   it('`store=<view>` names the view whether or not it is main; `store=primary` is the primary alone', async () => {
@@ -99,7 +101,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     expect([u.union, u.tree.b, top(u.tree).map(n => [n.n, n.src, n.at])]).toEqual([
       { view: 'all', at: '2026-09-30T00:01:00.000Z', sources: [{ store: 'primary', date: Z }, { store: 'meta', date: null }] },
       p.tree.b,
-      [['bk', 'primary', Z]],
+      [['bk', 'primary', Z], ['zz', 'primary', Z]],
     ])
     expect(await get(`date=${Z}&path=mb`)).toEqual({ status: 404, text: 'path not found' })
   })
@@ -108,6 +110,30 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     const [d, exact] = await Promise.all([body('d=261003&path='), body(`date=${C}&path=`)])
     expect(d).toEqual(exact)
     expect(await get('d=261002&path=')).toEqual({ status: 200, text: (await get(`date=${B}&path=`)).text })
+  })
+
+  it('`at=<instant>`: each store at its own newest scan at or before it; a store with none unknown', async () => {
+    // Between B and C: the primary's newest is A, meta's B. The body's `date`: the newest observation by then.
+    const mid = await body('at=20261002T1200Z&path=')
+    const b = await body(`date=${B}&path=`)
+    expect(mid).toEqual({ ...b, union: { view: 'all', at: '2026-10-02T12:00:00.000Z', sources: [{ store: 'primary', date: A }, { store: 'meta', date: B }] } })
+    // Before meta's first scan: the primary's Z alone, meta named unknown; ISO and compact forms alike.
+    for (const at of ['2026-09-30T12:00Z', '2026-09-30T12:00:00.000Z', '20260930T120000Z']) {
+      const z = await body(`at=${at}&path=`)
+      expect([z.date, z.union, top(z.tree).map(n => [n.n, n.src, n.at])]).toEqual([
+        Z,
+        { view: 'all', at: '2026-09-30T12:00:00.000Z', sources: [{ store: 'primary', date: Z }, { store: 'meta', date: null }] },
+        [['bk', 'primary', Z], ['zz', 'primary', Z]],
+      ])
+    }
+    // A drill: the owning store's own answer at its scan for the instant (`at` never reaches the member).
+    expect((await get('at=20261003T1200Z&path=mb')).text).toBe((await get(`date=${B}&path=mb&store=meta`)).text)
+    // `date=` wins over `at=`; a malformed or too-early instant is refused.
+    expect((await get(`date=${A}&at=20261003T1200Z&path=`)).text).toBe((await get(`date=${A}&path=`)).text)
+    expect([await get('at=2026-10-02&path='), await get('at=20260929T0000Z&path=')]).toEqual([
+      { status: 400, text: '{"error":"at=<UTC instant> (YYYY-MM-DDTHH:MM[:SS]Z or YYYYMMDDTHHMM[SS]Z) required"}\n' },
+      { status: 404, text: '{"error":"no scan at or before at=20260929T0000Z"}\n' },
+    ])
   })
 
   it('misses are 404s, never another scan or another store', async () => {
