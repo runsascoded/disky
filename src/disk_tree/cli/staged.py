@@ -238,7 +238,7 @@ def _serve(
 
     from disk_tree import trash as trash_mod
     from disk_tree.cli.trash import parse_duration
-    from disk_tree.d1 import D1Client, D1Error
+    from disk_tree.d1 import D1Client, D1Error, transient
     from disk_tree.drain import Schema, drain_once
     from disk_tree.notify.announce import make_announcer
 
@@ -286,7 +286,7 @@ def _serve(
         if r.returncode:
             err(f"  after {summary['run_id']}: exit {r.returncode}")
 
-    schemas = {c.database_id: Schema.detect(c) for c in clients}
+    schemas: dict[str, Schema] = {}
     err(f"dispatch --serve: draining D1 {', '.join(c.database_id for c in clients)} (undo={undo_state}, "
         f"chat={delete_cfg.get('chat', 'none')}, "
         f"{'trash' if trash_on else 'rm'}{f', ttl {ttl}' if ttl else ''})")
@@ -299,27 +299,50 @@ def _serve(
                 if schemas[c.database_id].hold:
                     c.query("UPDATE deletion_runs SET purge_state = 'done' WHERE run_id = ? AND purge_state = 'pending'", [r.run_id])
 
+    def poll() -> list[dict]:
+        """One pass over every D1: its enqueued runs (each D1's schema detected on the first pass that reaches it),
+        then the trash's TTL sweep."""
+        summaries = []
+        for c in clients:
+            if c.database_id not in schemas:
+                schemas[c.database_id] = Schema.detect(c)
+            summaries += drain_once(
+                c, size_fn=size_fn, delete_fn=delete_fn, schema=schemas[c.database_id], trash_fn=trash_fn,
+                undo_state=undo_state, hold_s=ttl_s, announce=announce, after=run_after,
+                host=host,
+                reclaim_fn=reclaim_fn if platform == 'darwin' else None,
+            )
+        for s in summaries:
+            verb = "would delete" if s["mode"] == "dry" else ("trashed" if s["trashed"] else "deleted")
+            freed = f", frees {naturalsize(s['freed_bytes'], binary=True)}" if s.get("freed_bytes") is not None else ""
+            err(f"  ran {s['run_id']}: {verb} {naturalsize(s['deleted_bytes'], binary=True)}{freed}"
+                f" across {s['deleted_objects']} object(s), {s['items']} path(s)"
+                + (f", {len(s['errors'])} failed" if s['errors'] else ""))
+            for uri, why in s["errors"]:
+                err(f"    {uri}: {why}")
+        if ttl_s is not None:
+            sweep_ttl(ttl_s)
+        return summaries
+
     idle = 0
+    down = 0
     try:
         while True:
-            summaries = []
-            for c in clients:
-                summaries += drain_once(
-                    c, size_fn=size_fn, delete_fn=delete_fn, schema=schemas[c.database_id], trash_fn=trash_fn,
-                    undo_state=undo_state, hold_s=ttl_s, announce=announce, after=run_after,
-                    host=host,
-                    reclaim_fn=reclaim_fn if platform == 'darwin' else None,
-                )
-            for s in summaries:
-                verb = "would delete" if s["mode"] == "dry" else ("trashed" if s["trashed"] else "deleted")
-                freed = f", frees {naturalsize(s['freed_bytes'], binary=True)}" if s.get("freed_bytes") is not None else ""
-                err(f"  ran {s['run_id']}: {verb} {naturalsize(s['deleted_bytes'], binary=True)}{freed}"
-                    f" across {s['deleted_objects']} object(s), {s['items']} path(s)"
-                    + (f", {len(s['errors'])} failed" if s['errors'] else ""))
-                for uri, why in s["errors"]:
-                    err(f"    {uri}: {why}")
-            if ttl_s is not None:
-                sweep_ttl(ttl_s)
+            try:
+                summaries = poll()
+            except Exception as e:
+                # The laptop offline or the API briefly failing: the next poll retries, backing off, rather than the
+                # agent exiting (and alerting) to be restarted. `--once` reports it.
+                if once or not transient(e):
+                    raise
+                down += 1
+                wait = interval * min(2 ** down, 10)
+                err(f"dispatch --serve: D1 unreachable ({type(e).__name__}: {e}); retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            if down:
+                err(f"dispatch --serve: D1 reachable again after {down} failed poll(s)")
+                down = 0
             if once:
                 if not summaries:
                     err("dispatch --serve --once: no enqueued runs")

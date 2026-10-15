@@ -10,9 +10,11 @@ stdlib only (like ``notify/discord_api.py``); no new dependency.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 API = "https://api.cloudflare.com/client/v4"
@@ -20,6 +22,20 @@ API = "https://api.cloudflare.com/client/v4"
 
 class D1Error(RuntimeError):
     pass
+
+
+_UNREACHABLE = {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN, errno.ECONNREFUSED}
+
+
+def transient(e: BaseException) -> bool:
+    """Whether a D1 call's error is the network's or the API's passing trouble, so the next poll may well succeed:
+    an HTTP 429 or 5xx, an unresolvable or unreachable host (the laptop offline), a timeout or a dropped connection.
+    Anything else (a 4xx, a local `PermissionError`, a bad query) is not."""
+    if isinstance(e, HTTPError):
+        return e.code == 429 or e.code >= 500
+    if isinstance(e, (URLError, TimeoutError, ConnectionError)):
+        return True
+    return isinstance(e, OSError) and e.errno in _UNREACHABLE
 
 
 class D1Client:
