@@ -591,7 +591,7 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
         sl = ist.sliced(store.read_json(f"{PREFIX}/{p.gen}/scans.json"))
         doc = prune_state(client, p.gen, d, k, bucket=p.bucket, scratch=p.scratch, dry_run=dry_run, sliced=sl)
         err(json.dumps({k_: v for k_, v in doc.items() if k_ != "delete"} | {"deleted_scans": [x["scan"] for x in doc["delete"]]}))
-        folded = ar.prune_folded(GcsRunStore(gs_bucket(p.bucket), None, p.gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN, dry_run=dry_run,
+        folded = ar.prune_folded(ar.GcsRunStore(gs_bucket(p.bucket), None, p.gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN, dry_run=dry_run,
                                  where=" gcs")
         err(json.dumps(_summary(folded)))
 
@@ -868,7 +868,7 @@ def prune_cmd(bucket, gen, ranges_gen, scratch, grace_s, dry_run, r2) -> None:
     else:
         if gs_bucket(bucket) is None:
             raise SystemExit(f"prune: the GCS store's prune; for {bucket}, `interval-store add` prunes its own store")
-        doc = ar.prune_folded(GcsRunStore(gs_bucket(bucket), None, gen, prefix=PREFIX), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")
+        doc = ar.prune_folded(ar.GcsRunStore(gs_bucket(bucket), None, gen, prefix=PREFIX), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")
     print(json.dumps({"gen": gen, "store": "r2" if r2 else "gcs", **_summary(doc)}, indent=1))
 
 

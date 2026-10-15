@@ -13,14 +13,15 @@
  *
  * Gated like `/api/subtree` (viewer scope); immutable per (scan, path, n,
  * generation), so edge-cached like it. A version-1 scan (dirs only, no size
- * sort) is a 409. Reads the scan's own (per-scan) size sort, never the interval
- * store's (`perScan`): `readLargest` pages a per-scan sort's groups, and an
- * interval store's rows carry validity ranges it doesn't select by — a scan
- * whose per-scan sort is gone is the same 409, never another scan's files.
+ * sort) is a 409. Reads the request's path store (`withPathStore`): under
+ * `PATH_STORE=intervals` a scan the interval store holds is read from its
+ * `bysize` sort as of that scan (`readLargest` → `readLargestIv`: its runs' close
+ * records applied, exactly the scan's own answer), any other from the scan's own
+ * size sort — never another scan's files.
  */
 import { filterJson, hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { openIndex, pathGens, perScan, readLargest, sizeVariant, storeReady } from '../_lib/index.js'
+import { openIndex, pathGens, readLargest, sizeVariant, storeReady, withPathStore } from '../_lib/index.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { storeKey, withStore } from '../_lib/stores.js'
 import { scanArg } from '../_lib/scanArg.js'
@@ -32,9 +33,10 @@ export const LARGEST_MAX = 500
 type Ctx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
 
 export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
-  // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
-  const ctx = withStore(ctx0)
-  if (ctx instanceof Response) return ctx
+  // `store=<key>`: a secondary store's env overlay (none = the primary, as is); then its path store.
+  const ctx1 = withStore(ctx0)
+  if (ctx1 instanceof Response) return ctx1
+  const ctx = await withPathStore(ctx1)
   const st = serverTiming()
   if (!storeReady(ctx.env)) {
     return new Response('largest API not configured (missing index store creds)', { status: 503 })
@@ -62,7 +64,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
     const scan = await scanArg(ctx.env, url.searchParams)
     if (scan instanceof Response) return scan
     const date = scan
-    const env = perScan(ctx.env)
+    const env = ctx.env
     const g = await st.time('pre', pathGens(env, [date]))
     const cacheKey = cacheKeyFor('largest', cacheEnvTag(ctx.env, ctx.request), `${date}/${encodeURIComponent(path)}?n=${n}&g=${g}`, storeKey(ctx.env))
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))

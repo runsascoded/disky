@@ -6,7 +6,7 @@
  * Both are pure functions over index rows / per-path aggregates so `buildView`
  * stays one pipeline: read a superset by total bytes, narrow per row, fold. */
 import { compileQuery, type NamePred } from './pathQuery.js'
-import { parseAst, resolveSyntax } from './querySyntax.js'
+import { parseAst, plain, resolveSyntax } from './querySyntax.js'
 
 /** `o=`: `owned` = rows some person owns (`usr` set), `unowned` = the
  * NULL-`usr` slices (ownership has one axis: a person or nobody). `{not}` =
@@ -72,8 +72,9 @@ export { QueryError } from './queryAst.js'
  * `simple`) → the predicate (undefined: no filter) and the syntax's id (the
  * cache key carries it beside `q`). Throws `QueryError` (an unknown `qs=`, a
  * parse error): the handler's 400. */
-export function queryParam(sp: URLSearchParams, deflt?: string): { query?: NamePred; syntax: string } {
-  const syntax = resolveSyntax(sp.get('qs'), deflt)
+export function queryParam(sp: URLSearchParams, deflt?: string, indexed = false): { query?: NamePred; syntax: string } {
+  // An indexed-only deployment has one syntax, `plain` (every term a literal); its `qs=` is ignored.
+  const syntax = indexed ? plain : resolveSyntax(sp.get('qs'), deflt)
   const ast = parseAst(sp.get('q'), syntax)
   return { query: ast ? compileQuery(ast) : undefined, syntax: syntax.id }
 }

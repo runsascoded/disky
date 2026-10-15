@@ -83,7 +83,8 @@ async function readRuns(r2: R2, kind: StoreRead['kind'], gen: string, root: stri
   }
 }
 
-/** The interval store (`interval-store/<INTERVAL_STORE_GEN>/`), or null when the deployment has none. */
+/** The interval store (`interval-store/<INTERVAL_STORE_GEN>/`: the pin, or the current generation `/api/health`
+ *  resolved), or null when the deployment has none. */
 export async function readInterval(env: Env): Promise<StoreRead | null> {
   const r2 = env.INDEX_R2 as R2 | undefined, gen = env.INTERVAL_STORE_GEN?.trim()
   if (!r2 || !gen) return null

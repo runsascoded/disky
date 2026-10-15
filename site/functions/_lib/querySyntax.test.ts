@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Matcher, ParseResult, QueryError } from './queryAst'
-import { DEFAULT_SYNTAX, matcherText, parseAst, regex, resolveSyntax, simple, SYNTAXES } from './querySyntax'
+import { DEFAULT_SYNTAX, matcherText, parseAst, plain, regex, resolveSyntax, simple, SYNTAXES } from './querySyntax'
 import { queryParam } from './scope'
 import { planNegative, planPositive } from './searchQuery'
 
@@ -179,5 +179,30 @@ describe('`queryParam`: what the API handlers read', () => {
   it('throws on a parse error or an unknown syntax (the handlers’ 400)', () => {
     expect(() => qp('q=a(&qs=regex')).toThrowError('invalid regex: Invalid regular expression: /a(/i: Unterminated group')
     expect(() => qp('q=a&qs=nope')).toThrowError("unknown query syntax 'nope' (want simple|regex)")
+  })
+})
+
+describe('`plain`: the indexed-only box — every character literal, any length, `qs=` ignored', () => {
+  it.each<[string, Matcher[][], Matcher[]]>([
+    ['tom*t', [[sub('tom*t')]], []],
+    ['*.pt', [[sub('*.pt')]], []],
+    ['a?b', [[sub('a?b')]], []],
+    ['/ckpt.*final/', [[sub('/ckpt.*final/')]], []],
+    ['(x)+[y]', [[sub('(x)+[y]')]], []],
+    ['ab cd', [[sub('ab'), sub('cd')]], []],
+    ['ckpt -x*y', [[sub('ckpt')]], [sub('x*y')]],
+    ['^ab*', [[{ kind: 'sub', text: 'ab*', start: true }]], []],
+    ['.c$', [[{ kind: 'sub', text: '.c', end: true }]], []],
+  ])('%s', (q, alts, neg) => {
+    expect(plain.parse(q)).toEqual({ ast: { alts, neg } })
+  })
+  it('`is:file` is still a parse error; `queryParam` reads `plain` under the flag, whatever `qs=`', () => {
+    const qp = (qs: string) => { const r = queryParam(new URLSearchParams(qs), 'regex', true); return { ast: r.query?.ast ?? null, syntax: r.syntax } }
+    expect([plain.parse('is:file').code, qp('q=a*b&qs=regex'), qp('q=a*b&qs=nope'), qp('q=a*b')]).toEqual([
+      'unsupported-kind',
+      { ast: { alts: [[sub('a*b')]], neg: [] }, syntax: 'plain' },
+      { ast: { alts: [[sub('a*b')]], neg: [] }, syntax: 'plain' },
+      { ast: { alts: [[sub('a*b')]], neg: [] }, syntax: 'plain' },
+    ])
   })
 })

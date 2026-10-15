@@ -266,7 +266,8 @@ class Runner(ar.Runner):
         if self.exists(f"{run}/drill/meta.json"):
             self.log(f"{d} drill: done")
             return None
-        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *drill_duckdb_args(self.cfg.machine)]
+        ck = ("-S", self.cfg.drill_checkpoint) if self.cfg.drill_checkpoint else ()
+        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *drill_duckdb_args(self.cfg.machine), *ck]
         name, spec = self.job("drill", d, 2, "static_drill", args)
 
         def build():

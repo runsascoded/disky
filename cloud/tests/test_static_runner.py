@@ -267,6 +267,21 @@ def test_the_drill_stage_runs_after_shards_and_catalog_before_publish():
     assert f.calls == _chain(d, [d], drill=True)
 
 
+def test_the_drill_tasks_checkpoint_where_the_profile_says():
+    """With the profile's `drill_checkpoint` (env `STATIC_NAMES_DRILL_CHECKPOINT`), the drill job's tasks get `-S` (a
+    reclaimed task's retry resumes after its last saved step); without one, none."""
+    from dataclasses import replace
+
+    d = "2026-10-09T0001"
+    f = Fake({}, [d])
+    cfg = replace(DRILL, drill_checkpoint="gs://scratch/ckpt")
+    assert load_profile({"STATIC_NAMES_PROFILE": "", "STATIC_NAMES_DRILL_CHECKPOINT": "gs://scratch/ckpt"}).drill_checkpoint == "gs://scratch/ckpt"
+    assert f.daily(cfg).run(d) == [d]
+    chain = _chain(d, [d], drill=True)
+    chain[4] = ("drill", 2, _py("static_drill", "build", f"-g {GEN} -d {d}", "-k", "task", "-M", "60GB", "-p", "16", "-S", "gs://scratch/ckpt"))
+    assert f.calls == chain
+
+
 def test_a_rerun_skips_a_built_drill():
     d = "2026-10-09T0001"
     done = {f"{ROOT}/deltas/{d}/scans.json": None, **{f"{ROOT}/deltas/{d}/dhist/r{i:04d}.parquet": None for i in range(8)},

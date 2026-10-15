@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
-import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, IV_BROKEN_TTL, ivRetry, IvGroup, openIndex, pathGens, planRects, planSizeRects, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
+import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRetry, IvGroup, openIndex, pathGens, planRects, planSizeRects, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
 import { type D1Variant, fixture, readJson, seedGeneration } from './testStore'
@@ -98,10 +98,56 @@ describe('interval store', () => {
     await expect(openIndex(env, '2026-08-03', 'bysize-user')).rejects.toThrow("index variant 'bysize-user' not synced for 2026-08-03")
   })
 
-  it('opts a request in with `ps=iv` under `PATH_STORE=opt-in`, never for a secondary store', () => {
-    const at = (q: string, mode = 'opt-in') => withPathStore({ request: new Request(`https://x/api/subtree?${q}`), env: { ...env, PATH_STORE: mode } }).env.PATH_STORE
-    expect([at('date=d'), at('date=d&ps=iv'), at('date=d&ps=iv&store=meta'), at('date=d', 'intervals'), at('date=d&store=meta', 'intervals')])
+  it('opts a request in with `ps=iv` under `PATH_STORE=opt-in`, never for a secondary store', async () => {
+    const at = async (q: string, mode = 'opt-in') => (await withPathStore({ request: new Request(`https://x/api/subtree?${q}`), env: { ...env, PATH_STORE: mode } })).env.PATH_STORE
+    expect(await Promise.all([at('date=d'), at('date=d&ps=iv'), at('date=d&ps=iv&store=meta'), at('date=d', 'intervals'), at('date=d&store=meta', 'intervals')]))
       .toEqual([undefined, 'intervals', undefined, 'intervals', undefined])
+  })
+
+  it('serves the store\'s current generation when unpinned, and a pin over it', async () => {
+    // `interval-store/CURRENT.json` (`interval_compact.CURRENT`) over the fixture store; `ptr` is what it holds (null: absent).
+    let ptr: string | null = 'g1'
+    let gets = 0
+    const base = r2([])
+    const bucket = {
+      ...base,
+      get: async (key: string, o?: unknown) => {
+        if (key !== IV_CURRENT) return (base.get as (k: string, o?: unknown) => Promise<unknown>)(key, o)
+        gets++
+        return ptr === null ? null : { json: async () => ({ gen: ptr }) }
+      },
+    } as unknown as R2Bucket
+    const unpinned = { ...env, INTERVAL_STORE_GEN: undefined, INDEX_R2: bucket } as Env
+    const gen = async (e: Env) => (await withPathStore({ request: new Request('https://x/api/subtree?date=2026-08-03'), env: e })).env.INTERVAL_STORE_GEN
+    // The pointer is held `IV_STATE_TTL` per isolate: the clock moves past it between cases. It starts well in the past,
+    // so what this case memoizes (handles, state) is stale to the cases after it.
+    let t = Date.now() - 10 * IV_STATE_TTL
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => t)
+    const expire = () => { t += IV_STATE_TTL }
+    try {
+      const c = cases.find(x => x.date === '2026-08-03' && x.path === 'b2/e' && x.w === 8 && x.depth == null)!
+      const e1 = (await withPathStore({ request: new Request('https://x/api/subtree?date=2026-08-03'), env: unpinned })).env
+      const v = await buildView(e1, { date: c.date, path: c.path, w: 8, h: 6, minArea: 12, atten: 2 })
+      expect([e1.INTERVAL_STORE_GEN, (await openIndex(e1, '2026-08-03', 'path')).gen, flatten(v.tree)[''], gets]).toEqual(['g1', 'iv:g1', c.tiles[''], 1])
+      // a pin wins, without reading the pointer
+      expect([await gen({ ...unpinned, INTERVAL_STORE_GEN: 'g6' } as Env), gets]).toEqual(['g6', 1])
+      // a compaction moves the pointer: served once the held one is `IV_STATE_TTL` old
+      ptr = 'g6'
+      expect([await gen(unpinned), gets]).toEqual(['g1', 1])
+      expire()
+      expect([await gen(unpinned), gets]).toEqual(['g6', 2])
+      // no pointer (a store from before it): per-scan reads, the store left off
+      ptr = null
+      expire()
+      const off = (await withPathStore({ request: new Request('https://x/api/subtree?date=2026-08-03'), env: unpinned })).env
+      expect([off.INTERVAL_STORE_GEN, off.PATH_STORE, intervalsOn(off), await ivGen(unpinned)]).toEqual([undefined, 'intervals', false, null])
+      // not opted in: the pointer is never read
+      expire()
+      const n = gets
+      expect([await gen({ ...unpinned, PATH_STORE: 'opt-in' } as Env), gets - n]).toEqual([undefined, 0])
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('keys a held date\'s answers to the interval generation', async () => {

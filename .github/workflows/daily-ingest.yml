@@ -3,14 +3,18 @@
 # the union's path store (`path` + `bysize` sorts, objects included;
 # specs/done/path-store.md §4.4), its search sidecars (specs/path-store-search.md;
 # ~21 MiB beside a 12 MiB `path` sort, <1 s) + snapshot → upload to
-# disk-tree-demo → publish footers to the D1 the Map reads → append the scan to
-# the static name index (`dt-cloud static-names add`: exact `?f=` literals;
-# the generation is the site's `STATIC_GEN`, built once by `static-names build`
-# when it doesn't exist yet) → append it to the interval store (`dt-cloud
-# interval-store add`: every scan's tree as versioned intervals, the Map's path
-# store under `PATH_STORE`; the generation is the site's `INTERVAL_STORE_GEN`,
-# built once by `interval-store build`). Idempotent per date (a fresh generation flips the
-# pointer; a date the static index already holds is not re-appended). Run it by
+# disk-tree-demo → append the scan to the static name index (`dt-cloud
+# static-names add`: exact `?f=` literals; the generation is the site's
+# `STATIC_GEN`, built once by `static-names build` when it doesn't exist yet) →
+# append it to the interval store (`dt-cloud interval-store add`: every scan's
+# tree as versioned intervals, the Map's path store under `PATH_STORE`; the
+# generation is the store's current one, `interval-store/CURRENT.json`, built once
+# by `interval-store build` and compacted into a new one by `add` every 2^5 scans,
+# the pointer the site follows moved with it) → publish footers to the D1 the Map
+# reads, which lists the scan: last, so a listed scan is already searchable (gcs's
+# order). Idempotent per date: a date already scanned is
+# not scanned again (the scan id is the date; the indexes append by it), and a
+# date the indexes already hold is not re-appended. Run it by
 # hand anytime via "Run workflow" (workflow_dispatch).
 #
 # Creds (repo secrets/vars): R2_HCCS_RO_* + R2_HCCS_ENDPOINT_URL (ctbk/crashes,
@@ -52,10 +56,24 @@ jobs:
           uv sync --frozen --all-packages --all-extras
       - name: Stamp date + generation
         id: d
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
         run: |
-          echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          date=$(date -u +%F)
+          echo "date=$date" >> "$GITHUB_OUTPUT"
           echo "gen=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+          # The scan id is the date: a second run that day would re-point the date's path store at a new
+          # listing while the static name index and interval store (append-only, keyed by scan id) keep the
+          # first — two answers for one scan. A date already scanned is not scanned again; the index steps
+          # below still run (each a no-op when caught up), so a re-run still catches them up.
+          if aws s3 ls "s3://$BUCKET/listing/$date/index/" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
+            echo "scanned=true" >> "$GITHUB_OUTPUT"
+            echo "$date is already scanned: listing, upload and D1 publish skipped"
+          fi
       - name: List the three buckets → canonical shards
+        if: steps.d.outputs.scanned != 'true'
         run: |
           set -euo pipefail
           mkdir -p work/listing work/index work/snap
@@ -65,12 +83,14 @@ jobs:
           list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" crashes  "$HCCS_ENDPOINT"
           list "${{ secrets.R2_DEMO_SRC_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_DEMO_SRC_RO_SECRET_ACCESS_KEY }}" jc-taxes "$RAC_ENDPOINT"
       - name: Union → path store (path + bysize sorts + search sidecars) + snapshot
+        if: steps.d.outputs.scanned != 'true'
         run: |
           cd cloud && uv run dt-cloud path-index -S -d "${{ steps.d.outputs.date }}" \
             -l "$GITHUB_WORKSPACE/work/listing/*/*.parquet" \
             -P "$GITHUB_WORKSPACE/work/index/path-index.parquet" \
             -o "$GITHUB_WORKSPACE/work/snap"
       - name: Upload tiers + snapshot to the index bucket
+        if: steps.d.outputs.scanned != 'true'
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
@@ -80,18 +100,9 @@ jobs:
             --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
           aws s3 cp work/snap/  "s3://$BUCKET/snapshots/r2/${{ steps.d.outputs.date }}/" \
             --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
-      - name: Publish footers → D1
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          D1_DB_ID: 261d0c80-8f73-442e-979a-4e25725b2271
-          D1_DB_NAME: disk-tree-demo-db
-        run: |
-          cd cloud && uv run dt-cloud index-sync "${{ steps.d.outputs.date }}" \
-            -g "${{ steps.d.outputs.gen }}" -b "$BUCKET" \
-            -k "listing/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
-            -d "$GITHUB_WORKSPACE/work/index" -v path -v bysize
       - name: Static name index — append the scan (or build the generation)
+        id: names
+        continue-on-error: true
         timeout-minutes: 75
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
@@ -111,6 +122,8 @@ jobs:
           cd cloud && uv run dt-cloud static-names "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
             -w "$RUNNER_TEMP/static-names" -p 4 -M 10GB $([ "$cmd" = build ] && echo "-x off")
       - name: Interval store — append the scan (or build the generation)
+        id: intervals
+        continue-on-error: true
         timeout-minutes: 60
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
@@ -118,17 +131,48 @@ jobs:
           DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
         run: |
           set -euo pipefail
-          # One source of truth: the generation the site reads (`site/wrangler.r2.toml`).
-          gen=$(sed -nE 's/^INTERVAL_STORE_GEN *= *"([^"]+)".*/\1/p' site/wrangler.r2.toml)
-          if [ -z "$gen" ]; then echo "no INTERVAL_STORE_GEN in site/wrangler.r2.toml: no interval store"; exit 0; fi
+          # The site serves the interval store under PATH_STORE (`site/wrangler.r2.toml`); without it there is none.
+          if ! grep -qE '^PATH_STORE *= *"' site/wrangler.r2.toml; then echo "no PATH_STORE in site/wrangler.r2.toml: no interval store"; exit 0; fi
+          # A pinned generation (INTERVAL_STORE_GEN there) is appended to without compacting (a compacted generation
+          # leaves R2 after the grace, and the pinned site would lose it); unpinned, the store's current one, compacted
+          # every 2^5 scans (`add -C`, default 5) with CURRENT.json, which the site follows, moved to the new generation.
+          pin=$(sed -nE 's/^INTERVAL_STORE_GEN *= *"([^"]+)".*/\1/p' site/wrangler.r2.toml)
           L='listing/{id}/index/{gen}/path-index.parquet'
-          cmd=add
-          if ! aws s3 ls "s3://$BUCKET/interval-store/$gen/scans.json" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
-            cmd=build  # the first run: the base generation over every scan so far
+          cd cloud
+          common=(-L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" -w "$RUNNER_TEMP/interval-store" -p 4 -M 10GB)
+          # CURRENT.json's generation, else the store's only one; empty when it has none (several and no pointer: fails).
+          gen=$(uv run dt-cloud interval-store current -o "r2://$BUCKET")
+          if [ -n "$pin" ]; then
+            echo "interval-store add -g $pin (pinned: no compaction)"
+            uv run dt-cloud interval-store add -g "$pin" -C none "${common[@]}"
+          elif [ -n "$gen" ]; then
+            echo "interval-store add (current: $gen)"
+            uv run dt-cloud interval-store add "${common[@]}"
+          else
+            gen="${{ steps.d.outputs.date }}"
+            echo "interval-store build -g $gen"  # the first run: the base generation over every scan so far
+            uv run dt-cloud interval-store build -g "$gen" "${common[@]}"
           fi
-          echo "interval-store $cmd -g $gen"
-          cd cloud && uv run dt-cloud interval-store "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
-            -w "$RUNNER_TEMP/interval-store" -p 4 -M 10GB
+      # Last, after both appends (as gcs's job does): the D1 publish is what lists the scan, so a listed scan is
+      # already searchable and on the interval store — never "not indexed yet" in between. An append that failed
+      # doesn't block it (browse and diff still work; search says so for that scan), the step below fails the run.
+      - name: Publish footers → D1
+        if: ${{ !cancelled() && steps.d.outputs.scanned != 'true' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DB_ID: 261d0c80-8f73-442e-979a-4e25725b2271
+          D1_DB_NAME: disk-tree-demo-db
+        run: |
+          cd cloud && uv run dt-cloud index-sync "${{ steps.d.outputs.date }}" \
+            -g "${{ steps.d.outputs.gen }}" -b "$BUCKET" \
+            -k "listing/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
+            -d "$GITHUB_WORKSPACE/work/index" -v path -v bysize
+      - name: Fail on an index append that failed
+        if: ${{ !cancelled() && (steps.names.outcome == 'failure' || steps.intervals.outcome == 'failure') }}
+        run: |
+          echo "static names: ${{ steps.names.outcome }}, interval store: ${{ steps.intervals.outcome }}"
+          exit 1
       - name: Smoke — the new generation serves
         run: |
           set -euo pipefail

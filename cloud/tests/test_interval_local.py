@@ -186,7 +186,8 @@ def test_add_with_nothing_pending_is_a_nop(world, local, tmp_path):
     ids = DATES[BASE:]
     assert out == {"gen": "g", "after": DATES[-1], "added": [], "merge": None, "files": 0,
                    "prune": {"manifest": f"manifests/{ids[-1]}.m001.json", "grace": [f"manifests/{d}.json" for d in ids], "runs": [],
-                             "objects": 0, "bytes": 0, "deleted": 0}}
+                             "objects": 0, "bytes": 0, "deleted": 0},
+                   "compact": None, "predecessors": []}
     assert {p.relative_to(local["gen"]).as_posix(): p.read_bytes() for p in sorted(local["gen"].rglob("*")) if p.is_file()} == before
 
 
@@ -214,6 +215,8 @@ def test_a_url_store_matches_a_local_one(world, local, tmp_path):
     fs = fsspec.filesystem("memory")
     got = {k.split("/store/", 1)[1]: fs.cat_file(k) for k in sorted(fs.find(f"/{tmp_path.name}/store"))}
     want = {f"{ist.PREFIX}/g/{p.relative_to(local['gen']).as_posix()}": p.read_bytes() for p in sorted(local["gen"].rglob("*")) if p.is_file()}
+    # The store's pointer, beside its only generation (the build wrote it).
+    assert got.pop(f"{ist.PREFIX}/CURRENT.json") == (local["store"] / ist.PREFIX / "CURRENT.json").read_bytes() == b'{"gen": "g"}\n'
     assert sorted(got) == sorted(want)
     stable = lambda k: k.endswith(".parquet") or "/manifests/" in k or k.endswith("/scans.json")  # noqa: E731 — the rest carry timings
     assert {k: v for k, v in got.items() if stable(k)} == {k: v for k, v in want.items() if stable(k)}

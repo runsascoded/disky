@@ -347,6 +347,8 @@ export interface SearchFound {
   truncated: boolean
   /** Why, when `truncated` (what the response's `partialReason` says). */
   reason?: string
+  /** The cut was `wallMs` (not a read budget): a retry with time to spare may answer more. */
+  timedOut?: true
   stats: {
     /** The sidecars' layout (§2). */
     layout: 1 | 2
@@ -558,6 +560,7 @@ export async function searchRoots(env: Env, h: IndexHandle, query: NamePred, pla
     roots: [...roots].sort(),
     truncated,
     ...(truncated ? { reason: reasons.join('; ') } : {}),
+    ...(timedOut ? { timedOut: true as const } : {}),
     stats: { layout: idx.v, mode: candidates === null ? 'scan' : 'trigrams', trigrams: tris.length, postingsRgs, candidates: candidates?.length ?? 0, dirGroups, namesRgs: idx.v === 1 ? dataGroups.length : 0, names, pathRgs: pathRead, rowsRgs: rowsRead, lifted },
   }
   if (ck && !timedOut) cachePut(ck, [found], 256 + rows.length * FOUND_BYTES)

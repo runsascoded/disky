@@ -128,6 +128,10 @@ def write_names(con, versions_sql: str, out: Path, target_rows: int = NAME_SHARD
     return write_run_shards((_sx_cast(b) for b in _batches(con, sql)), out, target_rows)
 
 
+#: The version columns the name index reads from coalesced versions (`cintervals/`) or a run's `cdelta/`.
+VERSION_COLS = "depth, path, usr, vf, vt, size, n_files"
+
+
 def files_sql(files: list[str], cols: str = "*") -> str:
     return f"SELECT {cols} FROM read_parquet([{', '.join(q(f) for f in files)}])"
 
@@ -1124,7 +1128,7 @@ def names_cmd(bucket, run, gen, mount, mem, threads, target_rows, tmp) -> None:
     t0 = monotonic()
     con = connect(threads, mem, tmp)
     out = Path(tmp) / "names-out"
-    doc = write_names(con, files_sql(files, "depth, path, usr, vf, vt, size, n_files"), out, target_rows)
+    doc = write_names(con, files_sql(files, VERSION_COLS), out, target_rows)
     n = _upload_dir(b, out, f"{prefix}/{NAMES}", last=("sidecar.parquet",))
     err(f"names {prefix}: {doc['rows']:,} rows, {doc['shards']} shards, {doc['bytes']:,} B, {n} files in {monotonic() - t0:.0f}s")
     print(json.dumps(doc))
@@ -1389,7 +1393,7 @@ def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
         (local / NAMES).symlink_to(src / NAMES)
         versions = None
     else:
-        versions = files_sql(cdelta, "depth, path, usr, vf, vt, size, n_files")
+        versions = files_sql(cdelta, VERSION_COLS)
     shutil.rmtree(local / ANCHORS, ignore_errors=True)
     diagnostics = f"static-names/diagnostics/{gen}/{run}/anchors"
     try:

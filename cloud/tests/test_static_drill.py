@@ -6,6 +6,9 @@ becoming heavy, a literal becoming a member, probes either way, closes, resurrec
 from __future__ import annotations
 
 import random
+import re
+import shutil
+from itertools import groupby
 from pathlib import Path
 
 import pyarrow as pa
@@ -617,3 +620,164 @@ def test_settling_by_ranges_writes_the_same_bytes(world, run_rg, tmp_path, monke
     rebuild(tmp_path / "old", threads=0)
     assert _tree(tmp_path / "old", drop={"s", "reads"}) == _tree(tmp_path / "new", drop={"s", "reads"})
     assert calls == SETTLE_CALLS[world["cfg"]["R"]][i]
+
+
+# ── Checkpoints: a reclaimed task's retry resumes (specs/drill-preemption.md) ──
+
+
+class Interrupted(Exception):
+    """A spot reclaim, right after a checkpoint's save."""
+
+
+def _ck(root: Path, on_save=None) -> sd.Checkpoint:
+    return sd.Checkpoint(str(root), "drill/g/scan/long-short", every_s=0, log=lambda *_: None, on_save=on_save)
+
+
+def _steps(long_settle: int, long_heavy: int, short_settle: int, short_heavy: int) -> list[tuple[str, int | None]]:
+    """A checkpointed build's saves in order: each step's (None), or a loop's number of parts (its items, at `every_s=0`)."""
+    return [("long/digests", None), ("long/roots", None), ("long/probes", None), ("long/settle", long_settle), ("long/counts", None),
+            ("long/heavy", long_heavy), ("long/written", None), ("short/roots", None), ("short/probes", None), ("short/settle", short_settle),
+            ("short/counts", None), ("short/heavy", short_heavy)]
+
+
+#: Per config (`R`) and run, the checkpointed build's saves (`_steps`: settled and newly heavy directories per kind).
+SAVES = {
+    3: [_steps(4, 36, 34, 160), _steps(10, 63, 30, 41), _steps(33, 9, 35, 32), _steps(8, 63, 26, 72)],
+    5: [_steps(2, 19, 27, 113), _steps(4, 12, 31, 59), _steps(4, 59, 23, 25), _steps(29, 26, 14, 90)],
+}
+
+
+def _tables(con) -> set[str]:
+    return {r[0] for r in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+
+
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_an_interrupted_build_resumes_to_the_same_bytes(world, run_rg, tmp_path, i):
+    """A checkpointed build (every loop item's part saved) writes the files of an uncheckpointed one, byte for byte;
+    interrupted right after each of its saves (its connection's new tables and its output dir lost, as a reclaimed task's
+    are), a rerun with the same checkpoint saves exactly the steps after that one and writes the same files again; then
+    the checkpoint clears to nothing."""
+    rebuild, con = world["rebuilds"][i], world["con"]
+    rebuild(tmp_path / "plain")
+    want = _tree(tmp_path / "plain", drop={"s", "reads"})
+    saves: list[str] = []
+    rebuild(tmp_path / "ck", checkpoint=_ck(tmp_path / "ck-store", saves.append))
+    assert _tree(tmp_path / "ck", drop={"s", "reads"}) == want
+    # the steps in save order, a loop's parts counted (one per item: `every_s=0`)
+    steps = [(s, None if g == [s] else len(g)) for s, g in ((s, list(g)) for s, g in groupby(saves, key=lambda s: s.split("#")[0]))]
+    assert saves == [s if n is None else f"{s}#{j}" for s, n in steps for j in range(n or 1)]
+    assert steps == SAVES[world["cfg"]["R"]][i]
+    # interrupted after each step, and after a loop's first, middle and last parts
+    at = sorted({k for k, s in enumerate(saves) if "#" not in s} | {saves.index(f"{s}#{j}") for s, n in steps if n for j in (0, n // 2, n - 1)})
+    for k in at:
+        name = saves[k]
+        store, out = tmp_path / f"store-{k}", tmp_path / f"out-{k}"
+
+        def interrupt(n, _k=k):
+            if n == saves[_k]:
+                raise Interrupted(n)
+
+        before = _tables(con)
+        with pytest.raises(Interrupted):
+            rebuild(out, checkpoint=_ck(store, interrupt))
+        for t in _tables(con) - before:
+            con.execute(f"DROP TABLE {t}")
+        shutil.rmtree(out)
+        resumed: list[str] = []
+        ck = _ck(store, resumed.append)
+        rebuild(out, checkpoint=ck)
+        assert (name, resumed) == (name, saves[k + 1:])
+        assert (name, _tree(out, drop={"s", "reads"})) == (name, want)
+        assert ck.clear() > 0
+        assert ck.store.listing(ck.prefix) == {}
+
+
+def test_a_checkpoint_restores_tables_exactly(tmp_path):
+    """A step's tables come back with their DuckDB types and rows (a `HUGEINT` digest beyond a double's precision, an
+    unsigned byte, nulls, booleans), and its doc; a part series comes back in order with the items it covers."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE dg ({sr.DIGEST_COLS})")
+    con.execute("INSERT INTO dg VALUES ('ckpt', 3, 170141183460469231731687303715884105727, -12345678901234567890123), ('zz', 0, 0, NULL)")
+    con.execute("CREATE TABLE pr (q VARCHAR, depth UTINYINT, existed BOOLEAN)")
+    con.execute("INSERT INTO pr VALUES ('a', 255, true), ('b', 0, NULL)")
+    want = {t: con.execute(f"SELECT * FROM {t} ORDER BY ALL").fetchall() for t in ("dg", "pr")}
+    types = {t: con.execute(f"SELECT column_name, column_type FROM (DESCRIBE {t})").fetchall() for t in ("dg", "pr")}
+    ck = sd.Checkpoint(str(tmp_path / "store"), "x/y", every_s=0, log=lambda *_: None)
+    assert not ck.done("s")
+    ck.save(con, "s", ("dg", "pr"), {"n": [1, 2]})
+    other = duckdb.connect()
+    assert ck.done("s")
+    assert ck.load(other, "s") == {"n": [1, 2]}
+    assert {t: other.execute(f"SELECT * FROM {t} ORDER BY ALL").fetchall() for t in ("dg", "pr")} == want
+    assert {t: other.execute(f"SELECT column_name, column_type FROM (DESCRIBE {t})").fetchall() for t in ("dg", "pr")} == types
+    parts = sd.Parts(ck, "loop", sd.ROLLUP_ARROW)
+    assert (parts.start, parts.loaded) == (0, None)
+    parts.add([("c", "d", 1, "x", 5, 10, 1)], 1)
+    parts.add([], 2)
+    parts.add([("c", "e", 0, "", 2, 3, 4), ("c", "e", 1, "y", 5, 6, 7)], 3)
+    again = sd.Parts(ck, "loop", sd.ROLLUP_ARROW)
+    assert (again.start, again.n_parts) == (3, 3)
+    assert again.loaded.to_pylist() == [
+        {"q": "c", "dir": "d", "kind": 1, "child": "x", "vf": 5, "b": 10, "o": 1},
+        {"q": "c", "dir": "e", "kind": 0, "child": "", "vf": 2, "b": 3, "o": 4},
+        {"q": "c", "dir": "e", "kind": 1, "child": "y", "vf": 5, "b": 6, "o": 7},
+    ]
+    assert sorted(ck.store.listing("x/y")) == ["x/y/loop/part-00000.parquet", "x/y/loop/part-00001.parquet", "x/y/loop/part-00002.parquet",
+                                               "x/y/loop/progress.json", "x/y/s/dg.parquet", "x/y/s/done.json", "x/y/s/pr.parquet"]
+    assert ck.clear() == 7
+    assert ck.store.listing("x/y") == {}
+
+
+def test_a_checkpoint_other_code_saved_is_not_resumed(tmp_path):
+    """A checkpoint is keyed by the code that saved it (`code.json`): reopened by the same code it resumes; by other code
+    (a rebuilt image after a bug fix) or with no version recorded, it is cleared, so no step a buggy build saved reaches
+    the fixed build's output. `close` logs the checkpoint's total cost."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t (x INTEGER)")
+    root, logs = str(tmp_path / "store"), []
+
+    def open_(code):
+        return sd.Checkpoint(root, "d/g/s/long", every_s=0, log=logs.append, code=code)
+
+    a = open_("aaaa")
+    a.save(con, "inputs", ("t",))
+    assert sorted(a.store.listing("d/g/s/long")) == ["d/g/s/long/code.json", "d/g/s/long/inputs/done.json", "d/g/s/long/inputs/t.parquet"]
+    assert open_("aaaa").done("inputs")
+    b = open_("bbbb")
+    assert not b.done("inputs")
+    assert sorted(b.store.listing("d/g/s/long")) == ["d/g/s/long/code.json"]
+    assert b.store.read_json("d/g/s/long/code.json") == {"code": "bbbb"}
+    sd.Checkpoint(root, "d/g/s/long", log=logs.append).save(con, "inputs", ("t",))
+    sd.Checkpoint(root, "d/g/s/long", log=logs.append).store.delete({"d/g/s/long/code.json": 0})
+    c = open_("cccc")
+    assert not c.done("inputs")
+    c.save(con, "inputs", ("t",))
+    c.load(con, "inputs")
+    logs.clear()
+    c.close()
+    assert [re.sub(r"\d+s\b", "<n>s", m).replace(root, "<root>") for m in logs] == ["checkpoint <root>/d/g/s/long: total 1 saves in <n>s, 1 resumes in <n>s"]
+    assert len(sd.code_version()) == 16
+
+
+def test_the_build_inputs_checkpoint_round_trips(world, tmp_path):
+    """`build -S`'s first step (`save_inputs`): table `pnew`, the new members and their history come back as saved, under
+    `drill/<gen>/<scan>/<kinds>/inputs/`."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE pnew (depth UTINYINT, path VARCHAR)")
+    con.execute("INSERT INTO pnew VALUES (2, 'b1/x'), (3, 'b2/zoo/zebra9.txt')")
+    history = sd.history_rows([_reader(world["base_out"]), _reader(world["run_dirs"][0])], ["zebra"])
+    assert history.num_rows > 0
+    ck = sd.drill_checkpoint(str(tmp_path / "store"), "g1", "2026-08-04", ("long",), log=lambda *_: None)
+    sd.save_inputs(con, ck, ["zebra"], history)
+    assert sorted(ck.store.listing(ck.prefix)) == ["drill/g1/2026-08-04/long/code.json"] + [f"drill/g1/2026-08-04/long/inputs/{f}" for f in ("done.json", "nmh.parquet", "pnew.parquet")]
+    other = duckdb.connect()
+    assert ck.load(other, "inputs") == {"new_members": ["zebra"]}
+    assert other.execute("SELECT * FROM pnew ORDER BY ALL").fetchall() == [(2, "b1/x"), (3, "b2/zoo/zebra9.txt")]
+    got = other.execute("SELECT * FROM nmh").to_arrow_table()
+    assert (got.schema, got.to_pylist()) == (history.schema, history.to_pylist())

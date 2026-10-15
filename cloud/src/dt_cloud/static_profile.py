@@ -57,6 +57,9 @@ class Profile:
     append_tasks: int = 16
     #: Whether each run also gets the heavy-term drilldown (`drill/`, `static_drill`): needs the base generation's `drill/`.
     drill: bool = False
+    #: Where the drill's tasks save each step (`static_drill build -S`: a store root, a bare bucket name meaning `gs://`), so
+    #: a reclaimed spot task's retry resumes after its last saved step (specs/drill-preemption.md); unset: no checkpoints.
+    drill_checkpoint: str | None = None
     #: Whether each run also gets anchored search's `names/` and `anchors/` (`static_anchors`): needs the base generation's.
     anchors: bool = False
     #: Mounted dirs copied onto the tasks' PYTHONPATH in place of the image's own code (a staged tree).
@@ -108,7 +111,7 @@ ENV = {
     "project": "GCP_PROJECT", "region": "STATIC_NAMES_REGION", "image": "STATIC_NAMES_IMAGE", "sa": "STATIC_NAMES_SA",
     "r2_sa": "STATIC_NAMES_R2_SA", "machine": "STATIC_NAMES_MACHINE", "ssd_gb": "STATIC_NAMES_SSD", "spot": "STATIC_NAMES_SPOT",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
-    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
+    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL",
 }
 

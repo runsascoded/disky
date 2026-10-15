@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { scanTime } from '../../src/scanSlug'
-import { AnchoredHits, AnchoredSource, parseKey, segmentMatches, START_MAX_ROWS, termInPath, termKey } from './staticAnchors'
+import { AnchoredHits, AnchoredSource, parseKey, PathTermHits, segmentMatches, START_MAX_ROWS, termInPath, termKey } from './staticAnchors'
 import { DRILL_RULES, rollupAt } from './staticDrill'
 import { type Found, SuffixHits, staticLiteral } from './staticFilter'
 import { type Blobs, type Hit } from './staticNames'
@@ -234,6 +234,125 @@ describe('`^q`: the starts-with catalog and scoped reads', () => {
   })
 })
 
+describe('path terms (`a/b`): every match root from the tail\'s name-index range = brute force from the name rows', () => {
+  /** `[text, start, end]`: `^` / `$` anchor the text's ends to segment boundaries. */
+  const TERMS: [string, boolean, boolean][] = [
+    ['data/de', false, false], ['deep/g0', false, false], ['er/h1.json', false, false], ['/tomato', false, false], ['tomato/to', false, false],
+    ['cfg/c1', false, false], ['c2/config.json', false, true], ['json/config.json', false, true], ['x/config', false, false],
+    ['train/train', true, false], ['b2/xt', false, false], ['json/j1', false, false], ['jsonx/k.json', false, false], ['b2/cfg', true, true], ['b2/config.json', false, false], ['nope/zz', false, false],
+  ]
+  const keyOf = ([text, start, end]: [string, boolean, boolean]) => termKey({ text, start, end })
+  /** Whether lowercase `l` holds `t` (anchored at segment boundaries as asked): written apart from the reader's test. */
+  const holds = (t: string, start: boolean, end: boolean, l: string): boolean => {
+    for (let i = l.indexOf(t); i >= 0; i = l.indexOf(t, i + 1)) {
+      if ((!start || i === 0 || l[i - 1] === '/') && (!end || i + t.length === l.length || l[i + t.length] === '/')) return true
+    }
+    return false
+  }
+  /** Every version of a stack (one name row each, every tier's), a later tier's row closing it (the smallest `vt`). */
+  async function versions(stack: keyof typeof STACKS): Promise<Hit[]> {
+    const { parquetReadObjects } = await import('hyparquet')
+    const { compressors } = await import('./zstd')
+    const dirs = ['', ...(stack === 'base' ? [] : ['deltas/2026-09-15/']), ...(stack === 'run2' ? ['deltas/2026-10-01/'] : [])]
+    const out = new Map<string, Hit>()
+    for (const d of dirs) for (const [k, b] of files) {
+      if (!k.startsWith(`${d}names/sx/`)) continue
+      for (const r of await parquetReadObjects({ file: b, compressors }) as { depth: number; path: string; usr: string; vf: bigint; vt: bigint; size: bigint; n_files: bigint }[]) {
+        const h: Hit = { path: r.path, depth: r.depth, usr: r.usr, vf: Number(r.vf), vt: Number(r.vt), size: r.size, n: r.n_files }
+        const id = `${h.path}\0${h.usr}\0${h.vf}`
+        const was = out.get(id)
+        if (!was || h.vt < was.vt) out.set(id, h)
+      }
+    }
+    return [...out.values()]
+  }
+  /** Brute force: the match roots under P live on `date`, summed by P's child. */
+  function bruteView(vs: Hit[], [t, start, end]: [string, boolean, boolean], P: string, date: string): Sums {
+    const roots = vs.filter(h => {
+      const l = h.path.toLowerCase(), slash = l.lastIndexOf('/')
+      return h.depth >= 1 && (P === '' || h.path.startsWith(P + '/')) && holds(t, start, end, l) && !(slash >= 0 && holds(t, start, end, l.slice(0, slash)))
+    })
+    return childSums(roots, P, date)
+  }
+  for (const stack of ['base', 'run1', 'run2'] as const) {
+    it(`${stack}: whole-range reads, at every path and scan`, async () => {
+      const scans = STACKS[stack].scans(), vs = await versions(stack), s = source(stack)
+      const got: unknown[] = [], want: unknown[] = []
+      let nonEmpty = 0
+      for (const term of TERMS) for (const P of E.paths) {
+        const key = keyOf(term)
+        if (termInPath(key, P)) continue
+        const f = await s.hits(key, P)
+        expect([key, P, f?.io.from, f?.scans]).toEqual([key, P, 'names', scans])
+        for (const d of scans) {
+          const want1 = bruteView(vs, term, P, d)
+          if (Object.keys(want1).length) nonEmpty++
+          got.push([key, P, d, childSums(f!.hits!, P, d)]); want.push([key, P, d, want1])
+        }
+      }
+      expect(got).toEqual(want)
+      expect(nonEmpty).toBeGreaterThan(50)
+    })
+  }
+  it('scoped under a path: exact at a bound equal to the groups meeting it, `term-too-common` one row under', async () => {
+    const probe = source('run2'), st = await probe.state(), vs = await versions('run2')
+    let seen = 0
+    for (const term of TERMS) {
+      const key = keyOf(term), k = `/${term[0].slice(term[0].lastIndexOf('/') + 1)}`
+      const count = async (under?: string) => (await Promise.all(st.tiers.map(t => t.names.select(k, { shard: null, groups: 0, bytes: 0, rows_read: 0, rows_matching: 0, index: 'none', ms: {} }, { exact: term[2], under })))).reduce((x, s) => x + (s?.rows ?? 0), 0)
+      const whole = await count()
+      for (const P of E.paths) {
+        if (P === '' || termInPath(key, P)) continue
+        const upper = await count(P)
+        if (!(upper > 0 && upper < whole)) continue
+        const at = await source('run2', 0, { startMaxRows: upper }).hits(key, P)
+        expect([at?.io.source, at?.io.upper, at?.scans]).toEqual(['path', upper, E.dates])
+        expect(E.dates.map(d => childSums(at!.hits!, P, d))).toEqual(E.dates.map(d => bruteView(vs, term, P, d)))
+        const under = source('run2', 0, { startMaxRows: upper - 1 })
+        expect([await under.hits(key, P), under.why(key)]).toEqual([null, 'term-too-common'])
+        seen++
+      }
+    }
+    expect(seen).toBeGreaterThan(5)
+  })
+  it('a tail too short to name a range (`cfg/c`, `cfg/c1/`) is `slash-tail-short`; `$` reads one character', async () => {
+    const s = source('run2')
+    const keys = [termKey({ text: 'cfg/c', start: false, end: false }), termKey({ text: 'cfg/c1/', start: false, end: false }), termKey({ text: 'deep/g', start: false, end: true })]
+    const got = await Promise.all(keys.map(async k => { const f = await s.hits(k, ''); return [f && f.hits, s.why(k)] }))
+    expect(got).toEqual([[null, 'slash-tail-short'], [null, 'slash-tail-short'], [[], undefined]])
+  })
+  it('a generation without anchors (no name index): `anchor-not-indexed`', async () => {
+    const blobs = blobsOf({ hide: ['anchors/meta.json'] })
+    const s = new AnchoredSource(tiers(blobs).tiers, blobs)
+    const k = termKey({ text: 'data/de', start: false, end: false })
+    expect([await s.hits(k, ''), s.why(k)]).toEqual([null, 'anchor-not-indexed'])
+  })
+  it('a mutation is caught: the parent test dropped (every row of the range holding the term is a root)', async () => {
+    const spy = vi.spyOn(PathTermHits.prototype, 'add').mockImplementation(function (this: PathTermHits, cols) {
+      const k = this.rowKey
+      for (let i = 0; i < cols.path.length; i++) {
+        if (!cols.s[i].startsWith(k) || cols.depth[i] < 1 || !cols.path[i].toLowerCase().includes(this.text)) continue
+        this.hits.push({ path: cols.path[i], depth: cols.depth[i], usr: cols.usr[i], vf: Number(cols.vf[i]), vt: Number(cols.vt[i]), size: cols.size[i], n: cols.n_files[i] })
+      }
+    })
+    try {
+      const vs = await versions('run2'), term: [string, boolean, boolean] = ['b2/config.json', false, false]
+      const f = await source('run2').hits(keyOf(term), '')
+      expect(E.dates.map(d => childSums(f!.hits!, '', d))).not.toEqual(E.dates.map(d => bruteView(vs, term, '', d)))
+    } finally { spy.mockRestore() }
+  })
+  it('keys: `//` + the anchors + the text, read back; `termInPath` is the path test', () => {
+    const terms = [{ text: 'a/b', start: false, end: false }, { text: '/x', start: true, end: false }, { text: 'c/d', start: false, end: true }]
+    expect(terms.map(termKey)).toEqual(['//00a/b', '//10/x', '//01c/d'])
+    expect(terms.map(termKey).map(parseKey)).toEqual([{ text: 'a/b', mode: 'path', start: false, end: false }, { text: '/x', mode: 'path', start: true, end: false }, { text: 'c/d', mode: 'path', start: false, end: true }])
+    const cases: [string, string, boolean][] = [
+      ['//00a/b', 'xa/bc', true], ['//00a/b', 'a', false], ['//10a/b', 'xa/b', false], ['//10a/b', 'q/a/b', true], ['//01a/b', 'a/bc', false], ['//01a/b', 'a/b/c', true],
+      ['//00/x', 'x', false], ['//00/x', 'b/x', true], ['//00a/b', '', false],
+    ]
+    expect(cases.map(([k, p]) => termInPath(k, p))).toEqual(cases.map(c => c[2]))
+  })
+})
+
 describe('the anchored stack', () => {
   it('drops a run without `anchors/meta.json` and every later one (its scans out of the answers)', async () => {
     const blobs = blobsOf({ hide: ['deltas/2026-09-15/anchors/meta.json'] })
@@ -298,10 +417,10 @@ describe('keys and segments', () => {
     expect(cases.map(([k, p]) => termInPath(k, p))).toEqual(cases.map(c => c[2]))
     expect([segmentMatches('abc', 'ab', 'start'), segmentMatches('abc', 'bc', 'end'), segmentMatches('abc', 'abc', 'exact'), segmentMatches('abc', 'b', null)]).toEqual([true, true, true, true])
   })
-  it('`staticLiteral`: an anchored literal\'s key, null under its minimum length or with `/`', () => {
+  it('`staticLiteral`: an anchored literal\'s key, null under its minimum length; a path term\'s, null with a tail too short', () => {
     const lit = (q: string) => staticLiteral(parseAst(q) ?? undefined)
-    expect(['^tomat', '.json$', '^config.json$', '^ab', '^a', 'gz$', '.gz$', '^x$', '"^a"', 'tomat'].map(lit))
-      .toEqual(['/tomat', '.json/', '/config.json/', '/ab', null, null, '.gz/', '/x/', '^a', 'tomat'])
+    expect(['^tomat', '.json$', '^config.json$', '^ab', '^a', 'gz$', '.gz$', '^x$', '"^a"', 'tomat', 'a/bc', '^a/bc$', 'a/b', 'a/b$', 'a/'].map(lit))
+      .toEqual(['/tomat', '.json/', '/config.json/', '/ab', null, null, '.gz/', '/x/', '^a', 'tomat', '//00a/bc', '//11a/bc', null, '//01a/b', null])
   })
   it('`SuffixHits` hands anchored keys to the anchored source, and nobody else', async () => {
     const blobs = blobsOf()

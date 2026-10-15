@@ -101,7 +101,7 @@ describe('/names with an escaped `^`/`$`', () => {
   })
   it('a bare anchor is refused before any request', async () => {
     const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher)
-    const msg = 'Starts-with (^) and ends-with ($) search isn’t indexed on this deployment yet; search for a plain substring instead.'
+    const msg = 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.'
     await expect(loadName({ ...request, name: '^foo' })).rejects.toEqual(new Error(msg))
     await expect(loadName({ ...request, name: 'foo$' })).rejects.toEqual(new Error(msg))
     expect(fetcher.mock.calls).toEqual([])

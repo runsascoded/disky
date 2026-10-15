@@ -26,6 +26,7 @@ from click import Choice, group, option
 
 from . import static_names as sn
 from . import static_roots as sr
+from .checkpoint import Checkpoint, code_version, Parts
 from .static_names import CODEC, OPEN, PREFIX, _batches, err, q
 from .static_profile import data_bucket
 from .resource_monitor import monitor_resources, resource_stage
@@ -52,6 +53,9 @@ DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field(
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
 ROLLUP_COLS = "q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT"
+#: `ROLLUP_COLS` as Arrow: a checkpoint's parts of rollup rows (settling's, the newly heavy directories').
+ROLLUP_ARROW = pa.schema([("q", pa.string()), ("dir", pa.string()), ("kind", pa.int8()), ("child", pa.string()), ("vf", pa.int64()),
+                          ("b", pa.int64()), ("o", pa.int64())])
 
 
 def insert_rows(con, table: str, rows: list[tuple]) -> None:
@@ -770,12 +774,12 @@ def full_rollups(con, rt: str, K: int, into: str) -> None:
 
 
 def long_day_roots(con, prev: pa.Table, new_members: list[str], sx_files: list[str], history: pa.Table | None,
-                   chunk_rows: int = 1 << 24, log=err, rule=None) -> dict:
+                   chunk_rows: int = 1 << 24, log=err, rule=None, ck: Checkpoint | None = None) -> dict:
     """The long members' delta at a scan: digests of every member's delta roots (over the run's suffix rows `sx_files`)
     refine the previous classes `prev` `(q, canonical)` → table `cls (q, canonical)`; each class canonical's delta roots
     → table `dr` (`ROOT_COLS`). `new_members` (members first at this scan) are classes of their own, their roots their
     whole history (`member_roots` over `history`, their tiered suffix rows `(s, depth, path, usr, vf, vt, size, n_files)`
-    in epoch seconds). Also table `newq (q)`."""
+    in epoch seconds). Also table `newq (q)`. `ck`: the digests (table `dg`) are saved, or restored when saved."""
     t0 = monotonic()
     con.register("prev_in", prev.select(["q", "canonical"]))
     con.execute("CREATE OR REPLACE TABLE pm AS SELECT q, canonical FROM prev_in")
@@ -784,11 +788,16 @@ def long_day_roots(con, prev: pa.Table, new_members: list[str], sx_files: list[s
     if new_members:
         insert_rows(con, "newq", [(m,) for m in new_members])
     con.execute("CREATE OR REPLACE TABLE mq AS SELECT q FROM pm")
-    con.execute(f"DROP TABLE IF EXISTS dg; CREATE TABLE dg ({sr.DIGEST_COLS})")
     chunks = [(f, w) for f in sx_files for w in sr.chunk_wheres(f, chunk_rows)]
-    for k, (f, where) in enumerate(chunks):
-        sr.member_roots(con, sr.sx_rows_sql(f"(SELECT * FROM read_parquet({q(f)}) WHERE {where})"), "mq", "dg", agg="digest", rule=rule)
-        log(f"drill long: digests, chunk {k + 1}/{len(chunks)} in {monotonic() - t0:.0f}s")
+    if ck and ck.done("digests"):
+        ck.load(con, "digests")
+    else:
+        con.execute(f"DROP TABLE IF EXISTS dg; CREATE TABLE dg ({sr.DIGEST_COLS})")
+        for k, (f, where) in enumerate(chunks):
+            sr.member_roots(con, sr.sx_rows_sql(f"(SELECT * FROM read_parquet({q(f)}) WHERE {where})"), "mq", "dg", agg="digest", rule=rule)
+            log(f"drill long: digests, chunk {k + 1}/{len(chunks)} in {monotonic() - t0:.0f}s")
+        if ck:
+            ck.save(con, "digests", ("dg",))
     con.execute("""CREATE OR REPLACE TABLE cls AS
         SELECT q, min(q) OVER (PARTITION BY canonical, n, h1, h2) AS canonical FROM (
             SELECT pm.q, pm.canonical, coalesce(d.n, 0) AS n, coalesce(d.h1, 0) AS h1, coalesce(d.h2, 0) AS h2
@@ -890,11 +899,14 @@ def _explode(where: str = "") -> str:
             FROM dr WHERE depth >= 2 {where})"""
 
 
-def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, floor: int, reads: TierReads, log=err) -> dict:
+def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, floor: int, reads: TierReads, log=err,
+                ck: Checkpoint | None = None) -> dict:
     """A run's rollups and `dcount` for one kind at scan `D` (epoch s), from tables `dr` (the scan's delta roots per class
     canonical; a new member's whole history), `newq` (new members), `pnew (depth, path)` (paths opened at the scan with
     no earlier version), `meas (q, dir, rows)` (the base's root rows per directory, those with ≥ `floor`) and the prior
-    tiers' rollups and `dcount`s. Writes tables `rup` (rollup rows) and `dcnt` (`DCOUNT_SCHEMA`); returns counts."""
+    tiers' rollups and `dcount`s. Writes tables `rup` (rollup rows) and `dcnt` (`DCOUNT_SCHEMA`); returns counts. `ck`: each
+    step that reads the prior tiers (probes, settling, base counts, newly heavy directories) saves its output, and is
+    skipped (its output restored) when saved; the SQL between them reruns (deterministic, over the same tables)."""
     t0 = monotonic()
     doc: Counter = Counter()
     _cmap(con, prior, kind)
@@ -939,15 +951,12 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     # probes: a directory child of a directory with a remainder, every root under it today a new path: did a tier hold one?
     probes = con.execute("""SELECT q, dir, child FROM nk WHERE n_close = 0 AND n_open_old = 0 AND NOT rootchild AND has_rem
         ORDER BY q, dir, child""").fetchall()
-    con.execute("CREATE OR REPLACE TABLE pr (q VARCHAR, dir VARCHAR, child VARCHAR, existed BOOLEAN)")
-    if probes:
-        t1 = monotonic()
-        ranges = [(c, f"{d}/{x}/", f"{d}/{x}0") for c, d, x in probes]
-        existed = []
-        for a, b in reads.windows(reads.plan(ranges, "any")):
-            existed += [reads.any(*r) for r in ranges[a:b]]
-        insert_rows(con, "pr", [(c, d, x, e) for (c, d, x), e in zip(probes, existed)])
-        log(f"drill {kind}: {len(probes):,} probes in {monotonic() - t1:.0f}s ({reads.io()}; requests {reads.requests()})")
+    if ck and ck.done("probes"):
+        ck.load(con, "probes")
+    else:
+        _probe(con, probes, reads, kind, log)
+        if ck:
+            ck.save(con, "probes", ("pr",))
     doc["probes"] = len(probes)
     doc["probes_existed"] = con.execute("SELECT count(*) FILTER (WHERE existed) FROM pr").fetchone()[0]
     con.execute("""CREATE OR REPLACE TABLE nkc AS SELECT nk.*,
@@ -985,7 +994,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
                 SELECT q, dir, sum(db)::BIGINT AS db, sum(dn)::BIGINT AS dn FROM nkc ANTI JOIN joins USING (q, dir, child) GROUP BY q, dir) AS n
             LEFT JOIN rc USING (q, dir) WHERE (n.db <> 0 OR n.dn <> 0) AND (n.q, n.dir) NOT IN (SELECT q, dir FROM aff)""")
     t1 = monotonic()
-    doc["restated"] = _settle(con, D, K, reads, kind, log)
+    doc["restated"] = _settle(con, D, K, reads, kind, log, ck)
     if doc["affected"]:
         log(f"drill {kind}: {doc['affected']:,} directories settled one by one, {doc['restated']:,} restated in {monotonic() - t1:.0f}s")
     # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's
@@ -1000,21 +1009,18 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         LEFT JOIN (SELECT m.c AS q, d.dir, sum(d.rows)::BIGINT AS rows FROM dc AS d JOIN cmap AS m ON d.tier = m.tier AND d.q = m.ci GROUP BY ALL) AS r
             USING (q, dir)""")
     unknown = con.execute(f"SELECT q, dir FROM nh WHERE base IS NULL AND {floor - 1} + runs + today > {R} ORDER BY q, dir").fetchall()
-    con.execute("CREATE OR REPLACE TABLE bx (q VARCHAR, dir VARCHAR, rows BIGINT)")
-    if unknown:
-        t1 = monotonic()
-        ranges = [(c, d + "/", d + "0", 0) for c, d in unknown]
-        counts = []
-        for a, b in reads.windows(reads.plan(ranges, "rows")):
-            counts += [len(reads.rows(c, lo, hi, only=o)) for c, lo, hi, o in ranges[a:b]]
-        insert_rows(con, "bx", [(c, d, n) for (c, d), n in zip(unknown, counts)])
-        log(f"drill {kind}: {len(unknown):,} base counts below the measurement's floor in {monotonic() - t1:.0f}s")
+    if ck and ck.done("counts"):
+        ck.load(con, "counts")
+    else:
+        _base_counts(con, unknown, reads, kind, log)
+        if ck:
+            ck.save(con, "counts", ("bx",))
     doc["base_counted"] = len(unknown)
     con.execute(f"""CREATE OR REPLACE TABLE newh AS SELECT nh.q, nh.dir, nh.k FROM nh LEFT JOIN bx USING (q, dir)
         WHERE coalesce(nh.base, bx.rows) + nh.runs + nh.today > {R}""")
     doc["heavy_new"] = con.execute("SELECT count(*) FROM newh").fetchone()[0]
     if doc["heavy_new"]:
-        count = newly_heavy_rollups(con, reads, kind, K, log=log)
+        count = newly_heavy_rollups(con, reads, kind, K, log=log, ck=ck)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir)")
     for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "dc", "nh", "bx", "newh", "cmap"):
@@ -1026,26 +1032,67 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     return dict(doc)
 
 
+def _probe(con, probes: list[tuple], reads: TierReads, kind: str, log=err) -> None:
+    """Table `pr (q, dir, child, existed)`: whether a prior tier holds a root under each probed child."""
+    con.execute("CREATE OR REPLACE TABLE pr (q VARCHAR, dir VARCHAR, child VARCHAR, existed BOOLEAN)")
+    if not probes:
+        return
+    t1 = monotonic()
+    ranges = [(c, f"{d}/{x}/", f"{d}/{x}0") for c, d, x in probes]
+    existed = []
+    for a, b in reads.windows(reads.plan(ranges, "any")):
+        existed += [reads.any(*r) for r in ranges[a:b]]
+    insert_rows(con, "pr", [(c, d, x, e) for (c, d, x), e in zip(probes, existed)])
+    log(f"drill {kind}: {len(probes):,} probes in {monotonic() - t1:.0f}s ({reads.io()}; requests {reads.requests()})")
+
+
+def _base_counts(con, unknown: list[tuple], reads: TierReads, kind: str, log=err) -> None:
+    """Table `bx (q, dir, rows)`: the base's root rows under each directory the measurement's floor left out."""
+    con.execute("CREATE OR REPLACE TABLE bx (q VARCHAR, dir VARCHAR, rows BIGINT)")
+    if not unknown:
+        return
+    t1 = monotonic()
+    ranges = [(c, d + "/", d + "0", 0) for c, d in unknown]
+    counts = []
+    for a, b in reads.windows(reads.plan(ranges, "rows")):
+        counts += [len(reads.rows(c, lo, hi, only=o)) for c, lo, hi, o in ranges[a:b]]
+    insert_rows(con, "bx", [(c, d, n) for (c, d), n in zip(unknown, counts)])
+    log(f"drill {kind}: {len(unknown):,} base counts below the measurement's floor in {monotonic() - t1:.0f}s")
+
+
 def newly_heavy_rollups(
     con,
     reads: TierReads,
     kind: str,
     K: int,
     log=err,
+    ck: Checkpoint | None = None,
 ) -> int:
     """Combine history and write full rollups one (q, dir) at a time, never a global expanded GROUP BY.
 
     Sort the relevant delta roots once so each directory's equality/prefix predicates can prune row groups.
     New members already carry their whole history in dr; other members read the same prior roots as before.
     The combine identity and min(vt) rule are unchanged. A single directory can still require substantial memory.
+    `ck`: the rollup rows so far are saved as parts (`checkpoint.Parts`; each directory's rows depend on it alone), and a
+    rerun appends the saved ones and continues at the first directory they don't cover. Returns the prior roots this
+    call inserted (a resumed loop's: those of the directories it built).
     """
     directories = con.execute("SELECT q, dir, k, q IN (SELECT q FROM newq) AS is_new FROM newh ORDER BY q, dir").fetchall()
+    parts = Parts(ck, "heavy", ROLLUP_ARROW)
+    con.execute(f"CREATE TABLE IF NOT EXISTS rup ({ROLLUP_COLS})")
+    if parts.loaded is not None:
+        _append_arrow(con, "rup", parts.loaded)
+    if parts.start == len(directories):
+        return 0
     resource_stage(f"{kind}: newly-heavy prepare", directories=len(directories))
     con.execute("""CREATE OR REPLACE TABLE newh_today AS SELECT d.* FROM dr AS d
         SEMI JOIN (SELECT DISTINCT q FROM newh) AS h USING (q) ORDER BY q, path""")
     total = 0
     t0 = monotonic()
+    con.execute(f"CREATE OR REPLACE TABLE nhr ({ROLLUP_COLS})")
     for i, (c, d, k, is_new) in enumerate(directories):
+        if i < parts.start:
+            continue
         started = monotonic()
         progress = dict(directory=i + 1, directories=len(directories), member=c, prefix=d)
         con.execute("CREATE OR REPLACE TABLE rtr (q VARCHAR, dir VARCHAR, k INTEGER, path VARCHAR, usr VARCHAR, vf BIGINT, vt BIGINT, size BIGINT, n_files BIGINT)")
@@ -1060,12 +1107,24 @@ def newly_heavy_rollups(
                     WHERE q = {q(c)} AND path >= {q(d + '/')} AND path < {q(d + '0')})
             GROUP BY q, dir, path, usr, vf""")
         resource_stage(f"{kind}: newly-heavy rollups", **progress, inserted_rows=count)
-        full_rollups(con, "rtn", K, "rup")
+        full_rollups(con, "rtn", K, "nhr")
         con.execute("DROP TABLE rtr; DROP TABLE rtn")
+        if ck:
+            parts.add(con.execute("SELECT * FROM nhr").to_arrow_table(), i + 1)
+        con.execute("INSERT INTO rup SELECT * FROM nhr; DELETE FROM nhr")
         if (i + 1) % 25 == 0 or i + 1 == len(directories) or monotonic() - started >= 5:
             log(f"drill {kind}: newly-heavy directory {i + 1}/{len(directories)}, {total:,} prior roots, {monotonic() - t0:.0f}s")
-    con.execute("DROP TABLE newh_today")
+    parts.flush(len(directories))
+    con.execute("DROP TABLE newh_today; DROP TABLE nhr")
     return total
+
+
+def _append_arrow(con, table: str, t: pa.Table) -> None:
+    con.register("_append_in", t)
+    try:
+        con.execute(f"INSERT INTO {table} SELECT * FROM _append_in")
+    finally:
+        con.unregister("_append_in")
 
 
 def _insert_root_batch(con, tables: list[pa.Table]) -> None:
@@ -1117,16 +1176,23 @@ def insert_prior_roots(
     return total
 
 
-def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err) -> int:
+def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err, ck: Checkpoint | None = None) -> int:
     """The touched heavy directories whose kept set may change (`aff`): rank the kept children (peaks after today), the new
     children (their value today) and the existing ones that could enter (their exact value on D); keep the top
     `min(K, children)`. When an existing child moves in or out, restate the directory's whole history under a full header;
     else a delta header and today's cells. Appends to `rup`; returns the restated count. Logs each step: the inputs, the
-    plan, and the loop (fetch vs settle seconds, rows and groups read, the caches' hits; the slowest directories)."""
+    plan, and the loop (fetch vs settle seconds, rows and groups read, the caches' hits; the slowest directories). `ck`: the
+    rows so far are saved as parts (`checkpoint.Parts`; each directory's rows depend on it alone), and a rerun takes the
+    saved ones and settles only the directories they don't cover."""
     t0 = monotonic()
     aff = con.execute("SELECT q, dir FROM aff ORDER BY q, dir").fetchall()
     if not aff:
         return 0
+    parts = Parts(ck, "settle", ROLLUP_ARROW)
+    out: list[tuple] = [] if parts.loaded is None else list(zip(*(c.to_pylist() for c in parts.loaded.columns)))
+    if parts.start == len(aff):
+        return _settled(con, out)
+    start, aff = parts.start, aff[parts.start:]
     kept: dict[tuple, list] = {}
     for c, d, child, b, o, peak, db, dn in con.execute("""SELECT kc.q, kc.dir, kc.child, kc.b, kc.o, kc.peak, coalesce(t.db, 0), coalesce(t.dn, 0)
             FROM kc SEMI JOIN aff USING (q, dir) LEFT JOIN tch AS t USING (q, dir, child) ORDER BY ALL""").fetchall():
@@ -1150,11 +1216,10 @@ def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err) -> i
         need = {(id(gf), g["file"], g["offset"]): g["length"] for p in plans for gf, g in p}
         log(f"drill {kind}: settling plan: {sum(map(len, plans)):,} group reads, {len(need):,} distinct groups, "
             f"{sum(need.values()):,} bytes, in {monotonic() - t1:.0f}s")
-    out: list[tuple] = []
     io0, rq0 = Counter(reads.io()), Counter(reads.requests())
     t_fetch = t_settle = 0.0
     slow: list[tuple] = []
-    done, t_log = 0, monotonic()
+    done, t_log, saved = 0, monotonic(), len(out)
     it = reads.windows(plans)
     while True:
         t2 = monotonic()
@@ -1167,6 +1232,9 @@ def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err) -> i
         for key, s, stats in _settle_dirs(aff[a:b], kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out):
             slow = sorted([*slow, (s, key, stats)], key=lambda x: x[0], reverse=True)[:5]
             done += 1
+            if ck:
+                parts.add(out[saved:], start + done)
+                saved = len(out)
             if done == len(aff) or monotonic() - t_log >= 60:
                 t_log = monotonic()
                 log(f"drill {kind}: settled {done:,}/{len(aff):,} directories, {t_fetch:.0f}s fetching, {t_settle + monotonic() - t2:.0f}s settling")
@@ -1183,10 +1251,15 @@ def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err) -> i
     for s, (c, d), st in slow:
         log(f"drill {kind}: settling, slow: {c!r} {d!r} {s:.1f}s, {st['candidates']:,} candidates, {st['rows_out']:,} prior roots, "
             f"{st['groups_read']:,} groups decoded ({st['group_bytes']:,} bytes)")
-    restated = sum(1 for r in out if r[2] == KIND_FULL)
+    parts.flush(start + done)
+    return _settled(con, out)
+
+
+def _settled(con, out: list[tuple]) -> int:
+    """Settling's rows appended to `rup`; returns the restated count."""
     if out:
         insert_rows(con, "rup", out)
-    return restated
+    return sum(1 for r in out if r[2] == KIND_FULL)
 
 
 def _settle_plan(aff: list[tuple], others: dict, cands: set, heavy_tot: dict, reads: TierReads) -> list[list[tuple]]:
@@ -1413,13 +1486,16 @@ def write_aliases(con, out: Path, table: str = "cls") -> None:
 def tier_files(meta: dict) -> list[str]:
     """Every file of a run's `drill/` (relative to it), per its `meta.json`: what `write_kind`, `write_state` and
     `write_aliases` wrote for both kinds, and the meta itself."""
-    out = ["meta.json", "aliases.parquet"]
-    for kind in KINDS:
-        for sub in ("roots", "rollups"):
-            out += [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(meta[f"{kind}_{sub}"]["files"])]
-            out += [f"{kind}-{sub}-index.parquet", f"{kind}-{sub}-index.top.parquet"]
-        out.append(f"state/dcount-{kind}.parquet")
-    return out
+    return ["meta.json", *(f for kind in KINDS for f in kind_files(meta, kind))]
+
+
+def kind_files(meta: dict, kind: str) -> list[str]:
+    """One kind's files of a run's `drill/` (the long kind's with the alias map)."""
+    out = ["aliases.parquet"] if kind == "long" else []
+    for sub in ("roots", "rollups"):
+        out += [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(meta[f"{kind}_{sub}"]["files"])]
+        out += [f"{kind}-{sub}-index.parquet", f"{kind}-{sub}-index.top.parquet"]
+    return [*out, f"state/dcount-{kind}.parquet"]
 
 
 def base_meta(R: int, K: int, rg: int | None = None) -> dict:
@@ -1433,35 +1509,52 @@ def base_meta(R: int, K: int, rg: int | None = None) -> dict:
 def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floor: int, sx_files: list[str], cdelta_files: list[str],
               new_members: list[str], history: pa.Table | None, meas: dict[str, str], tier: dict, chunk_rows: int = 1 << 24,
               file_rows: int = FILE_ROWS, rg: int | None = None, kinds: tuple[str, ...] = KINDS, log=err, rule=None,
-              threads: int = FETCH_THREADS, cache_bytes: int | None = None) -> dict:
+              threads: int = FETCH_THREADS, cache_bytes: int | None = None, checkpoint: Checkpoint | None = None) -> dict:
     """A scan's `drill/` in `out`: each kind's delta roots, rollups, indexes and `dcount` (long: and the run's alias map), and
     with both kinds `meta.json` last (one kind: its part, `meta.<kind>.json`; `join_meta` makes `meta.json` of the two). Needs
     table `pnew (depth, path)`; `meas[kind]` is a query of the base's `(q, dir, rows)` at ≥ `floor` rows. `threads`,
-    `cache_bytes`: the prior tiers' reads' prefetch (`TierReads`); the output is the same without it."""
+    `cache_bytes`: the prior tiers' reads' prefetch (`TierReads`); the output is the same without it. `checkpoint`: each
+    kind's steps are saved under its `<kind>/` (`roots`: the delta roots and classes; the long kind's `digests`; then
+    `day_rollups`' steps; `written`: a kind's files, when another kind follows it here), and a rerun resumes after the last
+    one saved; the files are the same (`meta`'s times and `reads` counts are the rerun's)."""
     t0 = monotonic()
     out.mkdir(parents=True, exist_ok=True)
     meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor}
-    for kind in kinds:
+    for i, kind in enumerate(kinds):
         t1 = monotonic()
+        ck = checkpoint.sub(kind) if checkpoint else None
+        if ck and ck.done("written"):
+            meta.update(ck.load_files("written", out))
+            continue
+        km: dict = {}
         resource_stage(f"{kind}: delta roots")
-        if kind == "long":
-            meta["classes"] = long_day_roots(con, prior[-1].alias_table(), new_members, sx_files, history, chunk_rows, log, rule)
-            meta["new_members_list"] = new_members
-            write_aliases(con, out)
+        if ck and ck.done("roots"):
+            km.update(ck.load(con, "roots"))
         else:
-            meta["short_delta"] = short_day_roots(con, cdelta_files, rule)
+            if kind == "long":
+                km["classes"] = long_day_roots(con, prior[-1].alias_table(), new_members, sx_files, history, chunk_rows, log, rule, ck)
+                km["new_members_list"] = new_members
+            else:
+                km["short_delta"] = short_day_roots(con, cdelta_files, rule)
+            if ck:
+                ck.save(con, "roots", ("dr", "newq", "cls") if kind == "long" else ("dr", "newq"), km)
+        if kind == "long":
+            write_aliases(con, out)
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
         reads = TierReads(prior, kind, threads, cache_bytes)
         resource_stage(f"{kind}: rollups")
-        meta[f"{kind}_day"] = day_rollups(con, prior, kind, D, R=R, K=K, floor=floor, reads=reads, log=log)
-        meta[f"{kind}_day"]["reads"] = reads.io()
+        km[f"{kind}_day"] = day_rollups(con, prior, kind, D, R=R, K=K, floor=floor, reads=reads, log=log, ck=ck)
+        km[f"{kind}_day"]["reads"] = reads.io()
         log(f"drill {kind}: requests {reads.requests()}")
         resource_stage(f"{kind}: write")
-        meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
+        km.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
         write_state(con, out, kind)
-        meta[f"{kind}_day"]["s"] = round(monotonic() - t1, 1)
+        km[f"{kind}_day"]["s"] = round(monotonic() - t1, 1)
+        meta.update(km)
         for t in ("dr", "rup", "dcnt", "meas", "newq"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
+        if ck and i < len(kinds) - 1:  # a rerun past this kind (on a fresh disk) restores its files
+            ck.save_files("written", out, kind_files(km, kind), km)
     con.execute("DROP TABLE IF EXISTS cls")
     meta["s"] = round(monotonic() - t0, 1)
     if tuple(kinds) == KINDS:
@@ -1672,14 +1765,18 @@ def _new_members(mount: str, prefix: str, run: str, prev: pa.Table) -> list[str]
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-R", "--read-rows", "R", default=100_000, type=int, help="Heavy: more stored root rows under the directory")
+@option("-S", "--checkpoint", "ckpt_url", envvar="STATIC_NAMES_DRILL_CHECKPOINT",
+        help="Save each step under this store root (a dir or `gs://` / `r2://` / `s3://` URL; $STATIC_NAMES_DRILL_CHECKPOINT), so a "
+             "rerun (a reclaimed spot task's retry) resumes after the last one saved; cleared once the drill is uploaded")
 @option("-t", "--to", "to_url", help="Write here instead (`gs://bucket/prefix`, e.g. the scratch bucket for a trial), not `deltas/<D>/drill/`")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
 @monitor_resources
 def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, fetch_threads, kind, K, mount, mem, dry_run, out, threads, R,
-              to_url, tmp) -> None:
+              ckpt_url, to_url, tmp) -> None:
     """The scan's run's `drill/` (`deltas/<scan id>/drill/`, written once: refused if its files are there): delta roots, classes,
     rollups, indexes, `dcount`, `meta.json` last. Prior tiers: the base's `drill/` and the live runs' (the newest earlier
-    manifest's; each must have its drill)."""
+    manifest's; each must have its drill). `-S`: resumable (specs/drill-preemption.md): the task's steps are saved under
+    `<root>/drill/<gen>/<scan id>/<kinds>/`."""
     import os
 
     kinds = KINDS if kind == "both" else (KINDS[int(os.environ.get("BATCH_TASK_INDEX", "0"))],) if kind == "task" else (kind,)
@@ -1691,10 +1788,13 @@ def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, f
     dst_bucket, dst = (to_url[5:].split("/", 1) if to_url else (bucket, f"{prefix}/{run}/drill"))
     dst = dst.rstrip("/")
     db = _gcs().bucket(dst_bucket)
+    ck = drill_checkpoint(ckpt_url, gen, date, kinds, work=tmp) if ckpt_url else None
     if not dry_run and kind == "task" and (db.blob(f"{dst}/meta.json").exists() or db.blob(f"{dst}/meta.{kinds[0]}.json").exists()):
         # a rerun task (its part done, the other's maybe not): nothing to build; join if both parts are there
         joined = db.blob(f"{dst}/meta.json").exists() or _join_parts(db, dst)
         err(f"gs://{dst_bucket}/{dst}/: {kinds[0]} already built{'' if joined else ' (the other kind not yet)'}")
+        if ck:  # reclaimed after its upload, before the clear
+            ck.clear()
         return
     if not dry_run and (db.blob(f"{dst}/meta.json").exists() or any(db.blob(f"{dst}/meta.{k}.json").exists() for k in kinds)
                         or (kinds == KINDS and any(True for _ in _gcs().list_blobs(dst_bucket, prefix=dst + "/", max_results=1)))):
@@ -1716,17 +1816,24 @@ def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, f
     hist = [str(p) for p in sorted((base / "cintervals").glob("*.parquet"))]
     hist += [str(p) for d in days for p in sorted((base / run_key(d, d) / "cdelta").glob("*.parquet"))]
     con = connect(threads, mem, tmp)
-    t0 = monotonic()
-    resource_stage("new paths")
-    con.execute(f"CREATE OR REPLACE TABLE pnew AS {pnew_sql(cdelta, hist)}")
-    err(f"drill build {date}: {con.execute('SELECT count(*) FROM pnew').fetchone()[0]:,} new paths in {monotonic() - t0:.0f}s")
-    new_members = _new_members(mount, prefix, run, prior[-1].alias_table())
-    history = None
-    if new_members and "long" in kinds:
-        resource_stage("new member history", new_members=len(new_members))
-        history = history_table(con, [str(base), *(str(base / r["key"]) for r in runs), str(base / run)], new_members)
-        err(f"drill build {date}: {len(new_members)} new members, {history.num_rows:,} history suffix rows")
-    meas = {"long": meas_sql("long", [str(p) for p in sorted((base / "roots-measure" / "dirs").glob("*.parquet"))]),
+    if ck and ck.done("inputs"):
+        new_members = ck.load(con, "inputs")["new_members"]
+        history = con.execute("SELECT * FROM nmh").to_arrow_table() if new_members and "long" in kinds else None
+    else:
+        t0 = monotonic()
+        resource_stage("new paths")
+        con.execute(f"CREATE OR REPLACE TABLE pnew AS {pnew_sql(cdelta, hist)}")
+        err(f"drill build {date}: {con.execute('SELECT count(*) FROM pnew').fetchone()[0]:,} new paths in {monotonic() - t0:.0f}s")
+        new_members = _new_members(mount, prefix, run, prior[-1].alias_table())
+        history = None
+        if new_members and "long" in kinds:
+            resource_stage("new member history", new_members=len(new_members))
+            history = history_table(con, [str(base), *(str(base / r["key"]) for r in runs), str(base / run)], new_members)
+            err(f"drill build {date}: {len(new_members)} new members, {history.num_rows:,} history suffix rows")
+        if ck:
+            save_inputs(con, ck, new_members, history)
+    con.execute("DROP TABLE IF EXISTS nmh")
+    meas ={"long": meas_sql("long", [str(p) for p in sorted((base / "roots-measure" / "dirs").glob("*.parquet"))]),
             "short": meas_sql("short", [str(p) for p in sorted((base / "roots-measure" / "short" / "dirs").glob("*.parquet"))],
                               [str(p) for p in sorted((base / "roots-measure" / "short" / "top").glob("*.parquet"))])}
     outp = Path(out) / "drill"
@@ -1734,7 +1841,8 @@ def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, f
     meta = build_day(con, prior, outp, D=scan_epoch(date), R=R, K=K, floor=floor_rows, sx_files=sx, cdelta_files=cdelta,
                      new_members=new_members, history=history, meas=meas, chunk_rows=chunk_rows, rg=RUN_RG, kinds=kinds,
                      rule=sn.gen_rule_at(bucket, gen), threads=fetch_threads, cache_bytes=int(cache_gb * 2 ** 30) if cache_gb else None,
-                     tier={"gen": gen, "first": date, "last": date, "level": 0, "scans": [date], "prior": [t.name for t in prior]})
+                     tier={"gen": gen, "first": date, "last": date, "level": 0, "scans": [date], "prior": [t.name for t in prior]},
+                     checkpoint=ck)
     if not dry_run:
         held = {f.name: f.read_bytes() for f in outp.glob("meta*.json")}
         for f in outp.glob("meta*.json"):
@@ -1747,7 +1855,31 @@ def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, f
             db.blob(f"{dst}/{name}").upload_from_string(body, if_generation_match=0)
             _join_parts(db, dst)
         err(f"drill build {date} ({'/'.join(kinds)}): → gs://{dst_bucket}/{dst}/")
+    if ck:
+        ck.clear()
+        ck.close()
     print(json.dumps(meta, indent=1))
+
+
+def drill_checkpoint(root: str, gen: str, scan: str, kinds: tuple[str, ...], **kw) -> Checkpoint:
+    """A run drill build's checkpoint (`build -S`): `<root>/drill/<gen>/<scan id>/<kinds>/` — one per Batch task (the long
+    and short kinds' tasks each clear only their own)."""
+    from .blobstore import store_url
+
+    return Checkpoint(store_url(root), f"drill/{gen}/{scan}/{'-'.join(kinds)}", code=code_version(), **kw)
+
+
+def save_inputs(con, ck: Checkpoint, new_members: list[str], history: pa.Table | None) -> None:
+    """The build's inputs before `build_day` (`ck`'s step `inputs`): table `pnew`, the new members and their history
+    (table `nmh`, dropped after)."""
+    tables = ["pnew"]
+    if history is not None:
+        con.register("nmh_in", history)
+        con.execute("CREATE OR REPLACE TABLE nmh AS SELECT * FROM nmh_in")
+        con.unregister("nmh_in")
+        tables.append("nmh")
+    ck.save(con, "inputs", tables, {"new_members": new_members})
+    con.execute("DROP TABLE IF EXISTS nmh")
 
 
 def _join_parts(db, dst: str) -> bool:

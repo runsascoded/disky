@@ -616,6 +616,26 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
     return {"sort": sort, "rows": start, "groups": len(rows), "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
+def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG) -> tuple[dict, dict]:
+    """A generation's served sorts from its range files under `gen_dir` (every `served_sorts(scans["slices"])` entry,
+    dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
+    (`served/stats.json`). What a base build (`interval_local.build_gen`) and a compaction (`interval_compact`) cut.
+    Returns `({sort: {rows, groups, bytes}}, stats)`."""
+    stamps = [s["ts"] for s in scans["scans"]]
+    served, sorts = gen_dir / "served", {}
+    for sort in served_sorts(scans["slices"]):
+        sub, _, _ = SORTS[sort]
+        t1 = monotonic()
+        sd = write_served(con, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", SUB_SCHEMA[sub],
+                          rg_rows=rg_rows, stamps=stamps)
+        sd["s"] = round(monotonic() - t1, 1)
+        (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
+        sorts[sort] = {"rows": sd["rows"], "groups": sd["groups"], "bytes": sd["bytes"]}
+    stats = {**churn_stats(con, str(gen_dir), scans), "slices": scans["slices"]}
+    (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
+    return sorts, stats
+
+
 def _seg_summary(rows: list[dict], dyadic: bool) -> dict:
     """Groups and rows per segment kind: `open`, then the closed ones — `hist` (one segment) or by
     dyadic level (`L<k>`, with its block count)."""

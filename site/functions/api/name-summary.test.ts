@@ -84,7 +84,7 @@ describe('an indexed-only deployment (`FILTER_INDEXED_ONLY=1`)', () => {
 })
 
 describe('an anchored name (`^q`, `q$`): /names reads literals only', () => {
-  const ANCHOR = { error: 'Starts-with (^) and ends-with ($) search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }
+  const ANCHOR = { error: 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }
   it('is `anchor-not-indexed` (flag set or not), never read; a lone `^`/`$` or an inner one stays a literal', async () => {
     const got = await Promise.all(['^qwen', 'qwen$', '^qwen$'].flatMap(name => [env, { ...env, FILTER_INDEXED_ONLY: '1' } as NameSummaryEnv].map(async vars => {
       const r = await request(new URLSearchParams({ date: '2026-10-05', name }).toString(), vars)

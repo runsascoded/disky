@@ -39,7 +39,8 @@ const anchored = (body: string, m: { start?: true; end?: true }): RegExp =>
 export function matcherTest(m: Matcher, opts: CompileOpts = {}): (path: string, lower: string) => boolean {
   switch (m.kind) {
     case 'sub': {
-      const s = m.text, rule = opts.hexRuns ?? null
+      // A path term (`a/b`) is matched plain: the hex-run rule is a name index's, and `/` spans names.
+      const s = m.text, rule = s.includes('/') ? null : opts.hexRuns ?? null
       if (!m.start && !m.end) return rule ? (_, l) => occurs(s, l, rule) : (_, l) => l.includes(s)
       if (rule) {
         // Per segment, as anchored search reads it (`segmentOccurs`): only `q$` can lose an occurrence to the rule.

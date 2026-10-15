@@ -36,7 +36,7 @@ describe('cacheStore', () => {
     } }
     const kv: string[] = []
     const env = { CACHE_KV: { put: async (k: string) => { kv.push(k) }, get: async () => null } as unknown as KVNamespace }
-    const keep = keepFor({ late: 3 })
+    const keep = keepFor({ interiors: { late: 3 } })
     const miss = await cacheStore(env, key, '{"budgetCut":true}', {}, undefined, keep)
     const hit = (await cacheMatch(env, key))!
     const flags = async (r: Response) => [r.headers.get('x-cache'), r.headers.get('x-cache-store')?.replace(/dur=\d+/, 'dur=<ms>') ?? null, r.headers.get('x-cache-partial'), r.headers.get('cache-control'), await r.text()]
@@ -49,8 +49,8 @@ describe('cacheStore', () => {
     ])
   })
 
-  it('`keepFor`: whole answers (no interiors, or only read-budget skips) are kept in both tiers', () => {
-    expect([keepFor(undefined), keepFor({}), keepFor({ late: 0 }), keepFor({ late: 1 })]).toEqual([true, true, true, { partialTtl: PARTIAL_TTL }])
+  it('`keepFor`: whole answers (no interiors, or only read-budget skips) are kept in both tiers; a time cut briefly', () => {
+    expect([keepFor({}), keepFor({ interiors: {} }), keepFor({ interiors: { late: 0 } }), keepFor({ interiors: { late: 1 } }), keepFor({ searchLate: true })]).toEqual([true, true, true, { partialTtl: PARTIAL_TTL }, { partialTtl: PARTIAL_TTL }])
   })
 })
 
@@ -79,7 +79,7 @@ describe('upgradePartial', () => {
 
   it('the full answer replaces the partial in the colo cache at the normal TTL (and goes to KV)', async () => {
     const { env, kv, bg, waitUntil, entry } = setup()
-    await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ late: 2 }))
+    await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ interiors: { late: 2 } }))
     const before = await entry()
     const runs: number[] = []
     const got = upgradePartial(env, key, async () => { runs.push(1); return { body: FULL, keep: true } }, waitUntil)
@@ -111,9 +111,9 @@ describe('upgradePartial', () => {
 
   it('a background run cut short too: the partial stays, and no rerun until it would have expired', async () => {
     const { env, bg, waitUntil, entry } = setup()
-    await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ late: 2 }))
+    await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ interiors: { late: 2 } }))
     let runs = 0
-    const cut = async () => { runs++; return { body: '{"budgetCut":true,"more":1}', keep: keepFor({ late: 1 }) } }
+    const cut = async () => { runs++; return { body: '{"budgetCut":true,"more":1}', keep: keepFor({ interiors: { late: 1 } }) } }
     const t0 = 1_000_000
     const got = upgradePartial(env, key, cut, waitUntil, t0)
     await Promise.all(bg)
@@ -127,7 +127,7 @@ describe('upgradePartial', () => {
 
   it('a background run that throws: the partial stays, no unhandled rejection, treated as cut short', async () => {
     const { env, bg, waitUntil, entry } = setup()
-    await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ late: 2 }))
+    await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ interiors: { late: 2 } }))
     const got = upgradePartial(env, key, async () => { throw new Error('D1_ERROR') }, waitUntil, 0)
     await Promise.all(bg)
     expect([got, upgradePartial(env, key, async () => ({ body: FULL, keep: true }), waitUntil, 1), await entry()]).toEqual([

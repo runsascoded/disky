@@ -110,6 +110,19 @@ def test_list_namespace():
     assert {h["Authorization"] for _, h in replay.calls} == {"Bearer t0k"}
 
 
+def test_list_namespace_logs_progress(capsys):
+    # One line per finished unit (an interval of 0), the last excepted: its totals line follows from the caller.
+    c, _ = client()
+    list(bulk_hf.list_hf(c, HfTarget("open-athena"), threads=1, progress_s=0))
+    assert capsys.readouterr().err.split("\n") == [
+        "hf://open-athena/: 4 buckets/repos",
+        "hf: 1/4 buckets/repos, 6 requests, waited 0s",
+        "hf: 2/4 buckets/repos, 8 requests, waited 0s",
+        "hf: 3/4 buckets/repos, 10 requests, waited 0s",
+        "",
+    ]
+
+
 def test_list_one_kind():
     c, _ = client()
     units = list(bulk_hf.list_hf(c, HfTarget("open-athena", "spaces")))

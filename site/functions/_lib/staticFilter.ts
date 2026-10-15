@@ -28,9 +28,9 @@ import { StaticCatalog } from './staticCatalog.js'
 import { type CatalogLookup, Drill, DRILL_DIR, DrillSource, type Rollup, type RollupCell } from './staticDrill.js'
 import { type Blobs, cacheIndexes, type FirstHits, type Hit, type Io, r2Blobs, scanAt, staticGen, staticPrefix } from './staticNames.js'
 import { tiers } from './staticRuns.js'
-import { ANCHOR_MIN, type FilterReject, type FilterRejectCode, reject, rejectAst } from './indexedOnly.js'
-import { type BoolAnswer, boolPlan, type BoolPlan, compound, evalBool, isDecline } from './staticBool.js'
-import { AnchoredSource, parseKey, termInPath, termKey } from './staticAnchors.js'
+import { type FilterReject, type FilterRejectCode, reject, rejectAst } from './indexedOnly.js'
+import { type BoolAnswer, boolPlan, type BoolPlan, compound, evalBool, isDecline, literalKey } from './staticBool.js'
+import { AnchoredSource, parseKey, termInPath } from './staticAnchors.js'
 import { type HexRule, hexAffected } from './hexRuns.js'
 import type { Matcher } from './queryAst.js'
 import { compileQuery, type NamePred } from './pathQuery.js'
@@ -40,15 +40,11 @@ export type { Hit } from './staticNames.js'
 export { type Rollup, rollupAt, rollupTotal } from './staticDrill.js'
 
 /** The key of the literal a query is, when the static index can answer it exactly, else null: a plain literal
- *  (lowercase) itself, an anchored one (`^q`, `q$`, `^q$`; at least `ANCHOR_MIN` characters) `staticAnchors.ts`'s
- *  `termKey` (`/q`, `q/`, `/q/`). */
+ *  (lowercase) itself, an anchored one (`^q`, `q$`, `^q$`; at least `ANCHOR_MIN` characters) or a path term
+ *  (`a/b`) `staticAnchors.ts`'s `termKey` (`/q`, `q/`, `/q/`, `//00a/b`). */
 export function staticLiteral(ast: QueryAst | undefined): string | null {
   if (!ast || ast.neg.length || ast.alts.length !== 1 || ast.alts[0].length !== 1) return null
-  const m = ast.alts[0][0]
-  if (m.kind !== 'sub' || m.text.includes('/') || !m.text) return null
-  const start = !!m.start, end = !!m.end
-  if ((start || end) && [...m.text].length < (start && end ? ANCHOR_MIN.exact : start ? ANCHOR_MIN.start : ANCHOR_MIN.end)) return null
-  return termKey({ text: m.text, start, end })
+  return literalKey(ast.alts[0][0])
 }
 
 /** One or two characters: never a suffix-range read (the shards hold suffixes of ≥ 3); the heavy source's. */
@@ -134,7 +130,9 @@ export class SuffixHits implements HitSource {
     readonly opts: { maxRows?: number; heavy?: HitSource | null; catalog?: CatalogLookup | null; cache?: HitCache | null; waitMs?: number; anchored?: HitSource | null } = {},
   ) {}
 
-  why(key: string): FilterRejectCode | undefined { return parseKey(key).mode ? this.opts.anchored?.why?.(key) : undefined }
+  /** An anchored or path key with no anchored source (`FILTER_STATIC_ANCHORS=0`) has no name index to read:
+   *  `anchor-not-indexed`, as on a generation without one. */
+  why(key: string): FilterRejectCode | undefined { return parseKey(key).mode ? (this.opts.anchored ? this.opts.anchored.why?.(key) : 'anchor-not-indexed') : undefined }
 
   /** Every first hit of `key` (null: over `maxRows`, the heavy source's business), and the scans they are exact
    *  on (absent: every scan of the store). */
@@ -382,8 +380,9 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  21: compound queries — `a b`, `a|b`, `a -b`, `-b` of literals — answered exactly from the static index
  *  (`staticBool.ts`), where they walked the path store, flagged approximate, before; 22: a secondary store reads only
  *  its own static index (`STORES_JSON` `STATIC_GEN`), never the primary's — a cached 21 body could hold the primary's
- *  matches under a secondary's root). */
-const RESPONSE_V = 22
+ *  matches under a secondary's root; 23: path terms (`a/b`) from the name index, where they walked (flagged approximate) or
+ *  were refused before, and an owner pool's series over static hits folds the ledger per root). */
+const RESPONSE_V = 23
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
@@ -416,8 +415,9 @@ export async function hexQuery(env: StaticFilterEnv, query: NamePred | undefined
 /** A response's `hexRuns` note: the rule, when it is on and some substring of the query is hex-affected (its
  *  matches inside long hex ids aren't counted); else nothing. Never a refusal. */
 export function hexNote(rule: HexRule | null, ast: QueryAst | undefined): { hexRuns?: HexRule } {
-  // A start-anchored literal (`^q`, `^q$`) occurs at a segment's start, which the rule never drops (`segmentOccurs`).
-  return rule && subMatchers(ast).some(m => !m.start && hexAffected(m.text, rule)) ? { hexRuns: { min: rule.min, tail: rule.tail } } : {}
+  // A start-anchored literal (`^q`, `^q$`) occurs at a segment's start, which the rule never drops (`segmentOccurs`);
+  // a path term (`a/b`) is matched plain, without the rule (`staticAnchors.ts`).
+  return rule && subMatchers(ast).some(m => !m.start && !m.text.includes('/') && hexAffected(m.text, rule)) ? { hexRuns: { min: rule.min, tail: rule.tail } } : {}
 }
 
 /** Why a static read declined: the source's own reason when it has one (`term-too-common` for a too-common `^q`,
@@ -458,7 +458,11 @@ export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefine
     // A compound query (`staticBool.ts`): its answer under `path`, every date covered, else why not. A view root
     // the query matches with nothing to exclude is the plain view.
     const plan = ast ? boolPlan(ast) : null
-    if (!plan) return (ast && rejectAst(ast)) ?? reject('unsupported-glob')
+    if (!plan) {
+      const r = ast && rejectAst(ast)
+      if (!r) throw new Error('indexedGate: a query with no static plan and no refusal')
+      return r
+    }
     const rule = await staticHexRule(env)
     if (!plan.neg.length && plan.alts.some(g => g.every(t => termInPath(t, path, rule)))) return null
     if (!s) return declined(s, null, null)

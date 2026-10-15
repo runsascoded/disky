@@ -49,14 +49,17 @@ SNAPSHOTS_SUBDIR = "r2"          # this store's snapshots: snapshots/r2/ (_lib/s
 SEARCH_SIDECARS = "1"            # the daily ingest builds them (`path-index -S`): filters the static index lacks read them (_lib/search.ts)
 # The static name index (exact `?f=` literals; `_lib/staticFilter.ts`), in INDEX_R2 under `static-names/<STATIC_GEN>/`:
 # the daily ingest appends each scan to it (`dt-cloud static-names add`), and builds the generation when it doesn't exist
-# yet (`static-names build`), reading STATIC_GEN from here. No anchors are built (`^q`, `q$` read the sidecars above).
-STATIC_GEN = "2026-10-14"
+# yet (`static-names build`), reading STATIC_GEN from here. A generation built since `static-names build` builds anchors
+# (`names/`, `anchors/`: `^q`, `^q$`, heavy `q$`, path terms) carries them, its runs too; an older one (2026-10-14) has
+# none; 2026-10-15 was built with anchors (the ingest builds a STATIC_GEN that does not exist yet).
+STATIC_GEN = "2026-10-15"
 # The interval store (every scan's tree as versioned intervals; `_lib/index.ts` `intervalsOn`), in INDEX_R2 under
-# `interval-store/<INTERVAL_STORE_GEN>/`: built by the daily ingest's `interval-store build` on its first run, then one
-# `add` per scan. `PATH_STORE = "opt-in"` serves it only to requests with `ps=iv` (parity checks against the per-scan
-# path store); `"intervals"` makes it the Map's path store.
-INTERVAL_STORE_GEN = "2026-10-14"
-PATH_STORE = "opt-in"
+# `interval-store/<gen>/`: built by the daily ingest's `interval-store build` on its first run, then one `add` per scan,
+# which compacts it into a new generation every 2^5 scans and moves `interval-store/CURRENT.json` to it. No
+# INTERVAL_STORE_GEN: the site serves the generation CURRENT.json names (`ivGen`); setting it pins one (a compacted
+# generation leaves R2 an hour after its successor lands, so a pin must move with it). `PATH_STORE = "opt-in"` serves it
+# only to requests with `ps=iv` (parity checks against the per-scan path store); `"intervals"` makes it the Map's path store.
+PATH_STORE = "intervals"
 FILTER_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"        # heavy literals (catalog members, 1–2 characters) from the drilldown (`drill/`)
 CACHE_NS = ""                    # response-cache keys as prod's (no host tag; `_lib/edgeCache.ts` `cacheEnvTag`): no PROD_HOST here

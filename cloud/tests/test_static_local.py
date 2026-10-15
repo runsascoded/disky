@@ -1,20 +1,25 @@
 """`dt_cloud.static_local`: the single-machine `static-names build` writes the generation the staged path's stages write
 (byte for byte: coalesced versions, suffix shards, sidecar, catalog; the drill as `static_drill.build_drill` over the
-staged roots), and `static-names add` appends scans as runs that read, under the combine rule, as the generation rebuilt
-over every scan (suffix rows, catalog, first hits and answers on every date)."""
+staged roots; the name index and anchors as `static_anchors`' base builders over the staged versions and shards), and
+`static-names add` appends scans as runs that read, under the combine rule, as the generation rebuilt over every scan
+(suffix rows, catalog, first hits and answers on every date; anchored and path-term views equal brute force)."""
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
+import fsspec
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
+from dt_cloud import static_anchors as an
 from dt_cloud import static_append as sa
 from dt_cloud import static_local as sl
 from dt_cloud import static_names as sn
 
+from test_static_anchors import _prefixes, _start_rows, _views
 from test_static_append import TERMS, _catalog, _combine, _reader, _sx
 from test_static_catalog import _gen
 from test_static_drill import _drill
@@ -23,6 +28,14 @@ from test_static_names import _brute_answer, _oracle, fixture, scan_ids  # noqa:
 V = 3
 K = 2  # scans appended after the base
 R, KEEP, FLOOR = 3, 2, 2
+#: Anchored keys over the fixture's names (`^q`, `q$`, `^q$`; present and absent).
+AKEYS = [an.term_key(t, m) for t, m in [
+    (".txt", "end"), ("txt", "end"), ("parquet", "end"), (".crc", "end"), ("418", "end"), ("5418y", "end"), ("zzz", "end"),
+    ("48", "start"), ("48.p", "start"), ("gof", "start"), ("ago", "start"), ("x54", "start"), ("é54", "start"), ("nk", "start"), ("zz", "start"),
+    ("48.parquet", "exact"), ("ab", "exact"), ("sh", "exact"), ("gof", "exact"), ("e5418", "exact"), ("pio", "exact"), ("nope", "exact"),
+]]
+#: Path terms (plain: the lowercase path holds the term, its parent doesn't).
+PATH_TERMS = ["b1/gof", "gof/gof", "1/g", "d/ab", "e5418/x54", "f/48.parquet", "b2/f", "/48", "zz/q"]
 
 
 def _layout(scans: dict) -> str:
@@ -46,6 +59,19 @@ def _add(root: Path, scans: dict, store: Path, work: Path, gen: str = "g", throu
     return json.loads(res.stdout)
 
 
+@contextmanager
+def _small_groups(rows: int = 5):
+    """Row groups of `rows` rows in the suffix shards and name index (`static_names` / `static_append`), and the
+    anchors' record of it (`static_anchors.SX_RG`, `meta.json`'s `rg`: the reader reads a key's roots up to R + 4·rg
+    rows before its rollups)."""
+    rg = (sn.SX_RG, sa.SX_RG, an.SX_RG)
+    sn.SX_RG = sa.SX_RG = an.SX_RG = rows
+    try:
+        yield
+    finally:
+        sn.SX_RG, sa.SX_RG, an.SX_RG = rg
+
+
 def _files(d: Path) -> dict[str, bytes]:
     return {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file()}
 
@@ -54,13 +80,67 @@ def _files(d: Path) -> dict[str, bytes]:
 def built(fixture, tmp_path_factory):  # noqa: F811
     root, scans, merged = fixture
     tmp = tmp_path_factory.mktemp("local")
-    rg, sn.SX_RG = sn.SX_RG, 5  # several row groups per shard, as `_gen`
-    try:
+    with _small_groups():  # several row groups per shard, as `_gen`
         summary = _build(root, scans, tmp / "store", tmp / "work")
         staged = _gen(root, scans, tmp / "staged", V)
-    finally:
-        sn.SX_RG = rg
-    return {"root": root, "scans": scans, "merged": merged, "summary": summary, "gen": tmp / "store" / sn.PREFIX / "g", "staged": staged, "tmp": tmp}
+        # the reference anchored tier: the name index of the staged versions, then `anchors/` over its shards
+        ref = tmp / "ref-anchors"
+        cint = sorted(str(f) for f in (staged["build"] / "cintervals").glob("*.parquet"))
+        an.write_names(staged["con"], an.files_sql(cint, an.VERSION_COLS), ref / an.NAMES)
+        an.build_tier_local(staged["con"], an.Tier(staged["out"]).files("end"), an.Tier(ref).files("exact"), ref / an.ANCHORS, R, KEEP,
+                            scan_ids(scans))
+    return {"root": root, "scans": scans, "merged": merged, "summary": summary, "gen": tmp / "store" / sn.PREFIX / "g", "staged": staged,
+            "ref_anchors": ref, "tmp": tmp}
+
+
+def _world(fx: dict) -> dict:
+    """`test_static_anchors._views`' inputs: every path of the fixture, and the versions (ms) from the oracle."""
+    oracle = _oracle(fx["merged"])
+    return {"paths": sorted({path for depth, path, *_ in oracle if depth >= 1}),
+            "versions": [(path, usr, vf * 1000, vt * 1000, size, n) for depth, path, usr, vf, vt, _k, size, n, *_ in oracle if depth >= 1]}
+
+
+def _ms(t) -> int:
+    return int(t.timestamp()) * 1000
+
+
+def _path_hits(rows: list[dict], term: str, P: str, D_ms: int) -> dict[str, list[int]]:
+    """A path term's view at `P` on scan `D_ms` (per child of P, Σ size, n_files of the live match roots): `rows` are
+    versions `(path, usr, vf, vt, size, n_files)`; a root holds the term in its lowercase path, its parent doesn't."""
+    def parent(path: str) -> str:
+        return path.rsplit("/", 1)[0] if "/" in path else ""
+
+    hits = [r for r in rows if (P == "" or r["path"].startswith(P + "/")) and term in r["path"].lower() and term not in parent(r["path"].lower())]
+    return an.child_sums(hits, P, D_ms)
+
+
+def _name_rows(tiers: list[Path], term: str) -> list[dict]:
+    """The site's read of a path term: the name-index range `/<tail>…` (tail: the term after its last `/`) over the
+    tiers, combined (equal `(s, path, usr, vf)`: the smallest `vt`)."""
+    tail = "/" + term.rsplit("/", 1)[-1]
+    rows: dict[tuple, dict] = {}
+    for t in tiers:
+        for f in sorted((t / an.NAMES / "sx").glob("*.parquet")):
+            for r in pq.read_table(f).to_pylist():
+                if r["s"].startswith(tail):
+                    k = (r["s"], r["path"], r["usr"], r["vf"])
+                    if k not in rows or r["vt"] < rows[k]["vt"]:
+                        rows[k] = r
+    return [{**r, "vf": _ms(r["vf"]), "vt": _ms(r["vt"])} for r in rows.values()]
+
+
+def _path_term_views(world: dict, tiers: list[Path], dates: list[str]) -> tuple[list, list]:
+    versions = [{"path": p, "usr": u, "vf": vf, "vt": vt, "size": s, "n_files": n} for p, u, vf, vt, s, n in world["versions"]]
+    dirs = [""] + sorted({p.rsplit("/", 1)[0] for p in world["paths"] if "/" in p} | set(world["paths"]))
+    got, want = [], []
+    for term in PATH_TERMS:
+        rows = _name_rows(tiers, term)
+        for P in dirs:
+            for d in dates:
+                D = sn.scan_epoch(d) * 1000
+                got.append((term, P, d, _path_hits(rows, term, P, D)))
+                want.append((term, P, d, _path_hits(versions, term, P, D)))
+    return got, want
 
 
 def test_build_writes_the_staged_generation(built):
@@ -101,11 +181,8 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
     one literal: the same `drill/` and `roots-measure/`, byte for byte, as the default's one chunk per shard, one piece per
     coalesced-versions file and one range per kind."""
     root, scans, gen = built["root"], built["scans"], built["gen"]
-    rg, sn.SX_RG = sn.SX_RG, 5
-    try:
+    with _small_groups():
         summary = _build(root, scans, tmp_path / "store", tmp_path / "work", extra=("-c", "1"))
-    finally:
-        sn.SX_RG = rg
     chunked = tmp_path / "store" / sn.PREFIX / "g"
     for sub in ("drill", "roots-measure"):
         assert _files(chunked / sub) == _files(gen / sub), sub
@@ -123,6 +200,53 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
     assert summary["drill"]["pieces"] > files
 
 
+def test_build_anchors_are_the_staged_anchors(built):
+    """`names/` and `anchors/` (with `anchors/start/`): the base builders' over the staged generation's versions and suffix
+    shards, byte for byte."""
+    gen, ref = built["gen"], built["ref_anchors"]
+    got = {f"{sub}/{k}": v for sub in (an.NAMES, an.ANCHORS) for k, v in _files(gen / sub).items()}
+    want = {f"{sub}/{k}": v for sub in (an.NAMES, an.ANCHORS) for k, v in _files(ref / sub).items()}
+    assert sorted(got) == sorted(want)
+    assert got == want
+    assert json.loads((gen / an.ANCHORS / "meta.json").read_text())["scans"] == scan_ids(built["scans"])
+
+
+def test_build_anchored_views_equal_brute_force(appended):
+    """The anchored reader over a base (`appended`'s over every scan) answers `^q`, `q$`, `^q$` at every path on every
+    scan as brute force: whole ranges (light), and with the whole-range bounds at 0 rows through the rollups, scoped
+    roots and the starts-with catalog."""
+    w, gen, ids = _world(appended), appended["full"], scan_ids(appended["scans"])
+    for kw in ({}, {"max_rows": 0, "start_max_rows": 0}):
+        got, want, sources = _views(w, [gen], ids, keys=AKEYS, **kw)
+        assert got == want
+        assert sources["light" if not kw else "rollup"] > 0
+    keys = _prefixes(w["paths"])
+    got, want, _ = _views(w, [gen], ids, keys=keys, max_rows=0, start_max_rows=0)
+    assert got == want
+    # the catalog's members at the fleet root are exactly the prefixes with more than R rows
+    reader = an.AnchoredReader([an.reader_tier(fsspec.filesystem("file"), str(gen))], max_rows=0, start_max_rows=0)
+    rows = _start_rows([gen])
+    members = sorted(k for k in keys if reader.view(k, "", ids)["source"] == "catalog")
+    assert members == sorted(k for k in keys if rows.get(k, 0) > R)
+    assert len(members) > 3
+
+
+def test_build_path_terms_equal_brute_force(built):
+    """A path term's views read from the name index (its tail's range, folded by the path test) equal brute force from
+    the versions, at every directory on every scan."""
+    got, want = _path_term_views(_world(built), [built["gen"]], scan_ids(built["scans"]))
+    assert got == want
+    assert sum(1 for x in want if x[3]) > 0
+
+
+def test_build_without_anchors(fixture, tmp_path):  # noqa: F811
+    """`-A`: no name index, no `anchors/` (the readers decline anchored terms, as before)."""
+    root, scans, _ = fixture
+    _build(root, scans, tmp_path / "store", tmp_path / "work", extra=("-A",))
+    gen = tmp_path / "store" / sn.PREFIX / "g"
+    assert ((gen / an.NAMES).exists(), (gen / an.ANCHORS).exists()) == (False, False)
+
+
 def test_build_refuses_an_existing_generation(built, tmp_path):
     res = CliRunner().invoke(sl.build_cmd, ["-g", "g", "-L", _layout(built["scans"]), "-s", str(built["root"]), "-o", str(built["tmp"] / "store"),
                                             "-x", "off", "-w", str(tmp_path)])
@@ -134,10 +258,11 @@ def appended(fixture, tmp_path_factory):  # noqa: F811
     root, scans, merged = fixture
     tmp = tmp_path_factory.mktemp("local-add")
     n = len(scans["scans"])
-    _build(root, scans, tmp / "store", tmp / "work", through=scans["scans"][n - K - 1]["id"])
-    base_files = _files(tmp / "store" / sn.PREFIX / "g")
-    out = _add(root, scans, tmp / "store", tmp / "work-add")
-    _build(root, scans, tmp / "full", tmp / "work-full")
+    with _small_groups(1):  # one-row groups: the reader's roots bound is R + 4 rows, and the fixture's keys reach the rollups
+        _build(root, scans, tmp / "store", tmp / "work", through=scans["scans"][n - K - 1]["id"])
+        base_files = _files(tmp / "store" / sn.PREFIX / "g")
+        out = _add(root, scans, tmp / "store", tmp / "work-add")
+        _build(root, scans, tmp / "full", tmp / "work-full")
     return {"root": root, "scans": scans, "merged": merged, "out": out, "gen": tmp / "store" / sn.PREFIX / "g", "full": tmp / "full" / sn.PREFIX / "g",
             "base_files": base_files, "tmp": tmp}
 
@@ -188,6 +313,39 @@ def test_add_drills_each_run(appended):
     assert json.loads((gen / sa.run_key(ids[-K], ids[-1]) / "drill" / "meta.json").read_text())["scans"] == ids[-K:]
 
 
+@pytest.mark.parametrize("stack", ["level0", "merged"])
+def test_add_anchored_views_equal_brute_force(appended, stack):
+    """Base ⊕ the level-0 runs (each with `names/`, `anchors/` and `anchors/start/`), and base ⊕ the carry's merged run:
+    `^q`, `q$`, `^q$` (whole ranges, then bounds 0: rollups, scoped roots, the starts-with catalog) and path terms
+    answer every scan as brute force."""
+    ids = scan_ids(appended["scans"])
+    gen = appended["gen"]
+    tiers = [gen / sa.run_key(d, d) for d in ids[-K:]] if stack == "level0" else [gen / sa.run_key(ids[-K], ids[-1])]
+    markers = [sorted(p.relative_to(t).as_posix() for p in (t / an.ANCHORS).rglob("meta.json")) for t in tiers]
+    assert markers == [["anchors/meta.json", "anchors/start/meta.json"]] * len(tiers)
+    w = _world(appended)
+    for kw in ({}, {"max_rows": 0, "start_max_rows": 0}):
+        got, want, sources = _views(w, [gen, *tiers], ids, keys=AKEYS, **kw)
+        assert got == want
+        assert sources["light" if not kw else "rollup"] > 0
+    got, want, sources = _views(w, [gen, *tiers], ids, keys=_prefixes(w["paths"]), max_rows=0, start_max_rows=0)
+    assert got == want
+    assert sources["catalog"] > 0
+    got, want = _path_term_views(w, [gen, *tiers], ids)
+    assert got == want
+
+
+def test_add_to_a_generation_without_anchors(fixture, tmp_path):  # noqa: F811
+    """A generation built with `-A`: `add` appends its runs without `names/` or `anchors/` (nothing to stack them on)."""
+    root, scans, _ = fixture
+    ids = scan_ids(scans)
+    _build(root, scans, tmp_path / "store", tmp_path / "work", through=ids[-2], extra=("-A",))
+    out = _add(root, scans, tmp_path / "store", tmp_path / "work-add")
+    assert [(x["scan"], x["anchors"]) for x in out["added"]] == [(ids[-1], None)]
+    gen = tmp_path / "store" / sn.PREFIX / "g"
+    assert sorted(p.relative_to(gen).as_posix() for p in gen.rglob("*") if p.name in (an.NAMES, an.ANCHORS)) == []
+
+
 def test_add_with_nothing_pending_is_a_nop(appended):
     before = _files(appended["gen"])
     out = _add(appended["root"], appended["scans"], appended["tmp"] / "store", appended["tmp"] / "work-nop")
@@ -212,11 +370,8 @@ def test_add_prunes_the_folded_runs_after_the_grace(appended, tmp_path):
     ids = scan_ids(scans)
     a, b, c, d = ids[-4:]
     store, work = tmp_path / "store", tmp_path / "work"
-    rg, sn.SX_RG = sn.SX_RG, 5
-    try:
+    with _small_groups():
         _build(root, scans, store, tmp_path / "work-build", through=ids[-5])
-    finally:
-        sn.SX_RG = rg
     gen = store / sn.PREFIX / "g"
     AGE, GRACE = 700, 600
 
@@ -302,13 +457,8 @@ def test_add_an_unchanged_scan(fixture, tmp_path):  # noqa: F811
 
 def test_url_store_matches_a_local_one(built, tmp_path):
     """A URL store (fsspec `memory://`) gets the same keys and bytes as a local one (but the catalog's timing)."""
-    import fsspec
-
-    rg, sn.SX_RG = sn.SX_RG, 5
-    try:
+    with _small_groups():
         _build(built["root"], built["scans"], f"memory://{tmp_path.name}/store", tmp_path / "work")
-    finally:
-        sn.SX_RG = rg
     fs = fsspec.filesystem("memory")
     got = {k.split("/store/", 1)[1]: fs.cat_file(k) for k in sorted(fs.find(f"/{tmp_path.name}/store"))}
     want = {f"{sn.PREFIX}/g/{k}": v for k, v in _files(built["gen"]).items()}
@@ -322,6 +472,11 @@ def test_publish_order():
             "deltas/a/drill/long-roots-index.parquet", "sidecar.parquet"]
     assert sl.publish_order(keys) == ["deltas/a/drill/long-roots-index.parquet", "deltas/a/sx/s0000.parquet", "sidecar.parquet",
                                       "deltas/a/catalog/meta.json", "deltas/a/meta.json", "deltas/a/drill/meta.json", "manifests/a.json"]
+    # a run's anchored tier: its name index and rollups, the starts-with catalog's marker, then `anchors/meta.json` (with the drill's)
+    keys = ["deltas/a/anchors/meta.json", "deltas/a/anchors/start/meta.json", "deltas/a/anchors/rollups/end-s0000.parquet",
+            "deltas/a/names/sidecar.parquet", "deltas/a/names/sx/s0000.parquet", "deltas/a/drill/meta.json", "manifests/a.json"]
+    assert sl.publish_order(keys) == ["deltas/a/anchors/rollups/end-s0000.parquet", "deltas/a/names/sidecar.parquet", "deltas/a/names/sx/s0000.parquet",
+                                      "deltas/a/anchors/start/meta.json", "deltas/a/anchors/meta.json", "deltas/a/drill/meta.json", "manifests/a.json"]
 
 
 

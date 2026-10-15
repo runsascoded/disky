@@ -203,6 +203,8 @@ export interface View {
   /** With `query`: the scan lists folders only (a v1 index, `DIRS_ONLY`): the matches are its folder-name
    *  matches, exact as such; a file name is never matched there. */
   dirsOnly?: true
+  /** With `q=`: the search stopped at its time budget (`Coverage.searchLate`): kept briefly, recomputed. */
+  searchLate?: true
 }
 
 /** Whether a filtered read may be missing matches, and why (the response's
@@ -214,6 +216,9 @@ export interface Coverage {
   /** The scan is a dir-only (v1) one (`staticRuns.ts` `dirOnlyScans`): its matches are its folders' names
    *  only — exact as such, but never the literal's whole answer. */
   dirsOnly?: string[]
+  /** A search stopped at its time budget (`SearchFound.timedOut`): unlike a read budget's cut, a run with more
+   *  time may answer more — so the answer is kept briefly and recomputed (`keepFor`). */
+  searchLate?: true
 }
 export const APPROX_NO_INDEX = 'this scan has no search index; small matches may be missing'
 export const APPROX_V1_TOO_BIG = 'this scan has no search index and this view is too big to scan; small matches may be missing'
@@ -223,16 +228,17 @@ export const APPROX_EXCL_NO_INDEX = 'this scan has no search index; small exclus
 export const DIRS_ONLY = 'this scan lists folders only — files aren’t searchable on it'
 export const APPROX_EXCL_UNINDEXED = 'this query’s exclusions can’t use the search index; small ones may be missed'
 /** Add a reason (once) to a coverage flag. */
-export function noteCoverage(cov: Coverage, flag: keyof Coverage, why: string | undefined): void {
+export function noteCoverage(cov: Coverage, flag: 'partial' | 'approximate' | 'dirsOnly', why: string | undefined): void {
   if (!why) return
   const have = (cov[flag] ??= [])
   if (!have.includes(why)) have.push(why)
 }
 /** A coverage as response fields. */
-export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly'> => ({
+export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate'> => ({
   ...(c.partial ? { partial: true as const, partialReason: c.partial.join(' · ') } : {}),
   ...(c.approximate ? { approximate: true as const, approximateReason: c.approximate.join(' · ') } : {}),
   ...(c.dirsOnly ? { dirsOnly: true as const } : {}),
+  ...(c.searchLate ? { searchLate: true as const } : {}),
 })
 
 export class NotFound extends Error {}
@@ -576,7 +582,7 @@ export async function readRootHistory(env: Env, dates: string[], scope: { lens?:
 
 /** m3 keeps no ownership ledger: no assignments fold into a user lens or an owner pool. */
 async function ownerLensFor(_env: Env, _date: string, _lens: Lens, _by?: string): Promise<FoldedLens | null> { return null }
-async function poolLensFor(_env: Env, _date: string, _owner: OwnerScope | undefined): Promise<FoldedLens | null> { return null }
+export async function poolLensFor(_env: Env, _date: string, _owner: OwnerScope | undefined): Promise<FoldedLens | null> { return null }
 
 /** A node in an owner pool once assignments apply: the pool's bytes and
  * objects there (`pl.b` / `pl.o`), exactly its in-pool rows when no assignment
@@ -898,7 +904,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // catalog's buckets on a scan past its stack — or a heavy literal its heavy source declined: `scan-not-indexed`,
       // never the thresholded walk, which can't see the literal's small matches and reads as "no matches".
       if (skey && (raw ? !covers(raw, [date]) : !!sfs!.source.heavyDeclined?.(skey))) throw new FilterRejected(reject('scan-not-indexed'))
-      // A heavy literal's rollups know no owners: under one, the view reads as before.
+      // A heavy literal's rollups know no owners: under one, an indexed-only deployment refuses (`owner-too-common`),
+      // any other reads as before.
       const off = shits?.rollup && owner ? 'rollup: no owners' : null
       if (off) shits = null
       // An indexed-only deployment never walks the path store for a filter (`indexedOnly.ts`); nor does a heavy
@@ -906,7 +913,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // matches": below the fleet root it is `term-too-common`, and the root's catalog buckets know no owners.
       // Nor does an anchored term on a generation with no anchors build (`anchor-not-indexed`), indexed-only or not.
       const noDrill = !!sfs && !!skey && sfs.source.heavy === false
-      const why = shits || sb ? null : (noDrill || raw?.rollup?.scopedBelow) && raw?.rollup?.bucketsOnly && owner ? reject('unsupported-scope') : declined(sfs, skey, raw)
+      const why = shits || sb ? null : off || ((noDrill || raw?.rollup?.scopedBelow) && raw?.rollup?.bucketsOnly && owner) ? reject('owner-too-common') : declined(sfs, skey, raw)
       if (why && (indexedOnly(env) || why.code === 'anchor-not-indexed' || (noDrill && why.code !== 'scan-not-indexed'))) throw new FilterRejected(why)
       tr?.('static', performance.now() - t0, shits ? `${skey} ${shits.rollup ? `rollup ${shits.rollup.cells.length}` : shits.hits.length}` : skey ? `declined${off ? ` (${off})` : ''}` : undefined)
       if (shits?.rollup) {
@@ -941,6 +948,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       const plan = !shits && !sb && store && pq ? planPositive(pq) : null
       const searched = plan ? await searchRoots(perScan(env), searchIdx!, query, plan, path, o.searchLimits, `pos:${JSON.stringify(pq)}`) : null
       if (searched) traceSearch('pos', searched)
+      if (searched?.timedOut) cov.searchLate = true
       // A search cut before it found anything (its heaviest name alone is
       // over budget) says nothing: the thresholded read below answers instead.
       const found = searched && (searched.roots.length || !searched.truncated) ? searched : null
@@ -1023,6 +1031,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       if (ns) {
         traceSearch('neg', ns)
         if (ns.truncated) searchCut = true
+        if (ns.timedOut) cov.searchLate = true
         noteCoverage(cov, 'partial', ns.reason && `exclusions: ${ns.reason}`)
         const an = aggregate(ns.rows)
         for (const e of ns.roots) if (rootFor(e) !== null) exclude(e, scoped(e, an.all.get(e)!, an.mine.get(e)!))
@@ -1792,8 +1801,9 @@ async function readRootAllRows(env: Env, date: string, path: string, dP: number)
 /** Bumped when a filtered view's answer changes for the same inputs (the subtree and diff cache keys carry
  *  it with `q=`): 2 — phase 2 bounded (subdivision area, levels, read and time budgets), the tile budget;
  *  3 — a view the query matches draws its subtree again; 4 — `depth=N` caps phase 2 at dP + N;
- *  5 — level-capped interiors from the `path` sort; 6 — `\^`, `\$`, `\\` escapes in a `simple` term (`q=` is keyed raw). */
-export const FILTER_VIEW_V = 6
+ *  5 — level-capped interiors from the `path` sort; 6 — `\^`, `\$`, `\\` escapes in a `simple` term (`q=` is keyed raw); 7 — a search cut by its time
+ *  budget is kept briefly and upgraded (`Coverage.searchLate`), where 6 kept it whole. */
+export const FILTER_VIEW_V = 7
 
 /** A filter view's phase 2 (the insides of its match roots) subdivides a root only when its tile is at
  *  least this many px² — room for a title and a few legible cells; a smaller root is one exact tile. */
@@ -2071,6 +2081,8 @@ export interface Diff {
   approximateReason?: string
   /** With `q=`: either side is a dir-only scan (`View.dirsOnly`; both are, or the diff is refused). */
   dirsOnly?: true
+  /** With `q=`: the search stopped at its time budget (`Coverage.searchLate`): kept briefly, recomputed. */
+  searchLate?: true
 }
 
 const LOOKUP_CAP = 240

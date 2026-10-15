@@ -3,7 +3,7 @@
  * scan's attribution, as the map does), and the
  * header/footer text. The tier decides only what is *shown* (`card.ts`): the
  * data read is the same. */
-import { FilterRejected } from '../indexedOnly.js'
+import { FilterRejected, indexedOnly } from '../indexedOnly.js'
 import type { Env } from '../auth.js'
 import { pathScans, servedStore, type Lens } from '../index.js'
 import { loadRegistry, canonId } from '../identity.js'
@@ -150,7 +150,7 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
   const subtitle = `scan ${date}${filterNote} · color by ${colorLabel}`
   let query
   try {
-    query = params.f ? queryParam(new URLSearchParams({ q: params.f, ...(params.qs ? { qs: params.qs } : {}) }), env.QUERY_SYNTAX).query : undefined
+    query = params.f ? queryParam(new URLSearchParams({ q: params.f, ...(params.qs ? { qs: params.qs } : {}) }), env.QUERY_SYNTAX, indexedOnly(env)).query : undefined
   } catch (e) {
     if (e instanceof QueryError) return { ...base, subtitle, total: '', empty: 'invalid filter' }
     throw e

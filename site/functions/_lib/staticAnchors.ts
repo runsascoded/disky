@@ -37,13 +37,23 @@
  *  heavy (the root from the catalog), a scoped one as `term-too-common`.
  *
  *  Tiers: the base and each run in the light index's manifest, up to the first run without `anchors/meta.json` (the
- *  run's name rows and rollups, written last) — their scans are the ones an anchored answer covers (`Found.scans`). */
+ *  run's name rows and rollups, written last) — their scans are the ones an anchored answer covers (`Found.scans`).
+ *
+ *  **Path terms** (a term holding `/`, e.g. `run-a/ckpt`, `/train`, `^ckpt/model$`): the path (lowercased) holds the
+ *  text as written, `/` the separator (`^` / `$`: the text begins / ends a segment), plain — no hex-run rule. A match
+ *  root X holds it and its parent doesn't, so the occurrence ends in X's own name, and the part after the text's last
+ *  `/` (its tail, `t`) begins that name (is it, with `$`). X's every version is therefore a row of the name index's
+ *  range `/t…` (exact key `/t` with `$`): that range, read whole or scoped under P like `^t`'s (≤ `START_MAX_ROWS`),
+ *  folded by the path test (`PathTermHits`), is every match root, exact. A tail under `PATH_TAIL_MIN` characters (or
+ *  empty: `ckpt/`) has no such range (`slash-tail-short`, specs/search-box-no-refusals.md); a range too big to read
+ *  under P is `term-too-common`. */
 import { type Found, type HitCache, type HitOpts, type HitSource, MAX_ROWS } from './staticFilter.js'
 import { DRILL_RULES, type DrillMeta, GroupFile, type Rollup, type RollupCell, type Top } from './staticDrill.js'
 import { type Blobs, cmp, FirstHits, type Hit, type IndexCache, type GroupIndex, type PathKeys, type SxColumns, StaticNames, underRange } from './staticNames.js'
 import { combineFolds, subBlobs, type Tiers, type TierState } from './staticRuns.js'
-import type { FilterRejectCode } from './indexedOnly.js'
+import { type FilterRejectCode, pathTail, pathTailOk } from './indexedOnly.js'
 import { dropped, type HexRule, occurs, ruleOf, sameRule, segmentOccurs } from './hexRuns.js'
+import { matcherTest } from './pathQuery.js'
 
 export const NAMES_DIR = 'names'
 export const ANCHORS_DIR = 'anchors'
@@ -57,16 +67,23 @@ export const START_MAX_ROWS = 400_000 + 2 * 8192
  *  Worker isolate's 128 MB. A read past this many is abandoned as too common (the root falls to the catalog). ~45 MB. */
 export const START_MAX_HITS = 150_000
 
-export type Mode = 'start' | 'end' | 'exact'
+/** A one-segment term's anchoring. */
+export type AnchorMode = 'start' | 'end' | 'exact'
+/** …or a path term (its text holds `/`). */
+export type Mode = AnchorMode | 'path'
 /** A term as the static index reads it: its lowercase literal and anchors. */
 export interface StaticTerm { text: string; start: boolean; end: boolean }
 
 /** The key a term travels under (`HitSource.hits`, cache keys): a plain literal itself, an anchored one marked with
- *  `/` — `/q` (`^q`), `q/` (`q$`), `/q/` (`^q$`). A static literal never holds `/`, so no key is both. */
-export const termKey = (t: StaticTerm): string => `${t.start ? '/' : ''}${t.text}${t.end ? '/' : ''}`
+ *  `/` — `/q` (`^q`), `q/` (`q$`), `/q/` (`^q$`); a path term (its text holds `/`) `//` + its anchors (`0`/`1`, start
+ *  then end) + its text. A one-segment literal never holds `/`, so no key is two of these. */
+export const termKey = (t: StaticTerm): string => t.text.includes('/')
+  ? `//${t.start ? 1 : 0}${t.end ? 1 : 0}${t.text}`
+  : `${t.start ? '/' : ''}${t.text}${t.end ? '/' : ''}`
 
-/** A key's literal and mode (null: a plain contains literal). */
-export function parseKey(key: string): { text: string; mode: Mode | null } {
+/** A key's literal and mode (null: a plain contains literal); a path term's anchors too. */
+export function parseKey(key: string): { text: string; mode: Mode | null; start?: boolean; end?: boolean } {
+  if (key.startsWith('//')) return { text: key.slice(4), mode: 'path', start: key[2] === '1', end: key[3] === '1' }
   const start = key.startsWith('/'), end = key.length > 1 && key.endsWith('/')
   const text = key.slice(start ? 1 : 0, end ? -1 : undefined)
   return { text, mode: start && end ? 'exact' : start ? 'start' : end ? 'end' : null }
@@ -74,15 +91,23 @@ export function parseKey(key: string): { text: string; mode: Mode | null } {
 
 /** Whether a lowercase segment matches `text` in `mode` (null: contains) under the generation's hex-run rule
  *  (`segmentOccurs`; null: the full index). */
-export const segmentMatches = (seg: string, text: string, mode: Mode | null, rule: HexRule | null = null): boolean =>
+export const segmentMatches = (seg: string, text: string, mode: AnchorMode | null, rule: HexRule | null = null): boolean =>
   segmentOccurs(seg, text, mode, rule)
+
+/** Whether a lowercase path holds a path term (the filter's own predicate for it, `pathQuery.ts`: plain, `^` / `$` at
+ *  segment boundaries). */
+export function pathHolds(text: string, start: boolean, end: boolean): (lower: string) => boolean {
+  const t = matcherTest({ kind: 'sub', text, ...(start ? { start: true } : {}), ...(end ? { end: true } : {}) })
+  return l => t(l, l)
+}
 
 /** Whether `path` (any case) holds the keyed term: some segment of its lowercase matches (a contains literal: the
  *  lowercase path contains it, which for a `/`-free literal is the same). The view root P holding it is the plain view. */
 export function termInPath(key: string, path: string, rule: HexRule | null = null): boolean {
-  const { text, mode } = parseKey(key)
+  const { text, mode, start, end } = parseKey(key)
   const l = path.toLowerCase()
   if (!mode) return occurs(text, l, rule)
+  if (mode === 'path') return path !== '' && pathHolds(text, !!start, !!end)(l)
   return path !== '' && l.split('/').some(seg => segmentMatches(seg, text, mode, rule))
 }
 
@@ -93,7 +118,7 @@ export function termInPath(key: string, path: string, rule: HexRule | null = nul
  *  occurrence the rule drops is no match, and an ancestor segment matches only where the term occurs under it. */
 export class AnchoredHits extends FirstHits {
   readonly text: string
-  readonly mode: Mode
+  readonly mode: AnchorMode
   private lo: string | null = null
   private hi = ''
   /** Past `cap` first hits: the read is abandoned (`hits` emptied, later rows skipped). */
@@ -101,7 +126,7 @@ export class AnchoredHits extends FirstHits {
   constructor(key: string, under?: string, readonly cap = Infinity, rule: HexRule | null = null) {
     super(key, rule)
     const k = parseKey(key)
-    if (!k.mode) throw new Error(`static anchors: ${JSON.stringify(key)} is not an anchored key`)
+    if (!k.mode || k.mode === 'path') throw new Error(`static anchors: ${JSON.stringify(key)} is not an anchored key`)
     this.text = k.text
     this.mode = k.mode
     if (under) [this.lo, this.hi] = underRange(under)
@@ -133,8 +158,49 @@ export class AnchoredHits extends FirstHits {
   }
 }
 
+/** A path term's match roots over name rows (`s` = `/` + the name) of its tail's range: per row, the tail test on `s`,
+ *  depth ≥ 1, the paths under `under`, the path holding the term and its parent not. One row per version: no dedup. */
+export class PathTermHits extends FirstHits {
+  readonly text: string
+  readonly end: boolean
+  private readonly holds: (lower: string) => boolean
+  private lo: string | null = null
+  private hi = ''
+  over = false
+  constructor(key: string, under?: string, readonly cap = Infinity) {
+    super(key)
+    const k = parseKey(key)
+    if (k.mode !== 'path') throw new Error(`static anchors: ${JSON.stringify(key)} is not a path term`)
+    this.text = k.text
+    this.end = !!k.end
+    this.holds = pathHolds(k.text, !!k.start, !!k.end)
+    if (under) [this.lo, this.hi] = underRange(under)
+  }
+
+  /** The name-index key its rows are read under: `/` + the tail (a prefix range; exact with `$`). */
+  get rowKey(): string { return `/${pathTail(this.text)}` }
+
+  override add(cols: SxColumns): void {
+    if (this.over) return
+    const k = this.rowKey, exact = this.end
+    this.rows_read += cols.path.length
+    for (let i = 0; i < cols.path.length; i++) {
+      const s = cols.s[i]
+      if (exact ? s !== k : !s.startsWith(k)) continue
+      const p = cols.path[i]
+      if (this.lo != null && (cmp(p, this.lo) < 0 || cmp(p, this.hi) >= 0)) continue
+      this.rows_matching++
+      if (cols.depth[i] < 1) continue
+      const l = p.toLowerCase(), slash = l.lastIndexOf('/')
+      if (!this.holds(l) || (slash >= 0 && this.holds(l.slice(0, slash)))) continue
+      this.hits.push({ path: p, depth: cols.depth[i], usr: cols.usr[i], vf: Number(cols.vf[i]), vt: Number(cols.vt[i]), size: cols.size[i], n: cols.n_files[i] })
+      if (this.hits.length > this.cap) { this.over = true; this.hits.length = 0; return }
+    }
+  }
+}
+
 /** Tiers' capped folds as one hit list, or null when any went over (or their union does). */
-function cappedHits(key: string, folds: AnchoredHits[], cap: number): Hit[] | null {
+function cappedHits(key: string, folds: (AnchoredHits | PathTermHits)[], cap: number): Hit[] | null {
   if (folds.some(f => f.over)) return null
   const hits = combineFolds(key, folds).hits
   return hits.length > cap ? null : hits
@@ -265,6 +331,9 @@ export class AnchoredSource implements HitSource {
   }
 
   async hits(key: string, under: string, opts: HitOpts = {}): Promise<Found | null> {
+    const k = parseKey(key)
+    // A path term whose tail is too short to name a range of the name index (`ckpt/`, `ckpt/a`).
+    if (k.mode === 'path' && !pathTailOk(k.text, !!k.end)) { this.whyNot.set(key, 'slash-tail-short'); return null }
     const f = await this.read(key, under, opts)
     // `^q`, `^q$` and a heavy `q$` need the anchored tiers: without them it is `anchor-not-indexed` (the term's
     // form, not the scan, is the reason), never the approximate walk. A light `q$` answers from the light index.
@@ -295,12 +364,12 @@ export class AnchoredSource implements HitSource {
     const k = `${key}\0${under}@${st.version}#${st.start.tiers.length}`
     let p = this.held.get(k)
     if (p) { this.held.delete(k); this.held.set(k, p) } else {
-      p = mode === 'start' ? this.startScoped(key, under, st) : this.scoped(key, mode, under, st)
+      p = mode === 'start' ? this.startScoped(key, under, st) : mode === 'path' ? this.pathScoped(key, under, st) : this.scoped(key, mode, under, st)
       this.held.set(k, p)
       p.then(f => this.trim(k, f), () => this.held.delete(k))
     }
     const f = await p
-    if (!f && mode === 'start') this.whyNot.set(key, 'term-too-common')
+    if (!f && (mode === 'start' || mode === 'path')) this.whyNot.set(key, 'term-too-common')
     return f && { ...f, io: { ...f.io, ms: Date.now() - t0 } }
   }
 
@@ -332,6 +401,22 @@ export class AnchoredSource implements HitSource {
     return { hits, io: { from: 'anchors', source: 'scoped', upper, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), bytes: got.reduce((n, g) => n + g.io.bytes, 0), tiers: readers.length }, scans: st.scans }
   }
 
+  /** A path term past its whole-range bound under `under`: the groups of its tail's range whose path bounds meet
+   *  `under` (≤ `startMaxRows` rows), folded by the path test; else null (`term-too-common`). */
+  private async pathScoped(key: string, under: string, st: AnchorState): Promise<Found | null> {
+    const { text, end } = parseKey(key)
+    const k = `/${pathTail(text)}`, exact = !!end
+    const readers = st.tiers.map(t => t.names)
+    const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact, under })))
+    const upper = sels.reduce((n, s) => n + (s?.rows ?? 0), 0)
+    if (upper > this.startMaxRows) return null
+    const fold = () => new PathTermHits(key, under, this.startMaxHits)
+    const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact, under, fold })))
+    const hits = cappedHits(key, got.map(g => g.fold as PathTermHits), this.startMaxHits)
+    if (!hits) return null
+    return { hits, io: { from: 'anchors', source: 'path', upper, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), bytes: got.reduce((n, g) => n + g.io.bytes, 0), tiers: readers.length }, scans: st.scans }
+  }
+
   private trim(k: string, f: Found | null): void {
     this.sizes.set(k, f?.hits?.length ?? f?.rollup?.cells.length ?? 0)
     let n = [...this.sizes.values()].reduce((s, x) => s + x, 0)
@@ -355,7 +440,9 @@ export class AnchoredSource implements HitSource {
    *  anchored tiers — held per stack version (and per colo through `cache`); `'heavy'` past `maxRows`, null when no
    *  tier is there to read. */
   private async whole(key: string, mode: Mode): Promise<Whole | 'heavy' | null> {
-    const maxRows = mode === 'start' ? this.startMaxRows : this.opts.maxRows ?? MAX_ROWS
+    // `^q` and a path term (its tail's range) read up to `startMaxRows`.
+    const wide = mode === 'start' || mode === 'path'
+    const maxRows = wide ? this.startMaxRows : this.opts.maxRows ?? MAX_ROWS
     const st = mode === 'end' ? null : await this.state()
     const light = st?.light ?? await this.light.state()
     const version = st ? st.version : light.version
@@ -367,16 +454,17 @@ export class AnchoredSource implements HitSource {
       p = (async () => {
         const cached = await this.opts.cache?.get(vkey)
         if (cached) return { hits: cached, io: { from: 'cache', version }, scans }
-        const k = mode === 'end' ? parseKey(key).text : `/${parseKey(key).text}`
-        const cap = mode === 'start' ? this.startMaxHits : Infinity
-        const fold = () => new AnchoredHits(key, undefined, cap, light.hexRuns)
-        const exact = mode !== 'start'
+        const { text, end } = parseKey(key)
+        const k = mode === 'end' ? text : mode === 'path' ? `/${pathTail(text)}` : `/${text}`
+        const cap = wide ? this.startMaxHits : Infinity
+        const fold = () => mode === 'path' ? new PathTermHits(key, undefined, cap) : new AnchoredHits(key, undefined, cap, light.hexRuns)
+        const exact = mode === 'path' ? !!end : mode !== 'start'
         const readers = st ? st.tiers.map(t => t.names) : light.tiers.map(t => t.names)
         const sels = await Promise.all(readers.map(r => r.select(k, newIo(), { exact })))
         const rows = sels.reduce((n, s) => n + (s?.rows ?? 0), 0)
         if (rows > maxRows) return 'heavy' as const
         const got = await Promise.all(readers.map(r => r.read(k, Infinity, { exact, fold })))
-        const hits = cappedHits(key, got.map(g => g.fold as AnchoredHits), cap)
+        const hits = cappedHits(key, got.map(g => g.fold as AnchoredHits | PathTermHits), cap)
         if (!hits) return 'heavy' as const
         await this.opts.cache?.put(vkey, hits)
         return { hits, io: { from: mode === 'end' ? 'shards' : 'names', version, rows_read: got.reduce((n, g) => n + g.io.rows_read, 0), bytes: got.reduce((n, g) => n + g.io.bytes, 0), tiers: readers.length }, scans }

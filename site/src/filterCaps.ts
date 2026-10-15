@@ -4,7 +4,7 @@
 import { useQuery } from '@tanstack/react-query'
 import type { QuerySyntax } from '../functions/_lib/queryAst'
 import { INDEXED_HELP } from '../functions/_lib/indexedOnly'
-import { simple } from '../functions/_lib/querySyntax'
+import { plain } from '../functions/_lib/querySyntax'
 import { useStore, useStoreFetch } from './store'
 
 /** `rootLabel`: the store root's label (`ROOT_LABEL`), the unfiltered view's root crumb; `rootTitle`: that
@@ -29,12 +29,12 @@ export function useFilterCaps(): FilterCaps {
   return q.data ?? { indexedOnly: false }
 }
 
-/** The filter box's "syntax" on an indexed-only deployment: `simple`'s parse, the one-form help. */
-export const INDEXED_SYNTAX: QuerySyntax = { id: simple.id, parse: q => simple.parse(q), describe: () => INDEXED_HELP }
+/** The filter box's syntax on an indexed-only deployment: `plain`'s parse (every character literal), its help. */
+export const INDEXED_SYNTAX: QuerySyntax = { id: plain.id, parse: q => plain.parse(q), describe: () => INDEXED_HELP }
 
 /** The refusal codes an API answers a filter with (`functions/_lib/indexedOnly.ts`): a reason to show
  *  inline, never a failure to retry. */
-const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|anchor-not-indexed|too-broad)$/
+const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|owner-too-common|anchor-not-indexed|too-broad)$/
 
 /** A failed API response: `message` as `apiErrorMessage` words it; `refusal` the structured
  *  `{ error, code }` body's reason when its code is a filter refusal (`REFUSAL`); `status` the HTTP status. */
