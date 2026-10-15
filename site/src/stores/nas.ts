@@ -9,6 +9,7 @@ const store: Store = {
   title: 'disk-tree — nas',
   desc: 'Disk usage of a NAS array (Unraid: XFS data disks + a btrfs cache), captured over ssh.',
   path: '/nas',
+  mark: 'nas',
   scheme: 'file:///',
   base: '/data/nas',
   ogImage: '/og.jpg',
