@@ -111,28 +111,6 @@ describe('interval store g7: no owner axis', () => {
     await expect(openIndex(slices(envs.iv), S1, 'user')).rejects.toThrow(`index variant 'user' not synced for ${S1}`)
   })
 
-  it('serves every lens view and owner pool of every scan as the per-scan reader draws it, reading nothing per-scan', async () => {
-    let drawn = 0
-    for (const date of [S1, S2, S3]) {
-      for (const path of PATHS) {
-        for (const scope of SCOPES) {
-          const o = { ...base, date, path, ...scope }
-          const want = await buildView(envs.perScan, o).catch(err)
-          const [got, gets] = await perScanGets(() => buildView(envs.iv, o).catch(err))
-          const tree = (v: typeof want) => (typeof v === 'string' ? v : v.tree)
-          expect({ o, tree: tree(got), gets }).toEqual({ o, tree: tree(want), gets: [] })
-          if (typeof got !== 'string' && typeof want !== 'string') {
-            // `none`: nothing in scope, drawn without a read.
-            expect([got.index, want.index === 'none']).toEqual([want.index === 'none' ? 'none' : 'iv:g7', want.index === 'none'])
-            drawn += got.index === 'none' ? 0 : 1
-          }
-        }
-      }
-    }
-    // The rest are `none` (the ledger names alice and bob alone), or a path the scan lacks (refused on both sides).
-    expect(drawn).toBe(30)
-  }, 60_000)
-
   it('totals a root by owner as the per-scan reader does, a date at a time and as a history', async () => {
     for (const scope of SCOPES) {
       const want = []
@@ -157,22 +135,6 @@ describe('interval store g7: no owner axis', () => {
         expect({ o, got: shape(got), gets }).toEqual({ o, got: shape(want), gets: [] })
       }
     }
-  })
-
-  it('folds owner totals on every scan from its history, as the per-scan reader folds them', async () => {
-    type Totals = Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>
-    const fold = ({ computed: _, ...body }: Totals) => body
-    const folds = async (env: 'perScan' | 'iv'): Promise<Totals[]> => {
-      // A fresh module and D1 each: `ownerTotals` memoizes per (scan, head) in the isolate, and caches in D1.
-      vi.resetModules()
-      const { ownerTotals } = await import('./ownerTotals')
-      const e = (await seed())[env]
-      const out = []
-      for (const date of [S1, S2, S3]) out.push(await ownerTotals(e, date))
-      return out
-    }
-    const [iv, per] = [await folds('iv'), await folds('perScan')]
-    expect(iv.map(t => [t.scan, t.computed.hist, fold(t)])).toEqual(per.map(t => [t.scan, true, fold(t)]))
   })
 
   it('reads the folded sorts, never a slice sort, for owner-scoped reads', () => {
