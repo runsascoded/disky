@@ -11,16 +11,15 @@
 # totals only anyway: no laptop paths.
 #
 # With SCAN_RUNS_PROFILE set (the deployment's `dt-cloud scan-run` profile), the
-# run is recorded in D1 as it goes (specs/scan-runs-ui.md): kind `ingest`, its
-# id `$AWS_BATCH_JOB_ID` (the profile's `run_id_env`), started at the capture's
-# own start, then phases capture (→ the capture's marker landing), queue (→ this
-# job's start), fetch, path-index, capture-meta, upload, index-sync; the EXIT
-# trap records the end, a failure with the phase it was in. Each phase also
-# prints `PHASE <name>: <s>s`. Recording never fails the ingest.
-#
-# A failure the script sees is also pushed to a person (`notify_failure`). A
-# kill it never sees (a Spot reclaim, OOM of the shell, an image pull) needs a
-# watcher outside the job.
+# run is recorded in D1 as it goes (specs/scan-runs-ui.md, specs/scan-job-wrapper.md):
+# kind `ingest`, its id `$AWS_BATCH_JOB_ID` (the profile's `run_id_env`), started at
+# the capture's own start, then phases capture (→ the capture's marker landing), queue
+# (→ this job's start), fetch, path-index, capture-meta, upload, index-sync and
+# static-names, each printing `PHASE <name>: <s>s (wall…)` (seconds from the job's
+# start). The EXIT trap's `finish` records the end; a failure alerts once, through
+# `disk-tree notify`'s channels. The entrypoint `dt-cloud scan-run supervise` records
+# what no trap sees (a platform termination, an OOM kill). A host lost outright still
+# needs a watcher outside the job.
 set -euo pipefail
 
 job_t0=$(date +%s)
@@ -60,57 +59,47 @@ app=${INGEST_APP_ROOT:-/app}
 time_bin=${INGEST_TIME:-/usr/bin/time}
 s3() { aws s3 "$@" --endpoint-url "$R2_ENDPOINT_URL" --only-show-errors; }
 
-# ── Scan-run recording (a no-op without SCAN_RUNS_PROFILE) ──────────────────
+# ── Scan-run recording (specs/scan-job-wrapper.md; a no-op without SCAN_RUNS_PROFILE) ──
+# `dt-cloud scan-run supervise` (the image's entrypoint) runs this script: a platform
+# termination or a kill is recorded failed and alerted even when no trap here runs.
 # `epoch YYYY-MM-DDTHH:MM:SS` (UTC; GNU date in the image, BSD date elsewhere).
 epoch() { date -u -d "$1Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%S' "$1" +%s; }
-scan_run() {
+export DT_JOB_START=$job_t0
+# One `dt-cloud scan-run` step; recording never fails the ingest (a fatal `phase-end` aside).
+sr() {
   [[ -n ${SCAN_RUNS_PROFILE:-} ]] || return 0
-  ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" scan-run record -c "$SCAN_RUNS_PROFILE" -K "$d1_store" -k ingest -g "$gen" "$@" "$date" ) || true
+  ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" scan-run "$@" ) || true
 }
-phase=queue
-phase_t0=$job_t0
-# A phase just ended: its marker, then its record (extra args: `-o KEY=URI` outputs).
-ended() {
-  local now; now=$(date +%s)
-  echo "PHASE $1: $(( now - phase_t0 ))s"
-  phase_t0=$now
-  scan_run -P "$1" -t "$now" "${@:2}"
-}
-# A failure pushes a notification (`disk-tree notify`: Pushover / a Discord webhook, from the job's
-# env; a no-op without one), linking the run on the site when INGEST_SITE_URL is set.
-notify_failure() {
-  local link=() q=
-  [[ $d1_store != primary ]] && q="?store=$d1_store"
-  [[ -n ${INGEST_SITE_URL:-} && -n ${AWS_BATCH_JOB_ID:-} ]] && link=(-u "$INGEST_SITE_URL/scans/$AWS_BATCH_JOB_ID$q" -l run)
-  "$app/.venv/bin/disk-tree" notify -p 1 -t "disky: $store ingest failed" ${link[@]+"${link[@]}"} \
-    "scan $date failed in $phase (exit $1)" || true
-}
-on_exit() {
-  local rc=$?
-  if (( rc )); then
-    scan_run -x "$rc" -F "$phase"
-    notify_failure "$rc"
-  else
-    scan_run -x 0
-  fi
-}
-trap on_exit EXIT
+begin() { sr phase-begin "$1"; }
+ended() { sr phase-end "$@"; }
+scan_err() { SR_ERR="exit $1: $3 (${BASH_SOURCE[1]##*/}:$2)"; }
+trap 'scan_err $? $LINENO "$BASH_COMMAND"' ERR
+trap 'exit 143' TERM
+trap 'exit 130' INT
+# `finish` records the end; a failure alerts once (`disk-tree notify`'s channels, from the job's env;
+# the profile's `alerts` label and link).
+trap 'sr finish -x $? ${SR_ERR:+-e "$SR_ERR"}' EXIT
 if [[ -n ${SCAN_RUNS_PROFILE:-} ]]; then
   facts=()
   [[ -n ${INGEST_MACHINE:-} ]] && facts+=(-m "$INGEST_MACHINE")
   [[ ${INGEST_SPOT:-} == 1 ]] && facts+=(--spot)
   [[ -n $region ]] && facts+=(-R "$region")
-  scan_run -S -t "$(epoch "$captured")" -T 1 ${facts[@]+"${facts[@]}"}
-  # The capture ran on the laptop until its marker landed; the job queued from then to its start.
+  # The run starts at its capture's start: the capture ran on the laptop until its marker landed,
+  # then the job queued until it started.
+  t_capture=$(epoch "$captured")
+  sr start -k ingest -K "$d1_store" -g "$gen" -t "$t_capture" -T 1 ${facts[@]+"${facts[@]}"} "$date"
   marked=$(aws s3api head-object --bucket "$bucket" --key "$key/_SUCCESS.json" --endpoint-url "$R2_ENDPOINT_URL" \
     --query LastModified --output text 2>/dev/null) || marked=
   if [[ $marked =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})[T\ ]([0-9]{2}:[0-9]{2}:[0-9]{2}) ]]; then
-    scan_run -P capture -t "$(epoch "${BASH_REMATCH[1]}T${BASH_REMATCH[2]}")" -o "capture=r2://$bucket/$key/"
+    t_marked=$(epoch "${BASH_REMATCH[1]}T${BASH_REMATCH[2]}")
+    sr phase-begin capture -b "$t_capture"
+    sr phase-end capture -t "$t_marked" -o "capture=r2://$bucket/$key/"
+    sr phase-begin queue -b "$t_marked"
+    sr phase-end queue -t "$job_t0"
   fi
-  scan_run -P queue -t "$job_t0"
 fi
 
-phase=fetch phase_t0=$(date +%s)
+begin fetch
 echo "[ingest] capture=$key date=$date gen=$gen host=$host store=$store d1=$d1_store vcpu=$(nproc) mem=$(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
 mkdir -p "$work/listing" "$work/index" "$work/snap"
 
@@ -120,25 +109,25 @@ s3 cp "s3://$bucket/$key/_SUCCESS.json" "$work/capture.json"
 echo "[ingest] fetched $(find "$work/listing" -name '*.parquet' | wc -l) shards, $(du -sh "$work/listing" | cut -f1) in $(( $(date +%s) - t0 ))s"
 ended fetch
 
-phase='path-index'
+begin path-index
 t0=$(date +%s)
 ( cd "$app/cloud" && "$time_bin" -v -o "$work/time.txt" "$app/.venv/bin/dt-cloud" path-index -g -d "$date" \
     -l "$work/listing/*.parquet" -P "$work/index/path-index.parquet" -o "$work/snap" )
 ended path-index
-phase='capture-meta'
+begin capture-meta
 "$app/.venv/bin/disk-tree" capture-meta -c "r2://$bucket/snapshots/$store/$date/meta.json" "$work/capture.json" "$work/snap/meta.json"
 ended capture-meta
 echo "[ingest] path-index: $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/time.txt")"
 echo "[ingest] outputs: index $(du -sh "$work/index" | cut -f1), snap $(du -sh "$work/snap" | cut -f1)"
 
-phase=upload
+begin upload
 t0=$(date +%s)
 s3 cp "$work/index/" "s3://$bucket/listing/$store/$date/index/$gen/" --recursive
 s3 cp "$work/snap/"  "s3://$bucket/snapshots/$store/$date/" --recursive
 echo "[ingest] uploaded to s3://$bucket/{listing/$store/$date/index/$gen,snapshots/$store/$date}/ in $(( $(date +%s) - t0 ))s"
 ended upload -o "index=r2://$bucket/listing/$store/$date/index/$gen/" -o "snapshot=r2://$bucket/snapshots/$store/$date/"
 
-phase='index-sync'
+begin index-sync
 t0=$(date +%s)
 : "${D1_DB_ID:?}" "${CLOUDFLARE_API_TOKEN:?}" "${CLOUDFLARE_ACCOUNT_ID:?}"
 # `-m`: the snapshot's meta (capture-meta stamped `started` above) → the pointers' `index_schema.started`;
@@ -153,7 +142,6 @@ ended index-sync
 # `tests/test_capture_ingest.py` pins). `add` appends this scan (and any other the generation
 # lacks) as a run; the first run of a generation `build`s its base over every scan so far.
 if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
-  phase='static-names'
   t0=$(date +%s)
   cmd=add
   if ! aws s3api head-object --bucket "$bucket" --key "static-names/$STATIC_GEN/scans.json" --endpoint-url "$R2_ENDPOINT_URL" > /dev/null 2>&1; then
@@ -167,6 +155,7 @@ if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
     echo "[ingest] static-names: generation $STATIC_GEN not built yet; skipping (STATIC_BUILD=1 builds it)"
     exit 0
   fi
+  begin static-names
   ( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
       -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(nproc)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
   echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/static-time.txt")"

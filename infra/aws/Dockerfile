@@ -24,4 +24,7 @@ RUN mkdir -p ui/dist && uv sync --frozen --no-dev --package dt-cloud
 # chmod: the source zip (Pulumi `AssetArchive`) doesn't carry file modes.
 COPY infra/aws/ingest.sh /ingest.sh
 RUN chmod 755 /ingest.sh
-ENTRYPOINT ["/ingest.sh"]
+# `supervise` runs the script in its own process group: a TERM reaches every phase at once, and a
+# terminated or killed job is recorded failed (specs/scan-job-wrapper.md). Its alert channels come
+# from the container env, as the script's do.
+ENTRYPOINT ["/app/.venv/bin/dt-cloud", "scan-run", "supervise", "--", "bash", "/ingest.sh"]
