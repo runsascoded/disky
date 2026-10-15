@@ -43,4 +43,7 @@ config:
     AWS_ACCESS_KEY_ID: disk-tree-m3/r2-access-key-id
     AWS_SECRET_ACCESS_KEY: disk-tree-m3/r2-secret-access-key
     CLOUDFLARE_API_TOKEN: disk-tree-m3/cf-d1-token
+    # The scan-run wrapper's alerts (`disk-tree notify`'s Pushover channel).
+    PUSHOVER_TOKEN: disk-tree-m3/pushover-token
+    PUSHOVER_USER: disk-tree-m3/pushover-user
 encryptionsalt: v1:QvVtYICwoEI=:v1:siNh6SqB8PdKdjVa:KJ40inG3RlfZPPjQqOdNm2PLHq01Yw==
