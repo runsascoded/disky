@@ -12,7 +12,7 @@ const NOW = Date.UTC(2026, 8, 29, 22, 15, 30)   // 2026-09-29T22:15:30Z
 const ACTOR = 'ryan@runsascoded.com'
 
 async function setup() {
-  const { db } = await sqliteD1('cw')
+  const { db } = await sqliteD1()
   await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', ?, 1)").bind(ACTOR).run()
   for (const p of [A, B]) {
     await db.prepare('INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, ?, 1)').bind(p, ACTOR).run()

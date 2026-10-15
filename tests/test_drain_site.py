@@ -11,7 +11,7 @@ import pytest
 from disk_tree import drain
 from disk_tree.drain import Schema
 
-# The columns `site/migrations/cw/0001_init.sql` (+ 0006_agents) give these tables.
+# The columns `site/schema.sql` gives these tables.
 SITE_SCHEMA = """
 CREATE TABLE plans (id INTEGER PRIMARY KEY, name TEXT, state TEXT DEFAULT 'open', created_by TEXT, created_ts INTEGER);
 CREATE TABLE plan_items (plan_id INTEGER, prefix TEXT, note TEXT, added_by TEXT, added_ts INTEGER, batch_id INTEGER,

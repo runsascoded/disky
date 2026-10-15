@@ -11,7 +11,7 @@ const STAFF = 'ryan@openathena.ai'
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,}$/
 
 async function setup() {
-  const { db } = await sqliteD1('cw')
+  const { db } = await sqliteD1()
   for (const email of [VIEWER, OPS]) {
     await db.prepare('INSERT INTO allowed_emails (email, who, ts) VALUES (?, ?, 1)').bind(email, STAFF).run()
   }

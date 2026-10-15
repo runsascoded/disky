@@ -67,6 +67,12 @@ CREATE TABLE agent_tokens (
   created  INTEGER NOT NULL
 );
 
+CREATE TABLE agents (
+  name TEXT PRIMARY KEY,
+  seen_ts INTEGER NOT NULL,
+  host TEXT
+);
+
 CREATE TABLE allowed_emails (
   email TEXT PRIMARY KEY,
   note  TEXT,
@@ -210,7 +216,7 @@ CREATE TABLE deletion_runs (
   undo_state TEXT NOT NULL DEFAULT 'none' CHECK (undo_state IN ('none', 'partial', 'full', 'expired')),
   purge_state TEXT NOT NULL DEFAULT 'none' CHECK (purge_state IN ('none', 'pending', 'done')),
   log_dir TEXT NOT NULL
-, plan_digest TEXT);
+, plan_digest TEXT, freed_bytes INTEGER);
 
 CREATE TABLE deletion_bands (
   run_id TEXT NOT NULL REFERENCES deletion_runs(run_id),
