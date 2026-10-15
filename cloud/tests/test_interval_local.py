@@ -450,3 +450,19 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
     assert json.loads((prefix / "served" / "stats.json").read_text())["slices"] is False
     base = {key: v for key, v in _parquets(gen).items() if not key.startswith(("deltas/", "manifests/"))}
     assert _parquets(prefix) == base
+
+
+def test_verify_reads_a_non_gcs_store(world, local, tmp_path):
+    """`interval-store verify` over a dir store (as over `r2://`): the served sorts and the per-scan sorts and footers
+    through `blobstore.Store`, no GCS client; every sampled view and diff of the base's scans (`scans.json`'s) equals the
+    per-scan path store's. The fixture's per-scan sorts have no footer sidecars, so their read cost is `null`."""
+    sampled = DATES[:BASE]
+    res = CliRunner().invoke(ist.cli, ["verify", "-b", str(local["store"]), "-g", "g", "-s", ",".join(sampled), "-o", str(tmp_path / "out"),
+                                       "-T", str(tmp_path / "tmp"), "-i", "0"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    summaries = json.loads(res.stdout.strip().splitlines()[-1])
+    assert [s["date"] for s in summaries] == sampled
+    assert [(s["views"] == s["view_eq"], s["diffs"] == s["diff_eq"]) for s in summaries] == [(True, True)] * len(sampled)
+    assert sum(s["views"] for s in summaries) > 0
+    recs = [json.loads(ln) for ln in (tmp_path / "out" / "verify" / f"t00-{sampled[0]}.jsonl").read_text().splitlines()]
+    assert sorted({r["ps_cost"] is None for r in recs if r["kind"] == "view" and "ps_cost" in r}) == [True]

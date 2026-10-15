@@ -50,6 +50,8 @@ def sx_rows_sql(src: str) -> str:
     return f"SELECT s, depth, path, usr, epoch(vf)::BIGINT AS vf, epoch(vt)::BIGINT AS vt, size, n_files FROM {src}"
 
 
+#: Per literal: its roots (`agg="count"`).
+COUNT_COLS = "q VARCHAR, n BIGINT"
 #: Per member: its roots' count and two order-free sums of row hashes (equal sets → equal digests).
 DIGEST_COLS = "q VARCHAR, n BIGINT, h1 HUGEINT, h2 HUGEINT"
 ROW_HASH = "hash(path, usr, vf, vt, size, n_files)"
@@ -59,6 +61,8 @@ def _sink(con, into: str, hit: str, agg: bool | str) -> None:
     if agg == "digest":
         con.execute(f"""INSERT INTO {into} SELECT q, count(*), sum({ROW_HASH})::HUGEINT, sum(hash({ROW_HASH}, 'x'))::HUGEINT
             FROM ({hit}) GROUP BY q""")
+    elif agg == "count":
+        con.execute(f"INSERT INTO {into} SELECT q, count(*) FROM ({hit}) GROUP BY q")
     elif agg:
         con.execute(f"""INSERT INTO {into} SELECT q, depth, path, count(*), count(*) FILTER (WHERE vt = {OPEN})
             FROM ({hit}) GROUP BY q, depth, path""")
@@ -74,7 +78,8 @@ def member_roots(con, rows_sql: str, members: str, into: str, agg: bool | str = 
     `q = left(s, L)` when `q` is a member, `s` starts at `q`'s first occurrence in the name, and the parent
     does not contain `q`. A `(q, path)`'s rows all share one suffix (its first occurrence), so feeding a
     shard in `(s, path)`-cut chunks never splits one: the aggregate is exact per chunk."""
-    con.execute(f"CREATE TABLE IF NOT EXISTS {into} ({DIGEST_COLS if agg == 'digest' else RP_COLS if agg else ROOT_COLS})")
+    cols = {"digest": DIGEST_COLS, "count": COUNT_COLS}.get(agg, RP_COLS) if agg else ROOT_COLS
+    con.execute(f"CREATE TABLE IF NOT EXISTS {into} ({cols})")
     top = con.execute(f"SELECT max(length(q)) FROM {members}").fetchone()[0]
     if not top:
         return
@@ -97,7 +102,7 @@ def member_roots(con, rows_sql: str, members: str, into: str, agg: bool | str = 
     con.execute("DROP TABLE IF EXISTS rx; DROP TABLE IF EXISTS rl; DROP TABLE IF EXISTS rpre")
 
 
-def short_roots(con, versions_sql: str, into: str, agg: bool = False, pieces: int = 1, log: str = "", rule: HexRule | None = None) -> None:
+def short_roots(con, versions_sql: str, into: str, agg: bool | str = False, pieces: int = 1, log: str = "", rule: HexRule | None = None) -> None:
     """Add every one- and two-character literal's first-hit rows among `versions_sql`'s rows `(depth, path,
     usr, vf, vt, size, n_files)` to `into` (as `member_roots`): each distinct character and character pair of
     the lowercase name that the lowercase parent does not contain (`static_catalog.short_events`' rule). In
@@ -109,7 +114,7 @@ def short_roots(con, versions_sql: str, into: str, agg: bool = False, pieces: in
             if log:
                 err(f"{log}: piece {k + 1}/{pieces} in {monotonic() - t0:.1f}s")
         return
-    con.execute(f"CREATE TABLE IF NOT EXISTS {into} ({RP_COLS if agg else ROOT_COLS})")
+    con.execute(f"CREATE TABLE IF NOT EXISTS {into} ({COUNT_COLS if agg == 'count' else RP_COLS if agg else ROOT_COLS})")
     hit = f"""SELECT g AS q, depth, path, usr, vf, vt, size, n_files FROM (
             SELECT unnest({grams_sql('l', rule)}) AS g, par, depth, path, usr, vf, vt, size, n_files
             FROM (SELECT {NAME} AS l, {PARENT} AS par, depth, path, usr, vf, vt, size, n_files FROM ({versions_sql}) WHERE depth >= 1)
@@ -358,34 +363,54 @@ def write_indexed(batches, out: Path, schema: pa.Schema, key: str, name: str, di
     return rows, pa.table(cols, schema=GROUP_INDEX_SCHEMA)
 
 
-def rollup_sql(con, rt: str, R: int, K: int) -> str:
+def heavy_rev(con, rt: str) -> None:
+    """Table `rev (q, dir, child, t, db, dn)`: per heavy `(q, dir)` (table `hv`) and child of `dir`, the summed size,
+    n_files changes of the roots at or under the child at each `t` (`+` at `vf`, `−` at `vt` unless open; a sum may be
+    0). Bottom-up, one depth at a time: the roots under a heavy directory (under a heavy depth-1 one: heaviness is
+    closed upwards), each cut to the deepest heavy level's children, are summed per `(q, prefix, t)` at their own depth,
+    and each level's sums are its parents' inputs — a root is read once and a level holds its distinct `(prefix, t)`,
+    where exploding every root to each heavy ancestor costs roots × heavy depth."""
+    con.execute("CREATE OR REPLACE TABLE rev (q VARCHAR, dir VARCHAR, child VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
+    top = con.execute("SELECT coalesce(max(k), 0) FROM hv").fetchone()[0]
+    if not top:
+        return
+    con.execute(f"""CREATE OR REPLACE TABLE bu_r AS SELECT r.q,
+            CASE WHEN r.depth > {top + 1} THEN array_to_string(string_split(r.path, '/')[1:{top + 1}], '/') ELSE r.path END AS p,
+            least(r.depth, {top + 1})::INTEGER AS d, r.vf, r.vt, r.size, r.n_files
+        FROM {rt} AS r SEMI JOIN (SELECT q, dir FROM hv WHERE k = 1) AS h ON r.q = h.q AND string_split(r.path, '/')[1] = h.dir""")
+    con.execute("CREATE OR REPLACE TABLE bu_cur (q VARCHAR, p VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
+    for j in range(top + 1, 1, -1):
+        con.execute(f"""CREATE OR REPLACE TABLE bu_a AS SELECT q, p, t, sum(db) AS db, sum(dn) AS dn FROM (
+                SELECT q, p, vf AS t, size::HUGEINT AS db, n_files::HUGEINT AS dn FROM bu_r WHERE d = {j}
+                UNION ALL SELECT q, p, vt, -size::HUGEINT, -n_files::HUGEINT FROM bu_r WHERE d = {j} AND vt <> {OPEN}
+                UNION ALL SELECT q, p, t, db, dn FROM bu_cur) GROUP BY q, p, t""")
+        con.execute(f"""INSERT INTO rev SELECT a.q, {raw_parent('a.p')}, string_split(a.p, '/')[-1], a.t, a.db, a.dn FROM bu_a AS a
+            SEMI JOIN (SELECT q, dir FROM hv WHERE k = {j - 1}) AS h ON a.q = h.q AND {raw_parent('a.p')} = h.dir""")
+        if j > 2:
+            con.execute(f"CREATE OR REPLACE TABLE bu_cur AS SELECT q, {raw_parent('p')} AS p, t, sum(db) AS db, sum(dn) AS dn FROM bu_a GROUP BY ALL")
+    for t in ("bu_r", "bu_a", "bu_cur"):
+        con.execute(f"DROP TABLE {t}")
+
+
+def rollup_sql(con, rt: str, R: int, K: int, dirs: pa.Table | None = None) -> str:
     """Rollup cells (`ROLLUP_SCHEMA`, a query) of `rt`'s (`ROOT_COLS`, every root of its members) heavy
     directories: `(q, dir)` with more than `R` root rows strictly under it. Per heavy `(q, dir)`, per child
     of `dir` (its next path segment), the running Σ size, n_files of the roots at or under the child, one
     cell per change (`+` at `vf`, `−` at `vt`); the `K` children with the largest peak bytes (ties by name)
-    are kept by name, the rest summed into the remainder. Heavy directories are closed upwards (their
-    ancestors are heavy), so the roots are exploded one depth at a time over a shrinking candidate set."""
-    con.execute("DROP TABLE IF EXISTS hrp")
-    con.execute(f"CREATE TABLE hrp AS SELECT q, depth, path, count(*)::BIGINT AS n, count(*) FILTER (WHERE vt = {OPEN})::BIGINT AS n_open FROM {rt} GROUP BY q, depth, path")
-    dirs, _, _ = dir_stats(con, "hrp", R + 1)
-    con.execute("DROP TABLE hrp")
+    are kept by name, the rest summed into the remainder. The per-child changes are summed bottom-up
+    (`heavy_rev`). `dirs`: `rt`'s `dir_stats` at a floor of at most `R + 1` (a measurement's), whose heavy
+    rows are the heavy directories (else `dir_stats` is run here)."""
+    if dirs is None:
+        con.execute("DROP TABLE IF EXISTS hrp")
+        con.execute(f"CREATE TABLE hrp AS SELECT q, depth, path, count(*)::BIGINT AS n, count(*) FILTER (WHERE vt = {OPEN})::BIGINT AS n_open FROM {rt} GROUP BY q, depth, path")
+        dirs, _, _ = dir_stats(con, "hrp", R + 1)
+        con.execute("DROP TABLE hrp")
     con.execute("CREATE OR REPLACE TABLE hv (q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT, children BIGINT)")
     if dirs.num_rows:
         con.register("hv_in", dirs.select(["q", "k", "dir", "rows", "children"]))
-        con.execute("INSERT INTO hv SELECT * FROM hv_in")
+        con.execute(f"INSERT INTO hv SELECT * FROM hv_in WHERE rows > {R}")
         con.unregister("hv_in")
-    con.execute("CREATE OR REPLACE TABLE rev (q VARCHAR, dir VARCHAR, child VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
-    con.execute(f"CREATE OR REPLACE TABLE hc AS SELECT q, string_split(path, '/') AS segs, vf, vt, size, n_files FROM {rt} SEMI JOIN (SELECT DISTINCT q FROM hv) USING (q)")
-    top = con.execute("SELECT coalesce(max(k), 0) FROM hv").fetchone()[0]
-    for k in range(1, top + 1):
-        con.execute(f"""CREATE OR REPLACE TABLE hc AS SELECT hc.* FROM hc SEMI JOIN (SELECT q, dir FROM hv WHERE k = {k}) AS h
-            ON hc.q = h.q AND array_to_string(hc.segs[1:{k}], '/') = h.dir""")
-        hit = f"SELECT q, array_to_string(segs[1:{k}], '/') AS dir, segs[{k + 1}] AS child, vf, vt, size, n_files FROM hc"
-        con.execute(f"""INSERT INTO rev SELECT q, dir, child, t, sum(db), sum(dn) FROM (
-                SELECT q, dir, child, vf AS t, size AS db, n_files AS dn FROM ({hit})
-                UNION ALL SELECT q, dir, child, vt AS t, -size, -n_files FROM ({hit}) WHERE vt <> {OPEN}
-            ) GROUP BY q, dir, child, t""")
-    con.execute("DROP TABLE hc")
+    heavy_rev(con, rt)
     run = """sum(db) OVER (PARTITION BY q, dir, child ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::BIGINT AS b,
              sum(dn) OVER (PARTITION BY q, dir, child ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::BIGINT AS o"""
     con.execute(f"""CREATE OR REPLACE TABLE rkeep AS SELECT q, dir, child FROM (

@@ -124,7 +124,11 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
                           # on ONE machine (`static_local.py`): the staged (Batch) path's stages in-process — ranges,
                           # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/` — over a
                           # work dir (`-w`), then copied to `<STORE>/static-names/GEN/` (a dir or `r2://`/`s3://` URL;
-                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts
+                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts.
+                          # The drill is chunked as the staged path (`-c` rows, default 4M: suffix rows per member-loop
+                          # chunk, roots per short piece and per measured / rolled-up q range; roots spill as parquet),
+                          # so its working set is `-c`-bound, not the corpus's; byte-identical at any `-c`. Logs a
+                          # `build GEN: drill/<step>` line per sub-step (seconds, disk / RSS peaks, row counts)
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
                           # catalog delta, drill run, `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.

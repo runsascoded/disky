@@ -184,21 +184,21 @@ class Footer:
         self.idx = [names.index(c) for c in cols if c in names]
 
     @classmethod
-    def load(cls, bucket, key_parquet: str, version: int) -> "Footer | None":
+    def load(cls, src, key_parquet: str, version: int) -> "Footer | None":
+        """From `src` (a `blobstore.Store` over the scans' root: `gs://`, `r2://`, `s3://`, a dir)."""
         import io
 
         cols = V2_COLS if version == 2 else V1_COLS
         gp = key_parquet.removesuffix(".parquet") + ".groups.parquet"
-        blob = bucket.blob(gp)
-        if blob.exists():
-            data = blob.download_as_bytes()
+        if src.exists(gp):
+            data = src.read_bytes(gp)
             t = pq.read_table(io.BytesIO(data))
             kv = {k.decode(): v.decode() for k, v in (pq.read_metadata(io.BytesIO(data)).metadata or {}).items()}
             return cls(t.to_pylist(), json.loads(kv["schema"]), int(kv["floor_bytes"]) if "floor_bytes" in kv else None, cols)
-        gj = bucket.blob(key_parquet.removesuffix(".parquet") + ".groups.json")
-        if not gj.exists():
+        gj = key_parquet.removesuffix(".parquet") + ".groups.json"
+        if not src.exists(gj):
             return None
-        doc = json.loads(gj.download_as_bytes())
+        doc = json.loads(src.read_bytes(gj))
         fields = ("rg", "d_min", "d_max", "p_min", "p_max", "b_max", "u_min", "u_max", "row_start", "row_end", "rg_json", "b_min")
         return cls([dict(zip(fields, g)) for g in doc["groups"]], doc["schema"], doc.get("floor_bytes"), cols)
 
@@ -305,11 +305,11 @@ def cases_for(scan: Scan, date: str) -> list[dict]:
     return cases
 
 
-def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, str, int] | None, out, bucket) -> dict:
-    """Every sampled case of one scan (and its diffs against `prev`), one JSON line each; `bucket` holds
-    the per-scan footers."""
+def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, str, int] | None, out, src) -> dict:
+    """Every sampled case of one scan (and its diffs against `prev`), one JSON line each; `src` (a `blobstore.Store`)
+    holds the per-scan footers."""
     summary = {"date": date, "views": 0, "view_eq": 0, "diffs": 0, "diff_eq": 0}
-    footers = _footers(bucket, scan.key, scan.v)
+    footers = _footers(src, scan.key, scan.v)
     cases = cases_for(scan, date)
     for c in cases:
         t0 = monotonic()
@@ -323,7 +323,10 @@ def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, 
                "tiles": len(want.get("kept") or {}), "threshold": want.get("threshold"),
                "iv_cost": got["cost"], "iv_served": got.get("served"), "t_ref": round(t_ref, 2), "t_iv": round(t_iv, 2)}
         if want.get("tree") is not None:
-            rec["ps_cost"] = perscan_cost(footers, scan.v, c["path"], want["threshold"], want["root"][0], max_depth=c.get("max_depth"))
+            # The per-scan side's read cost needs its footers (`.groups.parquet` / `.groups.json` sidecars); a sort
+            # without them has no cost to report (`null`), its parity is checked all the same.
+            rec["ps_cost"] = perscan_cost(footers, scan.v, c["path"], want["threshold"], want["root"][0], max_depth=c.get("max_depth")) \
+                if all(footers.values()) else None
             if scan.v == 2:
                 bys = scan.bysize_tiles(c["path"], want["threshold"], max_depth=c.get("max_depth"))
                 ex = {p: v[0] for p, v in want["kept"].items()}
@@ -367,21 +370,23 @@ def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, 
     return summary
 
 
-def _footers(bucket, key: str, version: int) -> dict[str, Footer]:
+def _footers(src, key: str, version: int) -> dict[str, Footer]:
     d = key.rsplit("/", 1)[0]
     if version == 2:
-        return {"path": Footer.load(bucket, key, 2), "bysize": Footer.load(bucket, f"{d}/path-index-bysize.parquet", 2)}
-    out = {"path": Footer.load(bucket, key, 1)}
+        return {"path": Footer.load(src, key, 2), "bysize": Footer.load(src, f"{d}/path-index-bysize.parquet", 2)}
+    out = {"path": Footer.load(src, key, 1)}
     for e in (16, 20, 24):
-        out[f"coarse{e}"] = Footer.load(bucket, f"{d}/path-index-coarse{e}.parquet", 1)
+        out[f"coarse{e}"] = Footer.load(src, f"{d}/path-index-coarse{e}.parquet", 1)
     return out
 
 
 def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
-    each scan's per-scan `path` sort copied to local disk first."""
+    each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
+    a URL, a dir, or a bare GCS bucket name)."""
     import duckdb
-    from google.cloud import storage
+
+    from .blobstore import Store, store_url
 
     by_id = {s["id"]: s for s in scans["scans"]}
     per = math.ceil(len(sampled) / tasks)
@@ -390,7 +395,7 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     store = ir.Store(served)
     con = duckdb.connect()
     con.execute(f"SET threads=16; SET memory_limit='80GB'; SET temp_directory={q(str(tmp / 'spill'))}")
-    bucket = storage.Client().bucket(scans["bucket"])
+    src = Store(store_url(scans["bucket"]))
     prev = None
     summaries = []
     with out_path.open("w") as out:
@@ -403,11 +408,11 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
 
                 shutil.copyfile(f"{mount}/{s['src']}", local)
             else:
-                bucket.blob(s["src"]).download_to_filename(str(local))
+                src.get(s["src"], local)
             err(f"{date}: per-scan path sort copied ({local.stat().st_size:,} B, {monotonic() - t0:.0f}s)")
             scan = Scan(con, str(local), s["version"], s["src"])
             if date == first_own or (first_own and sampled.index(date) > sampled.index(first_own)):
-                summaries.append(run_date(store, scan, date, s["ts"], prev, out, bucket))
+                summaries.append(run_date(store, scan, date, s["ts"], prev, out, src))
             if prev:
                 os.unlink(prev[0].file)
             prev = (scan, date, s["ts"])

@@ -724,6 +724,7 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
     credentials from Secret Manager. `purpose` labels the job; `component` is its cost label (`cost_labels`)."""
     machine = machine or p.machine
     vcpus = int(machine.rsplit("-", 1)[-1])
+    spot = p.spot and stage not in p.standard_stages
     buckets = [p.bucket, *([p.scratch] if scratch else [])]
     env = {"STATIC_NAMES_BUCKET": p.bucket, "STATIC_NAMES_SCRATCH": p.scratch}
     environment: dict = {"variables": env}
@@ -746,7 +747,7 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
                 }}],
                 "environment": environment,
                 "computeResource": {"cpuMilli": vcpus * 1000, "memoryMib": vcpus * 7700},
-                "maxRetryCount": 3 if p.spot else 0,
+                "maxRetryCount": 3 if spot else 0,
                 "maxRunDuration": f"{MAX_RUN_S}s",
                 "volumes": [
                     *({"gcs": {"remotePath": b}, "mountPath": f"/mnt/disks/gcs/{b}", "mountOptions": ["--implicit-dirs"]} for b in buckets),
@@ -757,7 +758,7 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
         "allocationPolicy": {
             "instances": [{"policy": {
                 "machineType": machine,
-                "provisioningModel": "SPOT" if p.spot else "STANDARD",
+                "provisioningModel": "SPOT" if spot else "STANDARD",
                 "bootDisk": {"type": "pd-balanced", "sizeGb": "100"},
                 "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": str(ssd_gb or p.ssd_gb)}, "deviceName": "stage"}],
             }}],

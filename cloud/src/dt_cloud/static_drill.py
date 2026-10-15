@@ -1505,21 +1505,39 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
 # ── A whole drill from roots (tests; the reference a run is checked against) ──
 
 
-def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: pa.Table, R: int, K: int, meta: dict | None = None) -> dict:
+def _count(con, table: str) -> int:
+    return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+
+
+def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
+                rollups: dict[str, str] | None = None, step=None) -> dict:
     """A tier holding every root: tables `long_roots` (canonical members only) and `short_roots` (`ROOT_COLS`) → `out`
-    (`static_roots.build_roots` per kind, its rows written as `write_kind` writes them), with `aliases` and `meta.json`."""
+    (`static_roots.build_roots` per kind, its rows written as `write_kind` writes them), with `aliases` and `meta.json`.
+    `rollups` `{kind: table}` (`ROLLUP_COLS`): a kind's rollup cells already cut (by `q` range, as `static_local`'s
+    chunked build does), written as they are. `step(name, t, **counts)` (optional) reports each kind's rollup and write
+    (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
     out.mkdir(parents=True, exist_ok=True)
     doc = {**base_meta(R, K), **(meta or {})}
     con.register("al_in", aliases)
     con.execute("CREATE OR REPLACE TABLE cls AS SELECT q, canonical FROM al_in")
     con.unregister("al_in")
     write_aliases(con, out)
+    t = monotonic()
     for kind, table in (("long", long_roots), ("short", short_roots)):
+        if rollups and kind in rollups:
+            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind]))
+            if step:
+                t = step(f"drill/write/{kind}", t)
+            continue
         con.execute(f"CREATE OR REPLACE TABLE dr AS SELECT * FROM {table}")
         con.execute(f"CREATE OR REPLACE TABLE rup AS {sr.rollup_sql(con, 'dr', R, K)}")
-        for t in ("rev2", "rkeep", "hv"):
-            con.execute(f"DROP TABLE IF EXISTS {t}")
+        if step:
+            t = step(f"drill/rollup/{kind}", t, roots=_count(con, "dr"), heavy_dirs=_count(con, "hv"), rup=_count(con, "rup"))
+        for tb in ("rev2", "rkeep", "hv"):
+            con.execute(f"DROP TABLE IF EXISTS {tb}")
         doc.update(write_kind(con, out, kind))
+        if step:
+            t = step(f"drill/write/{kind}", t)
     con.execute("DROP TABLE IF EXISTS dr; DROP TABLE IF EXISTS rup; DROP TABLE IF EXISTS cls")
     (out / "meta.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -20,6 +21,27 @@ from pathlib import Path
 
 #: A bare bucket name's scheme (the profiles predating URL stores name a GCS bucket).
 DEFAULT_SCHEME = "gs"
+
+#: A URL store's transfers (`get`/`put`) try this many times, sleeping `RETRY_BASE_S · 2^n` between: an R2 read that
+#: stalls past fsspec's socket timeout is transient, and one such stall aborted a 153-scan build (cw, 2026-10-15).
+RETRIES = 5
+RETRY_BASE_S = 2.0
+
+
+def _retrying(op: Callable[[], None]) -> None:
+    """`op()`, retried on a transient error (a timeout, a dropped connection, an I/O error); a missing key or a
+    refused credential is not transient and raises at once, as does the last attempt's error."""
+    from fsspec.exceptions import FSTimeoutError
+
+    for n in range(RETRIES):
+        try:
+            return op()
+        except (FileNotFoundError, PermissionError):
+            raise
+        except (FSTimeoutError, TimeoutError, OSError):
+            if n == RETRIES - 1:
+                raise
+            time.sleep(RETRY_BASE_S * 2**n)
 
 
 def store_url(root: str) -> str:
@@ -171,16 +193,27 @@ class Store:
         with ThreadPoolExecutor(workers) as ex:
             return sum(ex.map(one, list(keys)))
 
+    def size(self, key: str) -> int:
+        return (Path(self.root) / key).stat().st_size if not self.url else int(self.fs.size(self._p(key)))
+
+    def read_range(self, key: str, lo: int, hi: int) -> bytes:
+        """Bytes `[lo, hi)` of `key`: one ranged read."""
+        if self.url:
+            return self.fs.cat_file(self._p(key), start=lo, end=hi)
+        with open(Path(self.root) / key, "rb") as f:
+            f.seek(lo)
+            return f.read(hi - lo)
+
     def get(self, key: str, dst: Path) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if self.url:
-            self.fs.get(self._p(key), str(dst))
+            _retrying(lambda: self.fs.get(self._p(key), str(dst)))
         else:
             shutil.copyfile(Path(self.root) / key, dst)
 
     def put(self, src: Path, key: str) -> None:
         if self.url:
-            self.fs.put(str(src), self._p(key))
+            _retrying(lambda: self.fs.put(str(src), self._p(key)))
         else:
             dst = Path(self.root) / key
             dst.parent.mkdir(parents=True, exist_ok=True)

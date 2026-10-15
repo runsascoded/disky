@@ -784,3 +784,18 @@ def test_a_folded_run_an_inner_scan_was_built_over_is_backfilled_before_that_sca
     f.daily(DRILL).run(d)
     assert f.calls == [_drill_build(a), _drill_build(b), _tier_merge(l1["key"]), _drill_build(c), _drill_build(d), _tier_merge(l2["key"]),
                        _r2(d, [f"{a}_{d}"]), ("prune", d)]
+
+
+@pytest.mark.parametrize("stage, model, retries", [("anchors", "STANDARD", 0), ("append", "SPOT", 3)])
+def test_standard_stages_run_on_demand(stage, model, retries):
+    """A spot profile's `standard_stages` run STANDARD with no retries (a preemption restarts a single long task from
+    zero); every other stage stays spot."""
+    from dataclasses import replace
+
+    spec = sd.job_spec(replace(CFG, spot=True, standard_stages=("anchors",)), "sn-x", 1, ["true"], stage=stage)
+    ts = spec["taskGroups"][0]["taskSpec"]
+    assert (spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"], ts["maxRetryCount"]) == (model, retries)
+
+
+def test_standard_stages_from_env():
+    assert load_profile({"STATIC_NAMES_PROFILE": "", "STATIC_NAMES_STANDARD_STAGES": "anchors, drill"}).standard_stages == ("anchors", "drill")
