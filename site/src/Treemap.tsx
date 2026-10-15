@@ -25,6 +25,7 @@ import { usePerfCommit } from './perf'
 import { listingTime } from './listingTime'
 import { gradientBand } from './dayBand'
 import type { DayBand } from './dayBand'
+import { RootSourceLine } from './UnionNotes'
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -638,6 +639,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     return (
       <>
         <PathBar path={path} scheme={schemeOf(path)} home={home} onDrill={onPathChange} />
+        {/* Under a union root: the root's store and that store's scan. */}
+        <RootSourceLine node={path[1]} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
           {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}

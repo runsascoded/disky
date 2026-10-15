@@ -17,7 +17,7 @@ import { ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
-import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, type ViewNode } from '../_lib/view.js'
+import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, type ViewNode } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, upgradePartial } from '../_lib/edgeCache.js'
@@ -310,7 +310,11 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
     const q = url.searchParams.get('q') ?? ''
     if (q.trim()) return await unionFilteredRoot(ctx0, view, resolved, id, { w, h, minArea, atten, q })
     const ready = resolved.members.filter(m => m.date !== null)
-    const roots = await Promise.all(ready.map(m => ivRetry(() => readRootAgg(m.ctx.env, { date: m.date!, path: '' }))))
+    // Each member's root total (the union's threshold) and its every root (the table lists them all: `unionRoot`).
+    const [roots, rows] = await Promise.all([
+      Promise.all(ready.map(m => ivRetry(() => readRootAgg(m.ctx.env, { date: m.date!, path: '' })))),
+      Promise.all(ready.map(m => ivRetry(() => readRootRows(m.ctx.env, m.date!)))),
+    ])
     const total = roots.reduce((n, r) => n + (r?.b ?? 0), 0)
     const threshold = (total * minArea) / (w * h)
     const reads = await Promise.all(ready.map(m => subtree({ ...ctx0, request: memberRequest(ctx0.request, m.store, { date: m.date! }, ['d']) }, true, { id, threshold })))
@@ -318,7 +322,7 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
     if (bad) return bad
     type Body = { tier: string; index: string; nodes: number; truncated: boolean; budgetCut?: true; tree: ViewNode }
     const bodies = await Promise.all(reads.map(r => r.json() as Promise<Body>))
-    const tree = unionRoot(view, ctx0.env.ROOT_LABEL ?? 'all buckets', bodies.map((b, i) => ({ store: ready[i].store, date: ready[i].date!, tree: b.tree })))
+    const tree = unionRoot(view, ctx0.env.ROOT_LABEL ?? 'all buckets', bodies.map((b, i) => ({ store: ready[i].store, date: ready[i].date!, tree: b.tree, roots: rows[i] })))
     return new Response(JSON.stringify({
       date: resolved.date, path, w, h, minArea, atten,
       tier: bodies[0]?.tier ?? 'none', index: bodies[0]?.index ?? 'none',

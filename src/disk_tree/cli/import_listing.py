@@ -49,7 +49,7 @@ from disk_tree.find.aggregate_duckdb import DEFAULT_PARTITION_FILES
 @option('-p', '--pivot-sum', 'pivot_sums', multiple=True, help='Emit per-value byte-sum columns `sum_<col>_<v>` for this layer-1 column (e.g. storage_class_id); repeatable')
 @option('-r', '--row-group-rows', default=8192, help='Tiers: max rows per parquet row group (the HTTP range-read unit)')
 @option('-S', '--sort-variant', 'sort_variants', multiple=True, help='Tiers: extra sorted copies of each tier led by these comma-separated columns (e.g. `usr` → `(usr, depth, path)`, file `…path-by-usr.parquet`); repeatable')
-@option('-s', '--scheme', default='gcs', help='URI scheme for the scan root (gcs / s3 / r2)')
+@option('-s', '--scheme', default='gcs', help='URI scheme for the scan root (gcs / s3 / r2 / hf)')
 @option('-T', '--temp-dir', default=None, help='DuckDB spill directory (duckdb engine only; the stream engine is sort-free). Default: fresh per-invocation temp dir (safe under concurrent imports).')
 @option('-t', '--time', 'time_str', default=None, help='Snapshot time (ISO 8601) recorded on each Scan; default: now')
 @option('-w', '--to', default=None, help='Write the scan blob(s) to a dir or fsspec URL (`r2://bucket/prefix`) instead of the configured write dir — same as `index --to`')

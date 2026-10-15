@@ -79,6 +79,9 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       expect([path, u.status, u.text]).toEqual([path, 200, own.text])
     }
     expect(await get('path=nope')).toEqual({ status: 404, text: '{"error":"path not found"}\n' })
+    // The page's cutoff, when it names one (`at=` too), picks the path's store; before meta's first scan, `mb` is no one's.
+    expect(await get('path=mb&at=20261002T1200Z')).toEqual(await get('path=mb&store=meta'))
+    expect(await get('path=mb&at=20260930T1200Z')).toEqual({ status: 404, text: '{"error":"path not found"}\n' })
   })
 
   it('the root refuses one store’s scope axes', async () => {

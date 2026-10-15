@@ -354,12 +354,15 @@ class Store:
 
     def view(self, D: int, path: str, w: int, h: int, *, min_area: float = MIN_AREA, atten: float = ATTEN, max_depth: int | None = None,
              threshold: float | None = None) -> dict:
-        """The plain view of P at D (`buildView`), its read cost, and the sort that served the subtree."""
+        """The plain view of P at D (`buildView`), its read cost, and the sort that served the subtree. `objects`: the
+        scan lists objects — its root rows carry structural counts, which a dir-only (v1) scan's versions never do
+        (`buildDiff`'s `listsObjects`)."""
         cost = Cost()
         dP = depth_of(path)
         if path == "":
             roots = self.point_depth(D, 1, cost)
             root = Agg(kind="dir", nc=len(roots))
+            objects = any(r["n_desc"] >= 0 for r in roots)
             reads = [r["last_read"] for r in roots if r["last_read"] >= 0]
             root.a = max(reads) if reads else None
             for r in roots:
@@ -375,6 +378,7 @@ class Store:
             if not rs:
                 return {"tree": None, "cost": cost.total()}
             root = agg_of(rs[0])
+            objects = rs[0]["n_desc"] >= 0
         if root.b <= 0:
             return {"tree": None, "cost": cost.total()}
         thr = threshold if threshold is not None else root.b * min_area / (w * h)
@@ -385,7 +389,7 @@ class Store:
         if len(kept) > HARD_CAP:
             raise ValueError(f"{len(kept)} tiles over HARD_CAP")
         return {"tree": tree(path, root, kept, thr_at), "threshold": thr, "served": served, "kept": {p: (a.b, a.o, a.kind) for p, a in kept.items()},
-                "root": (root.b, root.o), "cost": cost.total()}
+                "root": (root.b, root.o), "objects": objects, "cost": cost.total()}
 
     def point_depth(self, D: int, depth: int, cost: Cost) -> list[dict]:
         return self.point(D, depth, "", "￿", cost).to_pylist()
@@ -409,10 +413,14 @@ class Store:
 # ── Diff (both sides' kept tiles at one threshold, one-sided paths looked up) ──
 
 
-def diff(side_a: dict, side_b: dict, lookup_a, lookup_b) -> list[tuple]:
+def diff(side_a: dict, side_b: dict, lookup_a, lookup_b, *, fold: bool = False) -> list[tuple]:
     """`(path, k, s, a_b, b_b, a_o, b_o)` over the union of both views' tiles: a path tiled on one side
-    only is looked up on the other (absent = 0), as the diff walk's point lookups do."""
+    only is looked up on the other (absent = 0), as the diff walk's point lookups do. `fold`: one side a
+    dir-only (v1) scan, the other a full one — the objects have no counterpart, so neither side's are tiles
+    (`buildDiff` folds them into `(other)`)."""
     ka, kb = side_a["kept"], side_b["kept"]
+    if fold:
+        ka, kb = ({p: v for p, v in k.items() if v[2] != "file"} for k in (ka, kb))
     out = []
     for p in sorted(set(ka) | set(kb)):
         a = ka.get(p)

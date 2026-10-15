@@ -9,6 +9,8 @@ import { onRequestGet as subtree } from './subtree'
 import { onRequestGet as filterCover } from './filter-cover'
 import { onRequestGet as filterCaps } from './filter-caps'
 import { onRequestGet as filterScans } from './filter-scans'
+import { onRequestGet as diff } from './diff'
+import { onRequestGet as series } from './series'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_lib/testStore')).S3Store }))
 
@@ -127,6 +129,21 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     for (const [meta, path, q, store] of [[META, 'mb', 'both', 'meta'], [META_OWN, 'mb', 'both', 'meta'], [META, 'bk', 'ckpt', 'primary']] as const) {
       const env = envOf(meta)
       expect(await get(subtree, env, `date=${A}&path=${path}&q=${q}`)).toEqual(await get(subtree, env, `date=${A}&path=${path}&q=${q}&store=${store}`))
+    }
+  })
+
+  it('`?f=` drilled into one member’s mount: series and diff delegate to that member, `q=` and all', async () => {
+    // The page opens a filtered union root with one matching root inside it (`r2://marin-na` on r2): the series
+    // and the diff ask that root's path with `q=`, which its member answers as `store=<member>` would.
+    const env = envOf(META_OWN)
+    for (const [route, qs, store] of [
+      [series, 'path=mb&q=both', 'meta'],
+      [diff, `from=${A}&to=${B}&path=mb&q=both`, 'meta'],
+      [series, 'path=bk&q=ckpt', 'primary'],
+    ] as const) {
+      const [s, b] = await get(route as typeof subtree, env, qs)
+      expect([s, b]).toEqual(await get(route as typeof subtree, env, `${qs}&store=${store}`))
+      expect(s).toBe(200)
     }
   })
 

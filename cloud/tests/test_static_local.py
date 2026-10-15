@@ -271,6 +271,35 @@ def test_add_prunes_the_folded_runs_after_the_grace(appended, tmp_path):
             assert tiered_cat.answer(term, ids) == _catalog(full / "catalog").answer(term, ids), term
 
 
+def test_add_an_unchanged_scan(fixture, tmp_path):  # noqa: F811
+    """A scan identical to the one before it (an idle day: its delta opens and closes nothing) appends as a run, and
+    base ⊕ that run reads as the generation rebuilt over every scan."""
+    import shutil
+
+    from dt_cloud.scan_id import scan_label
+
+    root, scans, _ = fixture
+    last = scans["scans"][-1]
+    idle = scan_label(sn.scan_epoch(last["id"]) + 86400)
+    root2 = tmp_path / "root"
+    shutil.copytree(root, root2)
+    src = last["src"].replace(last["id"], idle)
+    (root2 / src).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / last["src"], root2 / src)
+    scans2 = {**scans, "scans": [*scans["scans"], {**last, "id": idle, "src": src, "ts": sn.scan_epoch(idle)}]}
+    _build(root2, scans2, tmp_path / "store", tmp_path / "work", through=last["id"])
+    out = _add(root2, scans2, tmp_path / "store", tmp_path / "work-add")
+    assert [x["scan"] for x in out["added"]] == [idle]
+    _build(root2, scans2, tmp_path / "full", tmp_path / "work-full")
+    gen, full = tmp_path / "store" / sn.PREFIX / "g", tmp_path / "full" / sn.PREFIX / "g"
+    run = gen / sa.run_key(idle, idle)
+    assert _combine(_sx([gen, run])) == _sx([full])
+    merged = tmp_path / "check"
+    sa.merge_catalogs([gen / "catalog", run / "catalog"], merged)
+    for f in ("cells.parquet", "index.parquet"):
+        assert (merged / f).read_bytes() == (full / "catalog" / f).read_bytes(), f
+
+
 def test_url_store_matches_a_local_one(built, tmp_path):
     """A URL store (fsspec `memory://`) gets the same keys and bytes as a local one (but the catalog's timing)."""
     import fsspec

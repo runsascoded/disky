@@ -431,9 +431,9 @@ def test_supervise_kills_what_ignores_term_after_the_grace(tmp_path):
     t = time.monotonic()
     rc, out, lines = sv.end(signal.SIGTERM)
     assert (rc, out, alerts(lines), time.monotonic() - t < 10) == (137, "", [
-        f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 143): terminated (SIGTERM); killed after the 0.5s grace",
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 143) in fg: terminated (SIGTERM); killed after the 0.5s grace",
     ], True)
-    assert sv.run_row() == [("failed", None, "terminated (SIGTERM); killed after the 0.5s grace")]
+    assert sv.run_row() == [("failed", "fg", "terminated (SIGTERM); killed after the 0.5s grace")]
     assert [tuple(r.values()) for r in SqliteSink(sv.db).query("SELECT phase, status, note FROM scan_run_phases")] == [
         ("fg", "failed", "failed (exit 143)"),
     ]
@@ -517,4 +517,18 @@ def test_explicit_times_for_phases_before_the_job(job):
     ]
     assert [ln for ln in job.take() if ln.startswith("PHASE ")] == [
         "PHASE capture: -120s (wall)", "PHASE queue: 0s (wall)", "PHASE fetch: 5s (wall)",
+    ]
+
+
+def test_an_unphased_failure_inside_a_begun_phase_names_it(job):
+    """`set -e` kills the script inside a begun phase (no failing `phase-end`): `finish` names the one running phase."""
+    assert job("start", SCAN, at=T0 + 1) == 0
+    assert job("phase-begin", "listing", at=T0 + 2) == 0
+    assert job("phase-end", "-M", "listing", at=T0 + 3) == 0
+    assert job("phase-begin", "index", at=T0 + 4) == 0
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("finish", "-x", "3", "-e", "exit 3: cp a b (run.sh:9)", at=T0 + 5) == 0
+    assert job.rows("SELECT status, failed_phase, error FROM scan_runs") == [("failed", "index", "exit 3: cp a b (run.sh:9)")]
+    assert [ln for ln in job.take() if ln.startswith("alert")] == [
+        f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 3) in index: exit 3: cp a b (run.sh:9)",
     ]

@@ -1,0 +1,262 @@
+{
+ "/api/buckets/open-athena": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "id": "open-athena/biotasks",
+    "private": false,
+    "size": 1110,
+    "totalFiles": 3,
+    "repoType": "bucket"
+   }
+  ]
+ },
+ "/api/buckets/open-athena/biotasks/tree?recursive=true": {
+  "status": 200,
+  "headers": {
+   "link": "<https://huggingface.co/api/buckets/open-athena/biotasks/tree?limit=2&recursive=true&cursor=p2>; rel=\"next\""
+  },
+  "body": [
+   {
+    "type": "file",
+    "path": "research/17-notebook2task/2026-10-08/033b3d722c19c8b821c4f1e6789c303591954b7ac384fe5b238d6fee60e42604/seta-cytopathology/seed/kernel-metadata.json",
+    "size": 280,
+    "xetHash": "bde0a0a685640540b7e88379b526ca7ce269a7984f185c0c78251f610a97f372",
+    "mtime": "2026-10-06T21:08:37.113Z",
+    "uploadedAt": "2026-10-08T20:38:43.528Z"
+   },
+   {
+    "type": "file",
+    "path": "research/17-notebook2task/2026-10-08/033b3d722c19c8b821c4f1e6789c303591954b7ac384fe5b238d6fee60e42604/bix-asxl1/seed/kernel-metadata.json",
+    "size": 292,
+    "xetHash": "f10b546859056171375dbe97245ab6bb5875c3576ea4def0fa18f55cc36afaf5",
+    "mtime": "2026-10-06T21:08:37.621Z",
+    "uploadedAt": "2026-10-08T20:38:45.463Z"
+   }
+  ]
+ },
+ "/api/buckets/open-athena/biotasks/tree?limit=2&recursive=true&cursor=p2": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "type": "file",
+    "path": "research/17-notebook2task/2026-10-08/033b3d722c19c8b821c4f1e6789c303591954b7ac384fe5b238d6fee60e42604/bix-asxl1/seed/datasets/data/manifest.json",
+    "size": 538,
+    "xetHash": "f69f734c4f73e5b29ae8ed19db99ec8e405ee11a7471430fca375c0931cf943e",
+    "mtime": "2026-10-06T21:08:37.621Z",
+    "uploadedAt": "2026-10-08T20:38:45.116Z"
+   }
+  ]
+ },
+ "/api/models?author=open-athena&limit=1000": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "id": "open-athena/marinfold-exp75"
+   }
+  ]
+ },
+ "/api/datasets?author=open-athena&limit=1000": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "id": "open-athena/BFCL-RL-Campaign-Artifacts-2026.10.11"
+   }
+  ]
+ },
+ "/api/spaces?author=open-athena&limit=1000": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "id": "open-athena/README"
+   }
+  ]
+ },
+ "/api/models/open-athena/marinfold-exp75?expand%5B%5D=usedStorage&expand%5B%5D=private&expand%5B%5D=lastModified&expand%5B%5D=sha": {
+  "status": 200,
+  "headers": {},
+  "body": {
+   "id": "open-athena/marinfold-exp75",
+   "private": false,
+   "lastModified": "2026-07-19T21:12:05.000Z",
+   "sha": "4c9e7779635b585730180823e0ab4b3319b82f67",
+   "usedStorage": 25169920
+  }
+ },
+ "/api/models/open-athena/marinfold-exp75/tree/4c9e7779635b585730180823e0ab4b3319b82f67?recursive=true&expand=true": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "type": "directory",
+    "oid": "10c3b470c2551a838130cb8ba0639c180d7fe4c0",
+    "size": 0,
+    "path": "prot-exp75-cv1-1_5b-e8-lr1e-3-wd0p2-v1-bc3084",
+    "lastCommit": {
+     "date": "2026-07-19T21:12:05.000Z"
+    }
+   },
+   {
+    "type": "file",
+    "oid": "9ed6a229ccfd0023597a7aa7ee8180d2734de86c",
+    "size": 25169920,
+    "lfs": {
+     "oid": "213759a988544fe12205d16e52865ad774da33701764dcb2d5a4506b87ae8ce9",
+     "size": 25169920,
+     "pointerSize": 133
+    },
+    "xetHash": "947b086d22bd1f7498af9fc8aee276bb56e81acf0f76f08e56684693bc23e015",
+    "path": "prot-exp75-cv1-1_5b-e8-lr1e-3-wd0p2-v1-bc3084/checkpoints/step-35679/d/05ae5b225d9a0a196757c8aa5f5ac078",
+    "lastCommit": {
+     "date": "2026-07-19T21:12:05.000Z"
+    }
+   },
+   {
+    "type": "file",
+    "oid": "c283a04a926e65e671cbb3290f5d9a5763dfa0b4",
+    "size": 3899,
+    "path": ".gitattributes",
+    "lastCommit": {
+     "date": "2026-07-19T21:12:05.000Z"
+    }
+   }
+  ]
+ },
+ "/api/datasets/open-athena/BFCL-RL-Campaign-Artifacts-2026.10.11?expand%5B%5D=usedStorage&expand%5B%5D=private&expand%5B%5D=lastModified&expand%5B%5D=sha": {
+  "status": 200,
+  "headers": {},
+  "body": {
+   "id": "open-athena/BFCL-RL-Campaign-Artifacts-2026.10.11",
+   "private": false,
+   "lastModified": "2026-10-12T19:31:09.000Z",
+   "sha": "b5c35eae7ca3c1f6c1ea9f8d3e52b2ee45fe67c4",
+   "usedStorage": 86939762
+  }
+ },
+ "/api/datasets/open-athena/BFCL-RL-Campaign-Artifacts-2026.10.11/tree/b5c35eae7ca3c1f6c1ea9f8d3e52b2ee45fe67c4?recursive=true&expand=true": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "type": "directory",
+    "oid": "2d0669f087f18a30c1bf61d44a0fe0a24edb3225",
+    "size": 0,
+    "path": "evaluation-comparisons",
+    "lastCommit": {
+     "date": "2026-10-12T19:31:09.000Z"
+    }
+   },
+   {
+    "type": "file",
+    "oid": "78493b9703e8b5624bcd7655f7ae346e801641b5",
+    "size": 86937622,
+    "lfs": {
+     "oid": "674566f5f5afa137b202b345f8a2e8ac81be9447afcf272ff2b816a816ee941f",
+     "size": 86937622,
+     "pointerSize": 133
+    },
+    "xetHash": "276c5729f4f4cad6e10d1f531a593c184ba35571cff46c958fd5d937768d4fbc",
+    "path": "artifacts.tar.gz",
+    "lastCommit": {
+     "date": "2026-10-11T11:49:28.000Z"
+    }
+   },
+   {
+    "type": "file",
+    "oid": "d572684bba89cc2f55e73acad69b5f6175b9b0b0",
+    "size": 2562,
+    "path": ".gitattributes",
+    "lastCommit": {
+     "date": "2026-10-11T11:49:28.000Z"
+    }
+   }
+  ]
+ },
+ "/api/spaces/open-athena/README?expand%5B%5D=usedStorage&expand%5B%5D=private&expand%5B%5D=lastModified&expand%5B%5D=sha": {
+  "status": 200,
+  "headers": {},
+  "body": {
+   "id": "open-athena/README",
+   "private": false,
+   "lastModified": "2026-09-02T14:48:43.000Z",
+   "sha": "c61e315cb93fc0031ca0e9df4ef83b17663035ec",
+   "usedStorage": 0
+  }
+ },
+ "/api/spaces/open-athena/README/tree/c61e315cb93fc0031ca0e9df4ef83b17663035ec?recursive=true&expand=true": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "type": "file",
+    "oid": "a6344aac8c09253b3b630fb776ae94478aa0275b",
+    "size": 1519,
+    "path": ".gitattributes",
+    "lastCommit": {
+     "date": "2026-09-02T14:46:52.000Z"
+    }
+   },
+   {
+    "type": "file",
+    "oid": "b1deb9aa3761d1f8cdb9296b01e33a7134c15a3a",
+    "size": 541,
+    "path": "README.md",
+    "lastCommit": {
+     "date": "2026-09-02T14:48:43.000Z"
+    }
+   }
+  ]
+ },
+ "/api/datasets/open-athena/Complex-Closure-RLVR-Snowball-67B-A2B-Artifacts?expand%5B%5D=usedStorage&expand%5B%5D=private&expand%5B%5D=lastModified&expand%5B%5D=sha": {
+  "status": 200,
+  "headers": {},
+  "body": {
+   "id": "open-athena/Complex-Closure-RLVR-Snowball-67B-A2B-Artifacts",
+   "private": false,
+   "lastModified": "2026-10-13T14:31:23.000Z",
+   "sha": "08d258187a8f68c3fa4602fa791dddb05067fa50",
+   "usedStorage": 11224478
+  }
+ },
+ "/api/datasets/open-athena/Complex-Closure-RLVR-Snowball-67B-A2B-Artifacts/tree/08d258187a8f68c3fa4602fa791dddb05067fa50?recursive=true": {
+  "status": 200,
+  "headers": {},
+  "body": [
+   {
+    "type": "file",
+    "oid": "489b570e0bf9bae33980d161d2b2fdf67d10fc09",
+    "size": 11224478,
+    "lfs": {
+     "oid": "cc9f5622847dbfef55df012c7e77bfabeee17f9434db8e17e7b06b13e8c6cd75",
+     "size": 11224478,
+     "pointerSize": 133
+    },
+    "xetHash": "303d35b87eea464943c3df236112bcdf661b9ffb943ebc76b8d6df7aa39f44b0",
+    "path": "artifacts/data/closure-near-boundary-cases-v7/validation.jsonl"
+   },
+   {
+    "type": "file",
+    "oid": "489b570e0bf9bae33980d161d2b2fdf67d10fc09",
+    "size": 11224478,
+    "lfs": {
+     "oid": "cc9f5622847dbfef55df012c7e77bfabeee17f9434db8e17e7b06b13e8c6cd75",
+     "size": 11224478,
+     "pointerSize": 133
+    },
+    "xetHash": "303d35b87eea464943c3df236112bcdf661b9ffb943ebc76b8d6df7aa39f44b0",
+    "path": "artifacts/data/closure-value-controls-cases-v5/validation.jsonl"
+   },
+   {
+    "type": "file",
+    "oid": "f19e231cc16800345707687181adf6a8807d2769",
+    "size": 8904,
+    "path": ".gitattributes"
+   }
+  ]
+ }
+}

@@ -332,17 +332,36 @@ def test_diffs_equal_the_per_scan_reference(built, served):
 
     store = ir.Store(served)
     sc = _scans(built)
-    n_changed = 0
+    n_changed = folds = 0
     for (sa, a), (sb, b) in zip(sc, sc[1:]):
         for path in ["", "b1", "b2/e"]:
             ra, rb = a.root_b(path), b.root_b(path)
             if ra <= 0 or rb <= 0:
                 continue
             thr = max(ra, rb) * ir.MIN_AREA / (8 * 6)
-            want = ir.diff(a.view(path, 8, 6, threshold=thr), b.view(path, 8, 6, threshold=thr), a.lookup, b.lookup)
+            # Across the v1 → v2 cutover (08-02 → 08-03) the objects fold: per-scan from each source's format, the
+            # store from its rows (`Store.view`'s `objects`).
+            fold = a.v != b.v
+            want = ir.diff(a.view(path, 8, 6, threshold=thr), b.view(path, 8, 6, threshold=thr), a.lookup, b.lookup, fold=fold)
             cost = ir.Cost()
-            got = ir.diff(store.view(sa["ts"], path, 8, 6, threshold=thr), store.view(sb["ts"], path, 8, 6, threshold=thr),
-                          lambda p: store.lookup(sa["ts"], p, cost), lambda p: store.lookup(sb["ts"], p, cost))
-            assert got == want, (sa["id"], sb["id"], path)
+            ga, gb = store.view(sa["ts"], path, 8, 6, threshold=thr), store.view(sb["ts"], path, 8, 6, threshold=thr)
+            got = ir.diff(ga, gb, lambda p: store.lookup(sa["ts"], p, cost), lambda p: store.lookup(sb["ts"], p, cost),
+                          fold=ga["objects"] != gb["objects"])
+            assert (got, ga["objects"] != gb["objects"]) == (want, fold), (sa["id"], sb["id"], path)
             n_changed += sum(1 for r in want if r[2] != "unchanged")
+            folds += fold
     assert n_changed > 0
+    assert folds > 0
+
+
+def test_a_scans_rows_say_its_format(built, served):
+    """A v1 scan's versions carry no structural counts (`n_children` / `n_desc` -1), a store generation's always do:
+    what `buildDiff` (and `Store.view`'s `objects`) tells a dir-only scan by."""
+    from dt_cloud import interval_read as ir
+
+    store = ir.Store(served)
+    paths = ["", "b1", "b2", "b1/gof", "b1/d", "b2/e", "b2/f"]
+    sc = _scans(built)
+    # Every view each scan has (the fixture's paths come and go; a scan without P has no view of it).
+    got = [(s["id"], sorted({v["objects"] for v in (store.view(s["ts"], p, 30, 30) for p in paths) if v["tree"] is not None})) for s, _ in sc]
+    assert got == [(s["id"], [scan.v == 2]) for s, scan in sc]

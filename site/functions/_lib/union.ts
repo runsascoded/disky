@@ -22,7 +22,7 @@
  * deployment without a union view never reaches this module.
  */
 import { decodeScan, isScanId, scanInstant } from '../../src/scanSlug.js'
-import { compareScans, latestObserved, type Observation } from '../../src/federatedScans.js'
+import { compareScans, latestObserved, type Observation, parseCutoff } from '../../src/federatedScans.js'
 import { type Env, json, type Identity, requireViewer } from './auth.js'
 import { ivRetry, pathScans, storeReady, withPathStore } from './index.js'
 import { indexedScan, noScan } from './scanArg.js'
@@ -49,14 +49,19 @@ export function unionFor(request: Request, env: Env): UnionView | null | Respons
   return views[raw] ?? null
 }
 
+/** The params only a union view reads (its `at`-form cutoffs): never passed on to a member, whose own handler
+ *  takes the scan id the union resolved for it. */
+const UNION_ONLY = ['at', 'from_at', 'to_at']
+
 /** `request` as member `store` asks it: `store=<member>` (none for the
- * primary), `set` params replaced, `drop` params removed. Headers (the
+ * primary), `set` params replaced, `drop` params (and the union's own
+ * `at`-form cutoffs) removed. Headers (the
  * session cookie), method and signal carry over. */
 export function memberRequest(request: Request, store: string, set: Record<string, string> = {}, drop: string[] = []): Request {
   const url = new URL(request.url)
   if (store === PRIMARY_STORE) url.searchParams.delete('store')
   else url.searchParams.set('store', store)
-  for (const k of drop) url.searchParams.delete(k)
+  for (const k of [...UNION_ONLY, ...drop]) url.searchParams.delete(k)
   for (const [k, v] of Object.entries(set)) url.searchParams.set(k, v)
   return new Request(url, request)
 }
@@ -140,10 +145,27 @@ export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promi
   return { view, ctxs, obs: await Promise.all(ctxs.map(c => observations(c.env))), id }
 }
 
-/** The cutoff a request names under `key`: an exact scan id some member indexes (else the single-store 404);
- *  for `date` absent, `d=<slug>` — the latest scan any member indexes under the slug. */
+/** The `at`-form param beside a scan-id param: `date` → `at`, `from` → `from_at`, `to` → `to_at`. */
+export const atKey = (key: string): string => (key === 'date' ? 'at' : `${key}_at`)
+
+/**
+ * The cutoff a request names under `key`, three ways:
+ * - `<key>=<id>`: an exact scan id some member indexes (else the single-store 404), at its instant;
+ * - `<atKey>=<instant>` (`at=`, `from_at=`, `to_at=`; `parseCutoff`: ISO or compact UTC): that instant itself —
+ *   each member then reads its newest scan at or before it, so a cutoff between two members' scans (one
+ *   member's newer scan, another's older) is said exactly, which no one scan id can; `date` is the newest scan
+ *   any member observed by then (none: a 404);
+ * - for `date` absent, `d=<slug>`: the latest scan any member indexes under the slug.
+ */
 export async function cutoffOf(u: Union, sp: URLSearchParams, key = 'date'): Promise<Cutoff | Response> {
   const raw = sp.get(key)
+  const atRaw = raw === null ? sp.get(atKey(key)) : null
+  if (atRaw !== null) {
+    const at = parseCutoff(atRaw)
+    if (!at) return json({ error: `${atKey(key)}=<UTC instant> (YYYY-MM-DDTHH:MM[:SS]Z or YYYYMMDDTHHMM[SS]Z) required` }, 400)
+    const best = u.obs.flatMap(o => (latestObserved(o, at) ? [latestObserved(o, at)!] : [])).sort(compareScans).at(-1)
+    return best ? { date: best.id, at } : json({ error: `no scan at or before ${atKey(key)}=${atRaw}` }, 404)
+  }
   if (raw !== null || key !== 'date' || !sp.has('d')) {
     if (!raw || !isScanId(raw)) return json({ error: `${key}=YYYY-MM-DD[THHMM] required` }, 400)
     const hit = u.obs.map(o => o.find(s => s.id === raw)).find(Boolean)
@@ -157,6 +179,9 @@ export async function cutoffOf(u: Union, sp: URLSearchParams, key = 'date'): Pro
   return best ? { date: best.id, at: best.observed_through } : noScan('d', slug)
 }
 
+/** Whether a request names a cutoff at all (`date=`, `at=` or `d=`). */
+export const namesCutoff = (sp: URLSearchParams): boolean => ['date', 'at', 'd'].some(k => sp.has(k))
+
 /** The newest scan any member indexes: the "latest" cutoff (null = no member has one). */
 export function latestCutoff(u: Union): Cutoff | null {
   const best = u.obs.flat().sort(compareScans).at(-1)
@@ -168,7 +193,7 @@ export function membersAt(u: Union, c: Cutoff): Resolved {
   return { view: u.view, ...c, members: u.view.members.map((store, i) => ({ store, ctx: u.ctxs[i], date: latestObserved(u.obs[i], c.at)?.id ?? null })) }
 }
 
-/** Open, cut off at the request's `date=`/`d=`, resolve: what a single-scan endpoint (`/api/subtree`) reads. */
+/** Open, cut off at the request's `date=`/`at=`/`d=`, resolve: what a single-scan endpoint (`/api/subtree`) reads. */
 export async function resolveUnion(ctx: Ctx, view: UnionView, gate: boolean): Promise<{ resolved: Resolved; id: Identity | null } | Response> {
   const u = await openUnion(ctx, view, gate)
   if (u instanceof Response) return u
@@ -192,11 +217,18 @@ export async function memberOf(r: Resolved, path: string): Promise<Member | null
 /** Two members hold the same root: the union would double count it. */
 export class UnionOverlap extends Error {}
 
+/** A member's root rows (`readRootRows`): every top-level path at its scan, drawn or not. */
+export type RootRow = { path: string; b: number; o: number; m?: number | null; k?: 'file' | 'dir' }
+
 /** The union's root from its members' root trees (each read under the union's threshold): every member's
  *  top-level nodes, tagged with its store (`src`) and scan (`at`), largest first; the members' `(other)`s
  *  summed into one, last; the totals summed under `label`. A top-level name two members draw is a
- *  misconfigured union (`UnionOverlap`), never a sum. */
-export function unionRoot(view: UnionView, label: string, members: readonly { store: string; date: string; tree: ViewNode }[]): ViewNode {
+ *  misconfigured union (`UnionOverlap`), never a sum.
+ *
+ *  With a member's `roots` (the plain root; never a filtered one, whose roots are its matches), every root the
+ *  threshold folded into its `(other)` is listed too, out of the fold: the root's bucket table lists every
+ *  member's every root, however small against the union's total (the treemap may still dust it). */
+export function unionRoot(view: UnionView, label: string, members: readonly { store: string; date: string; tree: ViewNode; roots?: readonly RootRow[] | null }[]): ViewNode {
   const kids: ViewNode[] = []
   const other: ViewNode = { n: '(other)', k: 'dir', b: 0, o: 0, f: 0 }
   const seen = new Map<string, string>()
@@ -211,8 +243,21 @@ export function unionRoot(view: UnionView, label: string, members: readonly { st
       seen.set(c.n, m.store)
       kids.push({ ...c, src: m.store, at: m.date })
     }
+    const drawn = new Set((m.tree.c ?? []).map(c => c.n))
+    for (const r of m.roots ?? []) {
+      if (drawn.has(r.path)) continue
+      const prev = seen.get(r.path)
+      if (prev) throw new UnionOverlap(`union view '${view.key}': root '${r.path}' is in stores ${prev}, ${m.store}`)
+      seen.set(r.path, m.store)
+      kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m != null ? { d: Math.floor(r.m / 86400) } : {}), src: m.store, at: m.date })
+      other.b -= r.b; other.o -= r.o
+      if (other.f !== undefined) other.f -= 1
+    }
   }
-  kids.sort((x, y) => y.b - x.b)
+  if (other.f !== undefined && other.f <= 0) delete other.f
+  kids.sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
+  // Lifted roots leave the fold what the threshold folded beside them (nothing, at a bucket root); never below zero.
+  other.b = Math.max(0, other.b); other.o = Math.max(0, other.o)
   if (other.b > 0 || other.o > 0) kids.push(other)
   return {
     n: label, k: 'dir',

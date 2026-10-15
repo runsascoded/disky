@@ -23,6 +23,7 @@ import { usePerfCommit } from './perf'
 import { pathText } from './pathCrumbs'
 import { rowLabel, type RowMatches, rowsCover } from './filterCover'
 import { ActStatus, RowActs, type RowSource, useActDeps, useKeepFocus, useMatchAct } from './MatchActions'
+import { RootSourceTag } from './UnionNotes'
 
 // Sortable, paged listing of the treemap's current node's children — the
 // tabular twin of the map above it: every named row is a link, a directory
@@ -321,7 +322,9 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                       ? <Tooltip content={<code className="elide-full">{pathText(scheme, fullSegs, home)}</code>} placement="right">{name}</Tooltip>
                       : name
                     const inside = mark?.as === 'inside' && <Tooltip content={`${mark.n.toLocaleString('en-US')} staged ${mark.n === 1 ? 'item' : 'items'} inside: review them at /staged`}><a className="row-n staged-n" href="/staged"> · {mark.n.toLocaleString('en-US')} staged</a></Tooltip>
-                    return count ? <>{cell}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{cell}{inside}</>
+                    // A union root's row: its store's mark, that store's scan in its tip (`src`/`at`).
+                    const src = <RootSourceTag node={k} />
+                    return count ? <>{cell}{src}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{cell}{src}{inside}</>
                   })()}
                 </td>
                 <td className="num">{fmtBytes(k.b)}</td>

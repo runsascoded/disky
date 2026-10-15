@@ -466,3 +466,15 @@ def test_verify_reads_a_non_gcs_store(world, local, tmp_path):
     assert sum(s["views"] for s in summaries) > 0
     recs = [json.loads(ln) for ln in (tmp_path / "out" / "verify" / f"t00-{sampled[0]}.jsonl").read_text().splitlines()]
     assert sorted({r["ps_cost"] is None for r in recs if r["kind"] == "view" and "ps_cost" in r}) == [True]
+
+
+def test_verify_samples_the_appended_scans(world, local, tmp_path):
+    """`verify` reads the newest manifest's runs beside the base (as the Worker does), so a scan an `add` appended is
+    sampled like a base scan: every view and diff of every scan, base and appended, equals the per-scan path store's."""
+    res = CliRunner().invoke(ist.cli, ["verify", "-b", str(local["store"]), "-g", "g", "-s", ",".join(DATES), "-o", str(tmp_path / "out"),
+                                       "-T", str(tmp_path / "tmp"), "-i", "0"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    summaries = json.loads(res.stdout.strip().splitlines()[-1])
+    assert [s["date"] for s in summaries] == DATES
+    assert [(s["views"] == s["view_eq"], s["diffs"] == s["diff_eq"]) for s in summaries] == [(True, True)] * len(DATES)
+    assert min(s["views"] for s in summaries) > 0

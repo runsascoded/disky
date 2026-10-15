@@ -1131,7 +1131,7 @@ class JobRun:
     def facts(self) -> dict[str, str]:
         st = self.state()
         f = {"job_uid": self.run_id, "project": self.profile.project, "region": st.get("region"), "job": st.get("job_name"),
-             "scan": self.scan, "kind": st.get("kind", "scan")}
+             "scan": self.scan, "kind": st.get("kind", "scan"), "store": st.get("store") or self.profile.store}
         return {k: str(v) for k, v in f.items() if v}
 
     def logs_url(self) -> str | None:
@@ -1170,7 +1170,11 @@ class JobRun:
         """Record the run finished with `rc` (`error` its one-line reason), and on a failure post the `fail` alert
         unless one was already posted (a phase's, or an earlier `finish`'s)."""
         error = self.redact(error) if error else None
-        failed_phase = self.state().get("failed_phase")
+        st = self.state()
+        # A failing `phase-end` names its phase; a plain command failing inside a begun phase (`set -e`, the ERR trap)
+        # doesn't, so the one phase still running is the failure's. Several running (background phases): none named.
+        running = st.get("running", [])
+        failed_phase = st.get("failed_phase") or (running[0] if rc and len(running) == 1 else None)
         self.write(exit_code=rc, error=error, failed_phase=failed_phase)
         if rc and not self.alerted():
             self.mark_alerted()
@@ -1221,8 +1225,7 @@ class JobRun:
 
     def begin(self, name: str, began: int | None = None, gen: str | None = None) -> None:
         err(phase_line(name, self.clock(began), start=True))
-        if gen:
-            self.save(gen=gen)
+        self.save(running=[*(r for r in self.state().get("running", []) if r != name), name], **({"gen": gen} if gen else {}))
         self.write(phase=name, phase_start=True, began=began, gen=gen)
 
     def end(
@@ -1242,6 +1245,7 @@ class JobRun:
         """Close phase `name` with exit code `rc` at `at` (epoch s; default now): the PHASE line, its record, and on a
         failure its alert. Returns the exit status: `rc` for a fatal failure, else 0."""
         secs = self.clock(at)
+        self.save(running=[r for r in self.state().get("running", []) if r != name])
         if rc:
             note = f"failed (exit {rc})" + (f", {note}" if note else "")
         note = self.redact(note) if note else None

@@ -36,7 +36,7 @@ test('mobile chips wrap inside the viewport and show honest per-source coverage'
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.getByText('1/4 sources observed at this cutoff', { exact: true }).click()
   await expect(page.locator('.fp-sources li strong')).toHaveText(['awair', 'crashes', 'ctbk', 'jc-taxes'])
-  await expect(page.locator('.fp-sources li span')).toHaveText([
+  await expect(page.locator('.fp-sources li > span')).toHaveText([
     'No scan before cutoff', 'No scan before cutoff', /.+capture began .+/, 'No scan before cutoff',
   ])
   const rect = await page.getByRole('dialog').boundingBox()

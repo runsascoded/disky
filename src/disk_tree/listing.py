@@ -50,6 +50,16 @@ S3_CLASS_IDS = {
     "DEEP_ARCHIVE": 4,
 }
 
+# Hugging Face (`bulk-list hf://`) has no hot/cold tiers; its class is the
+# billing class. Public storage is the default (1, like STANDARD); private gets
+# 5 and plain git files (READMEs, small JSON — stored in the repo's git, never
+# counted in `usedStorage`) get 6, both outside the 2–4 tier range so no tier
+# pivot (`sum_storage_class_id_{2,3,4}`, priced as GCS tiers on the site)
+# misreads them as a colder tier. Under `import -p storage_class_id`,
+# `sum_storage_class_id_5` is the billing page's private total and
+# `size - sum_storage_class_id_6` its public + private total.
+HF_CLASS_IDS = {"public": 1, "private": 5, "git": 6}
+
 
 def _normalized_select(con: "duckdb.DuckDBPyConnection", glob: str) -> str:
     cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{glob}') LIMIT 0").fetchall()}

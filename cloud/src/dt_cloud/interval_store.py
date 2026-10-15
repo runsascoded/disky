@@ -848,6 +848,27 @@ def download_served(store: Store, prefix: str, dst: Path, *, workers: int = 16) 
         err(f"served {name}: {blob.size:,} B in {monotonic() - t0:.0f}s")
 
 
+def verify_runs(store: Store, prefix: str, dst: Path, scans: dict) -> list[str]:
+    """The newest manifest's runs, read beside the base as the Worker reads them: each run's served sorts downloaded under
+    `dst`, and its scans' docs (`deltas/<scan>/scans.json`, a scan's own run dir) added to `scans` so they can be sampled.
+    A scan whose own dir a carry folded and pruned (R2 keeps none of a folded run) stays unsampleable."""
+    from .append_runner import latest_key
+
+    newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
+    if newest is None:
+        return []
+    out = []
+    for r in store.read_json(f"{prefix}/{newest}")["runs"]:
+        d = dst / r["key"]
+        download_served(store, f"{prefix}/{r['key']}", d)
+        out.append(str(d))
+        for sid in r["scans"]:
+            if store.exists(f"{prefix}/deltas/{sid}/scans.json"):
+                scans["scans"] += store.read_json(f"{prefix}/deltas/{sid}/scans.json")["scans"]
+    err(f"verify: base + {len(out)} run(s) of {newest}")
+    return out
+
+
 @cli.command("verify")
 @option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-g", "--gen", required=True, help="Generation")
@@ -869,11 +890,12 @@ def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) ->
     tmp = Path(tmp)
     download_served(store, prefix, tmp / "served")
     scans = store.read_json(f"{prefix}/scans.json")
+    runs = verify_runs(store, prefix, tmp / "runs", scans)
     outp = Path(out) / "verify"
     outp.mkdir(parents=True, exist_ok=True)
     sampled = scan_ids.split(",") if scan_ids else load_profile(profile)["verify_scans"]
     tag = f"t{t:02d}" if not scan_ids else f"t{t:02d}-{sampled[0]}"
-    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount)
+    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs)
     (outp / f"{tag}.json").write_text(json.dumps(summaries, indent=1) + "\n")
     store.put_tree(outp, f"{prefix}/verify")
     print(json.dumps(summaries), flush=True)

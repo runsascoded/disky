@@ -32,23 +32,24 @@ export class CoverError extends HttpError {}
 /** One retry, on a 5xx (the cold cover's D1 stall or isolate limit: gcs 10-09 `nemotron`, a 503 at 46 s). */
 export const coverRetry = (failures: number, e: Error): boolean => failures < 1 && e instanceof CoverError && e.status >= 500
 
-/** What a cover is asked for: a scan, a path (the view's, or one row's), a filter and its syntax. */
-export interface CoverArgs { date: string | null; path: string; q: string | undefined; qs?: string }
+/** What a cover is asked for: a scan, a path (the view's, or one row's), a filter and its syntax. `at`: a union
+ *  view's cutoff instant (`?at=`), read in place of `date` (the page's scan for it). */
+export interface CoverArgs { date: string | null; at?: string | null; path: string; q: string | undefined; qs?: string }
 
 /** The cover query's options (`useFilterCover`, `fetchCover`): one retry on a 5xx; `enabled` only gates the
  *  page's observer (an imperative fetch ignores it). */
 export function coverQuery(
   fetcher: (url: string, init?: RequestInit) => Promise<Response>,
   storeKey: string,
-  o: { date: string | null; path: string; q: string | undefined; qs?: string; enabled: boolean },
+  o: CoverArgs & { enabled: boolean },
 ) {
   return {
-    queryKey: ['filter-cover', storeKey, o.date, o.path, o.q, o.qs ?? ''],
+    queryKey: ['filter-cover', storeKey, o.at ?? o.date, o.path, o.q, o.qs ?? ''],
     enabled: o.enabled && !!o.date && !!o.q,
     staleTime: Infinity,
     retry: coverRetry,
     queryFn: async ({ signal }: { signal?: AbortSignal }): Promise<FilterCover> => {
-      const qs = new URLSearchParams({ cv: String(COVER_V), date: o.date!, path: o.path, q: o.q!, ...(o.qs ? { qs: o.qs } : {}) })
+      const qs = new URLSearchParams({ cv: String(COVER_V), ...(o.at ? { at: o.at } : { date: o.date! }), path: o.path, q: o.q!, ...(o.qs ? { qs: o.qs } : {}) })
       const r = await fetcher(`/api/filter-cover?${qs}`, { credentials: 'include', signal })
       const text = await r.text()
       if (!r.ok) {
@@ -66,7 +67,7 @@ export function coverQuery(
 export function useFilterCover(
   fetcher: (url: string, init?: RequestInit) => Promise<Response>,
   storeKey: string,
-  o: { date: string | null; path: string; q: string | undefined; qs?: string; enabled: boolean },
+  o: CoverArgs & { enabled: boolean },
 ) {
   return useQuery<FilterCover>(coverQuery(fetcher, storeKey, o))
 }

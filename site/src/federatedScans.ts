@@ -25,6 +25,8 @@ export interface SourceCatalog {
   version: 1
   source: string
   label: string
+  /** The source's mark in the picker and on the map: a URL or a path the site serves; absent = its label. */
+  icon?: string
   mount: string
   scope: SourceScope
   scans: SourceScan[]
@@ -83,6 +85,29 @@ export function utcInstant(value: string): string {
   return canonical
 }
 
+const CUTOFF_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{3}))?)?Z$/
+const CUTOFF_COMPACT = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?Z$/
+
+/** An `at=` cutoff (a union view's instant, specs/federated-scans.md "Case 1 status"): an ISO UTC instant
+ *  (`2026-10-13T19:35Z`, `…:35:00Z`, `…:35:00.000Z`) or its compact form (`20261013T1935Z`, `20261013T193500Z`),
+ *  as its canonical ISO instant (`2026-10-13T19:35:00.000Z`). Null: neither form, or no such calendar time. */
+export function parseCutoff(value: string | null | undefined): string | null {
+  const m = value ? CUTOFF_ISO.exec(value) ?? CUTOFF_COMPACT.exec(value) : null
+  if (!m) return null
+  const [, y, mo, d, hh, mm, ss = '00', ms = '000'] = m
+  const iso = `${y}-${mo}-${d}T${hh}:${mm}:${ss}.${ms}Z`
+  const n = Date.parse(iso)
+  return Number.isFinite(n) && new Date(n).toISOString() === iso ? iso : null
+}
+
+/** A cutoff as the URL writes it: the compact form, to the minute (`20261013T1935Z`), seconds only when it has
+ *  them; an instant with milliseconds stays ISO (exact either way: `parseCutoff` reads both). */
+export function encodeCutoff(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/.exec(iso)
+  if (!m || m[7] !== '000') return iso
+  return `${m[1]}${m[2]}${m[3]}T${m[4]}${m[5]}${m[6] === '00' ? '' : m[6]}Z`
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('expected an object')
   return value as Record<string, unknown>
@@ -111,6 +136,12 @@ function scopeOf(value: unknown): SourceScope {
   const prefix = s.prefix === '' ? '' : relative(s.prefix, true)
   if (prefix && !prefix.endsWith('/')) throw new Error('nonempty scope prefix must end with /')
   return { store: string(s.store), prefix }
+}
+/** A source's icon: an absolute `http(s)://` URL or a path the site serves (`/…`); nothing a link could run. */
+function iconRef(value: unknown): string {
+  const s = string(value)
+  if (!/^(https?:\/\/\S+|\/[^\s/]\S*)$/.test(s)) throw new Error('expected an icon URL or site path')
+  return s
 }
 function contentDigest(value: unknown): string {
   const s = string(value)
@@ -145,8 +176,8 @@ export function parseSourceCatalog(value: unknown): SourceCatalog {
   const refs = scans.map(s => JSON.stringify([s.id, s.revision]))
   if (new Set(refs).size !== refs.length) throw new Error('duplicate scan revision')
   return {
-    version: 1, source: identifier(c.source), label: string(c.label), mount: identifier(c.mount),
-    scope, scans,
+    version: 1, source: identifier(c.source), label: string(c.label), ...(c.icon === undefined ? {} : { icon: iconRef(c.icon) }),
+    mount: identifier(c.mount), scope, scans,
   }
 }
 

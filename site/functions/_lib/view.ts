@@ -498,15 +498,16 @@ const floorOf = (h: IndexHandle): number | null => h.floor
 /** The store root's depth-1 rows (one per bucket) in a scan — `/api/series
  * ?split=roots` (specs/done/root-geneses.md §1); null = the scan has no tier. The
  * same one range read `readRootAgg` sums for the unscoped root. */
-export async function readRootRows(env: Env, date: string): Promise<{ path: string; b: number; o: number }[] | null> {
+export async function readRootRows(env: Env, date: string): Promise<{ path: string; b: number; o: number; m: number | null; k: 'file' | 'dir' }[] | null> {
   const top = await tryOpen(env, date, `coarse${COARSE_EXPS[0]}`)
   const rows = top ? await readRows(top, 1, 1, '', '￿') : []
   const src = rows.length ? rows : await (async () => { const fine = await tryOpen(env, date, 'path'); return fine ? readRows(fine, 1, 1, '', '￿') : null })()
   if (src == null) return null
-  const by = new Map<string, { path: string; b: number; o: number }>()
+  const by = new Map<string, { path: string; b: number; o: number; m: number | null; k: 'file' | 'dir' }>()
   for (const r of src) {
-    const a = by.get(r.path) ?? { path: r.path, b: 0, o: 0 }
+    const a = by.get(r.path) ?? { path: r.path, b: 0, o: 0, m: null, k: r.kind }
     a.b += r.size; a.o += r.n_files
+    if (r.mtime != null && (a.m == null || r.mtime > a.m)) a.m = r.mtime
     by.set(r.path, a)
   }
   return [...by.values()]
@@ -2113,6 +2114,12 @@ function sumInteriors(a?: View['interiors'], b?: View['interiors']): NonNullable
   return { read: xs.reduce((n, x) => n + x.read, 0), skipped: xs.reduce((n, x) => n + x.skipped, 0), reason: [...new Set(xs.map(x => x.reason))].join(' · '), ...(late ? { late } : {}) }
 }
 
+/** Whether a side's scan lists objects (a store generation) or only directories (a v1 index). Per-scan, its handle
+ *  says; on the interval store every scan reads one store sort, so its rows say: a version from a v1 scan has no
+ *  structural counts (`n_children` / `n_desc` -1 in the store, null as a `Row`), a store generation's always do — the
+ *  same test a view's `(other)` count makes (`f`). */
+const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null || v.rootAll.nd != null)
+
 /** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
  * the larger side's pixel-budget threshold — so a directory is named on both
@@ -2201,7 +2208,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // One side a v1 generation (dirs only), the other a store (objects too):
   // the objects have no counterpart to be compared with, so they fold into
   // `(other)` on the store side rather than reading as added / removed.
-  if (va && vb && isStore(va.idx) !== isStore(vb.idx)) {
+  if (va && vb && listsObjects(va) !== listsObjects(vb)) {
     for (const v of [va, vb]) for (const [p, a] of v.kept) if (a.kind === 'file') v.kept.delete(p)
   }
   const walkStart = performance.now()

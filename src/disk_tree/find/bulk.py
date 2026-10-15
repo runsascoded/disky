@@ -281,12 +281,15 @@ def dedupe_prefixes(prefixes: list[str]) -> "tuple[list[str], list[tuple[str, st
 def entries_to_frame(
     bucket: str,
     rows: "list[tuple]",
+    class_ids: "dict[str, int]" = SII_CLASS_IDS,
 ) -> pd.DataFrame:
     """Backend tuples → canonical listing columns.
 
     Four-field rows are the historical/S3 shape; a fifth field is the GCS
     generation. Accepting both keeps discovery plug-ins simple while every
-    written shard has one stable schema.
+    written shard has one stable schema. ``class_ids`` maps the raw class
+    string to ``storage_class_id`` (unknown → 0); Hugging Face passes
+    :data:`~disk_tree.listing.HF_CLASS_IDS`.
     """
     normalized = [(*row, None) if len(row) == 4 else row for row in rows]
     names, sizes, created, classes, generations = zip(*normalized) if normalized else ((), (), (), (), ())
@@ -300,7 +303,7 @@ def entries_to_frame(
             # it pandas ≥2 locks onto the first row's format and raises on the
             # other, killing the worker mid-listing.
             "created": pd.to_datetime(list(created), utc=True, format='ISO8601'),
-            "storage_class_id": [SII_CLASS_IDS.get(c or "", 0) for c in classes],
+            "storage_class_id": [class_ids.get(c or "", 0) for c in classes],
             "generation": pd.array(generations, dtype="Int64"),
         }
     )

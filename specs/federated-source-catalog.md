@@ -17,6 +17,7 @@ Illustrative fixture only: the zero digest and sizes below are placeholders, not
   "version": 1,
   "source": "awair",
   "label": "Awair",
+  "icon": "/icons/awair.svg",
   "mount": "awair",
   "scope": { "store": "r2:rac/awair", "prefix": "pyramid/" },
   "scans": [{
@@ -39,7 +40,7 @@ Illustrative fixture only: the zero digest and sizes below are placeholders, not
 }
 ```
 
-`path` is required; `bysize`, `mtime` and `search` are optional capability references. Absence means the capability is unavailable on that exact scan, not permission to fetch an older scan. A bare health-inventory response or UUID L2 listing is not a published path-store export. Serving also needs the producer's matching row-group/footer metadata/routing, using the existing path-store reader contract; the current catalog parser alone does not implement that reader or a cross-source D1 database.
+`icon` is optional: the source's mark on the picker's update chips and sources list, an absolute `http(s)://` URL or a path the serving site serves (`/…`); without one the picker shows `label`, which is also the icon's accessible name and tooltip. `path` is required; `bysize`, `mtime` and `search` are optional capability references. Absence means the capability is unavailable on that exact scan, not permission to fetch an older scan. A bare health-inventory response or UUID L2 listing is not a published path-store export. Serving also needs the producer's matching row-group/footer metadata/routing, using the existing path-store reader contract; the current catalog parser alone does not implement that reader or a cross-source D1 database.
 
 Publish only successful, complete exports. All byte/object totals are nonnegative safe integers. IDs/revisions are nonempty strings; each `(id, revision)` is unique. The parser refuses pending/failed entries, invalid capture ordering (`from ≤ through ≤ published`), malformed hashes, absolute artifact URLs, traversal and encoded path segments. Artifact keys are producer-controlled names, not arbitrary source object keys.
 

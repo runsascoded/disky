@@ -3,7 +3,7 @@
 Supported inputs:
 - Bare path: `/Users/ryan`  → `file` scheme, absolute path
 - `file://` URL
-- `s3://bucket/prefix` (and `r2://`, `gcs://`, `az://`)
+- `s3://bucket/prefix` (and `r2://`, `gcs://`, `az://`, `hf://namespace/kind/repo`)
 """
 
 from dataclasses import dataclass
@@ -32,7 +32,7 @@ def parse_url(url: str) -> ParsedUrl:
         )
 
     parsed = urlparse(url)
-    if parsed.scheme in ('s3', 'r2', 'gcs', 'az'):
+    if parsed.scheme in ('s3', 'r2', 'gcs', 'az', 'hf'):
         # Object-storage URLs: netloc is the bucket; path keeps the key prefix.
         return ParsedUrl(
             scheme=parsed.scheme,
@@ -77,6 +77,6 @@ def canonical(url: str) -> str:
     p = parse_url(url)
     if p.scheme == 'file':
         return p.path.rstrip('/') or '/'
-    if p.scheme in ('s3', 'r2', 'gcs', 'az'):
+    if p.scheme in ('s3', 'r2', 'gcs', 'az', 'hf'):
         return f'{p.scheme}://{p.host}{p.path}'.rstrip('/')
     return url

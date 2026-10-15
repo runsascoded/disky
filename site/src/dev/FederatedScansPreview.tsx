@@ -52,7 +52,7 @@ export default function FederatedScansPreview() {
   return <main className="federated-preview">
     <h1>Independent scans, one view</h1>
     <p>Development fixture — fictional sizes and schedules, not a live R2 inventory. Each project keeps its own scans; the cutoff selects its latest completed observation.</p>
-    <div className="fp-main-controls">{(['at', 'before', 'after'] as const).map(key => <FederatedScanPicker key={key} catalogs={catalogs} value={values[key]} now={now}
+    <div className="fp-main-controls">{(['at', 'before', 'after'] as const).map(key => <FederatedScanPicker key={key} sources={catalogs} value={values[key]} now={now}
       label={key === 'at' ? 'As of' : key === 'before' ? 'Compare from' : 'Compare to'} onChange={at => setParams(p => { const next = new URLSearchParams(p); next.set(key, at); return next })} />)}</div>
     <div className="fp-preview-totals">{fmtBytes(tree.b)} · {tree.o.toLocaleString()} objects{missing.length > 0 && <span role="status"> · Partial coverage: no earlier scan for {missing.join(', ')}</span>}</div>
     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBlock: 12 }}>

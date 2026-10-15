@@ -76,7 +76,11 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 #   a store's own static name index: `"vars": {"STATIC_GEN": "<gen>", …}` (its generation in INDEX_R2; FILTER_STATIC_HEAVY /
 #   FILTER_STATIC_ANCHORS per store too, FILTER_STATIC / FILTER_INDEXED_ONLY inherited unless set) — none: `scan-not-indexed`
 #   …and union views: `"<key>": {"union": ["primary", "<store>"…], "main": true}` — the stores' roots side by side
-#   (`_lib/union.ts`); `main` = what a request without `store=` reads (the main map)
+#   (`_lib/union.ts`); `main` = what a request without `store=` reads (the main map); `"sources": {"<member>": {"label": …,
+#   "icon": "/icons/meta.svg" | "https://…"}}` marks each member in the scan picker and the root's table (no icon: its label);
+#   a site-path icon must be a static asset under `public/icons/` (`/icons/*` is excluded from the Functions in
+#   `public/_routes.json`; elsewhere the catch-all serves index.html, the mark falls back to its label, and
+#   `/api/union-scans` lists it under `warnings`). A union page's cutoff that no one scan id says is `?at=<instant>`.
 
 # --- Session log (specs/session-log.md; tables: migrations/<lineage>/…_session_log.sql; on/off: the switch at /admin) ---
 # SESSION_LOG_RETAIN_DAYS = "30"             # days a session's log is kept (default 30)

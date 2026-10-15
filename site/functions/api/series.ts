@@ -27,7 +27,7 @@ import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
 import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
 import { metaRoots, rootPoints, type RootRow, type RootTrace } from '../_lib/series.js'
-import { latestCutoff, memberOf, memberRequest, membersAt, openUnion, unionFor } from '../_lib/union.js'
+import { cutoffOf, latestCutoff, memberOf, memberRequest, membersAt, namesCutoff, openUnion, unionFor } from '../_lib/union.js'
 import type { UnionView } from '../_lib/stores.js'
 import { scanTimes } from '../_lib/scanTimes.js'
 import { carryForward } from '../../src/federatedViews.js'
@@ -91,7 +91,8 @@ const UNION_ROOT_UNSCOPED = ['lens', 'o', 'cl', 'q', 'paths'] as const
  * one step function over the union's events (`carryForward`): at each instant any member scanned, each member
  * contributes its latest point at or before it, and nothing before its first — a point some member doesn't
  * cover yet names it (`missing`), its total partial, never a zero. `split=roots`: every member's roots, each at
- * its member's carried point. Below the root: the path's member answers (its roots at the latest cutoff).
+ * its member's carried point. Below the root: the path's member answers (its roots at the request's cutoff —
+ * `date=`/`at=`/`d=`, as `/api/subtree` takes it — else at the latest).
  */
 async function unionSeries(ctx0: SeriesCtx, view: UnionView): Promise<Response> {
   const url = new URL(ctx0.request.url)
@@ -100,7 +101,9 @@ async function unionSeries(ctx0: SeriesCtx, view: UnionView): Promise<Response> 
   const un = await openUnion(ctx0, view, true)
   if (un instanceof Response) return un
   if (path !== '') {
-    const c = latestCutoff(un)
+    // The path's member at the page's cutoff when it names one (`date=`/`at=`/`d=`), else at the latest.
+    const c = namesCutoff(url.searchParams) ? await cutoffOf(un, url.searchParams) : latestCutoff(un)
+    if (c instanceof Response) return c
     const m = c && await memberOf(membersAt(un, c), path)
     if (!m) return json({ error: 'path not found' }, 404)
     return seriesOf({ ...ctx0, request: memberRequest(ctx0.request, m.store) })

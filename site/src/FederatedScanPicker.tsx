@@ -3,23 +3,27 @@ import {
   useClick, useDismiss, useFloating, useInteractions, useRole,
 } from '@floating-ui/react'
 import { useId, useMemo, useState } from 'react'
-import { adjacentCutoffs, cutoffCoverage, cutoffDays } from './federatedPickerModel'
-import { resolveFederation, utcInstant, type SourceCatalog } from './federatedScans'
+import { adjacentCutoffs, cutoffCoverage, cutoffDays, dayCutoffs, fmtCutoff, markOf, sourcesAt, type PickerSource } from './federatedPickerModel'
+import { utcInstant } from './federatedScans'
+import { SourceMark } from './SourceMark'
 import './federatedScans.scss'
 
 export interface FederatedScanPickerProps {
-  catalogs: readonly SourceCatalog[]
+  /** The sources whose observations are the cutoffs (a `SourceCatalog` is one; so is a union member). */
+  sources: readonly PickerSource[]
   value: string
   onChange: (at: string) => void
   label: string
   /** Latest takes one wall-clock cutoff. Injected by previews/tests only. */
   now?: () => string
   timeZone?: string
+  /** One line, no visible label (the controls still name it): for a toolbar. */
+  compact?: boolean
 }
 
 /** Reused for main/before/after selection. Resolution is outside presentation;
  * neither date grouping nor source chips round the selected UTC cutoff. */
-export function FederatedScanPicker({ catalogs, value, onChange, label, now = () => new Date().toISOString(), timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone }: FederatedScanPickerProps) {
+export function FederatedScanPicker({ sources, value, onChange, label, now = () => new Date().toISOString(), timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone, compact }: FederatedScanPickerProps) {
   const [open, setOpen] = useState(false)
   const [draft, setDraft] = useState(value)
   const [error, setError] = useState<string | null>(null)
@@ -33,11 +37,13 @@ export function FederatedScanPicker({ catalogs, value, onChange, label, now = ()
   const { getReferenceProps, getFloatingProps } = useInteractions([
     useClick(context), useDismiss(context), useRole(context, { role: 'dialog' }),
   ])
-  const groups = useMemo(() => cutoffDays(catalogs, timeZone), [catalogs, timeZone])
-  const view = useMemo(() => resolveFederation(catalogs, value), [catalogs, value])
-  const { previous, next } = adjacentCutoffs(catalogs, value)
-  const coverage = cutoffCoverage(catalogs, value)
-  const display = (at: string) => new Date(at).toLocaleString(undefined, { timeZone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' })
+  const groups = useMemo(() => cutoffDays(sources, timeZone), [sources, timeZone])
+  const at = useMemo(() => utcInstant(value), [value])
+  const selected = useMemo(() => sourcesAt(sources, at), [sources, at])
+  const { previous, next } = adjacentCutoffs(sources, value)
+  const coverage = cutoffCoverage(sources, value)
+  const days = useMemo(() => dayCutoffs(sources), [sources])
+  const display = (t: string, day = days.has(t)) => fmtCutoff(t, timeZone, day)
   const choose = (at: string) => { onChange(utcInstant(at)); setOpen(false) }
   const apply = () => {
     let at: string
@@ -45,8 +51,8 @@ export function FederatedScanPicker({ catalogs, value, onChange, label, now = ()
     catch { setError('Enter a valid UTC instant, such as 2026-10-13T12:00:00Z.'); return }
     choose(at)
   }
-  return <div className="federated-picker">
-    <span className="fp-label">{label}</span>
+  return <div className={`federated-picker${compact ? ' compact' : ''}`}>
+    {!compact && <span className="fp-label">{label}</span>}
     <div className="fp-controls">
       <button type="button" disabled={!previous} aria-label={`${label}: previous update`} onClick={() => previous && choose(previous)}>‹</button>
       <button type="button" ref={refs.setReference} {...getReferenceProps()} aria-label={`${label}: choose cutoff`} className="fp-trigger">
@@ -66,15 +72,15 @@ export function FederatedScanPicker({ catalogs, value, onChange, label, now = ()
         <div className="fp-days">
           {groups.length === 0 && <p>No completed source scans yet. Earlier coverage is unknown, not zero.</p>}
           {groups.map(g => <section key={g.day} aria-label={g.day}>
-            <h3>{g.day}</h3><div className="fp-chips">{g.events.map(e => <button type="button" key={e.at} aria-pressed={e.at === view.at} onClick={() => choose(e.at)}>
-              <time dateTime={e.at}>{e.time}</time><span>{e.labels.join(', ')}</span>
+            <h3>{g.day}</h3><div className="fp-chips">{g.events.map(e => <button type="button" key={e.at} aria-pressed={e.at === at} onClick={() => choose(e.at)}>
+              <time dateTime={e.at}>{e.time}</time><span className="fp-chip-sources">{e.sources.map(m => <SourceMark key={m.source} mark={m} />)}</span>
             </button>)}</div>
           </section>)}
         </div>
         <details className="fp-sources">
           <summary>{coverage.ready}/{coverage.total} sources observed at this cutoff</summary>
-          <ul>{view.sources.map(s => <li key={s.source}><strong>{catalogs.find(c => c.source === s.source)?.label ?? s.source}</strong>
-            {s.scan ? <span>{display(s.scan.observed_through)}{s.scan.observed_from !== s.scan.observed_through && <small>capture began {display(s.scan.observed_from)}</small>}</span> : <span>No scan before cutoff</span>}
+          <ul>{selected.map(s => <li key={s.source.source}><strong><SourceMark mark={markOf(s.source)} /></strong>
+            {s.scan ? <span>{display(s.scan.observed_through, !!s.scan.day)}{s.scan.observed_from !== undefined && s.scan.observed_from !== s.scan.observed_through && <small>capture began {display(s.scan.observed_from)}</small>}</span> : <span>No scan before cutoff</span>}
           </li>)}</ul>
         </details>
         <button type="button" className="fp-close" onClick={() => setOpen(false)}>Close</button>
