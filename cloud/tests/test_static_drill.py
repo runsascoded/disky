@@ -541,3 +541,79 @@ def test_prefetch_plan_covers_the_reads(world, run_rg, tmp_path, monkeypatch, i)
             assert st["read"] == st["plan"]
         read += len(st["read"])
     assert read > 0
+
+
+def _today_by_ranges(con, cands: set[tuple]) -> dict[tuple, list]:
+    """`static_drill._today_rows` as it was: a join on the candidates' ranges themselves (`q` equal, `lo ≤ path < hi`)."""
+    ranges = sorted({(c, *sd._child_range(d, x, root)) for c, d, x in cands for root in (True, False)})
+    today: dict[tuple, list] = {r: [] for r in ranges}
+    con.execute("CREATE OR REPLACE TABLE sr_ (q VARCHAR, lo VARCHAR, hi VARCHAR)")
+    sd.insert_rows(con, "sr_", ranges)
+    for c, lo, hi, *row in con.execute("""SELECT r.q, r.lo, r.hi, d.path, d.usr, d.vf, d.vt, d.size, d.n_files
+            FROM sr_ AS r JOIN dr AS d ON d.q = r.q AND d.path >= r.lo AND d.path < r.hi""").fetchall():
+        today[(c, lo, hi)].append(tuple(row))
+    con.execute("DROP TABLE sr_")
+    return {k: sorted(v) for k, v in today.items()}
+
+
+def test_today_rows_equal_the_range_join():
+    """Settling's rows of today under each candidate child, matched on `(q, dir, child)` at the candidates' depths, are the
+    range join's: the child's path itself vs below it, siblings sharing a prefix (`x0`, `xy`, `x.bin`), nested candidates (a
+    root under both), an empty segment, the directory itself, other members and other directories."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE dr ({sr.ROOT_COLS})")
+    paths = {"ckpt": ["a/b", "a/b/x", "a/b/x/f1", "a/b/x/y/f2", "a/b/x0/f", "a/b/xy", "a/b/x.bin", "a/bb/x/f", "a/b//f", "c/b/x/f"],
+             "zz": ["a/b/x/f"]}
+    sd.insert_rows(con, "dr", [(qq, p.count("/") + 1, p, "u", 10, sn.OPEN, len(p), 1) for qq, ps in paths.items() for p in ps])
+    cands = {("ckpt", "a/b", "x"), ("ckpt", "a", "b"), ("ckpt", "a/b", ""), ("ckpt", "a/b", "xy"), ("ckpt", "c/b", "z")}
+
+    def row(p):
+        return (p, "u", 10, sn.OPEN, len(p), 1)
+
+    want = {
+        ("ckpt", "a/b/x", "a/b/x\x00"): [row("a/b/x")],
+        ("ckpt", "a/b/x/", "a/b/x0"): [row("a/b/x/f1"), row("a/b/x/y/f2")],
+        ("ckpt", "a/b", "a/b\x00"): [row("a/b")],
+        ("ckpt", "a/b/", "a/b0"): sorted(row(p) for p in ["a/b/x", "a/b/x/f1", "a/b/x/y/f2", "a/b/x0/f", "a/b/xy", "a/b/x.bin", "a/b//f"]),
+        ("ckpt", "a/b/", "a/b/\x00"): [],
+        ("ckpt", "a/b//", "a/b/0"): [row("a/b//f")],
+        ("ckpt", "a/b/xy", "a/b/xy\x00"): [row("a/b/xy")],
+        ("ckpt", "a/b/xy/", "a/b/xy0"): [],
+        ("ckpt", "c/b/z", "c/b/z\x00"): [],
+        ("ckpt", "c/b/z/", "c/b/z0"): [],
+    }
+    assert _today_by_ranges(con, cands) == want
+    assert sd._today_rows(con, cands) == want
+    assert sd._today_rows(con, set()) == {}
+
+
+#: Per config (`R`) and run, each kind's settling (long, short): `(candidates, today's roots under them)`, so the comparison
+#: below covers matched rows in every run but one.
+SETTLE_CALLS = {
+    3: [[(4, 8), (34, 82)], [(0, 0), (0, 0)], [(3, 3), (16, 17)], [(1, 2), (13, 20)]],
+    5: [[(2, 6), (28, 85)], [(1, 1), (14, 18)], [(1, 4), (6, 18)], [(29, 32), (14, 26)]],
+}
+
+
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_settling_by_ranges_writes_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
+    """A run's drill is the same files, byte for byte, with settling's rows of today read by the former range join (and
+    without prefetch); the two read the same rows."""
+    rebuild = world["rebuilds"][i]
+    calls: list[tuple[int, int]] = []
+    today_rows = sd._today_rows
+
+    def both(con, cands):
+        new = today_rows(con, cands)
+        old = _today_by_ranges(con, cands)
+        assert new == old
+        calls.append((len(cands), sum(map(len, new.values()))))
+        return old
+
+    rebuild(tmp_path / "new")
+    monkeypatch.setattr(sd, "_today_rows", both)
+    rebuild(tmp_path / "old", threads=0)
+    assert _tree(tmp_path / "old", drop={"s", "reads"}) == _tree(tmp_path / "new", drop={"s", "reads"})
+    assert calls == SETTLE_CALLS[world["cfg"]["R"]][i]

@@ -133,6 +133,7 @@ class CachedGroupFile(sr.GroupFile):
         if self.raw is not None:
             data = self.raw.get((self, file, lo))
             if data is not None and len(data) == hi - lo:
+                self.fetch_io["raw_hits"] += 1
                 return data
         self.fetch_io["miss_fetches"] += 1
         self.fetch_io["miss_bytes"] += hi - lo
@@ -238,6 +239,7 @@ class CachedGroupFile(sr.GroupFile):
         k = (g["file"], g["rg"])
         if k in self._groups:
             self._groups.move_to_end(k)
+            self.fetch_io["group_hits"] += 1
             return self._groups[k]
         data = self._get(g["file"], g["offset"], g["offset"] + g["length"])
         self.io["groups_read"] += 1
@@ -439,6 +441,7 @@ class TierReads:
                 if k not in best or r["vt"] < best[k]["vt"]:
                     best[k] = r
         self.stats["rows"] += 1
+        self.fetch_io["rows_out"] += len(best)
         return list(best.values())
 
     def any(self, c: str, lo: str, hi: str) -> bool:
@@ -494,7 +497,8 @@ class TierReads:
         return dict(out)
 
     def requests(self) -> dict:
-        """The requests actually made: prefetched (coalesced spans) and misses (fetched in the loops)."""
+        """The requests actually made: prefetched (coalesced spans) and misses (fetched in the loops); and the caches' hits (byte
+        spans served from the prefetch, `raw_hits`; decoded groups reused, `group_hits`) and the prior roots `rows` returned."""
         out: Counter = Counter(self.fetch_io)
         for _, gf in self.items:
             if gf is not None:
@@ -981,7 +985,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
                 SELECT q, dir, sum(db)::BIGINT AS db, sum(dn)::BIGINT AS dn FROM nkc ANTI JOIN joins USING (q, dir, child) GROUP BY q, dir) AS n
             LEFT JOIN rc USING (q, dir) WHERE (n.db <> 0 OR n.dn <> 0) AND (n.q, n.dir) NOT IN (SELECT q, dir FROM aff)""")
     t1 = monotonic()
-    doc["restated"] = _settle(con, D, K, reads)
+    doc["restated"] = _settle(con, D, K, reads, kind, log)
     if doc["affected"]:
         log(f"drill {kind}: {doc['affected']:,} directories settled one by one, {doc['restated']:,} restated in {monotonic() - t1:.0f}s")
     # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's
@@ -1113,11 +1117,13 @@ def insert_prior_roots(
     return total
 
 
-def _settle(con, D: int, K: int, reads: TierReads) -> int:
+def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err) -> int:
     """The touched heavy directories whose kept set may change (`aff`): rank the kept children (peaks after today), the new
     children (their value today) and the existing ones that could enter (their exact value on D); keep the top
     `min(K, children)`. When an existing child moves in or out, restate the directory's whole history under a full header;
-    else a delta header and today's cells. Appends to `rup`; returns the restated count."""
+    else a delta header and today's cells. Appends to `rup`; returns the restated count. Logs each step: the inputs, the
+    plan, and the loop (fetch vs settle seconds, rows and groups read, the caches' hits; the slowest directories)."""
+    t0 = monotonic()
     aff = con.execute("SELECT q, dir FROM aff ORDER BY q, dir").fetchall()
     if not aff:
         return 0
@@ -1133,11 +1139,50 @@ def _settle(con, D: int, K: int, reads: TierReads) -> int:
     opens = {(c, d): n for c, d, n in con.execute("SELECT q, dir, opens FROM tdir SEMI JOIN aff USING (q, dir)").fetchall()}
     rest = {(c, d): (b, o) for c, d, b, o in con.execute("SELECT q, dir, b, o FROM rc SEMI JOIN aff USING (q, dir)").fetchall()}
     heavy_tot = _heavy_totals(con, sorted({(c, f"{d}/{x}") for c, d, x in cands}))
+    t1 = monotonic()
     ctx = _settle_ctx(con, aff, cands)
+    n_today = sum(len(v) for v in ctx["today"].values())
+    log(f"drill {kind}: settling {len(aff):,} directories, {len(cands):,} candidates: inputs in {t1 - t0:.0f}s, "
+        f"{n_today:,} of today's roots under the candidates in {monotonic() - t1:.0f}s")
+    t1 = monotonic()
+    plans = _settle_plan(aff, others, cands, heavy_tot, reads)
+    if reads.raw is not None:
+        need = {(id(gf), g["file"], g["offset"]): g["length"] for p in plans for gf, g in p}
+        log(f"drill {kind}: settling plan: {sum(map(len, plans)):,} group reads, {len(need):,} distinct groups, "
+            f"{sum(need.values()):,} bytes, in {monotonic() - t1:.0f}s")
     out: list[tuple] = []
-    restated = 0
-    for a, b in reads.windows(_settle_plan(aff, others, cands, heavy_tot, reads)):
-        _settle_dirs(aff[a:b], kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out)
+    io0, rq0 = Counter(reads.io()), Counter(reads.requests())
+    t_fetch = t_settle = 0.0
+    slow: list[tuple] = []
+    done, t_log = 0, monotonic()
+    it = reads.windows(plans)
+    while True:
+        t2 = monotonic()
+        ab = next(it, None)
+        t_fetch += monotonic() - t2
+        if ab is None:
+            break
+        a, b = ab
+        t2 = monotonic()
+        for key, s, stats in _settle_dirs(aff[a:b], kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out):
+            slow = sorted([*slow, (s, key, stats)], key=lambda x: x[0], reverse=True)[:5]
+            done += 1
+            if done == len(aff) or monotonic() - t_log >= 60:
+                t_log = monotonic()
+                log(f"drill {kind}: settled {done:,}/{len(aff):,} directories, {t_fetch:.0f}s fetching, {t_settle + monotonic() - t2:.0f}s settling")
+        t_settle += monotonic() - t2
+    io = Counter(reads.io())
+    io.subtract(io0)
+    rq = Counter(reads.requests())
+    rq.subtract(rq0)
+    hits, decodes = rq["group_hits"], io["groups_read"]
+    log(f"drill {kind}: settling loop: {t_fetch:.0f}s fetching ({rq['prefetch_fetches']:,} requests, {rq['prefetch_bytes']:,} bytes; "
+        f"{rq['miss_fetches']:,} misses, {rq['evicted']:,} evicted), {t_settle:.0f}s settling: {io['rows']:,} reads returning "
+        f"{rq['rows_out']:,} prior roots, {decodes:,} groups decoded ({io['group_bytes']:,} bytes), decoded-group hit rate "
+        f"{hits / max(1, hits + decodes):.1%}")
+    for s, (c, d), st in slow:
+        log(f"drill {kind}: settling, slow: {c!r} {d!r} {s:.1f}s, {st['candidates']:,} candidates, {st['rows_out']:,} prior roots, "
+            f"{st['groups_read']:,} groups decoded ({st['group_bytes']:,} bytes)")
     restated = sum(1 for r in out if r[2] == KIND_FULL)
     if out:
         insert_rows(con, "rup", out)
@@ -1155,39 +1200,51 @@ def _settle_plan(aff: list[tuple], others: dict, cands: set, heavy_tot: dict, re
     return [[g for r in rs for g in reads.plan_rows(*r)] for rs in per]
 
 
-def _settle_dirs(aff, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D: int, K: int, reads: TierReads, out: list[tuple]) -> None:
+def _settle_dirs(aff, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D: int, K: int, reads: TierReads, out: list[tuple]):
+    """Settle each of `aff` in turn (rows appended to `out`), yielding `(key, seconds, stats)` per directory: its candidates,
+    the prior roots its reads returned, and the groups they decoded (bytes)."""
     for key in aff:
-        c, d = key
-        kn, hb, ho = hdr[key]
-        ks, ot = kept.get(key, []), others.get(key, [])
-        pool = [(rank_key(max(peak, b + db), child), child, "kept") for child, b, o, peak, db, dn in ks]
-        for child, root, db, dn, new in ot:
-            if new:
-                pool.append((rank_key(db, child), child, "new"))
-            elif (c, d, child) in cands:
-                pool.append((rank_key(_value_on(ctx, c, d, child, root, D, db, dn, reads, heavy_tot)[0], child), child, "in"))
-        o_new = ho + sum(1 for *_, new in ot if new)
-        top = sorted(pool)[:min(K, o_new)]
-        keep = {child for _, child, _ in top}
-        leaving = [child for child, *_ in ks if child not in keep]
-        entering = [child for _, child, origin in top if origin == "in"]
-        if leaving or entering:
-            out += _restate(ctx, c, d, D, keep, ks, ot, leaving, hb + opens[key], o_new, reads)
-            continue
-        out.append((c, d, KIND_DELTA, "", len(keep), hb + opens[key], o_new))
-        for child, b, o, peak, db, dn in ks:
+        t0, io0, rows0 = monotonic(), reads.io(), reads.fetch_io["rows_out"]
+        _settle_dir(key, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out)
+        io = reads.io()
+        yield key, monotonic() - t0, {"candidates": sum(1 for x, *_, new in others.get(key, []) if not new and (*key, x) in cands),
+                                      "rows_out": reads.fetch_io["rows_out"] - rows0,
+                                      "groups_read": io.get("groups_read", 0) - io0.get("groups_read", 0),
+                                      "group_bytes": io.get("group_bytes", 0) - io0.get("group_bytes", 0)}
+
+
+def _settle_dir(key, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D: int, K: int, reads: TierReads, out: list[tuple]) -> None:
+    c, d = key
+    kn, hb, ho = hdr[key]
+    ks, ot = kept.get(key, []), others.get(key, [])
+    pool = [(rank_key(max(peak, b + db), child), child, "kept") for child, b, o, peak, db, dn in ks]
+    for child, root, db, dn, new in ot:
+        if new:
+            pool.append((rank_key(db, child), child, "new"))
+        elif (c, d, child) in cands:
+            pool.append((rank_key(_value_on(ctx, c, d, child, root, D, db, dn, reads, heavy_tot)[0], child), child, "in"))
+    o_new = ho + sum(1 for *_, new in ot if new)
+    top = sorted(pool)[:min(K, o_new)]
+    keep = {child for _, child, _ in top}
+    leaving = [child for child, *_ in ks if child not in keep]
+    entering = [child for _, child, origin in top if origin == "in"]
+    if leaving or entering:
+        out += _restate(ctx, c, d, D, keep, ks, ot, leaving, hb + opens[key], o_new, reads)
+        return
+    out.append((c, d, KIND_DELTA, "", len(keep), hb + opens[key], o_new))
+    for child, b, o, peak, db, dn in ks:
+        if db or dn:
+            out.append((c, d, KIND_KEPT, child, D, b + db, o + dn))
+    rb, ro = rest.get(key, (0, 0))
+    rdb = rdn = 0
+    for child, root, db, dn, new in ot:
+        if child in keep:
             if db or dn:
-                out.append((c, d, KIND_KEPT, child, D, b + db, o + dn))
-        rb, ro = rest.get(key, (0, 0))
-        rdb = rdn = 0
-        for child, root, db, dn, new in ot:
-            if child in keep:
-                if db or dn:
-                    out.append((c, d, KIND_KEPT, child, D, db, dn))
-            else:
-                rdb, rdn = rdb + db, rdn + dn
-        if rdb or rdn:
-            out.append((c, d, KIND_REST, "", D, rb + rdb, ro + rdn))
+                out.append((c, d, KIND_KEPT, child, D, db, dn))
+        else:
+            rdb, rdn = rdb + db, rdn + dn
+    if rdb or rdn:
+        out.append((c, d, KIND_REST, "", D, rb + rdb, ro + rdn))
 
 
 def _settle_ctx(con, aff: list[tuple], cands: set[tuple]) -> dict:
@@ -1200,19 +1257,33 @@ def _settle_ctx(con, aff: list[tuple], cands: set[tuple]) -> dict:
             WHERE kind IN ({KIND_KEPT}, {KIND_REST})""").fetchall():
         cells.setdefault((c, d), {}).setdefault((kind, child), []).append((vf, b, o))
     heavy = {(c, d) for c, d in con.execute("SELECT q, dir FROM hdr SEMI JOIN (SELECT DISTINCT q, dir FROM sk) USING (q, dir)").fetchall()}
-    con.execute("CREATE OR REPLACE TABLE sr_ (q VARCHAR, lo VARCHAR, hi VARCHAR)")
-    ranges = set()
-    for c, d, x in cands:
-        for root in (True, False):
-            ranges.add((c, *_child_range(d, x, root)))
-    if ranges:
-        insert_rows(con, "sr_", sorted(ranges))
-    today: dict[tuple, list] = {r: [] for r in ranges}
-    for c, lo, hi, path, usr, vf, vt, size, n in con.execute("""SELECT r.q, r.lo, r.hi, d.path, d.usr, d.vf, d.vt, d.size, d.n_files
-            FROM sr_ AS r JOIN dr AS d ON d.q = r.q AND d.path >= r.lo AND d.path < r.hi""").fetchall():
-        today[(c, lo, hi)].append((path, usr, vf, vt, size, n))
-    con.execute("DROP TABLE sk; DROP TABLE sr_")
-    return {"cells": cells, "heavy": heavy, "today": today}
+    con.execute("DROP TABLE sk")
+    return {"cells": cells, "heavy": heavy, "today": _today_rows(con, cands)}
+
+
+def _today_rows(con, cands: set[tuple]) -> dict[tuple, list]:
+    """Today's roots (`dr`) under each candidate child `(c, d, x)`, `(path, usr, vf, vt, size, n_files)` in that order, keyed
+    by both of `_child_range`'s ranges: `(c, p, p\\0)` (the path `p = d/x` itself) and `(c, p/, p0)` (below it).
+
+    Each root of a candidate's member is cut at the depths of that member's candidate directories and matched on `(q, dir,
+    child)` by equality: rows × those depths. (A join on the ranges themselves, `q` equal and `lo ≤ path < hi`, compared every
+    root of a member with every one of its candidates' ranges: on gcs 10-14, 110M long roots against 2 × 374K ranges, ~41 of
+    the long kind's 50 settling minutes on 7 cores.)"""
+    today: dict[tuple, list] = {(c, *_child_range(d, x, root)): [] for c, d, x in cands for root in (True, False)}
+    if not cands:
+        return today
+    con.execute("CREATE OR REPLACE TABLE sc_ (q VARCHAR, dir VARCHAR, child VARCHAR)")
+    insert_rows(con, "sc_", sorted(cands))
+    t = con.execute("""SELECT e.q, e.dir, e.child, len(e.segs) = e.k + 1 AS root, e.path, e.usr, e.vf, e.vt, e.size, e.n_files FROM (
+            SELECT d.*, s.k, array_to_string(d.segs[1:s.k], '/') AS dir, d.segs[s.k + 1] AS child FROM (
+                SELECT q, path, usr, vf, vt, size, n_files, string_split(path, '/') AS segs FROM dr SEMI JOIN (SELECT DISTINCT q FROM sc_) USING (q)) AS d
+            JOIN (SELECT DISTINCT q, len(string_split(dir, '/')) AS k FROM sc_) AS s ON s.q = d.q AND s.k < len(d.segs)) AS e
+        SEMI JOIN sc_ USING (q, dir, child)
+        ORDER BY e.q, e.dir, e.child, root, e.path, e.usr, e.vf, e.vt, e.size, e.n_files""").to_arrow_table()
+    con.execute("DROP TABLE sc_")
+    for c, d, x, root, *row in zip(*(col.to_pylist() for col in t.columns)):
+        today[(c, *_child_range(d, x, root))].append(tuple(row))
+    return today
 
 
 def _heavy_totals(con, keys: list[tuple[str, str]]) -> dict[tuple[str, str], tuple[int, int]]:
