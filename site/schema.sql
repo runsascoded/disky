@@ -122,7 +122,7 @@ CREATE TABLE hosts (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   created_by TEXT,
   revoked_at TEXT
-);
+, grant_id TEXT, os TEXT, version TEXT, seen_at TEXT);
 
 CREATE TABLE index_row_groups (
   date      TEXT NOT NULL,
