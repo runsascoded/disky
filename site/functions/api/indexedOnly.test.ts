@@ -58,8 +58,9 @@ describe('D1', () => {
     const heavy = drillSource(blobsOf(drillFiles, { 'scans.json': { scans: drillScans.map(id => ({ id })) } }))
     return { source: new SuffixHits(new StaticNames(blobsOf(filterFiles)), { maxRows: 40, heavy }), scans: async () => scans, dirOnly: async () => dirOnly, gen: 'fixture' }
   }
-  const envOf = (flag: boolean, s: StaticFilterStore = store()): Env => {
-    const env = { ...base, ...(flag ? { FILTER_INDEXED_ONLY: '1' } : {}) } as Env
+  /** `paths`: `SEARCH_PATH_TERMS=1` (path terms answered; unset, parked). */
+  const envOf = (flag: boolean, s: StaticFilterStore = store(), paths = false): Env => {
+    const env = { ...base, ...(flag ? { FILTER_INDEXED_ONLY: '1' } : {}), ...(paths ? { SEARCH_PATH_TERMS: '1' } : {}) } as Env
     injectedStores.set(env, s)
     return env
   }
@@ -101,29 +102,32 @@ describe('D1', () => {
 
   describe('rejectQuery: what an indexed-only deployment refuses', () => {
     it('literals (any length, quoted spaces too) and AND / OR / NOT of them pass — `*`, `?` and regex characters are text; every other form has its code', () => {
-      const code = (q: string) => rejectQuery(q)?.code ?? null
+      const code = (q: string, paths = false) => rejectQuery(q, paths)?.code ?? null
       expect([
         code('tomat'), code('TOMAT'), code('.'), code('ab'), code('"final ckpt"'), code(''), code('  '),
         code('tomat -bin'), code('-ttl'), code('a b'), code('a|b'), code('a b|c -d'), code('"is:file" x'),
         code('ckpt.*pt'), code('tom*t'), code('a -b*c'), code('*'), code('a?b'), code('(x)+[y]'),
-        code('/ckpt/'), code('data/tomat'), code('a|b/c'), code('a/bc$|x'), code('is:file'), code('-is:dir x'),
+        code('/ckpt/'), code('data/tomat'), code('a|b/c'), code('a/bc$|x'), code('x -a/b'), code('"a/b"'), code('is:file'), code('-is:dir x'),
+        // Path terms on (`SEARCH_PATH_TERMS`): read from the name index's tail range, which needs the tail.
+        code('/ckpt/', true), code('data/tomat', true), code('a|b/c', true), code('a/bc$|x', true), code('x -a/b', true),
       ]).toEqual([
         null, null, null, null, null, null, null,
         null, null, null, null, null, null,
         null, null, null, null, null, null,
-        'slash-tail-short', null, 'slash-tail-short', null, 'unsupported-kind', 'unsupported-kind',
+        'unsupported-slash', 'unsupported-slash', 'unsupported-slash', 'unsupported-slash', 'unsupported-slash', 'unsupported-slash', 'unsupported-kind', 'unsupported-kind',
+        'slash-tail-short', null, 'slash-tail-short', null, 'slash-tail-short',
       ])
     })
     it('one anchored literal passes (`^q` from 2 characters, `q$` from 3, `^q$` from 1); shorter ones, globs and slashes don\'t', () => {
-      const code = (q: string) => rejectQuery(q)?.code ?? null
+      const code = (q: string, paths = false) => rejectQuery(q, paths)?.code ?? null
       expect([
         code('^train'), code('.json$'), code('^config.json$'), code('^ab'), code('.gz$'), code('^x$'), code('"^a"'), code('^TRAIN'),
         code('^ckpt -tmp'), code('^ab .json$'), code('x -.gz$|^ab'),
-        code('^a'), code('gz$'), code('^ab*cd'), code('^a/b'), code('^a .json$'), code('x -gz$'),
+        code('^a'), code('gz$'), code('^ab*cd'), code('^a/b'), code('^a .json$'), code('x -gz$'), code('^a/b', true),
       ]).toEqual([
         null, null, null, null, null, null, null, null,
         null, null, null,
-        'anchor-too-short', 'anchor-too-short', null, 'slash-tail-short', 'anchor-too-short', 'anchor-too-short',
+        'anchor-too-short', 'anchor-too-short', null, 'unsupported-slash', 'anchor-too-short', 'anchor-too-short', 'slash-tail-short',
       ])
     })
   })
@@ -213,15 +217,41 @@ describe('D1', () => {
     })
   })
 
-  describe('path terms (`a/b`): read from the name index (`staticAnchors.ts`)', () => {
+  describe('path terms parked (`SEARCH_PATH_TERMS` unset): a term holding `/` is `unsupported-slash` up front', () => {
+    const enc = (t: string) => `q=${encodeURIComponent(t)}`
+    /** A store whose every read fails: a refusal before any read passes, anything else throws. */
+    const unread: StaticFilterStore = {
+      source: { hits: async () => { throw new Error('read') } },
+      scans: async () => { throw new Error('read') },
+      gen: 'unread',
+    }
+    const TERMS = ['data/tomat', '^data/tomat$', 'tomat|data/raw', 'tomat -data/raw', 'data/', '/', 'data/t', '/tomat/', 'Data/Raw//', 'a b/c']
+    it('on every route (subtree, diff, series, filter-cover), alone or in AND / OR / NOT, whatever the tail; nothing read', async () => {
+      const got = []
+      for (const t of TERMS) {
+        got.push(await Promise.all([
+          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true, unread)),
+          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true, unread)),
+          call(series, `path=bk&${enc(t)}`, envOf(true, unread)),
+          call(filterCover as never, `date=${A}&path=bk&${enc(t)}`, envOf(true, unread)),
+        ]))
+      }
+      expect(got).toEqual(TERMS.map(() => Array(4).fill(refusal('unsupported-slash'))))
+    })
+    it('says so in words', () => {
+      expect(refusal('unsupported-slash')).toEqual([400, { error: 'Only text search (substrings of file or folder names, combined with spaces, | and -) is supported here; a term can’t contain “/” (it matches within one name).', code: 'unsupported-slash' }])
+    })
+  })
+
+  describe('path terms (`a/b`, `SEARCH_PATH_TERMS=1`): read from the name index (`staticAnchors.ts`)', () => {
     const enc = (t: string) => `q=${encodeURIComponent(t)}`
     it('this fixture has none: `anchor-not-indexed` on every route, alone or in a compound; a tail too short is `slash-tail-short`', async () => {
       const got = []
       for (const t of ['data/tomat', 'tomat|data/raw', 'tomat -data/raw', 'data/t', 'data/t -x']) {
         got.push(await Promise.all([
-          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true)),
-          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true)),
-          call(series, `path=bk&${enc(t)}`, envOf(true)),
+          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true, store(), true)),
+          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true, store(), true)),
+          call(series, `path=bk&${enc(t)}`, envOf(true, store(), true)),
         ]))
       }
       expect(got).toEqual([
@@ -234,9 +264,9 @@ describe('D1', () => {
       const got = []
       for (const t of ['^data/', 'data/', '/tomat/', 'Data/Raw//', 'tomat|data/']) {
         got.push(await Promise.all([
-          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true)),
-          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true)),
-          call(series, `path=bk&${enc(t)}`, envOf(true)),
+          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true, store(), true)),
+          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true, store(), true)),
+          call(series, `path=bk&${enc(t)}`, envOf(true, store(), true)),
         ]))
       }
       expect(got).toEqual([
@@ -247,7 +277,7 @@ describe('D1', () => {
         Array(3).fill(folder('data$')),
       ])
       // Nothing but slashes names no folder: the general wording.
-      expect([rejectQuery('/'), rejectQuery('^//')]).toEqual([
+      expect([rejectQuery('/', true), rejectQuery('^//', true)]).toEqual([
         { code: 'slash-tail-short', message: REJECT_MESSAGES['slash-tail-short'] },
         { code: 'slash-tail-short', message: REJECT_MESSAGES['slash-tail-short'] },
       ])
@@ -554,8 +584,14 @@ describe('D1', () => {
 
   describe('/api/filter-caps', () => {
     it('names the flag', async () => {
-      const got = await Promise.all([envOf(true), envOf(false)].map(async env => (await caps({ request: new Request('http://localhost/api/filter-caps'), env } as never)).json()))
-      expect(got).toEqual([{ indexedOnly: true, rootLabel: 'root' }, { indexedOnly: false, rootLabel: 'root' }])
+      const got = await Promise.all([envOf(true), envOf(false), envOf(true, store(), true), envOf(false, store(), true)].map(async env => (await caps({ request: new Request('http://localhost/api/filter-caps'), env } as never)).json()))
+      expect(got).toEqual([
+        { indexedOnly: true, rootLabel: 'root' },
+        { indexedOnly: false, rootLabel: 'root' },
+        // `SEARCH_PATH_TERMS=1`: path terms answered (an indexed-only box's concern only).
+        { indexedOnly: true, pathTerms: true, rootLabel: 'root' },
+        { indexedOnly: false, rootLabel: 'root' },
+      ])
     })
     it('and the store root\'s label (`ROOT_LABEL`), the primary\'s or a secondary store\'s own', async () => {
       const env = { ...envOf(true), ROOT_LABEL: 'marin CoreWeave (dev)', STORES_JSON: JSON.stringify({ meta: { vars: { ROOT_LABEL: 'our storage' } } }) } as Env

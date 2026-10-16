@@ -47,22 +47,23 @@ import { ANCHOR_MIN, pathTailOk } from './indexedOnly.js'
 export interface BoolPlan { alts: string[][]; neg: string[] }
 
 /** A matcher's static key: a non-empty substring, anchored ones at least `ANCHOR_MIN` long, one holding `/` (a path
- *  term) with a tail `pathTailOk` reads; else null. */
-export function literalKey(m: Matcher): string | null {
+ *  term) with a tail `pathTailOk` reads where `paths` (`SEARCH_PATH_TERMS`, `indexedOnly.ts` `pathTerms`); else null. */
+export function literalKey(m: Matcher, paths = false): string | null {
   if (m.kind !== 'sub' || !m.text) return null
   const start = !!m.start, end = !!m.end
-  if (m.text.includes('/')) return pathTailOk(m.text, end) ? termKey({ text: m.text, start, end }) : null
+  if (m.text.includes('/')) return paths && pathTailOk(m.text, end) ? termKey({ text: m.text, start, end }) : null
   if ((start || end) && [...m.text].length < (start && end ? ANCHOR_MIN.exact : start ? ANCHOR_MIN.start : ANCHOR_MIN.end)) return null
   return termKey({ text: m.text, start, end })
 }
 
-/** The query as AND-groups and negatives of static keys, else null (a glob, a regex, a path term's tail or an
- *  anchor too short). Each group's terms deduplicated, a group holding every term of another dropped (it matches a subset
- *  of it), duplicate groups and negatives dropped. */
-export function boolPlan(ast: QueryAst | undefined): BoolPlan | null {
+/** The query as AND-groups and negatives of static keys, else null (a glob, a regex, a path term — `paths` off — or
+ *  its tail, or an anchor too short). Each group's terms deduplicated, a group holding every term of another dropped
+ *  (it matches a subset of it), duplicate groups and negatives dropped. */
+export function boolPlan(ast: QueryAst | undefined, paths = false): BoolPlan | null {
   if (!ast) return null
-  const groups = ast.alts.map(g => g.map(literalKey))
-  const neg = ast.neg.map(literalKey)
+  const key = (m: Matcher) => literalKey(m, paths)
+  const groups = ast.alts.map(g => g.map(key))
+  const neg = ast.neg.map(key)
   if (groups.some(g => g.some(t => t == null)) || neg.some(t => t == null)) return null
   const sets = groups.map(g => [...new Set(g as string[])])
   if (!sets.some(g => g.length) && !neg.length) return null

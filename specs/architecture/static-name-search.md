@@ -393,11 +393,12 @@ Cases (`job/static-names/drill-cases.jsonl`, from `drill-cases -n 1` over `drill
 
 ## Indexed-only filter (`FILTER_INDEXED_ONLY=1`)
 
-A deployment flag (every deployment): the map's filter (`/api/subtree`, `/api/diff`, `/api/series`) accepts only what this index answers exactly, and never walks the path store for a filter. Its syntax is `plain` (`querySyntax.ts`): literal substrings of file or folder names (every character itself: `*`, `?`, regex characters, `/…/`; any length; `qs=` ignored), plain or anchored, path terms (`a/b`: the path holds the text, `/` the separator; read from the name index's range of the term's tail, `staticAnchors.ts` `PathTermHits`), alone or combined by AND (`a b`), OR (`a|b`) and NOT (`-b`) (`specs/search-extensions.md` §1, `site/functions/_lib/staticBool.ts`), under an owner pool or none (no person lens or storage classes), on a scan the index covers. What it can't answer yet is a 400 `{ "error": <message>, "code": <code> }` (`site/functions/_lib/indexedOnly.ts`; what closes each: `specs/search-box-no-refusals.md`):
+A deployment flag (every deployment): the map's filter (`/api/subtree`, `/api/diff`, `/api/series`) accepts only what this index answers exactly, and never walks the path store for a filter. Its syntax is `plain` (`querySyntax.ts`): literal substrings of file or folder names (every character itself: `*`, `?`, regex characters, `/…/`; any length; `qs=` ignored), plain or anchored, path terms only with `SEARCH_PATH_TERMS=1` (off by default: parked; `a/b`: the path holds the text, `/` the separator; read from the name index's range of the term's tail, `staticAnchors.ts` `PathTermHits`), alone or combined by AND (`a b`), OR (`a|b`) and NOT (`-b`) (`specs/search-extensions.md` §1, `site/functions/_lib/staticBool.ts`), under an owner pool or none (no person lens or storage classes), on a scan the index covers. What it can't answer yet is a 400 `{ "error": <message>, "code": <code> }` (`site/functions/_lib/indexedOnly.ts`; what closes each: `specs/search-box-no-refusals.md`):
 
 | Code | When |
 |---|---|
-| `slash-tail-short` | a path term whose text after its last `/` is under 2 characters (or empty) |
+| `unsupported-slash` | a term holding `/`, with `SEARCH_PATH_TERMS` off (the default; by design) |
+| `slash-tail-short` | with `SEARCH_PATH_TERMS=1`: a path term whose text after its last `/` is under 2 characters (or empty) |
 | `unsupported-kind` | an unquoted `is:file` / `is:dir` (not built: `specs/search-extensions.md` §3); every deployment refuses it as a parse error |
 | `unsupported-scope` | a filter with `lens=` or `cl=` |
 | `owner-too-common` | a heavy literal's rollup (or the catalog's buckets) under an owner pool: rollups carry no owners |
@@ -405,7 +406,7 @@ A deployment flag (every deployment): the map's filter (`/api/subtree`, `/api/di
 | `scan-not-indexed` | the literal's answer doesn't cover the scan: a scan outside the generation, or a heavy literal past the drill base (until the drill's per-scan append) (`/api/name-summary` keeps its own scan refusal); for a compound query, any of its terms' answers |
 | `term-too-common`, `too-broad` | budgets: a term too common to read here; a compound query the index can't combine exactly within its budget (every term of an AND-group heavy at the view path, a heavy term under a candidate, a negative's rollup with a remainder, past 24 reads or 400K hits) |
 
-A view root whose path holds the literal (for a compound query: every term of an AND-group, with no negative term) is the plain view, on any scan. The series names uncovered scans (`unindexed: [dates]`, gaps) instead of reading the client's roots per scan. `GET /api/filter-caps` → `{ indexedOnly }` tells the filter box, which parses with `plain`, refuses the same forms inline (never sending them), shows the server's codes as its message, and lists only the supported forms in its help.
+A view root whose path holds the literal (for a compound query: every term of an AND-group, with no negative term) is the plain view, on any scan. The series names uncovered scans (`unindexed: [dates]`, gaps) instead of reading the client's roots per scan. `GET /api/filter-caps` → `{ indexedOnly, pathTerms? }` tells the filter box, which parses with `plain`, refuses the same forms inline (never sending them), shows the server's codes as its message, and lists only the supported forms in its help.
 
 ## Acting on matches (`/api/filter-cover`)
 

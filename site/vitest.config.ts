@@ -1,4 +1,8 @@
 import { defineConfig } from 'vitest/config'
+import { writeBuildId } from './scripts/build-id.mjs'
+
+// The Functions import the build's identity (`functions/_lib/build.ts`): generated, untracked.
+writeBuildId()
 
 // Unit specs for the pure server folds (`functions/_lib`), client helpers and
 // the render bench's fold (`bench/lib.ts`); the Playwright suite under e2e/

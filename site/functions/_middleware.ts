@@ -1,7 +1,10 @@
 // Every HTML page response gets its card stamped into `<head>`
 // (specs/done/dogi.md): crawlers never run the React router, so the edge says what
 // each URL shows. Everything else passes through untouched, except an
-// `/assets/` miss (`assetMiss`).
+// `/assets/` miss (`assetMiss`). Every response, whatever answered it (a Function,
+// a cached body, the gate, a static asset), leaves with the build that served it
+// (`x-disky-build: <sha> <time>`, `_lib/build.ts`).
+import { withBuild } from './_lib/build.js'
 import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
 import { coloPutsSettled } from './_lib/index.js'
@@ -24,7 +27,11 @@ export const assetMiss = (): Response => new Response('asset not found\n', {
   headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
 })
 
-export const onRequest = async (ctx: { request: Request; env: OgEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
+type MiddlewareCtx = { request: Request; env: OgEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void }
+
+export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => withBuild(await serve(ctx))
+
+async function serve(ctx: MiddlewareCtx): Promise<Response> {
   const blocked = await restrictGate(ctx.request, ctx.env as never)
   if (blocked) return blocked
   const url = new URL(ctx.request.url)

@@ -39,7 +39,7 @@ import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
-import { apiError, INDEXED_SYNTAX, refusalOf, useFilterCaps, useIndexedScans } from './filterCaps'
+import { apiError, indexedSyntax, refusalOf, useFilterCaps, useIndexedScans } from './filterCaps'
 import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
@@ -216,17 +216,17 @@ function AppContent() {
   const storeSyntax = syntaxById(store.querySyntax ?? '') ?? DEFAULT_SYNTAX
   // An indexed-only deployment (`FILTER_INDEXED_ONLY`): its one syntax, `plain` (every character literal; `?qs=`
   // doesn't apply); what the static index can't answer yet is refused inline, never sent.
-  const { indexedOnly, rootLabel, rootTitle } = useFilterCaps()
-  const syntax = indexedOnly ? INDEXED_SYNTAX : (qsP && syntaxById(qsP)) || storeSyntax
+  const { indexedOnly, pathTerms = false, rootLabel, rootTitle } = useFilterCaps()
+  const syntax = indexedOnly ? indexedSyntax(pathTerms) : (qsP && syntaxById(qsP)) || storeSyntax
   const boxSyntax = syntax
   const fParse = useMemo((): { ok: boolean; error?: string } => {
     if (!indexedOnly && qsP && !syntaxById(qsP)) return { ok: false, error: `unknown query syntax '${qsP}' (want ${SYNTAXES.map(x => x.id).join('|')})` }
     if (!fqRaw) return { ok: false }
-    const refused = indexedOnly ? rejectQuery(fqRaw) : null
+    const refused = indexedOnly ? rejectQuery(fqRaw, pathTerms) : null
     if (refused) return { ok: false, error: refused.message }
     const r = syntax.parse(fqRaw)
     return r.error !== undefined ? { ok: false, error: r.error } : { ok: !!r.ast }
-  }, [fqRaw, qsP, syntax, indexedOnly])
+  }, [fqRaw, qsP, syntax, indexedOnly, pathTerms])
   // The box edits a local draft; the URL (and every query keyed on it) follows
   // after a 250 ms pause — one request pair per phrase, not per keystroke.
   const [fqDraft, setFqDraft] = useState<string | null>(null)
@@ -1271,7 +1271,7 @@ function AppContent() {
               />
             </Explain>
             {indexedOnly
-              ? <QueryHelpTip syntaxes={[INDEXED_SYNTAX]} active={INDEXED_SYNTAX} />
+              ? <QueryHelpTip syntaxes={[syntax]} active={syntax} />
               : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
             <FilterNote error={fErr} matched={fq && fHere ? matchedNote(fHere.b, !!graftPath, fmtBytes) : null} coverage={fCoverage}>
               {fq && !fErr && <UnionRefusals union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}

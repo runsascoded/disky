@@ -3,13 +3,15 @@
  *  the server's structured 400s turned into the filter box's message. */
 import { useQuery } from '@tanstack/react-query'
 import type { QuerySyntax } from '../functions/_lib/queryAst'
-import { INDEXED_HELP } from '../functions/_lib/indexedOnly'
+import { indexedHelp } from '../functions/_lib/indexedOnly'
 import { plain } from '../functions/_lib/querySyntax'
 import { useStore, useStoreFetch } from './store'
 
-/** `rootLabel`: the store root's label (`ROOT_LABEL`), the unfiltered view's root crumb; `rootTitle`: that
- *  crumb's tooltip (`ROOT_TITLE`) — each absent when the deployment sets none, or before it loads. */
-export interface FilterCaps { indexedOnly: boolean; rootLabel?: string; rootTitle?: string }
+/** `pathTerms`: an indexed-only deployment answers path terms (`a/b`; `SEARCH_PATH_TERMS`), absent: a term holding
+ *  `/` is refused (`unsupported-slash`). `rootLabel`: the store root's label (`ROOT_LABEL`), the unfiltered view's
+ *  root crumb; `rootTitle`: that crumb's tooltip (`ROOT_TITLE`) — each absent when the deployment sets none, or
+ *  before it loads. */
+export interface FilterCaps { indexedOnly: boolean; pathTerms?: boolean; rootLabel?: string; rootTitle?: string }
 
 /** The deployment's filter capabilities for this subtree's store (unloaded or unreachable: none, i.e. every
  *  form, and no root label). */
@@ -29,8 +31,11 @@ export function useFilterCaps(): FilterCaps {
   return q.data ?? { indexedOnly: false }
 }
 
-/** The filter box's syntax on an indexed-only deployment: `plain`'s parse (every character literal), its help. */
-export const INDEXED_SYNTAX: QuerySyntax = { id: plain.id, parse: q => plain.parse(q), describe: () => INDEXED_HELP }
+const indexed = (paths: boolean): QuerySyntax => ({ id: plain.id, parse: q => plain.parse(q), describe: () => indexedHelp(paths) })
+const INDEXED = [indexed(false), indexed(true)] as const
+/** The filter box's syntax on an indexed-only deployment: `plain`'s parse (every character literal), its help (with
+ *  the path-term form where `paths`, `FilterCaps.pathTerms`); one object per flag, a stable identity for memos. */
+export const indexedSyntax = (paths: boolean): QuerySyntax => INDEXED[paths ? 1 : 0]
 
 /** The refusal codes an API answers a filter with (`functions/_lib/indexedOnly.ts`): a reason to show
  *  inline, never a failure to retry. */

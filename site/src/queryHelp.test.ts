@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { regex, simple, SYNTAXES } from '../functions/_lib/querySyntax'
 import { QueryHelpCard } from './QueryHelp'
 import { INDEXED_HELP } from '../functions/_lib/indexedOnly'
+import { indexedSyntax } from './filterCaps'
 
 const render = (active = simple, onPick?: (id: string) => void) =>
   renderToStaticMarkup(createElement(QueryHelpCard, { syntaxes: SYNTAXES, active, onPick }))
@@ -31,6 +32,11 @@ describe('the filter box’s help card: generated from `describe()`', () => {
   it('the filter box’s and the indexed-only help each end on the one line about literal `^`/`$`', () => {
     const line = '^/$ anchor a name; write \\^ or \\$ (or quote it) to search them literally.'
     expect([simple.describe().notes.at(-1), INDEXED_HELP.notes.at(-1)]).toEqual([line, line])
+  })
+  it('the indexed-only card lists `a/b` only where path terms are on (`SEARCH_PATH_TERMS`, `FilterCaps.pathTerms`)', () => {
+    const forms = (paths: boolean) => rows(renderToStaticMarkup(createElement(QueryHelpCard, { syntaxes: [indexedSyntax(paths)], active: indexedSyntax(paths) }))).map(r => r[0])
+    const base = ['text', '^text', 'text$', '^text$', 'a b', 'a|b', '-x']
+    expect([forms(false), forms(true)]).toEqual([[...base, '"…"'], [...base, 'a/b', '"…"']])
   })
   it('any syntax renders its own forms', () => {
     for (const s of SYNTAXES) expect([s.id, rows(render(s))]).toEqual([s.id, s.describe().forms.map(f => [f.form, f.meaning, f.example])])

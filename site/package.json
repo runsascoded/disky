@@ -7,10 +7,11 @@
   "scripts": {
     "dev": "vite",
     "dev:full": "./dev",
-    "build": "tsc -b && tsc -p functions && vite build",
+    "build": "node scripts/build-id.mjs && tsc -b && tsc -p functions && vite build",
     "preview": "vite preview",
     "shots": "scrns",
     "clean": "rm -rf node_modules/.vite dist",
+    "build-id": "node scripts/build-id.mjs",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:e2e:list": "playwright test --list",

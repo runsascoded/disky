@@ -77,6 +77,9 @@ export interface Env {
    *  of a name, unscoped, on a scan the index covers (`_lib/indexedOnly.ts`); anything else is a 400 with a
    *  reason code, never a path-store scan. */
   FILTER_INDEXED_ONLY?: string
+  /** `1`: the search box answers path terms (`a/b`) from the static name index (`_lib/indexedOnly.ts` `pathTerms`);
+   *  unset, a term holding `/` is `unsupported-slash` on an indexed-only deployment and walked elsewhere. */
+  SEARCH_PATH_TERMS?: string
   /** With `FILTER_STATIC`: how long (ms) a filtered view waits past its phase-2 read for the static
    *  roots' own rows (kind, ages, classes) before answering without them; unset = until they land. */
   FILTER_DETAILS_MS?: string

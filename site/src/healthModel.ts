@@ -284,6 +284,9 @@ export interface HealthDoc {
    *  scan never published has no gaps to show — but worth a look (e.g. a backfilled run of a scan purged since). */
   unserved: string[]
   freshness: Freshness
+  /** The build serving the response (`functions/_lib/build.ts`): its commit and build time. Added as it is served,
+   *  never cached with the document. */
+  build?: { sha: string; time: string }
 }
 
 /** A scan job as /health reads it (D1 `scan_runs`: every run, downstream jobs and attempts included). */

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { excludedFromFunctions, FUNCTIONS_EXCLUDED } from './_lib/routes'
+import { BUILD, buildId } from './_lib/build'
+import { cacheKeyFor, cacheMatch, cacheStore } from './_lib/edgeCache'
 
 // The stamp itself (wasm-backed) is out of scope: any call to it fails the test.
 const stampPage = vi.fn(async () => { throw new Error('stamped a non-HTML response') })
@@ -55,7 +57,7 @@ describe('an `/assets/` miss is a no-store 404, never the SPA shell', () => {
       const res = await run('https://gcs.example.test/assets/index-NOPE.js', html(), method)
       expect([res.status, [...res.headers], await res.text()]).toEqual([
         404,
-        [['cache-control', 'no-store'], ['content-type', 'text/plain; charset=utf-8']],
+        [['cache-control', 'no-store'], ['content-type', 'text/plain; charset=utf-8'], ['x-disky-build', buildId()]],
         'asset not found\n',
       ])
     }
@@ -98,4 +100,35 @@ it('private anonymous unfurls bypass route handlers that read protected metadata
   const next = vi.fn(async () => new Response('protected staging counts'))
   const result = await onRequest({ request: new Request('https://cw.example/staged'), env: {} as never, next })
   expect([result === generic, next.mock.calls]).toEqual([true, []])
+})
+
+describe('every response names the build serving it (`x-disky-build: <sha> <time>`)', () => {
+  it('the header is `<sha> <iso time>`, from the generated build module', () => {
+    expect([buildId(), /^[0-9a-f]{10}(-dirty)?$|^unknown$/.test(BUILD.sha), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(BUILD.time)]).toEqual([`${BUILD.sha} ${BUILD.time}`, true, true])
+  })
+  it('a cached endpoint\'s miss and its colo hit — the stored copy written by an older build — both carry the current build', async () => {
+    const held = new Map<string, Response>()
+    const g = globalThis as unknown as { caches?: unknown }
+    const was = g.caches
+    g.caches = { default: { match: async (k: Request) => held.get(k.url)?.clone(), put: async (k: Request, r: Response) => { held.set(k.url, r) } } }
+    try {
+      const key = cacheKeyFor('subtree', '', 'k')
+      const req = () => new Request('https://gcs.example.test/api/subtree?date=x')
+      const miss = await onRequest({ request: req(), env: {} as never, next: () => cacheStore({}, key, '{"a":1}') })
+      const stale = new Response('{"a":1}', { headers: { 'content-type': 'application/json', 'cache-control': 'public, s-maxage=60', 'x-disky-build': 'old 2026-01-01T00:00:00Z' } })
+      held.set(key.url, stale)
+      const hit = await onRequest({ request: req(), env: {} as never, next: async () => (await cacheMatch({}, key))! })
+      expect([miss, hit].map(r => [r.headers.get('x-cache'), r.headers.get('x-disky-build')])).toEqual([['miss', buildId()], ['hit', buildId()]])
+    } finally {
+      g.caches = was
+    }
+  })
+  it('on any response: a refusal, an asset miss, one whose headers are immutable (copied)', async () => {
+    const got = await Promise.all([
+      run('https://gcs.example.test/api/x', new Response('{}', { status: 400 })),
+      run('https://gcs.example.test/assets/x.js', html()),
+      run('https://gcs.example.test/api/y', Response.redirect('https://gcs.example.test/z', 302)),
+    ])
+    expect(got.map(r => [r.status, r.headers.get('x-disky-build')])).toEqual([[400, buildId()], [404, buildId()], [302, buildId()]])
+  })
 })

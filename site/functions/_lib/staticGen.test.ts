@@ -88,8 +88,9 @@ describe('STATIC_GEN', () => {
     const log: string[] = []
     const env = { FILTER_STATIC: '1', INDEX_R2: r2(log), STATIC_GEN: GEN }
     const s = staticFilterStore(env)!
-    expect([s.gen, await s.scans(), staticTag(env, { ast: { neg: [], alts: [[{ kind: 'sub', text: 'qqq' }]] } as never })])
-      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.26`])
+    const term = (text: string) => ({ ast: { neg: [], alts: [[{ kind: 'sub', text }]] } as never })
+    expect([s.gen, await s.scans(), staticTag(env, term('qqq')), staticTag(env, term('a/bc')), staticTag({ ...env, SEARCH_PATH_TERMS: '1' }, term('a/bc')), staticTag({ ...env, SEARCH_PATH_TERMS: '1' }, term('qqq'))])
+      .toEqual([GEN, ['2026-08-01', '2026-09-01', ...RUNS], `${GEN}.27`, `${GEN}.27`, `${GEN}.27.p`, `${GEN}.27`])
     expect(log.filter(k => !k.includes(`static-names/${GEN}/`))).toEqual([])
   })
 

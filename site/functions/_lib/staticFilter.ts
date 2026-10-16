@@ -28,7 +28,7 @@ import { StaticCatalog } from './staticCatalog.js'
 import { type CatalogLookup, Drill, DRILL_DIR, DrillSource, type Rollup, type RollupCell } from './staticDrill.js'
 import { type Blobs, cacheIndexes, type FirstHits, type Hit, type Io, r2Blobs, scanAt, staticGen, staticPrefix } from './staticNames.js'
 import { tiers } from './staticRuns.js'
-import { type FilterReject, type FilterRejectCode, reject, rejectAst } from './indexedOnly.js'
+import { type FilterReject, type FilterRejectCode, pathTerms, reject, rejectAst } from './indexedOnly.js'
 import { type BoolAnswer, boolPlan, type BoolPlan, compound, evalBool, isDecline, literalKey } from './staticBool.js'
 import { AnchoredSource, parseKey, termInPath } from './staticAnchors.js'
 import { type HexRule, hexAffected } from './hexRuns.js'
@@ -42,9 +42,9 @@ export { type Rollup, rollupAt, rollupTotal } from './staticDrill.js'
 /** The key of the literal a query is, when the static index can answer it exactly, else null: a plain literal
  *  (lowercase) itself, an anchored one (`^q`, `q$`, `^q$`; at least `ANCHOR_MIN` characters) or a path term
  *  (`a/b`) `staticAnchors.ts`'s `termKey` (`/q`, `q/`, `/q/`, `//00a/b`). */
-export function staticLiteral(ast: QueryAst | undefined): string | null {
+export function staticLiteral(ast: QueryAst | undefined, paths = false): string | null {
   if (!ast || ast.neg.length || ast.alts.length !== 1 || ast.alts[0].length !== 1) return null
-  return literalKey(ast.alts[0][0])
+  return literalKey(ast.alts[0][0], paths)
 }
 
 /** One or two characters: never a suffix-range read (the shards hold suffixes of ≥ 3); the heavy source's. */
@@ -246,7 +246,7 @@ export function cacheHits(cache: Cache, prefix: string, version = 'hits-v1'): Hi
   }
 }
 
-export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: string; FILTER_STATIC_ANCHORS?: string; FILTER_INDEXED_ONLY?: string; INDEX_R2?: R2Bucket; STATIC_GEN?: string; STORE_KEY?: string }
+export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: string; FILTER_STATIC_ANCHORS?: string; FILTER_INDEXED_ONLY?: string; SEARCH_PATH_TERMS?: string; INDEX_R2?: R2Bucket; STATIC_GEN?: string; STORE_KEY?: string }
 
 /** The drilldown over a bucket's generation: the base `drill/` and its `runs`' (`staticDrill.ts`), with the fleet
  *  root from `opts.catalog` (default: the base catalog); `cached`: its indexes in `cache` under `prefix` (the
@@ -349,8 +349,8 @@ export function boundTo(s: StaticFilterStore, req: Req | undefined): StaticFilte
 }
 
 /** Whether `date` can be answered statically for `ast`: the literal, else null. */
-export async function staticKey(s: StaticFilterStore | null, ast: QueryAst | undefined, dates: string[]): Promise<string | null> {
-  const key = staticLiteral(ast)
+export async function staticKey(s: StaticFilterStore | null, ast: QueryAst | undefined, dates: string[], paths = false): Promise<string | null> {
+  const key = staticLiteral(ast, paths)
   if (!s || !key) return null
   const have = await s.scans()
   return dates.every(d => have.includes(d)) ? key : null
@@ -369,10 +369,10 @@ export async function dirsOnlyOf(s: StaticFilterStore | null, dates: string[]): 
  *  folder names only, the other files too, so every file match would read as added — `scan-dirs-only`, never a
  *  diff. Null: comparable (neither side dir-only, or both), not a static literal, or a view root the literal
  *  matches (the plain view, nothing searched). */
-export async function dirsOnlySplit(s: StaticFilterStore | null, ast: QueryAst | undefined, path: string, dates: string[]): Promise<FilterReject | null> {
-  const key = staticLiteral(ast)
+export async function dirsOnlySplit(s: StaticFilterStore | null, ast: QueryAst | undefined, path: string, dates: string[], paths = false): Promise<FilterReject | null> {
+  const key = staticLiteral(ast, paths)
   // A compound query (`staticBool.ts`) compares its matches as a literal does.
-  if (!s || !(key || compound(boolPlan(ast))) || (key && termInPath(key, path, s.hexRuns ? await s.hexRuns() : null))) return null
+  if (!s || !(key || compound(boolPlan(ast, paths))) || (key && termInPath(key, path, s.hexRuns ? await s.hexRuns() : null))) return null
   const n = (await dirsOnlyOf(s, dates)).length
   return n && n < dates.length ? reject('scan-dirs-only') : null
 }
@@ -417,8 +417,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  tile — in the view and both sides of a diff); 25: a match root's interior is read under an unfiltered view's bound
  *  (`FILTER_PHASE2_GROUPS`/`ROWS` 64 / 512K, the interval store planned as the plain view plans it), where 16 / 160K left a
  *  big root on an interval-store deployment one tile ("over the read budget")); 26: a diff's name whose lookup the walk's
- *  budget left unanswered folds into `(other)` on both sides, where it read as added / removed at zero. */
-const RESPONSE_V = 26
+ *  budget left unanswered folds into `(other)` on both sides, where it read as added / removed at zero; 27: path terms parked
+ *  behind `SEARCH_PATH_TERMS` (off: walked, flagged approximate, or refused `unsupported-slash` indexed-only) — a cached
+ *  26 holds their static answer under the same key; on, their keys carry `.p`). */
+const RESPONSE_V = 27
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
@@ -430,7 +432,9 @@ export const subTexts = (ast: QueryAst | undefined): string[] => subMatchers(ast
  *  a response never outlives a switch of backend or generation; else ''. */
 export function staticTag(env: StaticFilterEnv, query: { ast?: QueryAst } | undefined): string {
   const s = staticFilterStore(env)
-  return s && (staticLiteral(query?.ast) || subTexts(query?.ast).length) ? `${s.gen}.${RESPONSE_V}` : ''
+  if (!s || !(staticLiteral(query?.ast, pathTerms(env)) || subTexts(query?.ast).length)) return ''
+  // Path terms on (`SEARCH_PATH_TERMS`): a query holding one is answered statically, where off it walks (or is refused).
+  return `${s.gen}.${RESPONSE_V}${pathTerms(env) && subTexts(query?.ast).some(t => t.includes('/')) ? '.p' : ''}`
 }
 
 /** The deployment's hex-run rule: its static store's generation's (null: no static store, or a generation built
@@ -488,29 +492,30 @@ export async function staticCompound(s: StaticFilterStore, plan: BoolPlan, path:
  *  the literal matches is the plain view (nothing to search). The answer is held per isolate, so the view's
  *  own read reuses it. */
 export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefined, path: string, dates: string[], opts?: HitOpts): Promise<FilterReject | null> {
-  const key = staticLiteral(ast)
+  const paths = pathTerms(env)
+  const key = staticLiteral(ast, paths)
   const s = staticFilterStore(env)
   if (!key) {
     // A compound query (`staticBool.ts`): its answer under `path`, every date covered, else why not. A view root
     // the query matches with nothing to exclude is the plain view.
-    const plan = ast ? boolPlan(ast) : null
+    const plan = ast ? boolPlan(ast, paths) : null
     if (!plan) {
-      const r = ast && rejectAst(ast)
+      const r = ast && rejectAst(ast, paths)
       if (!r) throw new Error('indexedGate: a query with no static plan and no refusal')
       return r
     }
     const rule = await staticHexRule(env)
     if (!plan.neg.length && plan.alts.some(g => g.every(t => termInPath(t, path, rule)))) return null
     if (!s) return declined(s, null, null)
-    const split = await dirsOnlySplit(s, ast, path, dates)
+    const split = await dirsOnlySplit(s, ast, path, dates, paths)
     if (split) return split
     const got = await staticCompound(s, plan, path, dates)
     return 'answer' in got ? null : got.reject
   }
   if (termInPath(key, path, await staticHexRule(env))) return null
-  const skey = s ? await staticKey(s, ast, dates) : null
+  const skey = s ? await staticKey(s, ast, dates, paths) : null
   if (!skey) return declined(s, null, null)
-  const split = await dirsOnlySplit(s, ast, path, dates)
+  const split = await dirsOnlySplit(s, ast, path, dates, paths)
   if (split) return split
   const found = await s!.source.hits(key, path, opts)
   return found && covers(found, dates) ? null : declined(s, skey, found)

@@ -27,6 +27,7 @@ import { ShareDialog } from './ShareDialog'
 import { closeDialog, openDialog, useDialog } from './dialogs'
 import { useRegistry } from './identities'
 import { REPO_URL } from './SiteKbd'
+import { buildLine } from './build'
 import { useMyUser, useUserEmails } from './owners'
 import ProfileModal from './ProfileModal'
 import TokenModal from './TokenModal'
@@ -234,11 +235,25 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
               {DEFAULT_STORE.peer && <a role="menuitem" className="mi" href={DEFAULT_STORE.peer.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.peer.label} ↗</a>}
               {DEFAULT_STORE.liveTotals && <a role="menuitem" className="mi" href={DEFAULT_STORE.liveTotals.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.liveTotals.label} ↗</a>}
               <a role="menuitem" className="mi" href={REPO_URL} target="_blank" rel="noreferrer"><FaGithub aria-hidden /> Source on GitHub ↗</a>
+              <BuildLine />
             </div>
           </FloatingFocusManager>
         </FloatingPortal>
       )}
     </>
+  )
+}
+
+/** The page's build (`build.ts`): which deploy a report is about. Its commit links to GitHub when it names one. The
+ *  API's responses carry theirs (`x-disky-build`), so a mismatch shows a stale isolate or tab. */
+function BuildLine() {
+  const b = buildLine(REPO_URL)
+  if (!b) return null
+  const text = <><code>{b.sha}</code> · {b.time}</>
+  return (
+    <div className="menu-build" title="This page's build: commit · build time (the API names its own in the x-disky-build header)">
+      build {b.href ? <a href={b.href} target="_blank" rel="noreferrer">{text}</a> : text}
+    </div>
   )
 }
 

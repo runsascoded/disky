@@ -6,6 +6,7 @@ import { onRequestGet as route } from '../api/health'
 import { IV_RUN_FILES } from './health'
 import { sqliteD1 } from './testD1'
 import type { HealthDoc } from '../../src/healthModel'
+import { BUILD } from './build'
 
 describe('D1', () => {
   const D = (d: string) => `2026-10-${d}`
@@ -91,6 +92,23 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
     it('a generation without `scans.json` reports the error, no stack', async () => {
       const { doc } = await get({ INDEX_R2: r2({}), STATIC_GEN: 'sn1' })
       expect(doc.stores.map(s => [s.kind, s.base, s.runs, s.error])).toEqual([['static', [], [], 'static-names/sn1/scans.json: not on R2']])
+    })
+
+    it('names the build serving it on a miss and on a colo hit stored by an older build (the document is cached alone)', async () => {
+      const held = new Map<string, Response>()
+      const g = globalThis as unknown as { caches?: unknown }
+      const was = g.caches
+      g.caches = { default: { match: async (k: Request) => held.get(k.url)?.clone(), put: async (k: Request, r: Response) => { held.set(k.url, r) } } }
+      try {
+        const miss = await get({})
+        const [key] = held.keys()
+        const stored = await held.get(key)!.clone().json() as HealthDoc
+        held.set(key, new Response(JSON.stringify({ ...stored, build: { sha: 'old', time: '2026-01-01T00:00:00Z' } })))
+        const hit = await get({})
+        expect([stored.build, [miss.cache, miss.doc.build], [hit.cache, hit.doc.build]]).toEqual([undefined, ['miss', BUILD], ['hit', BUILD]])
+      } finally {
+        g.caches = was
+      }
     })
 
     it('no stores and no D1: an empty document', async () => {

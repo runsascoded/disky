@@ -60,14 +60,21 @@ export const anchorTooShort = (kind: keyof typeof ANCHOR_SHORT): FilterReject =>
 /** The deployment's flag. */
 export const indexedOnly = (env: { FILTER_INDEXED_ONLY?: string } | undefined): boolean => env?.FILTER_INDEXED_ONLY === '1'
 
+/** `SEARCH_PATH_TERMS=1` (a deployment flag, default off): path terms (`a/b`, `^a/b`, `a/b$`) are answered from the
+ *  static name index (`staticAnchors.ts`'s tail read; specs/search-box-no-refusals.md §3). Off, the search box is the
+ *  small subset that is always fast and exact: a term holding `/` is `unsupported-slash` on an indexed-only deployment
+ *  (every route and the box, up front), and the static index never reads one (`staticBool.ts` `literalKey`), so any
+ *  other deployment walks it as it walks a glob. */
+export const pathTerms = (env: { SEARCH_PATH_TERMS?: string } | undefined): boolean => env?.SEARCH_PATH_TERMS === '1'
+
 /** Why `q` isn't an indexed query; null when it is one (or is blank). Parsed as `plain` (every term a literal:
  *  `*`, `/…/` and regex characters are text), so the only parse error is `is:file` / `is:dir`
- *  (`unsupported-kind`). */
-export function rejectQuery(q: string | null | undefined): FilterReject | null {
+ *  (`unsupported-kind`). `paths`: path terms are on (`pathTerms`); off, a term holding `/` is `unsupported-slash`. */
+export function rejectQuery(q: string | null | undefined, paths = false): FilterReject | null {
   if (!(q ?? '').trim()) return null
   const r = plain.parse(q ?? '')
   if (r.error !== undefined) return reject('unsupported-kind')
-  return r.ast ? rejectAst(r.ast) : null
+  return r.ast ? rejectAst(r.ast, paths) : null
 }
 
 /** The fewest characters an anchored literal needs (code points): `q$` reads the suffix shards (suffixes of ≥ 3
@@ -95,11 +102,13 @@ export function slashTailShort(text: string, start: boolean): FilterReject {
 }
 
 /** Why a parsed query isn't indexed literals (`staticBool.ts` `boolPlan`'s shape); null when it is. Each term,
- *  positive or negative, is checked alike. */
-export function rejectAst(ast: QueryAst): FilterReject | null {
+ *  positive or negative, is checked alike. `paths`: path terms are on (`pathTerms`); off, any term holding `/` is
+ *  `unsupported-slash`. */
+export function rejectAst(ast: QueryAst, paths = false): FilterReject | null {
   const all = [...ast.alts.flat(), ...ast.neg]
   // `plain` parses neither; another syntax's AST (a test's) is refused as a slash-less literal can't be.
   if (all.some(m => m.kind !== 'sub')) throw new Error(`indexed-only: a ${all.find(m => m.kind !== 'sub')!.kind} matcher (only \`plain\` literals)`)
+  if (!paths && all.some(m => m.kind === 'sub' && m.text.includes('/'))) return reject('unsupported-slash')
   for (const m of all) {
     // A path term (its text holds `/`): read from its tail's name-index range, which needs the tail (`staticAnchors.ts`).
     if (m.kind === 'sub' && m.text.includes('/')) { if (!pathTailOk(m.text, !!m.end)) return slashTailShort(m.text, !!m.start); continue }
@@ -122,7 +131,8 @@ export class FilterRejected extends Error {
   constructor(readonly reject: FilterReject) { super(reject.message); this.name = 'FilterRejected' }
 }
 
-/** The filter box's help on an indexed-only deployment: the supported forms. */
+/** The filter box's help on an indexed-only deployment: the supported forms (`indexedHelp` adds path terms where
+ *  they're on). */
 export const INDEXED_HELP: SyntaxHelp = {
   label: 'plain text',
   summary: 'a substring of a file or folder name, case-insensitive; every character is itself (* and ? too)',
@@ -135,7 +145,6 @@ export const INDEXED_HELP: SyntaxHelp = {
     { form: 'a b', meaning: 'both (AND), in any names along the path', example: 'llama sft' },
     { form: 'a|b', meaning: 'either (OR; looser than AND)', example: 'qwen|llama' },
     { form: '-x', meaning: 'exclude what contains x (the whole query’s)', example: 'ckpt -tmp' },
-    { form: 'a/b', meaning: 'along the path: a name ending in a, then one starting with b', example: 'run-a/ckpt' },
     { form: '"…"', meaning: 'literal, spaces, -, |, ^ and $ included', example: '"final ckpt"' },
   ],
   notes: [
@@ -144,3 +153,11 @@ export const INDEXED_HELP: SyntaxHelp = {
     ESCAPE_NOTE,
   ],
 }
+
+/** A path term's help row (`SEARCH_PATH_TERMS`), listed before the quoting row. */
+const PATH_FORM = { form: 'a/b', meaning: 'along the path: a name ending in a, then one starting with b', example: 'run-a/ckpt' }
+
+/** The indexed-only help for a deployment: `INDEXED_HELP`, plus the path-term form when `paths` (`pathTerms`). */
+export const indexedHelp = (paths: boolean): SyntaxHelp => paths
+  ? { ...INDEXED_HELP, forms: [...INDEXED_HELP.forms.slice(0, -1), PATH_FORM, INDEXED_HELP.forms.at(-1)!] }
+  : INDEXED_HELP
