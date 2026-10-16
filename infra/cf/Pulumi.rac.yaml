@@ -17,9 +17,8 @@ config:
   disk-tree-m3-cf:fileTunnel:
     name: disk-tree-m3-files
     hostname: disk-files.rbw.sh
-    # 7793: a standalone `dt-serve` for phase 3 (the app's own server holds 7792, `/files` off);
-    # phase 4 points this back at 7792 once the app serves files itself.
-    service: http://127.0.0.1:7793
+    # The disky app's own server (`settings.files`, phase 4), which also runs the connector.
+    service: http://127.0.0.1:7792
   # importIds: cleared 2026-09-29 after adopting the hand-built Pages project,
   # domain, and CNAME (see infra/cf/__main__.py); set again only to adopt more.
 encryptionsalt: v1:nwPGjbzExuE=:v1:1AMvNuj6jk8rwI5V:XCst82XLfRQYbpPyOf/rRxKA3EkzDA==
