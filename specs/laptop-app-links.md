@@ -31,6 +31,8 @@ Site side done as `[local]` 9d5b55dd and live on dev. `/v1/laptop-files/status` 
 
 Verified on dev against the installed app (11f007f4): the status probe through the tunnel reports `{ online: true }`; with `disky tunnel off` it reports `{ online: false, reason: "tunnel 530" }` and the header shows "laptop offline". The links carry the encoded store path. Clicking them isn't automated, because Chrome's "Open disky?" dialog blocks automation; the app session verified each link on the Mac. Prod is waiting on a deploy.
 
+**Next scan** (Ryan, via the app session): the health JSON also carries `schedule` (local HH:MM, sorted; `[]` while scheduled scans are off) and `tz` (from /etc/localtime). `/v1/laptop-files/status` passes them through, type-checked, and the header reads "scanned 5h ago · next 18:00", computed by `nextScan` in the app's zone and shown in the viewer's. Verified live on dev 2026-10-16 (`[local]` 791eedec).
+
 ## Not in scope
 
 - Any write action through the tunnel (it stays read-only; deletion keeps going through staging → the drainer).
