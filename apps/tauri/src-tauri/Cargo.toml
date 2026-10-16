@@ -21,6 +21,7 @@ libc = "0.2"
 plist = "1"
 dt-capture = { path = "../crates/dt-capture" }
 dt-index = { path = "../crates/dt-index" }
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

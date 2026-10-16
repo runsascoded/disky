@@ -97,24 +97,11 @@ pub fn has_token() -> bool {
 
 /// The connector token from the Keychain; `None` when absent. Never logged.
 fn token() -> Option<String> {
-    let out = Command::new("/usr/bin/security").args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]).stderr(Stdio::null()).output().ok()?;
-    let t = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    (out.status.success() && !t.is_empty()).then_some(t)
+    crate::keychain::get(KEYCHAIN_SERVICE)
 }
 
-/// Store the token in the Keychain (replacing any), through `security -i`'s
-/// stdin so it never appears in a process's arguments.
 fn store_token(t: &str) -> Result<(), String> {
-    if t.is_empty() || t.contains(char::is_whitespace) || t.contains('"') {
-        return Err("expected one token on stdin".into());
-    }
-    let account = std::env::var("USER").unwrap_or_else(|_| "disky".into());
-    let mut child = Command::new("/usr/bin/security").arg("-i").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    let line = format!("add-generic-password -U -s {KEYCHAIN_SERVICE} -a \"{account}\" -l \"disky file previews tunnel\" -w \"{t}\"\n");
-    child.stdin.take().unwrap().write_all(line.as_bytes()).map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    if out.status.success() && msg.is_empty() { Ok(()) } else { Err(format!("security: {msg}")) }
+    crate::keychain::set(KEYCHAIN_SERVICE, "disky file previews tunnel", t)
 }
 
 fn pid_path() -> PathBuf {

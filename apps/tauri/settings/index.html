@@ -66,6 +66,17 @@
   <label><input type="radio" name="site" value="dev"> dev.disk.rbw.sh</label>
 </section>
 
+<section>
+  <h2>Alerts</h2>
+  <div class="row"><span id="alerts" class="status"></span><button id="alert-test">Send test</button></div>
+  <div class="hint" style="margin-left:0">A failed or missed scan alerts you. Add Pushover to get those on your phone too: your user key and an application token from pushover.net. They're kept in your Keychain.</div>
+  <div class="row" style="margin-top:6px">
+    <input type="password" id="po-user" placeholder="Pushover user key" autocomplete="off">
+    <input type="password" id="po-token" placeholder="Pushover app token" autocomplete="off">
+    <button id="po-save">Save</button><button id="po-clear">Remove</button>
+  </div>
+</section>
+
 <section id="files-card">
   <h2>File previews</h2>
   <div id="files-unset" class="hint" style="margin-left:0">Not set up. The hosted site can preview files on this Mac through a Cloudflare Tunnel: <code>disky tunnel set TEAM AUD CLIENT_ID</code>, then <code>disky tunnel token</code> (reads the connector token from stdin into the Keychain).</div>
@@ -94,6 +105,9 @@ function render(s) {
   $('fda-open').hidden = s.fda;
   $('agents-status').textContent = s.agents_status;
   renderFiles(s.files);
+  $('alerts').textContent = s.alerts[0].toUpperCase() + s.alerts.slice(1);
+  $('po-clear').hidden = !s.pushover;
+  for (const id of ['po-user', 'po-token']) $(id).placeholder = s.pushover ? 'saved in Keychain ✓' : id === 'po-user' ? 'Pushover user key' : 'Pushover app token';
 }
 
 function renderFiles(f) {
@@ -133,6 +147,15 @@ $('preset').onchange = () => {
 };
 $('fda-open').onclick = () => invoke('open_fda_settings');
 $('files-log').onclick = () => invoke('open_tunnel_log');
+$('po-save').onclick = async () => {
+  try {
+    render(await invoke('set_pushover', { user: $('po-user').value, token: $('po-token').value }));
+    $('po-user').value = $('po-token').value = '';
+    msg('Pushover keys saved.');
+  } catch (e) { msg(String(e)); }
+};
+$('po-clear').onclick = async () => { render(await invoke('set_pushover', { user: '', token: '' })); msg('Pushover keys removed.'); };
+$('alert-test').onclick = async () => msg(`Test alert sent (${await invoke('test_alert')}).`);
 $('files-on').onchange = async () => {
   try { render(await invoke('set_file_previews', { on: $('files-on').checked })); }
   catch (e) { msg(String(e)); }

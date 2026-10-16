@@ -14,6 +14,11 @@
 //! The fallback's credentials stay in that command's environment (direnv), not
 //! in app config. With neither, an alert is only a line in `disky.log`.
 //!
+//! Pushover set up in the app (Settings → Alerts, or `disky pushover set`: the
+//! user key and app token, in the Keychain) pushes every alert to the phone,
+//! native notification or not, and replaces the `notify` command (which then only
+//! runs if the push fails).
+//!
 //! The jobs post as the app (they're its bundle's executable), so one
 //! authorization covers them; the app asks for it ([`ask`]) when a scan is
 //! started from its menu or Settings, and at launch while scheduled scans are on.
@@ -46,6 +51,8 @@ pub struct Alert {
 pub enum Route {
     /// macOS notifications, as disky.
     Native,
+    /// macOS notifications, and Pushover.
+    NativePush,
     /// Not asked yet (the next scan from the menu asks).
     Unasked,
     /// A Script Editor banner, and the push fallback.
@@ -56,9 +63,10 @@ pub enum Route {
 
 pub fn route() -> Route {
     match status() {
+        Some(Auth::Allowed) if pushover_keys().is_some() => Route::NativePush,
         Some(Auth::Allowed) => Route::Native,
         Some(Auth::Unasked) => Route::Unasked,
-        _ if fallback().is_some() => Route::BannerPush,
+        _ if pushover_keys().is_some() || fallback().is_some() => Route::BannerPush,
         _ => Route::Banner,
     }
 }
@@ -67,6 +75,7 @@ pub fn route() -> Route {
 pub fn menu_line(r: Route) -> &'static str {
     match r {
         Route::Native => "Failure alerts: notifications ✓",
+        Route::NativePush => "Failure alerts: notifications + push ✓",
         Route::Unasked => "Failure alerts: allow notifications…",
         Route::BannerPush => "Failure alerts: banner + push",
         Route::Banner => "Failure alerts: banner only (no push)",
@@ -85,19 +94,104 @@ pub fn alert(a: &Alert) {
         Some(Auth::Allowed) => post(a).map_err(|e| note(&format!("disky: notification failed ({e}); falling back"))).ok(),
         _ => None,
     };
-    let how = match native {
+    let local = match native {
         Some(()) => Some("notification".to_string()),
-        None => {
-            let sent: Vec<String> = [banner(a), send_fallback(a)].into_iter().flatten().collect();
-            (!sent.is_empty()).then(|| sent.join(" + "))
-        }
+        None => banner(a),
     };
+    // The phone: Pushover when set up in the app; the `notify` command when it isn't (or the push failed)
+    // and no native notification went out.
+    let push = pushover_keys().and_then(|k| send_pushover(&k, a)).or_else(|| native.is_none().then(|| send_fallback(a)).flatten());
+    let parts: Vec<String> = [local, push].into_iter().flatten().collect();
+    let how = (!parts.is_empty()).then(|| parts.join(" + "));
     note(&format!("disky alert [{}] {}: {} → {}", a.key, a.title, a.body, how.as_deref().unwrap_or("logged only")));
     if how.is_some() {
         sent.insert(a.key.clone(), now);
         // Keys a month old can't throttle anything.
         sent.retain(|_, t| now - *t < 30 * 86_400);
         save_sent(&sent);
+    }
+}
+
+pub const PUSHOVER_USER: &str = "disky-pushover-user";
+pub const PUSHOVER_TOKEN: &str = "disky-pushover-token";
+
+/// Pushover's user key and app token, from the Keychain.
+fn pushover_keys() -> Option<(String, String)> {
+    Some((crate::keychain::get(PUSHOVER_USER)?, crate::keychain::get(PUSHOVER_TOKEN)?))
+}
+
+pub fn pushover_configured() -> bool {
+    pushover_keys().is_some()
+}
+
+pub fn set_pushover(user: &str, token: &str) -> Result<(), String> {
+    crate::keychain::set(PUSHOVER_USER, "disky Pushover user key", user.trim())?;
+    crate::keychain::set(PUSHOVER_TOKEN, "disky Pushover app token", token.trim())
+}
+
+pub fn clear_pushover() {
+    crate::keychain::delete(PUSHOVER_USER);
+    crate::keychain::delete(PUSHOVER_TOKEN);
+}
+
+/// POST the alert to Pushover's messages API; `Some("push")` on success.
+fn send_pushover((user, token): &(String, String), a: &Alert) -> Option<String> {
+    let r = ureq::post("https://api.pushover.net/1/messages.json")
+        .timeout(Duration::from_secs(15))
+        .send_form(&[("token", token.as_str()), ("user", user.as_str()), ("title", a.title.as_str()), ("message", a.body.as_str())]);
+    match r {
+        Ok(_) => Some("push".into()),
+        // The API's error body names the problem (`user key is invalid`); it never echoes the keys.
+        Err(ureq::Error::Status(code, resp)) => {
+            note(&format!("disky: pushover {code}: {}", resp.into_string().unwrap_or_default().trim()));
+            None
+        }
+        Err(e) => {
+            note(&format!("disky: pushover: {e}"));
+            None
+        }
+    }
+}
+
+/// `disky pushover set` (reads `USER_KEY APP_TOKEN` from stdin) | `clear` | `status`.
+pub fn pushover_cli(args: &[String]) -> i32 {
+    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["set"] => {
+            let mut s = String::new();
+            if std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).is_err() {
+                eprintln!("disky pushover set: can't read stdin");
+                return 1;
+            }
+            let parts: Vec<&str> = s.split_whitespace().collect();
+            let [user, token] = parts.as_slice() else {
+                eprintln!("disky pushover set: expected `USER_KEY APP_TOKEN` on stdin");
+                return 2;
+            };
+            match set_pushover(user, token) {
+                Ok(()) => {
+                    println!("Pushover keys stored in the Keychain; alerts now push");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("disky pushover set: {e}");
+                    1
+                }
+            }
+        }
+        ["clear"] => {
+            clear_pushover();
+            println!("Pushover keys removed");
+            0
+        }
+        ["status"] => {
+            println!("pushover: {}", if pushover_configured() { "keys in Keychain" } else { "not set up" });
+            println!("route: {}", menu_line(route()));
+            0
+        }
+        _ => {
+            eprintln!("usage: echo \"USER_KEY APP_TOKEN\" | disky pushover set | disky pushover clear | disky pushover status");
+            2
+        }
     }
 }
 
@@ -354,9 +448,10 @@ mod tests {
     #[test]
     fn menu_lines() {
         assert_eq!(
-            [Route::Native, Route::Unasked, Route::BannerPush, Route::Banner].map(menu_line),
+            [Route::Native, Route::NativePush, Route::Unasked, Route::BannerPush, Route::Banner].map(menu_line),
             [
                 "Failure alerts: notifications ✓",
+                "Failure alerts: notifications + push ✓",
                 "Failure alerts: allow notifications…",
                 "Failure alerts: banner + push",
                 "Failure alerts: banner only (no push)",

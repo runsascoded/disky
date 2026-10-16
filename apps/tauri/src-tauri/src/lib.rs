@@ -11,6 +11,7 @@
 mod agent;
 mod applink;
 mod jobs;
+mod keychain;
 mod links;
 mod notify;
 mod services;
@@ -292,6 +293,9 @@ struct UiState {
     scan: String,
     /// File previews (`tunnel.rs`); `None` when not set up.
     files: Option<FilesUi>,
+    /// How failure alerts go out (the menu's line), and whether Pushover is set up.
+    alerts: String,
+    pushover: bool,
 }
 
 #[derive(Serialize)]
@@ -328,6 +332,8 @@ fn ui_state(app: &AppHandle) -> UiState {
     let s = settings::load();
     UiState {
         files: files_ui(app, &s),
+        alerts: notify::menu_line(notify::route()).trim_start_matches("Failure alerts: ").to_string(),
+        pushover: notify::pushover_configured(),
         site_url: s.site_url(),
         settings: s,
         fda: agent::has_full_disk_access(),
@@ -354,6 +360,33 @@ async fn set_file_previews(app: AppHandle, on: bool) -> Result<UiState, String> 
         t.refresh(&app);
     }
     Ok(ui_state(&app))
+}
+
+/// Pushover's keys into the Keychain (Settings → Alerts); empty strings remove them.
+#[tauri::command]
+async fn set_pushover(app: AppHandle, user: String, token: String) -> Result<UiState, String> {
+    if user.trim().is_empty() && token.trim().is_empty() {
+        notify::clear_pushover();
+    } else {
+        notify::set_pushover(&user, &token)?;
+    }
+    if let Some(t) = app.try_state::<Tray>() {
+        t.refresh(&app);
+    }
+    Ok(ui_state(&app))
+}
+
+/// A test alert through the current route (unthrottled).
+#[tauri::command]
+async fn test_alert() -> String {
+    notify::alert(&notify::Alert {
+        key: "test".into(),
+        title: "disky: test alert".into(),
+        body: "Failure alerts reach you this way.".into(),
+        open: None,
+        every: 0,
+    });
+    notify::menu_line(notify::route()).trim_start_matches("Failure alerts: ").to_string()
 }
 
 #[tauri::command]
@@ -557,7 +590,7 @@ impl MissedSlot {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_state, save_settings, open_fda_settings, scan_now, set_file_previews, open_tunnel_log])
+        .invoke_handler(tauri::generate_handler![get_state, save_settings, open_fda_settings, scan_now, set_file_previews, open_tunnel_log, set_pushover, test_alert])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
