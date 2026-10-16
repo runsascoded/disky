@@ -16,6 +16,7 @@
 
 pub mod apfs;
 pub mod creds;
+pub mod device;
 pub mod target;
 
 use std::io;

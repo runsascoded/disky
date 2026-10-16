@@ -14,6 +14,7 @@ use object_store::path::Path as Key;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::creds;
+use crate::device::{key_segment, Device};
 
 pub enum Target {
     Dir(PathBuf),
@@ -25,6 +26,10 @@ pub enum Target {
         store: Arc<dyn ObjectStore>,
         rt: Arc<tokio::runtime::Runtime>,
     },
+    /// A connected Mac's presigned uploads (`device.rs`). `rel` is the
+    /// capture's `<host>/<root slug>/<stamp>`; the site files it under the
+    /// device's own id whatever `<host>` says.
+    Device { dev: Arc<Device>, rel: String },
 }
 
 /// `(scheme, bucket, prefix)` for `scheme://bucket/prefix…`.
@@ -86,6 +91,16 @@ impl Target {
                 store: store.clone(),
                 rt: rt.clone(),
             },
+            Target::Device { dev, rel: r } => Target::Device { dev: dev.clone(), rel: if r.is_empty() { rel.to_string() } else { format!("{r}/{rel}") } },
+        }
+    }
+
+    /// `(root key segment, stamp)` of a `Device` target's capture dir.
+    fn device_dir(rel: &str) -> io::Result<(String, &str)> {
+        let mut parts = rel.rsplit('/');
+        match (parts.next(), parts.next()) {
+            (Some(stamp), Some(slug)) => Ok((key_segment(slug), stamp)),
+            _ => Err(io::Error::other(format!("device upload outside a capture dir: {rel:?}"))),
         }
     }
 
@@ -93,7 +108,7 @@ impl Target {
     pub fn create(&self) -> io::Result<()> {
         match self {
             Target::Dir(d) => std::fs::create_dir_all(d),
-            Target::Store { .. } => Ok(()),
+            Target::Store { .. } | Target::Device { .. } => Ok(()),
         }
     }
 
@@ -106,6 +121,10 @@ impl Target {
                 let key = Key::parse(&key).map_err(io::Error::other)?;
                 rt.block_on(store.put(&key, PutPayload::from(data))).map(|_| ()).map_err(io::Error::other)
             }
+            Target::Device { dev, rel } => {
+                let (root, stamp) = Target::device_dir(rel)?;
+                dev.put(&root, stamp, name, &data)
+            }
         }
     }
 
@@ -114,6 +133,10 @@ impl Target {
         match self {
             Target::Dir(d) => d.display().to_string(),
             Target::Store { url, .. } => url.clone(),
+            Target::Device { dev, rel } => match Target::device_dir(rel) {
+                Ok((root, stamp)) => format!("{} captures/{}/{root}/{stamp}", dev.site, dev.id),
+                Err(_) => format!("{} captures/{}", dev.site, dev.id),
+            },
         }
     }
 }

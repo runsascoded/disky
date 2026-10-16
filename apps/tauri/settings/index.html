@@ -66,6 +66,20 @@
   <label><input type="radio" name="site" value="dev"> dev.disk.rbw.sh</label>
 </section>
 
+<section id="connect-card">
+  <h2>Upload to the site</h2>
+  <div id="conn-none" class="hint" style="margin-left:0">Choose disk.rbw.sh (or dev) under Site to connect this Mac to it.</div>
+  <div id="conn-off">
+    <div class="hint" style="margin-left:0">Connect this Mac to <b id="conn-site"></b>: each scan uploads its listing there and the site builds the index, so nothing is indexed or kept on this Mac. Sign in to the site as an admin in the disky window first.</div>
+    <div class="row" style="margin-top:6px"><input type="text" id="conn-host" placeholder="name on the site"><button id="conn-go">Connect</button></div>
+  </div>
+  <div id="conn-on">
+    <div class="row"><span id="conn-status" class="status ok"></span><button id="conn-open">Open</button><button id="conn-drop">Disconnect</button></div>
+    <div id="conn-detail" class="hint" style="margin-left:0"></div>
+  </div>
+  <div id="conn-msg" class="hint" style="margin-left:0"></div>
+</section>
+
 <section>
   <h2>Alerts</h2>
   <div class="row"><span id="alerts" class="status"></span><button id="alert-test">Send test</button></div>
@@ -105,9 +119,40 @@ function render(s) {
   $('fda-open').hidden = s.fda;
   $('agents-status').textContent = s.agents_status;
   renderFiles(s.files);
+  renderConnect(s);
   $('alerts').textContent = s.alerts[0].toUpperCase() + s.alerts.slice(1);
   $('po-clear').hidden = !s.pushover;
   for (const id of ['po-user', 'po-token']) $(id).placeholder = s.pushover ? 'saved in Keychain ✓' : id === 'po-user' ? 'Pushover user key' : 'Pushover app token';
+}
+
+function ago(t) {
+  const m = Math.round((Date.now() - new Date(t).getTime()) / 60000);
+  return m < 60 ? `${m}m ago` : m < 2880 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+}
+
+function renderConnect(s) {
+  const c = s.connect;
+  $('conn-none').hidden = !!c || !!s.connect_site;
+  $('conn-off').hidden = !!c || !s.connect_site;
+  $('conn-on').hidden = !c;
+  $('conn-site').textContent = s.connect_site ? new URL(s.connect_site).host : '';
+  if (!$('conn-host').value) $('conn-host').value = s.connect_host;
+  $('conn-msg').textContent = s.connect_msg;
+  if (c) $('conn-status').textContent = `Connected to ${new URL(c.site).host} as ${c.id}`;
+  if (c && !connStatusAt) refreshConnStatus();
+}
+
+let connStatusAt = 0;
+async function refreshConnStatus() {
+  connStatusAt = Date.now();
+  try {
+    const h = await invoke('connect_status');
+    const i = h.last_ingest;
+    $('conn-detail').textContent = [
+      h.seen_at ? `last contact ${ago(h.seen_at)}` : 'no contact yet',
+      i ? `last ingest ${i.status} ${ago(i.at)}${i.error ? `: ${i.error}` : ''}` : 'no scan ingested yet',
+    ].join(' · ');
+  } catch (e) { $('conn-detail').textContent = String(e); }
 }
 
 function renderFiles(f) {
@@ -155,6 +200,14 @@ $('po-save').onclick = async () => {
   } catch (e) { msg(String(e)); }
 };
 $('po-clear').onclick = async () => { render(await invoke('set_pushover', { user: '', token: '' })); msg('Pushover keys removed.'); };
+$('conn-go').onclick = async () => {
+  try { render(await invoke('connect_start', { host: $('conn-host').value })); }
+  catch (e) { $('conn-msg').textContent = String(e); }
+};
+$('conn-drop').onclick = async () => {
+  try { connStatusAt = 0; render(await invoke('disconnect_mac')); } catch (e) { $('conn-msg').textContent = String(e); }
+};
+$('conn-open').onclick = () => invoke('open_store');
 $('alert-test').onclick = async () => msg(`Test alert sent (${await invoke('test_alert')}).`);
 $('files-on').onchange = async () => {
   try { render(await invoke('set_file_previews', { on: $('files-on').checked })); }
@@ -178,6 +231,7 @@ $('save').onclick = async () => {
   const s = await invoke('get_state');
   render(s); fill(s);
   setInterval(async () => render(await invoke('get_state')), 3000);
+  setInterval(() => state?.connect && refreshConnStatus(), 60000);
 })();
 </script>
 </body>

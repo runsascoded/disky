@@ -26,3 +26,7 @@ object_store = { version = "0.14.2", features = ["aws"] }
 tokio = { version = "1.53.1", default-features = false, features = ["net", "rt", "time"] }
 serde_yaml = "0.9.34"
 bytes = "1.12.1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
+[dev-dependencies]
+tiny_http = "0.12"

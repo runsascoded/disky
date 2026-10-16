@@ -10,6 +10,7 @@
 
 mod agent;
 mod applink;
+mod connect;
 mod jobs;
 mod keychain;
 mod links;
@@ -92,6 +93,11 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
             move |url| {
                 if url.scheme() != "disky" {
                     return true;
+                }
+                // The enrollment script's answer (`connect.rs`): in-window only.
+                if url.host_str() == Some("connected") {
+                    connect_callback(&app, url);
+                    return false;
                 }
                 let (app2, url) = (app.clone(), url.clone());
                 let _ = app.run_on_main_thread(move || open_deep_link(&app2, &url));
@@ -296,6 +302,93 @@ struct UiState {
     /// How failure alerts go out (the menu's line), and whether Pushover is set up.
     alerts: String,
     pushover: bool,
+    /// "Connect this Mac" (`connect.rs`): the enrollment, else the site a
+    /// connection would go to (`None`: the local site, nothing to connect to),
+    /// the suggested host id, and the last attempt's outcome.
+    connect: Option<connect::Connect>,
+    connect_site: Option<String>,
+    connect_host: String,
+    connect_msg: String,
+}
+
+/// A connection in progress (the nonce its callback must carry, and the site),
+/// and the last outcome for the Settings window.
+#[derive(Default)]
+struct Connecting {
+    pending: std::sync::Mutex<Option<(String, String)>>,
+    msg: std::sync::Mutex<String>,
+}
+
+fn nonce() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).expect("/dev/urandom");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The site a connection goes to: the window's site when it's a hosted one.
+fn connect_site() -> Option<String> {
+    let u: tauri::Url = site_url().parse().ok()?;
+    (u.scheme() == "https").then(|| u.origin().ascii_serialization())
+}
+
+/// Settings → Connect: run the enrollment in the (signed-in) site window.
+#[tauri::command]
+fn connect_start(app: AppHandle, host: String) -> Result<UiState, String> {
+    let label = computer_name();
+    let site = connect_site().ok_or("switch Site to disk.rbw.sh (or dev) first: the local site has nothing to connect to")?;
+    let host = connect::host_slug(&host);
+    let w = app.get_webview_window("main");
+    let on_site = w.as_ref().and_then(|w| w.url().ok()).is_some_and(|u| u.origin().ascii_serialization() == site);
+    let (Some(w), true) = (w, on_site) else {
+        show_window(&app, None);
+        return Err(format!("opened {site}: sign in there as an admin, then click Connect again"));
+    };
+    let n = nonce();
+    let st = app.state::<Connecting>();
+    *st.pending.lock().unwrap() = Some((n.clone(), site.clone()));
+    *st.msg.lock().unwrap() = format!("Connecting to {site} as {host}…");
+    w.eval(connect::enroll_script(&n, &connect::enroll_body(&host, &label))).map_err(|e| e.to_string())?;
+    Ok(ui_state(&app))
+}
+
+fn connect_callback(app: &AppHandle, url: &tauri::Url) {
+    let st = app.state::<Connecting>();
+    let pending = st.pending.lock().unwrap().take();
+    let msg = match connect::parse_callback(url, pending.as_ref().map(|(n, _)| n.as_str())) {
+        Err(e) => return jobs::note(&format!("disky: {e}")),
+        Ok(connect::Enrolled::Failed(e)) => format!("Not connected: {e}"),
+        Ok(connect::Enrolled::Ok { id, store, token }) => {
+            let site = pending.map(|(_, s)| s).unwrap_or_default();
+            match connect::save(&site, id.clone(), store, &token) {
+                Ok(()) => format!("Connected to {site} as {id}. The next scan uploads there."),
+                Err(e) => format!("Enrolled, but couldn't save the token: {e}"),
+            }
+        }
+    };
+    jobs::note(&format!("disky: {msg}"));
+    *st.msg.lock().unwrap() = msg;
+}
+
+/// The site's view of this Mac (`GET /api/hosts/<id>`), for the Settings window.
+#[tauri::command]
+async fn connect_status() -> Result<serde_json::Value, String> {
+    connect::status()
+}
+
+/// This Mac's store on the site, in the site window.
+#[tauri::command]
+fn open_store(app: AppHandle) {
+    if let Some(c) = settings::load().connect {
+        show_window(&app, format!("{}/{}", c.site, c.store).parse().ok());
+    }
+}
+
+#[tauri::command]
+async fn disconnect_mac(app: AppHandle) -> Result<UiState, String> {
+    let r = connect::disconnect()?;
+    *app.state::<Connecting>().msg.lock().unwrap() = format!("Disconnected ({r}).");
+    Ok(ui_state(&app))
 }
 
 #[derive(Serialize)]
@@ -334,6 +427,10 @@ fn ui_state(app: &AppHandle) -> UiState {
         files: files_ui(app, &s),
         alerts: notify::menu_line(notify::route()).trim_start_matches("Failure alerts: ").to_string(),
         pushover: notify::pushover_configured(),
+        connect: s.connect.clone(),
+        connect_site: connect_site(),
+        connect_host: connect::host_slug(&computer_name()),
+        connect_msg: app.try_state::<Connecting>().map(|c| c.msg.lock().unwrap().clone()).unwrap_or_default(),
         site_url: s.site_url(),
         settings: s,
         fda: agent::has_full_disk_access(),
@@ -404,7 +501,8 @@ fn save_settings(app: AppHandle, settings: Settings, agents: bool, login: bool) 
     }
     let old = settings::load();
     // The Settings window doesn't edit file previews (`disky tunnel …`, the menu): keep them.
-    let settings = Settings { files: old.files.clone(), ..settings };
+    // Nor the connection (its own section): keep it too.
+    let settings = Settings { files: old.files.clone(), connect: old.connect.clone(), ..settings };
     settings::save(&settings)?;
     if agents != services::agents_enabled() {
         set_agents(agents)?;
@@ -590,7 +688,7 @@ impl MissedSlot {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_state, save_settings, open_fda_settings, scan_now, set_file_previews, open_tunnel_log, set_pushover, test_alert])
+        .invoke_handler(tauri::generate_handler![get_state, save_settings, open_fda_settings, scan_now, set_file_previews, open_tunnel_log, set_pushover, test_alert, connect_start, connect_status, disconnect_mac, open_store])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -616,6 +714,7 @@ pub fn run() {
                 files: CheckMenuItem::with_id(app, "files", tunnel::menu_line(&tunnel::State::NotConfigured), false, false, None::<&str>)?,
             };
             app.manage(tunnel::Tunnel::new());
+            app.manage(Connecting::default());
             tray.refresh(app.handle());
             let site_menu = Submenu::with_items(app, "Site", true, &[&tray.local, &tray.prod, &tray.dev])?;
             let menu = Menu::with_items(

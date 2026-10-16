@@ -33,11 +33,14 @@ pub struct Settings {
     /// File previews through a Cloudflare Tunnel (`tunnel.rs`); absent = not set up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<crate::tunnel::FilesTunnel>,
+    /// The site this Mac uploads its scans to (`connect.rs`); absent = not connected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect: Option<crate::connect::Connect>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()], files: None }
+        Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()], files: None, connect: None }
     }
 }
 
@@ -292,11 +295,11 @@ mod tests {
     fn fresh_install_is_local_and_explicit_hosted_settings_survive() {
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
-            Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()], files: None },
+            Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()], files: None, connect: None },
         );
         assert_eq!(
             serde_json::from_str::<Settings>(r#"{"site":"prod","scope":"home","schedule":["03:30"]}"#).unwrap(),
-            Settings { site: "prod".into(), scope: "home".into(), schedule: vec!["03:30".into()], files: None },
+            Settings { site: "prod".into(), scope: "home".into(), schedule: vec!["03:30".into()], files: None, connect: None },
         );
     }
 }

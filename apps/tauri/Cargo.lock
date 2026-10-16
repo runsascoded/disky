@@ -968,7 +968,9 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tiny_http",
  "tokio",
+ "ureq",
 ]
 
 [[package]]

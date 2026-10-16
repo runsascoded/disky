@@ -218,7 +218,8 @@ pub fn run(name: &str) -> i32 {
     // other jobs have nothing to run without a command.
     let job = match (cfg.jobs.get(name), name) {
         (Some(j), _) => j.clone(),
-        (None, "scan") => Job { local: true, log: Some("index".into()), ..Default::default() },
+        // Connected (`connect.rs`), it uploads instead: nothing is indexed here.
+        (None, "scan") => Job { local: crate::connect::device().is_none(), log: Some("index".into()), ..Default::default() },
         (None, _) => {
             note(&format!("disky job {name}: not configured in {} — nothing to run", config_path().display()));
             return 0;
@@ -233,7 +234,7 @@ pub fn run(name: &str) -> i32 {
         job_failed(name, Some(job), 1, Some(format!("can't open its logs in {}", logs_dir().display())));
         return 1;
     };
-    let in_process = name == "scan" && job.command.is_empty() && (job.to.is_some() || indexes_locally(job));
+    let in_process = name == "scan" && job.command.is_empty() && (job.to.is_some() || indexes_locally(job) || crate::connect::device().is_some());
     let cmd = if in_process {
         None
     } else {
@@ -311,19 +312,26 @@ fn capture(job: &Job, root: &str, mut out: std::fs::File, mut err: std::fs::File
     // `/` stays on one filesystem: the Data volume is reached through its
     // firmlinks once, not walked again at `/System/Volumes/Data`.
     let one_fs = root == "/";
-    let captured = match job.to.as_deref() {
-        Some(to) => {
-            let target = match dt_capture::target::Target::parse(to) {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ = writeln!(err, "{}", stamped(&format!("dt-capture: {e}")));
-                    return 1;
-                }
-            };
+    // An explicit `to` wins; otherwise a connected Mac uploads to its site.
+    let to = match job.to.as_deref() {
+        Some(to) => match dt_capture::target::Target::parse(to) {
+            Ok(t) => Some((t, to.to_string(), job.host.clone().unwrap_or_else(dt_capture::host))),
+            Err(e) => {
+                let _ = writeln!(err, "{}", stamped(&format!("dt-capture: {e}")));
+                return 1;
+            }
+        },
+        None => crate::connect::device().map(|d| {
+            let (label, id) = (format!("{} (as {})", d.site, d.id), d.id.clone());
+            (dt_capture::target::Target::Device { dev: std::sync::Arc::new(d), rel: String::new() }, label, id)
+        }),
+    };
+    let captured = match to {
+        Some((target, to, host)) => {
             let opts = dt_capture::Opts {
                 root: root.into(),
                 to: target,
-                host: job.host.clone().unwrap_or_else(dt_capture::host),
+                host,
                 batch_rows: 200_000,
                 one_fs,
                 container: cfg!(target_os = "macos"),
