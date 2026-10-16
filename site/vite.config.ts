@@ -154,6 +154,7 @@ export default defineConfig({
     'import.meta.env.VITE_PROD_HOST': JSON.stringify(PROD_HOST),
     'import.meta.env.VITE_DEV_HOST': JSON.stringify(DEV_HOST),
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
+    'import.meta.env.VITE_MARK': JSON.stringify(MARK),
     'import.meta.env.VITE_BUILD_SHA': JSON.stringify(BUILD_ID.sha),
     'import.meta.env.VITE_BUILD_TIME': JSON.stringify(BUILD_ID.time),
   },

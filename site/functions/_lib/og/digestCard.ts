@@ -72,6 +72,23 @@ export function niceTicks(lo: number, hi: number, n = 6): number[] {
 const fmtSigned = (n: number, fmt: (n: number) => string) => `${n < 0 ? '−' : '+'}${fmt(Math.abs(n))}`
 const md = (t: number) => { const d = new Date(t); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}` }
 
+/** The chart's y range over `vals` (and the quota `q`, when drawn): the data with a margin, never narrower than
+ *  `MIN_Y_SPAN` of its top value, centred on the data — a change of a few hundred MiB on hundreds of TiB is not
+ *  drawn as a full-height cliff. */
+export const MIN_Y_SPAN = 0.01
+export function yRange(vals: number[], q: number | null): [number, number] {
+  let lo = Math.min(...vals)
+  let hi = Math.max(...vals, ...(q != null ? [q] : []))
+  const min = hi * MIN_Y_SPAN
+  if (hi - lo < min) {
+    const mid = (Math.min(...vals) + Math.max(...vals)) / 2
+    lo = Math.min(lo, mid - min / 2)
+    hi = Math.max(hi, mid + min / 2)
+  }
+  const span = hi - lo || 1
+  return [lo - span * 0.08, hi + span * 0.06]
+}
+
 function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: number): string {
   const out: string[] = []
   const pts = d.points
@@ -79,11 +96,7 @@ function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: numb
   const tib = (b: number) => b / u.bytes
   const vals = pts.map(p => tib(p.bytes))
   const q = d.quota ? tib(d.quota.bytes) : null
-  let lo = Math.min(...vals)
-  let hi = Math.max(...vals, ...(q != null ? [q] : []))
-  const span = hi - lo || hi * 0.1 || 1
-  lo -= span * 0.08
-  hi += span * 0.06
+  let [lo, hi] = yRange(vals, q)
   const ticks = niceTicks(lo, hi)
   lo = Math.min(lo, ticks[0])
   const left = x0 + 44

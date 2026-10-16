@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { closedParent, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
+import { closedParent, countedItems, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
 import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
@@ -83,16 +83,18 @@ describe('names and sizes (plain text, never a mention)', () => {
     const at = { scan: 'S', stats: { 'gs://b/a/': { b: 5, o: 2, us: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { b: 4, o: 1, us: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { b: 0, o: 0 }, 'gs://b/zb/': { b: 0, o: 3 } } }
     expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/zb/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 6, empty: 2, owners: [{ label: 'U2', b: 6 }] })
   })
-  it('queuedOf: the title counts prefixes, batches and stagers over what is not empty at the scan', () => {
+  it('queuedOf: the title counts prefixes, batches and stagers over what is neither deleted nor empty at the scan (`countedItems`)', () => {
     const live = [
       { prefix: 'gs://b/a/', added_by: 'ann', batch_id: 1 },
       { prefix: 'gs://b/e1/', added_by: 'ann', batch_id: 1 },
       { prefix: 'gs://b/e2/', added_by: 'bo', batch_id: 2 },
       { prefix: 'gs://b/legacy/', added_by: 'cy', batch_id: null },
     ]
-    expect([queuedOf(live), queuedOf(live, new Set(['gs://b/e1/', 'gs://b/e2/']))]).toEqual([
+    const stats = { 'gs://b/a/': { b: 1, o: 1 }, 'gs://b/legacy/': { b: 1, o: 1 } }
+    expect([queuedOf(countedItems(live, new Set(), null)), queuedOf(countedItems(live, new Set(), stats)), queuedOf(countedItems(live, new Set(['gs://b/legacy/']), stats))]).toEqual([
       { items: 4, batches: 2, stagers: ['ann', 'bo', 'cy'] },
       { items: 2, batches: 1, stagers: ['ann', 'cy'] },
+      { items: 1, batches: 1, stagers: ['ann'] },
     ])
   })
 })
@@ -100,7 +102,8 @@ describe('names and sizes (plain text, never a mention)', () => {
 describe('stage replies: compact, phone-width', () => {
   const T = 2 ** 40
   const stats = (sizes: Record<string, number>) => Object.fromEntries(Object.entries(sizes).map(([p, b]) => [p, { b, o: b / T * 10 }]))
-  const reply = (o: Partial<Parameters<typeof stageReply>[0]>) => stageReply({ planId: 1, replyId: 3, by: 'Ann Bee', batches: 1, prefixes: [], stats: null, note: null, siteUrl: 'https://s', ...o })
+  // Every prefix in batch 1 unless `batchOf` says otherwise.
+  const reply = (o: Partial<Parameters<typeof stageReply>[0]>) => stageReply({ planId: 1, replyId: 3, by: 'Ann Bee', batches: 1, prefixes: [], stats: null, note: null, siteUrl: 'https://s', ...o, batchOf: { ...Object.fromEntries((o.prefixes ?? []).map(p => [p, 1])), ...o.batchOf } })
   const lines = (m: { blocks: unknown[] }) => (m.blocks[0] as { text: { text: string } }).text.text.split('\n')
   const buttons = (m: { blocks: unknown[] }) => (m.blocks[1] as { elements: { action_id: string; value?: string; text: { text: string } }[] }).elements.map(e => [e.action_id, e.value ?? null, e.text.text])
 
@@ -115,11 +118,21 @@ describe('stage replies: compact, phone-width', () => {
   })
   it('many: grouped by parent folder, the top 3 and how many more; unsized, by count', () => {
     const ps = [...['a', 'b', 'c'].map(s => `gs://b/r1/${s}/`), ...['a', 'b'].map(s => `gs://b/r2/${s}/`), 'gs://b/r3/a/', 'gs://b/r4/a/']
-    const m = reply({ prefixes: ps, batches: 4 })
+    const m = reply({ prefixes: ps, batches: 4, batchOf: Object.fromEntries(ps.map((p, i) => [p, 1 + (i % 4)])) })
     expect([m.text, lines(m), buttons(m)]).toEqual([
       'Ann Bee staged 7 paths in 4 batches',
       [':wastebasket: *Ann Bee* staged 7 paths in 4 batches', '`b/r1/` (3), `b/r2/` (2), `b/r3/a/`, +1 more'],
       [['staged_reject', '1:r3', 'Reject 4 batches'], ['staged_open', null, 'View in www']],
+    ])
+  })
+  it('counts the batches still holding a path: the title those holding what it shows, the reject those it unstages', () => {
+    const T1 = { b: T, o: 10 }
+    // Batches 1–3 covered: 1 holds a sized path, 2 one empty at the scan, 3 nothing (absorbed by a later stage).
+    const m = reply({ prefixes: ['gs://b/x/', 'gs://b/y/'], batches: 3, batchOf: { 'gs://b/x/': 1, 'gs://b/y/': 2 }, stats: { 'gs://b/x/': T1 } })
+    expect([m.text, lines(m), buttons(m)]).toEqual([
+      'Ann Bee staged 1 path · 1.0 TiB (+1 empty at scan)',
+      [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects (+1 empty at scan)', '`b/x/` 1.0 TiB'],
+      [['staged_reject', '1:r3', 'Reject 2 batches'], ['staged_open', null, 'View in www']],
     ])
   })
   it('long paths keep the bucket and the last two folders', () => {

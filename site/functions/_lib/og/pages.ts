@@ -5,7 +5,7 @@ import type { Env } from '../auth.js'
 import { canonId, loadRegistry } from '../identity.js'
 import { openPlanId } from '../plans.js'
 import { type PrefixStat } from '../prefixes.js'
-import { stagedStats } from '../stagedSlack.js'
+import { countedItems, deletedItems, stagedStats } from '../stagedSlack.js'
 import { filterStaged } from '../../../src/stagedFilter.js'
 import { type CardData, type CardTile, fmtB } from './card.js'
 import { ownerColors, type Site } from './data.js'
@@ -32,8 +32,9 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
   const at = rows.length ? await stagedStats(env, rows.map(r => r.prefix)) : null
   if (!rows.length || !at) return { ...base, subtitle: plan == null ? '' : `plan #${plan}`, total: '', empty: 'nothing staged' }
   const { scan: date, stats } = at
-  const reg = await regOf(env)
-  let items: Item[] = rows.map(r => {
+  const [reg, deleted] = await Promise.all([regOf(env), deletedItems(env.DB, plan!)])
+  // The prefixes the Slack parent counts: neither deleted by a real run nor empty at the scan.
+  let items: Item[] = countedItems(rows, deleted, stats).map(r => {
     const stat = stats[r.prefix]
     return { prefix: r.prefix, addedBy: r.added_by, stat, owner: stat?.us?.[0]?.[0] ?? null }
   })
