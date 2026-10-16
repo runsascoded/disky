@@ -276,3 +276,36 @@ describe('/v1/laptop-files/get — offline', () => {
     ])
   })
 })
+
+describe('/v1/laptop-files/status — is the laptop reachable', () => {
+  const status = async (respond: (s: Sent) => Response | Promise<Response>, id: Identity = ADMIN, env: Env = ENV) => {
+    const t = tunnel(respond)
+    const res = await serveLaptopFile(new Request(`${ORIGIN}/v1/laptop-files/status`), env, id, { fetch: t.fetch, audit: null, recent: async () => 0 })
+    return { status: res.status, body: await res.json(), cc: res.headers.get('cache-control'), sent: t.sent.map(s => [s.url, s.method, s.headers.range ?? null]) }
+  }
+  it('probes the tunnel’s `/files/` with the service token: 200 `ok` → online; offline answers say why; cached privately for 15 s', async () => {
+    const rs = await Promise.all([
+      status(() => new Response(JSON.stringify({ ok: true, root: '/' }), { headers: { 'content-type': 'application/json' } })),
+      status(() => new Response('error 1033', { status: 530 })),
+      status(() => new Response('not served locally', { status: 404 })),
+      status(() => { throw new TypeError('network') }),
+      status(() => new Response('<html>old dt-serve</html>', { status: 200 })),
+    ])
+    expect(rs).toEqual([
+      { status: 200, body: { online: true }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
+      { status: 200, body: { online: false, reason: 'tunnel 530' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
+      { status: 200, body: { online: false, reason: 'file serving off' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
+      { status: 200, body: { online: false, reason: 'unreachable' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
+      { status: 200, body: { online: false, reason: 'upstream 200' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
+    ])
+  })
+  it('the same gates as a file: grants and non-admins refused, nothing probed; no tunnel → 503', async () => {
+    const ok = () => new Response('{"ok":true}')
+    const rs = await Promise.all([status(ok, ident('grant', true)), status(ok, ident('session', false)), status(ok, ADMIN, { BASE_SCOPE: 'laptop' })])
+    expect(rs.map(r => [r.status, r.body, r.sent])).toEqual([
+      [403, { error: 'share links can’t open files' }, []],
+      [403, { error: 'admins only' }, []],
+      [503, { error: 'no file tunnel configured' }, []],
+    ])
+  })
+})

@@ -97,15 +97,18 @@ export interface LaptopFilesDeps {
  * passed for a session; this re-checks so a mis-wired caller still refuses). */
 export async function serveLaptopFile(request: Request, env: Env, id: Identity, deps: LaptopFilesDeps): Promise<Response> {
   const url = new URL(request.url)
+  const isStatus = url.pathname === `${LAPTOP_FILES_API}/status`
+  // The status probe is polled (every minute per open page): not a file read, so not audited.
   const out = async (res: Response, a: Omit<Audit, 'status'> = {}) => {
-    await deps.audit?.({ status: res.status, ...a })
+    if (!isStatus) await deps.audit?.({ status: res.status, ...a })
     return res
   }
   if (request.method !== 'GET' && request.method !== 'HEAD') return refuse(405, 'method')
-  if (url.pathname !== `${LAPTOP_FILES_API}/get`) return refuse(404, 'not found')
+  if (url.pathname !== `${LAPTOP_FILES_API}/get` && !isStatus) return refuse(404, 'not found')
   if (id.via === 'grant') return out(refuse(403, 'share links can’t open files'), { reason: 'grant' })
   if (id.via !== 'session' || !id.admin) return out(refuse(403, 'admins only'), { reason: 'not admin' })
   if (!tunnelConfigured(env)) return refuse(503, 'no file tunnel configured')
+  if (isStatus) return laptopStatus(env, deps.fetch)
   const segs = fileSegs(url.searchParams.get('path'))
   if (!segs) return out(refuse(400, 'bad path'), { reason: 'bad path' })
   const path = segs.join('/')
@@ -205,6 +208,32 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
     bytes: request.method === 'HEAD' || !Number.isFinite(length) ? 0 : length,
     range: contentRange ?? undefined,
   })
+}
+
+/** The probe's answer: `{ online }`, and why not. Private, cached briefly so a page's polls don't stampede. */
+const statusJson = (body: { online: boolean; reason?: string }) => json(body, 200, { 'cache-control': 'private, max-age=15' })
+
+/** Whether the machine answers now: its file server's health (`GET /files/` → `{ ok: true }`)
+ * through the tunnel, within 3 s (specs/laptop-app-links.md). */
+async function laptopStatus(env: Env, upstreamFetch: typeof fetch): Promise<Response> {
+  let res: Response
+  try {
+    res = await upstreamFetch(`${env.LAPTOP_TUNNEL_URL!.replace(/\/+$/, '')}/files/`, {
+      method: 'GET',
+      headers: { 'CF-Access-Client-Id': env.LAPTOP_TUNNEL_CLIENT_ID!, 'CF-Access-Client-Secret': env.LAPTOP_TUNNEL_CLIENT_SECRET! },
+      redirect: 'manual',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(3000),
+    })
+  } catch (e) {
+    return statusJson({ online: false, reason: (e as Error).name === 'TimeoutError' ? 'timeout' : 'unreachable' })
+  }
+  const text = await res.text()
+  if (OFFLINE_STATUSES.has(res.status)) return statusJson({ online: false, reason: `tunnel ${res.status}` })
+  if (res.status === 404 && text.startsWith('not served locally')) return statusJson({ online: false, reason: 'file serving off' })
+  let ok = false
+  try { ok = res.status === 200 && (JSON.parse(text) as { ok?: unknown }).ok === true } catch { /* not the health JSON */ }
+  return statusJson(ok ? { online: true } : { online: false, reason: `upstream ${res.status}` })
 }
 
 /** The D1-backed audit + rate-limit deps for a session (`e:<email>`). */

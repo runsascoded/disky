@@ -17,7 +17,8 @@ import { NotFoundError, type GetResult, type ListResult, type Range, type Store 
 import { CopyName } from './CopyName'
 import { epochDaysToDate } from './colors'
 import { listingTime } from './listingTime'
-import { objectSource, publicUrl, type ObjectSource, type ProxyInfo } from './objects'
+import { AppActions, useProxyInfo } from './laptop'
+import { objectSource, publicUrl, type ObjectSource } from './objects'
 import { useStore, useStoreFetch } from './store'
 import { storeQuery } from './stores'
 import { Tooltip } from './Tooltip'
@@ -134,21 +135,6 @@ function Body({ store, path }: { store: FtStore; path: string }) {
   }
 }
 
-function useProxyInfo(enabled: boolean) {
-  const store = useStore()
-  const sfetch = useStoreFetch()
-  return useQuery<ProxyInfo>({
-    queryKey: ['store-proxy', store.key],
-    queryFn: async () => {
-      const r = await sfetch('/api/store')
-      if (!r.ok) throw new Error(`store: ${r.status}`)
-      return r.json()
-    },
-    enabled,
-    staleTime: Infinity,
-  })
-}
-
 /** Whether a tunnelled file can be read now: one HEAD through the route
  * (`/v1/laptop-files`), so a sleeping laptop or a refused path reads as a
  * sentence instead of a viewer's error. Not cached: the laptop wakes. */
@@ -215,6 +201,7 @@ export default function ObjectPanel({ segs, node, onClose }: {
           {node?.d != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(node.d)}</>}
         </span>
         {dl && <a className="obj-dl" href={dl} download={segs[segs.length - 1]} target="_blank" rel="noreferrer">download</a>}
+        {src?.kind === 'tunnel' && <AppActions path={src.key} />}
         <button type="button" className="obj-close" aria-label="Close the object (Esc)" title="Close (Esc)" onClick={onClose}>×</button>
       </header>
       <div className="obj-uri"><code>{shown}</code></div>

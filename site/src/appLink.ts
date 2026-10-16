@@ -5,6 +5,14 @@
 
 export const APP_SCHEME_URL = (link: string): string => `disky://open?link=${encodeURIComponent(link)}`
 
+/** The app's actions on a store path (`Users/ryan/x.pdf`; specs/laptop-app-links.md): select it
+ *  in Finder (runs nothing), or open it in its default app (anything that can run code waits for
+ *  the app's own confirmation). Any page can navigate to these, so the app trusts no caller. */
+export const REVEAL_URL = (path: string): string => `disky://reveal?path=${encodeURIComponent(path)}`
+export const OPEN_FILE_URL = (path: string): string => `disky://open-file?path=${encodeURIComponent(path)}`
+/** This page in the app's window (the app accepts only prod / dev / its own server). */
+export const VIEW_URL = (url: string): string => `disky://view?url=${encodeURIComponent(url)}`
+
 interface Nav { userAgent: string; platform?: string; maxTouchPoints?: number }
 
 /** Inside the app's own window: its `disky/<version>` UA token, or the Tauri
@@ -26,6 +34,9 @@ export function offerAppLink(nav: Nav, win: object = {}): boolean {
   const touch = (nav.maxTouchPoints ?? 0) > 1
   return mac && !touch && !inApp(nav, win)
 }
+
+/** Where the app's file actions can land: this Mac's browser, or the app's own window. */
+export const onMac = (nav: Nav, win: object = {}): boolean => inApp(nav, win) || offerAppLink(nav, win)
 
 /** The in-app wall's "sign in with your browser" target: a server page (no
  *  SPA) that signs the browser in if needed, then hands its session to the app

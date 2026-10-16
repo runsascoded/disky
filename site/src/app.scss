@@ -181,6 +181,13 @@ header .hrow {
   .tb-scan .arrow { color: var(--ink-3); }
   // The page scan's freshness beside its date picker (tip: exact publish time).
   .tb-scan-ago { color: var(--ink-3); font-size: 12px; white-space: nowrap; cursor: default; }
+  // The scanned machine's file tunnel (admins): answering now, or not.
+  .tb-laptop {
+    display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); font-size: 12px; white-space: nowrap; cursor: default;
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }
+    &.on .dot { background: #2da44e; }
+    &.off .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+  }
   .tb-delta { font-weight: 650; text-decoration: none; font-variant-numeric: tabular-nums; &:hover { text-decoration: underline; } }
   // Drill-path crumbs: the deepest segment is inked; ancestors drill up.
   .tb-path {
@@ -2948,3 +2955,11 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   }
 }
 // The privacy notice while the session log is on (About, /privacy).
+
+// The disky app's actions on a path (specs/laptop-app-links.md): the object panel's header,
+// the view card's directory.
+.app-actions {
+  display: inline-flex; gap: 10px; font-size: 12.5px;
+  a { color: var(--s1); text-decoration: none; &:hover { text-decoration: underline; } }
+}
+.tip-viewcard .app-actions { margin-top: 4px; }

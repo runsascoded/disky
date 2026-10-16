@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { APP_SCHEME_URL, handoffUrl, offerAppLink } from './appLink'
+import { APP_SCHEME_URL, OPEN_FILE_URL, REVEAL_URL, VIEW_URL, handoffUrl, offerAppLink, onMac } from './appLink'
 
 const SAFARI = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15'
 const CHROME_MAC = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
@@ -45,5 +45,28 @@ describe('handoffUrl — the in-app wall\'s "sign in with your browser" target',
       'https://disk.example/auth/app-handoff',
       'https://disk.example/auth/app-handoff?next=%2FUsers%2Fx%3Fdepth%3D2',
     ])
+  })
+})
+
+describe('the app’s file actions (specs/laptop-app-links.md)', () => {
+  it('links encode the whole store path (spaces, `+`, `&`, `#`) and the page URL', () => {
+    expect([
+      REVEAL_URL('Users/ryan/Downloads/a b+c&d#e.pdf'),
+      OPEN_FILE_URL('Users/ryan/Downloads/IMG 1.MOV'),
+      VIEW_URL('https://disk.rbw.sh/~/Downloads?open=a%20b.pdf&c=w'),
+    ]).toEqual([
+      'disky://reveal?path=Users%2Fryan%2FDownloads%2Fa%20b%2Bc%26d%23e.pdf',
+      'disky://open-file?path=Users%2Fryan%2FDownloads%2FIMG%201.MOV',
+      'disky://view?url=https%3A%2F%2Fdisk.rbw.sh%2F~%2FDownloads%3Fopen%3Da%2520b.pdf%26c%3Dw',
+    ])
+  })
+  it('onMac: a desktop Mac browser or the app’s own window; never Windows, iPhone, iPad', () => {
+    expect([
+      onMac({ userAgent: CHROME_MAC, platform: 'MacIntel', maxTouchPoints: 0 }),
+      onMac({ userAgent: APP, platform: 'MacIntel', maxTouchPoints: 0 }),
+      onMac({ userAgent: CHROME_WIN, platform: 'Win32', maxTouchPoints: 0 }),
+      onMac({ userAgent: IPHONE, platform: 'iPhone', maxTouchPoints: 5 }),
+      onMac({ userAgent: SAFARI, platform: 'MacIntel', maxTouchPoints: 5 }),
+    ]).toEqual([true, true, false, false, false])
   })
 })

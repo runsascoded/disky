@@ -24,6 +24,7 @@ import { listingTime } from './listingTime'
 import { gradientBand } from './dayBand'
 import type { DayBand } from './dayBand'
 import { RootSourceLine } from './UnionNotes'
+import { AppActions, useProxyInfo } from './laptop'
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -229,6 +230,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // Tiling is a user preference (header toggle): `shared` by default.
   const [tiling] = useTiling()
   const store = useStore()
+  // An admin on a store whose files open through the machine's tunnel: the view's directory
+  // gets "Show in Finder" (specs/laptop-app-links.md).
+  const fileTunnel = !!useProxyInfo().data?.fileTunnel
   const [renderer] = useRenderer()
   const [titleSpace] = useTitleSpace()
   // Macro/micro hue for a cell, relative to the drilled root (see childRanks).
@@ -707,6 +711,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
+          {fileTunnel && p.length > 1 && <AppActions path={p.slice(1).map(x => x.n).join('/')} dir />}
         </div>
       )}
       renderCellExtra={renderCellExtra}
