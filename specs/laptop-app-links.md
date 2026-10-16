@@ -25,6 +25,12 @@ The contract: any web page can navigate to a `disky://` link, so the app never t
 3. **Leaf-viewer actions**: in the file viewer (and the row's context / hover actions), "Show in Finder" → `disky://reveal?path=…`, "Open on this Mac" → `disky://open-file?path=…`. Show them to admins on the laptop store when either the page is inside the app (user agent contains ` disky/`, as the "Open in disky" button already checks) or always, with a tooltip "needs the disky app on this Mac". Ryan's call; the app session's suggestion is both (in-app plain; in a browser with the tooltip). Directories get "Show in Finder" too.
 4. **"Open this page in disky"** for a signed-in browser whose app is already signed in: `disky://view?url=<location.href>` (the existing "Open in disky" mints a sign-in link instead; keep it for the not-yet-signed-in case, or offer both).
 
+## Status (2026-10-16)
+
+Site side done as `[local]` 9d5b55dd and live on dev. `/v1/laptop-files/status` gates like a file and isn't audited, since it's polled. `LaptopIndicator` sits beside "scanned …". `AppActions` puts "Show in Finder" and "Open on this Mac" in the object panel, and "Show in Finder" on the view card's directory. Both show on a Mac only, inside the app plainly, and in a browser with a "needs the disky app" note (both, per the app session's suggestion). "Open this page in disky" is in the user menu.
+
+Verified on dev against the installed app (11f007f4): the status probe through the tunnel reports `{ online: true }`; with `disky tunnel off` it reports `{ online: false, reason: "tunnel 530" }` and the header shows "laptop offline". The links carry the encoded store path. Clicking them isn't automated, because Chrome's "Open disky?" dialog blocks automation; the app session verified each link on the Mac. Prod is waiting on a deploy.
+
 ## Not in scope
 
 - Any write action through the tunnel (it stays read-only; deletion keeps going through staging → the drainer).
