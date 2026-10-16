@@ -83,6 +83,20 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
         // WKWebView drops `window.open` / `target=_blank` without a handler:
         // send them to the default browser (the site's "sign in with your
         // browser" link, external links), never a second in-app window.
+        // A `disky://` link clicked in the window (the site's "Show in Finder"):
+        // WKWebView can't load the scheme and LaunchServices never sees it, so
+        // hand it to the same handler a browser's link reaches.
+        .on_navigation({
+            let app = app.clone();
+            move |url| {
+                if url.scheme() != "disky" {
+                    return true;
+                }
+                let (app2, url) = (app.clone(), url.clone());
+                let _ = app.run_on_main_thread(move || open_deep_link(&app2, &url));
+                false
+            }
+        })
         .on_new_window(|url, _| {
             if matches!(url.scheme(), "http" | "https") {
                 open(url.as_str());
@@ -416,8 +430,44 @@ impl Tray {
         let _ = self.files.set_text(tunnel::menu_line(&state));
         let _ = self.files.set_checked(files.as_ref().is_some_and(|f| f.on));
         let _ = self.files.set_enabled(files.is_some());
+        set_scan_hint(app, status::scan_hint());
     }
 }
+
+/// "Scan now" with a faded hint after it ("4h ago · next 18:00", `status::scan_hint`).
+/// Tauri's menu items take plain text only, so this sets the native item's
+/// attributed title, through the tray's `NSStatusItem` (its menu is ours).
+#[cfg(target_os = "macos")]
+fn set_scan_hint(app: &AppHandle, hint: String) {
+    let Some(tray) = app.tray_by_id("disky") else { return };
+    let _ = tray.with_inner_tray_icon(move |t| {
+        use objc2::runtime::AnyObject;
+        use objc2::AnyThread;
+        use objc2_app_kit::{NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName};
+        use objc2_foundation::{MainThreadMarker, NSAttributedString, NSDictionary, NSMutableAttributedString, NSString};
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(menu) = t.ns_status_item().and_then(|i| i.menu(mtm)) else { return };
+        let Some(item) = (0..menu.numberOfItems()).filter_map(|i| menu.itemAtIndex(i)).find(|it| it.title().to_string().starts_with("Scan now")) else { return };
+        let font = NSFont::menuFontOfSize(0.0);
+        let attrs = |color: Option<&NSColor>| unsafe {
+            let mut keys = vec![NSFontAttributeName];
+            let mut vals: Vec<&AnyObject> = vec![&font];
+            if let Some(c) = color {
+                keys.push(NSForegroundColorAttributeName);
+                vals.push(c);
+            }
+            NSDictionary::from_slices(&keys, &vals)
+        };
+        let title = unsafe { NSMutableAttributedString::initWithString_attributes(NSMutableAttributedString::alloc(), &NSString::from_str("Scan now"), Some(&attrs(None))) };
+        let faded = NSColor::secondaryLabelColor();
+        let tail = unsafe { NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &NSString::from_str(&format!("   {hint}")), Some(&attrs(Some(&faded)))) };
+        title.appendAttributedString(&tail);
+        item.setAttributedTitle(Some(&title));
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_scan_hint(_: &AppHandle, _: String) {}
 
 /// The site setting changed: re-point an open site window, re-check the menu.
 fn site_changed(app: &AppHandle) {

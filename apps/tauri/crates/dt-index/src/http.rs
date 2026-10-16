@@ -390,7 +390,7 @@ mod tests {
         };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let jwt = token("k1", &claims(now));
-        let on = start(cfg(Some(crate::files::Files { root: root.clone(), access: access(Some(CLIENT)) })));
+        let on = start(cfg(Some(crate::files::Files { root: root.clone(), access: access(Some(CLIENT)), health: None })));
         let call = |method: &str, url: &str, jwt: Option<&str>, range: Option<&str>| {
             let mut r = ureq::request(method, url);
             if let Some(j) = jwt {

@@ -4,7 +4,8 @@
 //! must carry a valid Access JWT (`access.rs`), and the path must resolve
 //! (after `realpath`: no `..`, no symlink out) to a regular file under `root`.
 //! The edge enforces who may ask and the deny-list; this re-checks the root.
-//! `/files/` itself (no path) is the health check: `{"ok": true, "root": …}`.
+//! `/files/` itself (no path) is the health check: `{"ok": true, "root": …}`, plus
+//! whatever `Files::health` adds (the app: its scan `schedule` and `tz`).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,17 +15,25 @@ use tiny_http::{Request, Response, StatusCode};
 
 use crate::access::Access;
 
+/// Extra fields for the health check, computed per request (e.g. the app's scan schedule).
+pub type Health = Box<dyn Fn() -> serde_json::Map<String, serde_json::Value> + Send + Sync>;
+
 pub struct Files {
     /// Canonical (`realpath`) store root: `/` for a whole-Mac store.
     pub root: PathBuf,
     pub access: Access,
+    pub health: Option<Health>,
 }
 
 pub const JWT_HEADER: &str = "Cf-Access-Jwt-Assertion";
 
 impl Files {
     pub fn new(root: &Path, access: Access) -> std::io::Result<Self> {
-        Ok(Files { root: root.canonicalize()?, access })
+        Ok(Files { root: root.canonicalize()?, access, health: None })
+    }
+
+    pub fn with_health(self, health: Health) -> Self {
+        Files { health: Some(health), ..self }
     }
 }
 
@@ -130,7 +139,13 @@ pub fn respond(files: &Files, rel: &str, jwt: Option<&str>, range: Option<&str>)
     }
     // `/files/` itself: the health check (the site's "laptop online" indicator).
     if rel.trim_start_matches('/').is_empty() {
-        let b = serde_json::to_vec(&serde_json::json!({"ok": true, "root": files.root.to_string_lossy()})).unwrap();
+        let mut o = serde_json::Map::new();
+        o.insert("ok".into(), true.into());
+        o.insert("root".into(), files.root.to_string_lossy().into());
+        if let Some(extra) = &files.health {
+            o.extend(extra());
+        }
+        let b = serde_json::to_vec(&o).unwrap();
         let n = b.len();
         return Response::new(StatusCode(200), vec![h("content-type", "application/json"), h("cache-control", "no-store")], Box::new(std::io::Cursor::new(b)) as Box<dyn Read + Send>, Some(n), None);
     }
@@ -239,7 +254,7 @@ pub(crate) mod tests {
     #[test]
     fn serves_with_valid_jwt_only() {
         let (_t, root) = tree("serve");
-        let files = Files { root: root.clone(), access: access(Some(CLIENT)) };
+        let files = Files { root: root.clone(), access: access(Some(CLIENT)), health: None };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let jwt = token("k1", &claims(now));
 
@@ -273,5 +288,7 @@ pub(crate) mod tests {
         // The health check: JWT-gated like any file.
         assert_eq!(read(respond(&files, "", Some(&jwt), None)), (200, format!(r#"{{"ok":true,"root":"{}"}}"#, root.display())));
         assert_eq!(read(respond(&files, "", None, None)), (401, "missing Access JWT".into()));
+        let files = Files { health: None, ..files }.with_health(Box::new(|| serde_json::json!({"schedule": ["06:00"], "tz": "America/New_York"}).as_object().unwrap().clone()));
+        assert_eq!(read(respond(&files, "", Some(&jwt), None)), (200, format!(r#"{{"ok":true,"root":"{}","schedule":["06:00"],"tz":"America/New_York"}}"#, root.display())));
     }
 }

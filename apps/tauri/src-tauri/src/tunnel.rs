@@ -51,12 +51,36 @@ pub fn server_files(s: &settings::Settings) -> Option<dt_index::files::Files> {
     let f = s.files.as_ref()?;
     let access = dt_index::access::Access::new(&f.team, &f.aud, Some(f.client_id.clone()));
     match dt_index::files::Files::new(std::path::Path::new(&f.root), access) {
-        Ok(files) => Some(files),
+        Ok(files) => Some(files.with_health(Box::new(health))),
         Err(e) => {
             jobs::note(&format!("disky: file previews root {}: {e}", f.root));
             None
         }
     }
+}
+
+/// The health check's extras (`dt_index::files`), for the site's "next scan" beside
+/// "scanned …": the scan schedule (local `HH:MM`; empty while scheduled scans are
+/// off) and this Mac's IANA time zone.
+fn health() -> serde_json::Map<String, serde_json::Value> {
+    let schedule: Vec<String> = if crate::services::agents_enabled() {
+        settings::load().times().iter().map(|(h, m)| format!("{h:02}:{m:02}")).collect()
+    } else {
+        vec![]
+    };
+    let mut o = serde_json::Map::new();
+    o.insert("schedule".into(), schedule.into());
+    if let Some(tz) = local_tz() {
+        o.insert("tz".into(), tz.into());
+    }
+    o
+}
+
+/// `America/New_York`, from where `/etc/localtime` points (`…/zoneinfo/America/New_York`).
+fn local_tz() -> Option<String> {
+    let link = std::fs::read_link("/etc/localtime").ok()?;
+    let s = link.to_string_lossy();
+    s.split_once("zoneinfo/").map(|(_, tz)| tz.to_string())
 }
 
 /// `cloudflared` on PATH or in Homebrew's prefixes (a GUI app's PATH is launchd's, without Homebrew).

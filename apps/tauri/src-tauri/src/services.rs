@@ -185,7 +185,7 @@ fn agent_status(plist: &str) -> &'static str {
 
 fn loaded_status(text: &str, expected: &str) -> &'static str {
     if field(text, "program") != Some(expected) { return "upgrade needed"; }
-    if field(text, "state") != Some("running") && field(text, "last exit code").is_some_and(|v| v != "0") { return "last launch failed"; }
+    if field(text, "state") != Some("running") && field(text, "last exit code").and_then(|v| v.parse::<i64>().ok()).is_some_and(|c| c != 0) { return "last launch failed"; }
     "enabled"
 }
 
@@ -275,6 +275,8 @@ mod tests {
         assert_eq!(loaded_status(&format!("program = {exe}\nstate = not running\nlast exit code = 78\n"), exe), "last launch failed");
         assert_eq!(loaded_status(&format!("program = {exe}\nstate = running\nlast exit code = 78\n"), exe), "enabled");
         assert_eq!(loaded_status(&format!("program = {exe}\nstate = not running\nlast exit code = 0\n"), exe), "enabled");
+        // Freshly (re-)registered, not yet woken: launchd's placeholder isn't a failure.
+        assert_eq!(loaded_status(&format!("program = {exe}\nstate = not running\nlast exit code = (never exited)\n"), exe), "enabled");
     }
 }
 

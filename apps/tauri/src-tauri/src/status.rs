@@ -112,6 +112,23 @@ pub fn scan_line() -> String {
     }
 }
 
+/// The faded hint beside the menu's "Scan now": "4h ago · next 18:00", "running", "never".
+pub fn scan_hint() -> String {
+    let s = settings::load();
+    let st = settings::load_state();
+    let now = settings::now();
+    let in_flight = st.last_start.is_some_and(|start| st.last_end.is_none_or(|end| end < start));
+    if st.force || (in_flight && st.pid.is_some_and(process_alive)) {
+        return "running".into();
+    }
+    let last = st.last_end.map_or("never".into(), |t| ago(Duration::from_secs((now - t).max(0) as u64)));
+    let next = job_state(SCAN_LABEL).loaded.then(|| settings::next_slot(&s.times(), now)).flatten();
+    match next {
+        Some((h, m)) => format!("{last} · next {h:02}:{m:02}"),
+        None => last,
+    }
+}
+
 /// `850K`, `3.2M` files.
 pub fn count(n: u64) -> String {
     match n {
