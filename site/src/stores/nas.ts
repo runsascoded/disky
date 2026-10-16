@@ -12,6 +12,8 @@ const store: Store = {
   mark: 'nas',
   scheme: 'file:///',
   base: '/data/nas',
+  // The capture's root (`/mnt/user`): its paths keep the full path, and nothing else is above it.
+  root: ['mnt', 'user'],
   ogImage: '/og.jpg',
   prices: false,
   // Deletes run on the laptop's drainer, which can't reach the NAS's disks.
