@@ -122,20 +122,27 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
   const upstream = `${env.LAPTOP_TUNNEL_URL!.replace(/\/+$/, '')}/files/${segs.map(encodeURIComponent).join('/')}`
   // Unbound: the Workers runtime's `fetch` throws "Illegal invocation" when `this` is `deps`.
   const { fetch: upstreamFetch } = deps
+  const ask = () => upstreamFetch(upstream, {
+    method: request.method,
+    headers: {
+      'CF-Access-Client-Id': env.LAPTOP_TUNNEL_CLIENT_ID!,
+      'CF-Access-Client-Secret': env.LAPTOP_TUNNEL_CLIENT_SECRET!,
+      ...(upstreamRange ? { range: upstreamRange } : {}),
+    },
+    redirect: 'manual',
+    // Someone's file never lands in this Worker's subrequest cache.
+    cache: 'no-store',
+  })
+  // Cloudflare's cache drops `Range` on a URL's first miss for a cacheable extension (`.pdf`, `.mp4`)
+  // and answers whole; it bypasses from then on. So a ranged ask answered whole is cancelled and asked again.
+  const ignoredRange = (r: Response) => !!upstreamRange && r.status === 200 && !r.headers.get('content-range')
   let res: Response
   try {
-    res = await upstreamFetch(upstream, {
-      method: request.method,
-      headers: {
-        'CF-Access-Client-Id': env.LAPTOP_TUNNEL_CLIENT_ID!,
-        'CF-Access-Client-Secret': env.LAPTOP_TUNNEL_CLIENT_SECRET!,
-        ...(upstreamRange ? { range: upstreamRange } : {}),
-      },
-      redirect: 'manual',
-      // Past Cloudflare's cache: on a miss for a cacheable extension (`.pdf`, `.mp4`) it drops
-      // `Range` and fetches the whole object, so a file's first range read came back a 200.
-      cache: 'no-store',
-    })
+    res = await ask()
+    if (ignoredRange(res)) {
+      await res.body?.cancel()
+      res = await ask()
+    }
   } catch (e) {
     return out(offline('unreachable'), { reason: `fetch: ${(e as Error).message}` })
   }
@@ -151,6 +158,10 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
   if (res.status >= 300 && res.status < 400 || res.status === 401 || res.status === 403) {
     await res.body?.cancel()
     return out(refuse(502, 'the file tunnel refused this site', { upstream: res.status }), { reason: `upstream ${res.status}` })
+  }
+  if (ignoredRange(res)) {
+    await res.body?.cancel()
+    return out(refuse(502, 'the file tunnel ignored the byte range'), { reason: 'range ignored' })
   }
   const tooLarge = async (bytes: number | null) => {
     await res.body?.cancel()
