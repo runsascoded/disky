@@ -16,7 +16,7 @@ import { queryParam, QueryError } from '../_lib/scope.js'
 import { allMatchRoots, FILTER_VIEW_V, NotFound, pathTotals } from '../_lib/view.js'
 import { COVER_V, coverFloor, coverSet, overCapReason } from '../_lib/cover.js'
 import { hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
-import { FilterRejected, indexedOnly, rejectBody, rejectQuery } from '../_lib/indexedOnly.js'
+import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor, serverTiming } from '../_lib/edgeCache.js'
 import { storeKey, type UnionView, withStore } from '../_lib/stores.js'
 import { filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, resolveUnion, UnionOverlap, unionFor } from '../_lib/union.js'
@@ -119,14 +119,14 @@ async function cover(ctx0: Ctx): Promise<Response> {
   try {
     qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX, indexedOnly(ctx.env))
   } catch (e) {
-    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(qRaw) : null
+    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(qRaw, pathTerms(ctx.env)) : null
     if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
     throw e
   }
   let query = qp.query
   if (!query) return jsonRes({ error: 'q= (a filter) is required' }, 400)
-  const refused = indexedOnly(ctx.env) ? rejectQuery(qRaw) : null
+  const refused = indexedOnly(ctx.env) ? rejectQuery(qRaw, pathTerms(ctx.env)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
   // An exclusion (`-x`) leaves holes inside its match roots: a root is then no exact prefix.
   if (query.neg) return jsonRes({ error: 'A filter with exclusions can’t be turned into whole folders or files to act on; drop the exclusion to act on the matches.', code: 'cover-exclusions' }, 400)

@@ -18,7 +18,7 @@ import { ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
-import { FilterRejected, indexedOnly, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
+import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
@@ -91,14 +91,14 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX, indexedOnly(ctx.env))
   } catch (e) {
     // Indexed-only: a form it refuses is refused as such (`a b` is "one term", not "too short").
-    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(url.searchParams.get('q')) : null
+    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(url.searchParams.get('q'), pathTerms(ctx.env)) : null
     if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
     throw e
   }
   let query = qp.query
   // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`), before auth or any read.
-  const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw) ?? rejectScope(!!(lens || classes)) : null
+  const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw, pathTerms(ctx.env)) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
 
   const gated = member ? member.id : await st.time('auth', requireViewer(ctx as never))

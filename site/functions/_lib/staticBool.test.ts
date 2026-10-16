@@ -92,11 +92,12 @@ beforeAll(async () => {
 })
 
 const q = (t: string) => parseQuery(t)!
-const plan = (t: string) => boolPlan(parseAst(t, makeSimple({ minTerm: 1 }))!)
+/** `paths`: path terms on (`SEARCH_PATH_TERMS`). */
+const plan = (t: string, paths = false) => boolPlan(parseAst(t, makeSimple({ minTerm: 1 }))!, paths)
 
 describe('boolPlan: the queries the static index answers beyond one literal', () => {
   it('AND-groups of literals, OR between them (looser than AND), the whole query\'s negatives; lowercase keys', () => {
-    expect(['tomat bin', 'TOMAT -Bin', 'a b|c', 'a|b c', 'a b|c -d', '-x.bin -tomat', 'abc', 'a|b|c', '-a|b', 'a -b|c'].map(plan)).toEqual([
+    expect(['tomat bin', 'TOMAT -Bin', 'a b|c', 'a|b c', 'a b|c -d', '-x.bin -tomat', 'abc', 'a|b|c', '-a|b', 'a -b|c'].map(t => plan(t))).toEqual([
       { alts: [['tomat', 'bin']], neg: [] },
       { alts: [['tomat']], neg: ['bin'] },
       { alts: [['a', 'b'], ['c']], neg: [] },
@@ -111,7 +112,7 @@ describe('boolPlan: the queries the static index answers beyond one literal', ()
     ])
   })
   it('quotes keep spaces, `-`, `|` literal; a quoted `-x` is a positive term', () => {
-    expect(['"a b" -c', '"a|b" c', '"-draft" ckpt', '-"a b" x', '" lead" "x y"|z'].map(plan)).toEqual([
+    expect(['"a b" -c', '"a|b" c', '"-draft" ckpt', '-"a b" x', '" lead" "x y"|z'].map(t => plan(t))).toEqual([
       { alts: [['a b']], neg: ['c'] },
       { alts: [['a|b', 'c']], neg: [] },
       { alts: [['-draft', 'ckpt']], neg: [] },
@@ -120,7 +121,7 @@ describe('boolPlan: the queries the static index answers beyond one literal', ()
     ])
   })
   it('anchored terms are keys of their own (`/q` starts, `q/` ends, `/q/` is), in any position; escaped anchors are literal', () => {
-    expect(['^tomat bin', 'tomat -.pt$', '^ckpt$|.json$', '-^tmp', '\\^a b', '"^a" b'].map(plan)).toEqual([
+    expect(['^tomat bin', 'tomat -.pt$', '^ckpt$|.json$', '-^tmp', '\\^a b', '"^a" b'].map(t => plan(t))).toEqual([
       { alts: [['/tomat', 'bin']], neg: [] },
       { alts: [['tomat']], neg: ['.pt/'] },
       { alts: [['/ckpt/'], ['.json/']], neg: [] },
@@ -130,7 +131,7 @@ describe('boolPlan: the queries the static index answers beyond one literal', ()
     ])
   })
   it('duplicates collapse; an AND-group holding every term of another is inside it and dropped', () => {
-    expect(['a a b', 'a|a', 'a|a b', 'a b|a', 'a b|b a', '-a -a x', 'a b|a c|a'].map(plan)).toEqual([
+    expect(['a a b', 'a|a', 'a|a b', 'a b|a', 'a b|b a', '-a -a x', 'a b|a c|a'].map(t => plan(t))).toEqual([
       { alts: [['a', 'b']], neg: [] },
       { alts: [['a']], neg: [] },
       { alts: [['a']], neg: [] },
@@ -141,7 +142,7 @@ describe('boolPlan: the queries the static index answers beyond one literal', ()
     ])
   })
   it('not a plan: a glob, a regex, a `/`, an anchor too short for the index — anywhere in the query', () => {
-    expect(['tom*at bin', 'abc -/x', '/ttl/', 'a/b|c', 'x -tom*', '^a b', 'gz$ x', 'x -gz$'].map(plan)).toEqual([null, null, null, null, null, null, null, null])
+    expect(['tom*at bin', 'abc -/x', '/ttl/', 'a/b|c', 'x -tom*', '^a b', 'gz$ x', 'x -gz$'].map(t => plan(t))).toEqual([null, null, null, null, null, null, null, null])
   })
   it('`compound`: beyond one positive literal', () => {
     expect(['abc', 'abc def', '-d', 'abc -d', 'a|b', '^abc', '^ab|cd'].map(s => compound(plan(s)))).toEqual([false, true, true, true, true, false, true])
@@ -189,12 +190,12 @@ function asBrute(a: BoolAnswer, P: string, date: string): Brute {
 }
 
 /** Every (query, root, date) answer from `src` = brute force; the served / declined counts (per date). */
-async function sweepAnswers(src: HitSource, queries = QUERIES, budget?: BoolBudget): Promise<{ served: number; declined: Record<string, number> }> {
+async function sweepAnswers(src: HitSource, queries = QUERIES, budget?: BoolBudget, paths = false): Promise<{ served: number; declined: Record<string, number> }> {
   const got: unknown[] = [], want: unknown[] = []
   let served = 0
   const declined: Record<string, number> = {}
   for (const t of queries) for (const root of ROOTS) {
-    const a = await evalBool(src, plan(t)!, root, null, budget)
+    const a = await evalBool(src, plan(t, paths)!, root, null, budget)
     if (isDecline(a)) { declined[a.declined] = (declined[a.declined] ?? 0) + SCANS.length; continue }
     for (const date of SCANS) {
       served++
@@ -242,7 +243,7 @@ describe('anchored terms in a compound (`^q`, `q$`, `^q$`): the same rules, each
   })
 })
 
-describe('path terms in a compound (`a/b`): the same rules, each term held along the path', () => {
+describe('path terms in a compound (`a/b`, `SEARCH_PATH_TERMS=1`): the same rules, each term held along the path', () => {
   // Path keys from brute force over the objects (`objectsSource`; the fixture's index has no name index), plain ones
   // from the suffix index.
   const mixedPaths = (): HitSource => {
@@ -251,11 +252,16 @@ describe('path terms in a compound (`a/b`): the same rules, each term held along
   }
   const QS = ['data/tomat', '/tomat', 'bk/data', 'data/tomat bin', 'raw/tomat -inner', 'tomat -data/raw', 'bk/runs|data/raw', '^tomat-1/x.bin$', 'x/ckpt -2.pt', 'tomato/a.bin|ttl=7d/z.', '-tomat-1/to']
   it('= brute force at every root, both scans', async () => {
-    expect(await sweepAnswers(mixedPaths(), QS)).toEqual({ served: QS.length * ROOTS.length * SCANS.length, declined: {} })
+    expect(await sweepAnswers(mixedPaths(), QS, undefined, true)).toEqual({ served: QS.length * ROOTS.length * SCANS.length, declined: {} })
   })
   it('keys: a path term with a readable tail is a key of its own; a tail too short is no plan', () => {
-    expect(['data/tomat bin', 'a/bc -x', 'a/b x', 'x -a/', 'a/b$ x'].map(plan)).toEqual([
+    expect(['data/tomat bin', 'a/bc -x', 'a/b x', 'x -a/', 'a/b$ x'].map(t => plan(t, true))).toEqual([
       { alts: [['//00data/tomat', 'bin']], neg: [] }, { alts: [['//00a/bc']], neg: ['x'] }, null, null, { alts: [['//01a/b', 'x']], neg: [] },
+    ])
+  })
+  it('parked (`SEARCH_PATH_TERMS` unset): no plan holds a path term', () => {
+    expect(['data/tomat bin', 'a/bc -x', 'x -a/bc', 'a/b$ x', 'tomat|data/raw', 'tomat bin'].map(t => plan(t))).toEqual([
+      null, null, null, null, null, { alts: [['tomat', 'bin']], neg: [] },
     ])
   })
 })

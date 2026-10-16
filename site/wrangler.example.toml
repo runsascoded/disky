@@ -75,7 +75,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # OBJECT_BUCKETS = "my-bucket"                # comma-separated scanned buckets `/v1/objects` serves to members
 # STORES_JSON = '{"meta": {"scope": "meta"}}'  # secondary stores: `{"<key>": {"scope": …, "vars": {…}, "secrets": {…}}}`
 #   a store's own static name index: `"vars": {"STATIC_GEN": "<gen>", …}` (its generation in INDEX_R2; FILTER_STATIC_HEAVY /
-#   FILTER_STATIC_ANCHORS per store too, FILTER_STATIC / FILTER_INDEXED_ONLY inherited unless set) — none: `scan-not-indexed`
+#   FILTER_STATIC_ANCHORS per store too, FILTER_STATIC / FILTER_INDEXED_ONLY / SEARCH_PATH_TERMS inherited unless set) — none: `scan-not-indexed`
 #   …and union views: `"<key>": {"union": ["primary", "<store>"…], "main": true}` — the stores' roots side by side
 #   (`_lib/union.ts`); `main` = what a request without `store=` reads (the main map); `"sources": {"<member>": {"label": …,
 #   "icon": "/icons/meta.svg" | "https://…"}}` marks each member in the scan picker and the root's table (no icon: its label);
@@ -116,6 +116,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # FILTER_STATIC_HEAVY = "1"                 # with FILTER_STATIC: heavy literals (catalog members, and every 1–2 character one) from the drilldown under `drill/` (`_lib/staticDrill.ts`): match roots, or a heavy directory's per-child rollup; base-generation scans only
 # FILTER_STATIC_ANCHORS = "0"               # with FILTER_STATIC: turns off anchored terms (`^q`, `q$`, `^q$`) from the name index and the `q$` / `^q$` rollups under `names/`, `anchors/` (`_lib/staticAnchors.ts`; on by default, a generation without `anchors/meta.json` declines them)
 # FILTER_INDEXED_ONLY = "1"                # with FILTER_STATIC: the map's filter takes only one literal substring of a name, unscoped, on a scan the static index covers; every other form is a 400 `{ error, code }` (`_lib/indexedOnly.ts`), never a path-store scan
+# SEARCH_PATH_TERMS = "1"                  # with FILTER_STATIC: path terms (`a/b`, `^a/b`, `a/b$`) from the static name index (its tail's range, `_lib/staticAnchors.ts`; specs/search-box-no-refusals.md). Default off: parked — a term holding `/` is a 400 `unsupported-slash` on an indexed-only deployment (every route and the box), and walked (flagged approximate) on any other
 # FILTER_DETAILS_MS = "300"                # with FILTER_STATIC: ms a filtered view waits past phase 2 for its roots' kind/ages/classes (unset: until they land)
 # FILTER_PHASE2_MS = "1500"                # ms a filtered view's phase 2 (its match roots' insides) may take; reads still running then are dropped and those roots drawn whole (`interiors` in the response; default 1500)
 # PATH_STORE = "intervals"                 # read the dates INTERVAL_STORE_GEN holds from the change-interval path store on INDEX_R2 (`_lib/index.ts` `openInterval`, specs/interval-store.md); lenses and owner pools still read per-scan stores. `opt-in`: only requests with `ps=iv`

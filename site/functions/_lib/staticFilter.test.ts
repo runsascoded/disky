@@ -141,10 +141,12 @@ const FOLDED: unknown[] = [
 ]
 
 describe('staticLiteral: the queries the static index answers exactly', () => {
-  it('one positive substring (one and two characters too: the drilldown\'s; with `/`, a path term\'s key); nothing else', () => {
-    const lit = (s: string) => staticLiteral(parseAst(s)!)
-    expect(['tomat', 'TOMAT', 'x.bin', 'ab', 'A', '.', 'abc def', 'tom*at', '/tomat', 'tomat -xyz', 'abc|bcd', '"ttl=7d"', '/ttl/'].map(lit))
-      .toEqual(['tomat', 'tomat', 'x.bin', 'ab', 'a', '.', null, null, '//00/tomat', null, null, 'ttl=7d', null])
+  it('one positive substring (one and two characters too: the drilldown\'s; with `/` and `SEARCH_PATH_TERMS`, a path term\'s key); nothing else', () => {
+    const lit = (s: string, paths = false) => staticLiteral(parseAst(s)!, paths)
+    expect(['tomat', 'TOMAT', 'x.bin', 'ab', 'A', '.', 'abc def', 'tom*at', '/tomat', 'tomat -xyz', 'abc|bcd', '"ttl=7d"', '/ttl/'].map(s => lit(s)))
+      .toEqual(['tomat', 'tomat', 'x.bin', 'ab', 'a', '.', null, null, null, null, null, 'ttl=7d', null])
+    // Path terms on (`SEARCH_PATH_TERMS`): a key of its own.
+    expect(['/tomat', '/ttl/'].map(s => lit(s, true))).toEqual(['//00/tomat', null])
   })
 })
 
@@ -331,6 +333,17 @@ describe('a path term ending in `/` (empty tail), flag unset: the thresholded wa
       expect(got).toEqual(['fill/', '^bk/fill/'].flatMap(t => [[t, 'view', ...WALK], [t, 'route', ...WALK], [t, 'route&full=1', ...WALK], [t, 'brute', [1023750, 3000]]]))
     })
   }
+  it('a readable tail (`^bk/fil`): static only with `SEARCH_PATH_TERMS=1`; parked (unset), never the static index — the search sidecars, as any non-static query', async () => {
+    const got = []
+    for (const on of [true, false]) {
+      const env = envStatic(stores[1][1]())
+      if (on) (env as unknown as Record<string, string>).SEARCH_PATH_TERMS = '1'
+      const v = await buildView(env, { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: parseIn('^bk/fil', plain)! })
+      got.push([on, v.tier, v.matchCount, v.approximate, v.approximateReason])
+    }
+    const whole = { n: 1, b: 1023750, o: 3000 }
+    expect(got).toEqual([[true, 'static+path', whole, undefined, undefined], [false, 'search+path', whole, undefined, undefined]])
+  })
   it('`fill$` (the folder): its bytes, exact, from the static source', async () => {
     const v = await buildView(envStatic(stores[1][1]()), { date: A, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, query: parseIn('fill$', plain)! })
     expect([v.tier, v.matchCount, v.approximate, matchedRows(v)]).toEqual(['static+path', { n: 1, b: 1023750, o: 3000 }, undefined, [['bk/fill', 1023750, 3000]]])

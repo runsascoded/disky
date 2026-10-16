@@ -1,9 +1,9 @@
-import { execSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
 import { devChildrenActions } from './devChildrenActions'
+import { writeBuildId } from './scripts/build-id.mjs'
 
 // Ports: `devPort` in package.json (vite), `PORT` env overrides (a second dev
 // stack, or when another worktree already holds 3263); wrangler pages dev (the
@@ -139,12 +139,10 @@ const markIcons: Plugin = {
   },
 }
 
-// The build's commit (the session log stamps it on every batch, specs/session-log.md): `VITE_BUILD_SHA`, else
-// the checkout's HEAD, else none.
-function buildSha(): string {
-  if (process.env.VITE_BUILD_SHA) return process.env.VITE_BUILD_SHA
-  try { return execSync('git rev-parse --short=10 HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() } catch { return '' }
-}
+// The build's identity (`scripts/build-id.mjs`): its commit (the session log stamps it on every batch,
+// specs/session-log.md; `VITE_BUILD_SHA` overrides) and time, written for the Functions bundle too
+// (`functions/_lib/build.gen.ts`), so the page and the `x-disky-build` header agree.
+const BUILD_ID = writeBuildId()
 
 export default defineConfig({
   define: {
@@ -156,7 +154,8 @@ export default defineConfig({
     'import.meta.env.VITE_PROD_HOST': JSON.stringify(PROD_HOST),
     'import.meta.env.VITE_DEV_HOST': JSON.stringify(DEV_HOST),
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
-    'import.meta.env.VITE_BUILD_SHA': JSON.stringify(buildSha()),
+    'import.meta.env.VITE_BUILD_SHA': JSON.stringify(BUILD_ID.sha),
+    'import.meta.env.VITE_BUILD_TIME': JSON.stringify(BUILD_ID.time),
   },
   plugins: [react(), devSeriesIndex, devChildrenActions, llmsTxt, markIcons],
   server: {

@@ -40,7 +40,7 @@ import { extrasFor } from './extras.js'
 import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticCompound, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
 import { type BoolAnswer, boolPlan, compound } from './staticBool.js'
 import { scanAt } from './staticNames.js'
-import { FilterRejected, indexedOnly, reject } from './indexedOnly.js'
+import { FilterRejected, indexedOnly, pathTerms, reject } from './indexedOnly.js'
 
 export const MIN_AREA_DEFAULT = 12 // px² of the smallest legible cell (~3×4)
 // Each nesting level below the query root loses canvas to chrome (title bars,
@@ -876,7 +876,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // to combine, a term no source answers) an indexed-only deployment refuses, and any other reads as before (the
     // search or the thresholded walk, flagged); a scan it doesn't cover is `scan-not-indexed` on every deployment,
     // as for a single literal — never the walk's answer for a missing index.
-    const bplan = !lens && !classes ? boolPlan(pq) : null
+    const bplan = !lens && !classes ? boolPlan(pq, pathTerms(env)) : null
     let sb: BoolAnswer | null = null
     if (compound(bplan)) {
       const sfs = staticFilterStore(env)
@@ -897,12 +897,12 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // The static name index (`staticFilter.ts`): a single literal's match roots on any scan of its
       // generation, exact, from one cached suffix-range read — no search sidecars, no thresholded walk.
       const sfs = !lens && !classes ? staticFilterStore(env) : null
-      const skey = sfs ? await staticKey(sfs, pq, [date]) : null
+      const skey = sfs ? await staticKey(sfs, pq, [date], pathTerms(env)) : null
       // A literal the static index answers, on a scan its generation doesn't hold (newer than its newest — published,
       // not yet appended — or before its base): `scan-not-indexed` on every deployment, indexed-only or not — never the
       // thresholded walk, which can't see small matches and reads as "no matches". Queries the index can't answer at
       // all (regexes, globs: no literal) still walk; compound literals are `sb`'s, above.
-      if (sfs && !skey && staticLiteral(pq)) throw new FilterRejected(reject('scan-not-indexed'))
+      if (sfs && !skey && staticLiteral(pq, pathTerms(env))) throw new FilterRejected(reject('scan-not-indexed'))
       // A dir-only (v1) scan's index never saw a file: whatever answers, its matches are its folders'.
       if (skey && (await dirsOnlyOf(sfs, [date])).length) noteCoverage(cov, 'dirsOnly', DIRS_ONLY)
       const raw = skey ? await sfs!.source.hits(skey, path, { firstPaint: o.firstPaint }) : null
@@ -2270,7 +2270,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const dP = path === '' ? 0 : path.split('/').length
   const tr = o.trace
   // A literal's matches on a dir-only scan are its folders', on a full one its files' too: not comparable.
-  const split = query && !lens && !o.classes ? await dirsOnlySplit(staticFilterStore(env), query.ast, path, [from, to]) : null
+  const split = query && !lens && !o.classes ? await dirsOnlySplit(staticFilterStore(env), query.ast, path, [from, to], pathTerms(env)) : null
   if (split) throw new FilterRejected(split)
   let t0 = performance.now()
   const [ra, rb] = await Promise.all([

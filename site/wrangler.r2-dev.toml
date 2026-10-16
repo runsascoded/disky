@@ -34,7 +34,7 @@ OG_CARDS = "1"
 STORE_SCHEME = "r2://"
 PUBLIC_READ = "1"
 SNAPSHOTS_SUBDIR = "r2"
-SEARCH_SIDECARS = "1"            # the daily ingest builds them (`path-index -S`): filters the static index lacks read them (_lib/search.ts)
+FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
 STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
 

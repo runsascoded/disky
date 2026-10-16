@@ -112,6 +112,8 @@ run_wrangler() {
     done
   fi
 }
+# The Functions import the build's identity (`functions/_lib/build.gen.ts`, untracked): write it before wrangler bundles them.
+node scripts/build-id.mjs
 run_wrangler &
 wpid=$!
 trap 'kill "$wpid" 2>/dev/null || true; pkill -P "$wpid" 2>/dev/null || true; restore_config' EXIT INT TERM

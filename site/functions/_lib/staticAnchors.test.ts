@@ -437,9 +437,11 @@ describe('keys and segments', () => {
     expect([segmentMatches('abc', 'ab', 'start'), segmentMatches('abc', 'bc', 'end'), segmentMatches('abc', 'abc', 'exact'), segmentMatches('abc', 'b', null)]).toEqual([true, true, true, true])
   })
   it('`staticLiteral`: an anchored literal\'s key, null under its minimum length; a path term\'s, null with a tail too short', () => {
-    const lit = (q: string) => staticLiteral(parseAst(q) ?? undefined)
-    expect(['^tomat', '.json$', '^config.json$', '^ab', '^a', 'gz$', '.gz$', '^x$', '"^a"', 'tomat', 'a/bc', '^a/bc$', 'a/b', 'a/b$', 'a/'].map(lit))
+    const lit = (q: string, paths = true) => staticLiteral(parseAst(q) ?? undefined, paths)
+    expect(['^tomat', '.json$', '^config.json$', '^ab', '^a', 'gz$', '.gz$', '^x$', '"^a"', 'tomat', 'a/bc', '^a/bc$', 'a/b', 'a/b$', 'a/'].map(q => lit(q)))
       .toEqual(['/tomat', '.json/', '/config.json/', '/ab', null, null, '.gz/', '/x/', '^a', 'tomat', '//00a/bc', '//11a/bc', null, '//01a/b', null])
+    // Path terms parked (`SEARCH_PATH_TERMS` unset): no key.
+    expect(['a/bc', '^a/bc$', 'a/b$', 'tomat'].map(q => lit(q, false))).toEqual([null, null, null, 'tomat'])
   })
   it('`SuffixHits` hands anchored keys to the anchored source, and nobody else', async () => {
     const blobs = blobsOf()

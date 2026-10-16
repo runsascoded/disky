@@ -377,6 +377,12 @@ button.mini.neg {
   }
   // The store switcher's rows (a multi-store deploy): the store's label, its path dimmed after it.
   .store-link .dim { color: var(--ink-3); font-size: 12px; }
+  // The page's build (☰'s last line): small, dim, selectable for a bug report.
+  .menu-build {
+    padding: 4px 10px 2px; font-size: 11.5px; color: var(--ink-3); user-select: text;
+    a { color: inherit; text-decoration: none; &:hover { text-decoration: underline; } }
+    code { font-size: 11px; }
+  }
   &.user-menu { min-width: 250px; .user-card { padding: 4px 6px 2px; } }
 }
 // "Open in disky" fallback hint: bottom-center, click or 8 s to dismiss.

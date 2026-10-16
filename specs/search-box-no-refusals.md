@@ -1,16 +1,16 @@
 # The search box answers, fast and exact, or not at all
 
-**Status:** site side implemented on `cloud` 2026-10-15 (commits below); §3.1 built (`26dca187`, live per deployment after its generation rebuild); the rest of §3 planned, not built.
+**Status:** site side implemented on `cloud` 2026-10-15 (commits below); §3.1 built (`26dca187`, live per deployment after its generation rebuild); the rest of §3 planned, not built. Path terms (§2.1) parked the same day behind `SEARCH_PATH_TERMS` (default off): the baseline box is the small subset that is always fast and exact, and a term holding `/` is `unsupported-slash` by design.
 
 Every deployment runs one search: the prebuilt static name index (`FILTER_INDEXED_ONLY=1`, no per-scan search sidecars). The box means **literal text matched against names along a path**, answered exactly from that index; what it can't answer is not a half-built search style. The goal is that no form a user types reaches a "not supported" refusal. This spec records what each former refusal does now, and the index changes that close the rest.
 
 ## 1. What the box means
 
-Syntax `plain` (`site/functions/_lib/querySyntax.ts`; `queryParam(…, indexed)` under the flag, the client's `INDEXED_SYNTAX`):
+Syntax `plain` (`site/functions/_lib/querySyntax.ts`; `queryParam(…, indexed)` under the flag, the client's `indexedSyntax(pathTerms)`):
 
 - `text`: a file or folder name contains it (case-insensitive). Every character is itself: `*`, `?`, `(`, `.`, a `/…/` query. `qs=` is ignored.
 - `^text`, `text$`, `^text$`: a name starts with / ends with / is it.
-- `a/b`: a **path term**. The lowercase path contains the text as written, `/` the separator; `^` / `$` anchor its ends to segment boundaries.
+- `a/b`: **unsupported by design** (`unsupported-slash`, up front on every route and in the box: never a walk, never an approximate answer). With `SEARCH_PATH_TERMS=1` (off by default; §2.1) it is a **path term**: the lowercase path contains the text as written, `/` the separator; `^` / `$` anchor its ends to segment boundaries.
 - `a b` (AND), `a|b` (OR), `-x` (NOT), `"…"` (quotes), `\^` / `\$` (escapes), as before (`specs/search-extensions.md` §1, §2).
 - Owner pools (`o=owned`, `o=unowned`, `o=!a,b`) apply.
 
@@ -19,7 +19,7 @@ Syntax `plain` (`site/functions/_lib/querySyntax.ts`; `queryParam(…, indexed)`
 | Former code | Now | Commit |
 |---|---|---|
 | `unsupported-glob`, `unsupported-regex` | Gone. `*`, `?`, regex characters and `/…/` are literal text (`plain`), any term length (no `short-term` either: the index answers every literal) | `c475f982` |
-| `unsupported-slash` | Path terms answered exactly (§2.1). Left: a tail under 2 characters (`slash-tail-short`, §3.3; an empty one, `x/`, names `x$`) | `e797c8db` |
+| `unsupported-slash` | **Kept, by design**: a term holding `/` is refused up front (subtree, diff, series, filter-cover, name-summary and the box; `rejectQuery(q, pathTerms(env))`). Path terms answered exactly (§2.1, `e797c8db`) are parked behind `SEARCH_PATH_TERMS=1`; with it, left: a tail under 2 characters (`slash-tail-short`, §3.3; an empty one, `x/`, names `x$`) | `e797c8db`, parked after |
 | `unsupported-scope` | Owner pools answered (§2.2). Left: a person lens or a class scope (§3.4, §3.5); a heavy literal's rollup under a pool (`owner-too-common`, §3.4) | `b4e0cebd` |
 | `scan-not-indexed` (the publish window) | The r2 ingest lists a scan only after its appends land, as gcs does (§2.3). Left: a failed append; cw's waits (§3.6) | `c9243667` |
 | `anchor-too-short` | Unchanged: `^a`, `ab$` need §3.2 | — |
@@ -28,7 +28,9 @@ Syntax `plain` (`site/functions/_lib/querySyntax.ts`; `queryParam(…, indexed)`
 
 `term-too-common` and `too-broad` stay: they are budgets ("too common to answer exactly here; open a folder"), not missing forms.
 
-### 2.1 Path terms
+### 2.1 Path terms (parked: `SEARCH_PATH_TERMS=1`)
+
+Ryan's call (2026-10-15): the baseline search is a small subset that is always fast and exact, so path terms are off by default. The code stays and its tests run with the flag on. Off: `rejectQuery` / `rejectAst` refuse any term holding `/` (`unsupported-slash`, the client's box too: `/api/filter-caps` sends `pathTerms: true` only with the flag, and the help lists `a/b` only then), and `literalKey` / `boolPlan` / `staticLiteral` never key one, so a deployment that isn't indexed-only walks it as before `e797c8db` (or reads its search sidecars), flagged as any non-static query. Cache: `RESPONSE_V` 27 (a cached 26 held the static answer); with the flag on, a query holding a path term keys `<gen>.27.p`. Tests: `indexedOnly.test.ts` "path terms parked" (every route, alone or in a compound, every tail, over a store that throws on any read), `staticFilter.test.ts` (`^bk/fil`: `static+path` with the flag, the search sidecars without), `staticBool.test.ts` "parked", `queryHelp.test.ts`, `staticGen.test.ts` (the cache tags).
 
 A match root X of a path term holds it and its parent doesn't, so the occurrence ends in X's own name: the term's **tail** (its text after the last `/`) begins X's name (is it, with `$`). Every version of X is therefore a row of the name index's range `/tail…` (exact key `/tail` with `$`). `AnchoredSource` reads that range, whole when it holds ≤ `START_MAX_ROWS` (400K) rows (held per isolate and colo, cut to the view), else scoped to the groups meeting `[P/, P0)` under the same bound, and folds it by the path test (`PathTermHits`: the path holds the term, the parent doesn't). That is every match root, exact on every scan the anchored tiers cover. Keys are `//` + the anchors (`0`/`1`) + the text (`termKey`), so `staticBool.ts` combines path terms with any other term; `termInPath` and the path predicate (`pathQuery.ts`) match them plain, without the hex-run rule (a name index's rule; `/` spans names).
 
@@ -95,7 +97,8 @@ Static hits carry no class split. Add `c2, c3, c4` (bytes in Nearline / Coldline
 
 | Code | When | Closed by |
 |---|---|---|
-| `slash-tail-short` | a path term whose tail is under 2 characters, or empty (`x/`: the message names `x$`, the folder, same bytes; unflagged, `x/` walks, flagged `approximate`) | §3.3 (the kind bit for `x/`) |
+| `unsupported-slash` | any term holding `/`, with `SEARCH_PATH_TERMS` off (the default) | by design; the flag turns path terms on (§2.1) |
+| `slash-tail-short` | with `SEARCH_PATH_TERMS=1`: a path term whose tail is under 2 characters, or empty (`x/`: the message names `x$`, the folder, same bytes; unflagged, `x/` walks, flagged `approximate`) | §3.3 (the kind bit for `x/`) |
 | `anchor-too-short` | `^a`, `a$`, `ab$` | §3.2 |
 | `anchor-not-indexed` | `^q`, heavy `q$`, `^q$`, `a/b` on a generation built without anchors (r2 / m3 until rebuilt) | §3.1 (done; rebuild) |
 | `owner-too-common` | a heavy literal under a heavy folder, with an owner pool | §3.4 |

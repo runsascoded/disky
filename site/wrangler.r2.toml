@@ -50,7 +50,7 @@ STORE_SCHEME = "r2://"
 BASE_SCOPE = "r2"
 PUBLIC_READ = "1"                # anonymous viewer scope; reads open (_lib/auth.ts)
 SNAPSHOTS_SUBDIR = "r2"          # this store's snapshots: snapshots/r2/ (_lib/shared.ts)
-SEARCH_SIDECARS = "1"            # the daily ingest builds them (`path-index -S`): filters the static index lacks read them (_lib/search.ts)
+FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
 # The static name index (exact `?f=` literals; `_lib/staticFilter.ts`), in INDEX_R2 under `static-names/<STATIC_GEN>/`:
 # the daily ingest appends each scan to it (`dt-cloud static-names add`), and builds the generation when it doesn't exist
 # yet (`static-names build`), reading STATIC_GEN from here. A generation built since `static-names build` builds anchors

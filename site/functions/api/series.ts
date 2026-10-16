@@ -20,7 +20,7 @@ import { ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, st
 import { classKey, ownerKey, ownerOk, type OwnerScope, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
 import { type BoolAnswer, boolPlan, compound } from '../_lib/staticBool.js'
-import { indexedOnly, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
+import { indexedOnly, pathTerms, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
 import { poolLensFor, readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
 import type { FoldedLens } from '../_lib/owners.js'
 import { type Hit, scanAt } from '../_lib/staticNames.js'
@@ -195,14 +195,14 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
     qp = queryParam(url.searchParams, env.QUERY_SYNTAX, indexedOnly(env))
   } catch (e) {
     // Indexed-only: a form it refuses is refused as such (`a b` is "one term", not "too short").
-    const r = e instanceof QueryError && indexedOnly(env) ? rejectQuery(url.searchParams.get('q')) : null
+    const r = e instanceof QueryError && indexedOnly(env) ? rejectQuery(url.searchParams.get('q'), pathTerms(env)) : null
     if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof QueryError) return json({ error: `bad query: ${e.message}` }, 400)
     throw e
   }
   // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`).
   const strict = !!qp.query && indexedOnly(env)
-  const refused = strict ? rejectQuery(url.searchParams.get('q')) ?? rejectScope(!!(lens || classes)) : null
+  const refused = strict ? rejectQuery(url.searchParams.get('q'), pathTerms(env)) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
   // The static index's hex-run rule: substrings match where they `occur` under it, static or not (`hexRuns.ts`).
   const hx = await hexQuery(env, qp.query)
@@ -212,9 +212,9 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // A compound query (`a b`, `a|b`, `a -b`, `-b`; `staticBool.ts`): Σ each scan's match roots less its excluded
   // paths from the static answer — or, where the view root is the one match root (exclusions alone, an AND-group
   // its path holds), the root's own point less what it excludes.
-  const bplan = qp.query && !lens && !classes ? boolPlan(qp.query.ast) : null
+  const bplan = qp.query && !lens && !classes ? boolPlan(qp.query.ast, pathTerms(env)) : null
   const sfs = (query || compound(bplan)) && !lens && !classes ? staticFilterStore(env) : null
-  const skey = sfs && query ? staticLiteral(query.ast) : null
+  const skey = sfs && query ? staticLiteral(query.ast, pathTerms(env)) : null
   /** The query the response is keyed and answered by: a compound one the view root matches still subtracts its exclusions. */
   const keyed = query ?? (sfs && compound(bplan) && bplan.neg.length ? qp.query! : undefined)
   // `split=roots` (specs/done/root-geneses.md §1): the unscoped store root only —
