@@ -48,6 +48,7 @@ browser ──▶ disk.rbw.sh  /v1/laptop-files/<path>   (Pages Function, viewer
 - **The route** is `HttpStore`'s `get` (`/v1/laptop-files/get?path=<whole path>[&inline=1]`), so the leaf viewers need nothing new. Hide scopes ride only on grants and every grant is refused, so no hidden-prefix check is needed. The audit uses `access_log`'s existing columns (`event = 'file'`, `reason = "bytes=… range=…"`): no migration. The rate limit counts those rows (one D1 read per request).
 - **The hostname** is first-level (`disk-files.rbw.sh`): Universal SSL covers `*.rbw.sh`, not `*.disk.rbw.sh`.
 - **Whole-file GETs** go upstream as `Range: bytes=0-<cap−1>`: through the tunnel Cloudflare drops `content-length` on whole responses, so the size comes from the 206's `content-range` (a 206 whose total ≤ cap becomes the 200).
+- **A ranged ask answered whole is asked again:** Cloudflare's cache drops `Range` on a URL's first miss for a cacheable extension (`.pdf`, `.mp4`) and answers whole (BYPASS from then on), so the edge cancels that 200 and retries once; a second whole answer is a 502, never the wrong bytes. (A Cache Rule bypassing `disk-files.rbw.sh` would remove the retry; the token lacks zone Cache Rules: Edit.) Prod live 2026-10-16 (79bea7ff + 7dae41b8).
 - **The upstream `fetch`** is called unbound: the Workers runtime throws "Illegal invocation" for `deps.fetch(…)`.
 - **Responses** carry `content-security-policy: sandbox` and `content-disposition` (attachment unless `inline=1`): bytes from a disk are never a page on the site's origin.
 
