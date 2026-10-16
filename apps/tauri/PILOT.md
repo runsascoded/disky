@@ -11,7 +11,16 @@ This is an **Apple Silicon prerelease**, configured for macOS 13 or later. The f
 3. In disky's Settings, choose the whole Mac or your home folder and click **Save**. Grant **Full Disk Access** to disky in System Settings to include protected folders. You may need to quit and reopen disky after granting it.
 4. Click **Scan now**. The menu shows progress; open disky to browse the local result. Scheduling and Open at login are opt-in settings.
 
-The local view is the default. Selecting disk.rbw.sh only changes the viewer; uploading requires a separately configured destination. This pilot does not automatically upload your files or scan metadata.
+The local view is the default. Selecting disk.rbw.sh only changes the viewer: nothing is uploaded unless you click **Connect** (below). Your files themselves are never uploaded, only their paths, sizes and dates.
+
+## Connect this Mac to disk.rbw.sh (optional)
+
+Connecting uploads each scan's listing to the site, which builds the index. Nothing is indexed or kept on this Mac (useful when the disk is nearly full).
+
+1. Under Site, choose **disk.rbw.sh** and click **Save**. Sign in as an admin in the disky window (or use "Open in disky" from a signed-in browser).
+2. Under **Upload to the site**, keep or edit the suggested name (it becomes `disk.rbw.sh/<name>`) and click **Connect**. The device token is kept in your Keychain.
+3. Click **Scan now**. A few minutes after the scan, the section shows "last ingest succeeded", and **Open** shows this Mac on the site.
+4. **Disconnect** revokes the token. The site keeps the history.
 
 ## M1 test checklist
 

@@ -864,7 +864,7 @@ dependencies = [
 
 [[package]]
 name = "disk-tree-app"
-version = "0.2.0-alpha.3"
+version = "0.2.0-alpha.4"
 dependencies = [
  "block2",
  "dt-capture",
