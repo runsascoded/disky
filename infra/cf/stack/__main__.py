@@ -10,6 +10,8 @@ points here with `main: stack/` (`Pulumi.yaml.example`).
   a separate dev site, as opposed to a preview-branch alias of the production one.
 - Optionally the capture trigger (`capturesBucket` / `capturesQueue`): a finished
   laptop capture in R2 → a queue → the `capture-trigger` Worker → the ingest.
+- Optionally a file tunnel (`fileTunnel`): the machine's `dt-serve /files` behind a
+  Cloudflare Tunnel + service-token-only Access app, for the site's file previews.
 
 `pulumi preview` is read-only; `up` is a human's call.
 """
@@ -23,6 +25,7 @@ import pulumi_cloudflare as cloudflare
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from capture_trigger import CaptureTrigger  # noqa: E402
 from cfn_dashboard import AccessApp, BranchAlias, CfnDashboard, Store  # noqa: E402
+from cloudflare_tunnel import CloudflareTunnel  # noqa: E402
 
 cfg = pulumi.Config()
 account_id = cfg.require("accountId")
@@ -120,3 +123,19 @@ if captures_bucket:
         moved_from_root=cfg.get_bool("capturesMovedFromRoot") or False,
     )
     pulumi.export("captures_queue", trigger.queue.queue_name)
+
+# specs/laptop-file-tunnel.md: `{name, hostname, service}` (service: dt-serve's loopback address).
+file_tunnel = cfg.get_object("fileTunnel")
+if file_tunnel:
+    tunnel = CloudflareTunnel(
+        file_tunnel["name"],
+        account_id=account_id,
+        zone_id=zone_id,
+        hostname=file_tunnel["hostname"],
+        service=file_tunnel.get("service") or "http://127.0.0.1:7792",
+    )
+    pulumi.export("file_tunnel_url", f"https://{file_tunnel['hostname']}")     # → LAPTOP_TUNNEL_URL
+    pulumi.export("file_tunnel_aud", tunnel.app.aud)                            # → dt-serve --access-aud
+    pulumi.export("file_tunnel_client_id", tunnel.service_token.client_id)      # → LAPTOP_TUNNEL_CLIENT_ID, --access-client-id
+    pulumi.export("file_tunnel_client_secret", pulumi.Output.secret(tunnel.service_token.client_secret))   # → LAPTOP_TUNNEL_CLIENT_SECRET
+    pulumi.export("file_tunnel_token", tunnel.tunnel_token)                     # → cloudflared tunnel run --token

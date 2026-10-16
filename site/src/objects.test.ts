@@ -120,6 +120,16 @@ describe('objectSource', () => {
       { kind: 'none', bucket: 'Users', key: 'ryan/notes.md' },
     ])
   })
+  it('laptop: an admin whose deployment has a file tunnel (`fileTunnel`) reads the whole path through `/v1/laptop-files`; without it, size and dates', () => {
+    const proxy = { uri: 'r2://disk-tree', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
+    expect([
+      objectSource(laptop, ['Users', 'ryan', 'Downloads', 'a b.pdf'], { ...proxy, fileTunnel: true }),
+      objectSource(laptop, ['Users', 'ryan', 'Downloads', 'a b.pdf'], proxy),
+    ]).toEqual([
+      { kind: 'tunnel', key: 'Users/ryan/Downloads/a b.pdf', api: '/v1/laptop-files' },
+      { kind: 'none', bucket: 'Users', key: 'ryan/Downloads/a b.pdf' },
+    ])
+  })
   it('gcs: a scanned bucket the deployment serves to members reads through `/v1/objects/<bucket>`; others, and a guest (no `objectBuckets`), get size and dates', () => {
     const proxy = { uri: 'gs://my-data', prefixes: ['listing/', 'snapshots/', 'sweep/'] }
     const member = { ...proxy, objectBuckets: ['bucket-1', 'bucket-2'] }
