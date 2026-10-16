@@ -227,6 +227,49 @@ def test_alert_payloads_warn_fail_and_finish(job, slack):
     assert [ln for ln in job.take() if ln.startswith("alert")] == ["alert: slack: sent"] * 3
 
 
+CMD = ('( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" '
+       '-g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" -s "r2://$bucket" -o "r2://$bucket" '
+       '-w "$work/static-names" -p "$(nproc)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )')
+
+
+V2_OOM = {"memory.events": "low 0\nhigh 0\nmax 12\noom 1\noom_kill 1\n", "memory.max": f"{16 * 2**30}\n",
+          "memory.peak": f"{int(15.98 * 2**30)}\n"}
+V1_NO_COUNT = {"memory.oom_control": "oom_kill_disable 0\nunder_oom 0\n", "memory.limit_in_bytes": "9223372036854771712\n"}
+
+
+@pytest.mark.parametrize("files, error, recorded, alert", [
+    pytest.param(
+        V2_OOM, f"exit 137: {CMD} (ingest.sh:172)",
+        f"out of memory (OOM-killed), peak 16.0 GiB of 16.0 GiB: exit 137: {CMD} (ingest.sh:172)",
+        # 240 characters: the head, `…`, the location
+        'out of memory (OOM-killed), peak 16.0 GiB of 16.0 GiB: exit 137: ( cd "$app/cloud" && "$time_bin" -v -o '
+        '"$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L '
+        '"listing/$store/{id}/index/{g… (ingest.sh:172)',
+        id="cgroup-v2-oom-kill-long-command",
+    ),
+    pytest.param(V1_NO_COUNT, "killed (SIGKILL)", "killed (SIGKILL), most likely out of memory", None,
+                 id="supervise-kill-cgroup-v1-unlimited"),
+    pytest.param({}, "exit 137: false (run.sh:3)", "killed (SIGKILL), most likely out of memory: exit 137: false (run.sh:3)",
+                 None, id="no-cgroup"),
+    pytest.param(V2_OOM, "exit 2: false (run.sh:3)", "exit 2: false (run.sh:3)", None, id="not-137-untouched"),
+])
+def test_exit_137_says_out_of_memory(job, slack, tmp_path, files, error, recorded, alert):
+    """A SIGKILL nobody here sent (exit 137) is the OOM killer's: `finish` says so, with the cgroup's limit and peak,
+    and the alert clips a long ERR-trap command (the record keeps it whole)."""
+    cg = tmp_path / "cgroup"
+    cg.mkdir()
+    for name, text in files.items():
+        (cg / name).write_text(text)
+    job.mp.setenv("DT_CGROUP", str(cg))
+    rc = int(error.split(":")[0].split()[1]) if error.startswith("exit") else 137
+    assert job("start", SCAN, at=T0) == 0
+    assert job("finish", "-x", str(rc), "-e", error, at=T0 + 1) == 0
+    assert job.rows("SELECT error FROM scan_runs") == [(recorded,)]
+    assert slack.texts() == [f"*❌ cw-s3 {SCAN}*\nrun failed (exit {rc}): {alert or recorded}"]
+    if alert:
+        assert len(alert) == 240
+
+
 def test_logs_url_missing_a_fact_posts_no_link(job, slack):
     assert job("start", SCAN, at=T0) == 0  # no `-j`: `{job}` is unknown
     assert job("finish", "-x", "1", at=T0 + 1) == 0

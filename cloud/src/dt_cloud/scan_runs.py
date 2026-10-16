@@ -993,6 +993,63 @@ RECORD_ENV = "DT_RECORD"
 SUPERVISE_ENV = "DT_SUPERVISE"
 #: Set by `supervise`: the most a `phase -T` group gets after a received TERM/INT before KILL (inside the supervisor's).
 TERM_GRACE_ENV = "DT_TERM_GRACE"
+#: The container's cgroup (default `/sys/fs/cgroup`), where `finish` reads the memory limit, peak and OOM kills.
+CGROUP_ENV = "DT_CGROUP"
+#: An alert's ERR-trap text past this many characters keeps its head and its `(file:line)`.
+ALERT_ERROR_CHARS = 240
+
+
+def read_int(path: Path) -> int | None:
+    """A cgroup counter file's integer (`max`, unreadable or absent: None)."""
+    try:
+        v = path.read_text().strip()
+    except OSError:
+        return None
+    return int(v) if v.isdigit() else None
+
+
+def read_keyed(path: Path, key: str) -> int | None:
+    """One `key value` line's integer from a cgroup stats file (`memory.events`, `memory.oom_control`)."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    for ln in lines:
+        k, _, v = ln.partition(" ")
+        if k == key and v.strip().isdigit():
+            return int(v)
+    return None
+
+
+def gib(n: int) -> str:
+    return f"{n / 2**30:.1f} GiB"
+
+
+def oom_note(cgroup: Path) -> str:
+    """Why a command died of a SIGKILL nobody here sent (exit 137): the kernel's OOM killer, when the container's
+    cgroup counted a kill (v2 `memory.events`, v1 `memory.oom_control`), else most likely it; with the memory limit
+    and peak where the cgroup keeps them (v2 `memory.max`/`memory.peak`, v1 `memory.limit_in_bytes`/
+    `memory.max_usage_in_bytes`)."""
+    kills = read_keyed(cgroup / "memory.events", "oom_kill")
+    if kills is None:
+        kills = read_keyed(cgroup / "memory.oom_control", "oom_kill")
+    limit = read_int(cgroup / "memory.max") or read_int(cgroup / "memory.limit_in_bytes")
+    peak = read_int(cgroup / "memory.peak") or read_int(cgroup / "memory.max_usage_in_bytes")
+    if limit is not None and limit >= 2**60:  # v1's "unlimited"
+        limit = None
+    mem = (f"peak {gib(peak)} of {gib(limit)}" if peak and limit else
+           f"peak {gib(peak)}" if peak else f"limit {gib(limit)}" if limit else None)
+    what = "out of memory (OOM-killed)" if kills else "killed (SIGKILL), most likely out of memory"
+    return f"{what}{f', {mem}' if mem else ''}"
+
+
+def clip_error(error: str, n: int = ALERT_ERROR_CHARS) -> str:
+    """ERROR shortened for an alert past N characters: its head, `…`, and its trailing `(file:line)` if it has one."""
+    if len(error) <= n:
+        return error
+    m = re.search(r" \([^()]+:\d+\)$", error)
+    tail = m.group(0) if m else ""
+    return f"{error[:n - len(tail) - 1].rstrip()}…{tail}"
 
 
 def phase_line(name: str, secs: int, note: str | None = None, start: bool = False) -> str:
@@ -1165,6 +1222,10 @@ class JobRun:
         """Record the run finished with `rc` (`error` its one-line reason), and on a failure post the `fail` alert
         unless one was already posted (a phase's, or an earlier `finish`'s)."""
         error = self.redact(error) if error else None
+        # A SIGKILL from outside (a child's exit 137 in the ERR trap's text, or `supervise`'s CMD killed): the OOM killer's.
+        if rc == 137 and (error is None or error == "killed (SIGKILL)" or error.startswith("exit 137")):
+            note = oom_note(Path(self.env.get(CGROUP_ENV) or "/sys/fs/cgroup"))
+            error = f"{note}: {error}" if error and error.startswith("exit") else note
         st = self.state()
         # A failing `phase-end` names its phase; a plain command failing inside a begun phase (`set -e`, the ERR trap)
         # doesn't, so the one phase still running is the failure's. Several running (background phases): none named.
@@ -1173,7 +1234,7 @@ class JobRun:
         self.write(exit_code=rc, error=error, failed_phase=failed_phase)
         if rc and not self.alerted():
             self.mark_alerted()
-            self.alert("fail", f"run failed (exit {rc}){f' in {failed_phase}' if failed_phase else ''}{f': {error}' if error else ''}")
+            self.alert("fail", f"run failed (exit {rc}){f' in {failed_phase}' if failed_phase else ''}{f': {clip_error(error)}' if error else ''}")
 
     # under `supervise`
 
