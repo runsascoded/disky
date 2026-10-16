@@ -132,6 +132,9 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
         ...(upstreamRange ? { range: upstreamRange } : {}),
       },
       redirect: 'manual',
+      // Past Cloudflare's cache: on a miss for a cacheable extension (`.pdf`, `.mp4`) it drops
+      // `Range` and fetches the whole object, so a file's first range read came back a 200.
+      cache: 'no-store',
     })
   } catch (e) {
     return out(offline('unreachable'), { reason: `fetch: ${(e as Error).message}` })
