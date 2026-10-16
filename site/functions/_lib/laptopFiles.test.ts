@@ -97,7 +97,7 @@ describe('/v1/laptop-files/get — who', () => {
       sent: [{
         url: `${TUNNEL}/files/Users/ryan/Downloads/a%20b%2Bc.pdf`,
         method: 'GET',
-        headers: { 'CF-Access-Client-Id': 'cid.access', 'CF-Access-Client-Secret': 'csecret' },
+        headers: { 'CF-Access-Client-Id': 'cid.access', 'CF-Access-Client-Secret': 'csecret', range: `bytes=0-${DEFAULT_MAX_BYTES - 1}` },
       }],
     })
     expect(r.audits).toEqual([{ status: 200, bytes: 14, range: undefined }])
@@ -173,6 +173,27 @@ describe('/v1/laptop-files/get — how much', () => {
       'content-type': 'video/mp4',
       'x-content-type-options': 'nosniff',
     })
+  })
+  it('a whole-file GET asks upstream for the first `cap` bytes: through the tunnel Cloudflare drops `content-length` on whole responses, so the size comes from `content-range`', async () => {
+    const env = { ...ENV, LAPTOP_FILES_MAX_BYTES: '8' }
+    // dt-serve behind Cloudflare: a 206 for a range, a length-less 200 otherwise.
+    const respond = (body: string) => (s: Sent) => {
+      const m = s.headers.range?.match(/^bytes=0-(\d+)$/)
+      if (!m) return new Response(body, { headers: { 'content-type': 'application/pdf' } })
+      if (!body.length) return new Response('', { status: 416, headers: { 'content-range': 'bytes */0' } })
+      const end = Math.min(Number(m[1]), body.length - 1)
+      return new Response(body.slice(0, end + 1), { status: 206, headers: { 'content-type': 'application/pdf', 'content-length': String(end + 1), 'content-range': `bytes 0-${end}/${body.length}` } })
+    }
+    const small = await call('Users/a.pdf', { env, respond: respond('%PDF') })
+    const exact = await call('Users/a.pdf', { env, respond: respond('12345678') })
+    const empty = await call('Users/a.pdf', { env, respond: respond('') })
+    const big = await call('Users/a.pdf', { env, respond: respond('123456789') })
+    expect([small, exact, empty, big].map(r => [r.status, r.body, r.headers['content-length'], r.headers['content-range'], r.sent[0].headers.range, r.audits])).toEqual([
+      [200, '%PDF', '4', undefined, 'bytes=0-7', [{ status: 200, bytes: 4, range: undefined }]],
+      [200, '12345678', '8', undefined, 'bytes=0-7', [{ status: 200, bytes: 8, range: undefined }]],
+      [200, '', '0', undefined, 'bytes=0-7', [{ status: 200, bytes: 0, range: undefined }]],
+      [413, { error: 'too large to open whole; media can still stream', bytes: 9, cap: 8 }, undefined, undefined, 'bytes=0-7', [{ status: 413, bytes: 0, reason: 'cap' }]],
+    ])
   })
   it('the per-session rate limit: at LAPTOP_FILES_PER_MIN recent reads, a 429 without touching the laptop', async () => {
     const r = await call('Users/a.pdf', { env: { ...ENV, LAPTOP_FILES_PER_MIN: '5' }, recent: 5 })
