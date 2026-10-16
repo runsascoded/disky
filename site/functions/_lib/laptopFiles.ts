@@ -115,9 +115,11 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
 
   const range = request.headers.get('range')
   const upstream = `${env.LAPTOP_TUNNEL_URL!.replace(/\/+$/, '')}/files/${segs.map(encodeURIComponent).join('/')}`
+  // Unbound: the Workers runtime's `fetch` throws "Illegal invocation" when `this` is `deps`.
+  const { fetch: upstreamFetch } = deps
   let res: Response
   try {
-    res = await deps.fetch(upstream, {
+    res = await upstreamFetch(upstream, {
       method: request.method,
       headers: {
         'CF-Access-Client-Id': env.LAPTOP_TUNNEL_CLIENT_ID!,

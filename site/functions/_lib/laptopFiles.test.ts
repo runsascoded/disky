@@ -184,6 +184,21 @@ describe('/v1/laptop-files/get — how much', () => {
   })
 })
 
+describe('/v1/laptop-files/get — the upstream fetch', () => {
+  it('is called unbound: the Workers runtime’s `fetch` throws "Illegal invocation" when `this` is the deps object', async () => {
+    const req = new Request(`${ORIGIN}/v1/laptop-files/get?path=Users/a.pdf`)
+    const res = await serveLaptopFile(req, ENV, ADMIN, {
+      fetch: function (this: unknown) {
+        if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation')
+        return Promise.resolve(file('%PDF'))
+      } as unknown as typeof fetch,
+      audit: null,
+      recent: async () => 0,
+    })
+    expect([res.status, await res.text()]).toEqual([200, '%PDF'])
+  })
+})
+
 describe('/v1/laptop-files/get — offline', () => {
   it('unreachable, the tunnel without a connector (530), Cloudflare 502, and dt-serve with files off all read as offline', async () => {
     const rs = await Promise.all([
