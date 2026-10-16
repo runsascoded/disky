@@ -20,7 +20,7 @@ import { FaGithub } from 'react-icons/fa'
 import { MdMenu } from 'react-icons/md'
 import { Link, useLocation } from 'react-router-dom'
 import { AboutModal } from './About'
-import { offerAppLink, openInApp } from './appLink'
+import { VIEW_URL, offerAppLink, openInApp } from './appLink'
 import { Avatar } from './Avatar'
 import { AUTH_MODE, signInUrl, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut } from './auth'
 import { ShareDialog } from './ShareDialog'
@@ -340,6 +340,11 @@ function UserMenu() {
               {showAppLink && (
                 <Explain text="Sign the disky macOS app in as you, with a single-use link (expires in a minute)">
                   <button type="button" role="menuitem" className="mi" onClick={openApp}>Open in disky</button>
+                </Explain>
+              )}
+              {showAppLink && (
+                <Explain text="Show this page in the disky app's window — when the app is already signed in (no new sign-in link)">
+                  <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); window.location.href = VIEW_URL(window.location.href) }}>Open this page in disky</button>
                 </Explain>
               )}
               <button type="button" role="menuitem" className="mi" onClick={signOut}>Log Out</button>

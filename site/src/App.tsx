@@ -29,6 +29,7 @@ import { useHashSpy } from './hashSpy'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
+import { LaptopIndicator } from './laptop'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
 import type { DayBand } from './dayBand'
@@ -1214,6 +1215,7 @@ function AppContent() {
             <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</span>
           </Tooltip>
         )}
+        <LaptopIndicator />
         {bar.color.length > 1 && (
           <label className="tb-ctl">
             <span className="lbl">color</span>
