@@ -52,6 +52,7 @@
  *           "sources": {"primary": {"label": "Buckets", "icon": "/icons/buckets.svg"}, "meta": {"icon": "https://example.com/meta.png"}}}
  */
 import type { Env } from './auth.js'
+import { cachedHosts, hostStoreConfig } from './hosts.js'
 import { withReq } from './shared.js'
 
 /** `index_schema.store` of the primary store's rows (a fixed sentinel: one
@@ -124,9 +125,14 @@ const ICON_RE = /^(https?:\/\/[^\s]+|\/[^\s/][^\s]*)$/
 
 let parsed: { raw: string; stores: Record<string, StoreConfig>; views: Record<string, UnionView> } | null = null
 
-/** The secondary stores (`STORES_JSON`), validated; `{}` when unset. */
+/** The secondary stores: `STORES_JSON`'s, validated, plus each non-primary capture host's from D1 `hosts`
+ * (`_lib/hosts.ts`, as the middleware last loaded them) under its store key; a `STORES_JSON` entry wins.
+ * `{}` when neither has any. */
 export function secondaryStores(env: Env): Record<string, StoreConfig> {
-  return parseStores(env).stores
+  const { stores, views } = parseStores(env)
+  const hosts = cachedHosts(env).filter(h => h.store !== PRIMARY_STORE && !stores[h.store] && !views[h.store] && KEY_RE.test(h.store))
+  if (!hosts.length) return stores
+  return { ...stores, ...Object.fromEntries(hosts.map(h => [h.store, hostStoreConfig(env, h)])) }
 }
 
 /** The union views (`STORES_JSON` entries with `union`), validated; `{}` when unset. */

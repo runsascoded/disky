@@ -112,6 +112,18 @@ CREATE TABLE grants (
   last_used_at  INTEGER
 , disabled_at INTEGER, expiry_ends_sessions INTEGER NOT NULL DEFAULT 1, sessions_invalid_before INTEGER);
 
+CREATE TABLE hosts (
+  id TEXT PRIMARY KEY,
+  store TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL,
+  home TEXT,
+  root TEXT,
+  mark TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  created_by TEXT,
+  revoked_at TEXT
+);
+
 CREATE TABLE index_row_groups (
   date      TEXT NOT NULL,
   variant   TEXT NOT NULL,

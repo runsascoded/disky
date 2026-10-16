@@ -171,8 +171,58 @@ export function withPageConfig(s: Store, c: PageConfig | undefined): Store {
   }
 }
 
+/** A capture host as the edge stamps it into a member's page (`window.__DISKY_HOSTS__`, D1 `hosts`;
+ *  `functions/_lib/hosts.ts` `HostInfo`). */
+export interface HostInfo { id: string; store: string; label: string; home?: string; root?: string; mark?: string; revoked?: true }
+
+const segs = (p: string | undefined): string[] | undefined => p ? p.split('/').filter(Boolean) : undefined
+
+/** A capture host's store (specs/hosts-registry.md): a file store on the deployment's bucket under its own
+ *  `snapshots/<store>/`, mounted at `/<store>`, deletions on its own drainer, no ownership ledger. */
+export function hostStore(h: HostInfo): Store {
+  const root = segs(h.root)
+  return {
+    key: h.store,
+    label: h.label,
+    title: `disk-tree — ${h.label}`,
+    desc: `Disk usage of ${h.label}, captured by the disky app.`,
+    path: `/${h.store}`,
+    ...(h.mark ? { mark: h.mark } : {}),
+    scheme: 'file:///',
+    ...(segs(h.home) ? { home: segs(h.home) } : {}),
+    ...(root ? { root } : {}),
+    base: `/data/${h.store}`,
+    ogImage: '/og.jpg',
+    prices: false,
+    staging: false,
+    owners: false,
+    executor: 'laptop',
+    buckets: [],
+    rootLabel: 'all roots',
+    objectsNote: 'Local files; created is each file’s mtime at capture time.',
+    wall: { restrict: `${h.label}’s disk usage is private to its owner.`, signIn: 'Sign in' },
+  }
+}
+
+/** The build's stores plus a store per stamped host whose key no store (or path) already has. A malformed
+ *  stamp is ignored: the build's stores still serve. */
+export function withHosts(stores: Store[], hosts: unknown): Store[] {
+  if (!Array.isArray(hosts)) return stores
+  const out = [...stores]
+  for (const h of hosts as HostInfo[]) {
+    if (!h || typeof h.store !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(h.store) || typeof h.label !== 'string') continue
+    const s = hostStore(h)
+    if (out.some(o => o.key === s.key || o.path === s.path)) continue
+    out.push(s)
+  }
+  return out
+}
+
 export const STORES: Store[] = (([first, ...rest]) => [withPageConfig(first, (globalThis as { __DISKY__?: PageConfig }).__DISKY__), ...rest])(
-  resolveStores(import.meta.env.VITE_STORE, import.meta.env.VITE_STORES_EXTRA),
+  withHosts(
+    resolveStores(import.meta.env.VITE_STORE, import.meta.env.VITE_STORES_EXTRA),
+    (globalThis as { __DISKY_HOSTS__?: unknown }).__DISKY_HOSTS__,
+  ),
 )
 
 /** The primary store: `/`, and every request as it was before stores existed. */

@@ -52,6 +52,19 @@ elif name == 'aws':
     else:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst)
+elif name == 'dt-cloud' and args[:2] == ['hosts', 'resolve']:
+    # D1 `hosts` as `FAKE_HOSTS` (JSON host → store); unset = a D1 without the table
+    if 'FAKE_HOSTS' not in os.environ:
+        print('hosts: this D1 has no `hosts` table', file=sys.stderr)
+        sys.exit(4)
+    hosts = json.loads(os.environ['FAKE_HOSTS'])
+    if hosts.get(args[2]) == 'revoked':
+        print(f"hosts: host '{args[2]}' was disconnected at 2026-10-16T01:00:00Z", file=sys.stderr)
+        sys.exit(3)
+    if args[2] not in hosts:
+        print(f"hosts: no host '{args[2]}'", file=sys.stderr)
+        sys.exit(3 if hosts else 1)
+    print(hosts[args[2]])
 elif name == 'dt-cloud':
     if args[0] == os.environ.get('FAKE_FAIL'):
         sys.exit(3)
@@ -193,17 +206,58 @@ def test_invalid_capture_stamps_fail_before_any_cloud_operation(pipeline) -> Non
     assert trace.exists() is False
 
 
+def lookups_only(trace: Path) -> list[list[str]]:
+    """The run's calls, asserting each was the `hosts resolve` lookup (nothing touched the cloud)."""
+    calls = [c for c in map(json.loads, trace.read_text().splitlines())]
+    assert all(c[:3] == ['dt-cloud', 'hosts', 'resolve'] for c in calls), calls
+    return [c[1:] for c in calls]
+
+
 def test_an_unknown_host_is_refused_before_any_cloud_operation(pipeline) -> None:
     """specs/device-enrollment.md phase 1: a new Mac's capture must never publish into the primary store."""
     run, bucket, trace = pipeline
     result = run('2026-10-11T10-00-01Z', 'm1')
     unnamed = run('2026-10-11T10-00-01Z', 'm3', PRIMARY_HOST='')
     assert [(r.returncode, r.stdout, r.stderr) for r in (result, unnamed)] == [
-        (3, '', "[ingest] unknown capture host 'm1': neither PRIMARY_HOST (m3) nor in HOST_STORES (nas=nas); publishing nothing\n"),
-        (3, '', "[ingest] unknown capture host 'm3': neither PRIMARY_HOST (unset) nor in HOST_STORES (nas=nas); publishing nothing\n"),
+        (3, '', "[ingest] unknown capture host 'm1': no D1 hosts table, neither PRIMARY_HOST (m3) nor in HOST_STORES (nas=nas); publishing nothing\n"),
+        (3, '', "[ingest] unknown capture host 'm3': no D1 hosts table, neither PRIMARY_HOST (unset) nor in HOST_STORES (nas=nas); publishing nothing\n"),
     ]
-    assert trace.exists() is False
+    assert lookups_only(trace) == [['hosts', 'resolve', 'm1'], ['hosts', 'resolve', 'm3']]
     assert sorted(str(p.relative_to(bucket)) for p in bucket.rglob('*') if p.is_file() and not str(p.relative_to(bucket)).startswith('captures/')) == []
+
+
+HOSTS = json.dumps({'m3': 'primary', 'nas': 'nas', 'm1': 'm1', 'old': 'revoked'})
+
+
+def test_d1_hosts_route_each_capture_and_override_the_env(pipeline) -> None:
+    """specs/hosts-registry.md: D1 `hosts` names each host's store; the env's `PRIMARY_HOST` / `HOST_STORES` are
+    only the fallback for a D1 without the table, so an enrolled Mac publishes with no job change."""
+    run, bucket, trace = pipeline
+    results = [run('2026-10-11T10-00-01Z', h, FAKE_HOSTS=HOSTS, PRIMARY_HOST='', HOST_STORES='') for h in ('m3', 'nas', 'm1')]
+    assert [r.returncode for r in results] == [0, 0, 0]
+    assert [r.stdout.splitlines()[0].split(' date=')[1].split(' vcpu=')[0] for r in results] == [
+        '2026-10-11T1000 gen=202610111000 host=m3 store=laptop d1=primary',
+        '2026-10-11T1000 gen=202610111000 host=nas store=nas d1=nas',
+        '2026-10-11T1000 gen=202610111000 host=m1 store=m1 d1=m1',
+    ]
+    assert sorted({str(p.relative_to(bucket)).split('/2026')[0] for p in bucket.rglob('meta.json')}) == [
+        'snapshots/laptop', 'snapshots/m1', 'snapshots/nas',
+    ]
+
+
+def test_an_unregistered_or_disconnected_host_is_refused_and_a_failed_lookup_fails(pipeline) -> None:
+    run, bucket, trace = pipeline
+    results = [
+        run('2026-10-11T10-00-01Z', 'm2', FAKE_HOSTS=HOSTS),
+        run('2026-10-11T10-00-01Z', 'old', FAKE_HOSTS=HOSTS),
+        run('2026-10-11T10-00-01Z', 'm3', FAKE_HOSTS='{}'),
+    ]
+    assert [(r.returncode, r.stdout, r.stderr) for r in results] == [
+        (3, '', "[ingest] unknown capture host 'm2' (no host 'm2'); publishing nothing\n"),
+        (3, '', "[ingest] unknown capture host 'old' (host 'old' was disconnected at 2026-10-16T01:00:00Z); publishing nothing\n"),
+        (1, '', "[ingest] hosts lookup failed (exit 1): hosts: no host 'm3'\n"),
+    ]
+    assert lookups_only(trace) == [['hosts', 'resolve', 'm2'], ['hosts', 'resolve', 'old'], ['hosts', 'resolve', 'm3']]
 
 
 # ── scan-run recording (SCAN_RUNS_PROFILE; specs/scan-job-wrapper.md) ─────────
@@ -324,7 +378,7 @@ def test_without_a_profile_nothing_is_recorded(pipeline) -> None:
     assert result.returncode == 0, result.stderr
     calls = [c[:2] for c in map(json.loads, trace.read_text().splitlines())]
     assert sorted({tuple(c) for c in calls}) == [
-        ('aws', 's3'), ('disk-tree', 'capture-meta'), ('dt-cloud', 'index-sync'), ('dt-cloud', 'path-index'),
+        ('aws', 's3'), ('disk-tree', 'capture-meta'), ('dt-cloud', 'hosts'), ('dt-cloud', 'index-sync'), ('dt-cloud', 'path-index'),
         ('index-sync-meta', '2026-10-11T10:00:01.000Z'), ('nproc',), ('time', '-v'),
     ]
 
