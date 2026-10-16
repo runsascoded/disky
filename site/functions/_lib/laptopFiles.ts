@@ -114,6 +114,11 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
   if (await deps.recent() >= int(env.LAPTOP_FILES_PER_MIN, DEFAULT_PER_MIN)) return out(refuse(429, 'too many file requests; try again in a minute'), { reason: 'rate' })
 
   const range = request.headers.get('range')
+  const cap = int(env.LAPTOP_FILES_MAX_BYTES, DEFAULT_MAX_BYTES)
+  // A whole-file GET asks for its first `cap` bytes: through the tunnel Cloudflare sends whole
+  // responses without `content-length`, so the file's size has to come from a 206's `content-range`.
+  const whole = !range && request.method === 'GET'
+  const upstreamRange = whole ? `bytes=0-${cap - 1}` : range
   const upstream = `${env.LAPTOP_TUNNEL_URL!.replace(/\/+$/, '')}/files/${segs.map(encodeURIComponent).join('/')}`
   // Unbound: the Workers runtime's `fetch` throws "Illegal invocation" when `this` is `deps`.
   const { fetch: upstreamFetch } = deps
@@ -124,7 +129,7 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
       headers: {
         'CF-Access-Client-Id': env.LAPTOP_TUNNEL_CLIENT_ID!,
         'CF-Access-Client-Secret': env.LAPTOP_TUNNEL_CLIENT_SECRET!,
-        ...(range ? { range } : {}),
+        ...(upstreamRange ? { range: upstreamRange } : {}),
       },
       redirect: 'manual',
     })
@@ -144,25 +149,47 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
     await res.body?.cancel()
     return out(refuse(502, 'the file tunnel refused this site', { upstream: res.status }), { reason: `upstream ${res.status}` })
   }
-  const length = Number(res.headers.get('content-length') ?? NaN)
-  const cap = int(env.LAPTOP_FILES_MAX_BYTES, DEFAULT_MAX_BYTES)
-  if (!range && request.method === 'GET' && res.status === 200 && !(length <= cap)) {
+  const tooLarge = async (bytes: number | null) => {
     await res.body?.cancel()
-    return out(refuse(413, 'too large to open whole; media can still stream', { bytes: Number.isFinite(length) ? length : null, cap }), { bytes: 0, reason: 'cap' })
+    return out(refuse(413, 'too large to open whole; media can still stream', { bytes, cap }), { bytes: 0, reason: 'cap' })
+  }
+  let status = res.status
+  let length = Number(res.headers.get('content-length') ?? NaN)
+  let contentRange = res.headers.get('content-range')
+  if (whole) {
+    const total = Number(contentRange?.match(/\/(\d+)$/)?.[1] ?? NaN)
+    if (status === 206) {
+      // The first `cap` bytes were the whole file, or the file is too large.
+      if (!(total <= cap)) return tooLarge(Number.isFinite(total) ? total : null)
+      status = 200
+      length = total
+      contentRange = null
+    } else if (status === 416 && total === 0) {
+      await res.body?.cancel()
+      res = new Response('', { headers: res.headers })
+      status = 200
+      length = 0
+      contentRange = null
+    } else if (status === 200 && !(length <= cap)) {
+      return tooLarge(Number.isFinite(length) ? length : null)
+    }
   }
   const headers = new Headers(NO_STORE)
   for (const h of PASS) {
     const v = res.headers.get(h)
     if (v != null) headers.set(h, v)
   }
+  if (Number.isFinite(length)) headers.set('content-length', String(length))
+  if (contentRange) headers.set('content-range', contentRange)
+  else headers.delete('content-range')
   headers.set('x-content-type-options', 'nosniff')
   // Bytes from someone's disk are never a page on this origin.
   headers.set('content-security-policy', 'sandbox; default-src \'none\'; img-src \'self\' data:; media-src \'self\'; style-src \'unsafe-inline\'')
   const name = segs[segs.length - 1]
   headers.set('content-disposition', `${url.searchParams.get('inline') ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(name)}`)
-  return out(new Response(request.method === 'HEAD' ? null : res.body, { status: res.status, headers }), {
+  return out(new Response(request.method === 'HEAD' ? null : res.body, { status, headers }), {
     bytes: request.method === 'HEAD' || !Number.isFinite(length) ? 0 : length,
-    range: res.headers.get('content-range') ?? undefined,
+    range: contentRange ?? undefined,
   })
 }
 
