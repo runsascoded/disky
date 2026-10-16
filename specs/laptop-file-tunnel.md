@@ -39,7 +39,7 @@ browser ──▶ disk.rbw.sh  /v1/laptop-files/<path>   (Pages Function, viewer
 
 1. **Done** (`tauri-native-app` 8b880426): **App side behind a flag:** `dt-serve /files` with the path-root and JWT checks, unit tests (traversal, symlink escape, range, a missing or bad JWT). `cloudflared` run by hand.
 2. **Done** (`[local]` 6b0ebd85; m3 config `disk-files.rbw.sh`, `pulumi preview`: 7 to create): **IaC + edge route on `local`:** the component and route with tests (admin only, grant refused, hidden prefix refused, deny-list, size cap, offline 503, range pass-through).
-3. **m3 instance:** `pulumi up` on the cf stack (Ryan's go), Function secrets, a dev deploy and CIC: open a PDF and an `.mp4` under `~/Downloads` on dev.disk.rbw.sh, then with the laptop asleep (the offline message), then from a share link (refused).
+3. **Dev done 2026-10-16** (cf `pulumi up` cd3e0448 after adding Tunnel + Access edit to the `disk-tree-wrangler` token; dev secrets + vars; a standalone `dt-serve` on 7793 + `cloudflared` by hand; two fixes found live, `[local]` 15bfe6ff, 84ca8da6). Verified on dev.disk.rbw.sh: a PDF renders, a 279 MB `.mp4` plays and seeks (Range), the deny-list 403s `.ssh` / `.envrc`, a whole GET over 25 MiB 413s, a missing file 404s, `cloudflared` stopped → the offline sentence, anonymous 401. Not exercised live: a share link (unit-tested; refusing grants needs no live state). **m3 instance:** `pulumi up` on the cf stack (Ryan's go), Function secrets, a dev deploy and CIC: open a PDF and an `.mp4` under `~/Downloads` on dev.disk.rbw.sh, then with the laptop asleep (the offline message), then from a share link (refused).
 4. **App lifecycle:** the app starts and stops `cloudflared` with the setting; prod.
 
 ## As built (phases 1–2)
@@ -47,6 +47,8 @@ browser ──▶ disk.rbw.sh  /v1/laptop-files/<path>   (Pages Function, viewer
 - **The laptop:** `dt-serve -f ROOT --access-team <team>.cloudflareaccess.com --access-aud <aud> --access-client-id <id>` (default `127.0.0.1:7792`); off unless all three are given (`/files/*` → 404 `not served locally`, which the edge reads as offline). RS256 JWT, certs from `https://<team>/cdn-cgi/access/certs`, `iss`, `aud`, `exp`/`nbf` (60 s leeway), and `common_name` = the pinned service-token client id.
 - **The route** is `HttpStore`'s `get` (`/v1/laptop-files/get?path=<whole path>[&inline=1]`), so the leaf viewers need nothing new. Hide scopes ride only on grants and every grant is refused, so no hidden-prefix check is needed. The audit uses `access_log`'s existing columns (`event = 'file'`, `reason = "bytes=… range=…"`): no migration. The rate limit counts those rows (one D1 read per request).
 - **The hostname** is first-level (`disk-files.rbw.sh`): Universal SSL covers `*.rbw.sh`, not `*.disk.rbw.sh`.
+- **Whole-file GETs** go upstream as `Range: bytes=0-<cap−1>`: through the tunnel Cloudflare drops `content-length` on whole responses, so the size comes from the 206's `content-range` (a 206 whose total ≤ cap becomes the 200).
+- **The upstream `fetch`** is called unbound: the Workers runtime throws "Illegal invocation" for `deps.fetch(…)`.
 - **Responses** carry `content-security-policy: sandbox` and `content-disposition` (attachment unless `inline=1`): bytes from a disk are never a page on the site's origin.
 
 ## Decisions (Ryan, 2026-10-16)
