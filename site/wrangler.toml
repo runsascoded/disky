@@ -57,5 +57,10 @@ FILTER_STATIC_HEAVY = "1"
 FILTER_INDEXED_ONLY = "1"
 STORES_EXTRA = "nas"
 STORES_JSON = '{"nas": {"vars": {"ROOT_LABEL": "nas", "SNAPSHOTS_SUBDIR": "nas", "STORE_SCHEME": "file:///", "STORE_BUCKETS": "*", "STORE_BUCKET": "disk-tree", "STORE_REGION": "auto"}, "secrets": {"STORE_ENDPOINT": "STORE_ENDPOINT", "STORE_ACCESS_KEY_ID": "STORE_ACCESS_KEY_ID", "STORE_SECRET_ACCESS_KEY": "STORE_SECRET_ACCESS_KEY"}}}'
+# File previews from the laptop itself, admins only (specs/laptop-file-tunnel.md): the tunnel
+# (`infra/cf` `fileTunnel`) and the paths a preview never serves (globs from `/`).
+LAPTOP_TUNNEL_URL = "https://disk-files.rbw.sh"
+LAPTOP_FILES_DENY = "Users/*/.ssh/**,Users/*/.aws/**,Users/*/.gnupg/**,Users/*/.config/gcloud/**,Users/*/.kube/**,Users/*/.docker/config.json,Users/*/.netrc,Users/*/Library/Keychains/**,Users/*/Library/Application Support/Google/Chrome/**,Users/*/Library/Application Support/Superhuman/**,Users/*/Library/Cookies/**,**/.env*,**/*.pem,**/*.key,**/*.p12"
 # Secrets (Pages secrets at deploy; `.dev.vars` locally): STORE_ENDPOINT,
-# STORE_ACCESS_KEY_ID, STORE_SECRET_ACCESS_KEY, SESSION_SECRET.
+# STORE_ACCESS_KEY_ID, STORE_SECRET_ACCESS_KEY, SESSION_SECRET, LAPTOP_TUNNEL_CLIENT_ID,
+# LAPTOP_TUNNEL_CLIENT_SECRET (`pulumi stack output file_tunnel_client_{id,secret}`, infra/cf).
