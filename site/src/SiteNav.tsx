@@ -14,7 +14,7 @@ import {
 } from '@floating-ui/react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { DEFAULT_STORE, STORES } from './stores'
+import { DEFAULT_STORE, STORES, storeForPath } from './stores'
 import { useStore } from './store'
 import { FaGithub } from 'react-icons/fa'
 import { MdMenu } from 'react-icons/md'
@@ -35,6 +35,9 @@ import { UserCard, ghHandle, shortName } from './UserChip'
 import { useUnits } from './units'
 import { Tooltip } from './Tooltip'
 
+/** The deployment's mark (`MARK`, `scripts/marks/`): the favicon, and the header's logo beside the title — a store's own
+ *  `mark` instead while its routes are open, as the tab icon does (`marks.ts`). */
+const MARK: string = import.meta.env.VITE_MARK
 
 // The one bar every page wears, pinned to the viewport top: the site nav
 // folded into a ☰ menu (far left), the page's own scope/controls across the
@@ -61,6 +64,7 @@ export function SiteNav({ children, menu, crumbs }: {
    * the controls then take a row of their own under it. */
   crumbs?: ReactNode
 }) {
+  const mark = storeForPath(useLocation().pathname).mark ?? MARK
   const ref = useRef<HTMLDivElement>(null)
   const row2Ref = useRef<HTMLDivElement | null>(null)
   // `--topbar-h` = the sticky bar's height (row 1 when the controls overlay);
@@ -121,6 +125,7 @@ export function SiteNav({ children, menu, crumbs }: {
     <div className={'topbar' + (hidden ? ' ctrl-hidden' : '')} ref={ref}>
       <div className="tb-row">
         <NavMenu extra={menu} />
+        {mark && <Link to="/" className="tb-mark" aria-label="home"><img src={`/icons/${mark}.svg`} alt="" width={24} height={24} /></Link>}
         {crumbs ? <div className="tb-crumbs" ref={crumbsRef}>{crumbs}</div> : <div className="tb-mid">{children}</div>}
         <UserMenu />
         <SiteDialogs />

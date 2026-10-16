@@ -1,7 +1,7 @@
 /** The digest image: its chart and map texts, and the PNG it rasterizes to
  * (written to `tmp/digest-sample.png` for a look). */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { digestSvg, niceTicks, type DigestCardInput } from './digestCard'
+import { digestSvg, niceTicks, yRange, type DigestCardInput } from './digestCard'
 import { ensureWasm, svgToPng } from './render'
 import { diffRoot } from '../../../src/diffStyle'
 import type { DiffData } from '../../../src/diffModel'
@@ -39,6 +39,17 @@ describe('niceTicks', () => {
     expect(niceTicks(0, 1)).toEqual([0, 0.2, 0.4, 0.6, 0.8, 1])
     expect(niceTicks(3, 17)).toEqual([5, 7.5, 10, 12.5, 15])
     expect(Object.is(niceTicks(-1, 10)[0], 0)).toBe(true)  // never -0 (labelled `-0`)
+  })
+})
+
+describe('yRange', () => {
+  it('spans at least 1% of the top value, centred on the data (a +520 MiB change on 262 TiB is no cliff)', () => {
+    // 1% of 261.9 = 2.619 around the data's middle 261.87 → [260.5605, 263.1795], then the 8% / 6% margins.
+    expect(yRange([261.84, 261.9], null).map(v => +v.toFixed(5))).toEqual([260.35098, 263.33664])
+  })
+  it('a range wider than 1% is the data plus margins, unchanged', () => {
+    expect(yRange([10, 20], null)).toEqual([10 - 0.8, 20 + 0.6])
+    expect(yRange([10, 12], 20)).toEqual([10 - 0.8, 20 + 0.6])
   })
 })
 

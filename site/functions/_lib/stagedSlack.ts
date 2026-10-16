@@ -227,9 +227,13 @@ export interface ReplyView {
   batchId?: number
   /** The stager, as named (`who`). */
   by: string
+  /** Every batch it covers, live or not (named only once nothing is left). */
   batches: number
   /** What its batches still have staged. */
   prefixes: string[]
+  /** Each prefix's batch: the counts shown are of the batches still holding a
+   *  path (a batch absorbed or unstaged entirely drops out), as the parent's are. */
+  batchOf: Record<string, number>
   /** Bytes / objects by prefix at the latest scan; null = unsized. */
   stats: Record<string, PrefixStat> | null
   /** The latest batch note, if any. */
@@ -246,7 +250,11 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
   const empty = n - held.length
   let b = 0, o = 0
   for (const p of held) { b += v.stats?.[p]?.b ?? 0; o += v.stats?.[p]?.o ?? 0 }
-  const inBatches = v.batches > 1 ? ` in ${plural(v.batches, 'batch', 'batches')}` : ''
+  const batchesOf = (ps: readonly string[]) => new Set(ps.map(p => v.batchOf[p])).size
+  // The batches holding what is shown (the title), and what a reject unstages (the button).
+  const shown = batchesOf(held.length ? held : v.prefixes)
+  const live = batchesOf(v.prefixes)
+  const inBatches = shown > 1 ? ` in ${plural(shown, 'batch', 'batches')}` : ''
   const emptyNote = empty ? ` (+${fmtN(empty)} empty at scan)` : ''
   const size = v.stats ? ` · *${fmtBytes(b)}* · ${plural(o, 'object')}${emptyNote}` : ''
   const note = v.note ? `\n> ${(v.note.length > 140 ? `${v.note.slice(0, 139)}…` : v.note).replace(/\s*\n\s*/g, ' ')}` : ''
@@ -260,12 +268,12 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
       ],
     }
   }
-  const many = v.batches > 1
+  const many = live > 1
   const reject = {
     type: 'button', action_id: 'staged_reject', value: v.replyId != null ? `${v.planId}:r${v.replyId}` : `${v.planId}:${v.batchId}`,
-    text: { type: 'plain_text', text: many ? `Reject ${fmtN(v.batches)} batches` : 'Reject batch' },
+    text: { type: 'plain_text', text: many ? `Reject ${fmtN(live)} batches` : 'Reject batch' },
     confirm: {
-      title: { type: 'plain_text', text: many ? `Reject these ${fmtN(v.batches)} batches?` : 'Reject this batch?' },
+      title: { type: 'plain_text', text: many ? `Reject these ${fmtN(live)} batches?` : 'Reject this batch?' },
       text: { type: 'mrkdwn', text: `Unstages the ${plural(n, 'path')} ${many ? 'they' : 'it'} staged. Nothing is deleted.` },
       confirm: { type: 'plain_text', text: 'Reject' },
       deny: { type: 'plain_text', text: 'Cancel' },
@@ -428,10 +436,16 @@ export function sizeOf(at: ScanStats, prefixes: readonly string[], ownerName: (i
 /** A staged item, as the parent counts it. */
 export interface QueuedItem { prefix: string; added_by: string; batch_id: number | null }
 
-/** What the parent title counts: the `live` items (no real run deleted them)
- *  less those `empty` at the latest scan — their prefixes, batches, stagers. */
-export function queuedOf(live: readonly QueuedItem[], empty: ReadonlySet<string> = new Set()): NonNullable<ParentView['queued']> {
-  const held = live.filter(i => !empty.has(i.prefix))
+/** The staged items every count shows (the Slack parent's title, size line
+ *  and the plan's card): those no real run `deleted`, less those empty at the
+ *  scan (`stats`; null = unsized, so none is known empty). */
+export function countedItems<T extends { prefix: string }>(items: readonly T[], deleted: ReadonlySet<string>, stats: Record<string, PrefixStat> | null): T[] {
+  return items.filter(i => !deleted.has(i.prefix) && !(stats && emptyAt(stats[i.prefix])))
+}
+
+/** What the parent title counts of the `held` items (`countedItems`): their
+ *  prefixes, batches, stagers. */
+export function queuedOf(held: readonly QueuedItem[]): NonNullable<ParentView['queued']> {
   return {
     items: held.length,
     batches: new Set(held.map(i => i.batch_id).filter(b => b != null)).size,
@@ -465,7 +479,7 @@ async function loadView(db: D1Database, planId: number, siteUrl: string, actions
 }
 
 /** Items a real run of the plan deleted since they were staged (not undone). */
-async function deletedItems(db: D1Database, planId: number): Promise<Set<string>> {
+export async function deletedItems(db: D1Database, planId: number): Promise<Set<string>> {
   const { results } = await db.prepare(`
     SELECT DISTINCT i.prefix FROM plan_items i JOIN deletion_bands b ON b.prefix = i.prefix
     JOIN deletion_runs r ON r.run_id = b.run_id
@@ -503,36 +517,63 @@ async function detach(db: D1Database, planId: number, ts: string): Promise<{ won
 
 /** A stage reply's content from D1: a coalesced reply (`replyId`: its batches)
  *  or a pre-coalescing one (`batchId`). Null when it no longer exists. */
-async function loadReply(db: D1Database, planId: number, ref: { replyId: number } | { batchId: number }): Promise<{ by: string; batches: number; prefixes: string[]; note: string | null } | null> {
+async function loadReply(db: D1Database, planId: number, ref: { replyId: number } | { batchId: number }): Promise<{ by: string; batches: number; prefixes: string[]; batchOf: Record<string, number>; note: string | null } | null> {
   const batches = 'replyId' in ref
     ? (await db.prepare('SELECT id, note, created_by FROM stage_batches WHERE reply_id = ? AND plan_id = ? ORDER BY id').bind(ref.replyId, planId).all<{ id: number; note: string | null; created_by: string }>()).results
     : (await db.prepare('SELECT id, note, created_by FROM stage_batches WHERE id = ? AND plan_id = ?').bind(ref.batchId, planId).all<{ id: number; note: string | null; created_by: string }>()).results
   if (!batches.length) return null
   const ids = batches.map(b => b.id)
-  const prefixes = (await db.prepare(`SELECT prefix FROM plan_items WHERE plan_id = ? AND batch_id IN (${ids.map(() => '?').join(',')}) ORDER BY prefix`).bind(planId, ...ids).all<{ prefix: string }>()).results.map(r => r.prefix)
+  const items = (await db.prepare('SELECT prefix, batch_id FROM plan_items WHERE plan_id = ? AND batch_id IN (SELECT value FROM json_each(?)) ORDER BY prefix').bind(planId, JSON.stringify(ids)).all<{ prefix: string; batch_id: number }>()).results
   const note = [...batches].reverse().find(b => b.note)?.note ?? null
-  return { by: batches[0].created_by, batches: batches.length, prefixes, note }
+  return { by: batches[0].created_by, batches: batches.length, prefixes: items.map(i => i.prefix), batchOf: Object.fromEntries(items.map(i => [i.prefix, i.batch_id])), note }
 }
 
 interface ReplyCtx { planId: number; siteUrl: string; names: Names; stats: Record<string, PrefixStat> | null }
 async function renderReply(db: D1Database, c: ReplyCtx, ref: { replyId: number } | { batchId: number }): Promise<{ text: string; blocks: unknown[] } | null> {
   const r = await loadReply(db, c.planId, ref)
   if (!r) return null
-  return stageReply({ planId: c.planId, replyId: 'replyId' in ref ? ref.replyId : null, batchId: 'batchId' in ref ? ref.batchId : undefined, by: who(r.by, c.names), batches: r.batches, prefixes: r.prefixes, stats: c.stats, note: r.note, siteUrl: c.siteUrl })
+  return stageReply({ planId: c.planId, replyId: 'replyId' in ref ? ref.replyId : null, batchId: 'batchId' in ref ? ref.batchId : undefined, by: who(r.by, c.names), batches: r.batches, prefixes: r.prefixes, batchOf: r.batchOf, stats: c.stats, note: r.note, siteUrl: c.siteUrl })
 }
 
-/** Announce stage batch `batchId` in thread `thread`: join its stager's open
- *  reply there (updated within `COALESCE_S`) and edit it in place, or claim a
- *  new one and post it. The claim is the `stage_replies_open` unique index
- *  (one open reply per plan and stager): concurrent stages insert, one wins,
- *  every one attaches its batch to the winner. The winner re-renders after
- *  recording its post's ts, and a joiner that finds that ts edits the reply
- *  itself, so every batch attached ends up shown. */
-async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string; thread: string; batchId: number; by: string; now: number; ctx: ReplyCtx; sender: Sender }): Promise<void> {
+/** A claimed reply not posted within this many seconds was claimed by a
+ *  notify that died (a `waitUntil` cut short): the next announce re-claims. */
+export const CLAIM_GRACE_S = 120
+
+/** Batches of the plan that no posted or pending reply shows: never linked
+ *  (`reply_id` NULL: their notify died before announcing), or linked to a
+ *  reply closed without ever being posted. Bounded to batches still holding
+ *  an item, staged no earlier than `COALESCE_S` before the deployment's first
+ *  coalesced reply: older unlinked batches are pre-coalescing ones, announced
+ *  by replies of their own. Binds `?1` = plan id, `?2` = now (the floor while
+ *  there is no reply yet). */
+const UNSHOWN = `b.plan_id = ?1
+  AND (b.reply_id IS NULL OR b.reply_id IN (SELECT id FROM stage_replies WHERE slack_ts IS NULL AND open IS NULL))
+  AND b.created_ts >= COALESCE((SELECT min(created_ts) FROM stage_replies), ?2) - ${COALESCE_S}
+  AND EXISTS (SELECT 1 FROM plan_items i WHERE i.plan_id = b.plan_id AND i.batch_id = b.id)`
+
+/** Stagers (lowercased) with batches no reply shows (`UNSHOWN`). */
+export async function unshownStagers(db: D1Database, planId: number, now: number): Promise<string[]> {
+  const { results } = await db.prepare(`SELECT DISTINCT lower(b.created_by) AS stager FROM stage_batches b WHERE ${UNSHOWN} ORDER BY stager`).bind(planId, now).all<{ stager: string }>()
+  return results.map(r => r.stager)
+}
+
+/** Announce `stager`'s batches in thread `thread`: join their open reply
+ *  there (updated within `COALESCE_S`) and edit it in place, or claim a new
+ *  one and post it. The reply takes `batchId` (the stage being announced, if
+ *  any) and every batch of theirs no reply shows (`UNSHOWN`), so a batch
+ *  whose own notify died is announced by the next notify that runs — theirs,
+ *  or anyone's (`notifyPlan`'s sweep). The claim is the `stage_replies_open`
+ *  unique index (one open reply per plan and stager): concurrent stages
+ *  insert, one wins, every one attaches its batch to the winner. The winner
+ *  re-renders after recording its post's ts, and a joiner that finds that ts
+ *  edits the reply itself, so every batch attached ends up shown. A claim
+ *  left unposted past `CLAIM_GRACE_S` is closed and its batches re-adopted. */
+async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string; thread: string; batchId?: number; stager: string; now: number; ctx: ReplyCtx; sender: Sender }): Promise<void> {
   const { planId } = o.ctx
-  const stager = o.by.toLowerCase()
-  await db.prepare('UPDATE stage_replies SET open = NULL WHERE plan_id = ? AND stager = ? AND open = 1 AND (channel != ? OR thread_ts != ? OR updated_ts < ?)')
-    .bind(planId, stager, o.channel, o.thread, o.now - COALESCE_S).run()
+  const stager = o.stager.toLowerCase()
+  await db.prepare(`UPDATE stage_replies SET open = NULL WHERE plan_id = ? AND stager = ? AND open = 1
+    AND (channel != ? OR thread_ts != ? OR updated_ts < ? OR (slack_ts IS NULL AND created_ts < ?))`)
+    .bind(planId, stager, o.channel, o.thread, o.now - COALESCE_S, o.now - CLAIM_GRACE_S).run()
   const openReply = () => db.prepare('SELECT id, slack_ts FROM stage_replies WHERE plan_id = ? AND stager = ? AND open = 1').bind(planId, stager).first<{ id: number; slack_ts: string | null }>()
   let r = await openReply()
   let claimed = false
@@ -543,7 +584,8 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
     r = await openReply()
   }
   if (!r) return
-  await db.prepare('UPDATE stage_batches SET reply_id = ? WHERE id = ? AND plan_id = ?').bind(r.id, o.batchId, planId).run()
+  if (o.batchId != null) await db.prepare('UPDATE stage_batches SET reply_id = ? WHERE id = ? AND plan_id = ?').bind(r.id, o.batchId, planId).run()
+  await db.prepare(`UPDATE stage_batches AS b SET reply_id = ?3 WHERE ${UNSHOWN} AND lower(b.created_by) = ?4`).bind(planId, o.now, r.id, stager).run()
   await db.prepare('UPDATE stage_replies SET updated_ts = max(updated_ts, ?) WHERE id = ?').bind(o.now, r.id).run()
   const ref = { replyId: r.id }
   // Edit the reply until what it shows is what D1 holds (a joiner may attach
@@ -558,9 +600,11 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
   }
   if (claimed) {
     const m = await renderReply(db, o.ctx, ref)
-    if (!m) return
-    const p = await slackApi(env, 'chat.postMessage', { channel: o.channel, thread_ts: o.thread, ...m, ...o.sender, unfurl_links: false })
-    if (!p.ok || !p.ts) {
+    const p = m ? await slackApi(env, 'chat.postMessage', { channel: o.channel, thread_ts: o.thread, ...m, ...o.sender, unfurl_links: false }) : null
+    if (!m || !p?.ok || !p.ts) {
+      // Nothing to show (a sweep raced the batch's own notify) or the post
+      // failed: close the claim, so the next announce claims anew (after a
+      // failed post, re-adopting its batches).
       await db.prepare('UPDATE stage_replies SET open = NULL WHERE id = ?').bind(r.id).run()
       return
     }
@@ -596,8 +640,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
     const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
     // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
-    const empty = at ? new Set(queued.filter(p => emptyAt(at.stats[p]))) : undefined
-    const parent = renderParent({ ...v, queued: queuedOf(v.live, empty), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+    const parent = renderParent({ ...v, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : stage ? undefined : (ev as Event | undefined)
@@ -642,14 +685,19 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       await slackApi(env, 'chat.postMessage', { channel, thread_ts: old, text: `${ended} Continued in ${link ? `<${link}|a new thread>` : 'a new thread'}.`, ...PLAN_SENDER, unfurl_links: false })
       await slackApi(env, 'chat.update', { channel, ts: old, ...closedParent(planId, siteUrl, link) })
     }
+    const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null }
     if (stage) {
       await announceStage(env, db, {
-        channel, thread: ts, batchId: stage.batchId, by: stage.by, now,
-        ctx: { planId, siteUrl, names, stats: at?.stats ?? null },
+        channel, thread: ts, batchId: stage.batchId, stager: stage.by, now, ctx,
         sender: personSender(stage.by, people[stage.by.toLowerCase()], 'staged'),
       })
     } else if (event) {
       await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ?? PLAN_SENDER), unfurl_links: false })
+    }
+    // Batches no reply shows (their own notify died) are announced now, by
+    // whichever notify runs next, each in its stager's reply.
+    for (const s of await unshownStagers(db, planId, now)) {
+      await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s], 'staged') })
     }
   } catch (e) {
     console.log(`staged slack notify failed for plan ${planId}: ${(e as Error).message}`)

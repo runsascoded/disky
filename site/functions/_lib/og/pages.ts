@@ -8,7 +8,7 @@ import { loadLedger } from '../ledger.js'
 import { ownerTotals } from '../ownerTotals.js'
 import { openPlanId } from '../plans.js'
 import { type PrefixStat } from '../prefixes.js'
-import { stagedStats } from '../stagedSlack.js'
+import { countedItems, deletedItems, stagedStats } from '../stagedSlack.js'
 import { filterStaged } from '../../../src/stagedFilter.js'
 import { ownerIndex } from '../../../src/ownerIndex.js'
 import { type CardData, type CardTile, type Grid, fmtB } from './card.js'
@@ -115,13 +115,15 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
   const at = rows.length ? await stagedStats(env, rows.map(r => r.prefix)) : null
   if (!rows.length || !at) return { ...base, subtitle: plan == null ? '' : `plan #${plan}`, total: '', empty: 'nothing staged' }
   const { scan: date, stats } = at
-  const [reg, ledger, users] = await Promise.all([
+  const [reg, ledger, users, deleted] = await Promise.all([
     regOf(env),
     loadLedger(env).catch(() => ({ ownerRows: [] })),
     scanUsersOf(env, date).catch(() => []),
+    deletedItems(env.DB, plan!),
   ])
   const idx = ownerIndex({ owners: ledger.ownerRows.map(r => ({ ...r, who: r.who ?? '', memo: null })) })
-  let items: Item[] = rows.map(r => {
+  // The prefixes the Slack parent counts: neither deleted by a real run nor empty at the scan.
+  let items: Item[] = countedItems(rows, deleted, stats).map(r => {
     const stat = stats[r.prefix]
     const assignment = idx.assignmentOf(r.prefix, r.kind)
     return { prefix: r.prefix, addedBy: r.added_by, stat, owner: assignment ? canonId(assignment.who, reg) : stat?.us?.[0]?.[0] ?? null }

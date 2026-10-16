@@ -190,6 +190,23 @@ describe('D1', () => {
       ])
     })
 
+    it('counts the batches still holding a path, as the parent does: a batch absorbed by a later one drops out', async () => {
+      const calls = fakeSlack()
+      const { db } = await planDb()
+      await notifyPlan(env, db, 1, SITE, await stage(db, 1, run(1, 2)), { now: 1000 })
+      // Staging `run-1/` absorbs batch #1's two steps (`stageItems` deletes them).
+      await db.prepare("DELETE FROM plan_items WHERE batch_id = 1").run()
+      await notifyPlan(env, db, 1, SITE, await stage(db, 2, ['gs://b/ckpt/run-1/']), { now: 1060 })
+      const upd = calls.filter(c => c.method === 'chat.update').at(-1)!.body
+      expect([
+        calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(c => sectionText(c.body.blocks).split('\n')[0]),
+        [sectionText(upd.blocks), (upd.blocks as { elements?: { text: { text: string } }[] }[])[1].elements!.map(e => e.text.text)],
+      ]).toEqual([
+        ['*Staged for deletion* · plan #1 · 3 prefixes in 2 batches', '*Staged for deletion* · plan #1 · 2 prefixes in 2 batches'],
+        [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n`b/ckpt/run-1/` 1.0 TiB', ['Reject batch', 'View in www']],
+      ])
+    })
+
     it('concurrent stages by one stager claim one reply, which ends up covering both', async () => {
       const calls = fakeSlack({ delayMs: 5 })
       const { db, raw } = await planDb()
@@ -206,6 +223,59 @@ describe('D1', () => {
         ':wastebasket: *Ann Bee* staged 2 paths in 2 batches · *2.0 TiB* · 20 objects\nin `b/ckpt/`: `run-1/step-0/` 1.0 TiB, `run-2/step-0/` 1.0 TiB',
         [{ id: 1, slack_ts: '200.000001', open: 1 }],
         [{ id: 1, reply_id: 1 }, { id: 2, reply_id: 1 }],
+      ])
+    })
+  })
+
+  describe('a batch whose own notify never ran is still announced', () => {
+    const batchReplies = (raw: Awaited<ReturnType<typeof sqliteD1>>['raw']) => raw.prepare('SELECT id, reply_id FROM stage_batches ORDER BY id').all()
+
+    it('the stager\'s next stage adopts it into their reply (gcs plan #1: batch #30)', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      await stage(db, 30, run(30, 2), { ts: 990 })
+      await notifyPlan(env, db, 1, SITE, await stage(db, 31, run(31, 1), { ts: 1011 }), { now: 1011 })
+      expect([calls.filter(c => c.method === 'chat.postMessage').map(show), batchReplies(raw)]).toEqual([
+        [`post in ${PARENT}: :wastebasket: *Ann Bee* staged 3 paths in 2 batches · *3.0 TiB* · 30 objects\nin \`b/ckpt/\`: \`run-30/step-0/\` 1.0 TiB, \`run-30/step-1/\` 1.0 TiB, \`run-31/step-0/\` 1.0 TiB`],
+        // #100 predates every reply (a pre-coalescing batch, with its own reply): never adopted.
+        [{ id: 30, reply_id: 1 }, { id: 31, reply_id: 1 }, { id: 100, reply_id: null }],
+      ])
+    })
+
+    it('another stager\'s next notify announces a stager\'s only batch', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      const BO = 'bo@example.org'
+      await stage(db, 40, ['gs://b/bo/x/'], { by: BO, ts: 1000 })
+      await notifyPlan(env, db, 1, SITE, await stage(db, 41, run(41, 1), { ts: 1100 }), { now: 1100 })
+      // A later notify (any event) finds nothing left to adopt.
+      await notifyPlan(env, db, 1, SITE, undefined, { now: 1200 })
+      const posts = calls.filter(c => c.method === 'chat.postMessage')
+      expect([posts.map(show), posts.map(c => c.body.username), batchReplies(raw)]).toEqual([
+        [
+          `post in ${PARENT}: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-41/step-0/\` 1.0 TiB`,
+          `post in ${PARENT}: :wastebasket: *bo* staged 1 path · *1.0 TiB* · 10 objects\n\`b/bo/x/\` 1.0 TiB`,
+        ],
+        ['Ann Bee · staged', 'bo · staged'],
+        [{ id: 40, reply_id: 2 }, { id: 41, reply_id: 1 }, { id: 100, reply_id: null }],
+      ])
+    })
+
+    it('a reply claimed by a notify that died before posting is re-claimed, its batches adopted', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      await db.prepare("INSERT INTO stage_replies (id, plan_id, stager, channel, thread_ts, open, created_ts, updated_ts) VALUES (1, 1, ?, ?, ?, 1, 1000, 1000)").bind(ANN, CH, PARENT).run()
+      await stage(db, 50, run(50, 1), { ts: 1000 })
+      await db.prepare('UPDATE stage_batches SET reply_id = 1 WHERE id = 50').run()
+      await notifyPlan(env, db, 1, SITE, await stage(db, 51, run(51, 1), { ts: 1300 }), { now: 1300 })
+      expect([
+        calls.filter(c => c.method === 'chat.postMessage').map(show),
+        batchReplies(raw),
+        raw.prepare('SELECT id, slack_ts, open FROM stage_replies ORDER BY id').all(),
+      ]).toEqual([
+        [`post in ${PARENT}: :wastebasket: *Ann Bee* staged 2 paths in 2 batches · *2.0 TiB* · 20 objects\nin \`b/ckpt/\`: \`run-50/step-0/\` 1.0 TiB, \`run-51/step-0/\` 1.0 TiB`],
+        [{ id: 50, reply_id: 2 }, { id: 51, reply_id: 2 }, { id: 100, reply_id: null }],
+        [{ id: 1, slack_ts: null, open: null }, { id: 2, slack_ts: '200.000001', open: 1 }],
       ])
     })
   })
