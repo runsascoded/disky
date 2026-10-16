@@ -9,6 +9,7 @@
 //!   `DISKY_URL` overrides.
 //! - `scope`: `machine` (scan `/`, one filesystem) or `home` (`$HOME`); exported to
 //!   the scan job as `DISKY_SCAN_ROOT`.
+//! - `files`: file previews through a Cloudflare Tunnel (`tunnel.rs`), optional.
 //! - `schedule`: local `HH:MM` times; the scan agent wakes every 15 min and runs
 //!   when one has passed since its last run (`due`). Empty = scheduled scans off.
 //!
@@ -29,11 +30,14 @@ pub struct Settings {
     pub site: String,
     pub scope: String,
     pub schedule: Vec<String>,
+    /// File previews through a Cloudflare Tunnel (`tunnel.rs`); absent = not set up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<crate::tunnel::FilesTunnel>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()] }
+        Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()], files: None }
     }
 }
 
@@ -288,11 +292,11 @@ mod tests {
     fn fresh_install_is_local_and_explicit_hosted_settings_survive() {
         assert_eq!(
             serde_json::from_str::<Settings>("{}").unwrap(),
-            Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()] },
+            Settings { site: "local".into(), scope: "machine".into(), schedule: vec!["06:00".into(), "18:00".into()], files: None },
         );
         assert_eq!(
             serde_json::from_str::<Settings>(r#"{"site":"prod","scope":"home","schedule":["03:30"]}"#).unwrap(),
-            Settings { site: "prod".into(), scope: "home".into(), schedule: vec!["03:30".into()] },
+            Settings { site: "prod".into(), scope: "home".into(), schedule: vec!["03:30".into()], files: None },
         );
     }
 }

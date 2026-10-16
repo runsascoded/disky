@@ -86,6 +86,7 @@ pub fn dispatch(args: &[OsString]) -> Option<i32> {
             _ => { eprintln!("usage: disky alert TITLE MESSAGE | disky alert ask"); 2 }
         }),
         Some("agent") => Some(agent(&args[2..])),
+        Some("tunnel") => Some(crate::tunnel::cli(&args[2..].iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>())),
         Some("probe") => Some(probe()),
         Some("job") => Some(match (args.get(2).and_then(|a| a.to_str()), args.get(3).and_then(|a| a.to_str())) {
             (Some("scan"), Some("--scheduled")) => crate::jobs::run_scheduled_scan(),

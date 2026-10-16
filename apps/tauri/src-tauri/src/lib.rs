@@ -15,6 +15,7 @@ mod notify;
 mod services;
 mod settings;
 mod status;
+mod tunnel;
 mod volumes;
 
 use std::path::PathBuf;
@@ -186,7 +187,7 @@ fn open_deep_link(app: &AppHandle, deep: &tauri::Url) {
                 }
                 jobs::note(&format!("disky: switched site {current} → {name} for a sign-in link"));
                 if let Some(t) = app.try_state::<Tray>() {
-                    t.refresh();
+                    t.refresh(app);
                 }
             }
             show_window(app, Some(link))
@@ -257,6 +258,8 @@ fn save_settings(app: AppHandle, settings: Settings, agents: bool, login: bool) 
         return Err(format!("bad scope {:?}", settings.scope));
     }
     let old = settings::load();
+    // The Settings window doesn't edit file previews (`disky tunnel …`, the menu): keep them.
+    let settings = Settings { files: old.files.clone(), ..settings };
     settings::save(&settings)?;
     if agents != services::agents_enabled() {
         set_agents(agents)?;
@@ -292,10 +295,11 @@ struct Tray {
     local: CheckMenuItem<Wry>,
     scheduled: CheckMenuItem<Wry>,
     login: CheckMenuItem<Wry>,
+    files: CheckMenuItem<Wry>,
 }
 
 impl Tray {
-    fn refresh(&self) {
+    fn refresh(&self, app: &AppHandle) {
         let _ = self.scan.set_text(status::scan_line());
         let granted = agent::has_full_disk_access();
         let _ = self.fda.set_text(fda_line(granted));
@@ -309,6 +313,11 @@ impl Tray {
         let _ = self.local.set_checked(site == "local");
         let _ = self.scheduled.set_checked(services::agents_enabled());
         let _ = self.login.set_checked(login_enabled());
+        let files = settings::load().files;
+        let state = app.try_state::<tunnel::Tunnel>().map_or(tunnel::State::NotConfigured, |t| t.state());
+        let _ = self.files.set_text(tunnel::menu_line(&state));
+        let _ = self.files.set_checked(files.as_ref().is_some_and(|f| f.on));
+        let _ = self.files.set_enabled(files.is_some());
     }
 }
 
@@ -318,7 +327,7 @@ fn site_changed(app: &AppHandle) {
         let _ = w.navigate(u);
     }
     if let Some(t) = app.try_state::<Tray>() {
-        t.refresh();
+        t.refresh(app);
     }
 }
 
@@ -361,7 +370,7 @@ fn start_local_server(app: &AppHandle) {
 
 fn local_server_config(web: PathBuf) -> dt_index::http::Config {
     let home = std::env::var("HOME").ok().map(|h| h.trim_matches('/').to_string());
-    dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())), files: None }
+    dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())), files: tunnel::server_files(&settings::load()) }
 }
 
 /// A scheduled slot that passed with no scan starting (the agent isn't
@@ -423,8 +432,10 @@ pub fn run() {
                 local: CheckMenuItem::with_id(app, "site_local", "This Mac (local)", true, site == "local", None::<&str>)?,
                 scheduled: CheckMenuItem::with_id(app, "scheduled", "Scheduled scans", true, false, None::<&str>)?,
                 login: CheckMenuItem::with_id(app, "login", "Open at login", true, false, None::<&str>)?,
+                files: CheckMenuItem::with_id(app, "files", tunnel::menu_line(&tunnel::State::NotConfigured), false, false, None::<&str>)?,
             };
-            tray.refresh();
+            app.manage(tunnel::Tunnel::new());
+            tray.refresh(app.handle());
             let site_menu = Submenu::with_items(app, "Site", true, &[&tray.local, &tray.prod, &tray.dev])?;
             let menu = Menu::with_items(
                 app,
@@ -440,6 +451,7 @@ pub fn run() {
                     &PredefinedMenuItem::separator(app)?,
                     &tray.scheduled,
                     &tray.login,
+                    &tray.files,
                     &MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?,
                     &MenuItem::with_id(app, "logs", "Show logs", true, None::<&str>)?,
                     &PredefinedMenuItem::separator(app)?,
@@ -482,11 +494,26 @@ pub fn run() {
                                 services::open_login_items_settings();
                             }
                         }
+                        "files" => {
+                            if let Err(e) = tunnel::toggle() {
+                                jobs::note(&format!("disky: file previews: {e}"));
+                            }
+                            // Off the main thread: stopping waits for cloudflared to exit.
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                if let Some(t) = app.try_state::<tunnel::Tunnel>() {
+                                    t.tick();
+                                }
+                                if let Some(t) = app.try_state::<Tray>() {
+                                    t.refresh(&app);
+                                }
+                            });
+                        }
                         "quit" => app.exit(0),
                         _ => {}
                     }
                     if let Some(t) = app.try_state::<Tray>() {
-                        t.refresh();
+                        t.refresh(app);
                     }
                 })
                 .build(app)?;
@@ -512,8 +539,11 @@ pub fn run() {
                 loop {
                     let busy = settings::load_progress().is_some() || settings::load_state().force;
                     std::thread::sleep(Duration::from_secs(if busy { 3 } else { 20 }));
+                    if let Some(t) = handle.try_state::<tunnel::Tunnel>() {
+                        t.tick();
+                    }
                     if let Some(t) = handle.try_state::<Tray>() {
-                        t.refresh();
+                        t.refresh(&handle);
                     }
                     missed.check();
                 }
@@ -523,6 +553,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error building disky")
         .run(|app, event| match event {
+            tauri::RunEvent::Exit => {
+                if let Some(t) = app.try_state::<tunnel::Tunnel>() {
+                    t.stop();
+                }
+            }
             // Closing a window leaves the menu-bar item running.
             tauri::RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
             // Opened again while running (Spotlight, Finder, the Dock): show the window.
