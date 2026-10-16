@@ -4,6 +4,7 @@
 //! must carry a valid Access JWT (`access.rs`), and the path must resolve
 //! (after `realpath`: no `..`, no symlink out) to a regular file under `root`.
 //! The edge enforces who may ask and the deny-list; this re-checks the root.
+//! `/files/` itself (no path) is the health check: `{"ok": true, "root": …}`.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -126,6 +127,12 @@ pub fn respond(files: &Files, rel: &str, jwt: Option<&str>, range: Option<&str>)
     let Some(jwt) = jwt else { return err(401, "missing Access JWT") };
     if let Err(e) = files.access.verify(jwt) {
         return err(403, &format!("bad Access JWT: {e}"));
+    }
+    // `/files/` itself: the health check (the site's "laptop online" indicator).
+    if rel.trim_start_matches('/').is_empty() {
+        let b = serde_json::to_vec(&serde_json::json!({"ok": true, "root": files.root.to_string_lossy()})).unwrap();
+        let n = b.len();
+        return Response::new(StatusCode(200), vec![h("content-type", "application/json"), h("cache-control", "no-store")], Box::new(std::io::Cursor::new(b)) as Box<dyn Read + Send>, Some(n), None);
     }
     let path = match resolve(&files.root, rel) {
         Ok(p) => p,
@@ -263,5 +270,8 @@ pub(crate) mod tests {
         assert_eq!(read(r), (200, "%PDF-1.7".into()));
         assert_eq!(read(respond(&files, "out", Some(&jwt), None)), (403, "outside the store root".into()));
         assert_eq!(read(respond(&files, "../secret.txt", Some(&jwt), None)), (400, "bad path".into()));
+        // The health check: JWT-gated like any file.
+        assert_eq!(read(respond(&files, "", Some(&jwt), None)), (200, format!(r#"{{"ok":true,"root":"{}"}}"#, root.display())));
+        assert_eq!(read(respond(&files, "", None, None)), (401, "missing Access JWT".into()));
     }
 }

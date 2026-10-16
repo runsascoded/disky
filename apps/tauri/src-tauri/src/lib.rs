@@ -11,6 +11,7 @@
 mod agent;
 mod applink;
 mod jobs;
+mod links;
 mod notify;
 mod services;
 mod settings;
@@ -160,9 +161,65 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
-/// A `disky://` URL from LaunchServices (the browser's "Open in disky"). A
-/// link from the other known site (prod ↔ dev) switches the app to that site.
+/// Switch the app to site `name` (a link from the other known site), noting why.
+fn switch_site(app: &AppHandle, name: &str, why: &str) {
+    let current = settings::load().site;
+    if name == current {
+        return;
+    }
+    let mut s = settings::load();
+    s.site = name.to_string();
+    if let Err(e) = settings::save(&s) {
+        jobs::note(&format!("disky: can't save settings: {e}"));
+    }
+    jobs::note(&format!("disky: switched site {current} → {name} for {why}"));
+    if let Some(t) = app.try_state::<Tray>() {
+        t.refresh(app);
+    }
+}
+
+/// A `disky://` URL from LaunchServices: `links.rs`'s view / reveal / open-file,
+/// else the sign-in hand-off (`applink.rs`).
 fn open_deep_link(app: &AppHandle, deep: &tauri::Url) {
+    match links::parse(deep) {
+        Ok(None) => open_sign_in_link(app, deep),
+        Ok(Some(links::Link::View(url))) => {
+            let mut sites = vec![];
+            for (name, u) in [("prod", settings::PROD_URL), ("dev", settings::DEV_URL), ("local", settings::LOCAL_URL)] {
+                sites.push((name, u.parse::<tauri::Url>().expect("known site URL")));
+            }
+            match links::view_site(&url, &sites) {
+                Ok(name) => {
+                    // An explicit `DISKY_URL` pins the site: the window shows the page without switching.
+                    if std::env::var_os("DISKY_URL").is_none() {
+                        switch_site(app, name, "a view link");
+                    }
+                    show_window(app, Some(url));
+                }
+                Err(e) => jobs::note(&format!("disky: refused a disky://view link: {e}")),
+            }
+        }
+        // Off the main thread: `open-file` may wait on a confirmation dialog.
+        Ok(Some(links::Link::Reveal(p))) => {
+            std::thread::spawn(move || {
+                if let Err(e) = links::reveal(&p) {
+                    jobs::note(&format!("disky: reveal: {e}"));
+                }
+            });
+        }
+        Ok(Some(links::Link::OpenFile(p))) => {
+            std::thread::spawn(move || match links::open_file(&p) {
+                Ok(what) => jobs::note(&format!("disky: {what}")),
+                Err(e) => jobs::note(&format!("disky: open-file: {e}")),
+            });
+        }
+        Err(e) => jobs::note(&format!("disky: refused a disky:// link: {e}")),
+    }
+}
+
+/// `disky://open?link=…`, the browser's "Open in disky". A link from the other
+/// known site (prod ↔ dev) switches the app to that site.
+fn open_sign_in_link(app: &AppHandle, deep: &tauri::Url) {
     let current = settings::load().site;
     let mut sites = vec![];
     match tauri::Url::parse(&site_url()) {
@@ -179,17 +236,7 @@ fn open_deep_link(app: &AppHandle, deep: &tauri::Url) {
     }
     match applink::resolve(deep, &sites) {
         Ok((name, link)) => {
-            if name != current {
-                let mut s = settings::load();
-                s.site = name.to_string();
-                if let Err(e) = settings::save(&s) {
-                    jobs::note(&format!("disky: can't save settings: {e}"));
-                }
-                jobs::note(&format!("disky: switched site {current} → {name} for a sign-in link"));
-                if let Some(t) = app.try_state::<Tray>() {
-                    t.refresh(app);
-                }
-            }
+            switch_site(app, name, "a sign-in link");
             show_window(app, Some(link))
         }
         // Never log the URL itself: a valid-looking one carries a token.
@@ -229,11 +276,44 @@ struct UiState {
     agents_status: String,
     login: bool,
     scan: String,
+    /// File previews (`tunnel.rs`); `None` when not set up.
+    files: Option<FilesUi>,
 }
 
-fn ui_state() -> UiState {
+#[derive(Serialize)]
+struct FilesUi {
+    on: bool,
+    team: String,
+    root: String,
+    /// The menu's line for the tunnel's state.
+    status: String,
+    connected: bool,
+    /// Epoch seconds the current connection came up.
+    since: Option<i64>,
+    token: bool,
+    cloudflared: Option<String>,
+}
+
+fn files_ui(app: &AppHandle, s: &Settings) -> Option<FilesUi> {
+    let f = s.files.as_ref()?;
+    let t = app.try_state::<tunnel::Tunnel>();
+    let state = t.as_ref().map_or(tunnel::State::NotConfigured, |t| t.state());
+    Some(FilesUi {
+        on: f.on,
+        team: f.team.clone(),
+        root: f.root.clone(),
+        status: tunnel::menu_line(&state),
+        connected: state == tunnel::State::Connected,
+        since: t.and_then(|t| t.connected_since()),
+        token: tunnel::has_token(),
+        cloudflared: tunnel::cloudflared().map(|p| p.display().to_string()),
+    })
+}
+
+fn ui_state(app: &AppHandle) -> UiState {
     let s = settings::load();
     UiState {
+        files: files_ui(app, &s),
         site_url: s.site_url(),
         settings: s,
         fda: agent::has_full_disk_access(),
@@ -245,8 +325,26 @@ fn ui_state() -> UiState {
 }
 
 #[tauri::command]
-fn get_state() -> UiState {
-    ui_state()
+fn get_state(app: AppHandle) -> UiState {
+    ui_state(&app)
+}
+
+/// The Settings window's file-previews switch: save, then act now (not at the next tick).
+#[tauri::command]
+async fn set_file_previews(app: AppHandle, on: bool) -> Result<UiState, String> {
+    tunnel::set_on(on)?;
+    if let Some(t) = app.try_state::<tunnel::Tunnel>() {
+        t.tick();
+    }
+    if let Some(t) = app.try_state::<Tray>() {
+        t.refresh(&app);
+    }
+    Ok(ui_state(&app))
+}
+
+#[tauri::command]
+fn open_tunnel_log() {
+    open(&tunnel::log_path().to_string_lossy());
 }
 
 #[tauri::command]
@@ -270,7 +368,7 @@ fn save_settings(app: AppHandle, settings: Settings, agents: bool, login: bool) 
     if settings.site != old.site {
         site_changed(&app);
     }
-    Ok(ui_state())
+    Ok(ui_state(&app))
 }
 
 #[tauri::command]
@@ -409,7 +507,7 @@ impl MissedSlot {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_state, save_settings, open_fda_settings, scan_now])
+        .invoke_handler(tauri::generate_handler![get_state, save_settings, open_fda_settings, scan_now, set_file_previews, open_tunnel_log])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);

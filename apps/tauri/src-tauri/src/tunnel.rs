@@ -66,6 +66,11 @@ pub fn cloudflared() -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join("cloudflared")).find(|p| p.is_file())
 }
 
+/// Whether the Keychain holds a connector token (the value never leaves `token`).
+pub fn has_token() -> bool {
+    token().is_some()
+}
+
 /// The connector token from the Keychain; `None` when absent. Never logged.
 fn token() -> Option<String> {
     let out = Command::new("/usr/bin/security").args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]).stderr(Stdio::null()).output().ok()?;
@@ -144,19 +149,31 @@ pub struct Tunnel {
     child: Mutex<Option<Child>>,
     state: Mutex<State>,
     backoff: Mutex<(Duration, Option<Instant>)>,
+    /// Epoch seconds the current connection came up.
+    since: Mutex<Option<i64>>,
 }
 
 impl Tunnel {
     pub fn new() -> Self {
         reap_stale();
-        Tunnel { child: Mutex::new(None), state: Mutex::new(State::NotConfigured), backoff: Mutex::new((Duration::from_secs(5), None)) }
+        Tunnel { child: Mutex::new(None), state: Mutex::new(State::NotConfigured), backoff: Mutex::new((Duration::from_secs(5), None)), since: Mutex::new(None) }
     }
 
     pub fn state(&self) -> State {
         self.state.lock().unwrap().clone()
     }
 
+    pub fn connected_since(&self) -> Option<i64> {
+        *self.since.lock().unwrap()
+    }
+
     fn set(&self, s: State) {
+        let mut since = self.since.lock().unwrap();
+        match (&s, *since) {
+            (State::Connected, None) => *since = Some(settings::now()),
+            (State::Connected, Some(_)) => {}
+            _ => *since = None,
+        }
         *self.state.lock().unwrap() = s;
     }
 
@@ -220,7 +237,7 @@ impl Tunnel {
             drop(guard);
             return self.set(State::NoToken);
         };
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(jobs::logs_dir().join("cloudflared.log"));
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path());
         let mut cmd = Command::new(&bin);
         cmd.args(["tunnel", "--no-autoupdate", "--metrics", METRICS, "run"]).env("TUNNEL_TOKEN", token).stdin(Stdio::null());
         if let Ok(l) = log {
@@ -251,12 +268,19 @@ impl Tunnel {
 
 /// Toggle `files.on` (the menu item); `Err` when not set up.
 pub fn toggle() -> Result<bool, String> {
+    let on = !settings::load().files.is_some_and(|f| f.on);
+    set_on(on).map(|_| on)
+}
+
+/// Set `files.on` (the menu, the Settings window); `Err` when not set up.
+pub fn set_on(on: bool) -> Result<(), String> {
     let mut s = settings::load();
-    let f = s.files.as_mut().ok_or("file previews aren't set up (disky tunnel set …)")?;
-    f.on = !f.on;
-    let on = f.on;
-    settings::save(&s)?;
-    Ok(on)
+    s.files.as_mut().ok_or("file previews aren't set up (disky tunnel set …)")?.on = on;
+    settings::save(&s)
+}
+
+pub fn log_path() -> PathBuf {
+    jobs::logs_dir().join("cloudflared.log")
 }
 
 /// `disky tunnel …`: set up and inspect file previews from a shell.

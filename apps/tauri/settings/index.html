@@ -66,6 +66,17 @@
   <label><input type="radio" name="site" value="dev"> dev.disk.rbw.sh</label>
 </section>
 
+<section id="files-card">
+  <h2>File previews</h2>
+  <div id="files-unset" class="hint" style="margin-left:0">Not set up. The hosted site can preview files on this Mac through a Cloudflare Tunnel: <code>disky tunnel set TEAM AUD CLIENT_ID</code>, then <code>disky tunnel token</code> (reads the connector token from stdin into the Keychain).</div>
+  <div id="files-set">
+    <label><input type="checkbox" id="files-on"> Let the site preview files on this Mac</label>
+    <div class="hint">Admins open files through an outbound-only tunnel; each request must be signed by your Cloudflare Access app. Applies right away. Off, previews say the laptop is offline.</div>
+    <div class="row" style="margin:6px 0 0 24px"><span id="files-status" class="status"></span><button id="files-log">Show log</button></div>
+    <div id="files-detail" class="hint"></div>
+  </div>
+</section>
+
 <div class="row"><button class="primary" id="save">Save</button><button id="scan">Scan now</button></div>
 <div id="msg"></div>
 
@@ -82,6 +93,24 @@ function render(s) {
   $('fda-card').classList.toggle('banner', !s.fda);
   $('fda-open').hidden = s.fda;
   $('agents-status').textContent = s.agents_status;
+  renderFiles(s.files);
+}
+
+function renderFiles(f) {
+  $('files-unset').hidden = !!f;
+  $('files-set').hidden = !f;
+  if (!f) return;
+  $('files-on').checked = f.on;
+  const since = f.since ? ` since ${new Date(f.since * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : '';
+  const line = f.status.replace(/^File previews:? ?/, '');
+  $('files-status').textContent = f.connected ? `Connected${since}` : line ? line[0].toUpperCase() + line.slice(1) : 'Off';
+  $('files-status').className = 'status ' + (f.connected ? 'ok' : f.on ? 'bad' : '');
+  $('files-detail').textContent = [
+    `Access team ${f.team}`,
+    `files under ${f.root}`,
+    f.token ? 'token in Keychain ✓' : 'no token in Keychain',
+    f.cloudflared ? `cloudflared ${f.cloudflared}` : 'cloudflared not found (brew install cloudflared)',
+  ].join(' · ');
 }
 
 function fill(s) {
@@ -103,6 +132,11 @@ $('preset').onchange = () => {
   if (v !== 'custom') $('times').value = v.split(',').join(', ');
 };
 $('fda-open').onclick = () => invoke('open_fda_settings');
+$('files-log').onclick = () => invoke('open_tunnel_log');
+$('files-on').onchange = async () => {
+  try { render(await invoke('set_file_previews', { on: $('files-on').checked })); }
+  catch (e) { msg(String(e)); }
+};
 $('scan').onclick = async () => { try { await invoke('scan_now'); msg('Scan started.'); } catch (e) { msg(String(e)); } };
 $('save').onclick = async () => {
   const schedule = $('times').value.split(',').map(t => t.trim()).filter(Boolean);
