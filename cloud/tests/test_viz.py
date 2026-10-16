@@ -353,6 +353,23 @@ def test_write_path_index_plain(tmp_path: Path, listing: str):
     ]
 
 
+def test_class_bytes_carry_every_listed_class(tmp_path: Path):
+    """`meta.json` `class_bytes` splits by each object's `storage_class_id`, not just GCS's 2–4: hf's public 1, private
+    5 and unbilled git 6 each keep their own bytes (they used to fold into 1)."""
+    path = tmp_path / "hf.parquet"
+    pd.DataFrame(
+        {
+            "bucket": ["open-athena"] * 4,
+            "name": ["models/m/w.safetensors", "models/m/.gitattributes", "datasets/d/p.parquet", "buckets/b/x.bin"],
+            "size_bytes": [700 * GB, 1 * GB, 20 * GB, 300 * GB],
+            "created": [TS["d0701"]] * 4,
+            "storage_class_id": [1, 6, 5, 1],
+        }
+    ).to_parquet(path)
+    meta = write_path_index((str(path),), tmp_path / "out", "2026-07-20")
+    assert (meta["total_bytes"], meta["class_bytes"]) == (1021 * GB, {1: 1000 * GB, 5: 20 * GB, 6: 1 * GB})
+
+
 def test_deeper_nobody_rule_overrides_user_prefix(tmp_path: Path):
     # A `user: ~` (explicit nobody) prefix nested INSIDE a user prefix must win
     # for its subtree (deepest-prefix-wins is row-wise: the deeper row's NULL

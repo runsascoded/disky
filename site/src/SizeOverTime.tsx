@@ -1,4 +1,5 @@
 import { Tooltip } from './Tooltip'
+import { SectionAnchor } from './SectionAnchor'
 import { Explain } from './Help'
 import { TimeSeries } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
@@ -349,7 +350,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   return (
     <section id="over-time">
       <h2>
-        Size over time
+        <SectionAnchor id="over-time">Size over time</SectionAnchor>
         <Tooltip content={<>
           {user
             ? <><b>{shortName(user)}</b>’s bytes{prefix ? <> under <code>{prefix}</code></> : ''} per scan.</>

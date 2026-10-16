@@ -1402,8 +1402,7 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
         return
     headers = headers or auth()
     res = wm.warm(site_url, headers, paths, jobs=jobs)
-    bad = [r for r in res if r[1] != 200]
-    err(f"warm-cache: {len(res) - len(bad)}/{len(res)} warmed for {date} in {sum(r[2] for r in res):.0f}s of request time" + (f"; {len(bad)} failed" if bad else ""))
+    err(wm.summary(res, date))
 
 
 @main.group()
@@ -3107,6 +3106,48 @@ main.add_command(_job_token)
 from .d1_schema import cli as _d1_schema  # noqa: E402
 
 main.add_command(_d1_schema)
+
+
+@main.group("secrets")
+def _secrets() -> None:
+    """Secret Manager values for a step's environment."""
+
+
+@_secrets.command("exec")
+@option("-p", "--project", help="GCP project the bare secret names are in (default: `$GCP_PROJECT`, else ADC's)")
+@option("-s", "--secret", "bindings", multiple=True, help="ENV=SECRET[@VERSION] (repeatable): set ENV from the secret when it is unset")
+@argument("cmd", nargs=-1, required=True)
+def _secrets_exec(project: str | None, bindings: tuple[str, ...], cmd: tuple[str, ...]) -> None:
+    """Run CMD with each `-s` secret in its environment, fetched as the caller's credentials (a Batch VM's service
+    account). Values never reach argv, logs or a task's work dir (unlike Nextflow's `secret` store, which writes
+    them into `.command.run`); already-set variables are kept, so a job spec's `secretVariables` still win."""
+    from .gcp import gcp_project, session
+    from .secrets import resolve
+
+    env = dict(os.environ)
+    if bindings:
+        env.update(resolve(list(bindings), project or gcp_project(), session(), env))
+    os.execvpe(cmd[0], list(cmd), env)
+
+
+@main.command("batch-cancel")
+@option("-l", "--label", "labels", multiple=True, required=True, help="KEY=VALUE (repeatable): cancel only jobs carrying every one")
+@option("-n", "--dry-run", is_flag=True, help="List the live jobs that match; cancel none")
+@option("-r", "--region", default=None, help="Batch region (default `$BATCH_REGION`, else us-central1)")
+def _batch_cancel(labels: tuple[str, ...], dry_run: bool, region: str | None) -> None:
+    """Cancel (delete) every live Batch job carrying all of the `-l` labels, e.g. a killed Nextflow head's leftover
+    tasks (`-l nf-session=<id>`). Prints each job's name."""
+    from .batch import cancel_labelled
+    from .gcp import REGION
+
+    want = {}
+    for l in labels:
+        k, sep, v = l.partition("=")
+        if not sep or not k:
+            raise UsageError(f"label must be KEY=VALUE: {l!r}")
+        want[k] = v
+    for n in cancel_labelled(want, region=region or REGION, dry_run=dry_run, log=err):
+        print(n)
 
 
 if __name__ == "__main__":

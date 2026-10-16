@@ -65,6 +65,7 @@ beforeAll(async () => {
 })
 
 type Body = { date: string; path: string; n: number; files: { path: string; size: number; mtime: number | null }[]; more: boolean; capped?: true }
+type DirBody = { date: string; path: string; n: number; kind: 'dir'; dirs: { path: string; size: number; mtime: number | null; n_files: number }[]; more: boolean; capped?: true }
 
 /** The route's answer: status, and the body's answer fields (not its read cost, `groups` / `rows`: another sort). */
 async function ask(env: Env, date: string, path: string, n: number): Promise<[number, unknown]> {
@@ -72,6 +73,14 @@ async function ask(env: Env, date: string, path: string, n: number): Promise<[nu
   if (r.status !== 200) return [r.status, await r.text()]
   const j = await r.json() as Body
   return [200, { date: j.date, path: j.path, n: j.n, files: j.files, more: j.more, ...(j.capped ? { capped: true } : {}) }]
+}
+
+/** `ask`'s `kind=dir` twin: the largest folders. */
+async function askDirs(env: Env, date: string, path: string, n: number): Promise<[number, unknown]> {
+  const r = await largest({ request: new Request(`http://localhost/api/largest?date=${date}&path=${encodeURIComponent(path)}&n=${n}&kind=dir`), env })
+  if (r.status !== 200) return [r.status, await r.text()]
+  const j = await r.json() as DirBody
+  return [200, { date: j.date, path: j.path, n: j.n, dirs: j.dirs, more: j.more, ...(j.capped ? { capped: true } : {}) }]
 }
 
 /** The objects that are also a folder (in the scans' own sorts): the interval store folds each into its folder. */
@@ -100,6 +109,36 @@ describe('`/api/largest` from the interval store = the scan\'s own size sort, le
       expect([GETS.length - gets, ivReads.some(k => k.startsWith(`interval-store/${gen}/`))]).toEqual([0, true])
       // Not vacuous: answers with files, the twins' paths among them.
       expect(want.filter(w => (w[1] as Body).files.length).length).toBeGreaterThan(60)
+    })
+  }
+})
+
+// Folders: the same, but the twin is a folder on both sides — the interval store's carrying the object's bytes and
+// count (folded in), the scan's own not — so it is dropped from both.
+describe('`/api/largest?kind=dir` from the interval store = the scan\'s own size sort, less the object-and-folder twins', () => {
+  for (const gen of ['g2', 'g5']) {
+    it(`${gen}: every scan, path and n — the folders exactly, \`more\` wherever more exist`, async () => {
+      const cases = [S1, S2, S3].flatMap(date => PATHS.flatMap(path => NS.map(n => [date, path, n] as const)))
+      const want: [number, unknown][] = [], got: [number, unknown][] = [], beyond: boolean[] = []
+      // Both sides one longer, the twins dropped, cut to n: the folders the two agree on.
+      const cut = async (env: Env, date: string, path: string, n: number): Promise<[number, unknown]> => {
+        const [status, b] = await askDirs(env, date, path, n + 1) as [number, DirBody]
+        return [status, { date, path, n, dirs: b.dirs.filter(d => !TWINS.includes(d.path)).slice(0, n) }]
+      }
+      for (const [date, path, n] of cases) {
+        want.push(await cut(perScan, date, path, n))
+        const [, b] = await askDirs(perScan, date, path, n + 1) as [number, DirBody]
+        beyond.push(b.dirs.length > n)
+      }
+      const agreed: [number, unknown][] = []
+      for (const [date, path, n] of cases) {
+        got.push(await askDirs(ivEnv(gen), date, path, n))
+        agreed.push(await cut(ivEnv(gen), date, path, n))
+      }
+      expect(agreed).toEqual(want)
+      expect(cases.filter((_, i) => beyond[i] && !(got[i][1] as DirBody).more)).toEqual([])
+      // Not vacuous: answers with folders.
+      expect(want.filter(w => (w[1] as DirBody).dirs.length).length).toBeGreaterThan(30)
     })
   }
 })

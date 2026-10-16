@@ -91,3 +91,30 @@ def test_widths_match_the_sites_canvas_snap():
     m = re.search(r"WARMED_WIDTHS = \[([\d, ]+)\]", src)
     assert m is not None
     assert tuple(int(w) for w in m.group(1).split(",")) == W.WIDTHS
+
+
+def test_top_paths_sends_a_user_agent(monkeypatch):
+    # Cloudflare bans urllib's default User-Agent (error 1010 → 403), so the root-view fetch carries the same UA as
+    # the warm requests (hf's first warm-cache, 2026-10-16, 403'd here before a single path was warmed)
+    import io
+    import json
+
+    sent = []
+
+    def urlopen(req, timeout):
+        sent.append((req.full_url, dict(req.header_items())))
+        return io.BytesIO(json.dumps({"tree": {"n": "", "c": [{"n": "buckets"}, {"n": "models"}]}}).encode())
+
+    monkeypatch.setattr(W.urllib.request, "urlopen", urlopen)
+    assert W.top_paths("https://x.test/", {"Authorization": "Bearer t"}, "2026-10-16T0801") == ("", "buckets", "models")
+    assert sent == [(
+        "https://x.test/api/subtree?date=2026-10-16T0801&path=&w=1280&h=768&depth=1",
+        {"Authorization": "Bearer t", "User-agent": "gcs-usage-warm/1.0"},
+    )]
+
+
+def test_summary_counts_refusals_apart_from_failures():
+    """A 409 (a view the site refuses, e.g. a diff from before a union store's first scan) is reported as refused, not failed."""
+    res = [("/a", 200, 1.2, "miss"), ("/b", 409, 0.3, ""), ("/c", 409, 0.2, ""), ("/d", 500, 2.0, ""), ("/e", 0, 0.1, "URLError")]
+    assert W.summary(res, "2026-10-16T0716") == "warm-cache: 1/5 warmed for 2026-10-16T0716 in 4s of request time; 2 refused (409); 2 failed"
+    assert W.summary(res[:1], "d") == "warm-cache: 1/1 warmed for d in 1s of request time"

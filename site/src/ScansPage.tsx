@@ -19,7 +19,7 @@ import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome,
 } from './scanRunsModel'
-import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -183,7 +183,7 @@ export function ScansPage() {
         <div className="runs-wrap">
           <table className="runs sr-runs">
             <thead><tr>
-              <th>scan</th><th>status</th><th className="hide-sm">started (local time)</th>
+              <th><Tooltip content="When the scan started, in your time zone; hover for its id.">scan</Tooltip></th><th>status</th>
               <th className="num">duration</th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Bytes of the run's top-level outputs (listing, index, snapshot, …).">wrote</Tooltip></th>
               <th className="num"><Tooltip content="Against the previous scan's same structures. Green grew, red shrank.">Δ prev</Tooltip></th>
@@ -196,10 +196,9 @@ export function ScansPage() {
                 const map = r.status === 'succeeded' ? mapHref(r.scan, store.path, slug) : null
                 return (
                   <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
-                    <td className="nb"><Link to={scanHref(r.run_id)}><code>{r.scan}</code></Link>
+                    <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && r.kind}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
                     <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} /></td>
-                    <td className="nb hide-sm">{fmtRunTime(r.started_ts)}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
                     <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} /></td>
                     <td className="num nb">{bytes(s.out_bytes)}</td>
@@ -300,11 +299,11 @@ function RunList({ runs, links, title, scanHref }: { runs: ScanRun[]; links: Lin
     <h3>{title}</h3>
     <div className="runs-wrap">
       <table className="runs">
-        <thead><tr><th>run</th><th>kind</th><th>Batch status</th><th>started (local time)</th><th className="num">duration</th><th>machine</th><th className="num">cost</th><th>links</th></tr></thead>
+        <thead><tr><th>run</th><th>kind</th><th>Batch status</th><th>started</th><th className="num">duration</th><th>machine</th><th className="num">cost</th><th>links</th></tr></thead>
         <tbody>{runs.map(r => (
           <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
             <td className="nb">{r.parent && r.kind !== 'phase-recovery' ? <code>{r.job_name ?? r.run_id}</code> : <Link to={scanHref(r.run_id)}><code>{r.job_name ?? r.run_id}</code></Link>}</td>
-            <td>{r.kind}</td><td><Status cell run={r} /></td><td className="nb">{fmtRunTime(r.started_ts)}</td>
+            <td>{r.kind}</td><td><Status cell run={r} /></td><td className="nb">{r.started_ts == null ? '—' : <RunWhen ts={r.started_ts} scan={r.job_name ?? r.run_id} />}</td>
             <td className="num nb">{r.started_ts != null && r.finished_ts != null ? fmtDur(r.finished_ts - r.started_ts) : '—'}</td>
             <td className="nb">{r.machine ?? '—'}{r.tasks && r.tasks > 1 ? ` × ${r.tasks}` : ''}{r.spot ? ' (spot)' : ''}</td>
             <td className="num nb">{r.cost_usd == null ? '—' : usd(r.cost_usd)}</td>

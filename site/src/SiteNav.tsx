@@ -1,19 +1,23 @@
-import { Explain } from './Help'
 import {
   FloatingFocusManager,
+  FloatingNode,
   FloatingPortal,
+  FloatingTree,
   autoUpdate,
   flip,
   offset,
+  safePolygon,
   shift,
   useClick,
   useDismiss,
   useFloating,
+  useFloatingNodeId,
+  useHover,
   useInteractions,
   useRole,
 } from '@floating-ui/react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
 import { DEFAULT_STORE, STORES, storeForPath } from './stores'
 import { useStore } from './store'
 import { FaGithub } from 'react-icons/fa'
@@ -33,7 +37,9 @@ import ProfileModal from './ProfileModal'
 import TokenModal from './TokenModal'
 import { UserCard, ghHandle, shortName } from './UserChip'
 import { useUnits } from './units'
+import { Explain } from './Help'
 import { Tooltip } from './Tooltip'
+import { useScrollSpyPref } from './prefs'
 
 /** The deployment's mark (`MARK`, `scripts/marks/`): the favicon, and the header's logo beside the title — a store's own
  *  `mark` instead while its routes are open, as the tab icon does (`marks.ts`). */
@@ -41,8 +47,9 @@ const MARK: string = import.meta.env.VITE_MARK
 
 // The one bar every page wears, pinned to the viewport top: the site nav
 // folded into a ☰ menu (far left), the page's own scope/controls across the
-// middle, and the signed-in identity as an avatar menu (far right — units,
-// token, sign-out live in it). On the home page the middle IS the page scope
+// middle, and the signed-in identity as an avatar menu (far right — the
+// Display submenu, token, sign-out live in it; with no avatar — a public
+// deploy, or signed out — the Display submenu sits in ☰ instead). On the home page the middle IS the page scope
 // (scan, diff window, color axis, owner axis, name filter), so every
 // section below reads against a visible statement of what it's scoped to,
 // and the bar looks the same parked at the top as it does stuck mid-page.
@@ -146,10 +153,14 @@ export interface MenuEntry {
   onClick: () => void
 }
 
-/** A click-toggled floating menu anchored to its trigger button. */
+/** A click-toggled floating menu anchored to its trigger button. A node in a
+ *  `<FloatingTree>`, so a submenu (`DisplayMenu`) counts as inside it: a click
+ *  or focus there doesn't dismiss it. */
 function useMenu(placement: 'bottom-start' | 'bottom-end') {
   const [open, setOpen] = useState(false)
+  const nodeId = useFloatingNodeId()
   const { refs, floatingStyles, context } = useFloating({
+    nodeId,
     open,
     onOpenChange: setOpen,
     placement,
@@ -161,7 +172,7 @@ function useMenu(placement: 'bottom-start' | 'bottom-end') {
     useDismiss(context),
     useRole(context, { role: 'menu' }),
   ])
-  return { open, setOpen, refs, floatingStyles, context, getReferenceProps, getFloatingProps }
+  return { open, setOpen, nodeId, refs, floatingStyles, context, getReferenceProps, getFloatingProps }
 }
 
 /** The open site dialog, portaled to <body>: rendered inside the sticky bar,
@@ -179,8 +190,14 @@ function SiteDialogs() {
   )
 }
 
-function NavMenu({ extra }: { extra?: MenuEntry[] }) {
+function NavMenu(props: { extra?: MenuEntry[] }) {
+  return <FloatingTree><NavMenuInner {...props} /></FloatingTree>
+}
+
+function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
   const { pathname } = useLocation()
+  // No avatar menu (public deploy, signed out): the Display submenu lives here.
+  const noUserMenu = !useIdent()
   const isAdmin = useIsAdmin()
   // Full viewers share with a detailed preview (guest links can't: a token
   // outlives the session that minted it).
@@ -202,6 +219,7 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
       <button type="button" className="tb-menu-btn" ref={m.refs.setReference} {...m.getReferenceProps()} aria-label="Site menu" title="Site menu">
         <MdMenu aria-hidden />
       </button>
+      <FloatingNode id={m.nodeId}>
       {m.open && (
         <FloatingPortal>
           <FloatingFocusManager context={m.context} modal={false}>
@@ -230,6 +248,7 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
                 <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('share') }}>Share…</button>
               )}
               <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('about') }}>About — the data, axes &amp; colors</button>
+              {noUserMenu && <DisplayMenu side="right" />}
               {extra?.map(e => (
                 <button key={e.key} type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); e.onClick() }}>{e.label}</button>
               ))}
@@ -242,6 +261,113 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
           </FloatingFocusManager>
         </FloatingPortal>
       )}
+      </FloatingNode>
+    </>
+  )
+}
+
+/** The "Display ▸" submenu: per-browser display choices — byte units (SI / IEC), the trailing "B", and the
+ *  scroll-spy — in the avatar menu, or in ☰ when there's no avatar. A flyout beside the parent menu (a node of
+ *  its `<FloatingTree>`): hover opens it with a mouse; Enter / Space / → / a tap opens it and focuses its first
+ *  item, ↑ ↓ Home End move, ← / Esc close it back to its trigger. Choosing an item applies at once and leaves
+ *  the menu open. */
+function DisplayMenu({ side }: { side: 'left' | 'right' }) {
+  const { units, suffixB, setUnits, setSuffixB } = useUnits()
+  const [spy, setSpy] = useScrollSpyPref()
+  const [open, setOpen] = useState(false)
+  // Focus the first item on a keyboard / touch open; a hover open leaves focus where it is.
+  const [focusFirst, setFocusFirst] = useState(false)
+  const nodeId = useFloatingNodeId()
+  const other = side === 'left' ? 'right' : 'left'
+  const { refs, floatingStyles, context } = useFloating({
+    nodeId,
+    open,
+    onOpenChange: (o, _e, reason) => { setOpen(o); if (o) setFocusFirst(reason !== 'hover') },
+    placement: `${side}-start`,
+    // Beside the parent menu (padding-aligned with the trigger); where neither side fits (a phone), over the
+    // parent below the trigger.
+    middleware: [
+      offset({ mainAxis: 4, alignmentAxis: -7 }),
+      flip({ fallbackPlacements: [`${other}-start`, 'bottom-end', 'bottom-start', 'top-end'] }),
+      shift({ padding: 8 }),
+    ],
+    whileElementsMounted: autoUpdate,
+  })
+  const { getReferenceProps, getFloatingProps } = useInteractions([
+    useHover(context, { mouseOnly: true, delay: { open: 60 }, handleClose: safePolygon({ blockPointerEvents: true }) }),
+    useClick(context, { ignoreMouse: true }),
+    useDismiss(context),
+    useRole(context, { role: 'menu' }),
+  ])
+  const items = (): HTMLElement[] => Array.from(refs.floating.current?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? [])
+  useEffect(() => {
+    if (open && focusFirst) requestAnimationFrame(() => items()[0]?.focus())
+  }, [open, focusFirst]) // eslint-disable-line react-hooks/exhaustive-deps
+  const back = () => { setOpen(false); (refs.domReference.current as HTMLElement | null)?.focus() }
+  const onTriggerKey = (e: KeyboardEvent) => {
+    if (e.key === (side === 'left' ? 'ArrowLeft' : 'ArrowRight')) { e.preventDefault(); setFocusFirst(true); setOpen(true) }
+  }
+  const onMenuKey = (e: KeyboardEvent) => {
+    const all = items()
+    const i = all.indexOf(document.activeElement as HTMLElement)
+    const go = (j: number) => { e.preventDefault(); all[(j + all.length) % all.length]?.focus() }
+    if (e.key === 'ArrowDown') go(i + 1)
+    else if (e.key === 'ArrowUp') go(i < 0 ? -1 : i - 1)
+    else if (e.key === 'Home') go(0)
+    else if (e.key === 'End') go(-1)
+    else if (e.key === (side === 'left' ? 'ArrowRight' : 'ArrowLeft') || e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); back() }
+  }
+  const unit = (units === 'iec' ? 'Ti' : 'T') + (suffixB ? 'B' : '')
+  // Tips beside the flyout, away from the parent menu; on a phone (no room beside) above the item.
+  const tip = window.innerWidth < 640 ? 'top' : side
+  const check = (on: boolean) => <span className="mi-check" aria-hidden>{on ? '✓' : ''}</span>
+  return (
+    <>
+      <button
+        type="button"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={'mi mi-sub' + (open ? ' open' : '')}
+        ref={refs.setReference}
+        {...getReferenceProps({ onKeyDown: onTriggerKey })}
+      >
+        Display <span className="dim">{unit}</span><span className="mi-caret" aria-hidden>▸</span>
+      </button>
+      <FloatingNode id={nodeId}>
+        {open && (
+          <FloatingPortal>
+            <FloatingFocusManager context={context} modal={false} initialFocus={-1} returnFocus={false}>
+              <div className="menu-pop sub-menu" ref={refs.setFloating} style={floatingStyles} aria-label="Display" {...getFloatingProps({ onKeyDown: onMenuKey })}>
+                <div className="menu-head" role="presentation">Byte units</div>
+                <div role="group" aria-label="Byte units">
+                  <Tooltip placement={tip} content={<>Decimal units, powers of 1000: 1 T = 10¹² bytes, as bills, quotas and most dashboards quote them. The default. Remembered in this browser; a copied link stays plain. (<kbd>i</kbd> toggles.)</>}>
+                    <button type="button" role="menuitemradio" aria-checked={units === 'si'} className="mi" onClick={() => setUnits('si')}>
+                      {check(units === 'si')} SI <span className="dim">T, G, M (1000ⁿ)</span>
+                    </button>
+                  </Tooltip>
+                  <Tooltip placement={tip} content={<>Binary units, powers of 1024: 1 Ti = 2⁴⁰ bytes (≈ 1.1 T). Remembered in this browser, and a copied link carries it (<code>?iec</code>). (<kbd>i</kbd> toggles.)</>}>
+                    <button type="button" role="menuitemradio" aria-checked={units === 'iec'} className="mi" onClick={() => setUnits('iec')}>
+                      {check(units === 'iec')} IEC <span className="dim">Ti, Gi, Mi (1024ⁿ)</span>
+                    </button>
+                  </Tooltip>
+                </div>
+                <Tooltip placement={tip} content={<>Show the trailing “B” on sizes ({units === 'iec' ? '1.2 TiB' : '1.2 TB'}); off (the default), the tighter {units === 'iec' ? '1.2 Ti' : '1.2 T'} fits dense treemap cells better. Remembered in this browser; a copied link carries it (<code>?rb</code>). (<kbd>B</kbd> toggles.)</>}>
+                  <button type="button" role="menuitemcheckbox" aria-checked={suffixB} className="mi" onClick={() => setSuffixB(!suffixB)}>
+                    {check(suffixB)} “B” suffix <span className="dim">{units === 'iec' ? 'TiB' : 'TB'}</span>
+                  </button>
+                </Tooltip>
+                <hr />
+                <Tooltip placement={tip} content="On (the default): as you scroll the map page, the URL's #section names the section in view, so a copied link opens there. Off: the URL keeps the section you last linked or clicked. Remembered in this browser.">
+                  <button type="button" role="menuitemcheckbox" aria-checked={spy === 'on'} className="mi" onClick={() => setSpy(spy === 'on' ? 'off' : 'on')}>
+                    {check(spy === 'on')} Section in URL while scrolling
+                  </button>
+                </Tooltip>
+              </div>
+            </FloatingFocusManager>
+          </FloatingPortal>
+        )}
+      </FloatingNode>
     </>
   )
 }
@@ -260,6 +386,10 @@ function BuildLine() {
 }
 
 function UserMenu() {
+  return <FloatingTree><UserMenuInner /></FloatingTree>
+}
+
+function UserMenuInner() {
   const ident = useIdent()
   const canAssign = useCanAssign()
   const signOut = useSignOut()
@@ -268,7 +398,6 @@ function UserMenu() {
   const myUser = useMyUser(ident?.email, ownersOn)
   const emails = useUserEmails(ownersOn)
   const [appHint, setAppHint] = useState<string | null>(null)
-  const { units, suffixB, toggleUnits, toggleSuffixB } = useUnits()
   const m = useMenu('bottom-end')
   useEffect(() => {
     if (!appHint) return
@@ -306,6 +435,7 @@ function UserMenu() {
           ? <Avatar src={ident.avatar} name={dispName} size={26} />
           : <Avatar github={ghHandle(who)} name={shortName(who)} size={26} />}
       </button>
+      <FloatingNode id={m.nodeId}>
       {m.open && (
         <FloatingPortal>
           <FloatingFocusManager context={m.context} modal={false}>
@@ -314,16 +444,7 @@ function UserMenu() {
                 ? <GuestCard name={dispName} avatar={ident.avatar} email={ident.email} />
                 : <UserCard who={who} avatar={ident.avatar} extra={<SessionLines email={ident.email} user={myUser} emails={emails} />} />}
               <hr />
-              <Explain text="Byte units, site-wide: binary (TiB) ↔ decimal (TB)">
-                <button type="button" role="menuitem" className="mi" onClick={() => toggleUnits()}>
-                  Units: <b>{(units === 'iec' ? 'Ti' : 'T') + (suffixB ? 'B' : '')}</b> → {(units === 'iec' ? 'T' : 'Ti') + (suffixB ? 'B' : '')}
-                </button>
-              </Explain>
-              <Explain text="Show or hide the trailing B (Ti vs TiB), site-wide">
-                <button type="button" role="menuitem" className="mi" onClick={() => toggleSuffixB()}>
-                  Trailing B: <b>{suffixB ? 'On' : 'Off'}</b> <span className="dim">({units === 'iec' ? 'Ti' : 'T'}{suffixB ? 'B' : ''})</span>
-                </button>
-              </Explain>
+              <DisplayMenu side="left" />
               {!guest && (
                 <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('profile') }}>
                   Profile…
@@ -349,6 +470,7 @@ function UserMenu() {
           </FloatingFocusManager>
         </FloatingPortal>
       )}
+      </FloatingNode>
     </>
   )
 }

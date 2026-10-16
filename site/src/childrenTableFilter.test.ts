@@ -16,7 +16,8 @@ vi.mock('./plans', () => ({
 }))
 vi.mock('./perf', () => ({ usePerfCommit: () => {} }))
 vi.mock('./units', () => ({ useUnits: () => ({ fmtBytes: (b: number) => `${b} B` }) }))
-vi.mock('use-prms', () => ({ intParam: () => ({}), useUrlState: () => [20, () => {}] }))
+vi.mock('use-prms', () => ({ intParam: () => ({}), codeParam: () => ({}), useUrlState: () => [20, () => {}] }))
+vi.mock('./largest', () => ({ LARGEST_MAX: 500, LARGEST_STEP: 100, flatRows: () => [], useLargest: () => ({ data: undefined }) }))
 vi.mock('./Tooltip', () => ({ Tooltip: ({ content, children, placement }: { content: ReactNode; children: ReactNode; placement?: string }) => createElement('span', { 'data-tip': typeof content === 'string' ? content : '', 'data-placement': placement }, children) }))
 // A filtered row's controls as a marker naming what it acts on; the selection's action records its deps.
 vi.mock('./MatchActions', async () => {

@@ -110,6 +110,8 @@ class DigestConfig:
     ``plot_base`` unless wrangler names its deployment URL. ``primary`` +
     ``buckets`` (cw template) pick the headline bucket and label/quota each;
     ``prices`` (gcs template) are $/GiB-month by storage-class id.
+    ``op_icon``: the month OP's sender icon (and the cw day line's), a URL or a
+    file under ``icons_base`` (the deployment's mark, e.g. ``mark.png``); unset, 📆.
     ``units`` (cw template): `TiB` (default) or `TB`, every size the digest
     renders (text and plot). ``provisional`` (cw ``sender``): post a day's early scans as one
     provisional reply, edited in place, replaced by the final reply when the
@@ -124,6 +126,7 @@ class DigestConfig:
     discord_webhook_env: str | None = None
     icons_base: str = ""
     icons_dir: str = "job/icons"
+    op_icon: str = ""
     plot_project: str = ""
     plot_branch: str = "main"
     plot_base: str = ""
@@ -147,6 +150,13 @@ class DigestConfig:
         if not v:
             raise SystemExit(f"digest config `{key}` is unset: set it in the deployment's config file (-C)")
         return v
+
+    def op_sender(self) -> dict[str, str]:
+        """The month's OP (and the cw template's day line) sender icon: ``op_icon`` (a URL, or a file under ``icons_base``, e.g.
+        the deployment's mark) as ``icon_url``, else the 📆 emoji."""
+        if not self.op_icon:
+            return {"icon_emoji": ":calendar:"}
+        return {"icon_url": self.op_icon if "://" in self.op_icon else f"{self.need('icons_base')}/{self.op_icon}"}
 
     @property
     def primary_quota(self) -> Quota | None:
@@ -209,7 +219,7 @@ TEMPLATES = ("gcs", "cw")
 _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "template": (str,), "title": (str,), "site_url": (str,), "root": (str,), "state": (str,),
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
-    "icons_dir": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
+    "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
     "units": (str,),
 }
@@ -623,7 +633,7 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         client.edit(op_ts, body)
         _err(f"digest: edited OP {op_ts} ({tpl.n_scans(data)} scans)")
     else:
-        op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", icon_emoji=":calendar:").id
+        op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
 
@@ -763,7 +773,7 @@ def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, h
         hook.edit(op_id, body, files=[plot])
         _err(f"digest: edited OP {op_id} ({tpl.n_scans(data)} scans)")
     else:
-        op_id = hook.post(body, username=title, icon_url=f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", files=[plot]).id
+        op_id = hook.post(body, username=title, icon_url=tpl.cfg.op_sender().get("icon_url") or f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", files=[plot]).id
         state["op_id"] = op_id
         state["thread_id"] = bot.create_thread(op_id, title)
         save(state)

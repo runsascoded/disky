@@ -17,7 +17,6 @@ import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
-import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, pathCopy, pathDisplay, pathText, toUrlPath, toUrlSegs } from './pathCrumbs'
@@ -25,6 +24,8 @@ import { listsObjects, openHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useHashSpy } from './hashSpy'
+import { useScrollSpyPref } from './prefs'
+import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
@@ -634,7 +635,8 @@ function AppContent() {
   // Section `#hash` both ways (deep link in, scroll-spy out) and the scroll
   // position across navigation. A pending deep link is re-armed as the map,
   // meta and scans land (sections mount off different queries).
-  useHashSpy({ ids: SECTION_IDS, location, navType, deps: [mapTree, meta, scans], legacy: LEGACY_ANCHORS, offset: topbarH })
+  const [spy] = useScrollSpyPref()
+  useHashSpy({ ids: SECTION_IDS, location, navType, deps: [mapTree, meta, scans], legacy: LEGACY_ANCHORS, offset: topbarH, spy: spy === 'on' })
   const [lens, setLens] = useState(false)  // treemap storage-class lens (hatch by cold fraction)
   const { fmtBytes } = useUnits()
   // The treemap's drill path now lives in the URL *path* (below the store's own
@@ -1365,33 +1367,22 @@ function AppContent() {
               />
             </Suspense>
           )}
-          {/* The map's own listing — this node's children. */}
+          {/* The map's own listing — this node's children, or (`?tm=`) the largest files / folders anywhere below it:
+              the whole directory's, so not under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
           {mapPath && (
             <div id="tbl"><ChildrenTable
               node={mapPath[mapPath.length - 1]}
               segs={tblSegs}
               scheme={store.scheme}
               home={store.home}
+              scan={asof}
+              flatOk={objects && !scopeQs}
               onOpen={openPath}
               onOpenObject={openObject}
               filter={tblFilter}
               rowMatches={tblRowMatches}
               brush={brush}
               onBrush={setBrush}
-            /></div>
-          )}
-          {/* …and its flat twin: the largest files anywhere below it. The whole directory's, so not
-              shown under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
-          {mapPath && objects && (
-            <div id="ltbl"><LargestFiles
-              segs={tblSegs}
-              scheme={store.scheme}
-              home={store.home}
-              scan={asof}
-              total={mapPath[mapPath.length - 1].b}
-              enabled={!scopeQs}
-              onOpen={openPath}
-              onOpenObject={openObject}
             /></div>
           )}
         </>
@@ -1449,7 +1440,7 @@ function AppContent() {
       )}
       {asof && diffPrev && (
         <section id="diff">
-          <h2>Diff{diff && (
+          <h2><SectionAnchor id="diff">Diff</SectionAnchor>{diff && (
             <Tooltip content={<>
               <b>{scopeDesc}</b> at each scan — the same scope as the map above (drill, lens, name filter), so in a lens
               a subtree that left the slice (e.g. got assigned to someone else) shows as shrunk even if its bytes didn’t move.
@@ -1475,43 +1466,49 @@ function AppContent() {
                     fallback={<ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />} />
                 : <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />}
             </Explain>
-            <Explain text={startPinned
-              ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>
-              : <>Start tracks a <b>duration</b> back from the end (the buttons). Click to pin it to this scan.</>}>
-              <button type="button" role="switch" aria-checked={startPinned} className={'d-mode' + (startPinned ? ' on' : '')}
-                onClick={() => startPinned
-                  ? setSpan(asof && diffPrev ? spanTo(asof, diffPrev) : undefined)
-                  : setFrom(diffPrev ?? undefined)}>
-                {startPinned ? 'pinned' : 'duration'}
-              </button>
-            </Explain>
             <span className="arrow"> → </span>
             {union && asof
               ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Diff to scan (the page's scan)" compact
                   fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
               : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
-            {endIsLatest && (
-              <Explain text={endPinned
-                ? <>End is <b>pinned</b> to this scan. Click to follow the latest scan as new ones arrive.</>
-                : <>End follows the <b>latest</b> scan. Click to pin it to this one.</>}>
-                <button type="button" role="switch" aria-checked={endPinned} className={'d-mode' + (endPinned ? ' on' : '')}
-                  onClick={() => setEndPin(!endPinned)}>
-                  {endPinned ? 'pinned' : 'latest'}
-                </button>
-              </Explain>
-            )}
-            {!startPinned && spanPicks.length > 0 && (
-              <span className="gran spans" role="radiogroup" aria-label="Diff span (back from the after scan)">
-                {spanPicks.map(({ label, ms, scan }) => (
-                  <Explain key={label} text={<>Diff over the last {label}: {fmtS(scan)} → {fmtS(asof)}</>}>
-                    <button role="radio" aria-checked={diffPrev === scan} className={diffPrev === scan ? 'on' : ''}
-                      onClick={() => setSpan(scan === prevScan ? undefined : ms)}>
-                      {label}
-                    </button>
-                  </Explain>
-                ))}
+            <span className="d-modes">
+              <span className="gran d-mode" role="radiogroup" aria-label="Diff start">
+                <span className="d-mode-lbl">start</span>
+                <Explain text={<>Start tracks a <b>duration</b> back from the end (the buttons beside it): the window keeps its length as new scans arrive.</>}>
+                  <button type="button" role="radio" aria-checked={!startPinned} className={startPinned ? '' : 'on'}
+                    onClick={() => startPinned && setSpan(asof && diffPrev ? spanTo(asof, diffPrev) : undefined)}>duration</button>
+                </Explain>
+                <Explain text={<>Start is <b>pinned</b> to the scan picked on the left: the window's near end stays put as new scans arrive.</>}>
+                  <button type="button" role="radio" aria-checked={startPinned} className={startPinned ? 'on' : ''}
+                    onClick={() => !startPinned && setFrom(diffPrev ?? undefined)}>pinned</button>
+                </Explain>
               </span>
-            )}
+              {!startPinned && spanPicks.length > 0 && (
+                <span className="gran spans" role="radiogroup" aria-label="Diff span (back from the after scan)">
+                  {spanPicks.map(({ label, ms, scan }) => (
+                    <Explain key={label} text={<>Diff over the last {label}: {fmtS(scan)} → {fmtS(asof)}</>}>
+                      <button role="radio" aria-checked={diffPrev === scan} className={diffPrev === scan ? 'on' : ''}
+                        onClick={() => setSpan(scan === prevScan ? undefined : ms)}>
+                        {label}
+                      </button>
+                    </Explain>
+                  ))}
+                </span>
+              )}
+              {endIsLatest && (
+                <span className="gran d-mode" role="radiogroup" aria-label="Diff end">
+                  <span className="d-mode-lbl">end</span>
+                  <Explain text={<>End follows the <b>latest</b> scan as new ones arrive.</>}>
+                    <button type="button" role="radio" aria-checked={!endPinned} className={endPinned ? '' : 'on'}
+                      onClick={() => endPinned && setEndPin(false)}>latest</button>
+                  </Explain>
+                  <Explain text={<>End is <b>pinned</b> to the scan picked on the right.</>}>
+                    <button type="button" role="radio" aria-checked={endPinned} className={endPinned ? 'on' : ''}
+                      onClick={() => !endPinned && setEndPin(true)}>pinned</button>
+                  </Explain>
+                </span>
+              )}
+            </span>
             {diffHead ? (
               <>
                 {diffStale && <span className="loading"> · aligning the rows…</span>}
@@ -1577,7 +1574,7 @@ function AppContent() {
       <section id="mtime">
         {/* Granularity is auto-picked (and user-switchable) inside AgeChart, so
             the heading stays unit-free rather than lying about "month". */}
-        <h2>Bytes by {time.noun} date{' '}
+        <h2><SectionAnchor id="mtime">Bytes by {time.noun} date</SectionAnchor>{' '}
           <Tooltip content={<>
             The object’s <b>{time.description}</b> from the listing.
             {store.objectsNote}{readRange ? <>{' '}The other time axis is <b>last observed read</b> (from the usage logs, since {epochDaysToDate(readRange.min)}) —

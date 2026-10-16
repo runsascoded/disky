@@ -111,9 +111,13 @@ STORE_L2_SHAPE = (
      "sum_storage_class_id_2", "sum_storage_class_id_3", "sum_storage_class_id_4"],
     {},
 )
+# The storage classes the dir rollups sum explicitly (`c<id>`); class 1 is the rest. GCS's nearline / coldline /
+# archive (2–4), hf's private (5) and unbilled git (6): `meta.json` `class_bytes` keeps each apart.
+CLASS_IDS = (2, 3, 4, 5, 6)
 # The per-dir rollup cache's columns (`dir-stats.parquet`): a cache written
-# before the store (no `mtime_max` / `created_max`) is rebuilt, not read.
-DIR_STATS_COLS = ("bucket", "dir", "fp", "b", "o", "wts", "wb", "c2", "c3", "c4", "mtime_max", "created_max")
+# before the store (no `mtime_max` / `created_max`), or before a class joined
+# CLASS_IDS, is rebuilt, not read.
+DIR_STATS_COLS = ("bucket", "dir", "fp", "b", "o", "wts", "wb", *(f"c{c}" for c in CLASS_IDS), "mtime_max", "created_max")
 
 
 def _write_store(
@@ -359,9 +363,7 @@ def write_path_index(
               -- is plenty for a byte-weighted mean written day.
               sum(CASE WHEN created IS NOT NULL THEN size_bytes::DECIMAL(38,0) * epoch(created)::BIGINT END)::DECIMAL(38,0) AS wts,
               sum(CASE WHEN created IS NOT NULL THEN size_bytes END)::BIGINT AS wb,
-              sum(CASE WHEN storage_class_id = 2 THEN size_bytes END)::BIGINT AS c2,
-              sum(CASE WHEN storage_class_id = 3 THEN size_bytes END)::BIGINT AS c3,
-              sum(CASE WHEN storage_class_id = 4 THEN size_bytes END)::BIGINT AS c4,
+              {", ".join(f"sum(CASE WHEN storage_class_id = {c} THEN size_bytes END)::BIGINT AS c{c}" for c in CLASS_IDS)},
               {age_sums}
               -- the store's two native stamps (path-store.md §1.1), max over the
               -- dir's own objects: `mtime` = `updated` where the platform has it
@@ -598,11 +600,10 @@ def write_path_index(
 
     # Storage-class mix from the dir rollups (class 1/STANDARD = total minus
     # the explicitly-tracked classes — same derivation the per-user mix uses).
-    s_b, s_c2, s_c3, s_c4 = con.execute(
-        "SELECT coalesce(sum(b), 0)::BIGINT, coalesce(sum(c2), 0)::BIGINT,"
-        " coalesce(sum(c3), 0)::BIGINT, coalesce(sum(c4), 0)::BIGINT FROM dir_stats"
+    s_b, *s_cs = con.execute(
+        f"SELECT coalesce(sum(b), 0)::BIGINT, {', '.join(f'coalesce(sum(c{c}), 0)::BIGINT' for c in CLASS_IDS)} FROM dir_stats"
     ).fetchone()
-    classes = [(cid, cb) for cid, cb in ((1, int(s_b) - int(s_c2) - int(s_c3) - int(s_c4)), (2, int(s_c2)), (3, int(s_c3)), (4, int(s_c4))) if cb]
+    classes = [(cid, cb) for cid, cb in ((1, int(s_b) - sum(map(int, s_cs))), *zip(CLASS_IDS, map(int, s_cs))) if cb]
 
     meta = {
         "asof": asof,

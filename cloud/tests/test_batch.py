@@ -96,3 +96,22 @@ def test_unset_job_config_is_an_error_naming_it(monkeypatch):
             listing_job_spec("2026-07-30", ["b1"])
         assert str(e.value) == f"{var} is unset: export {what}"
         monkeypatch.setenv(var, "x")
+
+
+def test_live_labelled():
+    from dt_cloud.batch import live_labelled
+
+    def job(name: str, state: str, **labels: str) -> dict:
+        return {"name": f"projects/p/locations/r/jobs/{name}", "status": {"state": state}, "labels": labels}
+
+    jobs = [
+        job("a", "SCHEDULED", **{"nf-session": "s1", "deployment": "cw-s3"}),
+        job("b", "RUNNING", **{"nf-session": "s1"}),
+        job("c", "SUCCEEDED", **{"nf-session": "s1"}),
+        job("d", "DELETION_IN_PROGRESS", **{"nf-session": "s1"}),
+        job("e", "QUEUED", **{"nf-session": "s2"}),
+        job("f", "QUEUED"),
+    ]
+    assert live_labelled(jobs, {"nf-session": "s1"}) == ["a", "b"]
+    assert live_labelled(jobs, {"nf-session": "s1", "deployment": "cw-s3"}) == ["a"]
+    assert live_labelled(jobs, {"nf-session": "s3"}) == []
