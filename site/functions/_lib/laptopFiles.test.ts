@@ -19,13 +19,13 @@ const ident = (via: Identity['via'], admin: boolean, scopes: string[] = ['laptop
   ({ email: via === 'session' ? 'me@example.org' : null, name: null, scopes: admin ? [...scopes, 'admin'] : scopes, admin, via, subject: null })
 const ADMIN = ident('session', true)
 
-interface Sent { url: string; method: string; headers: Record<string, string> }
+interface Sent { url: string; method: string; headers: Record<string, string>; cache?: string }
 
 /** A stub tunnel: records what reached it, answers `respond`. */
 function tunnel(respond: (s: Sent) => Response | Promise<Response>) {
   const sent: Sent[] = []
   const fetch = (async (url: string, init: RequestInit) => {
-    const s = { url, method: init.method ?? 'GET', headers: { ...(init.headers as Record<string, string>) } }
+    const s = { url, method: init.method ?? 'GET', headers: { ...(init.headers as Record<string, string>) }, cache: init.cache }
     sent.push(s)
     return respond(s)
   }) as unknown as typeof globalThis.fetch
@@ -98,6 +98,9 @@ describe('/v1/laptop-files/get — who', () => {
         url: `${TUNNEL}/files/Users/ryan/Downloads/a%20b%2Bc.pdf`,
         method: 'GET',
         headers: { 'CF-Access-Client-Id': 'cid.access', 'CF-Access-Client-Secret': 'csecret', range: `bytes=0-${DEFAULT_MAX_BYTES - 1}` },
+        // Past Cloudflare's cache: on a miss for a cacheable extension (`.pdf`, `.mp4`) it drops
+        // `Range` and fetches the whole object, so the first range read of a file came back a 200.
+        cache: 'no-store',
       }],
     })
     expect(r.audits).toEqual([{ status: 200, bytes: 14, range: undefined }])
