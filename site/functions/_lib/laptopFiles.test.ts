@@ -35,12 +35,20 @@ function tunnel(respond: (s: Sent) => Response | Promise<Response>) {
 const file = (body: string, headers: Record<string, string> = {}, status = 200) =>
   new Response(body, { status, headers: { 'content-type': 'application/pdf', 'content-length': String(body.length), 'accept-ranges': 'bytes', ...headers } })
 
+/** dt-serve's answer for `body`: a 206 for a single `bytes=a-b` range, else the whole file. */
+const served = (body: string, type = 'application/pdf') => (s: Sent) => {
+  const m = s.headers.range?.match(/^bytes=(\d+)-(\d+)$/)
+  if (!m) return file(body, { 'content-type': type })
+  const [a, b] = [Number(m[1]), Math.min(Number(m[2]), body.length - 1)]
+  return new Response(body.slice(a, b + 1), { status: 206, headers: { 'content-type': type, 'content-length': String(b - a + 1), 'content-range': `bytes ${a}-${b}/${body.length}`, 'accept-ranges': 'bytes' } })
+}
+
 async function call(path: string | null, opts: { id?: Identity; env?: Env; method?: string; range?: string; recent?: number; respond?: (s: Sent) => Response | Promise<Response>; inline?: boolean } = {}) {
   const q = new URLSearchParams()
   if (path != null) q.set('path', path)
   if (opts.inline) q.set('inline', '1')
   const req = new Request(`${ORIGIN}/v1/laptop-files/get?${q}`, { method: opts.method ?? 'GET', headers: opts.range ? { range: opts.range } : {} })
-  const t = tunnel(opts.respond ?? (() => file('%PDF-1.7 hello')))
+  const t = tunnel(opts.respond ?? served('%PDF-1.7 hello'))
   const audits: Audit[] = []
   const res = await serveLaptopFile(req, opts.env ?? ENV, opts.id ?? ADMIN, {
     fetch: t.fetch,
@@ -98,8 +106,7 @@ describe('/v1/laptop-files/get — who', () => {
         url: `${TUNNEL}/files/Users/ryan/Downloads/a%20b%2Bc.pdf`,
         method: 'GET',
         headers: { 'CF-Access-Client-Id': 'cid.access', 'CF-Access-Client-Secret': 'csecret', range: `bytes=0-${DEFAULT_MAX_BYTES - 1}` },
-        // Past Cloudflare's cache: on a miss for a cacheable extension (`.pdf`, `.mp4`) it drops
-        // `Range` and fetches the whole object, so the first range read of a file came back a 200.
+        // Someone's file never lands in the Worker's subrequest cache.
         cache: 'no-store',
       }],
     })
@@ -198,6 +205,28 @@ describe('/v1/laptop-files/get — how much', () => {
       [413, { error: 'too large to open whole; media can still stream', bytes: 9, cap: 8 }, undefined, undefined, 'bytes=0-7', [{ status: 413, bytes: 0, reason: 'cap' }]],
     ])
   })
+  it('a ranged request answered whole (Cloudflare’s cache drops `Range` on a URL’s first miss) is cancelled and retried once; a second whole answer is a 502, never the wrong bytes', async () => {
+    const env = { ...ENV, LAPTOP_FILES_MAX_BYTES: '8' }
+    const body = '0123456789'
+    // The tunnel's first answer per URL ignores `Range`; later ones honor it.
+    const learning = () => {
+      let seen = 0
+      return (s: Sent) => {
+        const m = s.headers.range?.match(/^bytes=(\d+)-(\d+)$/)
+        if (seen++ === 0 || !m) return new Response(body, { headers: { 'content-type': 'video/mp4' } })
+        const [a, b] = [Number(m[1]), Math.min(Number(m[2]), body.length - 1)]
+        return new Response(body.slice(a, b + 1), { status: 206, headers: { 'content-type': 'video/mp4', 'content-length': String(b - a + 1), 'content-range': `bytes ${a}-${b}/${body.length}` } })
+      }
+    }
+    const part = await call('Users/a.mp4', { env, range: 'bytes=2-4', respond: learning() })
+    const whole = await call('Users/a.mp4', { env, respond: learning() })
+    const stubborn = await call('Users/a.mp4', { env, range: 'bytes=2-4', respond: () => new Response(body) })
+    expect([part, whole, stubborn].map(r => [r.status, r.body, r.headers['content-range'], r.sent.map(s => s.headers.range), r.audits])).toEqual([
+      [206, '234', 'bytes 2-4/10', ['bytes=2-4', 'bytes=2-4'], [{ status: 206, bytes: 3, range: 'bytes 2-4/10' }]],
+      [413, { error: 'too large to open whole; media can still stream', bytes: 10, cap: 8 }, undefined, ['bytes=0-7', 'bytes=0-7'], [{ status: 413, bytes: 0, reason: 'cap' }]],
+      [502, { error: 'the file tunnel ignored the byte range' }, undefined, ['bytes=2-4', 'bytes=2-4'], [{ status: 502, reason: 'range ignored' }]],
+    ])
+  })
   it('the per-session rate limit: at LAPTOP_FILES_PER_MIN recent reads, a 429 without touching the laptop', async () => {
     const r = await call('Users/a.pdf', { env: { ...ENV, LAPTOP_FILES_PER_MIN: '5' }, recent: 5 })
     expect([r.status, r.sent.length, r.audits]).toEqual([429, 0, [{ status: 429, reason: 'rate' }]])
@@ -214,7 +243,7 @@ describe('/v1/laptop-files/get — the upstream fetch', () => {
     const res = await serveLaptopFile(req, ENV, ADMIN, {
       fetch: function (this: unknown) {
         if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation')
-        return Promise.resolve(file('%PDF'))
+        return Promise.resolve(new Response('%PDF', { status: 206, headers: { 'content-length': '4', 'content-range': 'bytes 0-3/4' } }))
       } as unknown as typeof fetch,
       audit: null,
       recent: async () => 0,
