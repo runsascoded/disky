@@ -43,7 +43,7 @@ Requested by Ryan on 2026-10-16 (app session), with the M1 MacBook as the test p
    - Needs a prod D1 migration + a deploy (Ryan's go); m3 pings when it's on dev.
    - Site side built (m3 `51dedfbc`, 7 route tests, a real presigned PUT on a local stack). App side built against it, tested on a fake site, not yet against dev:
      - `dt-capture` `Target::Device` (`device.rs`): one sign + PUT per file in write order, so `_SUCCESS.json` goes last; retries; a 401 reads "disconnected".
-     - App `connect.rs` + Settings → "Upload to the site". Enrollment runs as a same-origin `fetch` in the signed-in site window and answers through an in-window `disky://connected` with a per-attempt nonce. Also: status (`seen_at`, `last_ingest`), Open, Disconnect.
+     - App `connect.rs` + Settings → "Upload to the site". For enrollment, the app sends `POST /api/hosts` itself, with the webview's session cookie (`cookies_for_url`) and the site's `Origin`, so the token never passes through page script or a URL (m3's review). Also: status (`seen_at`, `last_ingest`), Open, Disconnect.
      - The scan job: an explicit `jobs.scan.to` wins (m3 unchanged). Otherwise a connected Mac uploads, and an unconfigured scan job no longer indexes locally.
 4. **Drainer in the app** (app; site: a device-token runs API replacing the D1-token poll).
 5. **Pushover in the app** (app: Settings field, Keychain, direct API call; `notify` command stays as an escape hatch).

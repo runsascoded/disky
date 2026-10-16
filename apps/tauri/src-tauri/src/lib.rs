@@ -94,11 +94,6 @@ fn show_window(app: &AppHandle, url: Option<tauri::Url>) {
                 if url.scheme() != "disky" {
                     return true;
                 }
-                // The enrollment script's answer (`connect.rs`): in-window only.
-                if url.host_str() == Some("connected") {
-                    connect_callback(&app, url);
-                    return false;
-                }
                 let (app2, url) = (app.clone(), url.clone());
                 let _ = app.run_on_main_thread(move || open_deep_link(&app2, &url));
                 false
@@ -311,20 +306,9 @@ struct UiState {
     connect_msg: String,
 }
 
-/// A connection in progress (the nonce its callback must carry, and the site),
-/// and the last outcome for the Settings window.
+/// The last connection attempt's outcome, for the Settings window.
 #[derive(Default)]
-struct Connecting {
-    pending: std::sync::Mutex<Option<(String, String)>>,
-    msg: std::sync::Mutex<String>,
-}
-
-fn nonce() -> String {
-    use std::io::Read;
-    let mut b = [0u8; 16];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).expect("/dev/urandom");
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
+struct Connecting(std::sync::Mutex<String>);
 
 /// The site a connection goes to: the window's site when it's a hosted one.
 fn connect_site() -> Option<String> {
@@ -332,42 +316,26 @@ fn connect_site() -> Option<String> {
     (u.scheme() == "https").then(|| u.origin().ascii_serialization())
 }
 
-/// Settings → Connect: run the enrollment in the (signed-in) site window.
+/// Settings → Connect: enroll with the site as the admin signed in to the site window.
 #[tauri::command]
-fn connect_start(app: AppHandle, host: String) -> Result<UiState, String> {
-    let label = computer_name();
+async fn connect_start(app: AppHandle, host: String) -> Result<UiState, String> {
     let site = connect_site().ok_or("switch Site to disk.rbw.sh (or dev) first: the local site has nothing to connect to")?;
     let host = connect::host_slug(&host);
-    let w = app.get_webview_window("main");
-    let on_site = w.as_ref().and_then(|w| w.url().ok()).is_some_and(|u| u.origin().ascii_serialization() == site);
-    let (Some(w), true) = (w, on_site) else {
-        show_window(&app, None);
-        return Err(format!("opened {site}: sign in there as an admin, then click Connect again"));
-    };
-    let n = nonce();
-    let st = app.state::<Connecting>();
-    *st.pending.lock().unwrap() = Some((n.clone(), site.clone()));
-    *st.msg.lock().unwrap() = format!("Connecting to {site} as {host}…");
-    w.eval(connect::enroll_script(&n, &connect::enroll_body(&host, &label))).map_err(|e| e.to_string())?;
-    Ok(ui_state(&app))
-}
-
-fn connect_callback(app: &AppHandle, url: &tauri::Url) {
-    let st = app.state::<Connecting>();
-    let pending = st.pending.lock().unwrap().take();
-    let msg = match connect::parse_callback(url, pending.as_ref().map(|(n, _)| n.as_str())) {
-        Err(e) => return jobs::note(&format!("disky: {e}")),
-        Ok(connect::Enrolled::Failed(e)) => format!("Not connected: {e}"),
-        Ok(connect::Enrolled::Ok { id, store, token }) => {
-            let site = pending.map(|(_, s)| s).unwrap_or_default();
-            match connect::save(&site, id.clone(), store, &token) {
-                Ok(()) => format!("Connected to {site} as {id}. The next scan uploads there."),
-                Err(e) => format!("Enrolled, but couldn't save the token: {e}"),
-            }
-        }
+    // Every window shares WebKit's one cookie store: the Settings window's
+    // own webview reads the site window's session.
+    let w = app.webview_windows().into_values().next().ok_or("no window to read the site's session from")?;
+    let cookies = w.cookies_for_url(site.parse().map_err(|e| format!("{e}"))?).map_err(|e| e.to_string())?;
+    let cookie = cookies.iter().map(|c| format!("{}={}", c.name(), c.value())).collect::<Vec<_>>().join("; ");
+    let body = connect::enroll_body(&host, &computer_name());
+    let msg = match connect::enroll(&site, &cookie, &body).and_then(|(id, store, token)| {
+        connect::save(&site, id.clone(), store, &token).map(|()| id)
+    }) {
+        Ok(id) => format!("Connected to {site} as {id}. The next scan uploads there."),
+        Err(e) => format!("Not connected: {e}"),
     };
     jobs::note(&format!("disky: {msg}"));
-    *st.msg.lock().unwrap() = msg;
+    *app.state::<Connecting>().0.lock().unwrap() = msg;
+    Ok(ui_state(&app))
 }
 
 /// The site's view of this Mac (`GET /api/hosts/<id>`), for the Settings window.
@@ -387,7 +355,7 @@ fn open_store(app: AppHandle) {
 #[tauri::command]
 async fn disconnect_mac(app: AppHandle) -> Result<UiState, String> {
     let r = connect::disconnect()?;
-    *app.state::<Connecting>().msg.lock().unwrap() = format!("Disconnected ({r}).");
+    *app.state::<Connecting>().0.lock().unwrap() = format!("Disconnected ({r}).");
     Ok(ui_state(&app))
 }
 
@@ -430,7 +398,7 @@ fn ui_state(app: &AppHandle) -> UiState {
         connect: s.connect.clone(),
         connect_site: connect_site(),
         connect_host: connect::host_slug(&computer_name()),
-        connect_msg: app.try_state::<Connecting>().map(|c| c.msg.lock().unwrap().clone()).unwrap_or_default(),
+        connect_msg: app.try_state::<Connecting>().map(|c| c.0.lock().unwrap().clone()).unwrap_or_default(),
         site_url: s.site_url(),
         settings: s,
         fda: agent::has_full_disk_access(),
