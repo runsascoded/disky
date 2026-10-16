@@ -647,7 +647,7 @@ function AppContent() {
   const urlPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
   const drillPath = fromUrlPath(urlPath, store.home).join('/')
   const urlOf = (segs: string[]) => toUrlPath(segs, store.home)
-  const canonUrlPath = urlOf(drillPath.split('/').filter(Boolean))
+  const canonUrlPath = urlOf(drillPath ? drillPath.split('/').filter(Boolean) : store.root ?? [])
   useEffect(() => {
     if (urlPath.replace(/\/+$/, '') !== canonUrlPath) navigate({ pathname: `${storeBase}/${canonUrlPath}`, search, hash: window.location.hash }, { replace: true })
   }, [urlPath, canonUrlPath]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1138,16 +1138,18 @@ function AppContent() {
   // The deepest crumb is a tap-to-open path card (the full `<scheme>…/` prefix +
   // copy) rather than another drill link — it's where the page already is.
   // A store home (`Users/ryan`) folds to one `~` crumb.
+  // Where the store's own root is (`Store.root`), when this path is under it: crumbs above it would only bounce back.
+  const storeRoot = store.root && store.root.every((r, i) => segs[i] === r) ? store.root : []
   const crumbFullPath = pathText(pathScheme, segs, store.home, true)
   const crumbCopy = pathCopy(pathScheme, segs, true)
   const disp = pathDisplay(pathScheme, segs, store.home)
   const crumbItems: { label: string; segs: string[] }[] = [
     ...(disp.lead === '~' ? [{ label: '~', segs: segs.slice(0, disp.leadSegs) }] : []),
     ...disp.rest.map((sg, i) => ({ label: sg, segs: segs.slice(0, disp.leadSegs + i + 1) })),
-  ]
+  ].filter(c => c.segs.length > storeRoot.length)  // the store root is the root crumb
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
-      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={!segs.length} onClick={() => drillTo([])} />
+      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={segs.length <= storeRoot.length} onClick={() => drillTo(storeRoot)} />
       {crumbItems.map((c, i) => (
         <span key={i}>
           <span className="sep">/</span>
