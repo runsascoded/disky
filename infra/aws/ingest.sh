@@ -44,28 +44,43 @@ else
   echo "[ingest] invalid capture stamp: expected %Y-%m-%dT%H-%M-%SZ" >&2
   exit 2
 fi
-# The store comes from the capture's host: `PRIMARY_HOST` (the job env) is the deployment's
-# primary store, `snapshots/$STORE/` (default `laptop`) and D1 `primary`; `HOST_STORES`
-# (`host=store,…`) names the secondary stores (`STORES_JSON` keys on the site), which publish
-# under `snapshots/<store>/` and sync D1 as that store. Any other host is refused before
-# anything is recorded or published (specs/device-enrollment.md): a new Mac's capture must
-# never land in the primary's scans.
+# The store comes from the capture's host, as D1 `hosts` registers it (specs/hosts-registry.md;
+# `dt-cloud hosts resolve`): `primary` is the deployment's own store, `snapshots/$STORE/`
+# (default `laptop`) and D1 `primary`; any other store publishes under `snapshots/<store>/`
+# and syncs D1 as that store. An unknown or disconnected host is refused before anything is
+# recorded or published (specs/device-enrollment.md): a new Mac's capture must never land in
+# the primary's scans. A D1 without the table falls back to `PRIMARY_HOST` (the primary's
+# host) and `HOST_STORES` (`host=store,…`).
+app=${INGEST_APP_ROOT:-/app}
 host=${key#captures/}; host=${host%%/*}
 store=''
 d1_store=''
-if [[ -n ${PRIMARY_HOST:-} && $host == "$PRIMARY_HOST" ]]; then
-  store=${STORE:-laptop}
-  d1_store=primary
-fi
-for pair in ${HOST_STORES//,/ }; do
-  if [[ ${pair%%=*} == "$host" ]]; then store=${pair#*=}; d1_store=$store; fi
-done
-if [[ -z $store ]]; then
-  echo "[ingest] unknown capture host '$host': neither PRIMARY_HOST (${PRIMARY_HOST:-unset}) nor in HOST_STORES (${HOST_STORES:-}); publishing nothing" >&2
-  exit 3
-fi
+rc=0
+resolved=$(cd "$app/cloud" && "$app/.venv/bin/dt-cloud" hosts resolve "$host" 2>&1) || rc=$?
+case $rc in
+  0)
+    if [[ $resolved == primary ]]; then store=${STORE:-laptop}; d1_store=primary
+    else store=$resolved; d1_store=$resolved; fi ;;
+  3)
+    echo "[ingest] unknown capture host '$host' (${resolved#hosts: }); publishing nothing" >&2
+    exit 3 ;;
+  4)
+    if [[ -n ${PRIMARY_HOST:-} && $host == "$PRIMARY_HOST" ]]; then
+      store=${STORE:-laptop}
+      d1_store=primary
+    fi
+    for pair in ${HOST_STORES//,/ }; do
+      if [[ ${pair%%=*} == "$host" ]]; then store=${pair#*=}; d1_store=$store; fi
+    done
+    if [[ -z $store ]]; then
+      echo "[ingest] unknown capture host '$host': no D1 hosts table, neither PRIMARY_HOST (${PRIMARY_HOST:-unset}) nor in HOST_STORES (${HOST_STORES:-}); publishing nothing" >&2
+      exit 3
+    fi ;;
+  *)
+    echo "[ingest] hosts lookup failed (exit $rc): $resolved" >&2
+    exit 1 ;;
+esac
 work=${WORK:-/work}
-app=${INGEST_APP_ROOT:-/app}
 time_bin=${INGEST_TIME:-/usr/bin/time}
 s3() { aws s3 "$@" --endpoint-url "$R2_ENDPOINT_URL" --only-show-errors; }
 # The CPUs this task may use: the cgroup's quota (v2 `cpu.max`, v1 `cpu.cfs_quota_us`), rounded up. Fargate's

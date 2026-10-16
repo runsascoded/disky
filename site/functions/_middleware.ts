@@ -7,6 +7,8 @@
 import { withBuild } from './_lib/build.js'
 import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
+import { hostsScript, loadHosts, pageHosts } from './_lib/hosts.js'
+import type { Env } from './_lib/auth.js'
 import { coloPutsSettled } from './_lib/index.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
 
@@ -32,12 +34,15 @@ type MiddlewareCtx = { request: Request; env: OgEnv; next: () => Promise<Respons
 export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => withBuild(await serve(ctx))
 
 async function serve(ctx: MiddlewareCtx): Promise<Response> {
+  // The capture hosts' stores (D1 `hosts`, cached per isolate): every store lookup below reads them. A failed read
+  // leaves the build's stores serving; a host store then 404s until the next read succeeds.
+  await loadHosts(ctx.env as Env).catch(e => console.log(`hosts: ${(e as Error).message}`))
   const blocked = await restrictGate(ctx.request, ctx.env as never)
   if (blocked) return blocked
   const url = new URL(ctx.request.url)
   if (ctx.request.method === 'GET') {
     const anonymous = await anonymousPage(ctx.env, url)
-    if (anonymous) return anonymous
+    if (anonymous) return withHosts(ctx, anonymous)
   }
   const res = await ctx.next()
   // The reader puts decoded row groups in the colo without waiting (`putColoGroup`); a Worker drops work still in
@@ -46,11 +51,24 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   ctx.waitUntil?.(Promise.all([coloPutsSettled(), footerCacheDrain()]).then(() => undefined))
   if (url.pathname.startsWith('/assets/')) return isHtml(res) ? assetMiss() : res
   if (ctx.request.method !== 'GET' || !isHtml(res)) return res
+  let page = res
   try {
-    return await stampPage(ctx.env, url, res)
+    page = await stampPage(ctx.env, url, res)
   } catch (e) {
     // An unfurl detail must never break the page.
     console.log(`og stamp failed: ${(e as Error).message}`)
-    return res
   }
+  return withHosts(ctx, page)
+}
+
+/** A member's page carries the capture hosts' stores (`pageHosts`), as a script in its `<head>`. */
+async function withHosts(ctx: { request: Request; env: unknown }, page: Response): Promise<Response> {
+  const hosts = await pageHosts({ request: ctx.request, env: ctx.env as Env })
+  if (!hosts) return page
+  const headers = new Headers(page.headers)
+  headers.set('cache-control', 'private, no-store')
+  const stamped = new HTMLRewriter()
+    .on('head', { element(el) { el.prepend(hostsScript(hosts), { html: true }) } })
+    .transform(page)
+  return new Response(stamped.body, { status: page.status, headers })
 }

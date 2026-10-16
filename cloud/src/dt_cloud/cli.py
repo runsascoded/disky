@@ -3098,6 +3098,9 @@ _scan_runs.add_command(_scan_task)
 from .scan_started import stamp_started as _stamp_started  # noqa: E402
 
 main.add_command(_stamp_started)
+from .hosts import cli as _hosts  # noqa: E402
+
+main.add_command(_hosts)
 
 from .job_token import cli as _job_token  # noqa: E402
 
