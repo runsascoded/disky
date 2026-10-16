@@ -4,7 +4,8 @@ import { hostStore, resolveStores, withHosts } from './stores'
 // The capture hosts' stores (specs/hosts-registry.md): the edge stamps each member's page with D1 `hosts`;
 // the client mounts each one as a secondary store, behind any store the build already has.
 
-const built = resolveStores('laptop', 'nas')
+// The build's stores: the primary, and a secondary store the build carries a module for (as m3's `nas.ts`).
+const built = [...resolveStores('laptop', ''), { ...hostStore({ id: 'nas', store: 'nas', label: 'NAS', root: 'mnt/user' }), title: 'disk-tree — nas' }]
 
 describe('hostStore', () => {
   it('is a file store under `/<store>`, its `~` and root from the row', () => {
@@ -44,6 +45,6 @@ describe('withHosts', () => {
     ])).toEqual([['laptop', '/'], ['nas', '/nas'], ['m1', '/m1']])
     expect(withHosts(built, undefined)).toBe(built)
     expect(withHosts(built, { m1: {} })).toBe(built)
-    expect(withHosts(built, [{ id: 'nas', store: 'nas', label: 'Other' }]).find(s => s.key === 'nas')?.label).toBe('NAS')
+    expect(withHosts(built, [{ id: 'nas', store: 'nas', label: 'Other' }]).find(s => s.key === 'nas')?.title).toBe('disk-tree — nas')
   })
 })
