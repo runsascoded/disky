@@ -181,6 +181,8 @@ header .hrow {
   .tb-scan .arrow { color: var(--ink-3); }
   // The page scan's freshness beside its date picker (tip: exact publish time).
   .tb-scan-ago { color: var(--ink-3); font-size: 12px; white-space: nowrap; cursor: default; }
+  // The app's next scheduled scan, right after "scanned …" (admins, laptop online).
+  .tb-next { color: var(--ink-3); font-size: 12px; white-space: nowrap; cursor: default; &::before { content: '· '; } }
   // The scanned machine's file tunnel (admins): answering now, or not.
   .tb-laptop {
     display: inline-flex; align-items: center; gap: 5px; color: var(--ink-3); font-size: 12px; white-space: nowrap; cursor: default;

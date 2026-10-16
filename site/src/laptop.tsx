@@ -4,6 +4,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { OPEN_FILE_URL, REVEAL_URL, inApp, onMac } from './appLink'
 import type { ProxyInfo } from './objects'
+import { nextScan } from './schedule'
 import { useStore, useStoreFetch } from './store'
 import { Tooltip } from './Tooltip'
 
@@ -24,7 +25,7 @@ export function useProxyInfo(enabled = true) {
   })
 }
 
-export interface LaptopStatus { online: boolean; reason?: string }
+export interface LaptopStatus { online: boolean; reason?: string; schedule?: string[]; tz?: string }
 
 /** The tunnel's health (`/v1/laptop-files/status`), refetched on focus and every minute. */
 export function useLaptopStatus(enabled: boolean) {
@@ -50,22 +51,38 @@ const OFFLINE_WHY: Record<string, string> = {
   timeout: 'it didn’t answer within 3 s',
 }
 
-/** Header dot beside "scanned …": an admin on a store whose files open through the tunnel. */
+/** A next-scan instant as the header says it, in the viewer's own zone: "18:00", or "tomorrow 06:00". */
+export function nextLabel(t: Date, now: Date): string {
+  const hm = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+  return t.toDateString() === now.toDateString() ? hm : `tomorrow ${hm}`
+}
+
+/** Header dot beside "scanned …": an admin on a store whose files open through the tunnel —
+ *  with the app's next scheduled scan while it's online. */
 export function LaptopIndicator() {
   const proxy = useProxyInfo()
   const tunnel = !!proxy.data?.fileTunnel
   const q = useLaptopStatus(tunnel)
   if (!tunnel || !q.data) return null
-  const { online, reason } = q.data
+  const { online, reason, schedule, tz } = q.data
+  const now = new Date()
+  const next = online ? nextScan(schedule, tz, now) : null
   return (
-    <Tooltip content={<>
-      File previews reach this Mac through the disky app’s tunnel.
-      {online ? <> It’s answering now.</> : <> Offline: {OFFLINE_WHY[reason ?? ''] ?? reason ?? 'no answer'}. The map still shows the last scan.</>}
-    </>}>
-      <span className={`tb-laptop ${online ? 'on' : 'off'}`} tabIndex={0} aria-label={online ? 'laptop online' : 'laptop offline'}>
-        <span className="dot" aria-hidden />{online ? 'laptop online' : 'laptop offline'}
-      </span>
-    </Tooltip>
+    <>
+      {next && (
+        <Tooltip content={<>The disky app scans at {schedule!.join(', ')} ({tz}), and on wake when a slot was missed.</>}>
+          <span className="tb-next" tabIndex={0}>next {nextLabel(next, now)}</span>
+        </Tooltip>
+      )}
+      <Tooltip content={<>
+        File previews reach this Mac through the disky app’s tunnel.
+        {online ? <> It’s answering now.</> : <> Offline: {OFFLINE_WHY[reason ?? ''] ?? reason ?? 'no answer'}. The map still shows the last scan.</>}
+      </>}>
+        <span className={`tb-laptop ${online ? 'on' : 'off'}`} tabIndex={0} aria-label={online ? 'laptop online' : 'laptop offline'}>
+          <span className="dot" aria-hidden />{online ? 'laptop online' : 'laptop offline'}
+        </span>
+      </Tooltip>
+    </>
   )
 }
 

@@ -211,7 +211,7 @@ export async function serveLaptopFile(request: Request, env: Env, id: Identity, 
 }
 
 /** The probe's answer: `{ online }`, and why not. Private, cached briefly so a page's polls don't stampede. */
-const statusJson = (body: { online: boolean; reason?: string }) => json(body, 200, { 'cache-control': 'private, max-age=15' })
+const statusJson = (body: { online: boolean; reason?: string; schedule?: string[]; tz?: string }) => json(body, 200, { 'cache-control': 'private, max-age=15' })
 
 /** Whether the machine answers now: its file server's health (`GET /files/` → `{ ok: true }`)
  * through the tunnel, within 3 s (specs/laptop-app-links.md). */
@@ -231,9 +231,13 @@ async function laptopStatus(env: Env, upstreamFetch: typeof fetch): Promise<Resp
   const text = await res.text()
   if (OFFLINE_STATUSES.has(res.status)) return statusJson({ online: false, reason: `tunnel ${res.status}` })
   if (res.status === 404 && text.startsWith('not served locally')) return statusJson({ online: false, reason: 'file serving off' })
-  let ok = false
-  try { ok = res.status === 200 && (JSON.parse(text) as { ok?: unknown }).ok === true } catch { /* not the health JSON */ }
-  return statusJson(ok ? { online: true } : { online: false, reason: `upstream ${res.status}` })
+  let health: { ok?: unknown; schedule?: unknown; tz?: unknown } | null = null
+  try { health = res.status === 200 ? JSON.parse(text) : null } catch { /* not the health JSON */ }
+  if (health?.ok !== true) return statusJson({ online: false, reason: `upstream ${res.status}` })
+  // The app's scan schedule (local HH:MM slots + its IANA zone), for the header's "next 18:00".
+  const schedule = Array.isArray(health.schedule) ? health.schedule.filter((x): x is string => typeof x === 'string' && /^\d\d:\d\d$/.test(x)).slice(0, 48) : []
+  const tz = typeof health.tz === 'string' && /^[A-Za-z0-9_+\-/]{1,64}$/.test(health.tz) ? health.tz : undefined
+  return statusJson({ online: true, ...(schedule.length ? { schedule } : {}), ...(tz ? { tz } : {}) })
 }
 
 /** The D1-backed audit + rate-limit deps for a session (`e:<email>`). */
