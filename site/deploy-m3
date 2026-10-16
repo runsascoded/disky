@@ -20,6 +20,12 @@ project=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$config")
 
 ../scripts/branch-audit m3 local
 
+# The build id (`x-disky-build`, scripts/build-id.mjs), taken before the config swap below: the swap alone would
+# mark every dev build `-dirty`.
+VITE_BUILD_SHA=$(git rev-parse --short=10 HEAD)
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then VITE_BUILD_SHA+=-dirty; fi
+export VITE_BUILD_SHA
+
 restore() { [ -f tmp/wrangler.toml.deploy-bak ] && mv tmp/wrangler.toml.deploy-bak wrangler.toml; }
 if [ "$config" != wrangler.toml ]; then
   mkdir -p tmp; cp wrangler.toml tmp/wrangler.toml.deploy-bak; trap restore EXIT
