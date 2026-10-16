@@ -44,16 +44,26 @@ else
   echo "[ingest] invalid capture stamp: expected %Y-%m-%dT%H-%M-%SZ" >&2
   exit 2
 fi
-# The store comes from the capture's host: `HOST_STORES` (`host=store,…`, the job
-# env) names the secondary stores (`STORES_JSON` keys on the site), which publish
-# under `snapshots/<store>/` and sync D1 as that store. Any other host is the
-# deployment's primary store: `snapshots/$STORE/` (default `laptop`), D1 `primary`.
+# The store comes from the capture's host: `PRIMARY_HOST` (the job env) is the deployment's
+# primary store, `snapshots/$STORE/` (default `laptop`) and D1 `primary`; `HOST_STORES`
+# (`host=store,…`) names the secondary stores (`STORES_JSON` keys on the site), which publish
+# under `snapshots/<store>/` and sync D1 as that store. Any other host is refused before
+# anything is recorded or published (specs/device-enrollment.md): a new Mac's capture must
+# never land in the primary's scans.
 host=${key#captures/}; host=${host%%/*}
-store=${STORE:-laptop}
-d1_store=primary
+store=''
+d1_store=''
+if [[ -n ${PRIMARY_HOST:-} && $host == "$PRIMARY_HOST" ]]; then
+  store=${STORE:-laptop}
+  d1_store=primary
+fi
 for pair in ${HOST_STORES//,/ }; do
   if [[ ${pair%%=*} == "$host" ]]; then store=${pair#*=}; d1_store=$store; fi
 done
+if [[ -z $store ]]; then
+  echo "[ingest] unknown capture host '$host': neither PRIMARY_HOST (${PRIMARY_HOST:-unset}) nor in HOST_STORES (${HOST_STORES:-}); publishing nothing" >&2
+  exit 3
+fi
 work=${WORK:-/work}
 app=${INGEST_APP_ROOT:-/app}
 time_bin=${INGEST_TIME:-/usr/bin/time}
