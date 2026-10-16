@@ -156,6 +156,11 @@ def exists(parquet_path: str) -> bool:
     return blobfs.exists(parquet_path)
 
 
+def not_uploaded(remote: str, names: list[str]) -> list[str]:
+    """Of `names`, the files `remote` (the generation's dir where the site reads it) doesn't hold."""
+    return [n for n in names if not exists(f"{remote}/{n}")]
+
+
 def meta_started(meta_path: str) -> str | None:
     """A snapshot `meta.json`'s ``started`` (the scan's start instant, ISO
     8601: `path-index` stamps a bucket scan's, `capture-meta` a capture's), from

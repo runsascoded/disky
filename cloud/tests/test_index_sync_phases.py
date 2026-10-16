@@ -69,6 +69,8 @@ def d1(monkeypatch, d1_db) -> D1:
     monkeypatch.setattr(F, "_d1_query", db)
     monkeypatch.setattr(F, "_creds", lambda: ("tok", "acct"))
     monkeypatch.setattr(F, "_now", lambda: 1_790_000_000)
+    # These syncs read a local `-d`; the bucket's copy is not what's under test (`test_index_sync_cli`).
+    monkeypatch.setattr(F, "not_uploaded", lambda remote, names: [])
     return db
 
 

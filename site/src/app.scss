@@ -2001,6 +2001,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     border-radius: 6px;
     font-size: 12.5px;
   }
+  // An applied filter scopes every section below: the box says so at a glance.
+  &.active input {
+    border-color: var(--accent, #7aa2f7);
+    box-shadow: 0 0 0 1px var(--accent, #7aa2f7);
+    background: color-mix(in oklab, var(--accent, #7aa2f7) 16%, var(--panel));
+    font-weight: 600;
+  }
   .fnote {
     font-size: 12px;
     color: var(--ink-2);

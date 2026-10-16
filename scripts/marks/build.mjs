@@ -29,6 +29,17 @@ for (const key of Object.keys(STORES)) {
   for (const p of [bleed, ...icoParts]) rmSync(p)
   console.log(key)
 }
+// The deployments' Slack usage-bot app icons, `deploy/slack/icons/<key>.png`: the store's mark full-bleed (Slack rounds
+// the corners itself) at 1024 px (Slack takes a 512–2000 px square). Uploaded by hand: the API can't set an app icon.
+const bots = resolve(new URL('../../deploy/slack/icons', import.meta.url).pathname)
+mkdirSync(bots, { recursive: true })
+for (const key of ['gcs', 'cw', 'hf']) {
+  const bleed = join(bots, `${key}.bleed.tmp.svg`)
+  writeFileSync(bleed, mark(key, { bleed: true }))
+  png(bleed, 1024, join(bots, `${key}.png`))
+  rmSync(bleed)
+  console.log(`slack ${key}`)
+}
 for (const theme of ['light', 'dark']) {
   const base = join(out, `banner-${theme}`)
   writeFileSync(`${base}.svg`, banner(theme === 'dark') + '\n')

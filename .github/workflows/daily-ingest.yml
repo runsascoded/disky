@@ -162,9 +162,13 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           D1_DB_ID: 261d0c80-8f73-442e-979a-4e25725b2271
           D1_DB_NAME: disk-tree-demo-db
+          # `-b r2://…` (not a bare name, which reads as GCS): `index-sync` checks the uploaded tiers there first.
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+          DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
         run: |
           cd cloud && uv run dt-cloud index-sync "${{ steps.d.outputs.date }}" \
-            -g "${{ steps.d.outputs.gen }}" -b "$BUCKET" \
+            -g "${{ steps.d.outputs.gen }}" -b "r2://$BUCKET" \
             -k "listing/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
             -d "$GITHUB_WORKSPACE/work/index" -v path -v bysize
       - name: Fail on an index append that failed

@@ -65,10 +65,18 @@ export function esc(s: string): string {
 
 /** Binary bytes, 3 significant figures: `51.1 TiB`. */
 export function fmtB(n: number): string {
-  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB']
+  return fmtUnits(n, 1024, ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB'])
+}
+
+/** `fmtB` in decimal units (`15.4 TB`): a store billed in TB, as Hugging Face's digest. */
+export function fmtSI(n: number): string {
+  return fmtUnits(n, 1000, ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'])
+}
+
+function fmtUnits(n: number, base: number, u: string[]): string {
   let i = 0
   let v = n
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
+  while (v >= base && i < u.length - 1) { v /= base; i++ }
   return i === 0 ? `${v} B` : `${v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${u[i]}`
 }
 

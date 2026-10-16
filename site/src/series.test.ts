@@ -251,18 +251,20 @@ describe('seriesGaps: a series\' unindexed scans as gaps, never zeros', () => {
   const xOf = (d: string) => Date.parse(d)
   const fmt = (x: number) => new Date(x).toISOString().slice(5, 10)
   const at = (...ds: string[]) => ds.map(xOf)
-  it('leading gaps say where the index starts; interior ones count; none (or all cut by the range) is no note', () => {
+  it('the line spans its points: scans before the first / after the last are a note, not gaps (the x-range trims to them); interior ones are gaps, counted', () => {
     expect([
       seriesGaps(['2026-09-29', '2026-09-30'], at('2026-10-01', '2026-10-02'), xOf, -Infinity, fmt),
       seriesGaps(['2026-10-02'], at('2026-10-01', '2026-10-03'), xOf, -Infinity, fmt),
       seriesGaps(['2026-09-30', '2026-10-02'], at('2026-10-01', '2026-10-03'), xOf, -Infinity, fmt),
+      seriesGaps(['2026-10-04'], at('2026-10-01', '2026-10-03'), xOf, -Infinity, fmt),
       seriesGaps(['2026-09-29'], at('2026-10-01'), xOf, xOf('2026-09-30'), fmt),
       seriesGaps(undefined, at('2026-10-01'), xOf, -Infinity, fmt),
       seriesGaps(['2026-09-29'], [], xOf, -Infinity, fmt),
     ]).toEqual([
-      { xs: at('2026-09-29', '2026-09-30'), note: 'not indexed before 10-01' },
+      { xs: [], note: 'not indexed before 10-01' },
       { xs: at('2026-10-02'), note: '1 scan not indexed (gaps in the line)' },
-      { xs: at('2026-09-30', '2026-10-02'), note: '2 scans not indexed (gaps in the line)' },
+      { xs: at('2026-10-02'), note: 'not indexed before 10-01 · 1 scan not indexed (gaps in the line)' },
+      { xs: [], note: 'not indexed after 10-03' },
       { xs: [], note: null },
       { xs: [], note: null },
       { xs: at('2026-09-29'), note: '1 scan not indexed (gaps in the line)' },

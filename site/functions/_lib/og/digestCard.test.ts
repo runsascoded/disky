@@ -38,6 +38,7 @@ describe('niceTicks', () => {
     expect(niceTicks(720, 920)).toEqual([750, 800, 850, 900])
     expect(niceTicks(0, 1)).toEqual([0, 0.2, 0.4, 0.6, 0.8, 1])
     expect(niceTicks(3, 17)).toEqual([5, 7.5, 10, 12.5, 15])
+    expect(Object.is(niceTicks(-1, 10)[0], 0)).toBe(true)  // never -0 (labelled `-0`)
   })
 })
 
@@ -48,6 +49,19 @@ describe('digestSvg', () => {
       '800', '850', '900', '950', '1,000',
       '10/5', '10/12', '10/19', '10/26',
       '1 PiB quota', '830 TiB · 83%',
+    ])
+  })
+  it('in decimal TB (`units: TB`): the axis, quota share and call-out', () => {
+    const TB = 1e12
+    expect(texts(digestSvg({
+      ...input(false), note: 'example.org · TB', units: 'TB',
+      points: [{ t: day(1), bytes: 15 * TB }, { t: day(7), bytes: 15.2 * TB }, { t: day(14), bytes: 15.4 * TB }],
+      quota: { bytes: 253 * TB, name: '253 TB public' },
+    }))).toEqual([
+      'Usage — October 2026', 'example.org · TB',
+      '0', '50', '100', '150', '200', '250',
+      '10/5', '10/12', '10/19', '10/26',
+      '253 TB public quota', '15.4 TB · 6%',
     ])
   })
   it('adds the diff map: its title, the movement, and the cells labelled with signed changes', () => {

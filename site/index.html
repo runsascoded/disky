@@ -21,7 +21,7 @@
   <body>
     <div id="root"></div>
     <script>
-      // Boot watchdog: if a hashed bundle file fails to load (a 404 right after a
+      // Boot watchdog: if a hashed bundle file (script or stylesheet) fails to load (a 404 right after a
       // deploy, or HTML a browser cached for it before the middleware's `assetMiss`
       // guard), or `#root` is still empty 5 s after `load`, re-fetch the bundle
       // past the HTTP cache (`cache: 'reload'` overwrites a poisoned entry) and
@@ -51,6 +51,11 @@
           if ((t.tagName === 'SCRIPT' || t.tagName === 'LINK') && u && u.indexOf('/assets/') === 0) retry()
         }, true)
         addEventListener('load', function () {
+          // A stylesheet in <head> can fail before this listener exists (its error fires early, unlike a module
+          // script's), and an unstyled page still renders into #root: at `load` (which waits for stylesheets),
+          // one of ours that failed has no rules (Chrome keeps an empty `sheet` for a 404).
+          var css = [].slice.call(document.querySelectorAll('link[rel="stylesheet"][href^="/assets/"]'))
+          if (css.some(function (l) { try { return !l.sheet || !l.sheet.cssRules.length } catch (e) { return false } })) return retry()
           setTimeout(function () {
             var root = document.getElementById('root')
             if (root && root.firstChild) { try { sessionStorage.removeItem(KEY) } catch (e) {} }
