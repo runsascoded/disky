@@ -290,6 +290,8 @@ describe('/v1/laptop-files/status — is the laptop reachable', () => {
       status(() => new Response('not served locally', { status: 404 })),
       status(() => { throw new TypeError('network') }),
       status(() => new Response('<html>old dt-serve</html>', { status: 200 })),
+      status(() => new Response(JSON.stringify({ ok: true, root: '/', schedule: ['06:00', '18:00'], tz: 'America/New_York' }))),
+      status(() => new Response(JSON.stringify({ ok: true, schedule: ['06:00', 7, 'x'.repeat(9)], tz: 'y'.repeat(65) }))),
     ])
     expect(rs).toEqual([
       { status: 200, body: { online: true }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
@@ -297,6 +299,10 @@ describe('/v1/laptop-files/status — is the laptop reachable', () => {
       { status: 200, body: { online: false, reason: 'file serving off' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
       { status: 200, body: { online: false, reason: 'unreachable' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
       { status: 200, body: { online: false, reason: 'upstream 200' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
+      // The app's scan schedule rides along (the header's "next 18:00").
+      { status: 200, body: { online: true, schedule: ['06:00', '18:00'], tz: 'America/New_York' }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
+      // Only HH:MM-shaped strings, and a plausible zone name, pass.
+      { status: 200, body: { online: true, schedule: ['06:00'] }, cc: 'private, max-age=15', sent: [[`${TUNNEL}/files/`, 'GET', null]] },
     ])
   })
   it('the same gates as a file: grants and non-admins refused, nothing probed; no tunnel → 503', async () => {
