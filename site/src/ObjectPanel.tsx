@@ -149,6 +149,29 @@ function useProxyInfo(enabled: boolean) {
   })
 }
 
+/** Whether a tunnelled file can be read now: one HEAD through the route
+ * (`/v1/laptop-files`), so a sleeping laptop or a refused path reads as a
+ * sentence instead of a viewer's error. Not cached: the laptop wakes. */
+function useTunnelReach(src: { key: string; api: string } | null) {
+  return useQuery<{ ok: true } | { ok: false; message: string }>({
+    queryKey: ['tunnel-reach', src?.api, src?.key],
+    queryFn: async () => {
+      const r = await fetch(`${src!.api}/get?path=${encodeURIComponent(src!.key)}`, { method: 'HEAD' }).catch(() => null)
+      if (!r) return { ok: false, message: 'Couldn’t reach this site to ask the laptop — check the connection.' }
+      if (r.ok) return { ok: true }
+      if (r.status === 503) return { ok: false, message: 'The laptop is offline (asleep, or its app isn’t serving files) — preview it when it’s awake. Its size and date are above.' }
+      if (r.status === 403) return { ok: false, message: 'This path is never previewed from the laptop (a secrets deny-list or a hidden prefix).' }
+      if (r.status === 404) return { ok: false, message: 'The laptop no longer has this file — it moved or was deleted since the scan.' }
+      if (r.status === 429) return { ok: false, message: 'Too many file reads this minute — try again shortly.' }
+      return { ok: false, message: `The laptop couldn’t serve this file (HTTP ${r.status}).` }
+    },
+    enabled: !!src,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  })
+}
+
 export default function ObjectPanel({ segs, node, onClose }: {
   /** The object's path from the store root (bucket first). */
   segs: string[]
@@ -167,13 +190,15 @@ export default function ObjectPanel({ segs, node, onClose }: {
     !src ? null
     : src.kind === 'public' ? publicStore(src.base)
     : src.kind === 'proxy' ? HttpStore(src.api, storeQuery(store) ? { fetch: sfetch } : {})
+    : src.kind === 'tunnel' ? HttpStore(src.api)
     : null,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   [src?.kind, src && 'base' in src ? src.base : null, src && 'api' in src ? src.api : null, store, sfetch])
   const key = src?.key ?? segs.slice(1).join('/')
   const uri = store.scheme + segs.join('/')
   const shown = pathText(store.scheme, segs, store.home)
-  const dl = ft?.getUrl?.(key)
+  const reach = useTunnelReach(src?.kind === 'tunnel' ? src : null)
+  const dl = src?.kind === 'tunnel' && !reach.data?.ok ? undefined : ft?.getUrl?.(key)
   // Opening scrolls the panel into view; Escape closes it.
   useEffect(() => { ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) }, [uri])
   useEffect(() => {
@@ -195,6 +220,8 @@ export default function ObjectPanel({ segs, node, onClose }: {
       <div className="obj-uri"><code>{shown}</code></div>
       {!src ? <p className="loading">resolving where this object is read from…</p>
         : src.kind === 'none' ? <p className="hint">No preview: <code>{src.bucket}</code> isn’t readable from this site — it has no public URL the browser may read here, and the site’s file proxy reads {proxyQ.data ? <code>{proxyQ.data.uri}</code> : 'another bucket'}. Its size and date are above.</p>
+        : src.kind === 'tunnel' && !reach.data ? <p className="loading">reaching the laptop…</p>
+        : src.kind === 'tunnel' && 'message' in reach.data! ? <p className="hint">{reach.data.message}</p>
         : ft && <div className="obj-body"><Body store={ft} path={key} /></div>}
     </section>
   )

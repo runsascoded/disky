@@ -149,6 +149,17 @@ export interface Env {
   FOOTER_CACHE_MAX_ROWS?: string
   /** …and, when set, the most bytes (their text columns + 64 per row; unset = no byte cap). */
   FOOTER_CACHE_MAX_BYTES?: string
+  /** The machine's file tunnel (`/v1/laptop-files`, specs/laptop-file-tunnel.md):
+   *  its Access-gated origin and the service token Access admits (secrets)… */
+  LAPTOP_TUNNEL_URL?: string
+  LAPTOP_TUNNEL_CLIENT_ID?: string
+  LAPTOP_TUNNEL_CLIENT_SECRET?: string
+  /** …paths a preview never serves (comma-separated globs from the store root, `*` within a
+   *  segment, `**` across them), the whole-file GET cap (bytes, default 25 MiB) and the
+   *  requests one session may make per minute (default 600). */
+  LAPTOP_FILES_DENY?: string
+  LAPTOP_FILES_MAX_BYTES?: string
+  LAPTOP_FILES_PER_MIN?: string
 }
 
 export interface Ctx {

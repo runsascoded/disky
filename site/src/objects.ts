@@ -75,6 +75,8 @@ export function openHref(storePath: string, segs: string[], search: string): { p
 export const FILES_API = '/v1/files'
 /** The scanned-bucket object proxy: `/v1/objects/<bucket>`. */
 export const OBJECTS_API = '/v1/objects'
+/** The scanned machine's own files, through its tunnel (an admin's, the primary store's). */
+export const LAPTOP_FILES_API = '/v1/laptop-files'
 
 /** What `/api/store` reports for a deployment's `/v1/files` proxy: the one
  * bucket it reads (`<scheme>://<bucket>`) and the key prefixes it allows —
@@ -83,6 +85,8 @@ export interface ProxyInfo {
   uri: string
   prefixes: string[]
   objectBuckets?: string[]
+  /** The store's files open from the machine itself (`/v1/laptop-files`). */
+  fileTunnel?: boolean
 }
 
 /** Where an opened object's bytes come from:
@@ -91,10 +95,13 @@ export interface ProxyInfo {
  * - `proxy`: a gated proxy at `api` reads it: the scan-store proxy
  *   (`/v1/files`, its bucket, under an allowed prefix) or, for a scanned
  *   bucket the deployment serves to members, `/v1/objects/<bucket>`.
+ * - `tunnel`: a local machine's file, read from the machine itself through its
+ *   tunnel (`key` is the whole path from the store root); it may be offline.
  * - `none`: neither — the panel shows the object's size and dates only. */
 export type ObjectSource =
   | { kind: 'public'; base: string; key: string }
   | { kind: 'proxy'; key: string; api: string }
+  | { kind: 'tunnel'; key: string; api: string }
   | { kind: 'none'; bucket: string; key: string }
 
 const proxyBucket = (uri: string): string | null => uri.match(/^[a-z0-9]+:\/\/([^/]+)/)?.[1] ?? null
@@ -106,6 +113,7 @@ export function objectSource(store: Pick<Store, 'objectBases'>, segs: string[], 
   if (base) return { kind: 'public', base: base.replace(/\/+$/, ''), key }
   if (proxy && proxyBucket(proxy.uri) === bucket && proxy.prefixes.some(p => key.startsWith(p))) return { kind: 'proxy', key, api: FILES_API }
   if (proxy?.objectBuckets?.includes(bucket)) return { kind: 'proxy', key, api: `${OBJECTS_API}/${bucket}` }
+  if (proxy?.fileTunnel) return { kind: 'tunnel', key: segs.join('/'), api: LAPTOP_FILES_API }
   return { kind: 'none', bucket, key }
 }
 

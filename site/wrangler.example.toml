@@ -135,6 +135,10 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # OG_ANONYMOUS = "generic"                   # private default: no data reads/totals/names on plain links; explicit shares may be detailed
 #                                           # "shape" explicitly permits anonymous geometry + totals (GCS's approved policy)
 #                                           # public AUTH_MODE defaults to shape; unknown values fail closed to generic
+# LAPTOP_TUNNEL_URL = "https://files.disk.example.com"   # a local machine's file previews, admins only (`/v1/laptop-files`, specs/laptop-file-tunnel.md): its tunnel (`infra/cf` `fileTunnel`); needs the two LAPTOP_TUNNEL_CLIENT_* secrets
+# LAPTOP_FILES_DENY = "Users/*/.ssh/**,**/.env*,**/*.pem"  # with LAPTOP_TUNNEL_URL: paths never previewed (globs from the store root; `*` in a segment, `**` across)
+# LAPTOP_FILES_MAX_BYTES = "26214400"       # …the most a whole-file GET returns (Range reads stream past it; default 25 MiB)
+# LAPTOP_FILES_PER_MIN = "600"              # …file requests one session may make per minute (default 600)
 
 # Secrets — `wrangler pages secret put`, never in this file:
 # secret SESSION_SECRET                     required wherever anyone signs in: signs session cookies and card URLs
@@ -147,6 +151,8 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # secret GCP_SA_KEY                         a service-account key that submits Batch jobs and acts as JOB_SA
 # secret SLACK_BOT_TOKEN                    staged-plan threads (with SLACK_ADMIN_CHANNEL)
 # secret SLACK_SIGNING_SECRET               Slack's interactive buttons (`/slack/actions`)
+# secret LAPTOP_TUNNEL_CLIENT_ID            the file tunnel's Access service token (with LAPTOP_TUNNEL_URL; `pulumi stack output file_tunnel_client_id`)
+# secret LAPTOP_TUNNEL_CLIENT_SECRET
 #
 # Not set here:
 # builtin ASSETS                            Pages' static assets binding

@@ -4,13 +4,15 @@
  * (`storePrefixes`, the `/v1/files` defaults). No credentials, and no
  * endpoint URL either (an R2 endpoint carries the account id — the `uri` is
  * all the copy needs). The `/files` page header names it instead of a
- * baked-in bucket.
+ * baked-in bucket. `fileTunnel: true` tells an admin's object panel that the
+ * primary store's files open through `/v1/laptop-files` (specs/laptop-file-tunnel.md).
  *
  *   → { uri: "r2://idx", prefixes: ["listing/", …] }
  */
 import { type Ctx, baseScope, json, requireViewer } from '../_lib/auth.js'
 import { objectBuckets } from '../v1/objects/[[path]].js'
-import { withStore } from '../_lib/stores.js'
+import { isPrimary, withStore } from '../_lib/stores.js'
+import { tunnelConfigured } from '../_lib/laptopFiles.js'
 import { storePrefixes, storeScheme, storeTarget } from '../_lib/index.js'
 
 export const FILES_PREFIXES = ['listing/', 'snapshots/', 'sweep/']
@@ -26,5 +28,11 @@ export const onRequest = async (ctx0: Ctx): Promise<Response> => {
   // full base scope), so a guest's panel says "no preview" rather than 403s.
   const member = id.via !== 'public' && (id.scopes.includes(baseScope(ctx.env)) || id.scopes.includes('*'))
   const objects = member ? objectBuckets(ctx.env) : []
-  return json({ uri: `${storeScheme(target.endpoint)}://${target.bucket}`, prefixes: storePrefixes(ctx.env, FILES_PREFIXES), ...(objects.length ? { objectBuckets: objects } : {}) })
+  const fileTunnel = id.via === 'session' && id.admin && isPrimary(ctx.env) && tunnelConfigured(ctx.env)
+  return json({
+    uri: `${storeScheme(target.endpoint)}://${target.bucket}`,
+    prefixes: storePrefixes(ctx.env, FILES_PREFIXES),
+    ...(objects.length ? { objectBuckets: objects } : {}),
+    ...(fileTunnel ? { fileTunnel: true } : {}),
+  })
 }

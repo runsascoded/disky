@@ -5,7 +5,8 @@
 # needs, on the account, Cloudflare Pages and D1 (edit), and on the zone, DNS
 # (edit). Each optional block below adds its product: Workers KV Storage
 # (`kvName`); Workers R2 Storage and account API tokens (`r2Bucket`); Access
-# apps and policies (`access`); Queues and Workers R2 Storage (`capturesBucket`).
+# apps and policies (`access`); Queues and Workers R2 Storage (`capturesBucket`);
+# Cloudflare Tunnel plus Access apps, policies and service tokens (`fileTunnel`).
 config:
   my-deployment-cf:accountId: <cf-account-id>
   my-deployment-cf:zoneId: <zone-id>                # the zone holding `domain`
@@ -34,6 +35,12 @@ config:
   # → this queue → the `capture-trigger` Worker → the AWS Batch ingest (`infra/aws`):
   # my-deployment-cf:capturesBucket: my-captures-bucket
   # my-deployment-cf:capturesQueue: my-deployment-captures
+  # A local machine's file previews (specs/laptop-file-tunnel.md): a tunnel to its
+  # `dt-serve /files`, behind a service-token-only Access app on `hostname`:
+  # my-deployment-cf:fileTunnel:
+  #   name: my-deployment-files
+  #   hostname: files.disk.example.com
+  #   service: http://127.0.0.1:7792
   # Adopt live resources instead of creating them: `{key: import id}` over the
   # keys `CfnDashboard`'s docstring lists (infra/README.md, "Adopting live resources").
   # my-deployment-cf:importIds: {}
