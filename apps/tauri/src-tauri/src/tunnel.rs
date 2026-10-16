@@ -266,15 +266,22 @@ pub fn cli(args: &[String]) -> i32 {
         2
     };
     let mut s = settings::load();
-    let save = |s: &settings::Settings| settings::save(s).map(|_| 0).unwrap_or_else(|e| {
-        eprintln!("disky tunnel: {e}");
-        1
-    });
+    // The app's next supervision tick (≤ 20 s) starts or stops `cloudflared`.
+    let save = |s: &settings::Settings, done: &str| match settings::save(s) {
+        Ok(()) => {
+            println!("{done}");
+            0
+        }
+        Err(e) => {
+            eprintln!("disky tunnel: {e}");
+            1
+        }
+    };
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["set", team, aud, client_id, rest @ ..] if rest.len() <= 1 => {
             let on = s.files.as_ref().is_some_and(|f| f.on);
             s.files = Some(FilesTunnel { on, team: team.to_string(), aud: aud.to_string(), client_id: client_id.to_string(), root: rest.first().map_or_else(root_default, |r| r.to_string()) });
-            save(&s)
+            save(&s, &format!("file previews set up for {team} (root {}); {}", s.files.as_ref().unwrap().root, if on { "on" } else { "off: disky tunnel on" }))
         }
         ["token"] => {
             let mut t = String::new();
@@ -296,7 +303,8 @@ pub fn cli(args: &[String]) -> i32 {
         [v @ ("on" | "off")] => match s.files.as_mut() {
             Some(f) => {
                 f.on = *v == "on";
-                save(&s)
+                let done = if f.on { "file previews on: the app starts cloudflared within 20 s" } else { "file previews off: the app stops cloudflared within 20 s" };
+                save(&s, done)
             }
             None => {
                 eprintln!("disky tunnel: not set up (disky tunnel set TEAM AUD CLIENT_ID)");
