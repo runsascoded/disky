@@ -25,15 +25,15 @@ Requested by Ryan on 2026-10-16 (app session), with the M1 MacBook as the test p
 ## Flow
 
 1. The app is signed in to the site (the existing `disky://open?link=` hand-off).
-2. Settings → "Connect this Mac to disk.rbw.sh" (admins only): the app sends `{host: <slug of the computer name, editable>, label, os, version}`; the site creates the `hosts` row (store key = host slug unless taken) and returns a device token (a grant scoped to `host:<id>`: upload, its own deletion runs, its own status). Optional "Allow file previews" makes the tunnel too.
-3. Scheduled and "Scan now" captures upload through presigned URLs (`POST /api/hosts/<id>/uploads` → URLs for `captures/<host>/<root>/<stamp>/…`, then `_SUCCESS.json`). The existing trigger → ingest runs unchanged, now resolving the store from `hosts`.
+2. Settings → "Connect this Mac to disk.rbw.sh" (admins only): the app sends `{host: <slug of the computer name, editable>, label, home: "Users/<user>", os, version}` (`home` is per host: the site's `~`); the site creates the `hosts` row (store key = host slug unless taken) and returns a device token (a grant scoped to `host:<id>`: upload, its own deletion runs, its own status). Optional "Allow file previews" makes the tunnel too.
+3. Scheduled and "Scan now" captures upload through presigned URLs, minted per batch of shards (a capture writes dozens) with a short TTL under a fixed key prefix (`POST /api/hosts/<id>/uploads` → URLs for `captures/<host>/<root>/<stamp>/…`, then `_SUCCESS.json`). The device token is a grant, so the routes that refuse grants (`/v1/laptop-files`, the restricted ones) stay closed to it. The existing trigger → ingest runs unchanged, now resolving the store from `hosts`.
 4. The site shows the host as a store (its label, mark, "laptop online", "next scan") without a deploy.
 5. Disconnect: revoke the device token (and the tunnel); the store's history stays.
 
 ## Phases and owners
 
-1. **Unknown host refused** (`ingest.sh`: `[local]`/m3) — before anything else, so a stray capture can't pollute the primary. Small.
-2. **`hosts` table + store resolution from D1** (site + ingest; `[local]`), seeded with `m3 → laptop`, `nas → nas`; `HOST_STORES` / `STORES_JSON` become fallbacks, then go.
+1. **Unknown host refused** (`ingest.sh`: `[local]`/m3) — before anything else, so a stray capture can't pollute the primary. **Done in code** ([local] 0c5a83a9, m3 env 23ef219c: `PRIMARY_HOST` names the primary, any other host not in `HOST_STORES` exits 3 before any record, R2 or D1 write); **live with the next aws `pulumi up`** (Ryan's go). Don't connect the M1 before then.
+2. **`hosts` table + store resolution from D1** (site + ingest; `[local]`), seeded with `m3 → laptop`, `nas → nas`; `HOST_STORES` / `STORES_JSON` become fallbacks, then go. Ingest reads `hosts` first (it has the D1 token). The site is the larger part: stores are build-time TS today (`src/stores/*.ts`, `STORES_JSON`), so a runtime registry (`/api/hosts`: path, label, mark, scheme, home) and `withStore` resolving unknown keys from D1. A prod D1 migration (Ryan's go). m3 writes the site design here when it starts.
 3. **Enrollment + device tokens + presigned uploads** (site `[local]`; app: the Connect button, Keychain, the upload client in `dt-capture`).
 4. **Drainer in the app** (app; site: a device-token runs API replacing the D1-token poll).
 5. **Pushover in the app** (app: Settings field, Keychain, direct API call; `notify` command stays as an escape hatch).
