@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cardSvg, clip, fmtB, type CardData } from './card'
+import { cardSvg, clip, fmtB, fmtSI, type CardData } from './card'
 
 const T = 2 ** 40
 const data = (tier: 'anon' | 'full'): CardData => ({
@@ -72,12 +72,14 @@ describe('cardSvg', () => {
       clip('abc', 100, 15),
       clip('abc', 10, 15),
       [0, 512, 2048, 1.5 * 2 ** 30, 51.1 * T, 123.4 * T, 3100 * T].map(fmtB),
+      [0, 512, 2048, 1.5e9, 15.4e12, 253e12, 3.1e15].map(fmtSI),
     ]).toEqual([
       'a&lt;b&gt;&amp;&quot;c&quot;',
       'abcdefghij…',
       'abc',
       '',
       ['0 B', '512 B', '2.00 KiB', '1.50 GiB', '51.1 TiB', '123 TiB', '3.03 PiB'],
+      ['0 B', '512 B', '2.05 KB', '1.50 GB', '15.4 TB', '253 TB', '3.10 PB'],
     ])
   })
 })

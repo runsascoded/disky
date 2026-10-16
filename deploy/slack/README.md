@@ -7,6 +7,6 @@ To make one, copy the template to the deployment's branch (e.g. `job/slack/<depl
 1. api.slack.com/apps → *Create New App* → *From a manifest* → the workspace → paste the JSON → *Create*.
 2. *Install to Workspace*.
 3. Store the Bot User OAuth Token (`xoxb-…`) as the job's `SLACK_BOT_TOKEN` secret (and as the Pages secret `SLACK_BOT_TOKEN` when the site posts plan threads). Never paste it anywhere else.
-4. Upload an app icon under *Basic Information* (the API can't set one).
+4. Upload the app icon under *Basic Information* → *Display Information* (the API can't set one): `icons/<key>.png`, the store's mark (the site's favicon, `scripts/marks/`) full-bleed at 1024 px, written by `node scripts/marks/build.mjs` for `gcs`, `cw` and `hf`; add a key there for a new deployment.
 
 The manifest has no comments because Slack rejects unknown top-level keys. The scopes are what thrds's `SlackClient` calls (`chat.postMessage/update/delete/getPermalink`, `conversations.history/replies/info/list`, `users.info`, `emoji.list`), plus `chat:write.customize` for the per-message sender and avatar. `chat:write.public` lets the bot post to public channels without an `/invite`; a private channel still needs one.

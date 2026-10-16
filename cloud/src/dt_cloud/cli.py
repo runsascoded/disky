@@ -972,7 +972,7 @@ def index_sync(
     passing `-M` needs no separate backfill; `index-started` prints one)."""
     from disk_tree import blobfs
 
-    from .index_footer import SORT_VARIANTS, IncompleteGeneration, bucket_base, check_flip, check_store, exists, fill_starts, flip_d1, meta_started, sync_d1
+    from .index_footer import SORT_VARIANTS, IncompleteGeneration, bucket_base, check_flip, check_store, exists, fill_starts, flip_d1, meta_started, not_uploaded, sync_d1
 
     try:
         check_store(store)
@@ -1013,6 +1013,17 @@ def index_sync(
         else:
             skipped.append(variant)
     pre = f"index-sync: {'' if store == 'primary' else f'[{store}] '}{date}"
+    # The pointers name `key` under the bucket the site reads; footers read from a local `-d` say nothing about
+    # what is there. Never list a generation that isn't uploaded (a dry run's local tiers listed in a prod D1 500'd
+    # its newest scan): with a local `-d`, the bucket must hold each present variant at `key`.
+    if not local and not rows_only and listing_dir is not None and not blobfs.is_url(listing_dir) and present:
+        if bucket is None:
+            raise UsageError("-d is a local dir: pass -b (the root the site reads) so index-sync can check the generation is uploaded there before listing it")
+        remote = f"{bucket_base(bucket).rstrip('/')}/{key}"
+        missing = not_uploaded(remote, [INDEX_VARIANTS[v] for v, _ in present])
+        if missing:
+            err(f"index-sync: refusing to list {date} gen {gen}: not uploaded under {remote}: {', '.join(missing)}")
+            raise SystemExit(1)
     if pointer_only:
         try:
             flips = [check_flip(date, path, variant=variant, gen=gen, key=key, store=store, started=started) for variant, path in present]

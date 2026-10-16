@@ -172,9 +172,10 @@ export function unitTicks(min: number, max: number, base: number, count = 4): nu
   return out
 }
 
-/** A series' uncovered scans (`/api/series`'s `unindexed`) as chart gaps: their x's inside the shown range
- *  (`x ≥ xFrom`), sorted, and the muted note under the chart — `not indexed before <first point>` when every gap
- *  precedes the points, else how many scans are missing. Never a zero point: a gap is drawn as a gap. */
+/** A series' uncovered scans (`/api/series`'s `unindexed`) as chart gaps: those between its first and last points
+ *  (`x ≥ xFrom`), sorted, drawn as gaps in the line; those before the first or after the last are left off the chart,
+ *  whose x-range then spans the points alone, and named in the muted note under it (`not indexed before <first>`,
+ *  `not indexed after <last>`), with how many interior scans are missing. Never a zero point. */
 export function seriesGaps(
   unindexed: readonly string[] | undefined,
   pointXs: readonly number[],
@@ -182,9 +183,16 @@ export function seriesGaps(
   xFrom: number,
   fmtX: (x: number) => string,
 ): { xs: number[]; note: string | null } {
-  const xs = (unindexed ?? []).map(xOf).filter(x => x >= xFrom).sort((a, b) => a - b)
-  if (!xs.length) return { xs, note: null }
-  const first = pointXs.length ? Math.min(...pointXs) : null
-  if (first != null && xs.every(x => x < first)) return { xs, note: `not indexed before ${fmtX(first)}` }
-  return { xs, note: `${xs.length.toLocaleString('en-US')} ${xs.length === 1 ? 'scan' : 'scans'} not indexed (gaps in the line)` }
+  const all = (unindexed ?? []).map(xOf).filter(x => x >= xFrom).sort((a, b) => a - b)
+  if (!all.length) return { xs: all, note: null }
+  const count = (n: number) => `${n.toLocaleString('en-US')} ${n === 1 ? 'scan' : 'scans'} not indexed (gaps in the line)`
+  if (!pointXs.length) return { xs: all, note: count(all.length) }
+  const lo = Math.min(...pointXs), hi = Math.max(...pointXs)
+  const xs = all.filter(x => x > lo && x < hi)
+  const notes = [
+    all.some(x => x < lo) && `not indexed before ${fmtX(lo)}`,
+    all.some(x => x > hi) && `not indexed after ${fmtX(hi)}`,
+    xs.length > 0 && count(xs.length),
+  ].filter(Boolean)
+  return { xs, note: notes.join(' · ') }
 }

@@ -54,6 +54,7 @@ The two styles are opinionated but not store-specific: `gcs` = per-scan cost/cla
 | `plot_project` / `plot_branch` / `plot_base` | `gcs-usage-icons` / `main` / root alias | `gcs-usage-icons` / `cw` / `https://cw.gcs-usage-icons.pages.dev` |
 | `variant` / `reply_hour` | `sender` / — | `sender` / `12` |
 | `provisional` | — | `false` (see below) |
+| `units` | — | `TiB` (default; `TB`: decimal sizes everywhere — text, tail `T free`, the image's axis and labels; hf, billed in TB) |
 | `primary` | — | `$CW_BUCKET` or `marin-us-east-02a` |
 | `buckets` | — | `marin-us-east-02a: {label: 02a, quota: {bytes: 910 TiB, name: 1 PB, short: 1P}}`, `hero-checkpoints: {label: hero, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}` |
 | `prices` | `{1: 0.02, 2: 0.01, 3: 0.004, 4: 0.0012}` | — |

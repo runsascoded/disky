@@ -1258,7 +1258,7 @@ function AppContent() {
           </span>
         )}
         {bar.pathFilter && (
-          <span className="filterbox">
+          <span className={fq ? 'filterbox active' : 'filterbox'}>
             <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
               <input
                 value={fqDraft ?? fqRaw ?? ''}

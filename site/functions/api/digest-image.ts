@@ -3,14 +3,14 @@
  * interval, and gets the PNG back to host beside the Slack thread.
  *
  *   POST /api/digest-image {title, note, month: 'YYYY-MM', points: [{scan, bytes}],
- *                           quota?: {bytes, name}, diff?: {from, to, path, title}}
+ *                           quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → image/png (1.5× the 900px-wide layout)
  *
  * Viewer-gated (the job's grant); nothing cached — one render a run. */
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { ivRetry, storeReady, withPathStore } from '../_lib/index.js'
 import { ATTEN_DEFAULT, buildDiff, MIN_AREA_DEFAULT } from '../_lib/view.js'
-import { digestSvg, DIGEST_W, type DigestPoint } from '../_lib/og/digestCard.js'
+import { digestSvg, DIGEST_W, type DigestPoint, type DigestUnits } from '../_lib/og/digestCard.js'
 import { ensureWasm, svgToPng } from '../_lib/og/render.js'
 import { fonts, type OgEnv } from '../_lib/og/serve.js'
 import RESVG from '../_lib/og/vendor/resvg.wasm'
@@ -28,6 +28,7 @@ interface Body {
   points?: { scan?: unknown; bytes?: unknown }[]
   quota?: { bytes?: unknown; name?: unknown } | null
   diff?: { from?: unknown; to?: unknown; path?: unknown; title?: unknown } | null
+  units?: unknown
 }
 
 const bad = (msg: string) => new Response(msg, { status: 400 })
@@ -50,6 +51,8 @@ export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Pro
   // The month frame (scans fill it in left → right), widened to a lead-in scan before it.
   const from = Math.min(Date.UTC(y, mo, 1) - 16 * 3600_000, ...points.map(p => p.t))
   const to = Date.UTC(y, mo + 1, 1) - 8 * 3600_000
+  if (b.units !== undefined && b.units !== 'TiB' && b.units !== 'TB') return bad("units: 'TiB' | 'TB'")
+  const units = (b.units ?? 'TiB') as DigestUnits
   const quota = b.quota && typeof b.quota.bytes === 'number' && typeof b.quota.name === 'string' ? { bytes: b.quota.bytes, name: b.quota.name } : null
   let diff = null
   if (b.diff) {
@@ -62,7 +65,7 @@ export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Pro
     const built = diffRoot({ ...data, prev: f, curr: t }, 'delta', true, !path, path || 'all')
     diff = built ? { root: built.root, title } : null
   }
-  const svg = digestSvg({ title: b.title, note: b.note, points, from, to, quota, diff })
+  const svg = digestSvg({ title: b.title, note: b.note, points, from, to, quota, diff, units })
   await ensureWasm(RESVG)
   const png = svgToPng(svg, await fonts(ctx.env, new URL(ctx.request.url).origin), ZOOM)
   return new Response(png, { headers: { 'content-type': 'image/png', 'cache-control': 'no-store' } })

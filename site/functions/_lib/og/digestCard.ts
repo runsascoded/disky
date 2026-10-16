@@ -8,7 +8,7 @@
 import { staticLayout, treemapSvg } from '@rdub/treemap/svg'
 import { diffBorderWidth, diffCellStyle } from '../../../src/diffStyle.js'
 import type { DiffNode } from '../../../src/diffModel.js'
-import { esc, fmtB } from './card.js'
+import { esc, fmtB, fmtSI } from './card.js'
 import { interWidth } from './interMetrics.js'
 
 export const DIGEST_W = 900
@@ -27,7 +27,9 @@ const S1 = '#3987e5'
 const DANGER = '#f2635a'
 const GREW = '#4ade80'
 const VARS = { '--s1': S1, '--panel': PANEL, '--ink': INK, '--dt-treemap-ink': '#d0d0d8', '--dt-treemap-container-bg': PANEL }
-const TIB = 1024 ** 4
+/** The image's size unit: bytes per unit and the byte formatter (labels, call-out, map cells). */
+const UNITS = { TiB: { bytes: 1024 ** 4, fmt: fmtB }, TB: { bytes: 1e12, fmt: fmtSI } } as const
+export type DigestUnits = keyof typeof UNITS
 
 export interface DigestPoint {
   /** Epoch ms of the scan. */
@@ -46,6 +48,8 @@ export interface DigestCardInput {
   to: number
   quota?: { bytes: number; name: string } | null
   diff?: { root: DiffNode; title: string } | null
+  /** The y axis' unit and every size label's (default `TiB`). */
+  units?: DigestUnits
 }
 
 const r1 = (n: number) => Math.round(n * 10) / 10
@@ -60,17 +64,19 @@ export function niceTicks(lo: number, hi: number, n = 6): number[] {
   const mag = 10 ** Math.floor(Math.log10(raw))
   const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw)!
   const out: number[] = []
-  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(Math.round(v * 1e6) / 1e6)
+  // `|| 0`: a tick at a lo just under zero is -0, which would label `-0`
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(Math.round(v * 1e6) / 1e6 || 0)
   return out
 }
 
-const fmtSigned = (n: number) => `${n < 0 ? '−' : '+'}${fmtB(Math.abs(n))}`
+const fmtSigned = (n: number, fmt: (n: number) => string) => `${n < 0 ? '−' : '+'}${fmt(Math.abs(n))}`
 const md = (t: number) => { const d = new Date(t); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}` }
 
 function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: number): string {
   const out: string[] = []
   const pts = d.points
-  const tib = (b: number) => b / TIB
+  const u = UNITS[d.units ?? 'TiB']
+  const tib = (b: number) => b / u.bytes
   const vals = pts.map(p => tib(p.bytes))
   const q = d.quota ? tib(d.quota.bytes) : null
   let lo = Math.min(...vals)
@@ -116,7 +122,7 @@ function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: numb
   const lx = X(last.t)
   const ly = Y(tib(last.bytes))
   out.push(`<circle cx="${r1(lx)}" cy="${r1(ly)}" r="4" fill="${S1}"/>`)
-  const call = `${fmtB(last.bytes)}${q != null ? ` · ${Math.round((100 * tib(last.bytes)) / q)}%` : ''}`
+  const call = `${u.fmt(last.bytes)}${q != null ? ` · ${Math.round((100 * tib(last.bytes)) / q)}%` : ''}`
   const cw = interWidth(call, 15, 600)
   const right = lx + 10 + cw <= left + pw
   out.push(text(right ? lx + 10 : lx - 10, ly + 5, call, 15, { weight: 600, anchor: right ? 'start' : 'end' }))
@@ -132,6 +138,7 @@ function leaves(n: DiffNode, out: DiffNode[] = []): DiffNode[] {
 /** The digest image's SVG, `DIGEST_W` wide (its height in the `height` attribute). */
 export function digestSvg(d: DigestCardInput): string {
   const w = DIGEST_W - 2 * PAD
+  const { fmt } = UNITS[d.units ?? 'TiB']
   const out: string[] = []
   let y = PAD
   out.push(text(PAD, y + 18, d.title, 20, { weight: 600 }))
@@ -146,7 +153,7 @@ export function digestSvg(d: DigestCardInput): string {
     const shrank = ls.reduce((s, n) => s + n.removed, 0)
     y += 16
     out.push(text(PAD, y + 4, title, 17, { weight: 600 }))
-    out.push(text(DIGEST_W - PAD, y + 4, `grew ${fmtSigned(grew)} · shrank ${fmtSigned(-shrank)} · area = |Δ|`, 12, { fill: INK3, anchor: 'end' }))
+    out.push(text(DIGEST_W - PAD, y + 4, `grew ${fmtSigned(grew, fmt)} · shrank ${fmtSigned(-shrank, fmt)} · area = |Δ|`, 12, { fill: INK3, anchor: 'end' }))
     y += 14
     const label = (n: DiffNode) => (n.first ? `${n.label} (first scanned)` : n.label)
     const cells = staticLayout(root, {
@@ -157,7 +164,7 @@ export function digestSvg(d: DigestCardInput): string {
     out.push(`<g transform="translate(${PAD},${y})">`)
     out.push(treemapSvg(cells, {
       width: w, height: MAP_H,
-      getSize: n => n.weight, getLabel: label, formatSize: fmtB, formatCell: n => fmtSigned(n.delta),
+      getSize: n => n.weight, getLabel: label, formatSize: fmt, formatCell: n => fmtSigned(n.delta, fmt),
       colorForCell: n => diffCellStyle(n, 'delta'),
       measure: (s, px) => interWidth(s, px), vars: VARS, fontFamily: 'Inter',
       labelPx: 11.5, labelPxSm: 9.5, depthFade: 1, rootFade: 1,

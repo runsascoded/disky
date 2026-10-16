@@ -77,7 +77,8 @@ def test_index_sync_reads_and_writes_the_generation_in_place(monkeypatch, archiv
     sent: list[str] = []
     monkeypatch.setattr(F, "_d1_query", lambda sql, acct, tok, db_id: sent.append(sql) or [])
     monkeypatch.delenv("DATA_BUCKET")
-    where = ["-d", f"{root}/{KEY}"] if form == "dir" else ["-b", root]
+    # A local `-d` names the root the site reads too (`-b`): `index-sync` checks the generation is there before listing it.
+    where = ["-b", root, "-d", f"{root}/{KEY}"] if form == "dir" else ["-b", root]
     r = CliRunner().invoke(main, ["index-sync", *where, "-g", GEN, "-k", KEY, "-v", "path", "-M", f"{root}/snapshots", DATE])
     assert r.exit_code == 0, r.output
     assert logged == [f"index-sync: {DATE} [path] gen {GEN} @ {KEY} — 2 row groups (remote)"]

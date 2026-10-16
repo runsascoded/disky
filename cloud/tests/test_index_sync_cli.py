@@ -12,6 +12,18 @@ from dt_cloud import index_footer as F
 from dt_cloud.cli import main
 
 
+KEY = "listing/2026-09-30/index/G1"
+
+
+def uploaded(root: Path, *names: str) -> Path:
+    """A generation's files under the bucket `root` at `KEY` (what the site reads); the dir is also the job's local `-d`."""
+    d = root / KEY
+    d.mkdir(parents=True)
+    for name in names:
+        (d / name).write_bytes(b"")
+    return d
+
+
 @pytest.fixture
 def synced(monkeypatch) -> list[tuple[str, str, str, str, str, bool]]:
     calls: list[tuple[str, str, str, str, str, bool]] = []
@@ -44,13 +56,12 @@ def test_index_sync_skips_absent_variants(tmp_path: Path, synced, logged):
     ]
     assert F.INDEX_VARIANTS["bysize"] == "path-index-bysize.parquet"
     assert F.INDEX_VARIANTS["bysize-user"] == "path-index-bysize-by-user.parquet"
-    for name in ("path-index.parquet", "path-index-bysize.parquet"):
-        (tmp_path / name).write_bytes(b"")
-    r = CliRunner().invoke(main, ["index-sync", "-d", str(tmp_path), "-g", "G1", "-k", "listing/2026-09-30/index/G1", "2026-09-30"])
+    gen_dir = uploaded(tmp_path, "path-index.parquet", "path-index-bysize.parquet")
+    r = CliRunner().invoke(main, ["index-sync", "-b", str(tmp_path), "-d", str(gen_dir), "-g", "G1", "-k", KEY, "2026-09-30"])
     assert r.exit_code == 0, r.output
     assert synced == [
-        ("2026-09-30", f"{tmp_path}/path-index.parquet", "path", "G1", "listing/2026-09-30/index/G1", True),
-        ("2026-09-30", f"{tmp_path}/path-index-bysize.parquet", "bysize", "G1", "listing/2026-09-30/index/G1", True),
+        ("2026-09-30", f"{gen_dir}/path-index.parquet", "path", "G1", KEY, True),
+        ("2026-09-30", f"{gen_dir}/path-index-bysize.parquet", "bysize", "G1", KEY, True),
     ]
     assert logged == [
         "index-sync: 2026-09-30 [path] gen G1 @ listing/2026-09-30/index/G1 — 26516 row groups (remote)",
@@ -65,8 +76,8 @@ def test_index_sync_skips_absent_variants(tmp_path: Path, synced, logged):
 def test_index_sync_sorts_only(tmp_path: Path, synced, logged):
     """`-F` keeps just the store sorts: a pre-store generation dir (no
     `bysize`) syncs `path` alone."""
-    (tmp_path / "path-index.parquet").write_bytes(b"")
-    r = CliRunner().invoke(main, ["index-sync", "-F", "-d", str(tmp_path), "-g", "G1", "-k", "listing/2026-09-30/index/G1", "2026-09-30"])
+    gen_dir = uploaded(tmp_path, "path-index.parquet")
+    r = CliRunner().invoke(main, ["index-sync", "-F", "-b", str(tmp_path), "-d", str(gen_dir), "-g", "G1", "-k", KEY, "2026-09-30"])
     assert r.exit_code == 0, r.output
     assert [c[2] for c in synced] == ["path"]
     assert logged == [
@@ -129,3 +140,21 @@ def test_path_index_no_user_sorts_flag(monkeypatch, tmp_path: Path):
         r = CliRunner().invoke(main, ["path-index", "-d", "2026-09-30", "-l", "x.parquet", "-o", str(tmp_path / "out"), *args])
         assert r.exit_code == 0, r.output
     assert seen == [True, False]
+
+
+def test_index_sync_refuses_a_local_generation_not_uploaded(tmp_path: Path, synced, logged):
+    """A dry run reads its tiers from a local `-d`; listing them in the remote D1 would point the site at files the
+    bucket doesn't hold (hf.oa.dev's newest scan 500'd). Without `-b` it can't check, so it refuses; with `-b` and a
+    variant missing there, it refuses before any write."""
+    local = tmp_path / "work"
+    local.mkdir()
+    for name in ("path-index.parquet", "path-index-bysize.parquet"):
+        (local / name).write_bytes(b"")
+    bucket = tmp_path / "bucket"
+    (bucket / KEY).mkdir(parents=True)
+    (bucket / KEY / "path-index.parquet").write_bytes(b"")
+    r = CliRunner().invoke(main, ["index-sync", "-d", str(local), "-g", "G1", "-k", KEY, "2026-09-30"], env={"DATA_BUCKET": ""})
+    assert (r.exit_code, r.output.strip().splitlines()[-1]) == (2, "Error: -d is a local dir: pass -b (the root the site reads) so index-sync can check the generation is uploaded there before listing it")
+    r = CliRunner().invoke(main, ["index-sync", "-b", str(bucket), "-d", str(local), "-g", "G1", "-k", KEY, "2026-09-30"])
+    assert (r.exit_code, synced, logged) == (1, [], [f"index-sync: refusing to list 2026-09-30 gen G1: not uploaded under {bucket}/{KEY}: path-index-bysize.parquet"])
+    assert CliRunner().invoke(main, ["index-sync", "-L", "-d", str(local), "-g", "G1", "-k", KEY, "2026-09-30"]).exit_code == 0

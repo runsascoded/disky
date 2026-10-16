@@ -102,6 +102,59 @@ def test_qlabel_and_bucket_clause():
     )
 
 
+def test_bucket_path_site_root():
+    # a single-bucket store whose site serves the bucket at its root (hf.oa.dev: `open-athena` is `/`): `path: ""`
+    # links the bucket's clause to the root, not `/<bucket>`; `path` unset keeps `/<bucket>`
+    cfg = E.config_from_dict({"template": "cw", "site_url": SITE, "icons_base": "x", "primary": "org", "buckets": {
+        "org": {"label": "org", "path": "", "quota": {"bytes": "253 TB", "name": "253 TB", "short": "253T"}},
+    }})
+    assert cfg.buckets["org"] == E.Bucket("org", E.Quota(253 * 10**12, "253 TB", "253T"), path="")
+    assert D._bucket_clause("org", 14.3, "2026-10-16T0800", None, cfg) == (
+        f"[org]({SITE}/?d=2610160800#over-time): 6.2% of 253T (215.8 Ti free)"
+    )
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "buckets": {"b": {"path": 1}}})
+    assert str(e.value) == "digest config buckets.b.path: expected a string, got 1"
+
+
+def test_units_tb():
+    # `units: TB` (a store billed in decimal TB, as Hugging Face): every size the digest renders is TB (10**12) —
+    # rows, headline, weekly bullets, the reply and its tail (`T free`), the image body's points and `units`
+    TB = 10**12
+    cfg = E.config_from_dict({"template": "cw", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
+                              "primary": "org", "units": "TB", "buckets": {
+        "org": {"label": "org", "path": "", "quota": {"bytes": "253 TB", "name": "253 TB public", "short": "253T"}},
+    }})
+    assert (cfg.units, cfg.unit) == ("TB", E.Units("TB", TB, "T"))
+    meta = lambda tb: {"total_bytes": round(tb * TB), "total_objects": 9, "class_bytes": {}}  # noqa: E731
+    rows = D.rows_from_meta([("2026-09-30T0800", meta(15.0)), ("2026-10-01T0800", meta(15.5)), ("2026-10-02T0800", meta(15.4))], "org", unit=TB)
+    assert [r.tb for r in rows] == [15.0, 15.5, 15.4]
+    month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
+    assert D.op_body(month, oct1, None, cfg).split("\n") == [
+        f":arrow_deg50: **+0.4 TB** [month-to-date]({SITE}/?d=261002-2d#over-time) · 15 TB · 6.1% of 253 TB public · [dashboard]({SITE}/)",
+        "_as of 10/2 08:00Z_",
+        "",
+        "*Weekly summaries*",
+        f":arrow_deg30: [wk of 9/28]({SITE}/?d=261002-2d#over-time) _(partial)_: **+0.4 TB** → 15 TB · 6.1% of 253 TB public",
+    ]
+    assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
+        E.Reply("10/1 — 16 TB (+0.5, 3.3%)", f"[org]({SITE}/?d=261001-1d#over-time): 6.1% of 253T (237.5 T free)", icon_url="https://icons.example.org/arrows/av_deg60.png?v=4"),
+        E.Reply("10/2 — 15 TB (−0.1, 0.6%)", f"[org]({SITE}/?d=261002-1d#over-time): 6.1% of 253T (237.6 T free)", icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4"),
+    ]
+    assert D.image_body(month, oct1, cfg) == {
+        "title": "HF usage — October 2026",
+        "note": "cw.example.org · TB",
+        "month": "2026-10",
+        "points": [{"scan": s, "bytes": b * TB // 10} for s, b in (("2026-09-30T0800", 150), ("2026-10-01T0800", 155), ("2026-10-02T0800", 154))],
+        "units": "TB",
+        "quota": {"bytes": 253 * TB, "name": "253 TB public"},
+        "diff": {"from": "2026-09-30T0800", "to": "2026-10-02T0800", "path": "org", "title": "What changed in org — 9/30 → 10/2"},
+    }
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "units": "Ti"})
+    assert str(e.value) == "digest config units: 'Ti' is not one of ('TiB', 'TB')"
+
+
 def test_tail_zone_shared_quota():
     # `hot-data` and `side-data` share zone `z8`'s 100 TiB: one clause, the zone's free;
     # `more-data` (no config) and the primary keep their own clauses, in meta order
@@ -751,6 +804,7 @@ def test_image_body():
             {"scan": "2026-09-02T0000", "bytes": 712 * TIB},
             {"scan": "2026-09-02T1200", "bytes": 715 * TIB},
         ],
+        "units": "TiB",
         "quota": {"bytes": 910 * TIB, "name": "1 PB"},
         "diff": {"from": "2026-08-31T1200", "to": "2026-09-02T1200", "path": "main-data", "title": "What changed in main-data — 8/31 → 9/2"},
     }
@@ -764,6 +818,7 @@ def test_image_body_first_scan():
         "note": "cw.example.org · TiB",
         "month": "2026-09",
         "points": [{"scan": "2026-09-01T0000", "bytes": 710 * TIB}],
+        "units": "TiB",
         "quota": {"bytes": 910 * TIB, "name": "1 PB"},
     }
 
