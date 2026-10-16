@@ -6,6 +6,8 @@
 //! - `/data/<store>/<scan>/{meta,age}.json`: the snapshot files.
 //! - `/api/subtree`, `/api/diff`, `/api/series`: `view.rs`; `/api/age-pyramid`: the empty
 //!   plan (no pyramid locally; the age lens reads the tree's `ag`).
+//! - `/files/<path>`: a file's bytes for the site's previews through a
+//!   Cloudflare Tunnel (`files.rs`), only when `Config::files` is set.
 //! - Any other path: a file of the SPA's build, else its `index.html` (client
 //!   routes); other `/api/*`, `/auth/*`: 404.
 
@@ -31,6 +33,8 @@ pub struct Config {
     /// `index.html` as `window.__DISKY__` (`site/src/stores.ts`).
     pub home: Option<String>,
     pub title: Option<String>,
+    /// `/files/<path>` (spec `laptop-file-tunnel.md`); `None`: off (404).
+    pub files: Option<crate::files::Files>,
 }
 
 /// `index.html` with `<script>window.__DISKY__ = {…}</script>` ahead of the
@@ -130,6 +134,11 @@ fn decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A URL path's percent-decoding (`+` stays `+`: only queries use it for space).
+fn decode_path(s: &str) -> String {
+    decode(&s.replace('+', "%2B"))
 }
 
 /// A number as `JSON.stringify` writes it: integral values without `.0`.
@@ -291,7 +300,7 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
             let budget = get("bin_budget").and_then(|v| v.parse::<i64>().ok());
             json_resp(200, &json!({"records": [], "plan": {"outputBin": "1d", "tier": "1d", "binBudget": budget}}))
         }
-        p if p.starts_with("/api/") || p.starts_with("/auth/") || p.starts_with("/data/") || p.starts_with("/v1/") => text(404, "not served locally"),
+        p if p.starts_with("/api/") || p.starts_with("/auth/") || p.starts_with("/data/") || p.starts_with("/v1/") || p.starts_with("/files/") => text(404, "not served locally"),
         p => {
             let rel = p.trim_start_matches('/');
             let f = cfg.web.join(rel);
@@ -308,7 +317,14 @@ fn handle(cfg: &Config, scans: &Scans, url: &str) -> Resp {
 }
 
 fn respond(cfg: &Config, scans: &Scans, req: Request) {
-    let resp = if *req.method() == Method::Get || *req.method() == Method::Head { handle(cfg, scans, req.url()) } else { text(405, "read-only") };
+    let get = *req.method() == Method::Get || *req.method() == Method::Head;
+    if let (true, Some(files)) = (get, &cfg.files) {
+        if let Some(rel) = req.url().split('?').next().and_then(|p| p.strip_prefix("/files/")) {
+            let rel = decode_path(rel);
+            return crate::files::handle(files, &rel, req);
+        }
+    }
+    let resp = if get { handle(cfg, scans, req.url()) } else { text(405, "read-only") };
     let _ = req.respond(resp);
 }
 
@@ -339,7 +355,7 @@ mod tests {
 
     #[test]
     fn injects_page_config() {
-        let cfg = Config { scans: "s".into(), web: "w".into(), store: "laptop".into(), root_label: "r".into(), home: Some("Users/a".into()), title: Some("x </script>".into()) };
+        let cfg = Config { scans: "s".into(), web: "w".into(), store: "laptop".into(), root_label: "r".into(), home: Some("Users/a".into()), title: Some("x </script>".into()), files: None };
         let out = page(&cfg, b"<html><head><title>t</title></head><body></body></html>".to_vec());
         assert_eq!(String::from_utf8(out).unwrap(), r#"<html><head><title>t</title><script>window.__DISKY__ = {"home":"Users/a","title":"x <\/script>","staging":false}</script></head><body></body></html>"#);
         let bare = Config { home: None, title: None, ..cfg };
@@ -352,5 +368,63 @@ mod tests {
         assert_eq!(query("/api/subtree?path=Users%2Fryan&q=a+b&w=1280"), [("path".into(), "Users/ryan".into()), ("q".into(), "a b".into()), ("w".into(), "1280".into())]);
         assert_eq!(decode("100%"), "100%");
         assert_eq!(decode("%C3%BC"), "ü");
+    }
+
+    /// `/files` over a real socket: routing, the path's percent-decoding, HEAD, `Range`, and off when unset.
+    #[test]
+    fn serves_files_over_http() {
+        use crate::access::tests::{access, claims, token, CLIENT};
+        let (_t, root) = crate::files::tests::tree("http");
+        std::fs::write(root.join("a b+c.txt"), b"plus").unwrap();
+        let cfg = |files| Arc::new(Config { scans: root.join("none"), web: root.join("none"), store: "laptop".into(), root_label: "r".into(), home: None, title: None, files });
+        let start = |cfg: Arc<Config>| {
+            let server = Server::http("127.0.0.1:0").unwrap();
+            let port = server.server_addr().to_ip().unwrap().port();
+            std::thread::spawn(move || {
+                let scans = Scans::new(cfg.scans.clone());
+                for req in server.incoming_requests() {
+                    respond(&cfg, &scans, req);
+                }
+            });
+            format!("http://127.0.0.1:{port}")
+        };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let jwt = token("k1", &claims(now));
+        let on = start(cfg(Some(crate::files::Files { root: root.clone(), access: access(Some(CLIENT)) })));
+        let call = |method: &str, url: &str, jwt: Option<&str>, range: Option<&str>| {
+            let mut r = ureq::request(method, url);
+            if let Some(j) = jwt {
+                r = r.set(crate::files::JWT_HEADER, j);
+            }
+            if let Some(g) = range {
+                r = r.set("Range", g);
+            }
+            let resp = match r.call() {
+                Ok(r) | Err(ureq::Error::Status(_, r)) => r,
+                Err(e) => panic!("{e}"),
+            };
+            let (status, len, cr) = (resp.status(), resp.header("content-length").map(String::from), resp.header("content-range").map(String::from));
+            (status, len, cr, resp.into_string().unwrap())
+        };
+        assert_eq!(call("GET", &format!("{on}/files/a.txt"), None, None), (401, Some("18".into()), None, "missing Access JWT".into()));
+        assert_eq!(call("GET", &format!("{on}/files/a.txt"), Some(&jwt), None), (200, Some("10".into()), None, "0123456789".into()));
+        assert_eq!(call("GET", &format!("{on}/files/a.txt"), Some(&jwt), Some("bytes=3-4")), (206, Some("2".into()), Some("bytes 3-4/10".into()), "34".into()));
+        assert_eq!(call("HEAD", &format!("{on}/files/sub/b.pdf"), Some(&jwt), None), (200, Some("8".into()), None, "".into()));
+        assert_eq!(call("GET", &format!("{on}/files/a%20b+c.txt"), Some(&jwt), None), (200, Some("4".into()), None, "plus".into()));
+        // Raw, since a client normalizes dot segments (`%2E%2E` included) before sending.
+        let raw = |path: &str| {
+            use std::io::{Read, Write};
+            let mut s = std::net::TcpStream::connect(on.trim_start_matches("http://")).unwrap();
+            write!(s, "GET {path} HTTP/1.1\r\nHost: x\r\n{}: {jwt}\r\nConnection: close\r\n\r\n", crate::files::JWT_HEADER).unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).unwrap();
+            out.lines().next().unwrap().to_string()
+        };
+        assert_eq!(raw("/files/sub/%2E%2E/%2E%2E/secret.txt"), "HTTP/1.1 400 Bad Request");
+        assert_eq!(raw("/files/../secret.txt"), "HTTP/1.1 400 Bad Request");
+        assert_eq!(call("GET", &format!("{on}/files/out"), Some(&jwt), None).3, "outside the store root");
+        assert_eq!(call("POST", &format!("{on}/files/a.txt"), Some(&jwt), None).0, 405);
+        let off = start(cfg(None));
+        assert_eq!(call("GET", &format!("{off}/files/a.txt"), Some(&jwt), None), (404, Some("18".into()), None, "not served locally".into()));
     }
 }

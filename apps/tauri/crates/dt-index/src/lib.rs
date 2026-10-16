@@ -18,6 +18,8 @@
 //! Not written: the `.groups.json` / `.groups.parquet` footer sidecars (a
 //! serverless reader's range-read plan; a local reader has the footer).
 
+pub mod access;
+pub mod files;
 pub mod http;
 pub mod query;
 pub mod view;

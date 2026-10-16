@@ -21,6 +21,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 libc = "0.2"
 regex = "1"
 tiny_http = "0.12"
+base64 = "0.22"
+ring = "0.17"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [[bin]]
 name = "dt-serve"

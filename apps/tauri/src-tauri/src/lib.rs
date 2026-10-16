@@ -361,7 +361,7 @@ fn start_local_server(app: &AppHandle) {
 
 fn local_server_config(web: PathBuf) -> dt_index::http::Config {
     let home = std::env::var("HOME").ok().map(|h| h.trim_matches('/').to_string());
-    dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())) }
+    dt_index::http::Config { scans: jobs::local_scans_dir(), web, store: "laptop".into(), root_label: "this Mac".into(), home, title: Some(format!("disky — {}", computer_name())), files: None }
 }
 
 /// A scheduled slot that passed with no scan starting (the agent isn't
