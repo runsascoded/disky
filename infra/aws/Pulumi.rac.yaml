@@ -27,7 +27,9 @@ config:
     D1_DB_ID: e5288564-a010-4177-9f3c-77e25fad9f72
     D1_DB_NAME: disk-tree-m3-db
     INDEX_VARIANTS: path
-    # Capture host → secondary store (ingest.sh); other hosts are the primary (`laptop`).
+    # Capture host → store (ingest.sh): this Mac is the primary (`laptop`), the NAS its own store;
+    # any other host is refused (specs/device-enrollment.md).
+    PRIMARY_HOST: m3
     HOST_STORES: nas=nas
     # Record each ingest as a scan run in D1 (`/scans`; ingest.sh, the profile beside it in the image).
     # INGEST_MACHINE / INGEST_SPOT describe this job def (vcpu/memory_mib above, the FARGATE_SPOT queue,
