@@ -58,6 +58,15 @@ work=${WORK:-/work}
 app=${INGEST_APP_ROOT:-/app}
 time_bin=${INGEST_TIME:-/usr/bin/time}
 s3() { aws s3 "$@" --endpoint-url "$R2_ENDPOINT_URL" --only-show-errors; }
+# The CPUs this task may use: the cgroup's quota (v2 `cpu.max`, v1 `cpu.cfs_quota_us`), rounded up. Fargate's
+# `nproc` reports the host's (4 on a 1-vCPU task), and threads past the quota only add buffers and contention.
+vcpus() {
+  local cg=${DT_CGROUP:-/sys/fs/cgroup} q p
+  if { read -r q p < "$cg/cpu.max"; } 2>/dev/null && [[ $q != max ]]; then :
+  elif q=$(cat "$cg/cpu/cpu.cfs_quota_us" 2>/dev/null) && p=$(cat "$cg/cpu/cpu.cfs_period_us" 2>/dev/null) && (( q > 0 )); then :
+  else nproc; return; fi
+  echo $(( (q + p - 1) / p ))
+}
 
 # ── Scan-run recording (specs/scan-job-wrapper.md; a no-op without SCAN_RUNS_PROFILE) ──
 # `dt-cloud scan-run supervise` (the image's entrypoint) runs this script: a platform
@@ -112,7 +121,7 @@ if [[ -n ${SCAN_RUNS_PROFILE:-} ]]; then
 fi
 
 begin fetch
-echo "[ingest] capture=$key date=$date gen=$gen host=$host store=$store d1=$d1_store vcpu=$(nproc) mem=$(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
+echo "[ingest] capture=$key date=$date gen=$gen host=$host store=$store d1=$d1_store vcpu=$(vcpus) (nproc $(nproc)) mem=$(awk '/MemTotal/{printf "%.1f GiB", $2/1048576}' /proc/meminfo)"
 mkdir -p "$work/listing" "$work/index" "$work/snap"
 
 t0=$(date +%s)
@@ -169,7 +178,7 @@ if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
   fi
   begin static-names
   ( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
-      -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(nproc)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
+      -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(vcpus)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
   echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/static-time.txt")"
   ended static-names -o "static-names=r2://$bucket/static-names/$STATIC_GEN/"
 fi
