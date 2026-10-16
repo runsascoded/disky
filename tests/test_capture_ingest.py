@@ -119,6 +119,7 @@ def pipeline(tmp_path: Path):
         'CLOUDFLARE_API_TOKEN': 'fixture-token',
         'D1_DB_ID': 'fixture-db',
         'D1_DB_NAME': 'fixture',
+        'PRIMARY_HOST': 'm3',
         'HOST_STORES': 'nas=nas',
     }
     for key in ('DATE', 'GEN', 'STORE', 'STATIC_GEN', 'STATIC_MEM', 'STATIC_BUILD', 'SCAN_RUNS_PROFILE', 'INGEST_MACHINE', 'INGEST_SPOT', 'INGEST_SITE_URL', 'AWS_BATCH_JOB_ID', 'AWS_REGION', 'AWS_DEFAULT_REGION'):
@@ -190,6 +191,19 @@ def test_invalid_capture_stamps_fail_before_any_cloud_operation(pipeline) -> Non
     result = run('not-a-stamp')
     assert (result.returncode, result.stdout, result.stderr) == (2, '', '[ingest] invalid capture stamp: expected %Y-%m-%dT%H-%M-%SZ\n')
     assert trace.exists() is False
+
+
+def test_an_unknown_host_is_refused_before_any_cloud_operation(pipeline) -> None:
+    """specs/device-enrollment.md phase 1: a new Mac's capture must never publish into the primary store."""
+    run, bucket, trace = pipeline
+    result = run('2026-10-11T10-00-01Z', 'm1')
+    unnamed = run('2026-10-11T10-00-01Z', 'm3', PRIMARY_HOST='')
+    assert [(r.returncode, r.stdout, r.stderr) for r in (result, unnamed)] == [
+        (3, '', "[ingest] unknown capture host 'm1': neither PRIMARY_HOST (m3) nor in HOST_STORES (nas=nas); publishing nothing\n"),
+        (3, '', "[ingest] unknown capture host 'm3': neither PRIMARY_HOST (unset) nor in HOST_STORES (nas=nas); publishing nothing\n"),
+    ]
+    assert trace.exists() is False
+    assert sorted(str(p.relative_to(bucket)) for p in bucket.rglob('*') if p.is_file() and not str(p.relative_to(bucket)).startswith('captures/')) == []
 
 
 # ── scan-run recording (SCAN_RUNS_PROFILE; specs/scan-job-wrapper.md) ─────────
