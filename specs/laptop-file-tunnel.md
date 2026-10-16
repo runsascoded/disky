@@ -42,7 +42,7 @@ browser ──▶ disk.rbw.sh  /v1/laptop-files/<path>   (Pages Function, viewer
 3. **m3 instance:** `pulumi up` on the cf stack (Ryan's go), Function secrets, a dev deploy and CIC: open a PDF and an `.mp4` under `~/Downloads` on dev.disk.rbw.sh, then with the laptop asleep (the offline message), then from a share link (refused).
 4. **App lifecycle:** the app starts and stops `cloudflared` with the setting; prod.
 
-## Open questions for Ryan
+## Decisions (Ryan, 2026-10-16)
 
-- Admins only, or every signed-in viewer (the allowlist)? The spec starts with admins.
-- Should the NAS get the same (a `cloudflared` on Unraid as a container), or stay metadata only?
+- **Who:** admins only (`requireAdmin`). Opening it to allowlisted viewers is a later, deliberate change; share-link grants stay refused either way.
+- **NAS:** stays metadata only for now. A `cloudflared` container on Unraid can follow once the laptop path has run for a while; the edge route's `tunnel` source is generic enough to point at a second origin.
