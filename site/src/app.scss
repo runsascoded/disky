@@ -201,7 +201,15 @@ header .hrow {
     text-overflow: ellipsis;
     gap: 0;
     .tb-suffix { color: var(--ink-3); margin-left: 8px; font-family: inherit; }
+    // The row's own `text-overflow` never reaches its flex items, so each crumb ellipsizes itself (phone width).
+    // Ancestors give way first, down to `3em` (`op… / mo…`); the deepest crumb shrinks only past that, to `6em`
+    // (a path deeper than that overflows its oldest ancestors off the left edge).
+    > * { display: inline-flex; align-items: center; min-width: 3em; flex-shrink: 1000; }
+    > :last-child { min-width: min(6em, 100%); flex-shrink: 1; }
+    .sep { flex-shrink: 0; }
+    > span > .tt-ref { display: inline-flex; min-width: 0; }
     button {
+      min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
       background: none; border: none; padding: 0 1px; font: inherit; color: var(--ink); cursor: pointer;
       text-decoration: underline; text-decoration-color: var(--ink-3); text-underline-offset: 3px;
       &:hover { text-decoration-color: var(--ink); }
@@ -392,6 +400,19 @@ button.mini.neg {
     code { font-size: 11px; }
   }
   &.user-menu { min-width: 250px; .user-card { padding: 4px 6px 2px; } }
+  // A submenu's trigger ("Display ▸"): the caret flush right; lit while its flyout is open.
+  .mi-sub {
+    .mi-caret { margin-left: auto; padding-left: 12px; color: var(--ink-3); font-size: 11px; }
+    &.open { background: var(--line); }
+  }
+  // The flyout (`DisplayMenu`): a check column so radio / checkbox labels align.
+  &.sub-menu {
+    min-width: 230px;
+    .mi-check { display: inline-block; width: 1em; text-align: center; color: var(--accent, #58a6ff); font-weight: 700; }
+    .menu-head { padding: 3px 10px 2px; font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.04em; }
+    [role="group"] { display: flex; flex-direction: column; }
+    .dim { color: var(--ink-3); font-size: 12px; }
+  }
 }
 // "Open in disky" fallback hint: bottom-center, click or 8 s to dismiss.
 .app-hint {
@@ -551,6 +572,8 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   margin: 0;
   font-variant-numeric: tabular-nums;
   b { color: var(--ink); font-weight: 600; }
+  // An inline path (`<code>{path}</code>`) breaks anywhere rather than widen the page at phone width.
+  code { overflow-wrap: anywhere; }
   .scanpick {
     background: var(--panel);
     color: var(--ink);
@@ -561,22 +584,12 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
     padding: 1px 4px;
     cursor: pointer;
   }
-  // The diff window's two low-key mode toggles (start: pinned/duration; end:
-  // pinned/latest) — muted until hovered or active, so they sit quietly beside
-  // the scan pickers.
-  .d-mode {
-    background: none;
-    border: 1px solid transparent;
-    color: var(--ink-3);
-    font: inherit;
-    font-size: 0.85em;
-    padding: 1px 4px;
-    margin-left: 2px;
-    border-radius: 6px;
-    cursor: pointer;
-    &:hover { color: var(--ink-2); border-color: var(--line); }
-    &.on { color: var(--ink); border-color: var(--line); background: var(--panel); }
-  }
+  // The diff window's modes, right of the pickers: start (duration | pinned, the duration's spans beside it) and end
+  // (latest | pinned), each a labeled two-way toggle.
+  .d-modes { display: inline-flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-left: 10px; vertical-align: middle; }
+  .d-modes .gran { margin-left: 0; }
+  .d-mode { gap: 0; button { border-radius: 0; } button:nth-of-type(1) { border-radius: 5px 0 0 5px; } button:nth-of-type(2) { border-radius: 0 5px 5px 0; margin-left: -1px; } }
+  .d-mode-lbl { color: var(--ink-3); font-size: 11.5px; margin-right: 5px; }
 }
 .prose {
   max-width: 68ch;
@@ -1363,6 +1376,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 #over-time h2 .gran { margin-left: 12px; font-weight: 400; vertical-align: middle; }
 .sub .gran { margin-left: 10px; vertical-align: middle; }
 
+// A wide table scrolls inside its own box, never the page (`LifecycleFold`'s rules table is ~714 px).
+.tbl-scroll { overflow-x: auto; max-width: 100%; }
+
 .classes {
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
@@ -1957,20 +1973,21 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   }
 }
 
-// The largest-files table under the children table (`LargestFiles.tsx`):
-// the same worklist look, a heading with its count picker, and each row's dir
-// part (a drill link) muted ahead of the basename (which opens the file).
-#ltbl { overflow-x: auto; }
-.largest-tbl {
-  margin-top: 18px;
-  h3 {
-    display: flex; align-items: center; gap: 4px; margin: 0 0 4px;
-    font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3);
-    .info { cursor: help; text-transform: none; }
-    select.psize { margin-left: 8px; font: inherit; font-size: 11.5px; text-transform: none; letter-spacing: 0; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+// The children table's header: its row modes (children | files | folders) left, the pager right. A flat row's
+// folder part (a drill link) is muted ahead of its last segment.
+.children-tbl .pager.top {
+  // The pager's button look stops at the toggle: it keeps the radio strip's (`.gran`).
+  .tbl-modes { margin-right: auto; }
+  .tbl-modes button {
+    font-size: 11.5px; line-height: 1.4; padding: 1px 8px; border-radius: 5px;
+    &.on { background: var(--s1); border-color: var(--s1); color: #fff; }
+    &:disabled { opacity: 0.45; cursor: default; }
   }
+}
+.children-tbl {
   .worklist .prefix a.dir { color: var(--ink-3); }
-  .loading { font-size: 12px; color: var(--ink-3); margin: 4px 0; }
+  > .loading, > .err { font-size: 12px; margin: 6px 0; }
+  > .loading { color: var(--ink-3); }
 }
 
 // "no reads since …" callout in treemap tooltips (dark tip bg → soft red tint)
@@ -2374,7 +2391,7 @@ a.staged-chip {
 // more rows on narrow viewports). `useHashSpy` reads the computed margin back
 // to decide when a deep link has landed.
 :root { --anchor-gap: 16px; }
-#tree-map, #tbl, #ltbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
+#tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
 .leaf-note { margin: -8px 0 4px; color: var(--ink-2); code { color: var(--ink); } }
 // Nothing drawable under the drilled node: the canvas folds away (the owner
 // panel / rollup above it stay).
@@ -2963,3 +2980,11 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   a { color: var(--s1); text-decoration: none; &:hover { text-decoration: underline; } }
 }
 .tip-viewcard .app-actions { margin-top: 4px; }
+
+// Section headings link to their section (`SectionAnchor`): plain heading ink, a `#` on hover.
+a.sec-anchor {
+  color: inherit;
+  text-decoration: none;
+  &:hover, &:focus-visible { text-decoration: underline; text-decoration-color: var(--ink-3); }
+  &:hover::after { content: ' #'; color: var(--ink-3); font-weight: normal; }
+}

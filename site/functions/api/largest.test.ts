@@ -59,6 +59,28 @@ describe('D1', () => {
     return { files: r.rows.map((x): F => [x.path, x.size]), groups: r.groups, decoded: r.decoded, more: r.more, capped: r.capped }
   }
 
+  type D = [path: string, size: number, nFiles: number]
+  const flatBytes = 500 * 65535
+  const nestBytes = 4 * MiB + MiB / 4
+  /** Every directory in the fixture, with its bytes and the objects below it. */
+  const DIRS: D[] = [
+    ['bk', flatBytes + 6000 + nestBytes, 8009],
+    ['bk/flat', flatBytes, 8000],
+    ['bk/nest', nestBytes, 5],
+    ['bk/nest/a', nestBytes, 5],
+    ['bk/nest/a/b', 4 * MiB, 4],
+    ['bk/small', 6000, 3],
+  ]
+  /** The spec: dirs strictly below `P`, size-descending, ties by path. */
+  const expectedDirs = (P: string, n: number): D[] => DIRS
+    .filter(([p]) => P === '' || p.startsWith(P + '/'))
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+    .slice(0, n)
+  const runDirs = async (date: string, P: string, n: number, maxGroups?: number) => {
+    const r = await readLargest(await openIndex(env, date, 'bysize'), P, n, maxGroups, 'dir')
+    return { dirs: r.rows.map((x): D => [x.path, x.size, x.n_files]), groups: r.groups, decoded: r.decoded, more: r.more, capped: r.capped }
+  }
+
   describe('readLargest', () => {
     for (const date of [D1, BLOB, PQ]) {
       describe(date, () => {
@@ -104,6 +126,31 @@ describe('D1', () => {
     }
   })
 
+  describe('readLargest, kind dir', () => {
+    for (const date of [D1, BLOB, PQ]) {
+      describe(date, () => {
+        it('the largest folders below a path, never the path itself nor an object', async () => {
+          expect(await runDirs(date, 'bk', 2)).toEqual({ dirs: [['bk/flat', flatBytes, 8000], ['bk/nest', nestBytes, 5]], groups: [0], decoded: 2048, more: true, capped: false })
+          expect(await runDirs(date, 'bk/nest', 10)).toEqual({ dirs: [['bk/nest/a', nestBytes, 5], ['bk/nest/a/b', 4 * MiB, 4]], groups: [0, 1], decoded: 4096, more: false, capped: false })
+          expect(expectedDirs('bk', 2)).toEqual([['bk/flat', flatBytes, 8000], ['bk/nest', nestBytes, 5]])
+        })
+
+        it('at the store root: every dir (the bucket too), largest first; fewer than asked reads every group', async () => {
+          expect(await runDirs(date, '', 10)).toEqual({ dirs: expectedDirs('', 10), groups: [0, 1, 2, 3], decoded: 8015, more: false, capped: false })
+          expect(expectedDirs('', 10).map(d => d[0])).toEqual(['bk', 'bk/flat', 'bk/nest', 'bk/nest/a', 'bk/nest/a/b', 'bk/small'])
+        })
+
+        it('a leaf folder, an object or a path outside the store: no folders below it', async () => {
+          expect(await Promise.all([runDirs(date, 'bk/small', 5), runDirs(date, 'bk/nest/a/b', 5), runDirs(date, 'zz', 5)])).toEqual([
+            { dirs: [], groups: [1], decoded: 2048, more: false, capped: false },
+            { dirs: [], groups: [0, 1], decoded: 4096, more: false, capped: false },
+            { dirs: [], groups: [], decoded: 0, more: false, capped: false },
+          ])
+        })
+      })
+    }
+  })
+
   describe('GET /api/largest', () => {
     const get = async (qs: string) => {
       const r = await largest({ request: new Request(`http://localhost/api/largest?${qs}`), env })
@@ -125,6 +172,23 @@ describe('D1', () => {
       })
     })
 
+    it('`kind=dir`: the largest folders below, with their object counts', async () => {
+      expect(await get(`date=${D1}&path=bk&n=3&kind=dir`)).toEqual({
+        status: 200,
+        body: {
+          date: D1, path: 'bk', n: 3, kind: 'dir',
+          dirs: [
+            { path: 'bk/flat', size: flatBytes, mtime: MTIME, n_files: 8000 },
+            { path: 'bk/nest', size: nestBytes, mtime: MTIME, n_files: 5 },
+            { path: 'bk/nest/a', size: nestBytes, mtime: MTIME, n_files: 5 },
+          ],
+          more: true, groups: 1, rows: 2048,
+        },
+      })
+      // `kind=file` is the default's answer.
+      expect(await get(`date=${D1}&path=bk/small&kind=file`)).toEqual(await get(`date=${D1}&path=bk/small`))
+    })
+
     it('refuses a bad n, path or scan', async () => {
       expect(await Promise.all([
         get(`date=${D1}&path=bk&n=0`),
@@ -134,6 +198,7 @@ describe('D1', () => {
         get(`date=${D1}&path=bk/../x`),
         get('path=bk'),
         get('date=2026-01-01&path=bk'),
+        get(`date=${D1}&path=bk&kind=dirs`),
       ])).toEqual([
         { status: 400, body: 'bad n (want 1..500)' },
         { status: 400, body: 'bad n (want 1..500)' },
@@ -142,6 +207,7 @@ describe('D1', () => {
         { status: 400, body: 'bad path' },
         { status: 400, body: 'bad date' },
         { status: 404, body: { error: 'no scan matches date=2026-01-01' } },
+        { status: 400, body: 'bad kind (want file|dir)' },
       ])
     })
   })

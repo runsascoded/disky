@@ -1,18 +1,22 @@
 /** The largest files anywhere under a path — a flat, recursive "Large Files"
  * list (objects only, never dirs), size-descending, from the store
- * generation's `bysize` sort (`readLargest` in `_lib/index.ts`).
+ * generation's `bysize` sort (`readLargest` in `_lib/index.ts`); with
+ * `kind=dir`, the largest folders strictly below it instead (never objects,
+ * never the path itself).
  *
- *   GET /api/largest?date=<scan>|d=<slug>&path=<P>[&n=<1..500>][&store=<key>]
+ *   GET /api/largest?date=<scan>|d=<slug>&path=<P>[&n=<1..500>][&kind=file|dir][&store=<key>]
  *
- * → `{ date, path, n, files: [{ path, size, mtime }], more, groups, rows, capped? }`:
- * `path` is the full store path (no scheme), `mtime` epoch seconds (null where
- * the store has none), ties broken by path. `more`: files beyond the `n` listed
+ * → `{ date, path, n, files: [{ path, size, mtime }], more, groups, rows, capped? }`
+ * (`kind=dir`: `{ date, path, n, kind: 'dir', dirs: [{ path, size, mtime, n_files }], … }`,
+ * `n_files` = the objects below each): `path` is the full store path (no
+ * scheme), `mtime` epoch seconds (null where the store has none; a folder's
+ * newest), ties broken by path. `more`: files beyond the `n` listed
  * exist, or may (groups left unread). `groups` / `rows`: the size-sort row
  * groups decoded and the rows they held — the read's cost. `capped`: the read
  * hit its group budget, so the list is the largest in what it read.
  *
  * Gated like `/api/subtree` (viewer scope); immutable per (scan, path, n,
- * generation), so edge-cached like it. A version-1 scan (dirs only, no size
+ * generation, kind), so edge-cached like it. A version-1 scan (dirs only, no size
  * sort) is a 409. Reads the request's path store (`withPathStore`): under
  * `PATH_STORE=intervals` a scan the interval store holds is read from its
  * `bysize` sort as of that scan (`readLargest` → `readLargestIv`: its runs' close
@@ -21,7 +25,7 @@
  */
 import { filterJson, hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { openIndex, pathGens, readLargest, sizeVariant, storeReady, withPathStore } from '../_lib/index.js'
+import { type LargestKind, openIndex, pathGens, readLargest, sizeVariant, storeReady, withPathStore } from '../_lib/index.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { storeKey, withStore } from '../_lib/stores.js'
 import { scanArg } from '../_lib/scanArg.js'
@@ -48,6 +52,10 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   const nRaw = url.searchParams.get('n')
   const n = nRaw == null ? LARGEST_DEFAULT : Number(nRaw)
   if (!Number.isInteger(n) || n < 1 || n > LARGEST_MAX) return new Response(`bad n (want 1..${LARGEST_MAX})`, { status: 400 })
+  const kindRaw = url.searchParams.get('kind') ?? 'file'
+  if (kindRaw !== 'file' && kindRaw !== 'dir') return new Response('bad kind (want file|dir)', { status: 400 })
+  const kind: LargestKind = kindRaw
+  const key = kind === 'dir' ? 'dirs' : 'files'
 
   const gated = await st.time('auth', requireViewer(ctx as never))
   if (gated instanceof Response) return gated
@@ -57,7 +65,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   const restriction = restrictionFor(gated, ctx.env)
   if (restriction && isHidden(path, restriction)) return hiddenNotFound()
   const out = (res: Response | Promise<Response>) =>
-    restriction ? Promise.resolve(res).then(r => filterJson(r, (b: { files: { path: string }[] }) => ({ ...b, files: b.files.filter(f => !isHidden(f.path, restriction)) }))) : res
+    restriction ? Promise.resolve(res).then(r => filterJson(r, (b: Record<string, { path: string }[]>) => ({ ...b, [key]: b[key].filter(f => !isHidden(f.path, restriction)) }))) : res
 
   try {
     // An unindexed id, or a `d=` slug matching no scan: a 404, never another scan.
@@ -66,7 +74,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
     const date = scan
     const env = ctx.env
     const g = await st.time('pre', pathGens(env, [date]))
-    const cacheKey = cacheKeyFor('largest', cacheEnvTag(ctx.env, ctx.request), `${date}/${encodeURIComponent(path)}?n=${n}&g=${g}`, storeKey(ctx.env))
+    const cacheKey = cacheKeyFor('largest', cacheEnvTag(ctx.env, ctx.request), `${date}/${encodeURIComponent(path)}?n=${n}${kind === 'dir' ? '&k=dir' : ''}&g=${g}`, storeKey(ctx.env))
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return out(hit)
     let h
@@ -76,12 +84,14 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
       if (String((e as Error).message).includes('not synced')) return new Response('no size sort for this scan (objects not indexed)', { status: 409 })
       throw e
     }
-    const r = await readLargest({ ...h, trace: st.trace }, path, n)
+    const r = await readLargest({ ...h, trace: st.trace }, path, n, undefined, kind)
     const body = JSON.stringify({
       date,
       path,
       n,
-      files: r.rows.map(x => ({ path: x.path, size: x.size, mtime: x.mtime })),
+      ...(kind === 'dir'
+        ? { kind, dirs: r.rows.map(x => ({ path: x.path, size: x.size, mtime: x.mtime, n_files: x.n_files })) }
+        : { files: r.rows.map(x => ({ path: x.path, size: x.size, mtime: x.mtime })) }),
       more: r.more,
       groups: r.groups.length,
       rows: r.decoded,

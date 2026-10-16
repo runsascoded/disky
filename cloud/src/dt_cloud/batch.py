@@ -157,3 +157,29 @@ def wait_jobs(jobs: Sequence[tuple[str, str]], interval: int = 60, log=None) -> 
         if len(states) < len(jobs):
             time.sleep(interval)
     return states
+
+
+LIVE_STATES = ("QUEUED", "SCHEDULED", "RUNNING")
+
+
+def live_labelled(jobs: Sequence[Mapping], labels: Mapping[str, str]) -> list[str]:
+    """The short names of ``jobs`` carrying every one of ``labels`` and not yet in a terminal state."""
+    return [j["name"].rsplit("/", 1)[-1] for j in jobs
+            if j.get("status", {}).get("state") in LIVE_STATES
+            and all(j.get("labels", {}).get(k) == v for k, v in labels.items())]
+
+
+def cancel_labelled(labels: Mapping[str, str], *, region: str = REGION, dry_run: bool = False, log=None) -> list[str]:
+    """Delete (= cancel) every live Batch job in ``region`` carrying all of ``labels``; returns their names. A driver
+    killed mid-submit leaves jobs it never saw submitted: a run's own label finds them (a Nextflow head's session)."""
+    from .gcp import batch_jobs
+
+    project = gcp_project()
+    names = live_labelled(batch_jobs(project, region), labels)
+    for n in names:
+        if log:
+            log(f"{'would cancel' if dry_run else 'cancelling'} {n}")
+        if not dry_run:
+            r = session().delete(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{n}")
+            r.raise_for_status()
+    return names

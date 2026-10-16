@@ -832,3 +832,11 @@ def test_render_plot_posts_to_site(monkeypatch, tmp_path: Path):
     D.Cw(CFG).render_plot(MONTH, SEP, tmp_path / "op.png")
     assert calls == [(SITE, "tok", "/api/digest-image", D.image_body(MONTH, SEP, CFG))]
     assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
+
+
+def test_op_sender():
+    """The OP's sender icon: `op_icon` as a URL, or a file under `icons_base` (the deployment's mark); unset, 📆."""
+    base = {"template": "cw", "title": "t", "site_url": SITE, "icons_base": "https://icons.example.org"}
+    assert [E.config_from_dict({**base, **extra}).op_sender() for extra in ({}, {"op_icon": "mark.png"}, {"op_icon": "https://x.example/m.png"})] == [
+        {"icon_emoji": ":calendar:"}, {"icon_url": "https://icons.example.org/mark.png"}, {"icon_url": "https://x.example/m.png"},
+    ]

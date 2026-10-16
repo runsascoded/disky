@@ -39,6 +39,10 @@ FILE_ROWS = 50_000_000
 RUN_RG = 2048
 #: Decoded row groups kept per group file by the builder's reads.
 GROUP_CACHE = 2048
+#: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
+EXPLODE_PART_ROWS = 1 << 23
+#: Settling's input rows (affected directories' touched and kept children, as Python rows) loaded at once.
+SETTLE_CHUNK_ROWS = 1 << 22
 #: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
 #: loops fetch each miss in turn.
 FETCH_THREADS = 64
@@ -510,6 +514,20 @@ class TierReads:
                                 if matched.num_rows:
                                     yield matched
 
+    def cache_stats(self) -> dict:
+        """What the reads' caches hold now: decoded groups (and their Arrow bytes), parsed index row groups, raw bytes."""
+        groups = [v for _, gf in self.items if gf is not None for v in gf._groups.values()]
+        return {"decoded_groups": len(groups), "decoded_bytes": sum(t.nbytes for t, _ in groups),
+                "index_groups": sum(len(gf._entries) + len(gf._peeked) for _, gf in self.items if gf is not None),
+                "raw_bytes": self.raw.size if self.raw is not None else 0}
+
+    def drop_decoded(self) -> None:
+        """Drop the decoded groups (each group file's LRU; the index and raw bytes stay): between loops that read different
+        ranges, so one loop's working set isn't carried into the next."""
+        for _, gf in self.items:
+            if gf is not None:
+                gf._groups.clear()
+
     def close(self) -> None:
         """Free what the reads hold: the byte cache (whose keys hold the group files: a cycle), each group file's decoded
         groups and index entries."""
@@ -930,6 +948,22 @@ def _explode(where: str = "") -> str:
             FROM dr WHERE depth >= 2 {where})"""
 
 
+def _explode_parts(con) -> int:
+    """How many parts (by `hash(q)`) the aggregations over `_explode` run in: one per `EXPLODE_PART_ROWS` of `dr`'s rows at
+    depth ≥ 2, each exploded once per ancestor. Every group key leads with `q`, so a part's groups are whole."""
+    rows = con.execute("SELECT count(*) FROM dr WHERE depth >= 2").fetchone()[0]
+    return max(1, -(-rows // EXPLODE_PART_ROWS))
+
+
+def _by_parts(con, table: str, parts: int, select) -> None:
+    """Table `table` as `select(where)`'s rows over `parts` disjoint parts of `q` (`where` restricts `dr`'s rows to one), run
+    one after another: an aggregation's working set is a part's, not the whole exploded `dr`'s (gcs 2026-10-16T0701's short
+    kind: DuckDB couldn't pin a block at its 60 GB limit computing `tch` in one pass)."""
+    for i in range(parts):
+        w = f"AND hash(q) % {parts} = {i}" if parts > 1 else ""
+        con.execute(f"{'CREATE OR REPLACE TABLE' if i == 0 else 'INSERT INTO'} {table} {'AS ' if i == 0 else ''}{select(w)}")
+
+
 def _nop_step(name: str, t: float, **counts: int) -> float:
     return monotonic()
 
@@ -947,8 +981,9 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     doc: Counter = Counter()
     _cmap(con, prior, kind)
     # today's rows under each directory
-    con.execute(f"""CREATE OR REPLACE TABLE tdir AS SELECT q, dir, any_value(k) AS k, count(*)::BIGINT AS rows,
-            count(*) FILTER (WHERE vf = {D})::BIGINT AS opens FROM ({_explode()}) GROUP BY q, dir""")
+    parts = _explode_parts(con)
+    _by_parts(con, "tdir", parts, lambda w: f"""SELECT q, dir, any_value(k) AS k, count(*)::BIGINT AS rows,
+            count(*) FILTER (WHERE vf = {D})::BIGINT AS opens FROM ({_explode(w)}) GROUP BY q, dir""")
     # the prior state of the touched directories: each tier's rows for the member's canonical there, from the newest full header on
     con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
     for i, t in enumerate(prior):
@@ -974,12 +1009,12 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         raise RuntimeError(f"{bad} heavy directories whose kept children are not min(K, children) named cells")
     doc["heavy_touched"] = con.execute("SELECT count(*) FROM hdr").fetchone()[0]
     # per child of each touched heavy directory: today's change, and whether it is new
-    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT e.q, e.dir, e.child, bool_or(e.k + 1 = e.depth) AS rootchild,
+    _by_parts(con, "tch", parts, lambda w: f"""SELECT e.q, e.dir, e.child, bool_or(e.k + 1 = e.depth) AS rootchild,
             sum(CASE WHEN e.vf = {D} THEN e.size ELSE -e.size END)::BIGINT AS db,
             sum(CASE WHEN e.vf = {D} THEN e.n_files ELSE -e.n_files END)::BIGINT AS dn,
             count(*) FILTER (WHERE e.vf <> {D})::BIGINT AS n_close,
             count(*) FILTER (WHERE e.vf = {D} AND pn.path IS NULL)::BIGINT AS n_open_old
-        FROM ({_explode("AND q NOT IN (SELECT q FROM newq)")}) AS e SEMI JOIN hdr USING (q, dir)
+        FROM ({_explode("AND q NOT IN (SELECT q FROM newq) " + w)}) AS e SEMI JOIN hdr USING (q, dir)
         LEFT JOIN pnew AS pn ON pn.depth = e.depth AND pn.path = e.path
         GROUP BY e.q, e.dir, e.child""")
     con.execute("""CREATE OR REPLACE TABLE nk AS SELECT t.*, (h.ho > h.kept_n) AS has_rem FROM tch AS t ANTI JOIN kc USING (q, dir, child)
@@ -1031,6 +1066,8 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
             LEFT JOIN rc USING (q, dir) WHERE (n.db <> 0 OR n.dn <> 0) AND (n.q, n.dir) NOT IN (SELECT q, dir FROM aff)""")
     t1 = monotonic()
     doc["restated"] = _settle(con, D, K, reads, kind, log, ck)
+    reads.drop_decoded()
+    release_heap()
     if doc["affected"]:
         log(f"drill {kind}: {doc['affected']:,} directories settled one by one, {doc['restated']:,} restated in {monotonic() - t1:.0f}s")
     # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's
@@ -1058,6 +1095,9 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     t2 = step(f"drill/rollups/{kind}", t0, heavy_touched=doc["heavy_touched"], affected=doc["affected"], restated=doc["restated"])
     count = 0
     if doc["heavy_new"]:
+        reads.drop_decoded()
+        release_heap()
+        resource_stage(f"{kind}: newly-heavy start", directories=doc["heavy_new"], **duckdb_resources(con), **reads.cache_stats())
         count = newly_heavy_rollups(con, reads, kind, K, log=log, ck=ck)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     step(f"drill/newly-heavy/{kind}", t2, directories=doc["heavy_new"], prior_roots=count)
@@ -1180,6 +1220,20 @@ def duckdb_resources(con) -> dict:
     return {"duckdb_bytes": int(memory), "duckdb_spill_bytes": int(spill)}
 
 
+def release_heap() -> None:
+    """Return the C heap's free pages to the OS (glibc `malloc_trim`; elsewhere nothing): after a step that built and freed
+    many Python rows, so RSS reflects what is held, and the next step's DuckDB has the room."""
+    import ctypes
+    import ctypes.util
+
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+        trim = libc.malloc_trim
+    except (OSError, AttributeError):
+        return
+    trim(0)
+
+
 def insert_prior_roots(
     con,
     reads: TierReads,
@@ -1215,69 +1269,97 @@ def insert_prior_roots(
     return total
 
 
-def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err, ck: Checkpoint | None = None) -> int:
+def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err, ck: Checkpoint | None = None,
+            chunk_rows: int | None = None) -> int:
     """The touched heavy directories whose kept set may change (`aff`): rank the kept children (peaks after today), the new
     children (their value today) and the existing ones that could enter (their exact value on D); keep the top
     `min(K, children)`. When an existing child moves in or out, restate the directory's whole history under a full header;
     else a delta header and today's cells. Appends to `rup`; returns the restated count. Logs each step: the inputs, the
     plan, and the loop (fetch vs settle seconds, rows and groups read, the caches' hits; the slowest directories). `ck`: the
     rows so far are saved as parts (`checkpoint.Parts`; each directory's rows depend on it alone), and a rerun takes the
-    saved ones and settles only the directories they don't cover."""
+    saved ones and settles only the directories they don't cover.
+
+    The directories are settled in chunks of about `chunk_rows` input rows (their touched and kept children), each chunk's
+    inputs loaded, settled and appended to `rup` before the next: the inputs are Python rows, and loading every directory's
+    at once held ~65 GiB on gcs 2026-10-16's short kind (1,253 directories). Each directory's rows depend on it alone, so
+    the output is the same at any `chunk_rows` (default `SETTLE_CHUNK_ROWS`)."""
     t0 = monotonic()
     aff = con.execute("SELECT q, dir FROM aff ORDER BY q, dir").fetchall()
     if not aff:
         return 0
     parts = Parts(ck, "settle", ROLLUP_ARROW)
-    out: list[tuple] = [] if parts.loaded is None else list(zip(*(c.to_pylist() for c in parts.loaded.columns)))
+    restated = 0
+    if parts.loaded is not None:
+        loaded = list(zip(*(c.to_pylist() for c in parts.loaded.columns)))
+        restated += _settled(con, loaded)
+        del loaded
     if parts.start == len(aff):
-        return _settled(con, out)
-    start, aff = parts.start, aff[parts.start:]
-    kept: dict[tuple, list] = {}
-    for c, d, child, b, o, peak, db, dn in con.execute("""SELECT kc.q, kc.dir, kc.child, kc.b, kc.o, kc.peak, coalesce(t.db, 0), coalesce(t.dn, 0)
-            FROM kc SEMI JOIN aff USING (q, dir) LEFT JOIN tch AS t USING (q, dir, child) ORDER BY ALL""").fetchall():
-        kept.setdefault((c, d), []).append((child, b, o, peak, db, dn))
-    others: dict[tuple, list] = {}
-    for c, d, child, root, db, dn, new in con.execute("SELECT q, dir, child, rootchild, db, dn, is_new FROM nkc SEMI JOIN aff USING (q, dir) ORDER BY ALL").fetchall():
-        others.setdefault((c, d), []).append((child, root, db, dn, new))
-    cands = {(c, d, x) for c, d, x in con.execute("SELECT q, dir, child FROM cand WHERE NOT is_new").fetchall()}
-    hdr = {(c, d): (kn, hb, ho) for c, d, kn, hb, ho in con.execute("SELECT q, dir, kept_n, hb, ho FROM hdr SEMI JOIN aff USING (q, dir)").fetchall()}
-    opens = {(c, d): n for c, d, n in con.execute("SELECT q, dir, opens FROM tdir SEMI JOIN aff USING (q, dir)").fetchall()}
-    rest = {(c, d): (b, o) for c, d, b, o in con.execute("SELECT q, dir, b, o FROM rc SEMI JOIN aff USING (q, dir)").fetchall()}
-    heavy_tot = _heavy_totals(con, sorted({(c, f"{d}/{x}") for c, d, x in cands}))
-    t1 = monotonic()
-    ctx = _settle_ctx(con, aff, cands)
-    n_today = sum(len(v) for v in ctx["today"].values())
-    log(f"drill {kind}: settling {len(aff):,} directories, {len(cands):,} candidates: inputs in {t1 - t0:.0f}s, "
-        f"{n_today:,} of today's roots under the candidates in {monotonic() - t1:.0f}s")
-    t1 = monotonic()
-    plans = _settle_plan(aff, others, cands, heavy_tot, reads)
-    if reads.raw is not None:
-        need = {(id(gf), g["file"], g["offset"]): g["length"] for p in plans for gf, g in p}
-        log(f"drill {kind}: settling plan: {sum(map(len, plans)):,} group reads, {len(need):,} distinct groups, "
-            f"{sum(need.values()):,} bytes, in {monotonic() - t1:.0f}s")
+        return restated
+    start = parts.start
+    chunk_rows = chunk_rows or SETTLE_CHUNK_ROWS
+    sizes = dict(((c, d), n) for c, d, n in con.execute("""SELECT q, dir, count(*) FROM (
+            SELECT q, dir FROM nkc SEMI JOIN aff USING (q, dir) UNION ALL SELECT q, dir FROM kc SEMI JOIN aff USING (q, dir))
+        GROUP BY q, dir""").fetchall())
+    chunks = _settle_chunks(aff[start:], sizes, chunk_rows)
+    log(f"drill {kind}: settling {len(aff) - start:,} directories, {sum(sizes.values()):,} input rows, in {len(chunks):,} chunks of ≤ {chunk_rows:,} rows "
+        f"(largest directory {max(sizes.values(), default=0):,})")
     io0, rq0 = Counter(reads.io()), Counter(reads.requests())
     t_fetch = t_settle = 0.0
     slow: list[tuple] = []
-    done, t_log, saved = 0, monotonic(), len(out)
-    it = reads.windows(plans)
-    while True:
+    done, t_log = 0, monotonic()
+    for j, chunk in enumerate(chunks):
+        out: list[tuple] = []
+        saved = 0
+        t1 = monotonic()
+        con.execute("CREATE OR REPLACE TABLE affc (q VARCHAR, dir VARCHAR)")
+        insert_rows(con, "affc", chunk)
+        kept: dict[tuple, list] = {}
+        for c, d, child, b, o, peak, db, dn in con.execute("""SELECT kc.q, kc.dir, kc.child, kc.b, kc.o, kc.peak, coalesce(t.db, 0), coalesce(t.dn, 0)
+                FROM kc SEMI JOIN affc USING (q, dir) LEFT JOIN tch AS t USING (q, dir, child) ORDER BY ALL""").fetchall():
+            kept.setdefault((c, d), []).append((child, b, o, peak, db, dn))
+        others: dict[tuple, list] = {}
+        for c, d, child, root, db, dn, new in con.execute("SELECT q, dir, child, rootchild, db, dn, is_new FROM nkc SEMI JOIN affc USING (q, dir) ORDER BY ALL").fetchall():
+            others.setdefault((c, d), []).append((child, root, db, dn, new))
+        cands = {(c, d, x) for c, d, x in con.execute("SELECT q, dir, child FROM cand SEMI JOIN affc USING (q, dir) WHERE NOT is_new").fetchall()}
+        hdr = {(c, d): (kn, hb, ho) for c, d, kn, hb, ho in con.execute("SELECT q, dir, kept_n, hb, ho FROM hdr SEMI JOIN affc USING (q, dir)").fetchall()}
+        opens = {(c, d): n for c, d, n in con.execute("SELECT q, dir, opens FROM tdir SEMI JOIN affc USING (q, dir)").fetchall()}
+        rest = {(c, d): (b, o) for c, d, b, o in con.execute("SELECT q, dir, b, o FROM rc SEMI JOIN affc USING (q, dir)").fetchall()}
+        con.execute("DROP TABLE affc")
+        heavy_tot = _heavy_totals(con, sorted({(c, f"{d}/{x}") for c, d, x in cands}))
         t2 = monotonic()
-        ab = next(it, None)
-        t_fetch += monotonic() - t2
-        if ab is None:
-            break
-        a, b = ab
+        ctx = _settle_ctx(con, chunk, cands)
+        n_today = sum(len(v) for v in ctx["today"].values())
+        log(f"drill {kind}: settling {len(chunk):,} directories ({start + done + 1:,}–{start + done + len(chunk):,}), {len(cands):,} candidates: "
+            f"inputs in {t2 - t1:.0f}s, {n_today:,} of today's roots under the candidates in {monotonic() - t2:.0f}s")
         t2 = monotonic()
-        for key, s, stats in _settle_dirs(aff[a:b], kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out):
-            slow = sorted([*slow, (s, key, stats)], key=lambda x: x[0], reverse=True)[:5]
-            done += 1
-            if ck:
-                parts.add(out[saved:], start + done)
-                saved = len(out)
-            if done == len(aff) or monotonic() - t_log >= 60:
-                t_log = monotonic()
-                log(f"drill {kind}: settled {done:,}/{len(aff):,} directories, {t_fetch:.0f}s fetching, {t_settle + monotonic() - t2:.0f}s settling")
-        t_settle += monotonic() - t2
+        plans = _settle_plan(chunk, others, cands, heavy_tot, reads)
+        if reads.raw is not None:
+            need = {(id(gf), g["file"], g["offset"]): g["length"] for p in plans for gf, g in p}
+            log(f"drill {kind}: settling plan: {sum(map(len, plans)):,} group reads, {len(need):,} distinct groups, "
+                f"{sum(need.values()):,} bytes, in {monotonic() - t2:.0f}s")
+        it = reads.windows(plans)
+        while True:
+            t2 = monotonic()
+            ab = next(it, None)
+            t_fetch += monotonic() - t2
+            if ab is None:
+                break
+            a, b = ab
+            t2 = monotonic()
+            for key, s, stats in _settle_dirs(chunk[a:b], kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out):
+                slow = sorted([*slow, (s, key, stats)], key=lambda x: x[0], reverse=True)[:5]
+                done += 1
+                if ck:
+                    parts.add(out[saved:], start + done)
+                    saved = len(out)
+                if start + done == len(aff) or monotonic() - t_log >= 60:
+                    t_log = monotonic()
+                    log(f"drill {kind}: settled {start + done:,}/{len(aff):,} directories, {t_fetch:.0f}s fetching, {t_settle + monotonic() - t2:.0f}s settling")
+            t_settle += monotonic() - t2
+        restated += _settled(con, out)
+        del out, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, plans
+        release_heap()
+        resource_stage(f"{kind}: settle", chunk=j + 1, chunks=len(chunks), settled=start + done, **duckdb_resources(con), **reads.cache_stats())
     io = Counter(reads.io())
     io.subtract(io0)
     rq = Counter(reads.requests())
@@ -1286,12 +1368,27 @@ def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err, ck: 
     log(f"drill {kind}: settling loop: {t_fetch:.0f}s fetching ({rq['prefetch_fetches']:,} requests, {rq['prefetch_bytes']:,} bytes; "
         f"{rq['miss_fetches']:,} misses, {rq['evicted']:,} evicted), {t_settle:.0f}s settling: {io['rows']:,} reads returning "
         f"{rq['rows_out']:,} prior roots, {decodes:,} groups decoded ({io['group_bytes']:,} bytes), decoded-group hit rate "
-        f"{hits / max(1, hits + decodes):.1%}")
+        f"{hits / max(1, hits + decodes):.1%}; {monotonic() - t0:.0f}s in all")
     for s, (c, d), st in slow:
         log(f"drill {kind}: settling, slow: {c!r} {d!r} {s:.1f}s, {st['candidates']:,} candidates, {st['rows_out']:,} prior roots, "
             f"{st['groups_read']:,} groups decoded ({st['group_bytes']:,} bytes)")
     parts.flush(start + done)
-    return _settled(con, out)
+    return restated
+
+
+def _settle_chunks(aff: list[tuple], sizes: dict[tuple, int], chunk_rows: int) -> list[list[tuple]]:
+    """`aff` in order, cut into runs of directories whose input rows (`sizes`) sum to at most `chunk_rows` (a directory over
+    it alone is a chunk of its own)."""
+    chunks: list[list[tuple]] = []
+    n = 0
+    for key in aff:
+        m = sizes.get(key, 0)
+        if not chunks or (n + m > chunk_rows and chunks[-1]):
+            chunks.append([])
+            n = 0
+        chunks[-1].append(key)
+        n += m
+    return chunks
 
 
 def _settled(con, out: list[tuple]) -> int:

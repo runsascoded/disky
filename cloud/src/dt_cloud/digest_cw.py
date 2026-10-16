@@ -349,7 +349,7 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
         return Reply(f"{_md(day.date)} — {size}", tail, icon_url=f"{cfg.need('icons_base')}/arrows/av_deg{d}.png?v={AVATAR_REV}")
     if variant == "body":
         url = _diff_url(day.scan, day.since, cfg.site_url, slug=day.slug)
-        return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}** · {tail}", icon_emoji=":calendar:")
+        return Reply(cfg.title, f":arrow_deg{d}: [{_md(day.date)}]({url}) — **{size}** · {tail}", **cfg.op_sender())
     raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
 
 

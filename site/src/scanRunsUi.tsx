@@ -1,6 +1,8 @@
 // The scan-run pieces /scans and /health share (specs/done/scan-runs-ui.md, specs/done/health-page.md): the run list's fetch
 // (one React Query cache entry for both pages), the status chip, the phase bar and its colors.
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
+import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
 import { overlappingFailures, phaseFill, phaseOutcome, runOutcome, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
@@ -46,6 +48,26 @@ export const fmtDur = (s: number): string => (s < 60 ? `${Math.round(s)}s` : fmt
 
 export const fmtRunTime = (ts: number | null, timeZone?: string): string =>
   ts == null ? '—' : fmtTimestamp(new Date(ts * 1000).toISOString(), timeZone)
+
+/** A run's start, short, in the viewer's zone: `Thu Oct 16 · 3:16 AM` (the year only when it isn't `now`'s). */
+export const fmtRunShort = (ts: number, timeZone?: string, now: number = Date.now() / 1000): string => {
+  const at = new Date(ts * 1000)
+  const year = (t: Date) => t.toLocaleDateString('en-US', { year: 'numeric', timeZone })
+  const day = at.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', ...(year(at) === year(new Date(now * 1000)) ? {} : { year: 'numeric' }), timeZone })
+  const time = at.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone })
+  return `${day.replaceAll(',', '')} · ${time}`
+}
+
+/** A run's start as a table cell's content: the short local time (linked to `href` when given), its age dim beside it, and the
+ * scan id with the full timestamp in a tooltip. */
+export function RunWhen({ ts, scan, href }: { ts: number | null; scan: string; href?: string }) {
+  const label = ts == null ? <code>{scan}</code> : <>{fmtRunShort(ts)}</>
+  return (
+    <Tooltip content={<><div><code>{scan}</code></div>{ts != null && <div>{fmtRunTime(ts)}</div>}</>}>
+      <span className="run-when">{href ? <Link to={href}>{label}</Link> : label}{ts != null && <span className="dim"> · {ago(ts)} ago</span>}</span>
+    </Tooltip>
+  )
+}
 
 export const runDay = (ts: number, timeZone?: string): string =>
   new Date(ts * 1000).toLocaleDateString('en-CA', { year: 'numeric', month: '2-digit', day: '2-digit', timeZone })

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { MouseEvent } from 'react'
-import { intParam, useUrlState } from 'use-prms'
+import { codeParam, intParam, useUrlState } from 'use-prms'
 import { useCanAssign, useCanStage } from './auth'
 import { FaRegTrashCan } from 'react-icons/fa6'
 import { AGE_BUCKETS, ageBucketColor, dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonthShort } from './colors'
@@ -24,13 +24,22 @@ import { pathText } from './pathCrumbs'
 import { rowLabel, type RowMatches, rowsCover } from './filterCover'
 import { ActStatus, RowActs, type RowSource, useActDeps, useKeepFocus, useMatchAct } from './MatchActions'
 import { RootSourceTag } from './UnionNotes'
+import { flatRows, LARGEST_MAX, LARGEST_STEP, useLargest } from './largest'
 
 // Sortable, paged listing of the treemap's current node's children — the
 // tabular twin of the map above it: every named row is a link, a directory
 // drilling like its cell, an object opening in the leaf viewer.
 // Row selection + bulk staging / assignment: `gcs:specs/done/children-table-selection.md`.
+//
+// Three modes (`?tm=`, the header's toggle): the node's direct children (default), or a flat listing of the
+// largest files (`f`) or folders (`d`) anywhere below it, however deep (`/api/largest`) — the same table over
+// rows named by their path below the node, paged through the top `LARGEST_MAX` a step at a time.
 
 type SortKey = 'n' | 'b' | 'o' | 'd' | 'a'
+
+export type TableMode = 'children' | 'files' | 'folders'
+const tableModeParam = codeParam<TableMode>('children', { children: 'c', files: 'f', folders: 'd' })
+const MODES: [TableMode, string][] = [['children', 'children'], ['files', 'files'], ['folders', 'folders']]
 
 // Rows per page: `?n=` (default 20); the pager offers the usual sizes.
 const PAGE_SIZES = [20, 50, 100, 200]
@@ -39,7 +48,7 @@ const PAGE_SIZES = [20, 50, 100, 200]
  *  tooltip); ~60 chars fills the column's 480px at 12px mono. */
 const NAME_MAX = 60
 
-export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, filter, rowMatches, brush, onBrush }: {
+export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, filter, rowMatches, brush, onBrush }: {
   /** The treemap's currently-viewed node. */
   node: TreeNode
   /** Path segments from the tree root to `node` (no scheme, no root). */
@@ -47,6 +56,11 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   scheme: string
   /** The store home, read as `~` in row tooltips (`Store.home`). */
   home?: string[]
+  /** The page's scan: the flat modes' listing is its. */
+  scan?: string | null
+  /** Whether the flat modes (largest files / folders below) apply: a scan that lists objects, and no scope (lens,
+   *  owner pool, class, name filter) — the listing is the whole directory's, which a scoped view couldn't honor. */
+  flatOk?: boolean
   /** The ownership ledger (`Store.owners`): assignments show as the row's
    *  owner, and anyone who may assign (`useCanAssign`) does so from the actions column. */
   ownerIdx?: OwnerIndex | null
@@ -74,9 +88,30 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const { fmtBytes } = useUnits()
   const canAssign = useCanAssign()
   const [sort, setSort] = useState<{ k: SortKey; asc: boolean }>({ k: 'b', asc: false })
-  const [page, setPage] = useState(0)
   const [nP, setNP] = useUrlState('n', intParam(20))
   const PAGE = PAGE_SIZES.includes(nP) ? nP : 20
+  const [modeP, setMode] = useUrlState('tm', tableModeParam)
+  const mode: TableMode = flatOk ? modeP : 'children'
+  const flat = mode !== 'children'
+  const kind = mode === 'folders' ? 'dir' : 'file'
+  const path = segs.join('/')
+  // A new listing (drill, sort, mode) starts on page 1 — at once, so a flat listing never asks for the old page's rows.
+  const [pageAt, setPageAt] = useState({ page: 0, node, sort, mode })
+  const page = pageAt.node === node && pageAt.sort === sort && pageAt.mode === mode ? pageAt.page : 0
+  const setPage = (p: number) => setPageAt({ page: p, node, sort, mode })
+  // The flat listing: enough of the top to fill the page asked for, in steps (a page past the listed rows asks for more).
+  const want = Math.min(LARGEST_MAX, Math.ceil(((page + 1) * PAGE) / LARGEST_STEP) * LARGEST_STEP)
+  const lq = useLargest(path, scan, want, kind, flat)
+  const listed = useMemo(() => {
+    const d = lq.data
+    return flat && d ? flatRows(path, (kind === 'dir' ? d.dirs : d.files) ?? [], kind) : []
+  }, [flat, lq.data, path, kind])
+  // More rows below the listed ones (`more`), that a bigger ask can list: the answer was full (not a read cut
+  // short by its budget, `capped`) and under the most one ask lists.
+  const moreFlat = flat && !!lq.data?.more
+  const canGrow = moreFlat && !lq.data?.capped && listed.length === lq.data?.n && listed.length < LARGEST_MAX
+  // A row's segments from the root: a flat row's name is its path below the node.
+  const segsOf = (k: TreeNode) => (flat ? [...segs, ...k.n.split('/')] : [...segs, k.n])
   // A staging store (`Store.staging`): full viewers — not read-only guest
   // links — select + trash (stage for deletion; an admin approves later).
   // Owner assignment (`Store.owners`) is any signed-in viewer's, alongside. Both are the
@@ -99,7 +134,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const [memo, setMemo] = useState('')
 
   const kids = useMemo(() => {
-    const ks = (node.c ?? []).slice()
+    const ks = (flat ? listed : node.c ?? []).slice()
     const dir = sort.asc ? 1 : -1
     const val = (n: TreeNode): number | string =>
       sort.k === 'n' ? n.n
@@ -112,9 +147,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
       const vb = val(b)
       return (typeof va === 'string' ? (va as string).localeCompare(vb as string) : (va as number) - (vb as number)) * dir
     })
-  }, [node, sort])
-  // A new listing (drill, sort) starts on page 1.
-  useEffect(() => setPage(0), [node, sort])
+  }, [node, sort, flat, listed])
 
   // Columns the data can't fill are left out (no access logs → no `read`; no
   // attribution and no ledger → no `owner(s)`): a store without those axes
@@ -139,10 +172,11 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
       {label}{sort.k === k ? (sort.asc ? ' ▲' : ' ▼') : ''}
     </th>
   )
-  const pages = Math.max(1, Math.ceil(kids.length / PAGE))
+  // A flat listing with more below has one page past its rows (turning to it asks for them).
+  const pages = Math.max(1, Math.ceil(kids.length / PAGE) + (canGrow ? 1 : 0))
   const pg = Math.min(page, pages - 1)
   const shown = useMemo(() => kids.slice(pg * PAGE, (pg + 1) * PAGE), [kids, pg, PAGE])
-  const uriOfKid = (k: TreeNode) => scheme + [...segs, k.n].join('/')
+  const uriOfKid = (k: TreeNode) => scheme + segsOf(k).join('/')
   // Rows select (click / shift / ⌘, checkboxes, j/k) into one set keyed by
   // uri; the bar above the table stages or assigns the whole selection at once.
   // Under a filter a row stands for its matches (resolved on the click), never its whole prefix.
@@ -151,10 +185,9 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const sel = useRowSelection(selectable, uriOfKid)
   useRowSelectionKeys(sel, 'tbl', 'Children table')
   // Selection survives paging and sort by key, but not a drill: the rows
-  // picked under one path aren't candidates for a bulk action under another.
-  const path = segs.join('/')
+  // picked under one path (or mode) aren't candidates for a bulk action under another.
   const clearSel = sel.clear
-  useEffect(() => clearSel(), [path, clearSel])
+  useEffect(() => clearSel(), [path, mode, clearSel])
   // Deselect on a click anywhere outside the table (or its docked bar) — the
   // plotly "click empty space to clear" convention; without it a selection
   // could only be dropped from inside the section.
@@ -173,10 +206,10 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   // Unfiltered: each selected row's own prefix. Under a filter: the selected rows' matches, resolved on the click.
   const selAssign = [...sel.selected].map(u => actionItem(u, kindOf.get(u)))
   const sendDeps = useActDeps()
-  const selPaths = selKids.map(k => [...segs, k.n].join('/'))
+  const selPaths = selKids.map(k => segsOf(k).join('/'))
   const selAct = useMatchAct({
     ...sendDeps, scheme,
-    resolve: () => filter ? rowsCover(filter.resolve, selPaths) : Promise.resolve({ items: selKids.map(k => tableCoverItem(k, [...segs, k.n].join('/'))), complete: true }),
+    resolve: () => filter ? rowsCover(filter.resolve, selPaths) : Promise.resolve({ items: selKids.map(k => tableCoverItem(k, segsOf(k).join('/'))), complete: true }),
     landed: k => { sendDeps.landed?.(k); sel.clear(); setMemo('') },
   }, `${filter?.key ?? sendDeps.asOf?.()}|${path}`)
   const selFocus = useKeepFocus(selAct.state.s)
@@ -187,7 +220,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   // selection change (which re-renders the table) rebuilds only the JSX.
   const rowData = useMemo(() => shown.map(k => {
     const synthetic = k.n.startsWith('(')
-    const kidSegs = [...segs, k.n]
+    const kidSegs = segsOf(k)
     const uri = scheme + kidSegs.join('/')
     const cl = ownerIdx && !synthetic ? ownerIdx.assignmentOf(uri, k.k === 'file' ? 'object' : 'prefix') : null
     // Under a filter a row holding exactly one match shows (and opens) the path down to it, as its treemap
@@ -195,17 +228,17 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
     const lab = filter && !synthetic ? rowLabel(k, kidSegs.join('/'), rowMatches?.(kidSegs.join('/')) ?? null) : null
     let end: TreeNode = k
     for (const _ of lab?.segs.slice(1) ?? []) end = end.c![0]
-    const to = lab && lab.segs.length > 1 ? rowTarget([...segs, ...lab.segs.slice(0, -1)], end.n, end.k, false) : rowTarget(segs, k.n, k.k, synthetic)
+    const to = lab && lab.segs.length > 1 ? rowTarget([...segs, ...lab.segs.slice(0, -1)], end.n, end.k, false) : rowTarget(kidSegs.slice(0, -1), kidSegs[kidSegs.length - 1], k.k, synthetic)
     const label = lab?.label ?? k.n
     const fullSegs = lab ? [...segs, ...lab.segs] : kidSegs
     const mark = staged && !synthetic ? staged.markOf(uri, k.k !== 'file') : null
     return { k, synthetic, kidSegs, fullSegs, label, count: lab?.count, atLeast: !!lab?.atLeast, uri, to, shares: ownerShares(k), cl, si: selectable.indexOf(k), mark }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [shown, path, scheme, ownerIdx, selectable, filter, rowMatches, staged])
+  }), [shown, path, scheme, ownerIdx, selectable, filter, rowMatches, staged, flat])
   // Every hook above runs on every render: an empty page (a drill can leave
   // no children) must not shorten the hook list, or React throws "Rendered
-  // fewer hooks than expected" on the way in.
-  if (!kids.length) return null
+  // fewer hooks than expected" on the way in. A flat mode keeps its header (the toggle back) with nothing listed.
+  if (!kids.length && !flat) return null
   // The created cell is three table columns (swatch · month · year), so each
   // part lines up down the page; the year column only exists when a listed
   // row is outside the current year.
@@ -244,7 +277,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
     <span className="pg">
       <button type="button" disabled={pg === 0} onClick={() => setPage(0)} aria-label="first page">«</button>
       <button type="button" disabled={pg === 0} onClick={() => setPage(pg - 1)} aria-label="previous page">‹</button>
-      <span>{pg * PAGE + 1}–{Math.min(kids.length, (pg + 1) * PAGE)} of {kids.length.toLocaleString('en-US')}</span>
+      <span>{pg * PAGE + 1}–{Math.max(pg * PAGE + 1, Math.min(kids.length, (pg + 1) * PAGE))} of {kids.length.toLocaleString('en-US')}{moreFlat ? '+' : ''}</span>
       <button type="button" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)} aria-label="next page">›</button>
       <button type="button" disabled={pg >= pages - 1} onClick={() => setPage(pages - 1)} aria-label="last page">»</button>
       <select className="psize" value={PAGE} onChange={e => { setNP(+e.target.value); setPage(0) }} aria-label="rows per page">
@@ -258,17 +291,43 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
   const clearOnDeadClick = (e: MouseEvent) => {
     if (sel.selected.size && !(e.target as HTMLElement).closest('tr, button, input, select, a, .sel-bar')) sel.clear()
   }
+  const what = mode === 'folders' ? 'folders' : 'files'
+  const where = <code>{pathText(scheme, segs, home, true)}</code>
+  const modes = (
+    <span className="gran tbl-modes" role="radiogroup" aria-label="Table rows">
+      {MODES.map(([m, label]) => {
+        const tip = m === 'children' ? <>The rows directly in {where}: its folders and files, as the map draws them.</>
+          : !flatOk ? <>The largest {m} anywhere below, however deep: not for this view — {scan ? 'a scoped view (lens, owner, class or name filter) lists only what the scope holds' : 'no scan'}, or a scan indexed before objects were listed.</>
+          : <>The largest {m} anywhere below {where}, however deep, biggest first (up to {LARGEST_MAX.toLocaleString('en-US')}).{m === 'folders' ? ' A folder’s bytes include the folders listed inside it.' : ' Sizes are per path: a cloned or hard-linked file is charged in full, so deleting it can free less.'} Other columns sort the rows listed so far.</>
+        return (
+          <Tooltip key={m} content={tip}>
+            <button type="button" role="radio" aria-checked={mode === m} className={mode === m ? 'on' : ''} disabled={m !== 'children' && !flatOk}
+              onClick={() => setMode(m)}>{label}</button>
+          </Tooltip>
+        )
+      })}
+    </span>
+  )
+  // A flat mode's state with no rows to show yet (or none at all).
+  const flatNote = flat && !shown.length && (
+    lq.error ? <p className="err">Couldn’t list the largest {what}: {lq.error.message}</p>
+      : !lq.data || lq.isPlaceholderData ? <p className="loading">listing the largest {what}…</p>
+      : <p className="loading">No {what} below {where}.</p>
+  )
+  const total = kids.reduce((s, k) => s + k.b, 0)
+  // Folders nest (one listed inside another), so their bytes don't add up: no total there.
+  const showTotal = mode !== 'folders'
   return (
     <section className="children-tbl" onClick={clearOnDeadClick}>
-      {pager && <div className="pager top">{pager}</div>}
-      <table className="worklist selectable">
+      <div className="pager top">{modes}{pager}</div>
+      {flatNote || <table className="worklist selectable">
         <thead>
           <tr>
             {showSel && <th className="col-sel" onClick={e => { e.stopPropagation(); if (!(e.target as HTMLElement).closest('input')) sel.togglePage() }}><input type="checkbox" aria-label="select / deselect this page" title="select / deselect this page (⇧x)" checked={sel.pageAll} onChange={sel.togglePage} /></th>}
             {th('n', 'name', false)}
             {th('b', 'bytes')}
             <th className="num">share</th>
-            {th('o', 'objects')}
+            {mode !== 'files' && th('o', 'objects')}
             <th
               colSpan={createdCols}
               className={(hasAg ? 'agebar ' : 'created ') + 'sortable' + (sort.k === 'd' ? ' on' : '')}
@@ -298,12 +357,14 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
           {rowData.map(({ k, synthetic, kidSegs, fullSegs, label, count, atLeast, uri, to, shares, cl, si, mark }) => {
             const rowItem = actionItem(uri, k.k)
             // A row's hover is intent to act on it (under a filter: its matches are fetched after a short dwell).
-            const enter = () => { onBrush?.(k.n); if (filter) setHovered(k.n) }
+            // A flat row brushes the node's child it sits in.
+            const child = flat ? k.n.split('/')[0] : k.n
+            const enter = () => { onBrush?.(child); if (filter) setHovered(k.n) }
             const leave = () => { onBrush?.(null); if (filter) setHovered(h => (h === k.n ? null : h)) }
             return (
               <tr key={k.n} ref={si >= 0 ? sel.rowRef(si) : undefined} {...(si >= 0 && showSel ? sel.rowProps(si) : {})}
                 {...((onBrush || filter) && !synthetic ? { onMouseEnter: enter, onMouseLeave: leave } : {})}
-                data-brushed={brush === k.n || undefined}
+                data-brushed={(!flat && brush === k.n) || undefined}
                 className={mark && mark.as !== 'inside' ? 'staged' : undefined}>
                 {showSel && <td className="col-sel" onClick={e => { e.stopPropagation(); if (si >= 0 && !(e.target as HTMLElement).closest('input')) sel.toggle(si) }}>{si >= 0 && <input type="checkbox" aria-label={`select ${label}`} checked={sel.isSelected(k)} onChange={() => sel.toggle(si)} />}</td>}
                 <td className="prefix">
@@ -315,10 +376,31 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                         {elideMid(label, NAME_MAX)}
                       </a>
                     ) : <span>{elideMid(label, NAME_MAX)}</span>
+                    // A flat row: its folder part below the node, muted, drills there; the last segment opens the row.
+                    const rel = flat ? k.n.split('/') : []
+                    const relDir = rel.slice(0, -1)
+                    const base = rel[rel.length - 1]
+                    const flatName = flat && to && (
+                      <span>
+                        {relDir.length > 0 && (
+                          <a role="link" tabIndex={0} className="dir"
+                            onClick={() => onOpen([...segs, ...relDir])}
+                            onKeyDown={e => { if (e.key === 'Enter') onOpen([...segs, ...relDir]) }}>
+                            {elideMid(relDir.join('/'), Math.max(16, NAME_MAX - base.length))}/
+                          </a>
+                        )}
+                        <a role="link" tabIndex={0}
+                          onClick={() => (to.kind === 'open' ? onOpenObject : onOpen)(to.segs)}
+                          onKeyDown={e => { if (e.key === 'Enter') (to.kind === 'open' ? onOpenObject : onOpen)(to.segs) }}>
+                          {elideMid(base, NAME_MAX)}
+                        </a>
+                      </span>
+                    )
                     // The full path, only when it says more than the cell: the
                     // name is elided, or the view is drilled (at the root a row
                     // is just its bucket). To the right, clear of the row above.
-                    const cell = label.length > NAME_MAX || segs.length > 0
+                    const cell = flatName ? <Tooltip content={<code className="elide-full">{pathText(scheme, fullSegs, home)}</code>} placement="right">{flatName}</Tooltip>
+                      : label.length > NAME_MAX || segs.length > 0
                       ? <Tooltip content={<code className="elide-full">{pathText(scheme, fullSegs, home)}</code>} placement="right">{name}</Tooltip>
                       : name
                     const inside = mark?.as === 'inside' && <Tooltip content={`${mark.n.toLocaleString('en-US')} staged ${mark.n === 1 ? 'item' : 'items'} inside: review them at /staged`}><a className="row-n staged-n" href="/staged"> · {mark.n.toLocaleString('en-US')} staged</a></Tooltip>
@@ -329,7 +411,7 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
                 </td>
                 <td className="num">{fmtBytes(k.b)}</td>
                 <td className="num">{node.b ? ((100 * k.b) / node.b).toFixed(1) : 0}%</td>
-                <td className="num">{fmtN(k.o)}</td>
+                {mode !== 'files' && <td className="num">{fmtN(k.o)}</td>}
                 {hasAg ? <td className="created agebar">{k.ag ? <AgeBar ag={k.ag} d={k.d} /> : '—'}</td>
                 : k.d != null ? (() => {
                   const [mon, yr] = createdParts(k.d)
@@ -378,14 +460,16 @@ export function ChildrenTable({ node, segs, scheme, home, ownerIdx, userIdx, onP
           {/* Totals of the LISTED rows. */}
           <tr className="total-row">
             {showSel && <td />}
-            <td>total{kids.length !== (node.c ?? []).length ? ` (${kids.length} shown)` : ''}</td>
-            <td className="num">{fmtBytes(kids.reduce((s, k) => s + k.b, 0))}</td>
-            <td className="num">{node.b ? ((100 * kids.reduce((s, k) => s + k.b, 0)) / node.b).toFixed(1) : 0}%</td>
-            <td className="num">{kids.reduce((s, k) => s + k.o, 0).toLocaleString('en-US')}</td>
+            <td>{flat
+              ? <>{showTotal ? 'total ' : ''}({kids.length.toLocaleString('en-US')}{moreFlat ? '+' : ''} {kids.length === 1 ? what.slice(0, -1) : what}{moreFlat && kids.length ? `; more below ${fmtBytes(Math.min(...kids.map(k => k.b)))}` : ''})</>
+              : <>total{kids.length !== (node.c ?? []).length ? ` (${kids.length} shown)` : ''}</>}</td>
+            <td className="num">{showTotal && fmtBytes(total)}</td>
+            <td className="num">{showTotal && <>{node.b ? ((100 * total) / node.b).toFixed(1) : 0}%</>}</td>
+            {mode !== 'files' && <td className="num">{showTotal && kids.reduce((s, k) => s + k.o, 0).toLocaleString('en-US')}</td>}
             <td colSpan={createdCols + (hasRead ? 1 : 0) + (hasOwners ? 1 : 0) + (showSel ? 1 : 0)} />
           </tr>
         </tfoot>
-      </table>
+      </table>}
       {pager && <div className="pager">{pager}</div>}
       {/* The selection bar docks BELOW the table (sticky), so making a
           selection never shifts the rows you're clicking. The dock is ALWAYS

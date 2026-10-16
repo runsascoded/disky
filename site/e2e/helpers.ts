@@ -14,5 +14,5 @@ export function collectErrors(page: Page): string[] {
   return errors
 }
 
-// A size cell like "229 Ti" / "126 Gi" — proof the table/estate actually loaded.
-export const SIZE_RE = /\d+(\.\d+)?\s*(Ti|Gi|Ki|Mi|B)\b/
+// A size cell like "252 T" / "126 G" (SI, the default) or "229 Ti" (IEC) — proof the table/estate actually loaded.
+export const SIZE_RE = /\d+(\.\d+)?\s*([KMGT]i?B?|B)\b/

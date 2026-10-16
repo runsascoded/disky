@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
+import { fmtRunShort, fmtRunTime, runDay, scanRunsApi, scansHref, scansStore } from './scanRunsUi'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -32,6 +32,16 @@ describe('scan-run display times', () => {
       'Oct 12, 2026, 10:06 PM EDT', '2026-10-12',
       'Oct 13, 2026, 11:06 AM GMT+9', '2026-10-13',
       '—',
+    ])
+  })
+  it('short form: weekday, month, day and time in the viewer timezone; the year only outside the current one', () => {
+    const now = Date.parse('2026-10-16T12:00:00Z') / 1000
+    expect([
+      fmtRunShort(at, 'America/New_York', now), fmtRunShort(at, 'Asia/Tokyo', now),
+      fmtRunShort(Date.parse('2025-12-31T20:00:00Z') / 1000, 'America/New_York', now),
+    ]).toEqual([
+      'Mon Oct 12 · 10:06 PM', 'Tue Oct 13 · 11:06 AM',
+      'Wed Dec 31 2025 · 3:00 PM',
     ])
   })
 })

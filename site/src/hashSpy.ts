@@ -76,6 +76,9 @@ export interface HashSpyOptions {
   offset?: () => number
   /** How long a deep link or restore keeps pursuing its target (ms). */
   pursuitMs?: number
+  /** Whether the reader's scrolling writes the section in view to the hash (default on); off, the hash changes only on a
+   * navigation or `jumpToSection`, and back / forward still restore positions. */
+  spy?: boolean
 }
 
 // The hash in the URL bar as of the spy's last write (or the last navigation).
@@ -171,10 +174,21 @@ export function sectionInView(ids: readonly string[], offset: number): string {
   return window.scrollY < 40 ? '' : cur
 }
 
+/** Scroll section `id` to where a deep link parks it (its `scroll-margin-top`) and name it in the hash: a section heading's
+ * link. Smooth, so the reader sees where it went; replaceState like the spy (no history entry, the router not told). */
+export function jumpToSection(id: string): void {
+  const el = document.getElementById(id)
+  if (!el) return
+  resetUserScroll()
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  liveHash = `#${id}`
+  history.replaceState(history.state, '', window.location.pathname + window.location.search + liveHash)
+}
+
 /** Where a section parks: its top at its `scroll-margin-top` (the header's height plus a gap, in CSS). */
 const parkedAt = (el: Element): number => parseFloat(getComputedStyle(el).scrollMarginTop) || 0
 
-export function useHashSpy({ ids, location, navType, deps = [], legacy = {}, offset = () => 0, pursuitMs = 20_000 }: HashSpyOptions): void {
+export function useHashSpy({ ids, location, navType, deps = [], legacy = {}, offset = () => 0, pursuitMs = 20_000, spy = true }: HashSpyOptions): void {
   const prev = useRef<NavLocation | null>(null)
   const key = useRef(location.key)
   // The current navigation's target, while it's still worth pursuing (the
@@ -275,6 +289,7 @@ export function useHashSpy({ ids, location, navType, deps = [], legacy = {}, off
       raf = requestAnimationFrame(() => {
         raf = 0
         savePosition(key.current, window.scrollY)
+        if (!spy) return
         const id = sectionInView(ids, offset())
         const cur = id ? `#${id}` : ''
         if (cur === window.location.hash) return
@@ -290,5 +305,5 @@ export function useHashSpy({ ids, location, navType, deps = [], legacy = {}, off
       if (raf) cancelAnimationFrame(raf)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ids.join(',')])
+  }, [ids.join(','), spy])
 }

@@ -2404,12 +2404,16 @@ export const LARGEST_MAX_GROUPS = 64
  *  make groups spanning buckets, which its path bounds can't rule out): `LARGEST_MAX_GROUPS` per-scan groups of 8K. */
 export const LARGEST_MAX_ROWS = LARGEST_MAX_GROUPS * 8192
 
-/** What `readLargest` answers: the files, size-descending (ties by path),
+/** What `readLargest` lists: objects, or the directories strictly below the path. */
+export type LargestKind = 'file' | 'dir'
+
+/** What `readLargest` answers: the files (or dirs), size-descending (ties by path),
  * the size-sort groups it decoded, and whether files beyond them exist or
  * may (more matched than `n`, or candidate groups were left unread). */
 export interface Largest { rows: Row[]; groups: number[]; decoded: number; more: boolean; capped: boolean }
 
-/** The `n` largest objects (never dirs) under `path` (`''` = the store root),
+/** The `n` largest objects (never dirs; `kind = 'dir'`: the directories strictly below `path`, never objects nor
+ * `path` itself) under `path` (`''` = the store root),
  * from a store generation's `bysize` sort: its groups in sort order — largest
  * size bucket first — restricted by the span query to those whose path range
  * meets `[P/, P0)`, decoding each round's groups and keeping object rows
@@ -2418,13 +2422,15 @@ export interface Largest { rows: Row[]; groups: number[]; decoded: number; more:
  * size's: buckets only fall along the sort, so no later group can hold a row
  * that big (within a bucket rows are path-sorted, so a same-bucket group may
  * still beat the n-th, and is read). At most `LARGEST_MAX_GROUPS` groups. */
-export async function readLargest(h: IndexHandle, path: string, n: number, maxGroups = LARGEST_MAX_GROUPS): Promise<Largest> {
-  if (h.asOf != null) return readLargestIv(h, path, n, maxGroups * 8192)
+export async function readLargest(h: IndexHandle, path: string, n: number, maxGroups = LARGEST_MAX_GROUPS, kind: LargestKind = 'file'): Promise<Largest> {
+  if (h.asOf != null) return readLargestIv(h, path, n, maxGroups * 8192, kind)
   const range = path === '' ? { pLo: '', pHi: '￿' } : { pLo: path + '/', pHi: path + '0' }
-  const under = (p: string) => p >= range.pLo && p < range.pHi
+  const under = (p: string) => p >= range.pLo && p < range.pHi && p !== path
   const order = (a: Row, b: Row) => b.size - a.size || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
   let top: Row[] = []
   let matched = 0
+  const sliced = h.schema.some(l => l.name === 'usr')
+  const paths = new Map<string, Row>()
   const groups: number[] = []
   let decoded = 0
   let after = -1
@@ -2456,14 +2462,27 @@ export async function readLargest(h: IndexHandle, path: string, n: number, maxGr
     if (!batch.length) continue
     // Out of budget with a group still able to place a row.
     if (room <= 0) return { rows: top, groups, decoded, more: true, capped: true }
-    const rows = await decodeSpans(h, batch, r => r.kind === 'file' && under(r.path))
+    const rows = await decodeSpans(h, batch, r => r.kind === kind && under(r.path))
     groups.push(...batch.map(g => g.rg))
     decoded += batch.reduce((s, g) => s + (g.rowEnd - g.rowStart), 0)
-    matched += rows.length
     width = Math.min(LARGEST_BATCH, 2 * width)
-    top = [...top, ...rows].sort(order).slice(0, n)
+    if (sliced) {
+      // A labeled sort: one row per owner slice, a path's slices adjacent (keyed on its total, `keyedOnTotal`) —
+      // summed into one row per path, whichever round each slice is read in.
+      for (const r of rows) {
+        const m = paths.get(r.path)
+        paths.set(r.path, m ? { ...m, usr: null, size: m.size + r.size, n_files: m.n_files + r.n_files, mtime: maxOrNull(m.mtime, r.mtime) } : r)
+      }
+      matched = paths.size
+      top = [...paths.values()].sort(order).slice(0, n)
+    } else {
+      matched += rows.length
+      top = [...top, ...rows].sort(order).slice(0, n)
+    }
   }
 }
+
+const maxOrNull = (a: number | null, b: number | null): number | null => (a == null ? b : b == null ? a : Math.max(a, b))
 
 /** `readLargest` over an interval store's `bysize` sort, as of the handle's scan: the same answer as the scan's own
  *  size sort. Its groups (every tier's: a run's sort is its own) are read a size bucket at a time — those whose largest
@@ -2471,9 +2490,9 @@ export async function readLargest(h: IndexHandle, path: string, n: number, maxGr
  *  the same size, so in a group of that bucket or above) ends its version whichever tier it is read from: the live
  *  rows after each bucket are exact for every bucket read. The read stops once the next bucket is below the n-th
  *  size's (no later group holds a row that big), or past `maxRows` rows decoded (`capped`; `LARGEST_MAX_ROWS`). */
-async function readLargestIv(h: IndexHandle, path: string, n: number, maxRows: number): Promise<Largest> {
+async function readLargestIv(h: IndexHandle, path: string, n: number, maxRows: number, kind: LargestKind): Promise<Largest> {
   const range = path === '' ? { pLo: '', pHi: '\uffff' } : { pLo: path + '/', pHi: path + '0' }
-  const keep = (r: Row) => r.kind === 'file' && r.path >= range.pLo && r.path < range.pHi
+  const keep = (r: Row) => r.kind === kind && r.path >= range.pLo && r.path < range.pHi && r.path !== path
   const order = (a: Row, b: Row) => b.size - a.size || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
   const t0 = now()
   const spans = await overTiers(h, t => pageSizeSpans(t, range, -1, Infinity))

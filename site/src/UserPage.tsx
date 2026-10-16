@@ -17,10 +17,11 @@ import { Skeleton } from './Busy'
 import { SiteKbd } from './SiteKbd'
 import { useDocTitle, SITE } from './title'
 import { Tooltip } from './Tooltip'
+import { useUnits } from './units'
 import { UserChip, canonId, ghHandle, shortName, shortUserKey } from './UserChip'
 import {
   CLASS_NAMES, CLASS_PRICE_US,
-  ratePerByte, fmtBytesIec, fmtN, fmtUsd,
+  ratePerByte, fmtN, fmtUsd,
   type Meta, type TreeNode, type UserInfo,
 } from './types'
 
@@ -90,6 +91,7 @@ function useOwned(asof: string | null): { data: Map<string, Owned> | null; error
 
 // Est. $/mo with the storage-class mix behind it on hover.
 function DollarCell({ b, mix }: { b: number; mix?: Record<string, number> }) {
+  const { fmtBytes } = useUnits()
   if (!mix || !b) return <>—</>
   const rows = Object.entries(mix)
     .sort(([a], [c]) => Number(a) - Number(c))
@@ -105,7 +107,7 @@ function DollarCell({ b, mix }: { b: number; mix?: Record<string, number> }) {
           {rows.map(r => (
             <tr key={r.name}>
               <td>{r.name}</td>
-              <td className="num">{fmtBytesIec(r.b)}</td>
+              <td className="num">{fmtBytes(r.b)}</td>
               <td className="num">{fmtUsd(r.usd)}/mo</td>
             </tr>
           ))}
@@ -162,6 +164,7 @@ function UsersMap({ meta, owned, redact = false }: {
   /** og:image mode — names only: no sizes, no tooltips, no drill. */
   redact?: boolean
 }) {
+  const { fmtBytes } = useUnits()
   const navigate = useNavigate()
   const root = useMemo(
     (): OwnerCell => ({ n: '', b: meta.total_bytes, c: ownerCells(meta, owned) }),
@@ -175,7 +178,7 @@ function UsersMap({ meta, owned, redact = false }: {
         getSize={n => n.b}
         getChildren={n => n.c}
         getLabel={n => n.n}
-        formatSize={redact ? () => '' : n => fmtBytesIec(n)}
+        formatSize={redact ? () => '' : n => fmtBytes(n)}
         chrome={false}
         fullscreen={false}
         colorForCell={(n): CellStyle | null => {
@@ -188,7 +191,7 @@ function UsersMap({ meta, owned, redact = false }: {
           return (
             <div>
               <b>{n.n}</b>
-              <div>{fmtBytesIec(n.b, true)} · {meta.total_bytes ? ((100 * n.b) / meta.total_bytes).toFixed(1) : 0}%</div>
+              <div>{fmtBytes(n.b)} · {meta.total_bytes ? ((100 * n.b) / meta.total_bytes).toFixed(1) : 0}%</div>
               {n.id && <div className="tt-hint">click for breakdown</div>}
             </div>
           )
@@ -252,6 +255,7 @@ export function UsersOgPage() {
 }
 
 export function UsersPage() {
+  const { fmtBytes } = useUnits()
   useDocTitle('Users')
   const scan = useScan(store)
   const asof = scan.asof
@@ -318,7 +322,7 @@ export function UsersPage() {
                     <UserChip who={u.u} />
                   </Link>
                 </td>
-                <td className="num">{fmtBytesIec(u.b)}</td>
+                <td className="num">{fmtBytes(u.b)}</td>
                 <td className="num usd">{owned || mixes ? <DollarCell b={u.b} mix={mixOf(u.u)} /> : '…'}</td>
               </tr>
             ))}
@@ -331,7 +335,7 @@ export function UsersPage() {
                 </Tooltip>
                 {' '}<span style={{ fontWeight: 400, opacity: 0.7 }}>· {users.length} users</span>
               </td>
-              <td className="num">{fmtBytesIec(totals.b)}</td>
+              <td className="num">{fmtBytes(totals.b)}</td>
               <td className="num usd">
                 {totals.priced
                   ? <Tooltip content={totals.priced < users.length ? `${totals.priced} of ${users.length} users have a storage-class mix; the rest are unpriced, so this is a floor` : 'sum of the per-user estimates'}>
@@ -351,6 +355,7 @@ export function UsersPage() {
 const PAGE = 25
 
 function AssignmentsTable({ rows }: { rows: Estate['assignments'] }) {
+  const { fmtBytes } = useUnits()
   const [page, setPage] = useState(0)
   const pages = Math.ceil(rows.length / PAGE)
   const p = Math.min(page, pages - 1)
@@ -368,7 +373,7 @@ function AssignmentsTable({ rows }: { rows: Estate['assignments'] }) {
                 <Link to={`/${prefixToPath(r.prefix)}`}>{r.prefix}</Link>
                 {r.repainted_by && <span className="memo" title={`a newer assignment on ${r.repainted_by} covers this one`}> — superseded</span>}
               </td>
-              <td className="num">{fmtBytesIec(r.bytes)}</td>
+              <td className="num">{fmtBytes(r.bytes)}</td>
               <td className="num">{fmtN(r.objects)}</td>
               <td>{fmtDate(r.ts)}</td>
             </tr>
@@ -429,6 +434,7 @@ export function UserOgPage() {
 }
 
 export function UserPage() {
+  const { fmtBytes } = useUnits()
   const { id = '' } = useParams()
   useDocTitle(shortName(id))
   const scan = useScan(store)
@@ -499,7 +505,7 @@ export function UserPage() {
           </span>
         </div>
         <p className="sub">
-          {fmtBytesIec(owned, true)} owned ({asof ?? '…'} scan + live assignments)
+          {fmtBytes(owned)} owned ({asof ?? '…'} scan + live assignments)
           {mix != null && owned > 0 && <> · est. {fmtUsd(ratePerByte(mix) * owned)}/mo</>}
           {assignments.length > 0 && <> · {fmtN(assignments.length)} prefix{assignments.length === 1 ? '' : 'es'} assigned to {shortName(id)}</>}.
         </p>
