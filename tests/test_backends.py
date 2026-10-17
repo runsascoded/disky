@@ -57,12 +57,9 @@ def test_r2_lists_through_the_endpoint_with_r2_uris(monkeypatch):
 
 def test_r2_without_an_endpoint_refuses_at_list_time(monkeypatch, tmp_path):
     monkeypatch.delenv(R2_ENDPOINT_VAR, raising=False)
-    # No buckets.yml entry either: point the config root at a fresh dir. (The
-    # `DISK_TREE_ROOT` env var alone isn't enough: `config.ROOT_DIR` is read at
-    # import, so a real `~/.config/disk-tree/buckets.yml` with a `defaults`
-    # endpoint leaked in.)
+    # No buckets.yml entry either: point the config root at a fresh dir (`config.ROOT_DIR` is bound at import, so
+    # the env var alone wouldn't reach it).
     from disk_tree import config
-    monkeypatch.setenv('DISK_TREE_ROOT', str(tmp_path / 'root'))
     monkeypatch.setattr(config, 'ROOT_DIR', str(tmp_path / 'root'))
     r2 = backend_for('r2://bk')
     assert r2.endpoint_url is None
