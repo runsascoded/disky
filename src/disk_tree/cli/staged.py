@@ -94,7 +94,7 @@ def staged_cmd(as_json: bool):
 @cli.command("dispatch")
 @option("-a", "--after", default=None, help="--serve: shell command run after each real run that deleted something (the laptop re-captures)")
 @option("-c", "--config", "config_path", default=None, help="--serve: buckets.yml path (for the `delete:` chat/undo/database_id block)")
-@option("-d", "--d1", "d1_ids", multiple=True, help="--serve: D1 database id(s) to drain (repeatable; default the `delete:` block's, else $DISK_TREE_D1_DATABASE_ID)")
+@option("-d", "--d1", "d1_ids", multiple=True, help="--serve: D1 database id(s) to drain (repeatable; default the `delete:` block's, else $DISKY_D1_DATABASE_ID)")
 @option("-f", "--for-real", is_flag=True, help="Actually delete (default: dry-run, report only)")
 @option("-H", "--host", default=None, help="--serve: this agent's host name, recorded with its heartbeat")
 @option("-i", "--interval", default=30, type=int, help="--serve: base poll seconds (exp-backoff to 5x while idle)")
