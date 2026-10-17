@@ -12,7 +12,9 @@ import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity } from '.
 import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
+import { Allowances } from './Allowances'
 import { DiskSpace } from './DiskSpace'
+import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
@@ -33,6 +35,7 @@ import { ClassMixTip, Tooltip } from './Tooltip'
 import { LaptopIndicator } from './laptop'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
+import { dateAxis, useDateScale } from './dateScale'
 import type { DayBand } from './dayBand'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
@@ -1028,22 +1031,33 @@ function AppContent() {
     ),
   })
 
-  // The written-date gradient's domain: the drawn leaves' dates — objects and
-  // directories whose children this view didn't load alike (each is one cell).
-  const dateRange = useMemo((): DateRange | null => {
-    if (!mapTree) return null
-    let min = Infinity
-    let max = -Infinity
+  // The written-date gradient's axis: the drawn leaves' dates — objects and
+  // directories whose children this view didn't load alike (each is one cell)
+  // — under the page's scale (`?ts=`; `rank` weighs each by its bytes). The
+  // read lens keeps the access-log window as its domain, the same scale over it.
+  const [dateScale] = useDateScale()
+  const { dateRange, readAxis } = useMemo(() => {
+    const ds: [number, number][] = []
+    const as: [number, number][] = []
     const walk = (n: TreeNode) => {
-      if (n.d != null && !n.c) {
-        if (n.d < min) min = n.d
-        if (n.d > max) max = n.d
+      if (!n.c) {
+        if (n.d != null) ds.push([n.d, n.b])
+        if (n.a != null) as.push([n.a, n.b])
       }
       n.c?.forEach(walk)
     }
-    walk(mapTree)
-    return min < max ? { min, max } : null
-  }, [mapTree])
+    if (mapTree) walk(mapTree)
+    let min = Infinity
+    let max = -Infinity
+    for (const [d] of ds) {
+      if (d < min) min = d
+      if (d > max) max = d
+    }
+    return {
+      dateRange: min < max ? dateAxis({ min, max }, dateScale, ds) : null,
+      readAxis: readRange ? dateAxis(readRange, dateScale, as) : null,
+    }
+  }, [mapTree, dateScale, readRange])
 
   const catOrder = useMemo(() => {
     if (!mapTree) return []
@@ -1178,14 +1192,18 @@ function AppContent() {
     ...(disp.lead === '~' ? [{ label: '~', segs: segs.slice(0, disp.leadSegs) }] : []),
     ...disp.rest.map((sg, i) => ({ label: sg, segs: segs.slice(0, disp.leadSegs + i + 1) })),
   ].filter(c => c.segs.length > storeRoot.length)  // the store root is the root crumb
+  // The deepest crumb's page at the provider (`Store.externalLink`), as an icon right after its name.
+  const atRoot = segs.length <= storeRoot.length
+  const ext = <ExtLink link={store.externalLink?.(segs, here?.k !== 'file')} />
+  const rootCrumb = <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot} onClick={() => drillTo(storeRoot)} />
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
-      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={segs.length <= storeRoot.length} onClick={() => drillTo(storeRoot)} />
+      {atRoot ? <span>{rootCrumb}{ext}</span> : rootCrumb}
       {crumbItems.map((c, i) => (
         <span key={i}>
           <span className="sep">/</span>
           {i === crumbItems.length - 1
-            ? <PathPopover label={c.label} fullPath={crumbFullPath} copy={crumbCopy} />
+            ? <><PathPopover label={c.label} fullPath={crumbFullPath} copy={crumbCopy} />{ext}</>
             : <Tooltip content={<code>{pathText(pathScheme, c.segs, store.home)}</code>}><button type="button" onClick={() => drillTo(c.segs)}>{c.label}</button></Tooltip>}
         </span>
       ))}
@@ -1318,6 +1336,7 @@ function AppContent() {
       )}
 
       <DiskSpace space={meta?.disk_space} />
+      {atRoot && <Allowances spec={store.allowances} classBytes={meta?.class_bytes} />}
 
       {mapTree && !mapFailed ? (
         <>
@@ -1345,7 +1364,7 @@ function AppContent() {
             shade={shade}
             userIdx={userIdx}
             dateRange={dateRange}
-            readRange={readRange}
+            readRange={readAxis}
             hl={effHl}
             onPickUser={u => pickUser(u, false)}
             onPickUnowned={pickUnowned}

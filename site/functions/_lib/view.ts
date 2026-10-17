@@ -342,7 +342,8 @@ function display(a: Agg): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   // A folder's date is its newest write, not a byte-weighted mean: a mean of
   // half-July, half-September reads "August", a date nothing was written on.
-  if (a.m != null) out.d = Math.floor(a.m / 86400)
+  // An mtime of 0 is a listing's "unknown" (no object was written in 1970): no date, as for none.
+  if (a.m) out.d = Math.floor(a.m / 86400)
   if (a.a != null) out.a = a.a
   if (a.ag?.some(v => v > 0)) out.ag = a.ag.map(v => Math.round(v))
   const desc = (m: Record<string, number>) =>

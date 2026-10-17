@@ -17,15 +17,16 @@ import { STORES, type Store } from './stores'
 import { useMinSlug } from './scan'
 import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
+import { dagNodes, processOf, type DagNode, type RunDagRow } from './runDag'
 import './scans.scss'
 
 type DetailResponse = Links & {
   run: ScanRun; secs: number | null; failed_at: string | null; phases: ScanRunPhase[]; spans: PhaseSpan[]
   outputs: OutputDelta[]; downstream: ScanRun[]; siblings: ScanRun[]; prev_scan: string | null; next_scan: string | null
-  phase_issues: PhaseIssue[]; recoveries: PhaseRecovery[]
+  phase_issues: PhaseIssue[]; recoveries: PhaseRecovery[]; dag?: RunDagRow | null
 }
 
 const useScanRun = (id: string, store: Store) => useQuery<DetailResponse, Error>({
@@ -217,8 +218,22 @@ export function ScansPage() {
   )
 }
 
+/** Brushing between the pipeline DAG and the phase timeline: the highlighted DAG node (a phase's `task` process). */
+interface Brush { hl: string | null; onHover: (node: string | null) => void }
+
+/** A tooltip's pointer handlers, plus the brush: entering an element highlights `node`, leaving clears it. */
+function brushed(tipOn: ReturnType<ReturnType<typeof useSvgTip>['on']>, brush: Brush | undefined, node: string | null) {
+  if (!brush || !node) return tipOn
+  return {
+    onPointerMove: (e: ReactPointerEvent<SVGElement>) => { tipOn.onPointerMove(e); if (brush.hl !== node) brush.onHover(node) },
+    onPointerLeave: () => { tipOn.onPointerLeave(); brush.onHover(null) },
+  }
+}
+const brushClass = (brush: Brush | undefined, node: string | null): string =>
+  !brush?.hl || !node ? '' : brush.hl === node ? ' brushed' : ' dimmed'
+
 /** The run's phases on its clock: one row per phase. */
-function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string }) {
+function PhaseTimeline({ spans, secs, color, brush }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string; brush?: Brush }) {
   const tip = useSvgTip()
   const [ref, W] = useWidth<HTMLDivElement>()
   if (!spans.length || !secs) return <p className="dim">No phase markers for this run (the job records its phases; the backfill recovers them from the last 30 days of logs).</p>
@@ -238,7 +253,7 @@ function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: numbe
       <svg className="sr-gantt" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Phase timeline">
         {ticks.map(t => <g key={t}><line className="grid" x1={x(t)} x2={x(t)} y1={0} y2={H - 20} /><text className="tick" x={x(t)} y={H - 5} textAnchor="middle">{t ? fmtDur(t).replace(' 00m', '') : '0'}</text></g>)}
         {rows.map((s, i) => (
-          <g key={s.phase} className={s.tail ? 'tail' : s.status === 'running' ? 'active' : undefined} {...tip.on(<><div><b>{s.phase}</b>{s.lane ? ' — beside the main sequence' : ''}</div><div>{fmtDur(s.start)} → {s.status === 'running' ? 'now' : fmtDur(s.end)} · {fmtDur(s.end - s.start)}{s.status === 'running' ? ' elapsed · running' : ''}</div>{s.note && <div className="dim">{s.note}</div>}</>)}>
+          <g key={s.phase} className={`${s.tail ? 'tail' : s.status === 'running' ? 'active' : ''}${brushClass(brush, s.task ? processOf(s.task) : null)}` || undefined} {...brushed(tip.on(<><div><b>{s.phase}</b>{s.lane ? ' — beside the main sequence' : ''}</div><div>{fmtDur(s.start)} → {s.status === 'running' ? 'now' : fmtDur(s.end)} · {fmtDur(s.end - s.start)}{s.status === 'running' ? ' elapsed · running' : ''}</div>{s.task ? <div className="dim">in pipeline step <b>{s.task}</b>{s.machine ? ` · ${s.machine}` : ''}</div> : s.machine && <div className="dim">its own Batch task · {s.machine}</div>}{s.note && <div className="dim">{s.note}</div>}</>), brush, s.task ? processOf(s.task) : null)}>
             <rect className="sr-row-hit" x={0} y={i * rowH} width={W} height={rowH} />
             <text className={`lbl${s.status === 'failed' ? ' failed-label' : ''}`} x={L - 8} y={i * rowH + 16} textAnchor="end">{s.phase.length > cut ? `${s.phase.slice(0, cut - 1)}…` : s.phase}</text>
             <rect x={x(s.start)} y={i * rowH + 5} width={Math.max(2, x(s.end) - x(s.start))} height={rowH - 10} rx={2} style={{ fill: s.tail ? 'var(--other)' : phaseFill(s, color), stroke: s.status === 'running' ? color(s.phase) : undefined }} className={s.status === 'failed' ? 'failed' : undefined} />
@@ -247,6 +262,82 @@ function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: numbe
         ))}
       </svg>
       {tip.el}
+    </div>
+  )
+}
+
+/** The run's pipeline DAG: its processes in dependency columns, each coloured by its tasks' phases, a one-task
+ * process linking that task's logs. */
+function RunDag({ dag, phases, run, project, brush }: { dag: RunDagRow; phases: ScanRunPhase[]; run: ScanRun; project: string | null; brush?: Brush }) {
+  const tip = useSvgTip()
+  const nodes = useMemo(() => dagNodes(dag.dag, phases, run.status === 'running'), [dag, phases, run.status])
+  const edges = dag.dag.edges
+  if (!nodes.length) return null
+  const w = 168, h = 46, gx = 44, gy = 14, pad = 4
+  const cols = Math.max(...nodes.map(n => n.layer)) + 1, rows = Math.max(...nodes.map(n => n.row)) + 1
+  const W = cols * w + (cols - 1) * gx + 2 * pad, H = rows * h + (rows - 1) * gy + 2 * pad
+  const at = new Map(nodes.map(n => [n.id, { x: pad + n.layer * (w + gx), y: pad + n.row * (h + gy) }]))
+  const now = Math.floor(Date.now() / 1000)
+  const sub = (n: DagNode) => {
+    const k = n.tasks.length > 1 ? `${n.tasks.length} tasks · ` : ''
+    if (n.status === 'pending' || n.status === 'unrecorded') return n.status === 'pending' ? 'waiting' : 'no phases recorded'
+    return `${k}${n.start != null ? fmtDur((n.end ?? now) - n.start) : ''}${n.status === 'running' ? ' · running' : n.status === 'failed' ? ' · failed' : ''}`
+  }
+  const tipOf = (n: DagNode) => <>
+    <div><b>{n.label}</b></div>
+    {n.tasks.length ? n.tasks.map(t => <div key={t.task}>{t.tag || n.label}{t.machine ? ` · ${t.machine}` : ''}{t.start != null ? ` · ${fmtDur((t.end ?? now) - t.start)}` : ''}<div className="dim">{t.phases.join(', ')}</div></div>)
+      : <div className="dim">{n.status === 'pending' ? 'Not started yet.' : 'This process recorded no phases (a run before phases named their task, or it ran nothing).'}</div>}
+  </>
+  return (
+    <div className="sr-svgwrap sr-dagwrap"><div className="runs-wrap">
+      <svg className="sr-dag" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Pipeline DAG">
+        <defs><marker id="sr-dag-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" className="arrow" /></marker></defs>
+        {edges.map(([f, t]) => {
+          const a = at.get(f), b = at.get(t)
+          if (!a || !b) return null
+          const x1 = a.x + w, y1 = a.y + h / 2, x2 = b.x, y2 = b.y + h / 2, mx = (x1 + x2) / 2
+          return <path key={`${f}>${t}`} className="edge" d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`} markerEnd="url(#sr-dag-arrow)" />
+        })}
+        {nodes.map(n => {
+          const { x, y } = at.get(n.id)!
+          const one = n.tasks.length === 1 && n.tasks[0].job_name && project ? taskLogsHref(project, n.tasks[0].job_name, n.tasks[0].start) : null
+          const body = <g className={`node ${n.status}${brushClass(brush, n.id)}`} {...brushed(tip.on(tipOf(n)), brush, n.id)}>
+            <rect x={x} y={y} width={w} height={h} rx={6} />
+            <text className="name" x={x + 10} y={y + 19}>{n.label}</text>
+            <text className="sub" x={x + 10} y={y + 36}>{sub(n)}</text>
+          </g>
+          return one ? <a key={n.id} href={one} target="_blank" rel="noreferrer">{body}</a> : <g key={n.id}>{body}</g>
+        })}
+      </svg>
+    </div>{tip.el}</div>
+  )
+}
+
+/** A Nextflow run's step tasks: each its own Batch job, with its machine, phases and logs. */
+function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; project: string | null }) {
+  const t0 = run.started_ts
+  return (
+    <div className="runs-wrap">
+      <table className="runs sr-tasks">
+        <thead><tr>
+          <th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th>
+          <th><Tooltip content="Nextflow deletes a task's Batch job when it finishes (its logs stay), so the job links only while it runs.">Batch job</Tooltip></th><th>logs</th>
+        </tr></thead>
+        <tbody>{tasks.map(t => {
+          const live = t.status === 'running' && project && run.region ? batchHref(project, run.region, t.job_name) : null
+          const end = t.end ?? (t.status === 'running' ? Math.floor(Date.now() / 1000) : null)
+          return (
+            <tr key={t.job_name}>
+              <td className={t.status === 'failed' ? 'failed-label' : undefined}>{t.phases.join(', ')}{t.status === 'running' && <span className="dim"> · running</span>}</td>
+              <td className="nb">{t.machine ?? <span className="dim">—</span>}</td>
+              <td className="num nb">{t.start != null && t0 != null ? `+${fmtDur(t.start - t0)}` : '—'}</td>
+              <td className="num nb">{t.start != null && end != null ? fmtDur(end - t.start) : '—'}</td>
+              <td className="nb">{live ? <a href={live} target="_blank" rel="noreferrer"><code>{t.job_name}</code></a> : <code className="dim">{t.job_name}</code>}</td>
+              <td className="nb">{project ? <a href={taskLogsHref(project, t.job_name, t.start)} target="_blank" rel="noreferrer">logs ↗</a> : <span className="dim">—</span>}</td>
+            </tr>
+          )
+        })}</tbody>
+      </table>
     </div>
   )
 }
@@ -331,6 +422,9 @@ export function ScanRunPage() {
   const r = d?.run
   const kinds = new Set(list.data?.runs.map(s => s.run.kind))
   const map = r && r.status === 'succeeded' ? mapHref(r.scan, store.path, slug) : null
+  const tasks = useMemo(() => runTasks(d?.phases ?? []), [d])
+  const [hl, setHl] = useState<string | null>(null)
+  const brush: Brush = { hl, onHover: setHl }
   return (
     <main className="staged-page scans-page">
       <SiteNav />
@@ -340,7 +434,9 @@ export function ScanRunPage() {
         <p className="sub">
           <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} /> · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
           {d.secs != null && <> · {fmtDur(d.secs)}</>}
-          {r.machine && <> · {r.machine}{r.spot ? ' (spot)' : ''}</>}
+          {tasks.length
+            ? <> · <Tooltip content="A Nextflow run: a head job on this machine runs the pipeline, and each step runs as its own Batch job on a machine sized for it (Tasks below)."><span>Nextflow · {tasks.length} tasks{r.machine && <span className="dim"> + {r.machine} head</span>}</span></Tooltip></>
+            : r.machine && <> · {r.machine}{r.spot ? ' (spot)' : ''}</>}
           {r.cost_usd != null && <> · ~{usd(r.cost_usd)}</>}
           {map && <> · <Link to={map}>map at this scan</Link></>}
           {' · '}<Links run={r} links={d} />
@@ -353,14 +449,22 @@ export function ScanRunPage() {
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}
         <dl className="sr-facts">
           <div><dt>run id</dt><dd>{d.project ? <a href={logsHref(d.project, r)} target="_blank" rel="noreferrer"><code>{r.run_id}</code></a> : <code>{r.run_id}</code>}</dd></div>
-          {r.job_name && <div><dt>Batch job</dt><dd>{d.project && r.region ? <a href={batchHref(d.project, r.region, r.job_name)} target="_blank" rel="noreferrer"><code>{r.job_name}</code></a> : <code>{r.job_name}</code>}{r.region && <span className="dim"> · {r.region}</span>}</dd></div>}
+          {r.job_name && <div><dt>{tasks.length ? 'head Batch job' : 'Batch job'}</dt><dd>{d.project && r.region ? <a href={batchHref(d.project, r.region, r.job_name)} target="_blank" rel="noreferrer"><code>{r.job_name}</code></a> : <code>{r.job_name}</code>}{r.region && <span className="dim"> · {r.region}</span>}</dd></div>}
           {r.gen && <div><dt>index generation</dt><dd><code>{r.gen}</code></dd></div>}
           {r.image && <div><dt>image</dt><dd><code>{r.image}</code></dd></div>}
           <div><dt>recorded by</dt><dd>{r.source === 'job' ? 'the job' : 'backfill (Batch, logs, the bucket)'}</dd></div>
         </dl>
+        {d.dag && <>
+          <h3>Pipeline</h3>
+          <RunDag dag={d.dag} phases={d.phases} run={r} project={d.project} brush={brush} />
+        </>}
         <h3>Phases</h3>
         {!!d.phase_issues?.length && <p className="dim">Original attempt: failed bars include time spent waiting until failure or timeout, not successful build time. Later recoveries are separate below.</p>}
-        <PhaseTimeline spans={d.spans} secs={d.secs} color={color} />
+        <PhaseTimeline spans={d.spans} secs={d.secs} color={color} brush={d.dag ? brush : undefined} />
+        {!!tasks.length && <>
+          <h3>Tasks</h3>
+          <TasksTable tasks={tasks} run={r} project={d.project} />
+        </>}
         {!!d.recoveries?.length && <>
           <h3>Phase recovery attempts</h3>
           <p className="dim">Each attempt is linked to its original phase. Durations exclude the gap between attempts and are not added to the original job duration.</p>

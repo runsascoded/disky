@@ -434,3 +434,32 @@ def test_d1_query_refuses_without_a_database(monkeypatch):
     with pytest.raises(RuntimeError, match=r"^no D1 database: set \$D1_DB_ID"):
         _d1_query("SELECT 1", acct="acct", tok="tok", db_id="")
     assert calls == []
+
+
+def test_d1_queries_read_the_database_id_when_they_run(monkeypatch):
+    """`$D1_DB_ID` set after the module's import (`dt-cloud scan head` copies it from the profile) is the database a query
+    goes to; none at all is refused."""
+    import urllib.request
+
+    from dt_cloud import index_footer as F
+
+    urls: list[str] = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"success": true, "result": [{"results": []}]}'
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: urls.append(req.full_url) or Resp())
+    monkeypatch.delenv("D1_DB_ID", raising=False)
+    with pytest.raises(RuntimeError) as e:
+        F._d1_query("SELECT 1;", "acct", "tok")
+    assert str(e.value) == "no D1 database: set $D1_DB_ID (and $D1_DB_NAME) to this deployment's D1"
+    monkeypatch.setenv("D1_DB_ID", "late-db")
+    assert F._d1_query("SELECT 1;", "acct", "tok") == []
+    assert urls == ["https://api.cloudflare.com/client/v4/accounts/acct/d1/database/late-db/query"]

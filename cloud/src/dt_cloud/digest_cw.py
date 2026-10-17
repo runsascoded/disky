@@ -58,6 +58,21 @@ def _quota(tb: float, q: Quota | None, u: Units = UNITS["TiB"]) -> str:
     return f" · {tb / (q.bytes / u.bytes) * 100:.1f}% of {q.name}" if q else ""
 
 
+def _scoped(tb: float, classes: dict[int, float] | None, q: Quota) -> float:
+    """What ``q`` counts of a scan whose total is ``tb`` and per-class sizes ``classes`` (both in the digest's
+    units): its ``classes``' sum, or the total for a quota over every class."""
+    if not q.classes:
+        return tb
+    if classes is None:
+        raise ValueError(f"quota {q.name!r} counts storage classes {list(q.classes)}, but the scan's meta.json has no class_bytes")
+    return sum(classes.get(c, 0.0) for c in q.classes)
+
+
+def _quotas(tb: float, classes: dict[int, float] | None, qs: tuple[Quota, ...], u: Units) -> str:
+    """` · NN.N% of <quota>` per quota (each over its own classes); `''` with none."""
+    return "".join(_quota(_scoped(tb, classes, q), q, u) for q in qs)
+
+
 def _extras(extra: dict[str, float], dextra: dict[str, float | None], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
     """` · [<label>](<over-time url>) <N> TiB (Δ)` per non-primary bucket (Δ
     omitted when the prior scan lacked the bucket), linked over the same span
@@ -95,13 +110,17 @@ def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"]) -> str:
     return f"{tb / qt * 100:.1f}% of {q.short or _qlabel(q.bytes)} ({qt - tb:,.1f} {u.short} free)"
 
 
-def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
+def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None,
+                   classes: dict[int, float] | None = None) -> str:
     """`[<label>](<over-time url>): NN.N% of <quota> (<free> Ti free)` for one
-    bucket; a bucket with no known quota renders its raw TiB."""
+    bucket (`, `-joined per quota, each over its own ``classes``); a bucket
+    with no known quota renders its raw TiB."""
     b = cfg.buckets.get(bucket)
-    q = b.quota if b else None
+    qs = b.quotas if b else ()
     link = _bucket_link(bucket, scan, since, cfg, slug)
-    return f"{link}: {tb:,.0f} {cfg.unit.short}" if q is None else f"{link}: {_quota_clause(tb, q, cfg.unit)}"
+    if not qs:
+        return f"{link}: {tb:,.0f} {cfg.unit.short}"
+    return f"{link}: " + ", ".join(_quota_clause(_scoped(tb, classes, q), q, cfg.unit) for q in qs)
 
 
 def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
@@ -122,7 +141,8 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         z = cfg.buckets[b].zone if b in cfg.buckets else None
         groups.setdefault(f"zone:{z}" if z else f"bucket:{b}", []).append((b, tb))
     return " · ".join(
-        _bucket_clause(*g[0], day.scan, day.since, cfg, day.slug) if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug)
+        _bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
+        if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug)
         for g in groups.values()
     )
 
@@ -143,6 +163,8 @@ class Scan:
     extra: dict[str, float] = field(default_factory=dict)
     # its canonical `?d=` slug (`scan_slugs`); None: its minute
     slug: str | None = field(default=None, compare=False)
+    # the primary's per-storage-class sizes (`class_bytes`, unrounded, in the digest's units); None: the meta has none
+    classes: dict[int, float] | None = field(default=None, compare=False)
 
     @property
     def date(self) -> str:
@@ -158,6 +180,14 @@ def primary_totals(m: dict, primary: str, unit: int = TIB) -> tuple[int, int, di
         p = bk[primary]
         return int(p["total_bytes"]), int(p["total_objects"]), {b: v["total_bytes"] / unit for b, v in bk.items() if b != primary}
     return int(m["total_bytes"]), int(m["total_objects"]), {}
+
+
+def primary_classes(m: dict, primary: str, unit: int = TIB) -> dict[int, float] | None:
+    """A meta.json's per-storage-class sizes (``class_bytes``, in ``unit`` bytes) for the primary bucket: its
+    ``buckets`` entry's when the meta has one, else the flat ones; None when they're absent."""
+    bk = m.get("buckets") or {}
+    cb = bk[primary].get("class_bytes") if primary in bk else m.get("class_bytes")
+    return None if cb is None else {int(c): b / unit for c, b in cb.items()}
 
 
 def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.datetime | None = None, unit: int = TIB) -> list[Scan]:
@@ -180,6 +210,7 @@ def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.dat
                 hours=(ts - pts).total_seconds() / 3600 if pts is not None else None,
                 extra={k: round(v, 1) for k, v in extra.items()},
                 slug=slugs[scan],
+                classes=primary_classes(m, primary, unit),
             )
         )
         ptb, pobjs, pts = tb, objs, ts
@@ -226,6 +257,7 @@ class DayRow:
     dextra: dict[str, float | None] = field(default_factory=dict)  # …and Δ vs the prior reply scan
     provisional: bool = False  # `sender`: the day's latest scan before its reply scan has landed
     slug: str | None = field(default=None, compare=False)  # `scan`'s canonical `?d=` slug; None: its minute
+    classes: dict[int, float] | None = field(default=None, compare=False)  # `scan`'s primary per class (`Scan.classes`)
 
 
 def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = False) -> list[DayRow]:
@@ -276,6 +308,7 @@ def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False) -> Da
         dextra=_dextra(s, prev),
         provisional=provisional,
         slug=s.slug,
+        classes=s.classes,
     )
 
 
@@ -284,7 +317,7 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -
     per-ISO-week bullets, trailing sparkline. The month/year title is NOT in
     the body -- it's folded into the OP's sender name by the poster.
     ``plot_url=None`` omits the image line."""
-    site_url, q, u = cfg.site_url, cfg.primary_quota, cfg.unit
+    site_url, qs, u = cfg.site_url, cfg.primary_quotas, cfg.unit
     rows, base = month.rows, month.base
     last = rows[-1]
     mdtb = last.tb - base.tb
@@ -297,7 +330,7 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -
     # with extra buckets alongside, the headline total is visibly the primary's
     primary = f"{_bucket_link(cfg.primary, last.scan, mtd_since, cfg, last.slug)} " if cfg.primary and last.extra else ""
     lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} {u.name}** [month-to-date]({mtd_url}) · {primary}{last.tb:,.0f} {u.name}{_quota(last.tb, q, u)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
+        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} {u.name}** [month-to-date]({mtd_url}) · {primary}{last.tb:,.0f} {u.name}{_quotas(last.tb, last.classes, qs, u)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
         # the OP is re-edited every scan, so it is the thread's live view; say which scan it reflects
         f"_as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_",
         "",
@@ -318,7 +351,7 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig) -
         # the link opens the Diff section over exactly this bullet's span
         lines.append(
             f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({_diff_url(end.scan, scan_ts(prev_end.scan) if prev_end is not end else None, site_url, slug=end.slug)}){partial}: "
-            f"**{_tb(wdtb)} {u.name}** → {end.tb:,.0f} {u.name}{_quota(end.tb, q, u)}"
+            f"**{_tb(wdtb)} {u.name}** → {end.tb:,.0f} {u.name}{_quotas(end.tb, end.classes, qs, u)}"
         )
         prev_end = end
     if plot_url is not None:
@@ -381,8 +414,8 @@ def load_tree(root: str, scan: str, primary: str) -> dict:
 
 
 def image_body(month: Month, m: dt.date, cfg: DigestConfig) -> dict:
-    """`POST /api/digest-image`'s request for ``month``: every scan from the lead-in on (bytes of the primary), the
-    primary's quota, and the headline interval's diff (none until the month spans two scans)."""
+    """`POST /api/digest-image`'s request for ``month``: every scan from the lead-in on (bytes of the primary, under
+    its quota's classes), the primary's quota, and the headline interval's diff (none until the month spans two scans)."""
     base, last = month.base, month.rows[-1]
     scans = ([base] if base is not month.rows[0] else []) + month.rows
     q, u = cfg.primary_quota, cfg.unit
@@ -391,7 +424,8 @@ def image_body(month: Month, m: dt.date, cfg: DigestConfig) -> dict:
         # the line is the primary's; say so once there are other buckets
         "note": " · ".join([cfg.host, *([cfg.primary] if cfg.primary and last.extra else []), u.name]),
         "month": f"{m:%Y-%m}",
-        "points": [{"scan": r.scan, "bytes": round(r.tb * u.bytes)} for r in scans],
+        # under the plotted quota's classes, so the line and the quota line measure the same bytes
+        "points": [{"scan": r.scan, "bytes": round((_scoped(r.tb, r.classes, q) if q else r.tb) * u.bytes)} for r in scans],
         # the card's axis + labels
         "units": u.name,
     }

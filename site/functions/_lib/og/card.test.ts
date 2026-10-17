@@ -36,12 +36,45 @@ describe('cardSvg', () => {
       3, 2,
     ])
   })
-  it('full: tiles labelled where they fit, owners named in the legend', () => {
+  it('full: tiles labelled at every depth where they fit, owners named in the legend', () => {
     const svg = cardSvg(data('full'))
     expect([texts(svg), count(svg, 'tile'), count(svg, 'kid')]).toEqual([
-      ['marin GCS', 'marin-us-central2/checkpoints', 'scan 2026-10-02', 'secret-run-a 30.0 TiB', 'secret-run-b 15.0 TiB', '51.1 TiB · 179,327,698 objects', 'Grace 30.0 TiB', 'Hedy 25.0 TiB'],
+      ['marin GCS', 'marin-us-central2/checkpoints', 'scan 2026-10-02', 'step-1000 20.0 TiB', 'step-2000 10.0 TiB', 'secret-run-a 30.0 TiB', 'secret-run-b 15.0 TiB', '51.1 TiB · 179,327,698 objects', 'Grace 30.0 TiB', 'Hedy 25.0 TiB'],
       3, 2,
     ])
+  })
+  describe('nested to any depth', () => {
+    const deep = (tier: 'anon' | 'full'): CardData => ({
+      ...data(tier), legend: undefined,
+      tiles: [{
+        name: 'run', b: 100 * T, color: '#4269d0', kids: [{
+          name: 'ckpt', b: 99 * T, color: '#4269d0', kids: [
+            { name: 'step-1', b: 60 * T, color: '#4269d0', kids: [{ name: 'shard-0', b: 40 * T, color: '#4269d0' }, { name: 'shard-1', b: 20 * T, color: '#efb118' }] },
+            { name: 'step-2', b: 39 * T, color: '#efb118' },
+          ],
+        }, { name: 'x', b: 1 * T, color: '#9498a0' }],
+      }],
+    })
+    /** `[text, font size]` per label inside the treemap box (the header and footer excluded). */
+    const labels = (svg: string) => [...svg.matchAll(/<text x="[^"]+" y="([^"]+)"[^>]*font-size="([^"]+)"[^>]*>([^<]*)<\/text>/g)]
+      .filter(m => Number(m[1]) > 144 && Number(m[1]) < 560).map(m => [m[3], Number(m[2])])
+    it('anon: every level drawn, none labelled', () => {
+      const svg = cardSvg(deep('anon'))
+      expect([texts(svg), count(svg, 'tile'), count(svg, 'kid')]).toEqual([
+        ['marin GCS', 'marin-us-central2/checkpoints', 'scan 2026-10-02', '51.1 TiB · 179,327,698 objects'],
+        1, 6,
+      ])
+    })
+    it('full: a header per level where it fits, smaller deeper; a cell too narrow stays unlabelled', () => {
+      const svg = cardSvg(deep('full'))
+      expect([labels(svg), count(svg, 'tile'), count(svg, 'kid')]).toEqual([
+        [
+          ['shard-0 40.0 TiB', 11], ['shard-1 20.0 TiB', 11], ['step-1 60.0 TiB', 12], ['step-2 39.0 TiB', 12],
+          ['ckpt 99.0 TiB', 13], ['run 100 TiB', 15],
+        ],
+        1, 6,
+      ])
+    })
   })
   it('an explicitly public map labels both levels without a signed tier', () => {
     const svg = cardSvg({ ...data('anon'), publicLabels: true })

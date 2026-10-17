@@ -5,7 +5,7 @@ import pulumi
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gcp"))
-from task_logs import TaskLogView
+from task_logs import TaskLogBucket, TaskLogView
 
 
 class Mocks(pulumi.runtime.Mocks):
@@ -63,3 +63,39 @@ def test_task_logs_reader_is_view_scoped_and_deployment_filtered():
 def test_task_log_prefix_must_be_literal(prefix: str):
     with pytest.raises(ValueError, match="^job_uid_prefix must be a nonempty literal job-name prefix$"):
         TaskLogView("logs", project="deployment", location="global", bucket="_Default", view_id="v", job_uid_prefix=prefix, reader="reader")
+
+
+@pulumi.runtime.test
+def test_task_log_bucket_keeps_batch_task_logs_beside_default():
+    mocks = Mocks()
+    pulumi.runtime.set_mocks(mocks, project="test", stack="test", preview=False)
+    logs = TaskLogBucket("tl", project="deployment", location="global", bucket_id="batch-task-logs", retention_days=90)
+
+    def check(_):
+        assert logs.path == "projects/deployment/locations/global/buckets/batch-task-logs"
+        assert mocks.resources == {
+            "tl": ("disky:gcp:TaskLogBucket", {}),
+            "tl-bucket": ("gcp:logging/projectBucketConfig:ProjectBucketConfig", {
+                "project": "deployment",
+                "location": "global",
+                "bucketId": "batch-task-logs",
+                "retentionDays": 90,
+                "description": "Batch task logs (container stdout/stderr), 90 days",
+            }),
+            "tl-sink": ("gcp:logging/projectSink:ProjectSink", {
+                "project": "deployment",
+                "name": "batch-task-logs",
+                "destination": "logging.googleapis.com/projects/deployment/locations/global/buckets/batch-task-logs",
+                "filter": 'log_id("batch_task_logs")',
+                "description": "Batch task logs → batch-task-logs",
+                "uniqueWriterIdentity": True,
+            }),
+        }
+
+    return pulumi.Output.all(logs.bucket.id, logs.sink.id).apply(check)
+
+
+@pytest.mark.parametrize("days", [0, 3651])
+def test_task_log_bucket_retention_bounds(days: int):
+    with pytest.raises(ValueError, match="^retention_days must be 1–3650$"):
+        TaskLogBucket("tl", project="p", location="global", bucket_id="b", retention_days=days)

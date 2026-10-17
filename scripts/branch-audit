@@ -5,10 +5,10 @@
 # at parity (react lib, python engine, site src + functions) should print
 # `parity`; anything else is either base-bound work not yet cherry-picked up,
 # or a regression from a merge. Run before and after each parent merge:
-# cloud → local → m3 / tauri-native-app; cloud → gcs / cw-s3.
+# cloud → local → m3 / tauri-native-app; cloud → gcs / cw.
 #
 # Pairs and surfaces come from `.claude/cp.yml` (every peer vs `cloud`, plus
-# `gcs cw-s3`), so one config drives both `git cp` and this audit.
+# `gcs cw`), so one config drives both `git cp` and this audit.
 #
 #   scripts/branch-audit                  # every configured pair, every surface
 #   scripts/branch-audit gcs cloud site/src   # one pair, one or more surfaces
@@ -32,7 +32,7 @@ else
       *) PAIRS+=("$b cloud") ;;
     esac
   done
-  PAIRS+=("gcs cw-s3")
+  PAIRS+=("gcs cw")
 fi
 if [ $# -ge 3 ]; then
   SURFACES=("${@:3}")

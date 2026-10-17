@@ -8,6 +8,7 @@ import {
   byRunTime, failedAt, outputIndex, type OutputDelta, phaseSpans, type PhaseSpan, runSecs, type RunSummary, type ScanRun,
   type ScanRunOutput, type ScanRunPhase, type PhaseIssue, type PhaseRecovery, phaseIssues, phaseRecoveries, summarize, withDeltas,
 } from '../../src/scanRunsModel.js'
+import type { Dag, RunDagRow } from '../../src/runDag.js'
 
 export interface ScanRunRows { runs: ScanRun[]; phases: ScanRunPhase[]; outputs: ScanRunOutput[] }
 
@@ -20,6 +21,17 @@ export async function loadScanRuns(db: D1Database, store: string): Promise<ScanR
       db.prepare('SELECT o.* FROM scan_run_outputs o JOIN scan_runs r ON r.run_id = o.run_id WHERE r.store = ? ORDER BY o.run_id, o.key').bind(store),
     ])
     return { runs: runs.results as ScanRun[], phases: phases.results as ScanRunPhase[], outputs: outputs.results as ScanRunOutput[] }
+  } catch (e) {
+    if (/no such table/i.test(String((e as Error).message ?? e))) return null
+    throw e
+  }
+}
+
+/** The run's pipeline DAG (the engine-neutral graph its head stored), or null: a one-VM run, or no `scan_run_dags`. */
+export async function loadDag(db: D1Database, runId: string): Promise<RunDagRow | null> {
+  try {
+    const r = await db.prepare('SELECT engine, dag FROM scan_run_dags WHERE run_id = ?').bind(runId).first<{ engine: string; dag: string }>()
+    return r ? { engine: r.engine, dag: JSON.parse(r.dag) as Dag } : null
   } catch (e) {
     if (/no such table/i.test(String((e as Error).message ?? e))) return null
     throw e
@@ -47,6 +59,8 @@ export interface ScanRunDetail {
   next_scan: string | null
   phase_issues: PhaseIssue[]
   recoveries: PhaseRecovery[]
+  /** The pipeline DAG, when its head recorded one */
+  dag?: RunDagRow | null
 }
 
 export function scanRunDetail(rows: ScanRunRows, id: string, now: number): ScanRunDetail | null {

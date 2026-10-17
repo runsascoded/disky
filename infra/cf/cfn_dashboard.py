@@ -72,6 +72,15 @@ class BranchAlias:
 
 
 @dataclass(frozen=True)
+class ExtraDomain:
+    """Another hostname for the project, beside `domain` and the branch aliases: production's (`branch` None) or a
+    preview branch's. A rename adds the new names here and keeps the old ones as they are (changing `domain` or an
+    alias in place replaces its resources, detaching the old host); the site redirects whichever it calls legacy."""
+    domain: str
+    branch: str | None = None
+
+
+@dataclass(frozen=True)
 class Store:
     """One deployment's Cloudflare-side facts (all non-secret; ids are public)."""
     pages_project: str
@@ -81,6 +90,7 @@ class Store:
     # Custom hostnames for preview branches (the dev stack): each one is a
     # PagesDomain + a proxied CNAME to `<branch>.<project>.pages.dev`.
     branch_aliases: tuple[BranchAlias, ...] = ()
+    extra_domains: tuple[ExtraDomain, ...] = ()
     # Zero Trust Access gate, or None when the deployment does its own identity
     # (gcs.oa.dev: own Google OIDC client + emailed codes — gcs:specs/done/oidc-cutover.md).
     access: AccessApp | None = None
@@ -215,6 +225,29 @@ class CfnDashboard(pulumi.ComponentResource):
                 project_name=self.pages.name,
                 name=alias.domain,
                 opts=child(f"domain:{alias.branch}", depends_on=[cname]),
+            )
+
+        # Extra hostnames: the same PagesDomain + CNAME pair, keyed by hostname.
+        self.extra_cnames: dict[str, cloudflare.DnsRecord] = {}
+        self.extra_domains: dict[str, cloudflare.PagesDomain] = {}
+        for x in store.extra_domains:
+            cname = cloudflare.DnsRecord(
+                f"{name}-x-{x.domain}-cname",
+                zone_id=zone_id,
+                name=x.domain,
+                type="CNAME",
+                content=f"{x.branch}.{store.pages_host}" if x.branch else store.pages_host,
+                ttl=1,
+                proxied=True,
+                opts=child(f"cname:{x.domain}", ignore=["comment"]),
+            )
+            self.extra_cnames[x.domain] = cname
+            self.extra_domains[x.domain] = cloudflare.PagesDomain(
+                f"{name}-x-{x.domain}-domain",
+                account_id=account_id,
+                project_name=self.pages.name,
+                name=x.domain,
+                opts=child(f"domain:{x.domain}", depends_on=[cname]),
             )
 
         # D1 database (container only; its schema stays with the app).

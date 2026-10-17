@@ -54,7 +54,7 @@ def main(
         size_map[str((root / name).resolve())] = int(kib)
     trees = worktrees()
     cwds = process_cwds(processes)
-    keep = {"cloud", "gcs", "cw-s3", "m3", "local", "tauri-native-app", "gcs-prod", "cw-s3-prod"}
+    keep = {"cloud", "gcs", "cw", "m3", "local", "tauri-native-app", "gcs-prod", "cw-prod"}
     refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
     retained = sorted(keep.intersection(refs))
     paths = sorted((Path(t["worktree"]) for t in trees), key=lambda p: len(p.parts), reverse=True)

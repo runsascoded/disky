@@ -24,6 +24,7 @@ import { useUnits } from './units'
 import { usePerfCommit } from './perf'
 import { listingTime } from './listingTime'
 import { gradientBand } from './dayBand'
+import { DATE_SCALES, type DateAxis, useDateScale } from './dateScale'
 import type { DayBand } from './dayBand'
 import { RootSourceLine } from './UnionNotes'
 import { AppActions, useProxyInfo } from './laptop'
@@ -152,6 +153,8 @@ const coldShade = (color: string, cold: number): string =>
 
 export interface DateRange { min: number; max: number }
 
+const SCALE_TIP = 'How dates spread over the gradient. log (default): by age back from the newest date in view, so recent weeks get distinct colors and the old tail shares a few. lin: evenly by calendar time. rank: by bytes, so each stretch of the gradient covers about the same area of the map; neighboring colors can be far apart in time.'
+
 /** The secondary color axis ("shade by"): a perturbation *within* each cell's
  * primary color. `none` = the primary color as-is; `class` = darker for a
  * larger share of cold storage classes (`coldShade`). Opt-in — the primary
@@ -182,9 +185,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
   shade?: ShadeMode
   userIdx: Map<string, UserIndexEntry>
-  dateRange: DateRange | null
+  /** The written lens's axis: the drawn cells' days under the page's scale (`dateScale.ts`). */
+  dateRange: DateAxis | null
   // Access-log observation window (epoch days) — domain of the read lens.
-  readRange?: DateRange | null
+  readRange?: DateAxis | null
   hl?: Highlight | null
   /** Legend-row interactions (plotly-style): hover a row = solo it (others
    *  fade, map dims to it), click = pin (sticky `hl`; click again, any empty
@@ -329,7 +333,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         ink = 'var(--ink)'
       } else if (mode === 'date') {
         if (kid.d != null && dateRange && dateRange.max > dateRange.min) {
-          bg = dateColor((kid.d - dateRange.min) / (dateRange.max - dateRange.min))
+          bg = dateColor(dateRange.t(kid.d))
           ink = inkFor(bg)
         } else {
           bg = 'var(--other)'
@@ -337,7 +341,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         }
       } else if (mode === 'read') {
         if (kid.a != null && readRange && readRange.max > readRange.min) {
-          bg = dateColor((kid.a - readRange.min) / (readRange.max - readRange.min))
+          bg = dateColor(readRange.t(kid.a))
           ink = inkFor(bg)
         } else {
           // Never read since logging began — the sweep-interesting bucket.
@@ -543,14 +547,16 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   // The gradient key doubles as a brush: hovering a point on it dims every
   // leaf cell outside a window of days around that point (`gradientBand`).
   // A band from elsewhere (the age chart) on the same axis shows on it too.
-  const gradLi = (range: DateRange, axis: DayBand['axis']) => {
-    const span = range.max - range.min
-    const shown = effBand?.axis === axis && span > 0 ? effBand : null
+  const [scale, setScale] = useDateScale()
+  const gradLi = (range: DateAxis, axis: DayBand['axis']) => {
+    const shown = effBand?.axis === axis && range.max > range.min ? effBand : null
     const at = (e: PointerEvent<HTMLSpanElement>) => {
       const r = e.currentTarget.getBoundingClientRect()
       const b = gradientBand(range, (e.clientX - r.left) / r.width, axis)
       if (b.lo !== effBand?.lo || b.hi !== effBand?.hi || effBand?.axis !== axis) setBand(b)
     }
+    const lo = shown ? range.t(shown.lo) : 0
+    const hi = shown ? range.t(shown.hi) : 0
     return (
       <span className="li gradli">
         {epochDaysToDate(range.min)}
@@ -559,15 +565,18 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           onPointerMove={at} onPointerDown={at} onPointerLeave={() => setBand(null)}
           aria-label="Hover to highlight cells from these dates"
         >
-          {shown && (
-            <span
-              className="gradwin"
-              style={{ left: `${(100 * (shown.lo - range.min)) / span}%`, width: `${Math.max(1, (100 * (shown.hi - shown.lo)) / span)}%` }}
-            />
-          )}
+          {shown && <span className="gradwin" style={{ left: `${100 * lo}%`, width: `${Math.max(1, 100 * (hi - lo))}%` }} />}
+          {/* out of the row's flow (above the bar): showing or changing it never moves the bar under the pointer */}
+          {shown && <span className="gradsel">{shown.lo === shown.hi ? epochDaysToDate(shown.lo) : `${epochDaysToDate(shown.lo)}–${epochDaysToDate(shown.hi)}`}</span>}
         </span>
         {epochDaysToDate(range.max)}
-        {shown && <span className="gradsel">{shown.lo === shown.hi ? epochDaysToDate(shown.lo) : `${epochDaysToDate(shown.lo)}–${epochDaysToDate(shown.hi)}`}</span>}
+        <Explain text={SCALE_TIP} label="date scale">
+          <span className="seg date-scale">
+            {DATE_SCALES.map(k => (
+              <button key={k} type="button" className={scale === k ? 'on' : ''} onClick={() => setScale(k)}>{k}</button>
+            ))}
+          </span>
+        </Explain>
       </span>
     )
   }

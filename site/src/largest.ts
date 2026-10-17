@@ -46,6 +46,6 @@ export function flatRows(path: string, items: LargeItem[], kind: LargestKind): T
     k: kind,
     b: x.size,
     o: x.n_files ?? 1,
-    ...(x.mtime != null ? { d: Math.floor(x.mtime / 86400) } : {}),
+    ...(x.mtime ? { d: Math.floor(x.mtime / 86400) } : {}),  // an mtime of 0 is unknown
   }))
 }

@@ -49,7 +49,7 @@ export function foldPrefixes(prefixes: string[], rows: StatRow[]): Record<string
   const out: Record<string, PrefixStat> = {}
   for (const [k, a] of acc) {
     const s: PrefixStat = { b: a.b, o: a.o }
-    if (a.m != null) s.d = Math.floor(a.m / 86400)  // newest write (view.ts `display`)
+    if (a.m) s.d = Math.floor(a.m / 86400)  // newest write (view.ts `display`; an mtime of 0 is unknown)
     if (a.a != null) s.a = a.a
     if (a.ub.size) s.us = [...a.ub].sort((x, y) => y[1] - x[1])
     if (a.cb.size) s.cb = Object.fromEntries([...a.cb].sort((x, y) => y[1] - x[1]))

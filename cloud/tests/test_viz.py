@@ -172,7 +172,8 @@ def access(tmp_path: Path) -> str:
     return str(path)
 
 
-def test_access_rows_on_or_after_scan_date_are_excluded(tmp_path: Path, listing: str, attribution: str, access: str):
+@pytest.mark.parametrize("asof", ["2026-07-20", "2026-07-20T1334"])
+def test_access_rows_on_or_after_scan_date_are_excluded(tmp_path: Path, listing: str, attribution: str, access: str, asof: str):
     """A scan dated D aggregates access-log rows with `day < D` only, whatever
     shards exist when it runs — so a re-aggregation of an old date reproduces
     it rather than leaking later reads in. The fixture's `datasets` read is
@@ -182,9 +183,9 @@ def test_access_rows_on_or_after_scan_date_are_excluded(tmp_path: Path, listing:
     identities_path.write_text(IDENTITIES_YAML)
     out = tmp_path / "out"
     pidx = tmp_path / "path-index.parquet"
-    meta = write_path_index((listing,), out, "2026-07-20", (attribution,), identities_path, access=(access,), path_index=pidx)
+    meta = write_path_index((listing,), out, asof, (attribution,), identities_path, access=(access,), path_index=pidx)
     rd = epoch_day(TS["d0703"])
-    assert meta["access"] == {"from": rd, "to": rd}
+    assert (meta["asof"], meta["access"]) == (asof, {"from": rd, "to": rd})
     a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
     assert pd.isna(a_by_path["b1/datasets"])
     assert a_by_path["b1"] == rd

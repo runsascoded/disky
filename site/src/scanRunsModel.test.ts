@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, structureOf, summarize, withDeltas, runOutcome, overlappingFailures,
+  type ScanRunPhase, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
 } from './scanRunsModel'
 
 export const run = (o: Partial<ScanRun> & Pick<ScanRun, 'run_id' | 'scan'>): ScanRun => ({
@@ -179,5 +179,35 @@ describe('links', () => {
       'https://console.cloud.google.com/batch/jobsDetail/regions/us-central1/jobs/job-1/logs?project=p')
     expect(logsHref('p', { run_id: 'uid-1', started_ts: 1_800_000_000, job_name: null, region: null })).toBe(
       'https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22uid-1%22%0Alog_id%28%22batch_task_logs%22%29%0Atimestamp%20%3E%3D%20%222027-01-15T07%3A50%3A00.000Z%22?project=p')
+  })
+})
+
+describe('runTasks', () => {
+  const task = (name: string, seq: number, start: number, end: number | null, job: string | null, machine: string | null, status: ScanRunPhase['status'] = 'done'): ScanRunPhase =>
+    ({ ...phase('nf', name, seq, start, end ?? 0), finished_ts: end, status, job_name: job, machine })
+  it('groups a Nextflow run\'s phases by their Batch job, in start order', () => {
+    expect(runTasks([
+      task('import b1', 3, 700, 800, 'nf-b1', 'n2-standard-16'),
+      task('list b1', 0, 120, 700, 'nf-b1', 'n2-standard-16'),
+      task('bucket-check', 1, 130, 135, 'nf-bc', 'e2-standard-2'),
+      task('index', 4, 900, null, 'nf-ix', 'n2-standard-8', 'running'),
+      task('head-only', 2, 100, 110, null, null),
+    ])).toEqual([
+      { job_name: 'nf-b1', machine: 'n2-standard-16', phases: ['list b1', 'import b1'], start: 120, end: 800, status: 'done' },
+      { job_name: 'nf-bc', machine: 'e2-standard-2', phases: ['bucket-check'], start: 130, end: 135, status: 'done' },
+      { job_name: 'nf-ix', machine: 'n2-standard-8', phases: ['index'], start: 900, end: null, status: 'running' },
+    ])
+  })
+  it('is empty for a one-VM run', () => {
+    expect(runTasks([phase('u1', 'listing', 0, 0, 10)])).toEqual([])
+  })
+})
+
+describe('taskLogsHref', () => {
+  it('queries the task job\'s logs by name, which outlive the deleted job', () => {
+    const q = 'log_id("batch_task_logs")\nlabels.task_group_name:"/jobs/nf-e8646fb0-1792179471443/"\ntimestamp >= "2027-01-15T07:50:00.000Z"'
+    expect(taskLogsHref('p', 'nf-e8646fb0-1792179471443', 1_800_000_000)).toBe(
+      `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(q).replace(/\(/g, '%28').replace(/\)/g, '%29')}?project=p`,
+    )
   })
 })

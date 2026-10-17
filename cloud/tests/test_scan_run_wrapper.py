@@ -32,7 +32,7 @@ PROFILE = {
 }
 SECRET = "s3cr3t-site-token"
 NOTIFY_ENV = ("PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK", "SLACK_BOT_TOKEN", "SLACK_ALERT_CHANNEL",
-              "DISK_TREE_NOTIFY", "DT_ALERTS", "DT_RECORD", "SCAN_ID", "BATCH_JOB_UID")
+              "DISK_TREE_NOTIFY", "DT_ALERTS", "DT_RECORD", "SCAN_ID", "BATCH_JOB_UID", "NF_PROCESS", "NF_TAG")
 
 
 class Transport:
@@ -574,4 +574,85 @@ def test_an_unphased_failure_inside_a_begun_phase_names_it(job):
     assert job.rows("SELECT status, failed_phase, error FROM scan_runs") == [("failed", "index", "exit 3: cp a b (run.sh:9)")]
     assert [ln for ln in job.take() if ln.startswith("alert")] == [
         f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 3) in index: exit 3: cp a b (run.sh:9)",
+    ]
+
+
+def test_a_nextflow_task_records_its_own_job_and_alerts_with_its_logs(job, monkeypatch):
+    """A step in its own Batch job (`$BATCH_JOB_UID` ≠ the run id): each phase records that job + machine, looked up
+    once per task, and the step's alert links the task's logs."""
+    looked: list[tuple] = []
+
+    def by_uid(uid, project=None, region="us-central1"):
+        looked.append((uid, project, region))
+        return {"name": f"projects/{project}/locations/{region}/jobs/nf-1a2b", "uid": uid,
+                "allocationPolicy": {"instances": [{"policy": {"machineType": "n2-standard-16"}}]}}
+
+    monkeypatch.setattr("dt_cloud.gcp.batch_job_by_uid", by_uid)
+    assert job("start", "-j", "head-job", "-R", "us-central1", SCAN, at=T0) == 0
+    job.mp.setenv("BATCH_JOB_UID", "task-uid-1")
+    job.mp.setenv("NF_PROCESS", "list_source")
+    job.mp.setenv("NF_TAG", "s3://b1")
+    assert job("phase-begin", "list b1", at=T0 + 120) == 0
+    assert job("phase-end", "-M", "list b1", at=T0 + 600) == 0
+    assert job("phase-begin", "import b1", at=T0 + 600) == 0
+    assert job("phase-end", "-M", "import b1", at=T0 + 700) == 0
+    assert looked == [("task-uid-1", "proj-1", "us-central1")]
+    assert job.rows("SELECT phase, started_ts, finished_ts, job_name, machine, task FROM scan_run_phases ORDER BY seq") == [
+        ("list b1", T0 + 120, T0 + 600, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),
+        ("import b1", T0 + 600, T0 + 700, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),
+    ]
+    assert job.rows("SELECT job_name, machine FROM scan_runs") == [("head-job", None)]
+    jr = scan_runs.JobRun(str(job.profile), None, False, None, str(job.db))
+    assert jr.logs_url() == "https://logs.test/q;uid=task-uid-1?project=proj-1&job=nf-1a2b"
+
+
+def test_the_runs_own_job_looks_nothing_up(job, monkeypatch):
+    monkeypatch.setattr("dt_cloud.gcp.batch_job_by_uid", lambda *a, **k: pytest.fail("looked up the run's own job"))
+    job.mp.setenv("BATCH_JOB_UID", "u1")
+    assert job("start", SCAN, at=T0) == 0
+    assert job("phase-begin", "listing", at=T0 + 10) == 0
+    assert job("phase-end", "-M", "listing", at=T0 + 70) == 0
+    assert job.rows("SELECT phase, job_name, machine, task FROM scan_run_phases") == [("listing", None, None, None)]
+
+
+def test_finish_stores_the_runs_dag_and_a_local_tasks_node(job, tmp_path):
+    """`finish -D`: the head's DAG, reduced to the engine-neutral graph, beside the run; a task without a Batch job of its own (the local executor) still
+    names its pipeline node, untagged."""
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["index"])\n    v1(["post"])\n    v0 --> v1\n')
+    assert job("start", SCAN, at=T0) == 0
+    job.mp.setenv("NF_PROCESS", "index")
+    job.mp.setenv("NF_TAG", "")
+    assert job("phase-begin", "index-write", at=T0 + 10) == 0
+    assert job("phase-end", "-M", "index-write", at=T0 + 70) == 0
+    job.mp.delenv("NF_PROCESS")
+    assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
+    assert job.rows("SELECT phase, job_name, task FROM scan_run_phases") == [("index-write", None, "index")]
+    assert job.rows("SELECT run_id, engine, dag FROM scan_run_dags") == [
+        ("u1", "nextflow", '{"nodes":[{"id":"index","label":"index"},{"id":"post","label":"post"}],"edges":[["index","post"]]}'),
+    ]
+
+
+def test_dag_command_stores_a_runs_archived_dag(job, tmp_path):
+    """`scan-run dag RUN FILE`: a run recorded before its head stored its DAG gets it from the archive's `dag.mmd`."""
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["list_source"])\n    v1(( ))\n    v2(["index"])\n    v0 --> v1\n    v1 --> v2\n')
+    assert job("start", SCAN, at=T0) == 0
+    r = CliRunner().invoke(cli, ["dag", "-c", str(job.profile), "-s", str(job.db), "u1", str(dag)])
+    assert (r.exit_code, r.stdout, job.take()[-1]) == (0, "", "scan-run dag: u1 · nextflow · 2 nodes, 1 edges")
+    assert job.rows("SELECT run_id, engine, dag FROM scan_run_dags") == [
+        ("u1", "nextflow", '{"nodes":[{"id":"list_source","label":"list_source"},{"id":"index","label":"index"}],"edges":[["list_source","index"]]}'),
+    ]
+
+
+def test_a_dag_the_database_refuses_never_leaves_the_run_unfinished(job, tmp_path):
+    """A database whose `scan_run_dags` is in another shape (the migration not applied yet): the run still finishes."""
+    SqliteSink(job.db).execute(["DROP TABLE scan_run_dags", "CREATE TABLE scan_run_dags (run_id TEXT PRIMARY KEY, mermaid TEXT NOT NULL)"])
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["index"])\n')
+    assert job("start", SCAN, at=T0) == 0
+    assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
+    assert job.rows("SELECT status, finished_ts FROM scan_runs") == [("succeeded", T0 + 80)]
+    assert [l for l in job.take() if l.startswith("scan-run record failed")] == [
+        "scan-run record failed (the scan continues): OperationalError: table scan_run_dags has no column named engine",
     ]

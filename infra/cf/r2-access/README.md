@@ -20,35 +20,48 @@ WRANGLER_LOG_PATH="$PWD/tmp/r2-access-wrangler.log" pnpm --dir infra/cf/r2-acces
 infra/.venv/bin/python -m pytest -q --disable-warnings infra/tests/test_r2_access_stack.py infra/tests/test_cf_stack.py
 ```
 
-The preview performed on October 12 succeeded: six new Cloudflare resources plus the stack, no updates/deletes, and `schedules: []`. The detailed preview and saved plan are in ignored `tmp/r2-access-preview.txt` and `tmp/r2-access-preview-plan.json`. Provider warnings say certain configuration resources cannot be removed by destroy alone: explicitly disable cron through an apply before decommissioning the Worker/stack; do not assume destroy stops collection.
+Applied 2026-10-17 with cron **off**: the previewed plan (six Cloudflare resources plus the stack, creates only, `schedules: []`) went through `up --plan`, and a follow-up preview showed 7 unchanged. The Worker exists without its runtime secret, so it cannot query anything yet, and no schedule invokes it. Preview/apply logs are in ignored `tmp/r2-access-{preview,up}.txt`. Provider warnings say certain configuration resources cannot be removed by destroy alone: explicitly disable cron through an apply before decommissioning the Worker/stack; do not assume destroy stops collection.
 
 ## Preview/apply handoff
 
-Local passphrase-encrypted state lives in **`state/` beside this file**, matching the existing RAC m3 stack convention. Keep/back up that state and its passphrase; it is not disposable benchmark scratch. No `up` was run by the agent. The `wt/m3` environment supplies the RAC deployment token and existing state passphrase; do not substitute an OA token or the Observability-only runtime token.
+Local passphrase-encrypted state lives in **`state/` beside this file**, matching the existing RAC m3 stack convention. Keep/back up that state and its passphrase; it is not disposable benchmark scratch. Every credential comes from **`wt/m3`'s environment**: the RAC deployment token, the state passphrase and the runtime Observability token (`CF_OBSERVABILITY_TOKEN`, no expiry; the root `.envrc` copy is the expiring pilot token). Do not substitute an OA token. Put any `env` *inside* `direnv exec`, never outside it.
 
 From the repository root:
 
 ```bash
 direnv exec wt/m3 pulumi -C infra/cf/r2-access preview --stack rac --diff --save-plan "$PWD/tmp/r2-access-preview-plan.json" --suppress-outputs
-# Human-only, after reviewing the preview:
 direnv exec wt/m3 pulumi -C infra/cf/r2-access up --stack rac --plan "$PWD/tmp/r2-access-preview-plan.json"
 ```
 
-After creation, install the runtime secret interactively, using RAC deployment credentials (the prompted value is the dedicated Observability token):
+After creation, install the runtime secret from that same environment, piped so the value is never echoed or typed:
 
 ```bash
-direnv exec wt/m3 pnpm --dir infra/cf/r2-access exec wrangler secret put CF_OBSERVABILITY_TOKEN
+direnv exec wt/m3 sh -c 'printf %s "$CF_OBSERVABILITY_TOKEN" | pnpm --dir infra/cf/r2-access exec wrangler secret put CF_OBSERVABILITY_TOKEN'
 ```
 
-Then set `disky-r2-access:secretReady: true` and `disky-r2-access:enabled: true` in `Pulumi.rac.yaml`, preview, and human-apply that second plan. The pilot token expires **October 18**; replace/renew it before expiry. Inspect a scheduled run's private `_SUCCESS.json` and sanitized Worker execution logs before treating this as an operating collector.
+Then set `disky-r2-access:secretReady: true` and `disky-r2-access:enabled: true` in `Pulumi.rac.yaml`, rebuild, preview (expect only the cron trigger's `schedules` to change), and apply that second plan. Inspect the first scheduled run's private `state.json`, its `_SUCCESS.json` and the sanitized Worker execution logs before treating this as an operating collector.
 
 ## Collection contract and limits
 
-Hourly runs query six-hour windows ending two hours behind the scheduled hour; the daily replay covers six days, within the provider retention window. Each run has immutable raw pages and publishes `_SUCCESS.json` only after every configured bucket drains to an empty page. Partial runs without that marker are incomplete. Concurrent/replayed runs have different UUID prefixes, with no racing mutable watermark.
+Windows are half-open `[from, to)` in milliseconds. The telemetry API excludes **both** timeframe bounds (measured; see the spec), so every query sends `from − 1`, and events outside the window are refused.
 
-The pilot caps each invocation at 50 total pages, 500 events per page and 4 MiB per response. A cap, non-COMPLETED query, query sampling, count mismatch, stalled cursor or failed write fails the run; it must not publish a success marker. The provider's seven-day retention, late/best-effort delivery and unknown capture sampling still apply. A success marker means the API query drained, **not** that every access was logged. Historical gaps older than retention cannot be recovered.
+- **Hourly** (`HOURLY_CRON`): `to` = the scheduled hour − `LAG_HOURS` (2). `from` = the published watermark − `OVERLAP_HOURS` (1), or `to − LOOKBACK_HOURS` (6) on the first run. Measured delivery latency was 13–25 s, so the overlap catches late deliveries with a wide margin.
+- **Daily** (`DAILY_CRON`): replays `REPLAY_HOURS` (144) up to `to`, within the provider's seven-day retention.
+- Every `from` is clamped to `to − REPLAY_HOURS`. A watermark older than that floor is recorded as a **gap** in the state; it cannot be recovered.
 
-This is deliberately a small-fleet collector. Do not reuse these limits blindly for `marin-na`'s traffic: measure first, then narrow windows or move high-volume drains into queued/durable jobs. A downstream overlay must deduplicate provider event IDs across run manifests before counting accesses, and must separate content reads from HEAD/list/write/delete operations. Raw archives contain sensitive keys, actors and IPs; they must not flow to the public R2 demo. See [collector contract] and [deployment isolation].
+Each run, in order:
+
+1. Drains each bucket's window to an empty cursor page, writing immutable raw pages under `runs/<scheduled>/<run id>/<bucket>/NNNN.json`. These expire after 30 days.
+2. Runs one weighted-count calculation per UTC hour of the window, *after* the drain. Each hour gets `observed` (distinct events archived), `estimated` (Σ row weights), `max_sample_interval` and `capture`. `capture` is `unsampled` (all weights 1 and estimated = observed), `sampled` (provider ingestion sampling, permanent) or `inconsistent` (e.g. delivered between the drain and the count; a later overlap or the daily replay re-checks it).
+3. Merges events into **per-UTC-day aggregates**, deduplicated by provider event id: `{events: {id: [timestamp, action]}, actions, classes, hours}`. `classes` separates `content_read` (GET) from `metadata_read` (HEAD), `list`, `write`, `delete` and `other`. Changed days are written to **new immutable keys** `agg/<bucket>/<day>/<run id>.json`; an unchanged day writes nothing.
+4. **Publishes** with one conditional write of `state.json` (`onlyIf` the etag it read). That write repoints each day to its aggregate and advances `collected_through` (the watermark) to `to`. A run that read an older state fails with `state_conflict` and publishes nothing. The very first state write is unconditional.
+5. Writes `_SUCCESS.json`, the run manifest (windows, gaps, new events, hour sampling counts, raw page keys).
+
+Readers start from `state.json` only. Aggregate keys it does not name are unpublished, from failed or superseded runs. A cap, non-COMPLETED query, query-time sampling (`abr_level` ≠ 1), count mismatch, stalled cursor, out-of-window event or failed write fails the run before step 4.
+
+The pilot caps each invocation at 50 event pages, 500 events per page and 4 MiB per response; the daily replay adds 144 small calculation queries. A published watermark means the API queries drained, **not** that every access was logged: provider delivery is best effort, and `sampled` hours hold fewer events than requests. Historical gaps older than retention cannot be recovered. Superseded `agg/` versions and `state.json` are not lifecycle-expired; at pilot volume that is a few objects per day.
+
+This is deliberately a small-fleet collector: day aggregates hold every event id in memory and in one object. Do not reuse these limits blindly for `marin-na`'s traffic: measure first, then narrow windows or move high-volume drains into queued/durable jobs. Raw archives contain sensitive keys, actors and IPs; they must not flow to the public R2 demo. See [collector contract] and [deployment isolation].
 
 [collector contract]: ../../../specs/r2-access-logging.md
 [deployment isolation]: ../../../specs/deployment-isolation.md

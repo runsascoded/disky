@@ -754,6 +754,56 @@ def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row
     print(json.dumps(s))
 
 
+@main.command("age-pyramid")
+@option("-c", "--check", is_flag=True, help="Then check each tier against the path sort's dated files (depth-1 totals above the tier's floor, the root's); exit 1 on a mismatch")
+@option("-m", "--mem", default=None, help="DuckDB memory limit (default DuckDB's)")
+@option("-o", "--out", "out_dir", type=Path, required=True, help="Output dir: `age-pyramid-<bin>.parquet` per bin")
+@option("-t", "--threads", default=None, type=int, help="DuckDB threads (default DuckDB's)")
+@argument("path_sort", type=Path)
+def age_pyramid(check: bool, mem: str | None, out_dir: Path, threads: int | None, path_sort: Path) -> None:
+    """The age chart's tiers (`age-pyramid-<bin>.parquet`, specs/done/age-index.md) from a scan's `path` sort
+    (`path-index.parquet`: what `path-index -P` writes, which has none), for `index-sync` to publish beside it (`index-write`
+    writes them itself, from the layer-2s). Prints the summary as JSON."""
+    from .index_verify import Mismatch, build_age_pyramid
+
+    try:
+        s = build_age_pyramid(path_sort, out_dir, mem=mem, threads=threads, check=check)
+    except Mismatch as e:
+        err(f"age-pyramid: {e}")
+        raise SystemExit(1) from None
+    err(f"age-pyramid: floor {s['floor']}, {len(s['bins'])} tiers → {out_dir}{' (checked)' if check else ''}")
+    print(json.dumps(s))
+
+
+@main.command("index-verify")
+@option("-b", "--bucket", "buckets", multiple=True, required=True, help="A bucket of the scan (repeatable): every listed bucket must be one, and each one's totals are reported (0 when empty)")
+@option("-d", "--date", "scan", required=True, callback=scan_id_option, help="The scan id (recorded in the report)")
+@option("-g", "--gen", default=None, help="The index generation (recorded in the report)")
+@option("-l", "--listing", "listings", multiple=True, required=True, help="The scan's listing parquet glob(s) (repeatable): `bucket, size_bytes, created`")
+@option("-m", "--mem", default=None, help="DuckDB memory limit (default DuckDB's)")
+@option("-o", "--out", type=Path, default=None, help="Write the report here (`verification.json`); always printed")
+@option("-s", "--snapshots", type=Path, required=True, help="The scan's snapshot dir (`path-index -o`): `meta.json`, `age.json`")
+@option("-t", "--threads", default=None, type=int, help="DuckDB threads (default DuckDB's)")
+@argument("path_sort", type=Path)
+def index_verify(buckets: tuple[str, ...], scan: str, gen: str | None, listings: tuple[str, ...], mem: str | None, out: Path | None,
+                 snapshots: Path, threads: int | None, path_sort: Path) -> None:
+    """Check a scan's index against the listings it was built from (`index_verify.verify_index`): per-bucket and total
+    bytes / objects in the `path` sort and the snapshot's `meta.json`, the `age.json` histogram, and (where written
+    beside the sort) the age pyramids and the `bysize` sort. Exit 1 on the first mismatch, writing nothing."""
+    from .index_verify import Mismatch, verify_index
+
+    try:
+        report = verify_index(path_sort, listings, snapshots, buckets, scan=scan, gen=gen, mem=mem, threads=threads)
+    except Mismatch as e:
+        err(f"index-verify {scan}: {e}")
+        raise SystemExit(1) from None
+    text = json.dumps(report, indent=2) + "\n"
+    if out:
+        out.write_text(text)
+    err(f"index-verify {scan}: {report['totals']['objects']:,} objects, {report['totals']['bytes']:,} B over {len(buckets)} buckets: ok")
+    print(text, end="")
+
+
 @main.command("index-recut")
 @option("-c", "--check", is_flag=True, help="Then check the re-cut `bysize`'s root and depth-1 views against per-path sums over the `path` sort (`bysize_check`), printed as `check` in the JSON; exit 1 unless every view is exact")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
@@ -1416,9 +1466,10 @@ def lifecycle() -> None:
     bucket, the per-scan snapshot shape."""
 
 
-def _lifecycle_clients(buckets: tuple[str, ...]):
+def _lifecycle_clients(buckets: tuple[str, ...], endpoint: str | None = None):
     """The S3 and/or GCS client the given bucket URIs need (`None` for a cloud
-    none of them name), so one `pull` can snapshot a mixed set."""
+    none of them name), so one `pull` can snapshot a mixed set. `endpoint`: the S3
+    buckets' (default `$SWEEP_S3_ENDPOINT`)."""
     from .lifecycle import is_gcs
 
     gcs = s3 = None
@@ -1429,7 +1480,7 @@ def _lifecycle_clients(buckets: tuple[str, ...]):
     if any(not is_gcs(b) for b in buckets):
         from .sweep import s3_client
 
-        s3 = s3_client()
+        s3 = s3_client(endpoint)
     return s3, gcs
 
 
@@ -1446,14 +1497,15 @@ def _lc_buckets(buckets: tuple[str, ...]) -> tuple[str, ...]:
 
 @lifecycle.command("pull")
 @_LC_BUCKET
+@option("-E", "--endpoint", help="The S3 buckets' endpoint (default $SWEEP_S3_ENDPOINT)")
 @option("-k", "--keep-going", is_flag=True, help="A bucket whose rules can't be read (e.g. no `storage.buckets.get`) is reported and left out, instead of failing the whole pull — for the job's fleet snapshot")
 @option("-o", "--out", type=Path, help="Write here instead of stdout")
-def lifecycle_pull(buckets: tuple[str, ...], keep_going: bool, out: Path | None) -> None:
+def lifecycle_pull(buckets: tuple[str, ...], endpoint: str | None, keep_going: bool, out: Path | None) -> None:
     """One bucket → the bare rule list; several → `{<bucket>: rules}` in this order."""
     from .lifecycle import dump, dump_map, pull_any, pull_many
 
     buckets = _lc_buckets(buckets)
-    s3, gcs = _lifecycle_clients(buckets)
+    s3, gcs = _lifecycle_clients(buckets, endpoint)
     if len(buckets) == 1:
         text = dump(pull_any(buckets[0], s3=s3, gcs=gcs), bucket=buckets[0])
     else:
@@ -2148,7 +2200,7 @@ def access() -> None:
 @option("-f", "--from", "start", required=True, help="Inclusive query start, ISO timestamp with timezone")
 @option("-l", "--limit", default=100, type=int, help="Bounded diagnostic sample size (1–2000)")
 @option("-o", "--output", type=Path, help="Save private provider response to this local file")
-@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+@option("-t", "--to", "end", required=True, help="Exclusive query end, ISO timestamp with timezone")
 def access_r2_query(
     account: str,
     bucket: str,
@@ -2186,11 +2238,11 @@ def access_r2_query(
 @access.command("r2-export")
 @option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
 @option("-b", "--bucket", required=True, help="Source R2 bucket")
-@option("-f", "--from", "start", required=True, help="Query start, ISO timestamp with timezone")
+@option("-f", "--from", "start", required=True, help="Inclusive query start, ISO timestamp with timezone")
 @option("-l", "--limit", default=2000, type=int, help="Events per cursor page (1–2000)")
 @option("-n", "--max-pages", default=20, type=int, help="Refuse export if this page cap is reached")
 @option("-o", "--output", type=Path, required=True, help="New private archive file; existing files refused")
-@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+@option("-t", "--to", "end", required=True, help="Exclusive query end, ISO timestamp with timezone")
 def access_r2_export(
     account: str,
     bucket: str,
@@ -2200,12 +2252,15 @@ def access_r2_export(
     output: Path,
     end: str,
 ) -> None:
-    """Drain a bounded window into a private archive; print only a summary.
+    """Drain `[from, to)` into a private archive; print only a summary.
 
-    Refuses sampled or incomplete queries. Query exhaustion does not prove
+    Refuses query-sampled or incomplete queries. After the drain, a weighted
+    count reports `capture_sampling`: `unsampled` (every row weight 1 and the
+    count equals the drained events), `sampled` (provider ingestion sampling)
+    or `inconsistent` (e.g. a late delivery). Query exhaustion does not prove
     complete provider delivery. No ingest watermark is advanced.
     """
-    from .r2_access import export_window, query_body, query_events
+    from .r2_access import calculation_body, capture_sampling, export_window, query_body, query_events
 
     token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
     if not token:
@@ -2218,8 +2273,11 @@ def access_r2_export(
             fetch=lambda body: query_events(account, token, body),
             max_pages=max_pages,
         )
+        calculation = query_events(account, token, calculation_body(bucket, start, end))
+        archive["summary"].update(capture_sampling(calculation, archive["summary"]["events"]))
     except (ValueError, RuntimeError) as exc:
         raise UsageError(str(exc)) from exc
+    archive["calculation"] = calculation
     archive["account"] = account
     # Exclusive create prevents overwriting a concurrent collector's output.
     # A later scheduled collector must publish this before its own watermark.
@@ -3151,6 +3209,40 @@ def _batch_cancel(labels: tuple[str, ...], dry_run: bool, region: str | None) ->
         want[k] = v
     for n in cancel_labelled(want, region=region or REGION, dry_run=dry_run, log=err):
         print(n)
+
+
+@main.group("scan")
+def _scan() -> None:
+    """A scan as a Nextflow DAG (specs/pipelines-everywhere.md): `head` runs it, each task runs one `step`."""
+
+
+@_scan.command("step")
+@option("-p", "--profile", "profile_path", default=None, help="The deployment's scan profile YAML (default `$DT_SCAN_PROFILE_JSON`, as the head passes it, else `$DT_SCAN_PROFILE`)")
+@argument("name")
+@argument("arg", required=False)
+def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
+    """Run scan step NAME (ARG: `list`'s source URI) for the scan `$SNAP_ID` / `$GEN` / `$DT_JOB_START` the head
+    stamped, recording its phases into the run `$DT_RUN_ID`. Idempotent: done work is skipped. Steps:
+    `dt_cloud.scan_steps.STEPS`."""
+    from .scan_steps import run_step
+
+    sys.exit(run_step(name, arg, profile_path=profile_path))
+
+
+@_scan.command("head")
+@option("-F", "--fresh", is_flag=True, help="Run every task with Nextflow's cache off (each step still skips what its own outputs say is done): after a cached task's output was lost")
+@option("-n", "--dry-run", is_flag=True, help="Write the params, executor config and history line; print the Nextflow command; run nothing")
+@option("-N", "--nf-dir", type=Path, default=None, help="Where `scan.nf` + `base.config` are (default `$DT_NF_DIR`, else `job/nf`)")
+@option("-R", "--reproc", is_flag=True, help="Re-aggregate from the archived listings / layer-2s: skip `list`, run from `index` (REPROC=1: unrecorded, no serving side effects)")
+@option("-w", "--launch-dir", type=Path, default=None, help="Nextflow's launch dir (default: the profile's `work` for the local executor, else `$TMPDIR/nf-<scan>`)")
+@argument("profile_path", type=Path)
+def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, launch_dir: Path | None, profile_path: Path) -> None:
+    """Run one scan of the deployment PROFILE_PATH describes (`job/profiles/<deployment>.yml`) through
+    `job/nf/scan.nf`: `$SNAP_ID` / `$GEN` / `$DT_JOB_START` when set (resuming that scan's session), else stamped now."""
+    from .scan_head import head
+
+    nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
+    sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
 
 
 if __name__ == "__main__":

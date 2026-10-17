@@ -161,8 +161,8 @@ describe('D1', () => {
     await body(`date=${C}&path=&depth=1`)
     const tail = (label: string) => `?w=1280&h=768&a=12&t=2&l=&o=&b=&D=1&cl=&x=0&F=1&qs=&q=&head=0&g=<g>&st=&rl=${label}&T=${thr}`
     expect(puts.map(k => decodeURIComponent(k).replace(/&g=[^&]+/, '&g=<g>')).sort()).toEqual([
-      `https://subtree.cache/v5/~localhost/${C}/${tail('Fleet')}`,
-      `https://subtree.cache/v5/~localhost/@meta/${B}/${tail('our storage')}`,
+      `https://subtree.cache/v6/~localhost/${C}/${tail('Fleet')}`,
+      `https://subtree.cache/v6/~localhost/@meta/${B}/${tail('our storage')}`,
     ])
   })
 })

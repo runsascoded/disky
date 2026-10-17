@@ -39,6 +39,8 @@ FILE_ROWS = 50_000_000
 RUN_RG = 2048
 #: Decoded row groups kept per group file by the builder's reads.
 GROUP_CACHE = 2048
+#: Index spans (`CachedGroupFile._span`: a run of index row groups' entries and key tuples) kept per group file.
+SPAN_CACHE = 512
 #: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
 EXPLODE_PART_ROWS = 1 << 23
 #: Settling's input rows (affected directories' touched and kept children, as Python rows) loaded at once.
@@ -132,7 +134,7 @@ class CachedGroupFile(sr.GroupFile):
         self._peeked: dict[int, list[dict]] = {}
         self._md: dict[str, pq.FileMetaData] = {}
         self._groups: OrderedDict[tuple[str, int], tuple[pa.Table, list[tuple]]] = OrderedDict()
-        self._spans: dict[tuple[int, int], tuple[list[dict], list[tuple], list[tuple]]] = {}
+        self._spans: OrderedDict[tuple[int, int], tuple[list[dict], list[tuple], list[tuple]]] = OrderedDict()
         self.cap_groups = cache_groups
         self.raw: ByteCache | None = None
         self.fetch_io: Counter = Counter()
@@ -202,11 +204,17 @@ class CachedGroupFile(sr.GroupFile):
 
     def _span(self, a: int, b: int) -> tuple[list[dict], list[tuple], list[tuple]]:
         """The entries of index row groups `top[a:b]` and their last / first keys, built once per span (a per-call build
-        over the ~1K entries a top row group holds was most of a probe's time)."""
+        over the ~1K entries a top row group holds was most of a probe's time). The newest `SPAN_CACHE` spans are kept: each
+        holds its own key tuples, and a loop's distinct spans grow with its reads (unbounded, they were the likeliest holder
+        of the ~16 GiB outside DuckDB that gcs 0701's long settling grew by)."""
         s = self._spans.get((a, b))
         if s is None:
             entries = [e for t in self.top[a:b] for e in self._peek_top(t)]
             s = self._spans[(a, b)] = (entries, [(e["q_max"], e["k_max"]) for e in entries], [(e["q_min"], e["k_min"]) for e in entries])
+            if len(self._spans) > SPAN_CACHE:
+                self._spans.popitem(last=False)
+        else:
+            self._spans.move_to_end((a, b))
         return s
 
     def _sel(self, a: int, b: int, lo, hi) -> list[dict]:
@@ -519,6 +527,7 @@ class TierReads:
         groups = [v for _, gf in self.items if gf is not None for v in gf._groups.values()]
         return {"decoded_groups": len(groups), "decoded_bytes": sum(t.nbytes for t, _ in groups),
                 "index_groups": sum(len(gf._entries) + len(gf._peeked) for _, gf in self.items if gf is not None),
+                "index_spans": sum(len(gf._spans) for _, gf in self.items if gf is not None),
                 "raw_bytes": self.raw.size if self.raw is not None else 0}
 
     def drop_decoded(self) -> None:

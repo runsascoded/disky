@@ -1,10 +1,10 @@
 # R2 access-log pilot and collector contract
 
-Status: 2026-10-12. Native Data Access Logs enabled on RAC `jc-taxes`; one bounded S3 LIST and HEAD succeeded after enabling. The user created a dedicated RAC Observability token (pilot expiry October 18) and saved it locally. API retrieval verified both `HeadObject` and `ListObjectsV2`; forced one-event pages recovered both followed by an empty page. The bounded Worker collector and Pulumi stack are implemented locally: 18 collector tests and nine infrastructure tests pass, type-check and dry-run build pass, and the real RAC preview proposes six new CF resources plus the stack, with no updates/deletes and cron disabled. No infrastructure apply occurred; no OA or HCCS logging settings changed. No scheduled collector is deployed.
+Status: 2026-10-17. Gate 2 complete: window boundaries, delivery latency and ingestion sampling measured on RAC `jc-taxes` against known HEAD/LIST requests (below). The Worker collector now re-queries an overlap before a durable watermark, deduplicates by event id into per-day aggregates, records per-hour sampling, and publishes through one conditional `state.json` write. `dt-cloud access r2-export` queries `[from, to)` exactly and reports measured capture sampling. A replacement RAC Observability token (no expiry) is in `wt/m3`'s env; the October 18 pilot token remains in the root `.envrc` until it expires. No OA or HCCS settings were changed by this work.
 
 ## Reference implementation
 
-`dt-cloud access r2-query` performs a bounded private diagnostic query against the documented Cloudflare telemetry API. It filters dataset `r2` by bucket and requires timezone-qualified start/end timestamps. It preserves the complete provider envelope, including query status, sampling statistics and page counts; it never advances an ingest watermark. Prefer `$CF_OBSERVABILITY_TOKEN`, falling back to `$CLOUDFLARE_API_TOKEN`; Cloudflare currently specifies Workers Observability Write permission even for this query operation.
+`dt-cloud access r2-query` performs a bounded private diagnostic query against the documented Cloudflare telemetry API. It filters dataset `r2` by bucket and requires timezone-qualified start/end timestamps; the window is `[from, to)` (it sends `from − 1`, see below). It preserves the complete provider envelope, including query status, sampling statistics and page counts; it never advances an ingest watermark. Prefer `$CF_OBSERVABILITY_TOKEN`, falling back to `$CLOUDFLARE_API_TOKEN`; Cloudflare currently specifies Workers Observability Write permission even for this query operation.
 
 ```bash
 dt-cloud access r2-query -a "$CLOUDFLARE_ACCOUNT_ID" -b jc-taxes -f 2026-10-11T23:25:00Z -t 2026-10-12T00:00:00Z -o tmp/jc-taxes-events.json
@@ -12,13 +12,25 @@ dt-cloud access r2-query -a "$CLOUDFLARE_ACCOUNT_ID" -b jc-taxes -f 2026-10-11T2
 
 This is a sample, not an export: a successful response with a 100-event cap is not evidence that the entire window was collected. Raw responses can contain object keys, actor identities and IPs; keep them private and out of Git, public build logs and demo artifacts.
 
-`dt-cloud access r2-export` drains a bounded window using `$metadata.id` cursors until an empty page. It refuses non-COMPLETED queries, query-level sampling, page-count discrepancies, stalled cursors and page-cap exhaustion. It deduplicates event identities, writes a new private archive (mode 0600; existing output refused), and prints only action counts/coverage status. This is not yet a scheduled collector, overlap store or watermark publisher. Large exports belong on remote nodes; the laptop test collected only the two known pilot events.
+`dt-cloud access r2-export` drains a bounded window using `$metadata.id` cursors until an empty page. It refuses non-COMPLETED queries, query-level sampling, page-count discrepancies, stalled cursors and page-cap exhaustion. It deduplicates event identities and refuses events outside the window. After the drain it runs a weighted-count calculation over the same window and reports `capture_sampling` (`unsampled` / `sampled` / `inconsistent`), `estimated_events` and `max_sample_interval`. It writes a new private archive (mode 0600; existing output refused, the calculation included) and prints only action counts and coverage status. It advances no watermark; the scheduled collector ([RAC collector stack]) does that. Large exports belong on remote nodes; the laptop drains stayed bounded (at most 1,805 events, 5 pages).
 
 ```bash
 dt-cloud access r2-export -a "$CLOUDFLARE_ACCOUNT_ID" -b jc-taxes -f 2026-10-11T23:25:00Z -t 2026-10-11T23:40:00Z -l 1 -n 4 -o tmp/jc-taxes-paged.json
 ```
 
-Live pagination proved `events.count` is the returned page's count, not the full query's total: the one-event pages each reported 1, while the drained window contained 2 distinct events. Query-level `statistics.abr_level=1` is not proof of unsampled capture: ingestion sampling is independently reported by `sampleInterval` in calculation aggregates, not the event metadata observed in this pilot. Export summaries therefore explicitly mark capture sampling as unknown and provider delivery as best effort.
+Live pagination proved `events.count` is the returned page's count, not the full query's total: the one-event pages each reported 1, while the drained window contained 2 distinct events. Query-level `statistics.abr_level=1` is not proof of unsampled capture: ingestion sampling is reported only by `sampleInterval` in calculation aggregates, never in event metadata (measured below).
+
+## Measured query semantics (gate 2, 2026-10-17)
+
+Ground truth: two bursts of LIST + HEAD requests (6 and 5) on `jc-taxes` with the RAC read-only key, client send/receive times recorded. Raw responses stay in ignored `tmp/r2-gate2/` (0600).
+
+- **Timestamps.** `timestamp` is the server receipt time in ms, between client send and receive. `$metadata.timestampNs` is the same value × 10⁶, and the ULID event id encodes the same millisecond. There is no separate ingest clock to filter on.
+- **Boundaries: both ends exclusive.** An event at `t` is returned for `(t−1, t+1)` but not for `(t, t+1)`, `(t, t+1000)`, `(t−1, t)` or `(t−1000, t)`. Verified on two events, events view and calculations alike. `from == to` is rejected as a validation error. Two windows sharing an edge `T` would both miss an event at exactly `T`, so the collector and `r2-export` send `from − 1` to get exactly `[from, to)`.
+- **Ordering and cursors.** Events come newest-first. Cursor pages (`offset` = last id, `offsetDirection: next`) drain to an empty page.
+- **Late delivery.** All 11 requests arrived (0 lost). Each became queryable 13–25 s after its timestamp, out of order: a later HEAD appeared before two earlier ones. A late event shows up on a re-query of an overlapping window under its original timestamp, so a window queried too early misses it. The collector's 2-hour lag and 1-hour overlap re-query cover that with a wide margin, and the daily replay re-checks six days.
+- **Ingestion sampling is real and visible only in calculations.** Event rows carry no weight. A `count` calculation sums per-row weights, and `sampleInterval` is their mean per aggregate. Over 144 h the drain returned 1,750 `ListObjectsV2` rows while `count` was 1,795 (`sampleInterval` 1.02571 = 1795/1750). Bisected to specific LIST bursts (~180 requests in ~90 s): 10/14 12:30–13:30Z drained 169 rows vs `count` 178 (1.0533), and 17:30–18:30Z 165 vs 183 (1.1091). Quiet hours and the 11 ground-truth requests were exact (`sampleInterval` 1, count = drained). The weighted rows sat in per-second bursts, while `jc-taxes` sees only hundreds of events a day. The cause is undocumented, so treat any `sampleInterval` > 1 as missing events.
+- **Query-time sampling is separate.** One 6-day calculation came back with `abr_level` 10, every count a multiple of 10 (a lone GET counted as 10); the identical query a minute later was `abr_level` 1. Both tools already refuse `abr_level` ≠ 1. Per-bucket `series` values in calculation responses are coarse estimates (2 HEADs shown as 20) and are never used.
+- **Consequences.** Absence of an event in a `sampled` hour is weaker still than "no read observed". Report per-hour `capture`, never convert weighted estimates into per-object access records, and keep `sampled` hours out of any deletion-safety reasoning.
 
 ## Provider semantics and cost
 
@@ -49,9 +61,9 @@ RAC enables and collects RAC bucket logs with RAC credentials into RAC private s
 ## Next gates
 
 1. Complete: RAC token and dashboard/API/pagination pilot verified.
-2. Validate window boundary semantics and ingestion sampling via calculation queries; implement overlap/replay and durable publish state.
-3. Human-review/apply the prepared [RAC collector stack], install its runtime secret separately, then preview/apply cron enablement. The initial preview leaves cron off, protects the new private archive and expires raw `runs/` objects after 30 days. Verify one scheduled run and replace/renew the seven-day pilot token before expiry; the public demo's serving bucket is not a raw-log destination.
-4. Hand the same contract to HCCS, then pilot OA after reviewing account pricing/sampling and permissions.
+2. Complete (2026-10-17): boundary, latency and sampling semantics measured (above); overlap/replay with event-id dedupe, per-hour sampling and a conditional `state.json` publish implemented in the Worker; `r2-export` uses `[from, to)` and reports capture sampling.
+3. [RAC collector stack] applied 2026-10-17 with cron off (6 resources + stack created; re-preview unchanged); its runtime secret (the replacement token, no expiry, from `wt/m3`) installed and cron enabled 03:33Z (`13 * * * *` hourly, `17 7 * * *` daily replay; the apply changed only `collector-cron`). Remaining: verify one scheduled run's `state.json`, `_SUCCESS.json` and sanitized logs. The public demo's serving bucket is not a raw-log destination.
+4. Hand the same contract to HCCS. OA: Data Access Logs were enabled on `marin-na` around 03:15Z on 2026-10-17 (dashboard, by Ryan). No OA collector exists yet; build it after reviewing OA's pricing, sampling and permissions, and measure `marin-na`'s volume before reusing the pilot's limits.
 
 [Data Access Logs][logs], [Observability pricing][pricing], [query API][query], [datasets][datasets].
 

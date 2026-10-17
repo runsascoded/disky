@@ -20,6 +20,33 @@ def _millis(value: str) -> int:
     return int(instant.timestamp() * 1000)
 
 
+def _window(start: str, end: str) -> tuple[int, int]:
+    first, last = _millis(start), _millis(end)
+    if first >= last:
+        raise ValueError("query start must precede end")
+    return first, last
+
+
+def timeframe(first: int, last: int) -> dict:
+    """The provider's ``timeframe`` is exclusive at BOTH ends (measured
+    2026-10-17: an event at t is returned for (t-1, t+1), not for (t, t+1000)
+    or (t-1000, t)); ``from - 1`` makes the query exactly ``[first, last)``."""
+    return {"from": first - 1, "to": last}
+
+
+def window_of(body: dict) -> tuple[int, int]:
+    """The half-open ``[first, last)`` a ``timeframe(...)`` body covers."""
+    return body["timeframe"]["from"] + 1, body["timeframe"]["to"]
+
+
+def _parameters(bucket: str) -> dict:
+    return {
+        "datasets": ["r2"],
+        "filters": [{"key": "bucket", "operation": "eq", "type": "string", "value": bucket}],
+        "filterCombination": "and",
+    }
+
+
 def query_body(
     bucket: str,
     start: str,
@@ -29,21 +56,73 @@ def query_body(
 ) -> dict:
     if not 1 <= limit <= 2000:
         raise ValueError("limit must be between 1 and 2000")
-    first, last = _millis(start), _millis(end)
-    if first >= last:
-        raise ValueError("query start must precede end")
+    first, last = _window(start, end)
     return {
         "queryId": "disky-r2-pilot",
-        "timeframe": {"from": first, "to": last},
+        "timeframe": timeframe(first, last),
         "dry": True,
         "view": "events",
         "limit": limit,
+        "parameters": _parameters(bucket),
+    }
+
+
+def calculation_body(
+    bucket: str,
+    start: str,
+    end: str,
+) -> dict:
+    """Weighted event count per action over ``[start, end)``: the only place
+    ingestion sampling is visible (rows carry weights; event rows do not)."""
+    first, last = _window(start, end)
+    return {
+        "queryId": "disky-r2-sampling",
+        "timeframe": timeframe(first, last),
+        "dry": True,
+        "view": "calculations",
         "parameters": {
-            "datasets": ["r2"],
-            "filters": [{"key": "bucket", "operation": "eq", "type": "string", "value": bucket}],
-            "filterCombination": "and",
+            **_parameters(bucket),
+            "calculations": [{"operator": "count", "alias": "events"}],
+            "groupBys": [{"type": "string", "value": "action"}],
         },
     }
+
+
+def capture_sampling(
+    response: dict,
+    observed: int,
+) -> dict:
+    """Classify a drained window against its calculation.
+
+    ``count`` sums per-row weights and ``sampleInterval`` is their mean, so a
+    value > 1 means the provider stored fewer rows than requests (measured: a
+    LIST burst hour drained 169 rows, count 178). ``unsampled`` requires every
+    weight to be 1 AND the weighted count to equal the drained events; anything
+    else (e.g. a delivery between drain and calculation) is ``inconsistent``.
+    Per-bucket ``series`` values are coarse estimates and are ignored.
+    """
+    result = response["result"]
+    if result["run"]["status"] != "COMPLETED":
+        raise RuntimeError("calculation is not COMPLETED")
+    statistics = result.get("statistics") or result["run"].get("statistics", {})
+    if statistics.get("abr_level", 1) not in (None, 1):
+        raise RuntimeError("calculation was sampled at query time")
+    calculations = result["calculations"]
+    if len(calculations) != 1:
+        raise RuntimeError("expected exactly one calculation")
+    estimated = 0.0
+    interval = 1.0
+    for aggregate in calculations[0]["aggregates"]:
+        estimated += aggregate["count"]
+        interval = max(interval, aggregate["sampleInterval"])
+    estimated_events = round(estimated)
+    if interval > 1:
+        status = "sampled"
+    elif estimated_events == observed:
+        status = "unsampled"
+    else:
+        status = "inconsistent"
+    return {"capture_sampling": status, "estimated_events": estimated_events, "max_sample_interval": interval}
 
 
 def _post(
@@ -102,6 +181,7 @@ def export_window(
     seen: set[str] = set()
     cursors: set[str] = set()
     actions: Counter[str] = Counter()
+    first, last = window_of(body)
     current = dict(body)
     for _ in range(max_pages):
         response = fetch(current)
@@ -138,6 +218,8 @@ def export_window(
             ident = event["$metadata"]["id"]
             if not isinstance(ident, str) or not ident:
                 raise RuntimeError("event has no valid pagination identity")
+            if not first <= event["timestamp"] < last:
+                raise RuntimeError("event outside the requested window")
             if ident not in seen:
                 seen.add(ident)
                 action = event["source"].get("action", "unknown")

@@ -24,7 +24,7 @@ import pulumi_cloudflare as cloudflare
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from capture_trigger import CaptureTrigger  # noqa: E402
-from cfn_dashboard import AccessApp, BranchAlias, CfnDashboard, Store  # noqa: E402
+from cfn_dashboard import AccessApp, BranchAlias, CfnDashboard, ExtraDomain, Store  # noqa: E402
 from cloudflare_tunnel import CloudflareTunnel  # noqa: E402
 
 cfg = pulumi.Config()
@@ -52,13 +52,16 @@ store = Store(
     domain=cfg.require("domain"),
     d1_name=cfg.require("d1Name"),
     branch_aliases=tuple(BranchAlias(domain=a["domain"], branch=a["branch"]) for a in cfg.get_object("branchAliases") or []),
+    extra_domains=tuple(ExtraDomain(domain=x["domain"], branch=x.get("branch")) for x in cfg.get_object("extraDomains") or []),
     access=access_app(cfg.get_object("access")),
     kv_name=cfg.get("kvName"),
     r2_bucket=cfg.get("r2Bucket"),
     r2_location=cfg.get("r2Location") or "enam",
     service_token=cfg.get("serviceToken"),
 )
-dash = CfnDashboard(pulumi.get_stack(), account_id=account_id, zone_id=zone_id, store=store, import_ids=cfg.get_object("importIds") or None)
+# The component's name prefixes every resource's logical name (`<name>-pages`, `<name>-d1`, …): pinned by
+# `componentName` when the stack is renamed, else a rename would replace them all (the D1 with its data).
+dash = CfnDashboard(cfg.get("componentName") or pulumi.get_stack(), account_id=account_id, zone_id=zone_id, store=store, import_ids=cfg.get_object("importIds") or None)
 
 pulumi.export("pages_project", dash.pages.name)
 pulumi.export("custom_domain", dash.domain.name)

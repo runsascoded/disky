@@ -9,6 +9,7 @@ import { ownerTotals } from '../ownerTotals.js'
 import { openPlanId } from '../plans.js'
 import { type PrefixStat } from '../prefixes.js'
 import { countedItems, deletedItems, stagedStats } from '../stagedSlack.js'
+import { HI_CONTRAST } from '../../../src/colors.js'
 import { filterStaged } from '../../../src/stagedFilter.js'
 import { ownerIndex } from '../../../src/ownerIndex.js'
 import { type CardData, type CardTile, type Grid, fmtB } from './card.js'
@@ -134,24 +135,30 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
     if (f.error) return { ...base, subtitle: `plan #${plan} · scan ${date}`, total: '', empty: 'invalid filter' }
     items = f.rows
   }
-  const color = ownerColors(users)
+  const owners = ownerColors(users)
+  // With no owner known (a store without attribution, cw's), every item would be the same grey as its bucket: colour
+  // each by its rank instead, as the map's tree colours do.
+  const anyOwner = items.some(i => i.owner != null)
+  const rank = new Map([...items].sort((x, y) => (y.stat?.b ?? 0) - (x.stat?.b ?? 0)).map((it, i) => [it.prefix, i]))
+  const color = (it: Item) => anyOwner ? owners(it.owner) : HI_CONTRAST[(rank.get(it.prefix) ?? 0) % HI_CONTRAST.length]
   const byBucket = new Map<string, Item[]>()
   for (const it of items) {
     const bucket = it.prefix.replace(/^[a-z0-9]+:\/\//, '').split('/')[0]
     byBucket.set(bucket, [...(byBucket.get(bucket) ?? []), it])
   }
   const tiles: CardTile[] = [...byBucket].map(([bucket, its]) => {
-    const kids = its.map(i => ({ name: i.prefix, b: i.stat?.b ?? 0, color: color(i.owner) }))
+    // each item named within its bucket (the tile names the bucket)
+    const kids = its.map(i => ({ name: i.prefix.replace(/^[a-z0-9]+:\/\//, '').slice(bucket.length).replace(/^\//, ''), b: i.stat?.b ?? 0, color: color(i) }))
     const b = kids.reduce((s, k) => s + k.b, 0)
     const top = [...its].sort((x, y) => (y.stat?.b ?? 0) - (x.stat?.b ?? 0))[0]
-    return { name: bucket, b, color: color(top?.owner ?? null), kids }
+    return { name: bucket, b, color: anyOwner ? owners(top?.owner ?? null) : UNOWNED_COLOR, kids }
   })
   const b = items.reduce((s, i) => s + (i.stat?.b ?? 0), 0)
   const o = items.reduce((s, i) => s + (i.stat?.o ?? 0), 0)
   const byOwner = new Map<string | null, number>()
   for (const i of items) byOwner.set(i.owner, (byOwner.get(i.owner) ?? 0) + (i.stat?.b ?? 0))
-  const legend = [...byOwner].filter(([, v]) => v > 0).sort((x, y) => y[1] - x[1]).slice(0, 6)
-    .map(([u, v]) => ({ label: u ? (reg[u]?.name ?? u) : 'unowned', color: color(u), b: v }))
+  const legend = anyOwner ? [...byOwner].filter(([, v]) => v > 0).sort((x, y) => y[1] - x[1]).slice(0, 6)
+    .map(([u, v]) => ({ label: u ? (reg[u]?.name ?? u) : 'unowned', color: owners(u), b: v })) : []
   return {
     ...base,
     subtitle: `plan #${plan} · scan ${date}${params.q ? ` · filter “${params.q}”` : ''}`,

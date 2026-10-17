@@ -5,8 +5,8 @@
  *
  * Tiers: an `anon` card draws shapes and colours only. No tile is labelled
  * and the legend carries no names, so nothing on it names a child path or a
- * person (a scraper can't walk the tree card by card). A `full` card labels
- * tiles and names the legend's owners. An explicitly public map may also
+ * person (a scraper can't walk the tree card by card), at any depth. A `full`
+ * card labels tiles at every depth where they fit and names the legend's owners. An explicitly public map may also
  * label its paths without changing its unsigned authentication tier. */
 import { squarify } from '@rdub/treemap/squarify'
 import { parseColor } from '@rdub/treemap/parseColor'
@@ -20,7 +20,7 @@ export interface CardTile {
   color: string
   /** Displayed value independent of layout weight, e.g. a signed net change. */
   value?: string
-  /** One level of children, drawn inside (unlabelled). */
+  /** Children, drawn nested inside (to any depth), labelled where they fit on a labelled card. */
   kids?: CardTile[]
 }
 
@@ -38,6 +38,8 @@ export interface CardData {
   /** e.g. `3,095 TiB · 562,769,600 objects`. */
   total: string
   tiles: CardTile[]
+  /** The view depth the tiles were read to (a map card's `deepestView`): diagnostics only, not drawn. */
+  depth?: number
   /** Owners (or other colour keys) by bytes. Only a `full` card shows labels. */
   legend?: LegendItem[]
   /** Shown instead of a treemap when there's nothing to draw. */
@@ -135,8 +137,40 @@ function gridSvg(g: Grid, full: boolean, x: number, y: number, w: number, h: num
   return out.join('')
 }
 
-/** The card. Tiles are laid out by bytes; children inside each tile get a
- * 4px inset. Labels only on a `full` card, and only where they fit. */
+/** A level's label size (px): 15 for the view's children, then 13, 12, 11. */
+const LABEL_PX = [15, 13, 12, 11]
+export const labelPx = (depth: number): number => LABEL_PX[Math.min(depth, LABEL_PX.length) - 1]
+/** A level's padding around its children (px). */
+const padOf = (depth: number): number => depth === 1 ? 4 : depth === 2 ? 3 : 2
+/** A cell is labelled only past this width (px), and only when its label's line fits its height. */
+const LABEL_MIN_W = 70
+/** A cell's children are drawn only in an inner box at least this big each way (px). */
+const NEST_MIN = 10
+
+/** One cell and, nested inside it, its children: the main map's nesting. A labelled cell gets a header
+ *  strip (`name size`) with its children below it, where they still fit. `labels` off (the anon
+ *  tier) draws the shapes alone at every depth. Children first, so a label sits over them. */
+function cellSvg(out: string[], t: CardTile, x: number, y: number, w: number, h: number, depth: number, labels: boolean): void {
+  out.push(depth === 1
+    ? `<rect class="tile" x="${r1(x)}" y="${r1(y)}" width="${r1(w)}" height="${r1(h)}" fill="${svgColor(t.color)}" stroke="${BG}" stroke-width="2"/>`
+    : `<rect class="kid" x="${r1(x)}" y="${r1(y)}" width="${r1(w)}" height="${r1(h)}" fill="${svgColor(t.color)}" fill-opacity="0.85" stroke="${BG}" stroke-opacity="0.6" stroke-width="1"/>`)
+  const size = labelPx(depth)
+  const head = size + 7
+  const pad = padOf(depth)
+  const label = labels && w > LABEL_MIN_W ? clip(`${t.name} ${t.value ?? fmtB(t.b)}`, w - 10, size) : ''
+  const headed = !!label && h > size + 10
+  const top = headed ? head : pad
+  const kids = (t.kids ?? []).filter(k => k.b > 0)
+  if (kids.length && w - 2 * pad >= NEST_MIN && h - top - pad >= NEST_MIN) {
+    for (const k of squarify(kids, x + pad, y + top, w - 2 * pad, h - top - pad, k => k.b)) {
+      cellSvg(out, k.it, k.x, k.y, k.w, k.h, depth + 1, labels)
+    }
+  }
+  if (headed) out.push(text(x + 6, y + size + 2, label, size, { fill: inkOn(t.color), weight: 600 }))
+}
+
+/** The card. Tiles are laid out by bytes, each with its children nested inside (`cellSvg`). Labels only
+ * on a `full` card, and only where they fit. */
 export function cardSvg(d: CardData): string {
   const full = d.tier === 'full' || d.publicLabels === true
   const out: string[] = []
@@ -154,26 +188,7 @@ export function cardSvg(d: CardData): string {
     out.push(`<rect x="${mx}" y="${my}" width="${mw}" height="${mh}" rx="6" fill="#20232a"/>`)
     out.push(text(mx + mw / 2, my + mh / 2, d.empty ?? 'nothing to show', 26, { fill: MUTED, anchor: 'middle' }))
   } else {
-    for (const r of squarify(tiles, mx, my, mw, mh, t => t.b)) {
-      const t = r.it
-      out.push(`<rect class="tile" x="${r1(r.x)}" y="${r1(r.y)}" width="${r1(r.w)}" height="${r1(r.h)}" fill="${svgColor(t.color)}" stroke="${BG}" stroke-width="2"/>`)
-      const inset = 4
-      const kids = (t.kids ?? []).filter(k => k.b > 0)
-      if (kids.length && r.w > 24 && r.h > 24) {
-        const top = full && r.h > 40 ? 22 : inset
-        for (const k of squarify(kids, r.x + inset, r.y + top, r.w - 2 * inset, r.h - top - inset, k => k.b)) {
-          out.push(`<rect class="kid" x="${r1(k.x)}" y="${r1(k.y)}" width="${r1(k.w)}" height="${r1(k.h)}" fill="${svgColor(k.it.color)}" fill-opacity="0.85" stroke="${BG}" stroke-opacity="0.6" stroke-width="1"/>`)
-          if ((d.publicLabels || t.value !== undefined && full) && k.w > 70 && k.h > 30) {
-            const label = clip(`${k.it.name} ${k.it.value ?? fmtB(k.it.b)}`, k.w - 10, 13)
-            if (label) out.push(text(k.x + 6, k.y + 17, label, 13, { fill: inkOn(k.it.color), weight: 600 }))
-          }
-        }
-      }
-      if (full && r.w > 70 && r.h > 24) {
-        const label = clip(`${t.name} ${t.value ?? fmtB(t.b)}`, r.w - 10, 15)
-        if (label) out.push(text(r.x + 6, r.y + 17, label, 15, { fill: inkOn(t.color), weight: 600 }))
-      }
-    }
+    for (const r of squarify(tiles, mx, my, mw, mh, t => t.b)) cellSvg(out, r.it, r.x, r.y, r.w, r.h, 1, full)
   }
   out.push(text(40, 598, d.total, 24, { weight: 600 }))
   if (full && d.legend?.length) {

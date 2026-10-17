@@ -11,8 +11,8 @@ import { loadLedger } from '../ledger.js'
 import { scanTimes } from '../scanTimes.js'
 import { parseOwner, queryParam, QueryError } from '../scope.js'
 import { snapshotsPrefix } from '../shared.js'
-import { decodeSel, resolveAfter } from '../../../src/scanSlug.js'
-import { ATTEN_DEFAULT, buildView, MIN_AREA_DEFAULT, NotFound } from '../view.js'
+import { decodeSel, fmtScanUtc, resolveAfter } from '../../../src/scanSlug.js'
+import { ATTEN_DEFAULT, buildView, MIN_AREA_DEFAULT, NotFound, type View } from '../view.js'
 import { hexQuery } from '../staticFilter.js'
 import { dateColor, HI_CONTRAST, slotColor } from '../../../src/colors.js'
 import { mapColorMode } from '../../../src/colorMode.js'
@@ -27,10 +27,55 @@ import type { OgTier } from './sign.js'
 /** The unowned pool's colour (the dark theme's `--t-unattr`). */
 export const UNOWNED_COLOR = '#4a4943'
 const FOLD_COLOR = '#2b2e35'
+/** A container that carries no colour of its own: date / read modes' dirs, tree mode's lone top-level dirs. */
+const FRAME_COLOR = '#232322'
 
 /** The treemap box on the card (`card.ts`), the view's pixel budget. */
 const BOX_W = 1120
 const BOX_H = 410
+
+/** The card's view depth (specs/done/dogi.md "Depth by budget"): the floor is always read; the deeper
+ * views then race the rest of the wall-clock budget, and the deepest one landed within it is drawn.
+ * `minArea`/`atten` already prune what a deeper level can add, so the cap only bounds the read. */
+export const OG_FLOOR_DEPTH = 2
+export const OG_MAX_DEPTH = 5
+/** ms from the start of the floor read (`OG_DEPTH_BUDGET_MS`; `0`: the floor alone). Slack's unfurler
+ *  waits a few seconds for the whole image. */
+export const OG_DEPTH_BUDGET_MS = 1500
+
+export interface DepthPlan { floor: number; deeper: number[]; budgetMs: number }
+
+/** The env's plan: the floor, then depth 3 and the cap (`OG_MAX_DEPTH`), under `OG_DEPTH_BUDGET_MS`. */
+export function depthPlan(env: Pick<Env, 'OG_DEPTH_BUDGET_MS' | 'OG_MAX_DEPTH'>): DepthPlan {
+  const num = (v: string | undefined, dflt: number) => v != null && v.trim() !== '' && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : dflt
+  const max = Math.max(OG_FLOOR_DEPTH, Math.floor(num(env.OG_MAX_DEPTH, OG_MAX_DEPTH)))
+  return { floor: OG_FLOOR_DEPTH, deeper: [...new Set([OG_FLOOR_DEPTH + 1, max])].filter(d => d > OG_FLOOR_DEPTH && d <= max), budgetMs: num(env.OG_DEPTH_BUDGET_MS, OG_DEPTH_BUDGET_MS) }
+}
+
+/** Iterative deepening under a wall-clock budget: `read(floor)` (awaited whatever it takes); then, if
+ * `more` says its view can deepen and budget is left, every `deeper` read at once, raced against the
+ * rest of the budget; the deepest that landed wins, else the floor. A deeper read that fails or runs
+ * past the budget is dropped (never awaited, never thrown). */
+export async function deepestView<T>(plan: DepthPlan, read: (depth: number) => Promise<T>, more: (v: T) => boolean, now: () => number = Date.now): Promise<{ value: T; depth: number }> {
+  const t0 = now()
+  const floor = await read(plan.floor)
+  const left = plan.budgetMs - (now() - t0)
+  if (!plan.deeper.length || left <= 0 || !more(floor)) return { value: floor, depth: plan.floor }
+  const landed = new Map<number, T>()
+  const runs = plan.deeper.map(d => read(d).then(v => { landed.set(d, v) }, () => {}))
+  let timer: ReturnType<typeof setTimeout> | null = null
+  await Promise.race([Promise.all(runs), new Promise<void>(res => { timer = setTimeout(res, left) })])
+  clearTimeout(timer)
+  const depth = Math.max(...landed.keys(), plan.floor)
+  return { value: landed.get(depth) ?? floor, depth }
+}
+
+/** A view that a deeper read could add cells to: some child of the view's children has children of
+ * its own to draw (a level whose cells all fall under the threshold has no deeper cells either). */
+export const canDeepen = (tree: TreeNode, floor = OG_FLOOR_DEPTH): boolean => {
+  const at = (n: TreeNode, d: number): boolean => d === floor ? !n.n.startsWith('(') && n.k !== 'file' : (n.c ?? []).some(k => at(k, d + 1))
+  return at(tree, 0)
+}
 
 /** A `?d=` selection's "after" scan prefix (ISO), in any spelling the page
  * accepts (`scanSlug.ts` `decodeSel`): dashless compact (`261002`,
@@ -92,36 +137,56 @@ export function dominant(n: TreeNode): string | null {
   return top[1] >= n.b - owned ? top[0] : null
 }
 
-/** Tiles: the view's children (folds grey), each with its own children. */
+/** Tiles: the view's children (folds grey), each with its children nested to the view's depth. In
+ * `tree` mode a cell takes its depth-1 ancestor's slot and its depth-2 ancestor's rank among siblings
+ * (the map's `slotOf`), the slots one level further down for each lone top-level dir (a single
+ * bucket's view would otherwise be one hue; the lone dirs are a neutral frame); in `date`/`read` modes a
+ * container is neutral and its leaves carry the scale. */
 export function tilesOf(tree: TreeNode, color: (u: string | null) => string, mode: ColorMode = 'user', access?: Meta['access']): CardTile[] {
   const realKids = (n: TreeNode) => (n.c ?? []).filter(k => !k.n.startsWith('(')).sort((a, b) => b.b - a.b)
   const ranks = new Map(realKids(tree).map((n, i) => [n, i]))
-  // Only these leaves are drawn by the card's two-level renderer, not their
-  // unloaded descendants or parent means (the dashboard uses drawn leaves too).
-  const dates = (tree.c ?? []).flatMap(n => n.c?.length ? n.c : [n]).filter(n => !n.n.startsWith('(') && n.d != null).map(n => n.d!)
-  const lo = dates.length ? Math.min(...dates) : 0
-  const hi = dates.length ? Math.max(...dates) : 0
-  const fill = (n: TreeNode, slot: number, i = 0, count = 1, container = false): string => {
-    if (n.n.startsWith('(')) return FOLD_COLOR
+  // The date scale spans the drawn leaves only, not their unloaded descendants or containers' means
+  // (the dashboard uses drawn leaves too).
+  let lo = Infinity
+  let hi = -Infinity
+  const leaves = (n: TreeNode): void => {
+    for (const k of n.c ?? []) {
+      if (k.n.startsWith('(')) continue
+      if (k.c?.length) leaves(k)
+      else if (k.d != null) { lo = Math.min(lo, k.d); hi = Math.max(hi, k.d) }
+    }
+  }
+  leaves(tree)
+  if (lo > hi) { lo = 0; hi = 0 }
+  const fill = (n: TreeNode, slot: number, i: number, count: number, container: boolean): string => {
     if (mode === 'tree') return slotColor(slot, i, count)
     if (mode === 'user') return color(dominant(n))
-    if (container) return '#232322'
+    if (container) return FRAME_COLOR
     if (mode === 'date') return n.d != null && hi > lo ? dateColor((n.d - lo) / (hi - lo)) : '#5d5c55'
     return n.a != null && access && access.to > access.from ? dateColor((n.a - access.from) / (access.to - access.from)) : '#6e332b'
   }
-  const tile = (n: TreeNode): CardTile => n.n.startsWith('(')
-    ? { name: n.n, b: n.b, color: FOLD_COLOR }
-    : realTile(n)
-  const realTile = (n: TreeNode): CardTile => {
+  /** `depth` 1 is the view's child; `slot`/`i`/`count` its tree-mode colour key. */
+  // Tree mode's slot level: below each lone top-level dir that has children of its own.
+  let lone = 0
+  if (mode === 'tree') for (let n = tree; realKids(n).length === 1 && realKids(realKids(n)[0]).length; n = realKids(n)[0]) lone++
+  const tile = (n: TreeNode, depth: number, slot: number, i: number, count: number): CardTile => {
+    if (n.n.startsWith('(')) return { name: n.n, b: n.b, color: FOLD_COLOR }
+    if (!n.c?.length) return { name: n.n, b: n.b, color: fill(n, slot, i, count, false) }
     const kids = realKids(n)
-    const kidRanks = new Map(kids.map((k, i) => [k, i]))
-    const slot = ranks.get(n)!
+    const kidRanks = new Map(kids.map((k, j) => [k, j]))
+    if (depth <= lone) return { name: n.n, b: n.b, color: FRAME_COLOR, kids: n.c.map(k => tile(k, depth + 1, kidRanks.get(k) ?? 0, 0, 1)) }
     return {
-      name: n.n, b: n.b, color: fill(n, slot, 0, 1, !!n.c?.length),
-      ...(n.c?.length ? { kids: n.c.map(k => ({ name: k.n, b: k.b, color: fill(k, slot, kidRanks.get(k) ?? 0, kids.length) })) } : {}),
+      name: n.n, b: n.b, color: fill(n, slot, i, count, true),
+      kids: n.c.map(k => depth === lone + 1 ? tile(k, depth + 1, slot, kidRanks.get(k) ?? 0, kids.length) : tile(k, depth + 1, slot, i, count)),
     }
   }
-  return (tree.c ?? []).map(tile)
+  return (tree.c ?? []).map(n => tile(n, 1, ranks.get(n) ?? 0, 0, 1))
+}
+
+/** Tree mode's keyed tiles: the top level, or the children of a lone top-level dir framed by `tilesOf`. */
+export function slotTiles(tiles: CardTile[]): CardTile[] {
+  const real = tiles.filter(t => !t.name.startsWith('('))
+  return real.length === 1 && real[0].color === FRAME_COLOR && real[0].kids?.length ? slotTiles(real[0].kids) : tiles
 }
 
 /** The legend: the root's owners by bytes, then the unowned remainder. */
@@ -137,9 +202,10 @@ const fmtN = (n: number) => n.toLocaleString('en-US')
 
 export interface Site { name: string; scheme: string; defaultColor?: ColorMode }
 
-/** The map card for a view (`routes.ts` params). Errors become a card that
- * says so, never a throw: an unfurl must always get an image. */
-export async function mapCard(env: Env, site: Site, title: string, params: Record<string, string>, tier: OgTier): Promise<CardData> {
+/** The map card for a view (`routes.ts` params), its depth by `depthPlan`'s budget (`deepen: false`: the
+ * floor view alone, for callers that need only the totals). Errors become a card that says so, never a
+ * throw: an unfurl must always get an image. */
+export async function mapCard(env: Env, site: Site, title: string, params: Record<string, string>, tier: OgTier, opts: { deepen?: boolean } = {}): Promise<CardData> {
   const base = { tier, site: site.name, title, tiles: [] as CardTile[], ...(env.PUBLIC_READ ? { publicLabels: true } : {}) }
   const date = await resolveScan(env, params.d)
   if (!date) return { ...base, subtitle: '', total: '', empty: 'no scans yet' }
@@ -150,7 +216,7 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
   const available = barControls({ owners: !!users.length, hasAttr: !!users.length, classes: false, readRange: !!meta.access }).color
   const mode = mapColorMode(params.c, available, site.defaultColor ?? (users.length ? 'user' : 'tree'))
   const colorLabel = mode === 'date' ? listingTime(site.scheme).label : mode === 'user' ? 'owner' : mode
-  const subtitle = `scan ${date}${filterNote} · color by ${colorLabel}`
+  const subtitle = `scan ${fmtScanUtc(date)}${filterNote} · color by ${colorLabel}`
   let query
   try {
     query = params.f ? queryParam(new URLSearchParams({ q: params.f, ...(params.qs ? { qs: params.qs } : {}) }), env.QUERY_SYNTAX, indexedOnly(env)).query : undefined
@@ -163,11 +229,16 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
   const lensUser = !owner && params.o && params.o !== 'me' ? canonId(params.o, reg) : null
   const lens: Lens | undefined = lensUser ? { key: lensUser } : undefined
   let tree: TreeNode
+  let depth: number
+  const plan = depthPlan(env)
   try {
     // The static index's hex-run rule: the card's filter matches as the map's does.
     query = (await hexQuery(env, query)).query
-    const view = await buildView(env, { date, path, w: BOX_W, h: BOX_H, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, lens, owner, query, maxDepth: 2 })
-    tree = view.tree
+    const q = query
+    const read = (maxDepth: number): Promise<View> => buildView(env, { date, path, w: BOX_W, h: BOX_H, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, lens, owner, query: q, maxDepth })
+    const got = await deepestView(opts.deepen === false ? { ...plan, deeper: [] } : plan, read, v => canDeepen(v.tree))
+    tree = got.value.tree
+    depth = got.depth
   } catch (e) {
     if (e instanceof NotFound) return { ...base, subtitle, total: '', empty: 'path not found' }
     if (e instanceof FilterRejected) return { ...base, subtitle, total: '', empty: 'search unavailable' }
@@ -187,8 +258,9 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
     subtitle,
     total: `${fmtB(tree.b)} · ${fmtN(tree.o)} objects`,
     tiles,
+    depth,
     legend: mode === 'user' ? legendOf(tree, color, name) : mode === 'tree'
-      ? tiles.filter(t => !t.name.startsWith('(')).sort((a, b) => b.b - a.b).slice(0, 6).map(t => ({ label: t.name, b: t.b, color: t.color }))
+      ? slotTiles(tiles).filter(t => !t.name.startsWith('(')).sort((a, b) => b.b - a.b).slice(0, 6).map(t => ({ label: t.name, b: t.b, color: t.color }))
       : [],
     ...(tree.b ? {} : { empty: query ? 'no matches' : 'empty' }),
   }

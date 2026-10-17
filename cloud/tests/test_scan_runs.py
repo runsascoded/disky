@@ -12,7 +12,8 @@ from dt_cloud import scan_runs
 from dt_cloud.d1_schema import table_ddl
 
 from dt_cloud.scan_runs import (
-    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cli, cost, env_run_id, fill, load_profile, measure, measure_after,
+    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cli, cost, env_run_id, fill, labelled_cost, load_profile, measure,
+    measure_after,
     parse_profile, record, record_sql, recovery_record, write_all,
 )
 from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, phases_of, reconstruct, task_lines
@@ -655,6 +656,32 @@ def test_record_without_a_priced_machine_has_no_cost():
     assert record(s, QUEUED, "2026-10-14T0600", "job-4", 3600, exit_code=0).run.cost_usd is None
 
 
+def test_labelled_cost_sums_the_jobs_carrying_every_label():
+    def tagged(name, machine, labels, end="2026-10-08T08:01:00Z"):
+        j = job(name, f"uid-{name}", "2026-10-08T07:00:00Z", "SUCCEEDED",
+                [(*RUNNING, "2026-10-08T07:01:00Z"), ("RUNNING", "SUCCEEDED", end)], machine=machine)
+        return {**j, "labels": labels}
+
+    jobs = [
+        tagged("nf-a", "m-32", {"nf-session": "s1", "deployment": "cw-s3"}),           # 1 h × 2.0 $/h
+        tagged("nf-b", "m-32", {"nf-session": "s1"}, end="2026-10-08T07:31:00Z"),     # 0.5 h × 2.0 $/h
+        tagged("nf-c", "unpriced", {"nf-session": "s1"}),                             # unpriced: left out
+        tagged("nf-d", "m-32", {"nf-session": "s2"}),                                 # another session
+    ]
+    assert labelled_cost(PROFILE, jobs, {"nf-session": "s1"}) == 3.0
+    assert labelled_cost(PROFILE, jobs, {"nf-session": "s1", "deployment": "cw-s3"}) == 2.0
+    assert labelled_cost(PROFILE, jobs, {"nf-session": "s3"}) is None
+
+
+def test_record_finish_adds_the_runs_other_jobs_cost():
+    s = sink()
+    record(s, QUEUED, "2026-10-14T0600", "job-6", 0, start=True, facts={"machine": "box-1", "spot": False})
+    fin = record(s, QUEUED, "2026-10-14T0600", "job-6", 3600, exit_code=0, extra_cost=1.25)
+    assert fin.run.cost_usd == 1.61  # 0.36 $/h × 1 h + 1.25
+    record(s, QUEUED, "2026-10-14T0600", "job-7", 0, start=True, facts={"machine": "unpriced"})
+    assert record(s, QUEUED, "2026-10-14T0600", "job-7", 3600, exit_code=0, extra_cost=1.25).run.cost_usd is None
+
+
 def test_record_refuses_unknown_facts():
     with pytest.raises(ValueError) as e:
         record(sink(), QUEUED, "2026-10-14T0600", "job-5", 0, start=True, facts={"zone": "z"})
@@ -695,3 +722,32 @@ def test_record_cli_without_a_run_id_reports_and_exits_zero(tmp_path, monkeypatc
     assert (r.exit_code, r.stdout, said) == (
         0, "", ["scan-run record failed (the scan continues): SystemExit: scan-run: no run id: pass -r or set $JOB_ID"],
     )
+
+
+def test_phase_sql_names_the_task_columns_only_when_known():
+    """A one-VM run's phase writes no task columns, so a D1 without them (before `scan-run-phase-jobs`) still takes it."""
+    head = ("INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note{c}) "
+            "VALUES ('u1', 'list', 0, 1, 2, 'done', NULL{v}) ON CONFLICT(run_id, phase) DO UPDATE SET seq = excluded.seq, "
+            "status = excluded.status, started_ts = COALESCE(excluded.started_ts, scan_run_phases.started_ts), "
+            "finished_ts = COALESCE(excluded.finished_ts, scan_run_phases.finished_ts), "
+            "note = COALESCE(excluded.note, scan_run_phases.note){u}")
+    assert scan_runs.phase_sql("u1", Phase("list", 0, 1, 2)) == head.format(c="", v="", u="")
+    assert scan_runs.phase_sql("u1", Phase("list", 0, 1, 2, job_name="nf-1", machine="e2-standard-4")) == head.format(
+        c=", job_name, machine", v=", 'nf-1', 'e2-standard-4'",
+        u=", job_name = COALESCE(excluded.job_name, scan_run_phases.job_name), machine = COALESCE(excluded.machine, scan_run_phases.machine)",
+    )
+
+
+def test_d1_sink_reads_the_database_id_when_made(monkeypatch):
+    """`scan head` sets `$D1_DB_ID` from the profile after `index_footer` (whose `D1_DB_ID` is read at import) is loaded;
+    the sink takes the env's value then, not the stale one (the generic head's first prod run recorded no start)."""
+    from dt_cloud import index_footer
+
+    monkeypatch.setattr(index_footer, "D1_DB_ID", "")
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setenv("D1_DB_ID", "db-from-profile")
+    assert scan_runs.D1Sink().db_id == "db-from-profile"
+    monkeypatch.delenv("D1_DB_ID")
+    with pytest.raises(SystemExit) as e:
+        scan_runs.D1Sink()
+    assert str(e.value) == "scan-run: no D1 database: set $D1_DB_ID to this deployment's D1 (or pass --sqlite / -n)"

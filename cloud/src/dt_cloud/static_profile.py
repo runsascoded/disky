@@ -50,6 +50,10 @@ class Profile:
     r2_sa: str | None = None
     machine: str = "n2-highmem-16"
     ssd_gb: int = 750
+    #: Per-stage overrides of `machine` / `ssd_gb`, by a Batch job's `stage` label (`drill`, `anchors`, `append`,
+    #: `<tier>-merge`, …): the drill can take a bigger machine without upsizing the 16 append tasks.
+    machines: Mapping[str, str] = field(default_factory=dict)
+    ssd_gbs: Mapping[str, int] = field(default_factory=dict)
     spot: bool = True
     #: Stages (a Batch job's `stage` label: `anchors`, `drill`, `append`, …) that run STANDARD even when `spot`: a long
     #: single-task stage restarts from zero on each preemption, so spot's discount can cost more than it saves.
@@ -76,6 +80,14 @@ class Profile:
     def __post_init__(self):
         if self.compact_level is not None and (isinstance(self.compact_level, bool) or not isinstance(self.compact_level, int) or self.compact_level < 1):
             raise SystemExit(f"compact_level must be an integer ≥ 1 or none, not {self.compact_level!r}")
+
+    def machine_for(self, stage: str) -> str:
+        """`stage`'s machine: its override in `machines`, else `machine`."""
+        return self.machines.get(stage) or self.machine
+
+    def ssd_for(self, stage: str) -> int:
+        """`stage`'s local SSD (GB): its override in `ssd_gbs`, else `ssd_gb`."""
+        return self.ssd_gbs.get(stage) or self.ssd_gb
 
     def need(self, name: str):
         v = getattr(self, name)
@@ -110,6 +122,7 @@ ENV = {
     "gen": "STATIC_NAMES_GEN", "r2_bucket": "R2_BUCKET", "r2_secrets": "STATIC_NAMES_R2_SECRETS", "r2_endpoint": "R2_ENDPOINT",
     "project": "GCP_PROJECT", "region": "STATIC_NAMES_REGION", "image": "STATIC_NAMES_IMAGE", "sa": "STATIC_NAMES_SA",
     "r2_sa": "STATIC_NAMES_R2_SA", "machine": "STATIC_NAMES_MACHINE", "ssd_gb": "STATIC_NAMES_SSD", "spot": "STATIC_NAMES_SPOT",
+    "machines": "STATIC_NAMES_MACHINES", "ssd_gbs": "STATIC_NAMES_SSDS",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL",
@@ -144,6 +157,14 @@ def _parse(name: str, raw: str):
             if k.strip() not in R2_SECRET_VARS or not v.strip():
                 raise SystemExit(f"STATIC_NAMES_R2_SECRETS: {part!r} is not endpoint=|key_id=|secret=<secret name>")
             out[k.strip()] = v.strip()
+        return out
+    if name in ("machines", "ssd_gbs"):
+        out = {}
+        for part in filter(None, (p.strip() for p in raw.split(","))):
+            k, _, v = part.partition("=")
+            if not k.strip() or not v.strip():
+                raise SystemExit(f"{ENV[name]}: {part!r} is not <stage>=<value>")
+            out[k.strip()] = int(v) if name == "ssd_gbs" else v.strip()
         return out
     if name == "compact_level":
         return parse_compact_level(ENV[name], raw)

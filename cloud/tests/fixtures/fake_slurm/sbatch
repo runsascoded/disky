@@ -1,0 +1,19 @@
+#!/bin/bash
+# A fake `sbatch` (test_scan_fallback.py): a task whose machine (`NF_MACHINE`, exported by scan.nf) matches
+# `$FAKE_SLURM_STUCK` (an ERE) stays pending forever, like a Batch job in a stocked-out pool; any other runs now.
+# Each submit appends `<process> <machine> <PD|R>` to `$FAKE_SLURM/submitted`. Run in the task's work dir.
+q=$FAKE_SLURM
+id=$$
+proc=$(sed -n "s/^export NF_PROCESS='\(.*\)'\$/\1/p" .command.sh)
+machine=$(sed -n "s/^export NF_MACHINE='\(.*\)'\$/\1/p" .command.sh)
+if [[ -n "$FAKE_SLURM_STUCK" && "$machine" =~ ^($FAKE_SLURM_STUCK)$ ]]; then
+    st=PD
+else
+    st=R
+    nohup bash "$1" >/dev/null 2>&1 </dev/null &
+fi
+mkdir -p "$q/jobs" "$q/meta"
+echo "$id $st" > "$q/jobs/$id"
+echo "$proc $machine" > "$q/meta/$id"
+echo "$proc $machine $st" >> "$q/submitted"
+echo "Submitted batch job $id"

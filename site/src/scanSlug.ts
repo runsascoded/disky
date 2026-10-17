@@ -50,6 +50,18 @@ export function scanParts(s: string): { y: string; mo: string; d: string; hh?: s
   return m ? { y: m[1], mo: m[2], d: m[3], ...(m[4] ? { hh: m[4] } : {}), ...(m[5] ? { mm: m[5] } : {}) } : null
 }
 
+/** A scan id for a reader with no timezone of their own (the OG card, rendered once for every viewer): a
+ * timed id is its UTC instant, labelled ("10/16/26 2:09pm UTC"); a date-only id is its calendar date
+ * ("10/15/26"). The site itself shows the viewer's local time (`fmtScan`). */
+export function fmtScanUtc(s: string): string {
+  const p = scanParts(s)
+  if (!p) return s
+  const date = `${+p.mo}/${+p.d}/${p.y.slice(2)}`
+  if (!p.hh) return date
+  const h = +p.hh
+  return `${date} ${h % 12 || 12}:${p.mm ?? '00'}${h < 12 ? 'am' : 'pm'} UTC`
+}
+
 /** A scan id's instant (UTC). Date-only ids read as midnight UTC. */
 export const scanTime = (d: string): number => {
   const p = scanParts(d)

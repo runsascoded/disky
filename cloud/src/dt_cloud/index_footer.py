@@ -280,6 +280,7 @@ def _sql_escape(s: str) -> str:
 # binds it — `D1_DB_ID` / `D1_DB_NAME` in the job's environment. No default:
 # every deployment names its own D1 (a default once pointed at gcs's production
 # D1, so a run that forgot it wrote there).
+#: Import-time values, for display only; every query reads `$D1_DB_ID` when it runs (`_d1_query`).
 D1_DB_ID = os.environ.get("D1_DB_ID", "")
 D1_DB_NAME = os.environ.get("D1_DB_NAME", "")
 
@@ -323,10 +324,12 @@ D1_TIMEOUT = 60.0
 INSERT_BYTES = 64_000
 
 
-def _d1_query(sql: str, acct: str, tok: str, db_id: str = D1_DB_ID) -> list[dict]:
+def _d1_query(sql: str, acct: str, tok: str, db_id: str = "") -> list[dict]:
     """Run one SQL string against D1 over the HTTP API (no Node/wrangler).
     Returns the statement's result rows (`[]` for writes); `meta` per row batch
     is dropped. Refuses without a database id (`$D1_DB_ID`)."""
+    # The process's `$D1_DB_ID` now, not at import: a caller (`dt-cloud scan head`) may set it after importing this module.
+    db_id = db_id or os.environ.get("D1_DB_ID", "")
     if not db_id:
         raise RuntimeError("no D1 database: set $D1_DB_ID (and $D1_DB_NAME) to this deployment's D1")
     import time
@@ -474,7 +477,7 @@ def sync_d1(
     variant: str = "path",
     gen: str,
     key: str,
-    db_id: str = D1_DB_ID,
+    db_id: str = "",
     remote: bool = True,
     insert_bytes: int = INSERT_BYTES,
     blob: bool = True,
@@ -547,7 +550,7 @@ def sync_d1(
             with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as tf:
                 tf.write("\n".join(stmts[i : i + 300]))
                 sqlpath = tf.name
-            subprocess.run(["npx", "wrangler", "d1", "execute", D1_DB_NAME, "--local", "--file", sqlpath], check=True, cwd=str(site))
+            subprocess.run(["npx", "wrangler", "d1", "execute", os.environ.get("D1_DB_NAME", ""), "--local", "--file", sqlpath], check=True, cwd=str(site))
         return len(rows)
 
     tok, acct = _creds()
@@ -583,7 +586,7 @@ def check_flip(
     variant: str = "path",
     gen: str,
     key: str,
-    db_id: str = D1_DB_ID,
+    db_id: str = "",
     store: str = PRIMARY_STORE,
     started: str | None = None,
 ) -> Flip:
@@ -619,7 +622,7 @@ def check_flip(
     return flip
 
 
-def flip_d1(flip: Flip, db_id: str = D1_DB_ID) -> bool:
+def flip_d1(flip: Flip, db_id: str = "") -> bool:
     """Point (date, variant) at ``flip``'s generation — the schema row, then
     the retirements `sync_d1` runs after it. False (nothing written) when the
     pointer already names it."""
@@ -631,7 +634,7 @@ def flip_d1(flip: Flip, db_id: str = D1_DB_ID) -> bool:
     return True
 
 
-def gc_d1(date: str, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE, dry_run: bool = False) -> int:
+def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool = False) -> int:
     """Delete every row group of ``date`` whose generation is not the one its
     variant's schema row points at (leftovers of a flip, or of a sync that
     failed before flipping). Returns rows deleted (``dry_run``: counted, not
@@ -674,7 +677,7 @@ def started_sql(date: str, started: str, store: str = PRIMARY_STORE) -> str:
     )
 
 
-def fill_starts(snapshots: str, store: str = PRIMARY_STORE, db_id: str = D1_DB_ID) -> list[tuple[str, str]]:
+def fill_starts(snapshots: str, store: str = PRIMARY_STORE, db_id: str = "") -> list[tuple[str, str]]:
     """Fill the start of every date-only `path` pointer of ``store`` that has
     none, from its own ``<snapshots>/<scan id>/meta.json`` (``snapshots``: the
     store's snapshot dir, a local path or fsspec URL); a scan whose meta is
@@ -713,7 +716,7 @@ def snapshot_starts(snapshots: str) -> list[tuple[str, str | None]]:
     return [(scan, meta_started(metas[scan])) for scan in sorted(metas) if is_scan_id(scan)]
 
 
-def pointers(db_id: str = D1_DB_ID) -> list[tuple[str, str, str]]:
+def pointers(db_id: str = "") -> list[tuple[str, str, str]]:
     """Every ``index_schema`` row as ``(date, variant, dir)``, across every
     store (a secondary store's variants keep their ``<store>:`` prefix): the
     generation dirs some reader can reach. `gen_gc` keeps all of them."""
@@ -764,7 +767,7 @@ def cold_path(base: str, gdir: str, variant: str) -> str:
 
 def retire_d1(
     retain: int,
-    db_id: str = D1_DB_ID,
+    db_id: str = "",
     store: str = PRIMARY_STORE,
     base: str | None = None,
     has_cold=exists,
@@ -856,7 +859,7 @@ def row_bytes(r: dict) -> int:
     return len(r["p_min"]) + len(r["p_max"]) + len(r["u_min"] or "") + len(r["u_max"] or "") + len(r["rg_json"]) + ROW_FIXED_BYTES
 
 
-def footer_cache_present(acct: str, tok: str, db_id: str = D1_DB_ID) -> bool:
+def footer_cache_present(acct: str, tok: str, db_id: str = "") -> bool:
     """Whether this D1 has the footer LRU's table (`footer_cache`, in `site/schema.sql`)."""
     return bool(_d1_query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';", acct, tok, db_id))
 
@@ -908,7 +911,7 @@ def evict(
     grace: int = EVICT_GRACE_S,
     now: int | None = None,
     dry_run: bool = False,
-    db_id: str = D1_DB_ID,
+    db_id: str = "",
 ) -> Eviction:
     """One eviction pass, as the site's `evictFooters`: demote the least recently read `hot` entries
     (ties: the older scan first) until the rest fit the budget, then delete the rows — then the entry —
@@ -945,7 +948,7 @@ def adopt(
     store: str = PRIMARY_STORE,
     base: str | None = None,
     has_cold=exists,
-    db_id: str = D1_DB_ID,
+    db_id: str = "",
 ) -> tuple[list[Entry], list[tuple[str, str, str]]]:
     """Track the store sorts synced before the footer LRU: each pointed (scan, sort) whose rows are in D1
     with no `footer_cache` entry becomes `hot`, read today (so eviction orders them by scan, oldest first —
@@ -996,7 +999,7 @@ def adopt(
     return adopted, skipped
 
 
-def index_dir(date: str, variant: str = "path", db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> str | None:
+def index_dir(date: str, variant: str = "path", db_id: str = "", store: str = PRIMARY_STORE) -> str | None:
     """Bucket-relative dir holding ``date``'s ``variant`` parquet — the D1
     pointer (``index_schema.dir``); None when that (date, variant) was never
     synced. The parquet is ``<dir>/<INDEX_VARIANTS[variant]>``."""
@@ -1026,7 +1029,7 @@ def _pack(head: str, values: list[str], limit: int) -> list[str]:
     return out
 
 
-def synced_variants(db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> list[tuple[str, str]]:
+def synced_variants(db_id: str = "", store: str = PRIMARY_STORE) -> list[tuple[str, str]]:
     """Every (date, variant) of ``store`` with a schema row in D1 (= a complete
     sync); variants as the store names them (a secondary store's prefix off).
     The primary's query is unchanged: secondary rows (a `:` in the variant)

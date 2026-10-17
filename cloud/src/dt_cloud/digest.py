@@ -72,11 +72,14 @@ UNITS = {"TiB": Units("TiB", TIB, "Ti"), "TB": Units("TB", 10**12, "T")}
 class Quota:
     """A bucket's quota: ``bytes``, its long ``name`` (the OP + plot: `1 PB`)
     and an optional ``short`` label (the reply tail: `1P`; None → SI from
-    ``bytes``, see `digest_cw._qlabel`)."""
+    ``bytes``, see `digest_cw._qlabel`). ``classes``: the storage-class ids it
+    counts (`meta.json` `class_bytes`; Hugging Face's public allowance counts
+    class 1, its private one class 5); empty: every byte."""
 
     bytes: int
     name: str
     short: str | None = None
+    classes: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,12 +90,20 @@ class Bucket:
     every bucket in the zone): they must carry equal quotas, and the tail
     renders them as one clause against it. ``path`` is the bucket's path on
     the site, its links' target (None: ``/<bucket>``, a union-of-buckets
-    site's; ``""``: the site root, a single-bucket store served there)."""
+    site's; ``""``: the site root, a single-bucket store served there).
+    ``more``: further quotas, each beside ``quota`` wherever it renders (YAML:
+    ``quota`` as a list), e.g. a private allowance beside a public one; the
+    plot draws ``quota`` only."""
 
     label: str | None = None
     quota: Quota | None = None
     zone: str | None = None
     path: str | None = None
+    more: tuple[Quota, ...] = ()
+
+    @property
+    def quotas(self) -> tuple[Quota, ...]:
+        return (self.quota, *self.more) if self.quota else ()
 
 
 @dataclass(frozen=True)
@@ -162,6 +173,11 @@ class DigestConfig:
     def primary_quota(self) -> Quota | None:
         b = self.buckets.get(self.primary) if self.primary else None
         return b.quota if b else None
+
+    @property
+    def primary_quotas(self) -> tuple[Quota, ...]:
+        b = self.buckets.get(self.primary) if self.primary else None
+        return b.quotas if b else ()
 
     @property
     def host(self) -> str:
@@ -248,8 +264,20 @@ def _bucket(name: str, b: dict | None) -> Bucket:
     q = b.get("quota")
     if q is None:
         return Bucket(b.get("label"), zone=b.get("zone"), path=b.get("path"))
-    q = _keys(f"buckets.{name}.quota", q, {"bytes", "name", "short"}, {"bytes", "name"})
-    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])), b.get("zone"), b.get("path"))
+    qs = [_quota(f"buckets.{name}.quota[{i}]", x) for i, x in enumerate(q)] if isinstance(q, list) else [_quota(f"buckets.{name}.quota", q)]
+    if not qs:
+        raise ValueError(f"digest config buckets.{name}.quota: an empty list")
+    if b.get("zone") is not None and (len(qs) > 1 or qs[0].classes):
+        raise ValueError(f"digest config buckets.{name}: a zone's quota is one quota over every class")
+    return Bucket(b.get("label"), qs[0], b.get("zone"), b.get("path"), tuple(qs[1:]))
+
+
+def _quota(where: str, q: Any) -> Quota:
+    q = _keys(where, q, {"bytes", "name", "short", "classes"}, {"bytes", "name"})
+    cs = q.get("classes", [])
+    if not isinstance(cs, list) or not all(isinstance(c, int) and not isinstance(c, bool) for c in cs):
+        raise ValueError(f"digest config {where}.classes: expected a list of storage-class ids, got {cs!r}")
+    return Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"]), tuple(cs))
 
 
 def _check_zones(buckets: dict[str, Bucket]) -> None:
@@ -266,7 +294,7 @@ def _check_zones(buckets: dict[str, Bucket]) -> None:
 def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     """A config from a parsed YAML/JSON mapping, overlaid on ``base`` (default:
     the preset its ``template`` names). ``buckets`` map names to ``{label,
-    quota: {bytes, name, short}, zone}`` (``bytes`` may be `910 TiB`), ``prices``
+    quota: {bytes, name, short, classes}, zone, path}`` (``quota`` may be a list) (``bytes`` may be `910 TiB`), ``prices``
     storage-class ids to $/GiB-month. Validated: unknown keys (at any level),
     a wrong-typed value, an unknown template or ``units``, or an out-of-range
     ``reply_hour`` raise ``ValueError``."""

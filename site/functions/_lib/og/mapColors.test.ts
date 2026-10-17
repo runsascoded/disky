@@ -90,7 +90,7 @@ describe('map cards honor the dashboard color axis', () => {
     const site = { name: 'Test storage', scheme: 'r2://', defaultColor: 'date' as const }
     const defaultCard = await mapCard({}, site, 'root', {}, 'anon')
     expect(colors(defaultCard)).toEqual(colors(await card('w')))
-    expect(defaultCard.subtitle).toBe('scan 2026-10-13T1000 · color by modified')
+    expect(defaultCard.subtitle).toBe('scan 10/13/26 10:00am UTC · color by modified')
     expect(colors(await mapCard({}, site, 'root', { c: 't' }, 'anon'))).toEqual(colors(await card('t')))
   })
 

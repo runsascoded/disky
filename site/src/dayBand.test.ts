@@ -3,9 +3,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it } from 'vitest'
 import { AgeChart } from './AgeChart'
 import { gradientBand } from './dayBand'
+import { dateAxis } from './dateScale'
 
 it("the gradient brushes the day under the pointer ± 5% of the span, clamped to the range", () => {
-  const range = { min: 20_000, max: 20_100 }
+  const range = dateAxis({ min: 20_000, max: 20_100 }, 'lin')
   expect([0, 0.5, 0.123, 1, -0.2, 1.4].map(t => gradientBand(range, t, 'd'))).toEqual([
     { lo: 20_000, hi: 20_005, axis: 'd' },
     { lo: 20_045, hi: 20_055, axis: 'd' },
@@ -14,7 +15,7 @@ it("the gradient brushes the day under the pointer ± 5% of the span, clamped to
     { lo: 20_000, hi: 20_005, axis: 'd' },
     { lo: 20_095, hi: 20_100, axis: 'd' },
   ])
-  expect(gradientBand({ min: 20_000, max: 20_008 }, 0.5, 'a')).toEqual({ lo: 20_004, hi: 20_004, axis: 'a' })
+  expect(gradientBand(dateAxis({ min: 20_000, max: 20_008 }, 'lin'), 0.5, 'a')).toEqual({ lo: 20_004, hi: 20_004, axis: 'a' })
 })
 
 it("a band from the map's gradient shades exactly the age chart's bars it overlaps", () => {
