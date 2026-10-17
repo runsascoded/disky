@@ -249,7 +249,7 @@ export function unionRoot(view: UnionView, label: string, members: readonly { st
       const prev = seen.get(r.path)
       if (prev) throw new UnionOverlap(`union view '${view.key}': root '${r.path}' is in stores ${prev}, ${m.store}`)
       seen.set(r.path, m.store)
-      kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m != null ? { d: Math.floor(r.m / 86400) } : {}), src: m.store, at: m.date })
+      kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m ? { d: Math.floor(r.m / 86400) } : {}), src: m.store, at: m.date })
       other.b -= r.b; other.o -= r.o
       if (other.f !== undefined) other.f -= 1
     }

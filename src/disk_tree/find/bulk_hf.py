@@ -49,7 +49,8 @@ files 6 — so every non-6 byte is a billed byte. ``generation`` is NULL.
 under a fixed 1000-request / 300 s window (a free account's quota). The
 client keeps ``concurrency`` requests in flight (≈8 drew 429s), stops issuing
 while the window is nearly spent until it resets, and retries 429 / 5xx
-honoring ``Retry-After``. Throughput is therefore window-bound, ~3.3 req/s.
+honoring ``Retry-After``, and a reset / dropped / timed-out connection like a
+5xx. Throughput is therefore window-bound, ~3.3 req/s.
 
 Auth: ``HF_TOKEN`` (a read token sees private repos and buckets; none lists
 public ones only). ``HF_ENDPOINT`` overrides ``https://huggingface.co``.
@@ -58,6 +59,7 @@ No request writes to the Hub.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -196,8 +198,20 @@ class HfClient:
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         for attempt in range(self.max_retries + 1):
             self._wait_turn()
-            with self._slots:
-                r = self.transport(url, headers)
+            try:
+                with self._slots:
+                    r = self.transport(url, headers)
+            except (OSError, http.client.HTTPException) as e:
+                # A reset, dropped or timed-out connection (`URLError`, `RemoteDisconnected`, `TimeoutError`,
+                # `IncompleteRead`): no status to read, retried like a 5xx.
+                with self._lock:
+                    self.requests += 1
+                if attempt == self.max_retries:
+                    raise
+                delay = float(min(2 ** attempt, 60))
+                err(f"hf: {e} on {url}; retrying in {delay:g}s ({attempt + 1}/{self.max_retries})")
+                self._pause(delay)
+                continue
             with self._lock:
                 self.requests += 1
             m = _RATELIMIT.search(r.headers.get("ratelimit", ""))

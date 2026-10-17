@@ -9,8 +9,8 @@ import { Link } from 'react-router-dom'
 import { Tooltip } from './Tooltip'
 import { elideMid, copyText } from './CopyName'
 import { useUnits } from './units'
-import { fmtN } from './types'
-import { dateColor } from './colors'
+import { fmtN, type TreeNode } from './types'
+import { dateInk, useDateScale } from './dateScale'
 import { type PrefixSortKey, type PrefixStat, relAgo } from './prefixes'
 import { useStore } from './store'
 import { listingTime } from './listingTime'
@@ -69,9 +69,8 @@ export function PrefixTable<R extends PrefixRow>({ rows, sort, onSort, shareOf, 
   const { fmtBytes } = useUnits()
   const time = listingTime(useStore().scheme)
   // Created ink across the listed rows' range, as the map's table does.
-  const ds = rows.map(r => r.stat?.d).filter((d): d is number => d != null)
-  const [dMin, dMax] = ds.length ? [Math.min(...ds), Math.max(...ds)] : [0, 0]
-  const ink = (d: number) => dateColor(dMax > dMin ? (d - dMin) / (dMax - dMin) : 1)
+  const [dateScale] = useDateScale()
+  const ink = dateInk(rows.flatMap(r => (r.stat?.d != null ? [[r.stat.d, r.stat.b] as const] : [])), dateScale)
   const th = (k: PrefixSortKey, label: string, num = true) => (
     <th key={k} className={(num ? 'num ' : '') + 'sortable' + (sort.k === k ? ' on' : '')} title="sort" onClick={() => onSort(k)}>
       {label}{sort.k === k ? (sort.asc ? ' ▲' : ' ▼') : ''}

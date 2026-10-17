@@ -196,3 +196,15 @@ def test_pre_image_follows_first_parents(tmp_path):
     c = site / "migrations/2026-10-03_c.sql"
     c.write_text("c\n")
     assert [pre_image(site, [b]), pre_image(site, [c]), pre_image(site, [a, b, c])] == ["dep 2\n", "dep 3\n", "dep 1\n"]
+
+
+def test_pending_recipes_in_arrival_order(tmp_path):
+    """Pending recipes replay in the order they arrived on the branch, not by name (`x-neutral` rebuilds the table `x`
+    created, and sorts before it); an uncommitted one is last."""
+    repo, site = tmp_path, tmp_path / "site"
+    _git(repo, "init", "-q")
+    _commit(repo, "base", {"site/schema.sql": "base\n"})
+    _commit(repo, "x", {"site/schema.sql": "x\n", "site/migrations/scan-run-dags.sql": "x\n"})
+    _commit(repo, "x-neutral", {"site/schema.sql": "y\n", "site/migrations/scan-run-dags-neutral.sql": "y\n"})
+    (site / "migrations/a-new.sql").write_text("z\n")
+    assert [r.name for r in pending(site)] == ["scan-run-dags.sql", "scan-run-dags-neutral.sql", "a-new.sql"]

@@ -106,6 +106,13 @@ The staged-plan parent message (`stagedSlack.ts`) gets an `image` block with the
 - Live on prod since 2026-10-02 (`0034` applied; both revisions deployed). Dev (`dev.gcs.oa.dev`) runs with `OG_CARDS` on, against prod's D1.
 - Measured on dev: cold renders 0.5–2.9 s per card (the view read dominates; the rasterize is ~100–200 ms), cached about 60 ms.
 
+## Depth by budget (2026-10-16), built
+
+The map card used to read its view at `maxDepth: 2` and label only the depth-1 tiles. Now:
+- **Nested tiles to any depth** (`card.ts` `cellSvg`): each cell draws its children inset inside it, as the map nests. A labelled cell (`full` tier or a public map) gets a header strip (`name size`) when it is wider than 70 px and its label's line fits, with its children below it. The label is 15 px at depth 1, then 13, 12 and 11 px. Children are drawn only in an inner box of at least 10 px each way. The `anon` tier draws the same shapes with no labels at any depth. `labelKids` is gone: a full card labels every level that fits.
+- **Depth chosen by wall-clock budget** (`data.ts` `deepestView`): the depth-2 floor is always read. If some depth-2 cell is a real directory (`canDeepen`) and budget is left, depths 3 and the cap (`OG_MAX_DEPTH`, default 5) are read at once, raced against the rest of the budget (`OG_DEPTH_BUDGET_MS`, default 1500 ms, `0` = the floor alone). The deepest view that lands in time is drawn. A deeper read that fails or runs late is dropped. Cold latency is at most about max(floor, budget). `minArea`/`atten` already prune what each deeper level adds, so the cap only bounds the read. The page-stamp path (full-tier `desc`) reads the floor alone (`deepen: false`). The image's `server-timing` names the depth drawn (`data;dur=…;desc="depth N"`). `RENDER_VERSION` is 7.
+- **Measured (r2.rbw.sh root, 2026-10-16):** `/api/subtree` at the card's box returns 26 nodes at depth 2, 224 at depth 3 and 1,111 at depth 5 (uncapped: 1,168). Each depth costs about the same per read (0.2–0.8 s cold, 0.13–0.4 s warm from a laptop, network included). The prod card's data stage was 186–203 ms cold at depth 2. Rasterizing (resvg, node) goes from 33 ms / 47 KB (depth 2) to 110 ms / 134 KB (depth 5, 1,124 rects).
+
 ## Rollout
 
 `site/deploy --dev` first; check unfurls with Slack's link fetcher UA and a real paste in a test DM. Prod after Ryan's go.

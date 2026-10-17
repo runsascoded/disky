@@ -99,7 +99,7 @@ def plan_chunks(names_sizes: list[tuple[str, int]], max_chunk_bytes: int) -> lis
 LEASE_TTL_HOURS = 8
 
 
-def acquire_lease(client, data_bucket: str, owner: str) -> bool:
+def acquire_lease(client, data_bucket: str, owner: str) -> int | None:
     """Single-writer lease over the whole ingest (atomic create-if-absent).
 
     Two concurrent ingests would race the per-bucket watermarks and cut
@@ -121,26 +121,28 @@ def acquire_lease(client, data_bucket: str, owner: str) -> bool:
     for _ in range(2):
         try:
             blob.upload_from_string(body, content_type="application/json", if_generation_match=0)
-            return True
+            return blob.generation
         except PreconditionFailed:
             blob.reload()
             cur = json.loads(blob.download_as_bytes())
             if dt.datetime.fromisoformat(cur["expires"]) > dt.datetime.now(dt.timezone.utc):
                 err(f"ingest lease held by {cur.get('owner')} until {cur['expires']} — skipping")
-                return False
+                return None
             try:  # expired: steal (generation-matched delete, then retry the create)
                 blob.delete(if_generation_match=blob.generation)
             except (PreconditionFailed, NotFound):
                 pass
-    return False
+    return None
 
 
-def release_lease(client, data_bucket: str) -> None:
-    from google.api_core.exceptions import NotFound
+def release_lease(client, data_bucket: str, generation: int | None = None) -> None:
+    """Drop the lease: only ours (`generation`, as `acquire_lease` returned it), never one a later holder took after
+    ours expired; gone already is fine."""
+    from google.api_core.exceptions import NotFound, PreconditionFailed
 
     try:
-        client.bucket(data_bucket).blob("access/state/.lease").delete()
-    except NotFound:
+        client.bucket(data_bucket).blob("access/state/.lease").delete(if_generation_match=generation)
+    except (NotFound, PreconditionFailed):
         pass
 
 
@@ -434,9 +436,19 @@ def ingest(
 
     client = storage.Client()
     owner = os.environ.get("BATCH_JOB_UID") or f"{socket.gethostname()}:{os.getpid()}"
-    if not acquire_lease(client, data_bucket, owner):
+    gen = acquire_lease(client, data_bucket, owner)
+    if gen is None:
         return []
     out = []
+    # A TERM (a cancelled or preempted Batch task, a Nextflow head stopping its tasks) unwinds through the `finally`
+    # below, so the lease is released, not held for its TTL (gcs 2026-10-17: a stopped run's lease made the next
+    # ingest skip).
+    import signal
+
+    def _term(sig, frame):  # noqa: ANN001
+        raise SystemExit(128 + sig)
+
+    prev = signal.signal(signal.SIGTERM, _term)
     try:
         for b in buckets:
             resource_stage("bucket", bucket=b)
@@ -454,7 +466,8 @@ def ingest(
                 )
             )
     finally:
-        release_lease(client, data_bucket)
+        signal.signal(signal.SIGTERM, prev)
+        release_lease(client, data_bucket, gen)
     done = [r for r in out if r["files"]]
     err(
         "access ingest done: "

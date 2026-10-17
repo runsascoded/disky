@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DAY, RUN_ID_RE, canonicalSel, exactPrefix, exactSlug, scanNeighbors, decodeScan, decodeSel, encodeScan, encodeSel, isScanId, latestScan, mergeSel, resolveAfter, resolveBefore, resolveScan, scanMatches, selOf } from './scanSlug'
+import { DAY, RUN_ID_RE, canonicalSel, exactPrefix, exactSlug, fmtScanUtc, scanNeighbors, decodeScan, decodeSel, encodeScan, encodeSel, isScanId, latestScan, mergeSel, resolveAfter, resolveBefore, resolveScan, scanMatches, selOf } from './scanSlug'
 
 // Two scans on 10/9 (plus a third in its noon hour), a date-only scan on 10/8.
 const SCANS = ['2026-10-08', '2026-10-09T0601', '2026-10-09T1200', '2026-10-09T1215', '2026-10-09T1802']
@@ -173,5 +173,12 @@ describe('a date-only scan and a timed scan on one day: each exactly selectable'
       { before: '2026-10-09', after: '2026-10-09T1236' },
       { before: '2026-10-08', after: '2026-10-09T1236' },
     ])
+  })
+})
+
+describe('fmtScanUtc — a scan id for a reader with no timezone of their own (the OG card)', () => {
+  it('a timed id is its UTC instant, labelled; a date-only id its calendar date', () => {
+    expect(['2026-10-16T1409', '2026-10-17T0002', '2026-10-17T1200', '2026-01-05T0930', '2026-10-15', 'junk'].map(fmtScanUtc))
+      .toEqual(['10/16/26 2:09pm UTC', '10/17/26 12:02am UTC', '10/17/26 12:00pm UTC', '1/5/26 9:30am UTC', '10/15/26', 'junk'])
   })
 })

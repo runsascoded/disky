@@ -155,6 +155,48 @@ def test_units_tb():
     assert str(e.value) == "digest config units: 'Ti' is not one of ('TiB', 'TB')"
 
 
+def test_class_scoped_quotas():
+    # a quota per billed storage class (Hugging Face: public 1 vs 253 TB, private 5 vs 5.1 TB; unbilled git 6 in
+    # neither): `quota` as a list, each `classes`-scoped, over the meta's `class_bytes` (JSON keys are strings). The
+    # headline and the deltas stay the total; each `% of` clause counts its own classes; the plot's line is the
+    # first quota's classes
+    TB = 10**12
+    cfg = E.config_from_dict({"template": "cw", "title": "HF usage", "site_url": SITE, "icons_base": "https://icons.example.org",
+                              "primary": "org", "units": "TB", "buckets": {"org": {"label": "org", "path": "", "quota": [
+        {"bytes": "253 TB", "name": "253 TB public", "short": "253T public", "classes": [1]},
+        {"bytes": "5.1 TB", "name": "5.1 TB private", "short": "5.1T private", "classes": [5]},
+    ]}}})
+    assert cfg.buckets["org"] == E.Bucket(
+        "org", E.Quota(253 * TB, "253 TB public", "253T public", (1,)), path="",
+        more=(E.Quota(5_100_000_000_000, "5.1 TB private", "5.1T private", (5,)),),
+    )
+
+    def meta(pub: float, priv: float, git: float) -> dict:
+        cb = {"1": round(pub * TB), "5": round(priv * TB), "6": round(git * TB)}
+        return {"total_bytes": sum(cb.values()), "total_objects": 9, "class_bytes": cb}
+
+    rows = D.rows_from_meta([("2026-09-30T0800", meta(15.0, 0.02, 0.005)), ("2026-10-01T0800", meta(15.5, 0.5, 0.005))], "org", unit=TB)
+    assert [(r.tb, r.classes) for r in rows] == [(15.0, {1: 15.0, 5: 0.02, 6: 0.005}), (16.0, {1: 15.5, 5: 0.5, 6: 0.005})]
+    month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
+    assert D.op_body(month, oct1, None, cfg).split("\n") == [
+        f":arrow_deg70: **+1.0 TB** [month-to-date]({SITE}/?d=261001-1d#over-time) · 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private · [dashboard]({SITE}/)",
+        "_as of 10/1 08:00Z_",
+        "",
+        "*Weekly summaries*",
+        f":arrow_deg50: [wk of 9/28]({SITE}/?d=261001-1d#over-time) _(partial)_: **+1.0 TB** → 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private",
+    ]
+    assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
+        E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"[org]({SITE}/?d=261001-1d#over-time): 6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free)",
+                icon_url="https://icons.example.org/arrows/av_deg70.png?v=4"),
+    ]
+    assert D.image_body(month, oct1, cfg)["points"] == [{"scan": "2026-09-30T0800", "bytes": 15 * TB}, {"scan": "2026-10-01T0800", "bytes": 15_500_000_000_000}]
+    # a class-scoped quota over a meta without `class_bytes` refuses rather than counting every byte
+    bare = D.rows_from_meta([("2026-10-01T0800", {"total_bytes": TB, "total_objects": 1})], "org", unit=TB)
+    with pytest.raises(ValueError) as e:
+        D.op_body(D.Month(lead=[], rows=bare), oct1, None, cfg)
+    assert str(e.value) == "quota '253 TB public' counts storage classes [1], but the scan's meta.json has no class_bytes"
+
+
 def test_tail_zone_shared_quota():
     # `hot-data` and `side-data` share zone `z8`'s 100 TiB: one clause, the zone's free;
     # `more-data` (no config) and the primary keep their own clauses, in meta order
@@ -337,6 +379,9 @@ buckets:
     ),
     ({"buckets": ["b"]}, "digest config buckets: expected a mapping, got list"),
     ({"buckets": {"b": {"quota": {"bytes": "lots", "name": "x"}}}}, "not a size: 'lots'"),
+    ({"buckets": {"b": {"quota": []}}}, "digest config buckets.b.quota: an empty list"),
+    ({"buckets": {"b": {"quota": [{"bytes": "1 PB", "name": "x", "classes": "1"}]}}}, "digest config buckets.b.quota[0].classes: expected a list of storage-class ids, got '1'"),
+    ({"buckets": {"b": {"zone": "z", "quota": {"bytes": "1 PB", "name": "x", "classes": [1]}}}}, "digest config buckets.b: a zone's quota is one quota over every class"),
     ({"prices": {"1": "cheap"}}, "digest config prices: expected numbers, got {'1': 'cheap'}"),
     ({"reply_hour": "12"}, "digest config reply_hour: expected int, got '12'"),
     ({"reply_hour": True}, "digest config reply_hour: expected int, got True"),

@@ -311,10 +311,10 @@ def manifest_sql(row: dict) -> str:
 def synced_groups(db_id: str | None = None, store: str | None = None) -> set[str]:
     """The group keys already in the manifest (a complete group: footer synced,
     row written last)."""
-    from .index_footer import D1_DB_ID, _creds, _d1_query
+    from .index_footer import _creds, _d1_query
 
     tok, acct = _creds()
-    rows = _d1_query(f"SELECT key FROM pyramid_multiscans WHERE dataset = '{multiscan_dataset(store)}';", acct, tok, db_id or D1_DB_ID)
+    rows = _d1_query(f"SELECT key FROM pyramid_multiscans WHERE dataset = '{multiscan_dataset(store)}';", acct, tok, db_id)
     return {r["key"] for r in rows}
 
 
@@ -324,8 +324,8 @@ def sync_manifest(row: dict, db_id: str | None = None) -> None:
     what makes the reader open the group, so it is the last thing to land."""
     from pyrmts_engine.multiscan_index import multiscan_d1_ddl
 
-    from .index_footer import D1_DB_ID, _creds, _d1_query
+    from .index_footer import _creds, _d1_query
 
     tok, acct = _creds()
-    _d1_query(multiscan_d1_ddl(), acct, tok, db_id or D1_DB_ID)
-    _d1_query(manifest_sql(row), acct, tok, db_id or D1_DB_ID)
+    _d1_query(multiscan_d1_ddl(), acct, tok, db_id)
+    _d1_query(manifest_sql(row), acct, tok, db_id)

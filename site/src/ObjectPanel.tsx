@@ -15,6 +15,7 @@ import { renderMarkdown } from '@rdub/file-tree/renderers/markdown'
 import type { ElideCtx } from '@rdub/file-tree/renderers/table'
 import { NotFoundError, type GetResult, type ListResult, type Range, type Store as FtStore } from '@rdub/file-tree'
 import { CopyName } from './CopyName'
+import { ExtLink } from './ExtLink'
 import { epochDaysToDate } from './colors'
 import { listingTime } from './listingTime'
 import { AppActions, useProxyInfo } from './laptop'
@@ -196,6 +197,7 @@ export default function ObjectPanel({ segs, node, onClose }: {
     <section className="object-panel" id="object" ref={ref} aria-label={`object ${segs[segs.length - 1]}`}>
       <header>
         <CopyName text={pathCopy(store.scheme, segs)}><b className="obj-name">{segs[segs.length - 1]}</b></CopyName>
+        <ExtLink link={store.externalLink?.(segs, false)} />
         <span className="obj-meta">
           {node && <>{fmtBytes(node.b)}</>}
           {node?.d != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(node.d)}</>}

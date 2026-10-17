@@ -1,0 +1,80 @@
+{
+ "scan": "2026-10-16T1200",
+ "gen": "20261016T120001Z",
+ "job_start": "1792152001",
+ "run_id": "run-1",
+ "session": "3451f758-027e-585b-afda-2067dc98abf5",
+ "sources": [
+  {
+   "uri": "gcs://example-data",
+   "machine": null,
+   "disk": null
+  },
+  {
+   "uri": "r2://example-serving",
+   "machine": null,
+   "disk": null,
+   "secrets": [
+    "CLOUDFLARE_API_TOKEN=example-cf-token",
+    "R2_ACCESS_KEY_ID=example-serving-key-id",
+    "R2_SECRET_ACCESS_KEY=example-serving-secret",
+    "AWS_ACCESS_KEY_ID=example-serving-key-id",
+    "AWS_SECRET_ACCESS_KEY=example-serving-secret"
+   ]
+  }
+ ],
+ "list_default": {
+  "machine": "e2-standard-4",
+  "disk": null
+ },
+ "steps": [
+  "list",
+  "index",
+  "static-names",
+  "publish-r2",
+  "index-rows",
+  "index-sync",
+  "index-gc"
+ ],
+ "pre": [],
+ "pre_label": "small",
+ "interval_label": "big",
+ "post": [
+  "index-gc"
+ ],
+ "over_time": false,
+ "over_time_label": "post",
+ "fold": [
+  "bucket-check",
+  "index-sync"
+ ],
+ "skip_list": false,
+ "secrets": [
+  "CLOUDFLARE_API_TOKEN=example-cf-token",
+  "R2_ACCESS_KEY_ID=example-serving-key-id",
+  "R2_SECRET_ACCESS_KEY=example-serving-secret"
+ ],
+ "step_secrets": {
+  "list": [
+   "CLOUDFLARE_API_TOKEN=example-cf-token",
+   "R2_ACCESS_KEY_ID=example-serving-key-id",
+   "R2_SECRET_ACCESS_KEY=example-serving-secret",
+   "AWS_ACCESS_KEY_ID=example-source-key-id",
+   "AWS_SECRET_ACCESS_KEY=example-source-secret"
+  ]
+ },
+ "secrets_project": "example-project",
+ "env": {
+  "R2_ENDPOINT": "https://example-account.r2.example.org",
+  "R2_BUCKET": "example-serving",
+  "DT_DATA_MOUNT": "/mnt/disks"
+ },
+ "profile_json": "<profile>",
+ "labels": {
+  "deployment": "example",
+  "component": "scan"
+ },
+ "cache": true,
+ "queue_size": 20,
+ "work_bucket": "example-data"
+}

@@ -12,7 +12,9 @@ from `lfs-files`, and the run never hit a 429.
 
 from __future__ import annotations
 
+import http.client
 import json
+import urllib.error
 from pathlib import Path
 
 import pandas as pd
@@ -230,6 +232,44 @@ def test_5xx_backs_off_then_raises():
     with pytest.raises(HfError) as e:
         c.get_json("/x")
     assert (str(e.value), clock.sleeps, c.requests) == (f"HTTP 502 for {E}/x: bad gateway", [1.0, 2.0, 4.0], 4)
+
+
+def test_connection_errors_back_off_and_retry(capsys):
+    """A reset / dropped / timed-out connection (raised by the transport, no status) is retried like a 5xx: hf's first
+    Nextflow scan (2026-10-17T0247) died on one `Connection reset by peer` seven minutes into the listing."""
+    seq: list = [
+        urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer")),
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        TimeoutError("The read operation timed out"),
+        Response(200, {}, b'[{"id": "ns/m"}]'),
+    ]
+
+    def transport(url, h):
+        r = seq.pop(0)
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
+    clock = Clock()
+    c = HfClient(transport=transport, sleep=clock.sleep, clock=clock)
+    assert c.get_json("/api/models") == [{"id": "ns/m"}]
+    assert (clock.sleeps, c.requests) == ([1.0, 2.0, 4.0], 4)
+    assert capsys.readouterr().err.splitlines() == [
+        f"hf: <urlopen error [Errno 104] Connection reset by peer> on {E}/api/models; retrying in 1s (1/8)",
+        f"hf: Remote end closed connection without response on {E}/api/models; retrying in 2s (2/8)",
+        f"hf: The read operation timed out on {E}/api/models; retrying in 4s (3/8)",
+    ]
+
+
+def test_connection_errors_raise_after_the_retries():
+    def transport(url, h):
+        raise urllib.error.URLError(ConnectionResetError(104, "Connection reset by peer"))
+
+    clock = Clock()
+    c = HfClient(max_retries=2, transport=transport, sleep=clock.sleep, clock=clock)
+    with pytest.raises(urllib.error.URLError):
+        c.get_json("/x")
+    assert (clock.sleeps, c.requests) == ([1.0, 2.0], 3)
 
 
 # ---------- shards + CLI ----------

@@ -85,6 +85,11 @@ export interface Env {
   FILTER_DETAILS_MS?: string
   /** A filter view's phase-2 time budget, ms (`view.ts` `FILTER_PHASE2_MS`). */
   FILTER_PHASE2_MS?: string
+  /** A map card's wall-clock budget (ms) for reading its view deeper than the floor (`og/data.ts`
+   *  `OG_DEPTH_BUDGET_MS`; `0`: the floor alone). */
+  OG_DEPTH_BUDGET_MS?: string
+  /** The deepest view a map card reads (`og/data.ts` `OG_MAX_DEPTH`). */
+  OG_MAX_DEPTH?: string
   /** Worker-served indexes (the static name index's suffix shards and catalog). */
   INDEX_R2?: R2Bucket
   /** `1`: the small served files — snapshot JSONs (`snapshots/…`: `meta.json`, `lifecycle.json`,

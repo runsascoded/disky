@@ -1,7 +1,7 @@
 // /api/scan-runs[/:run_id] — what each scan job did (specs/done/scan-runs-ui.md):
 //
 //   GET /api/scan-runs[?store=<key>]          { configured, runs: RunSummary[], project, meta }     viewer
-//   GET /api/scan-runs/:run_id[?store=<key>]  { ...ScanRunDetail, project, meta }                    viewer
+//   GET /api/scan-runs/:run_id[?store=<key>]  { ...ScanRunDetail, dag, project, meta }               viewer
 //
 // Rows come from D1 (`dt-cloud scan-run record | backfill`), scoped to the
 // request's store (`withStore`: no `store=` = the primary; a secondary store's
@@ -10,7 +10,7 @@
 // either unset = no such links.
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
-import { loadScanRuns, scanRunDetail, scanRunsList } from '../../_lib/scanRuns.js'
+import { loadDag, loadScanRuns, scanRunDetail, scanRunsList } from '../../_lib/scanRuns.js'
 import { storeKey, withStore } from '../../_lib/stores.js'
 
 type Env = AuthEnv & { DB?: D1Database; GCP_PROJECT?: string; META_TREE_URL?: string }
@@ -31,5 +31,6 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env; params?: 
   if (!id) return json({ ...scanRunsList(rows, now), ...links }, 200, headers)
   if (!rows) return json({ error: 'scan runs are not set up on this deployment (no scan_runs table)' }, 404)
   const d = scanRunDetail(rows, id, now)
-  return d ? json({ ...d, ...links }, 200, headers) : json({ error: `no scan run ${id}` }, 404)
+  if (!d) return json({ error: `no scan run ${id}` }, 404)
+  return json({ ...d, dag: await loadDag(db, id), ...links }, 200, headers)
 }

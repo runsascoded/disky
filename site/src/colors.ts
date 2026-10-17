@@ -50,12 +50,12 @@ export const ago = (ts: number): string => {
   return `${Math.floor(s / 86400)}d`
 }
 
-/** Day-precision variant (`8/21`, year-qualified when not the current year) —
+/** Day-precision variant (`8/21`, `8/21/25` when not the current year) —
  * read-recency spans days, not the months the created-age lens works in. */
 export const epochDaysToDate = (d: number, now = new Date()): string => {
   const dt = new Date(d * 86400_000)
   const md = `${dt.getUTCMonth() + 1}/${dt.getUTCDate()}`
-  return dt.getUTCFullYear() === now.getUTCFullYear() ? md : `${dt.getUTCFullYear()}-${md}`
+  return dt.getUTCFullYear() === now.getUTCFullYear() ? md : `${md}/${String(dt.getUTCFullYear()).slice(2)}`
 }
 
 // ---- category slots (tree mode) ----

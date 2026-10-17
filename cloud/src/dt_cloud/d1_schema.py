@@ -163,9 +163,19 @@ def table_ddl(tables: Sequence[str], text: str | None = None) -> str:
 
 
 def pending(site: Path) -> list[Path]:
-    """The recipes not yet applied to every database of this branch: the files in `site/migrations/`, in name
-    order (a date-prefixed slug orders two pending at once)."""
-    return sorted((site / "migrations").glob("*.sql"))
+    """The recipes not yet applied to every database of this branch: the files in `site/migrations/`, in the order
+    they arrived on it (the first-parent commit that added each; an uncommitted one last; ties by name). Names are
+    slugs, so name order isn't arrival order (`scan-run-dags-neutral` sorts before the `scan-run-dags` it rebuilds)."""
+    recipes = sorted((site / "migrations").glob("*.sql"))
+    if not recipes:
+        return recipes
+
+    def arrival(r: Path) -> tuple[int, str]:
+        added = _git(site, "log", "--first-parent", "--diff-merges=first-parent", "--diff-filter=A", "--no-patch", "--format=%H", "-1", "HEAD",
+                     "--", str(r.resolve())).strip()
+        return (int(_git(site, "rev-list", "--first-parent", "--count", added).strip()) if added else 1 << 62, r.name)
+
+    return sorted(recipes, key=arrival)
 
 
 def _git(site: Path, *args: str) -> str:

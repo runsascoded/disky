@@ -732,7 +732,8 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
     """A Batch job of `tasks` tasks (in parallel) running `commands` (one shell script, `&&`-chained) in the image, the
     data bucket (and `scratch`) mounted read-only under /gcs, a local SSD at /stage. `r2`: as the R2 account, with its
     credentials from Secret Manager. `purpose` labels the job; `component` is its cost label (`cost_labels`)."""
-    machine = machine or p.machine
+    per = getattr(p, "machine_for", None)  # a profile with per-stage overrides (static names); else its one machine
+    machine = machine or (per(stage) if per else p.machine)
     vcpus = int(machine.rsplit("-", 1)[-1])
     spot = p.spot and stage not in p.standard_stages
     buckets = [p.bucket, *([p.scratch] if scratch else [])]
@@ -770,7 +771,7 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
                 "machineType": machine,
                 "provisioningModel": "SPOT" if spot else "STANDARD",
                 "bootDisk": {"type": "pd-balanced", "sizeGb": "100"},
-                "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": str(ssd_gb or p.ssd_gb)}, "deviceName": "stage"}],
+                "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": str(ssd_gb or (p.ssd_for(stage) if hasattr(p, "ssd_for") else p.ssd_gb))}, "deviceName": "stage"}],
             }}],
             "serviceAccount": {"email": (p.r2_sa or p.sa) if r2 else p.sa},
             "location": {"allowedLocations": [f"regions/{p.region}"]},

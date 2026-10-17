@@ -48,6 +48,7 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # STORES_EXTRA = "meta"                       # comma-separated secondary store keys, each under its own path (`/meta`)
 # PROD_HOST = "my.example.com"                # `g d` toggles between these two hosts (src/hosts.ts);
 # DEV_HOST = "dev.my.example.com"             #   either unset = no binding
+# HOST_REDIRECTS = "old.example.com=my.example.com"  # comma-separated `old=new`: a GET/HEAD on a renamed host 301s to the new one (same path + query); other methods are served
 # CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
 #                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
@@ -134,7 +135,10 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # OG_DEFAULT_COLOR = "w"                     # match Store.defaultColor if set: t=tree, w=written, r=read, u=owner
 # OG_ANONYMOUS = "generic"                   # private default: no data reads/totals/names on plain links; explicit shares may be detailed
 #                                           # "shape" explicitly permits anonymous geometry + totals (GCS's approved policy)
+#                                           # "full": anonymous unfurls get the full card (labelled tiles, sizes, owners; a map's scan + totals)
 #                                           # public AUTH_MODE defaults to shape; unknown values fail closed to generic
+# OG_DEPTH_BUDGET_MS = "1500"                 # a map card's wall-clock budget for reading deeper than 2 levels (0: 2 levels only)
+# OG_MAX_DEPTH = "5"                          # the deepest view a map card reads (levels below the view)
 # LAPTOP_TUNNEL_URL = "https://files.disk.example.com"   # a local machine's file previews, admins only (`/v1/laptop-files`, specs/laptop-file-tunnel.md): its tunnel (`infra/cf` `fileTunnel`); needs the two LAPTOP_TUNNEL_CLIENT_* secrets
 # LAPTOP_FILES_DENY = "Users/*/.ssh/**,**/.env*,**/*.pem"  # with LAPTOP_TUNNEL_URL: paths never previewed (globs from the store root; `*` in a segment, `**` across)
 # LAPTOP_FILES_MAX_BYTES = "26214400"       # …the most a whole-file GET returns (Range reads stream past it; default 25 MiB)

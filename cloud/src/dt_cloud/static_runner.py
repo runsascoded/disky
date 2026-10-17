@@ -247,7 +247,7 @@ class Runner(ar.Runner):
         check that its liveness marker is there."""
         last = key.rsplit("_", 1)[-1]
         name, spec = self.job(f"{tier}-merge", last, 1, "static_merge", ["tier", "-g", self.cfg.gen, "-r", key, "-t", tier,
-                                                                         *duckdb_args(self.cfg.machine)])
+                                                                         *duckdb_args(self.cfg.machine_for(f"{tier}-merge"))])
         self.run_job(name, spec)
         if not self.tier_done(tier, key):
             raise RuntimeError(f"{self.root}/{key}: its {tier} not written (the merge job succeeded)")
@@ -267,7 +267,7 @@ class Runner(ar.Runner):
             self.log(f"{d} drill: done")
             return None
         ck = ("-S", self.cfg.drill_checkpoint) if self.cfg.drill_checkpoint else ()
-        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *drill_duckdb_args(self.cfg.machine), *ck]
+        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *drill_duckdb_args(self.cfg.machine_for("drill")), *ck]
         name, spec = self.job("drill", d, 2, "static_drill", args)
 
         def build():
@@ -284,7 +284,7 @@ class Runner(ar.Runner):
         if self.exists(f"{run}/anchors/meta.json") and (not start or self.exists(f"{run}/anchors/start/meta.json")):
             self.log(f"{d} anchors: done")
             return None
-        args = ["run", "-g", self.cfg.gen, "-d", d, *duckdb_args(self.cfg.machine)]
+        args = ["run", "-g", self.cfg.gen, "-d", d, *duckdb_args(self.cfg.machine_for("anchors"))]
         name, spec = self.job("anchors", d, 1, "static_anchors", args)
 
         def build():

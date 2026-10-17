@@ -29,4 +29,8 @@ describe('foldPrefixes: index rows → one stat per staged prefix', () => {
       'gs://b/x': { b: 1, o: 1 },
     })
   })
+
+  it('an mtime of 0 (a listing\'s unknown) gives no date, as none does', () => {
+    expect(foldPrefixes(['gs://b/x'], [row('b/x', null, 7, 1, { mt: 0 })])).toEqual({ 'gs://b/x': { b: 7, o: 1 } })
+  })
 })

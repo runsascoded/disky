@@ -283,6 +283,12 @@ CREATE TABLE scan_runs (
   updated_ts   INTEGER NOT NULL
 );
 
+CREATE TABLE scan_run_dags (
+  run_id  TEXT PRIMARY KEY REFERENCES scan_runs(run_id),
+  engine  TEXT NOT NULL,
+  dag     TEXT NOT NULL
+);
+
 CREATE TABLE scan_run_outputs (
   run_id  TEXT NOT NULL REFERENCES scan_runs(run_id),
   key     TEXT NOT NULL,
@@ -301,7 +307,7 @@ CREATE TABLE scan_run_phases (
   started_ts  INTEGER,
   finished_ts INTEGER,
   status      TEXT NOT NULL DEFAULT 'done' CHECK (status IN ('running', 'done', 'failed')),
-  note        TEXT,
+  note        TEXT, job_name TEXT, machine TEXT, task TEXT,
   PRIMARY KEY (run_id, phase)
 );
 

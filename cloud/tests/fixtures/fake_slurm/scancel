@@ -1,0 +1,6 @@
+#!/bin/bash
+# A fake `scancel` (see sbatch): drops each job, appending its `<process> <machine>` to `$FAKE_SLURM/cancelled`.
+for id in "$@"; do
+    cat "$FAKE_SLURM/meta/$id" >> "$FAKE_SLURM/cancelled"
+    rm -f "$FAKE_SLURM/jobs/$id"
+done

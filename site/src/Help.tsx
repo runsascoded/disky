@@ -25,13 +25,14 @@ const labelOf = (el: HTMLElement): string => (el.querySelector(':scope > .help-t
  * is hovered or focused, and is always available to assistive tech through
  * `aria-describedby`. The wrapper lights up (`help-active`) while it is the
  * control the card is explaining, so the card and its target read as a pair.
- * Nothing floats. */
-export function Explain({ text, children, className }: { text: ReactNode; children: ReactNode; className?: string }) {
+ * Nothing floats. `label` names the control in the card's header when its own
+ * text doesn't (default: that text). */
+export function Explain({ text, label, children, className }: { text: ReactNode; label?: string; children: ReactNode; className?: string }) {
   const ctx = useContext(HelpCtx)
   const [on] = useHelpPref()
   const id = useId()
   const send = ctx?.send
-  const target = useCallback((el: HTMLElement): HelpTarget => ({ id, text, label: labelOf(el) }), [id, text])
+  const target = useCallback((el: HTMLElement): HelpTarget => ({ id, text, label: label ?? labelOf(el) }), [id, text, label])
   const enter = useCallback((e: React.PointerEvent<HTMLElement>) => send?.({ type: 'enter', target: target(e.currentTarget) }), [send, target])
   const leave = useCallback(() => send?.({ type: 'leave', id }), [send, id])
   // Keyboard focus only: a menu auto-focusing its first item on a mouse open

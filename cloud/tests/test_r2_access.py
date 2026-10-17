@@ -1,15 +1,31 @@
 import pytest
 
-from dt_cloud.r2_access import export_window, query_body, query_events
+from dt_cloud.r2_access import calculation_body, capture_sampling, export_window, query_body, query_events
+
+START = 1791676800000  # 2026-10-11T00:00:00Z
+END = 1791763200000  # 2026-10-12T00:00:00Z
 
 
-def page(ids: list[str], count: int | None = None, abr_level: int = 1, status: str = "COMPLETED") -> dict:
+def page(ids: list[str], count: int | None = None, abr_level: int = 1, status: str = "COMPLETED", timestamp: int = START) -> dict:
     return {"success": True, "result": {
         "events": {"count": len(ids) if count is None else count, "events": [
-            {"$metadata": {"id": ident}, "source": {"action": "HeadObject"}} for ident in ids
+            {"timestamp": timestamp, "$metadata": {"id": ident}, "source": {"action": "HeadObject"}} for ident in ids
         ]},
         "statistics": {"abr_level": abr_level},
         "run": {"status": status},
+    }}
+
+
+BODY = query_body("jc-taxes", "2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z", limit=1)
+
+
+def calculation(aggregates: list[tuple[int, float]], abr_level: int = 1, status: str = "COMPLETED") -> dict:
+    return {"success": True, "result": {
+        "run": {"status": status},
+        "statistics": {"abr_level": abr_level},
+        "calculations": [{"alias": "events", "aggregates": [
+            {"count": count, "sampleInterval": interval} for count, interval in aggregates
+        ]}],
     }}
 
 
@@ -38,28 +54,28 @@ def test_export_drains_cursor_pages_and_reports_only_observation_coverage():
 ])
 def test_export_refuses_partial_or_sampled_queries(response: dict, message: str):
     with pytest.raises(RuntimeError, match=f"^{message}$"):
-        export_window({"limit": 1}, fetch=lambda body: response)
+        export_window(BODY, fetch=lambda body: response)
 
 
 def test_export_refuses_page_cap_without_claiming_exhaustion():
     with pytest.raises(RuntimeError, match="^max_pages reached before cursor exhaustion$"):
-        export_window({"limit": 1}, fetch=lambda body: page(["a"]), max_pages=1)
+        export_window(BODY, fetch=lambda body: page(["a"]), max_pages=1)
 
 
 def test_export_refuses_stalled_cursor():
     with pytest.raises(RuntimeError, match="^pagination cursor did not advance$"):
-        export_window({"limit": 1}, fetch=lambda body: page(["a"]))
+        export_window(BODY, fetch=lambda body: page(["a"]))
 
 
 def test_export_refuses_page_count_shortfall():
     with pytest.raises(RuntimeError, match="^page event count does not match returned events$"):
-        export_window({"limit": 1}, fetch=lambda body: page(["a"], count=2))
+        export_window(BODY, fetch=lambda body: page(["a"], count=2))
 
 
 def test_export_accepts_documented_omitted_abr_level():
     response = page([])
     response["result"]["statistics"].pop("abr_level")
-    assert export_window({"limit": 1}, fetch=lambda body: response)["summary"]["query_abr_levels"] == [1]
+    assert export_window(BODY, fetch=lambda body: response)["summary"]["query_abr_levels"] == [1]
 
 
 def test_export_cli_saves_private_archive_and_only_prints_summary(monkeypatch, tmp_path):
@@ -71,7 +87,8 @@ def test_export_cli_saves_private_archive_and_only_prints_summary(monkeypatch, t
 
     monkeypatch.setenv("CF_OBSERVABILITY_TOKEN", "dedicated-test-token")
     responses = iter([page(["a"]), page([])])
-    monkeypatch.setattr(r2_access, "query_events", lambda account, token, body: next(responses))
+    calc = calculation([(1, 1)])
+    monkeypatch.setattr(r2_access, "query_events", lambda account, token, body: calc if body["view"] == "calculations" else next(responses))
     output = tmp_path / "archive.json"
     args = ["access", "r2-export", "-a", "a" * 32, "-b", "jc-taxes",
             "-f", "2026-10-11T00:00:00Z", "-t", "2026-10-12T00:00:00Z", "-o", str(output)]
@@ -79,10 +96,11 @@ def test_export_cli_saves_private_archive_and_only_prints_summary(monkeypatch, t
     assert result.exit_code == 0
     assert json.loads(result.output) == {
         "pages": 2, "events": 1, "query_exhausted": True,
-        "query_abr_levels": [1], "capture_sampling": "unknown", "provider_delivery": "best_effort",
-        "actions": {"HeadObject": 1},
+        "query_abr_levels": [1], "capture_sampling": "unsampled", "provider_delivery": "best_effort",
+        "actions": {"HeadObject": 1}, "estimated_events": 1, "max_sample_interval": 1,
     }
-    assert json.loads(output.read_text())["pages"] == [page(["a"]), page([])]
+    saved = json.loads(output.read_text())
+    assert (saved["pages"], saved["calculation"]) == ([page(["a"]), page([])], calc)
     assert S_IMODE(output.stat().st_mode) == 0o600
     again = CliRunner().invoke(main, args)
     assert again.exit_code == 2
@@ -98,7 +116,8 @@ def test_export_cli_saves_private_archive_and_only_prints_summary(monkeypatch, t
 def test_query_is_scoped_bounded_and_not_persisted():
     assert query_body("jc-taxes", "2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z", limit=100) == {
         "queryId": "disky-r2-pilot",
-        "timeframe": {"from": 1791676800000, "to": 1791763200000},
+        # The provider excludes both bounds: `from - 1` makes the window [start, end).
+        "timeframe": {"from": START - 1, "to": END},
         "dry": True,
         "view": "events",
         "limit": 100,
@@ -190,3 +209,45 @@ def test_cli_prefers_dedicated_token_and_preserves_json(monkeypatch, tmp_path):
     assert result.output == f"saved bounded provider response to {output}; no ingest watermark advanced\n"
     assert json.loads(output.read_text()) == response
     assert calls == [("a" * 32, "dedicated-test-token", query_body("jc-taxes", "2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z"))]
+
+
+def test_export_refuses_events_outside_the_half_open_window():
+    with pytest.raises(RuntimeError, match="^event outside the requested window$"):
+        export_window(BODY, fetch=lambda body: page(["a"], timestamp=END))
+    assert export_window(BODY, fetch=lambda body: page([] if "offset" in body else ["a"], timestamp=END - 1))["summary"]["events"] == 1
+
+
+def test_calculation_body_is_a_weighted_count_by_action_over_the_same_window():
+    assert calculation_body("jc-taxes", "2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z") == {
+        "queryId": "disky-r2-sampling",
+        "timeframe": {"from": START - 1, "to": END},
+        "dry": True,
+        "view": "calculations",
+        "parameters": {
+            "datasets": ["r2"],
+            "filters": [{"key": "bucket", "operation": "eq", "type": "string", "value": "jc-taxes"}],
+            "filterCombination": "and",
+            "calculations": [{"operator": "count", "alias": "events"}],
+            "groupBys": [{"type": "string", "value": "action"}],
+        },
+    }
+
+
+@pytest.mark.parametrize("aggregates,observed,expected", [
+    ([(4, 1), (2, 1)], 6, {"capture_sampling": "unsampled", "estimated_events": 6, "max_sample_interval": 1}),
+    # Measured 2026-10-14 12:30–13:30Z: 169 drained LIST rows, weighted count 178.
+    ([(178, 1.0532544378698225)], 169, {"capture_sampling": "sampled", "estimated_events": 178, "max_sample_interval": 1.0532544378698225}),
+    ([(5, 1)], 4, {"capture_sampling": "inconsistent", "estimated_events": 5, "max_sample_interval": 1}),
+    ([], 0, {"capture_sampling": "unsampled", "estimated_events": 0, "max_sample_interval": 1}),
+])
+def test_capture_sampling_classifies_windows(aggregates: list, observed: int, expected: dict):
+    assert capture_sampling(calculation(aggregates), observed) == expected
+
+
+@pytest.mark.parametrize("response,message", [
+    (calculation([(10, 10)], abr_level=10), "calculation was sampled at query time"),
+    (calculation([], status="RUNNING"), "calculation is not COMPLETED"),
+])
+def test_capture_sampling_refuses_query_sampled_or_incomplete(response: dict, message: str):
+    with pytest.raises(RuntimeError, match=f"^{message}$"):
+        capture_sampling(response, 0)

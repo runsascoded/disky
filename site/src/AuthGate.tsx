@@ -41,10 +41,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
 // The wall: Google-first (one button, no typing), with an emailed-code fallback
 // for the non-Google tail. A first visit gets Google's own in-page button
 // (`oneTap`); with several Google accounts in the browser it can still open
-// Google's account chooser. A returning visitor (the `oa_google_hint` cookie a
-// Google sign-in leaves, surviving sign-out) gets "Continue as <them>" instead:
-// the redirect flow (`/auth/google`) with `login_hint`, which skips the chooser,
-// plus a "Not <them>?" link to it. Google's prompt with auto-select signs a
+// Google's account chooser. A returning visitor (the `oa_google_hint[_accounts]`
+// cookies Google sign-ins leave, up to five, surviving sign-out) gets a row per
+// remembered account instead (`RememberedAccount`): the redirect flow
+// (`/auth/google?account=<it>`) with `login_hint`, which skips the chooser, plus
+// "Use another Google account" for it. Google's prompt with auto-select signs a
 // returning visitor in with no click at all, once their account has granted
 // this client through the button or prompt. Where Google's script can't load,
 // the button degrades to the plain redirect.
@@ -103,6 +104,7 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
             title={null}   // the card's own <h1> + `restrict` line already say what this is
             googleUrl={clientId && !app ? googleUrl : undefined}
             withNext={!next}
+            continueAs={clientId && !app ? email => <RememberedAccount email={email} /> : undefined}
             oneTap={clientId && !app ? {
               clientId,
               nonceEndpoint: '/auth/google/onetap/nonce',
@@ -128,6 +130,24 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         </details>
       </div>
     </div>
+  )
+}
+
+/** One remembered Google account (the `oa_google_hint_accounts` cookie's, newest first): Google's mark, the address,
+ *  "Last used" on the newest only (CSS), an arrow. A hint, never an identity: the click still signs in at Google. */
+function RememberedAccount({ email }: { email: string }) {
+  return (
+    <span className="remembered-account">
+      <svg viewBox="0 0 48 48" width="18" height="18" aria-label="Google" role="img">
+        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z" />
+        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z" />
+        <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z" />
+        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z" />
+      </svg>
+      <span className="account-email">{email}</span>
+      <span className="account-last-used">Last used</span>
+      <span className="account-arrow" aria-hidden="true">→</span>
+    </span>
   )
 }
 

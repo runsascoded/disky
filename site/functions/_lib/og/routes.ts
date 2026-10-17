@@ -14,8 +14,13 @@ export interface PageView {
 }
 
 /** First path segments that are not map pages: API and asset routes, and the
- * app's other pages (handled below or left to the static card). */
-const NOT_MAP = new Set(['api', 'auth', 'data', 'v1', 'og', 'slack', 'assets', '_fonts', 'files', 'admin', 'about', 'help', 'privacy', 'token', 'login'])
+ * app's other pages (handled below or left to the static card). Every page route
+ * in `src/Root.tsx` is one of these or a card kind (`routes.test.ts` checks): an
+ * app page read as a folder drew an empty map of a path named `scans`, `meta`, …. */
+const NOT_MAP = new Set([
+  'api', 'auth', 'data', 'v1', 'og', 'slack', 'assets', '_fonts', 'files', 'admin', 'about', 'help', 'privacy', 'token', 'login',
+  'signin', 'dev', 'meta', 'runs', 'scans', 'health', 'names', 'sweep', 'hot', 'marks', 'mark',
+])
 
 /** Map params a card depends on: the scan (`d`), the filter (`f`, `qs`), the
  * owner lens or pool (`o`, `by`), the colour axis (`c`) and classes (`cl`). */
@@ -47,6 +52,8 @@ export function pageView(url: URL, site: string): PageView | null {
   if (head === 'users' && segs.length === 1) return { kind: 'users', params: pick(sp, ['d']), title: `${site} — users` }
   if (head === 'user' && segs.length === 2) return { kind: 'user', params: { id: segs[1], ...pick(sp, ['d']) }, title: `${segs[1]} · ${site}` }
   if (head === 'assignments' && segs.length === 1) return { kind: 'assignments', params: pick(sp, ['d']), title: `${site} — assigner × assignee` }
+  // their other shapes are the OG render pages (`/users/og`, `/user/:id/og`) and a redirect (`/users/*` → `/`)
+  if (head === 'users' || head === 'user' || head === 'assignments' || head === 'staged') return null
   if (NOT_MAP.has(head) || segs.some(s => s.includes('..'))) return null
   // A file-looking single segment at the root (`/og.jpg`, `/favicon.svg`) is an asset.
   if (segs.length === 1 && /\.(?:png|jpe?g|svg|ico|txt|json|js|css|webmanifest|wasm|ttf)$/i.test(head)) return null

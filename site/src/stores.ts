@@ -31,6 +31,16 @@ export interface LifecycleConfig {
   recordedFrom?: string
 }
 
+/** A declared allowance (a provider's quota with no API): ``bytes`` over the scan's ``classes`` (`meta.json`
+ *  `class_bytes` ids), ``name`` as the provider states it (`253 TB`). */
+export interface Allowance { label: string; bytes: number; name: string; classes: number[] }
+
+/** `Store.allowances`: the meters, where the figures come from, and a note (what isn't measured). */
+export interface Allowances { rows: Allowance[]; source?: { label: string; href: string; asof: string }; note?: ReactNode }
+
+/** A link out of the site to a path's page at its provider (`Store.externalLink`). */
+export interface ExternalLink { href: string; label: string }
+
 export interface Store {
   key: string
   label: string    // store selector button
@@ -110,6 +120,12 @@ export interface Store {
    *  deployment's `/v1/files` proxy when that reads it, else shows size and
    *  dates only (`objects.ts` `objectSource`). */
   objectBases?: Record<string, string>
+  /** A path's own page at the provider (its repo / folder / file view), by the path from the store root (bucket
+   *  first) and whether it's a directory: the deepest crumb's path card and the object panel link it. Each
+   *  deployment's own transform (hf: the Hub's `/<repo>/tree/main/…`); undefined = no page. Unset = no links. */
+  externalLink?: (segs: string[], dir: boolean) => ExternalLink | undefined
+  /** Declared allowances, metered against the scan's per-class bytes on the root view. Unset = none. */
+  allowances?: Allowances
   /** Where viewers take ownership questions (`AttributionRules`): an email
    *  address and/or a chat link. Unset = no contact line. */
   contact?: { email?: string; chat?: { label: string; href: string } }

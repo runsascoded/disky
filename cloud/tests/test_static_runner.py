@@ -814,3 +814,34 @@ def test_standard_stages_run_on_demand(stage, model, retries):
 
 def test_standard_stages_from_env():
     assert load_profile({"STATIC_NAMES_PROFILE": "", "STATIC_NAMES_STANDARD_STAGES": "anchors, drill"}).standard_stages == ("anchors", "drill")
+
+
+def test_per_stage_machines():
+    """`machines` / `ssd_gbs` (env `STATIC_NAMES_MACHINES` / `STATIC_NAMES_SSDS`, `<stage>=<value>,…`) size one stage's jobs —
+    the drill on a bigger machine, its DuckDB sized to it — and leave the others on `machine` / `ssd_gb`."""
+    from dataclasses import replace
+
+    assert (load_profile({"STATIC_NAMES_PROFILE": "", "STATIC_NAMES_MACHINES": "drill=n2-highmem-32, anchors=n2-highmem-8",
+                          "STATIC_NAMES_SSDS": "drill=1500"}).machines,
+            load_profile({"STATIC_NAMES_PROFILE": "", "STATIC_NAMES_SSDS": "drill=1500"}).ssd_gbs) == (
+        {"drill": "n2-highmem-32", "anchors": "n2-highmem-8"}, {"drill": 1500})
+    d = "2026-10-09T0001"
+    f = Fake({}, [d])
+    sized: dict[str, tuple[str, str]] = {}
+    run_job = f.run_job
+
+    def spy(name: str, spec: dict, wait: float | None = None) -> None:
+        pol = spec["allocationPolicy"]["instances"][0]["policy"]
+        sized[spec["labels"]["stage"]] = (pol["machineType"], pol["disks"][0]["newDisk"]["sizeGb"])
+        run_job(name, spec, wait)
+
+    f.run_job = spy
+    cfg = replace(DRILL, machines={"drill": "n2-highmem-32"}, ssd_gbs={"drill": 1500})
+    assert f.daily(cfg).run(d) == [d]
+    assert {k: v for k, v in sized.items() if k in ("append", "drill", "shards", "catalog")} == {
+        "append": (CFG.machine, str(CFG.ssd_gb)), "shards": (CFG.machine, str(CFG.ssd_gb)), "catalog": (CFG.machine, str(CFG.ssd_gb)),
+        "drill": ("n2-highmem-32", "1500"),
+    }
+    drill = next(c for c in f.calls if c[0] == "drill")
+    assert drill == ("drill", 2, _py("static_drill", "build", f"-g {GEN} -d {d}", "-k", "task",
+                                     *sd.drill_duckdb_args("n2-highmem-32")))

@@ -35,6 +35,21 @@
     .active rect:not(.sr-row-hit) { fill-opacity: 0.65; stroke-width: 1.5; stroke-dasharray: 4 3; }
     .active .lbl, .active .dur { fill: var(--ink); }
     .failed-label { fill: var(--danger); } }
+  .sr-dagwrap { margin: 6px 0 14px; }
+  .sr-dag { .edge { fill: none; stroke: var(--ink-3); stroke-width: 1.3; } .arrow { fill: var(--ink-3); }
+    .node { cursor: default;
+      rect { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+      .name { fill: var(--ink); font-size: 13px; font-weight: 600; font-family: ui-monospace, monospace; }
+      .sub { fill: var(--ink-3); font-size: 11.5px; }
+      &.done rect { stroke: var(--grew); fill: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
+      &.running rect { stroke: var(--ink); stroke-dasharray: 4 3; fill: color-mix(in srgb, var(--ink) 6%, var(--surface)); }
+      &.failed rect { stroke: var(--danger); fill: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
+      &.failed .sub { fill: var(--danger); }
+      &.pending .name, &.unrecorded .name { fill: var(--ink-3); } }
+    a .node { cursor: pointer; } a:hover .node rect { stroke-width: 2.5; }
+    .node.brushed rect { stroke-width: 3; } .node.dimmed { opacity: 0.3; } }
+  // brushing with the pipeline DAG: the hovered step's phases stand out, the rest fade
+  .sr-gantt g.dimmed { opacity: 0.25; } .sr-gantt g.brushed .sr-row-hit { fill: color-mix(in srgb, var(--ink) 8%, transparent); }
   .sr-bar { vertical-align: middle; .sr-bar-bg { fill: var(--other); } }
   .sr-runs .links, .runs .links { color: var(--ink-3); }
   .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;

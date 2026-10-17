@@ -3,7 +3,8 @@ import type { MouseEvent } from 'react'
 import { codeParam, intParam, useUrlState } from 'use-prms'
 import { useCanStage } from './auth'
 import { FaRegTrashCan } from 'react-icons/fa6'
-import { AGE_BUCKETS, ageBucketColor, dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonthShort } from './colors'
+import { AGE_BUCKETS, ageBucketColor, dateGradientCss, epochDaysToDate, epochDaysToMonthShort } from './colors'
+import { dateInk, useDateScale } from './dateScale'
 import { useStore } from './store'
 import { listingTime } from './listingTime'
 import { Tooltip } from './Tooltip'
@@ -142,11 +143,11 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
 
   // Created-month ink: an age gradient over the listed rows' range, so a
   // column of "May / Jun / Apr" also reads at a glance as older ↔ newer.
-  const [dMin, dMax] = useMemo(() => {
-    const ds = kids.map(k => k.d).filter((d): d is number => d != null)
-    return ds.length ? [Math.min(...ds), Math.max(...ds)] : [0, 0]
-  }, [kids])
-  const ageInk = (d: number) => dateColor(dMax > dMin ? (d - dMin) / (dMax - dMin) : 1)
+  // The map's scale (`?ts=`) over the rows' own days.
+  const [dateScale] = useDateScale()
+  const ds = useMemo(() => kids.flatMap(k => (k.d != null ? [[k.d, k.b] as const] : [])), [kids])
+  const [dMin, dMax] = ds.length ? [Math.min(...ds.map(([d]) => d)), Math.max(...ds.map(([d]) => d))] : [0, 0]
+  const ageInk = useMemo(() => dateInk(ds, dateScale), [ds, dateScale])
 
   const th = (k: SortKey, label: string, num = true) => (
     <th

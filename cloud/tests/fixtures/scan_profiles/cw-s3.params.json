@@ -1,0 +1,91 @@
+{
+ "scan": "2026-10-16T1200",
+ "gen": "20261016T120001Z",
+ "job_start": "1792152001",
+ "run_id": "run-1",
+ "session": "06a5f601-f0b7-58a3-9817-fc0a8fee5e63",
+ "sources": [
+  {
+   "uri": "s3://bucket-big",
+   "machine": "n2-standard-8",
+   "disk": null
+  },
+  {
+   "uri": "s3://bucket-b",
+   "machine": null,
+   "disk": null
+  },
+  {
+   "uri": "s3://bucket-c",
+   "machine": null,
+   "disk": {
+    "request": 375,
+    "type": "local-ssd"
+   }
+  }
+ ],
+ "list_default": {
+  "machine": "e2-standard-4",
+  "disk": {
+   "request": 100,
+   "type": null
+  }
+ },
+ "steps": [
+  "bucket-check",
+  "list",
+  "index",
+  "static-names",
+  "publish-r2",
+  "interval-store",
+  "index-rows",
+  "index-sync",
+  "over-time",
+  "index-gc",
+  "warm-cache",
+  "probe",
+  "digest"
+ ],
+ "pre": [],
+ "pre_label": "small",
+ "interval_label": "big",
+ "post": [
+  "index-gc",
+  "warm-cache",
+  "probe",
+  "digest"
+ ],
+ "over_time": true,
+ "over_time_label": "post",
+ "fold": [
+  "bucket-check",
+  "index-sync"
+ ],
+ "skip_list": false,
+ "secrets": [
+  "AWS_ACCESS_KEY_ID=example-access-key-id",
+  "AWS_SECRET_ACCESS_KEY=example-secret-access-key",
+  "CLOUDFLARE_API_TOKEN=example-cf-token",
+  "SITE_TOKEN=example-job-grant"
+ ],
+ "step_secrets": {},
+ "secrets_project": "example-project",
+ "env": {
+  "SCAN_RUNS_PROFILE": "/app/job/scan-runs.json",
+  "D1_DB_ID": "00000000-0000-0000-0000-000000000000",
+  "SITE_URL": "https://site.example.org",
+  "R2_BUCKET": "example-r2",
+  "DT_RECORD": "off",
+  "DT_DATA_MOUNT": "/mnt/disks"
+ },
+ "profile_json": "<profile>",
+ "labels": {
+  "deployment": "cw-s3",
+  "stack": "prod",
+  "team": "x",
+  "component": "scan"
+ },
+ "cache": true,
+ "queue_size": 20,
+ "work_bucket": "example-data"
+}

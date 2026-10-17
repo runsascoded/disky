@@ -90,13 +90,23 @@ main {
   gap: var(--main-gap);
 }
 header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
-.disk-space {
+.disk-space, // A path's page at its provider (`ExtLink`): a quiet icon right of the name.
+.ext-link {
+  flex: none; display: inline-flex; align-items: center;
+  color: var(--ink-3); text-decoration: none;
+  &:hover { color: var(--ink); }
+}
+.allowances {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   .disk-space-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; }
   .disk-space-labels > span { white-space: nowrap; }
   .disk-space-bar { height: 5px; overflow: hidden; border-radius: 3px; background: var(--line); }
   .disk-space-bar > span { display: block; height: 100%; background: var(--s1); }
+}
+.allowances {
+  display: flex; flex-direction: column; gap: 8px;
+  .allowances-note { margin: 0; .nowrap { white-space: nowrap; } }
 }
 header .hrow {
   display: flex;
@@ -210,6 +220,10 @@ header .hrow {
     > :last-child { min-width: min(6em, 100%); flex-shrink: 1; }
     .sep { flex-shrink: 0; }
     > span > .tt-ref { display: inline-flex; min-width: 0; }
+    .ext-link { margin-left: 6px; font-size: 11px; }
+    // the icon's tooltip wrapper keeps its width: shrunk to 0, the icon spills past the row, and the crumbs'
+    // scroll-to-end then hides the first crumb's start under the mark
+    > span > .tt-ref:has(> .ext-link) { flex: none; }
     button {
       min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
       background: none; border: none; padding: 0 1px; font: inherit; color: var(--ink); cursor: pointer;
@@ -853,6 +867,42 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
       gap: 12px;
       text-align: left;
       .signin { display: block; text-align: center; }
+      // A remembered Google account ("Continue as <it>", up to five, newest first): an outlined row, not the
+      // filled primary button — Google's mark, the address, "Last used" on the first row only, an arrow.
+      .signin:has(.remembered-account) {
+        background: transparent;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        font-weight: 400;
+        padding: 12px 14px;
+        transition: border-color 120ms ease, background 120ms ease;
+        &:hover { filter: none; border-color: var(--ink-3); background: var(--surface); }
+      }
+      .signin:has(.remembered-account) ~ .signin .account-last-used { display: none; }
+      .remembered-account {
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr) auto 16px;
+        align-items: center;
+        gap: 10px;
+        text-align: left;
+        font-size: 14px;
+        svg { display: block; }
+        .account-email { overflow-wrap: anywhere; }
+        .account-last-used {
+          padding: 3px 7px;
+          border-radius: 4px;
+          background: color-mix(in srgb, var(--s1) 14%, transparent);
+          color: var(--s1);
+          font-size: 11px;
+          white-space: nowrap;
+        }
+        .account-arrow { color: var(--ink-3); grid-column: 4; }
+        @media (max-width: 440px) {
+          grid-template-columns: 18px minmax(0, 1fr) 16px;
+          .account-last-used { display: none; }
+          .account-arrow { grid-column: 3; }
+        }
+      }
       // Google's own rendered button (`oneTap`): GSI sizes it to its content,
       // so centre it; the box reserves the button's height while GSI loads.
       .signin-onetap { display: flex; justify-content: center; min-height: 40px; }
@@ -1036,6 +1086,7 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
   .gradbar {
     position: relative;
     display: inline-block;
+    flex: none;  // a fixed width for the whole drag: the pointer maps over the bar's rect
     width: 120px;
     height: 10px;
     border-radius: 3px;
@@ -1052,8 +1103,27 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
     pointer-events: none;
   }
   .gradsel {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--panel);
+    white-space: nowrap;
+    pointer-events: none;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
     font-weight: 600;
+  }
+  .date-scale {
+    display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+    button {
+      font: inherit; font-size: 10px; padding: 0 5px; cursor: pointer;
+      background: transparent; color: var(--ink-3); border: none;
+      &.on { background: var(--line); color: var(--ink); }
+      & + button { border-left: 1px solid var(--line); }
+    }
   }
 }
 
@@ -2415,6 +2485,7 @@ a.staged-chip {
     .obj-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; overflow-wrap: anywhere; cursor: copy; }
     .obj-meta { color: var(--ink-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
     .obj-dl { font-size: 12.5px; }
+    .ext-link { margin-left: -6px; }
     .obj-close {
       margin-left: auto; border: none; background: none; color: var(--ink-2);
       font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px;
