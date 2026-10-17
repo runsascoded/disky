@@ -96,4 +96,4 @@ def test_runs_and_expired(root):
 
 def test_trash_root_default_is_the_finder_trash(monkeypatch):
     monkeypatch.delenv("DISK_TREE_TRASH_DIR", raising=False)
-    assert str(trash.trash_root()) == os.path.expanduser("~/.Trash/disk-tree")
+    assert str(trash.trash_root()) == os.path.expanduser("~/.Trash/disky")

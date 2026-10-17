@@ -101,7 +101,7 @@ def staged_cmd(as_json: bool):
 @option("-j", "--json", "as_json", is_flag=True, help="Emit JSON")
 @option("-o", "--once", is_flag=True, help="--serve: drain the enqueued runs once and exit")
 @option("-s", "--serve", is_flag=True, help="Drain edge-enqueued runs from D1 and execute them (the CP4 drainer)")
-@option("-t", "--trash", "trash_on", is_flag=True, help="--serve: real runs rename paths into ~/.Trash/disk-tree/<run>/ instead of deleting (`disk-tree trash` restores / empties)")
+@option("-t", "--trash", "trash_on", is_flag=True, help="--serve: real runs rename paths into ~/.Trash/disky/<run>/ instead of deleting (`disk-tree trash` restores / empties)")
 @option("-u", "--uri", "uris", multiple=True, help="Dispatch only these staged URIs (repeatable); the plan stays open while items remain")
 @option("-x", "--ttl", default=None, help="--serve: with --trash, empty runs trashed longer ago than this (e.g. 7d) on each poll")
 @argument("plan_ref", required=False)
