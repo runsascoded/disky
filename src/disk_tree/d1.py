@@ -17,6 +17,11 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from disk_tree.env import get as env_get, name as env_name
+
+#: The D1 database to drain when none is passed (`DISKY_D1_DATABASE_ID`, else `DISK_TREE_D1_DATABASE_ID`).
+DATABASE_ID_VAR = env_name("D1_DATABASE_ID")
+
 API = "https://api.cloudflare.com/client/v4"
 
 
@@ -49,16 +54,16 @@ class D1Client:
     @classmethod
     def from_env(cls, database_id: str | None = None) -> "D1Client":
         """Build from the standard Cloudflare env vars. ``database_id`` falls
-        back to ``DISK_TREE_D1_DATABASE_ID``."""
+        back to ``DISKY_D1_DATABASE_ID`` (or ``DISK_TREE_D1_DATABASE_ID``)."""
         account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
         token = os.environ.get("CLOUDFLARE_API_TOKEN")
-        database_id = database_id or os.environ.get("DISK_TREE_D1_DATABASE_ID")
+        database_id = database_id or env_get("D1_DATABASE_ID")
         missing = [
             name
             for name, val in [
                 ("CLOUDFLARE_ACCOUNT_ID", account_id),
                 ("CLOUDFLARE_API_TOKEN", token),
-                ("DISK_TREE_D1_DATABASE_ID", database_id),
+                (DATABASE_ID_VAR, database_id),
             ]
             if not val
         ]

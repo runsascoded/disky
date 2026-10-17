@@ -158,8 +158,8 @@ def test_announce_formats_a_run():
 
 
 def test_d1_from_env_reports_missing_vars(monkeypatch):
-    for v in ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "DISK_TREE_D1_DATABASE_ID"):
+    for v in ("CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "DISKY_D1_DATABASE_ID", "DISK_TREE_D1_DATABASE_ID"):
         monkeypatch.delenv(v, raising=False)
     with pytest.raises(D1Error) as e:
         D1Client.from_env()
-    assert str(e.value) == "missing env for D1 access: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, DISK_TREE_D1_DATABASE_ID"
+    assert str(e.value) == "missing env for D1 access: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, DISKY_D1_DATABASE_ID"

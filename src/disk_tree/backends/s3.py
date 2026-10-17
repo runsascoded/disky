@@ -11,6 +11,7 @@ from tqdm import tqdm
 from utz import o
 
 from disk_tree import time
+from disk_tree.blobfs import R2_ENDPOINT_VAR
 
 from .base import Backend, ErrorCollector
 
@@ -39,7 +40,7 @@ class S3Backend(Backend):
     def _aws_cmd(self, subcmd: list[str]) -> list[str]:
         if self.scheme != 's3' and not self.endpoint_url:
             raise RuntimeError(
-                f"{self.scheme}:// needs an S3 endpoint — set DISK_TREE_R2_ENDPOINT_URL, or give the bucket an "
+                f"{self.scheme}:// needs an S3 endpoint — set {R2_ENDPOINT_VAR}, or give the bucket an "
                 "`endpoint_url` in buckets.yml"
             )
         cmd = ['aws']
