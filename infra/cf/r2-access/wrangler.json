@@ -10,12 +10,17 @@
   "dev": {"port": 3277},
   "observability": {"enabled": true, "head_sampling_rate": 1},
   "limits": {"cpu_ms": 10000},
-  "r2_buckets": [{"binding": "ARCHIVE", "bucket_name": "disky-r2-access-logs"}],
+  "r2_buckets": [
+    {"binding": "ARCHIVE", "bucket_name": "disky-r2-access-logs"},
+    {"binding": "PUBLIC", "bucket_name": "disk-tree-demo"}
+  ],
   "secrets": {"required": ["CF_OBSERVABILITY_TOKEN"]},
   "vars": {
     "ACCOUNT_ID": "0dcad5654e9744de6616f74b8df4af63",
     "ARCHIVE_BUCKET_NAME": "disky-r2-access-logs",
     "SOURCE_BUCKETS": "[\"jc-taxes\"]",
+    "PUBLIC_BUCKETS": "[\"jc-taxes\"]",
+    "PUBLIC_PREFIX": "access/r2",
     "HOURLY_CRON": "13 * * * *",
     "DAILY_CRON": "17 7 * * *",
     "LAG_HOURS": "2",

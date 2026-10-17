@@ -71,3 +71,14 @@ export function dagNodes(dag: Dag, phases: readonly ScanRunPhase[], running: boo
     }
   })
 }
+
+/** What the pipeline brush highlights: a step (`to` unset: a hovered or pinned node, or a phase's step), or an edge's
+ * two ends (`from` → `to`: a hovered arrow). */
+export interface Hl { from: string; to?: string }
+
+/** A step's role under the brush: `from` (the hovered / pinned step, or an arrow's tail), `to` (an arrow's head),
+ * `dimmed` (anything else while something is highlighted), or `''` (nothing is). */
+export function brushRole(hl: Hl | null, node: string | null): '' | 'from' | 'to' | 'dimmed' {
+  if (!hl || !node) return ''
+  return node === hl.from ? 'from' : node === hl.to ? 'to' : 'dimmed'
+}

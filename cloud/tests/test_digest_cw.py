@@ -17,7 +17,6 @@ import pytest
 
 from dt_cloud import digest as E
 from dt_cloud import digest_cw as D
-from dt_cloud import digest_plot as DP
 
 from digest_examples import CW_EXAMPLE, config_file
 
@@ -264,6 +263,13 @@ def test_rows_from_meta_buckets_switch():
         f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-1d#over-time) · [main]({SITE}/main-data?d=260902-1d#over-time) 712 TiB · 78.2% of 1 PB · "
         f"[hot]({SITE}/hot-data?d=260902-1d#over-time) 91 TiB · [dashboard]({SITE}/)"
     )
+
+
+def _node(n: str, b: float, kids=()) -> dict:
+    d = {"n": n, "b": round(b * TIB), "o": 1, "d": 20000}
+    if kids:
+        d["c"] = list(kids)
+    return d
 
 
 def test_primary_node():
@@ -628,123 +634,6 @@ def test_post_digest_empty_month(tmp_path: Path):
     assert fake.calls == []
 
 
-# ---- diff treemap ------------------------------------------------------------
-
-
-def _node(n: str, b: float, kids=()) -> dict:
-    d = {"n": n, "b": round(b * TIB), "o": 1, "d": 20000}
-    if kids:
-        d["c"] = list(kids)
-    return d
-
-
-BASE_TREE = _node("bkt", 160, [
-    _node("marin", 100, [_node("a", 60), _node("s", 40)]),
-    _node("tmp", 50, [_node("t14", 50)]),
-    _node("models", 10),
-])
-LATEST_TREE = _node("bkt", 165, [
-    _node("marin", 130, [_node("a", 50), _node("s", 70), _node("new", 10)]),
-    _node("tmp", 30, [_node("t14", 20), _node("t30", 10)]),
-    _node("iris", 5, [_node("x", 5)]),
-])
-
-
-def _shape(n):
-    """A `DiffNode` as `(name, Δ Ti)` for a leaf, `(name, Δ Ti, [kids…])` for a box."""
-    d = round(n.delta / TIB, 1)
-    return (n.name, d, [_shape(k) for k in n.kids]) if n.kids else (n.name, d)
-
-
-def test_diff_tree():
-    # per-dir Δ, nested; a dir on one side only is fully grown/shrunk; a box's
-    # kids by area desc then name; `iris` → its one child `x` collapses to `iris/x`
-    assert _shape(DP.diff_tree(BASE_TREE, LATEST_TREE)) == ("", 5.0, [
-        ("marin", 30.0, [("s", 30.0), ("a", -10.0), ("new", 10.0)]),
-        ("tmp", -20.0, [("t14", -30.0), ("t30", 10.0)]),
-        ("models", -10.0),
-        ("iris/x", 5.0),
-    ])
-    assert DP.diff_tree(BASE_TREE, BASE_TREE).kids == ()
-
-
-def test_diff_tree_area_is_gross():
-    # a box's area is its kids' (Σ|Δ| of the leaves), not its net Δ
-    d = DP.diff_tree(BASE_TREE, LATEST_TREE)
-    assert [(k.name, round(k.area / TIB, 1)) for k in d.kids] == [("marin", 50.0), ("tmp", 40.0), ("models", 10.0), ("iris/x", 5.0)]
-
-
-def test_diff_tree_residual():
-    # what the named children don't account for lands in `…` — including the
-    # tree builder's `(other)` (direct files + sub-floor dirs), never drawn by name
-    base = _node("bkt", 100, [_node("marin", 100, [_node("a", 60), _node("(other)", 40)])])
-    latest = _node("bkt", 130, [_node("marin", 130, [_node("a", 50), _node("(other)", 80)])])
-    assert _shape(DP.diff_tree(base, latest)) == ("", 30.0, [("marin", 30.0, [("…", 40.0), ("a", -10.0)])])
-
-
-def test_diff_tree_folds_small():
-    # gross |Δ| = 105 Ti; min_frac 0.2 → 21 Ti: `models` and `iris` fold into the
-    # top-level `…`; `marin`'s and `tmp`'s small kids fold away, leaving each one
-    # child, so each collapses to a leaf named for its dominant path (carrying the dir's net Δ)
-    assert _shape(DP.diff_tree(BASE_TREE, LATEST_TREE, min_frac=0.2)) == ("", 5.0, [
-        ("marin/s", 30.0),
-        ("tmp/t14", -20.0),
-        ("…", -5.0),
-    ])
-
-
-def test_diff_tree_max_depth():
-    # boxes nest at most `max_depth` deep; below that a dir is a leaf with its net Δ
-    assert _shape(DP.diff_tree(BASE_TREE, LATEST_TREE, max_depth=1)) == ("", 5.0, [
-        ("marin", 30.0), ("tmp", -20.0), ("models", -10.0), ("iris", 5.0),
-    ])
-
-
-def test_diff_tree_chain():
-    # single-child chains collapse into one box named by the whole chain
-    base = _node("bkt", 10, [_node("u", 10, [_node("v", 10, [_node("p", 5), _node("q", 5)])])])
-    latest = _node("bkt", 14, [_node("u", 14, [_node("v", 14, [_node("p", 8), _node("q", 6)])])])
-    assert _shape(DP.diff_tree(base, latest)) == ("", 4.0, [("u/v", 4.0, [("p", 3.0), ("q", 1.0)])])
-
-
-def test_diff_tree_drops_churn():
-    # `d` churned (+3/−3, each under the 4-Ti fold): net 0 → no area, not drawn
-    base = _node("bkt", 20, [_node("big", 10), _node("d", 10, [_node("p", 5), _node("q", 5)])])
-    latest = _node("bkt", 30, [_node("big", 20), _node("d", 10, [_node("p", 8), _node("q", 2)])])
-    assert _shape(DP.diff_tree(base, latest, min_frac=0.25)) == ("", 10.0, [("big", 10.0)])
-
-
-def test_squarify():
-    from dt_cloud.digest_plot import squarify
-
-    assert squarify([5], 0, 0, 3, 2) == [(0, 0, 3, 2)]
-    # a wide rect splits into vertical strips; a tall one into horizontal strips
-    assert squarify([1, 1], 0, 0, 2, 1) == [(0, 0, 1, 1), (1, 0, 1, 1)]
-    assert squarify([1, 1], 0, 0, 1, 2) == [(0, 0, 1, 1), (0, 1, 1, 1)]
-    # 4×2 with [2,1,1]: the 2 takes a 2×2 column (ratio 1); the two 1s share the
-    # remaining 2×2 as stacked 2×1 (adding the second doesn't worsen the row)
-    assert squarify([2, 1, 1], 0, 0, 4, 2) == [(0, 0, 2, 2), (2, 0, 2, 1), (2, 1, 2, 1)]
-    rects = squarify([6, 6, 4, 3, 2, 2, 1], 10, 20, 6, 4)
-    assert len(rects) == 7
-    assert round(sum(w * h for _, _, w, h in rects), 9) == 24
-    assert [round(w * h, 9) for _, _, w, h in rects] == [6, 6, 4, 3, 2, 2, 1]
-    assert squarify([], 0, 0, 1, 1) == []
-
-
-def test_render_smoke(tmp_path: Path):
-    pytest.importorskip("matplotlib")
-    from dt_cloud.digest_plot import render_quota
-
-    rows = [{"ts": E.scan_ts(s), "tb": D.rows_from_meta([(s, m)], P)[0].tb} for s, m in SEPT]
-    out = tmp_path / "p.png"
-    render_quota(rows, out, "t", "cw.example.org", 910.0, "1 PB", diff=DP.diff_tree(BASE_TREE, LATEST_TREE), diff_label="8/31 → 9/2")
-    assert out.stat().st_size > 10_000
-    render_quota(rows, tmp_path / "s.png", "t", "cw.example.org", 910.0, "1 PB")  # sparkline only
-    assert (tmp_path / "s.png").stat().st_size > 5_000
-    render_quota(rows, tmp_path / "n.png", "t", "cw.example.org")  # no quota: y fit to the data, no headroom band
-    assert (tmp_path / "n.png").stat().st_size > 5_000
-
-
 # ---- redo replies (rule change) --------------------------------------------
 
 
@@ -885,3 +774,17 @@ def test_op_sender():
     assert [E.config_from_dict({**base, **extra}).op_sender() for extra in ({}, {"op_icon": "mark.png"}, {"op_icon": "https://x.example/m.png"})] == [
         {"icon_emoji": ":calendar:"}, {"icon_url": "https://icons.example.org/mark.png"}, {"icon_url": "https://x.example/m.png"},
     ]
+
+
+def test_icons_dir_resolves_beside_the_config_from_a_task_work_dir(tmp_path, monkeypatch):
+    """A Nextflow step runs in its task work dir, not /app: the config's relative `icons_dir` resolves against the
+    config's repo root (`<app>/job/digest.yml` → `<app>/job/icons-x`), ahead of the cwd (hf's first NF scan: no digest)."""
+    from dt_cloud.cli import _icons_dir
+
+    app, work = tmp_path / "app", tmp_path / "work" / "ab" / "cd12"
+    (app / "job" / "icons-x").mkdir(parents=True)
+    (app / "job" / "digest.yml").write_text("{}\n")
+    work.mkdir(parents=True)
+    monkeypatch.chdir(work)
+    assert (_icons_dir("job/icons-x", app / "job" / "digest.yml"), _icons_dir("/abs/icons", app / "job" / "digest.yml")) == (
+        app / "job" / "icons-x", Path("/abs/icons"))

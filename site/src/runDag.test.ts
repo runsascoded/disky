@@ -1,6 +1,6 @@
 // The DAG view's model (src/runDag.ts): layout and the join of nodes to phases, over the engine-neutral graph.
 import { describe, expect, it } from 'vitest'
-import { type Dag, dagLayers, dagNodes } from './runDag'
+import { brushRole, type Dag, dagLayers, dagNodes } from './runDag'
 import type { ScanRunPhase } from './scanRunsModel'
 
 // What `dt_cloud.run_dag.from_nextflow` stores for job/nf/scan.nf over cw's profile (cloud/tests/test_run_dag.py)
@@ -58,5 +58,14 @@ describe('dagNodes', () => {
       ['list_source', 'done'], ['index', 'done'], ['static_names', 'failed'], ['publish_r2', 'unrecorded'],
       ['interval_store', 'unrecorded'], ['index_rows', 'unrecorded'], ['post', 'unrecorded'],
     ])
+  })
+})
+
+describe('brushRole', () => {
+  it('marks a step, an arrow\'s two ends, and dims the rest', () => {
+    const roles = (hl: Parameters<typeof brushRole>[0]) => ['list_source', 'index', 'post', null].map(n => brushRole(hl, n))
+    expect(roles(null)).toEqual(['', '', '', ''])
+    expect(roles({ from: 'index' })).toEqual(['dimmed', 'from', 'dimmed', ''])
+    expect(roles({ from: 'list_source', to: 'index' })).toEqual(['from', 'to', 'dimmed', ''])
   })
 })

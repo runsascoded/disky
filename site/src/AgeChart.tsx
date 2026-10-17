@@ -1,3 +1,4 @@
+import { readState } from './readLens'
 import { useMemo, useState } from 'react'
 import { dateColor, dateGradientCss, epochDaysToDate, userColor } from './colors'
 import type { UserIndexEntry } from './colors'
@@ -45,7 +46,7 @@ const bucketLabel = (b: number, gran: Granularity): string =>
 /** Stacked bars of bytes by created date (month/week/day), split per color mode.
  *  `readRange` null means the read axis is unavailable for this scan (no access
  *  window, or age strata published before they carried `a`). */
-export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, scheme = 'gs://', band, onBand }: {
+export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, readUnlogged = [], scheme = 'gs://', band, onBand }: {
   rows: AgeRow[]
   /** The diff window's "before" scan, same path — enables the diff toggle. When
    *  present the chart can show per-vintage growth/shrink (created-date bucket
@@ -60,6 +61,9 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   onMode?: (m: ColorMode) => void
   userIdx: Map<string, UserIndexEntry>
   readRange?: { min: number; max: number } | null
+  /** Top-level cells in view the access logs don't cover: their bytes have no `a`, so they land in the
+   *  no-read stratum, which then says so (the strata carry no bucket to split them out by). */
+  readUnlogged?: string[]
   scheme?: string
   /** The shared date brush: hovering a bar brushes the map to its days; a band
    *  set elsewhere (the map's gradient) shades the bars it covers. */
@@ -110,6 +114,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   }, [baseRows, rows, gran])
   const showDiff = diffOn && !!diff
 
+  const neverLabel = readUnlogged.length ? `no observed reads, or not logged (${readUnlogged.join(', ')})` : 'no observed reads'
   const { buckets, byBucket, colorOf, labelOf, segOrder, legend } = useMemo(() => {
     const slotMap = new Map(catOrder.slice(0, 8).map((k, i) => [k, SLOTS[i]]))
     const userMode = mode === 'user'
@@ -127,14 +132,13 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
       byBucket.set(bk, m)
     }
     const buckets = [...byBucket.keys()].sort((a, b) => a - b)
-    const rr = readRange && readRange.max > readRange.min ? readRange : null
     const colorOf = (k: string): string =>
       mode === 'read'
-        ? (k === String(NEVER) || !rr ? 'var(--never-read)' : dateColor((Number(k) - rr.min) / (rr.max - rr.min)))
+        ? (k === String(NEVER) ? 'var(--never-read)' : (rs => rs.kind === 'read' ? dateColor(rs.t) : 'var(--never-read)')(readState(Number(k), true, readRange)))
       : userMode ? (k === 'unattributed' ? 'var(--t-unattr)' : userColor(k, userIdx))
       : `var(${slotMap.get(k) ?? '--other'})`
     const labelOf = (k: string): string =>
-      mode === 'read' ? (k === String(NEVER) ? 'no observed reads' : `read ${epochDaysToDate(Number(k))}`)
+      mode === 'read' ? (k === String(NEVER) ? neverLabel : `read ${epochDaysToDate(Number(k))}`)
       : k === 'unattributed' ? 'unowned' // internal key; display name is standardized
       : k
     // Stack order: categorical modes put the biggest slice at the base; the
@@ -153,7 +157,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
             ['(other)', 'var(--other)'],
           ]
     return { buckets, byBucket, colorOf, labelOf, segOrder, legend }
-  }, [rows, catOrder, mode, userIdx, gran, readRange])
+  }, [rows, catOrder, mode, userIdx, gran, readRange, neverLabel])
 
   const maxB = useMemo(
     () => Math.max(...buckets.map(b => [...byBucket.get(b)!.values()].reduce((a, v) => a + v, 0))),
@@ -192,7 +196,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
           </span>
         ) : mode === 'read' ? (
           <>
-            <span className="li"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
+            <span className="li"><span className="sw" style={{ background: 'var(--never-read)' }} />{neverLabel}</span>
             {readRange && (
               <span className="li gradli">
                 {epochDaysToDate(readRange.min)}

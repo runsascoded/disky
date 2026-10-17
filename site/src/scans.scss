@@ -37,7 +37,10 @@
     .failed-label { fill: var(--danger); } }
   .sr-dagwrap { margin: 6px 0 14px; }
   .sr-dag { .edge { fill: none; stroke: var(--ink-3); stroke-width: 1.3; } .arrow { fill: var(--ink-3); }
-    .node { cursor: default;
+    // an arrow's hover band: wide and invisible, under the nodes (drawn after), so the gap between two steps is a target
+    .edge-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; }
+    .edge-g.brushed .edge { stroke: var(--ink); stroke-width: 2; } .edge-g.dimmed { opacity: 0.3; }
+    .node { cursor: pointer;
       rect { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
       .name { fill: var(--ink); font-size: 13px; font-weight: 600; font-family: ui-monospace, monospace; }
       .sub { fill: var(--ink-3); font-size: 11.5px; }
@@ -46,10 +49,20 @@
       &.failed rect { stroke: var(--danger); fill: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
       &.failed .sub { fill: var(--danger); }
       &.pending .name, &.unrecorded .name { fill: var(--ink-3); } }
-    a .node { cursor: pointer; } a:hover .node rect { stroke-width: 2.5; }
-    .node.brushed rect { stroke-width: 3; } .node.dimmed { opacity: 0.3; } }
-  // brushing with the pipeline DAG: the hovered step's phases stand out, the rest fade
-  .sr-gantt g.dimmed { opacity: 0.25; } .sr-gantt g.brushed .sr-row-hit { fill: color-mix(in srgb, var(--ink) 8%, transparent); }
+    .node.brushed rect { stroke-width: 3; } .node.to rect { stroke-dasharray: 5 3; } .node.dimmed { opacity: 0.3; }
+    .node.pinned rect { stroke: var(--ink); } }
+  // brushing with the pipeline DAG: the step's phases stand out, the rest fade; the row under the pointer stands out
+  // most (declared last, at the brushed rule's specificity), and an arrow's head step's rows are lighter than its tail's
+  .sr-gantt { g { cursor: default; } g.brushed, g.dimmed { cursor: pointer; }
+    g.dimmed { opacity: 0.25; }
+    g.brushed .sr-row-hit { fill: color-mix(in srgb, var(--ink) 7%, transparent); }
+    g.brushed.to .sr-row-hit { fill: color-mix(in srgb, var(--ink) 4%, transparent); }
+    g.brushed:hover .sr-row-hit, g:hover .sr-row-hit { fill: color-mix(in srgb, var(--ink) 14%, transparent); }
+    g:hover .lbl { fill: var(--ink); } }
+  .sr-drawer { margin: 0 0 14px; padding: 8px 12px 4px; border: 1px solid var(--line); border-left: 3px solid var(--ink-3); border-radius: 4px; background: var(--surface);
+    .sr-drawer-head { display: flex; align-items: baseline; gap: 10px; font-size: 13.5px; margin-bottom: 4px; }
+    .sr-drawer-close { margin-left: auto; background: none; border: 1px solid var(--line); border-radius: 4px; color: var(--ink-2); cursor: pointer; font: inherit; font-size: 12px; padding: 1px 8px;
+      &:hover { color: var(--ink); border-color: var(--ink-3); } } }
   .sr-bar { vertical-align: middle; .sr-bar-bg { fill: var(--other); } }
   .sr-runs .links, .runs .links { color: var(--ink-3); }
   .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;

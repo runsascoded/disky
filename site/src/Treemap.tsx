@@ -28,6 +28,9 @@ import { DATE_SCALES, type DateAxis, useDateScale } from './dateScale'
 import type { DayBand } from './dayBand'
 import { RootSourceLine } from './UnionNotes'
 import { AppActions, useProxyInfo } from './laptop'
+import { readState } from './readLens'
+
+const allLogged = () => true
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -179,7 +182,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', home, redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -189,6 +192,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   dateRange: DateAxis | null
   // Access-log observation window (epoch days) — domain of the read lens.
   readRange?: DateAxis | null
+  /** Whether the access logs cover a top-level cell (`readLens.ts`); uncovered cells show "not logged". */
+  readLogged?: (bucket: string | undefined) => boolean
+  /** The view's top-level cells the logs don't cover, for the legend. */
+  readUnlogged?: string[]
   hl?: Highlight | null
   /** Legend-row interactions (plotly-style): hover a row = solo it (others
    *  fade, map dims to it), click = pin (sticky `hl`; click again, any empty
@@ -340,12 +347,17 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           ink = 'var(--ink)'
         }
       } else if (mode === 'read') {
-        if (kid.a != null && readRange && readRange.max > readRange.min) {
-          bg = dateColor(readRange.t(kid.a))
+        const rs = readState(kid.a, readLogged(kidPath[1]?.n), readRange)
+        if (rs.kind === 'read') {
+          bg = dateColor(rs.t)
           ink = inkFor(bg)
-        } else {
+        } else if (rs.kind === 'never') {
           // Never read since logging began — the sweep-interesting bucket.
           bg = 'var(--never-read)'
+          ink = 'var(--ink)'
+        } else {
+          // No access logs cover this cell's bucket: unknown, not unread.
+          bg = 'var(--other)'
           ink = 'var(--ink)'
         }
       } else {
@@ -411,7 +423,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           : `color-mix(in oklab, ${bg} ${depth === 1 ? 40 : 62}%, var(--surface))`
       return { bg, ink, hatch, segments, edge, opacity: dim ? 0.22 : undefined }
     },
-    [mode, shade, slotOf, userIdx, dateRange, readRange, effHl, effBand, lens],
+    [mode, shade, slotOf, userIdx, dateRange, readRange, readLogged, effHl, effBand, lens],
   )
 
   // owner roll-up for the current view (user coloring only): everyone ≥1% of
@@ -589,6 +601,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
               <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}). Logs may omit events; this is not proof of no access.`}>
                 <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
               </Tooltip>
+              {readUnlogged.length > 0 && (
+                <Tooltip content={`No access logs are collected for ${readUnlogged.join(', ')}: reads there are unknown, not absent.`}>
+                  <span className="li has-tt"><span className="sw" style={{ background: 'var(--other)' }} />not logged</span>
+                </Tooltip>
+              )}
               {gradLi(readRange, 'a')}
             </>
           ) : dateRange ? gradLi(dateRange, 'd') : null}
@@ -659,7 +676,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
-            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>}
+            : readRange && !n.n.startsWith('(') && (readLogged(path[1]?.n)
+              ? <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>
+              : <> · reads not logged</>)}
         </div>
         {classes}
         {users}

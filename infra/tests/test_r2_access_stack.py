@@ -71,6 +71,7 @@ def test_private_stack_and_explicit_cron_enablement(enabled: bool):
             "keepBindings": ["secret_text"], "observability": {"enabled": True, "headSamplingRate": 1},
             "limits": {"cpuMs": 10000},
             "bindings": [{"name": "ARCHIVE", "type": "r2_bucket", "bucketName": bucket},
+                         {"name": "PUBLIC", "type": "r2_bucket", "bucketName": "disk-tree-demo"},
                          *[{"name": key, "type": "plain_text", "text": value} for key, value in sorted(DEFINITION["vars"].items())]],
         }
 

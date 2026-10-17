@@ -3,7 +3,16 @@ const HOUR = 3_600_000
 const DAY = 24 * HOUR
 const STATE_KEY = 'state.json'
 type Archive = Pick<Env['ARCHIVE'], 'put' | 'get'>
-type CollectorEnv = Omit<Env, 'ARCHIVE'> & { ARCHIVE: Archive }
+type CollectorEnv = Omit<Env, 'ARCHIVE' | 'PUBLIC' | 'PUBLIC_BUCKETS' | 'PUBLIC_PREFIX' | 'EXCLUDED_ACCESS_KEY_IDS'> & {
+  ARCHIVE: Archive
+  /** Optional: where the derived, public read-recency files go (`PUBLIC_BUCKETS` names which sources). */
+  PUBLIC?: Pick<Env['ARCHIVE'], 'put'>
+  PUBLIC_BUCKETS?: string
+  PUBLIC_PREFIX?: string
+  /** Secret, optional: a JSON array of access key ids whose requests are the deployment's own (its scanner's
+   * LISTs/HEADs). They stay in the private aggregates (the sampling check counts them) but never reach `PUBLIC`. */
+  EXCLUDED_ACCESS_KEY_IDS?: string
+}
 
 export class CollectionError extends Error {
   constructor(readonly code: string) { super(`r2-access: ${code}`) }
@@ -29,6 +38,11 @@ export function settings(env: CollectorEnv, cron: string, scheduledTime: number)
     if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(name) || name === env.ARCHIVE_BUCKET_NAME || buckets.includes(name)) throw new CollectionError('invalid_config')
     buckets.push(name)
   }
+  const published = env.PUBLIC_BUCKETS ? JSON.parse(env.PUBLIC_BUCKETS) as unknown : []
+  if (!Array.isArray(published) || published.some(name => typeof name !== 'string' || !buckets.includes(name))) throw new CollectionError('invalid_config')
+  if (published.length && (!env.PUBLIC || !env.PUBLIC_PREFIX || !/^[a-z0-9][a-z0-9/_-]*[a-z0-9]$/.test(env.PUBLIC_PREFIX))) throw new CollectionError('invalid_config')
+  const excluded = env.EXCLUDED_ACCESS_KEY_IDS ? JSON.parse(env.EXCLUDED_ACCESS_KEY_IDS) as unknown : []
+  if (!Array.isArray(excluded) || excluded.some(id => typeof id !== 'string' || !id)) throw new CollectionError('invalid_config')
   if (cron !== env.HOURLY_CRON && cron !== env.DAILY_CRON) throw new CollectionError('unwired_cron')
   const lag = integer(env.LAG_HOURS, 1, 24)
   const lookback = integer(env.LOOKBACK_HOURS, 1, 144)
@@ -38,6 +52,7 @@ export function settings(env: CollectorEnv, cron: string, scheduledTime: number)
   const to = Math.floor(scheduledTime / HOUR) * HOUR - lag * HOUR
   return {
     buckets, to, replay: cron === env.DAILY_CRON,
+    published: published as string[], publicPrefix: env.PUBLIC_PREFIX ?? '', excluded: new Set(excluded as string[]),
     lookback: lookback * HOUR, overlap: overlap * HOUR, floor: to - replay * HOUR,
     pageSize: integer(env.PAGE_SIZE, 1, 2000),
     maxPages: integer(env.MAX_PAGES, 1, 100),
@@ -123,9 +138,10 @@ function completed(text: string) {
   return result
 }
 
-export interface Event { id: string, action: string, timestamp: number }
+/** `key`: the object key (absent for bucket-level actions: LIST, HeadBucket); `own`: made with an excluded access key. */
+export interface Event { id: string, action: string, timestamp: number, key: string | null, status: number | null, own: boolean }
 
-export function parsePage(text: string, bucket: string, from: number, to: number): Event[] {
+export function parsePage(text: string, bucket: string, from: number, to: number, excluded: Set<string> = new Set()): Event[] {
   const page = object(completed(text).events)
   if (!Array.isArray(page.events) || page.count !== page.events.length) throw new CollectionError('page_count_mismatch')
   return page.events.map((value: unknown) => {
@@ -136,7 +152,13 @@ export function parsePage(text: string, bucket: string, from: number, to: number
     if (typeof source.action !== 'string' || !Number.isSafeInteger(event.timestamp)) throw new CollectionError('invalid_event')
     const timestamp = event.timestamp as number
     if (timestamp < from || timestamp >= to) throw new CollectionError('event_outside_window')
-    return { id: metadata.id, action: source.action, timestamp }
+    const resource = source.resource == null ? {} : object(source.resource)
+    const response = source.response == null ? {} : object(source.response)
+    const actor = source.actor == null ? {} : object(source.actor)
+    const key = typeof resource.key === 'string' && resource.key ? resource.key : null
+    const status = Number.isSafeInteger(response.status) ? response.status as number : null
+    const own = typeof actor.accessKeyId === 'string' && excluded.has(actor.accessKeyId)
+    return { id: metadata.id, action: source.action, timestamp, key, status, own }
   })
 }
 
@@ -188,12 +210,15 @@ export function actionClass(action: string): string {
   return CLASSES[action] ?? 'other'
 }
 
+/** `[timestamp, action, key, status, own]`; a version-1 day holds `[timestamp, action]` (no key: never published). */
+export type DayEvent = [number, string, string | null, number | null, 0 | 1] | [number, string]
+
 export interface DayAggregate {
-  schema_version: 1
+  schema_version: 1 | 2
   bucket: string
   day: string
-  /** Distinct provider events, keyed by immutable event id: `[timestamp, action]`. */
-  events: Record<string, [number, string]>
+  /** Distinct provider events, keyed by immutable event id. */
+  events: Record<string, DayEvent>
   actions: Record<string, number>
   classes: Record<string, number>
   /** UTC hour (`"00"`–`"23"`) → the latest sampling check covering it. */
@@ -234,11 +259,12 @@ export function mergeDay(
   events: Event[],
   cells: Record<string, { estimated: number, maxInterval: number }>,
 ): DayAggregate {
-  const merged: Record<string, [number, string]> = { ...previous?.events }
+  const merged: Record<string, DayEvent> = { ...previous?.events }
   for (const event of events) {
     const known = merged[event.id]
     if (known && (known[0] !== event.timestamp || known[1] !== event.action)) throw new CollectionError('event_identity_changed')
-    merged[event.id] = [event.timestamp, event.action]
+    if (known && known.length > 2 && (known[2] !== event.key || known[3] !== event.status)) throw new CollectionError('event_identity_changed')
+    merged[event.id] = [event.timestamp, event.action, event.key, event.status, event.own ? 1 : 0]
   }
   const actions: Record<string, number> = {}
   const classes: Record<string, number> = {}
@@ -255,7 +281,18 @@ export function mergeDay(
     const seen = observed[hour] ?? 0
     hours[hour] = { observed: seen, estimated: cell.estimated, max_sample_interval: cell.maxInterval, capture: capture(seen, cell.estimated, cell.maxInterval) }
   }
-  return { schema_version: 1, bucket, day, events: sorted(merged), actions: sorted(actions), classes: sorted(classes), hours: sorted(hours) }
+  return { schema_version: 2, bucket, day, events: sorted(merged), actions: sorted(actions), classes: sorted(classes), hours: sorted(hours) }
+}
+
+/** A day's public read-recency file: one JSON line per event, sorted by (timestamp, id), with only the
+ * object key, time, action and status: no IPs, user agents, actors or access key ids. The deployment's own
+ * requests (`own`) and version-1 events (no key recorded) are left out. */
+export function publicDay(day: DayAggregate): string {
+  const lines = Object.entries(day.events)
+    .filter((entry): entry is [string, [number, string, string | null, number | null, 0 | 1]] => entry[1].length === 5 && entry[1][4] === 0)
+    .sort(([a, [ta]], [b, [tb]]) => ta - tb || (a < b ? -1 : a > b ? 1 : 0))
+    .map(([id, [ts, action, key, status]]) => JSON.stringify({ id, bucket: day.bucket, ts, action, key, status }))
+  return lines.map(line => `${line}\n`).join('')
 }
 
 async function readJson<T>(archive: Archive, key: string): Promise<{ value: T, etag: string } | null> {
@@ -287,7 +324,10 @@ export async function collect(
   const query = async (body: object) => {
     const response = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${env.ACCOUNT_ID}/workers/observability/telemetry/query`, {
       method: 'POST', headers: { authorization: `Bearer ${env.CF_OBSERVABILITY_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000), redirect: 'error',
+      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000),
+      // Workers' fetch takes only `follow` / `manual` (`error` throws a TypeError: the first scheduled run, 10-17 04:13Z,
+      // failed on it in 151 ms); a manual 3xx isn't `ok`, so it fails the run as `provider_http_3xx`.
+      redirect: 'manual',
     })
     if (!response.ok) {
       await response.body?.cancel()
@@ -307,7 +347,7 @@ export async function collect(
     for (;;) {
       if (pages >= config.maxPages) throw new CollectionError('page_cap_exceeded')
       const text = await query(eventsBody(bucket, from, to, config.pageSize, offset))
-      const page = parsePage(text, bucket, from, to)
+      const page = parsePage(text, bucket, from, to, config.excluded)
       pages++
       if (page.length > config.pageSize) throw new CollectionError('page_size_exceeded')
       const next = page.at(-1)?.id
@@ -342,6 +382,11 @@ export async function collect(
       const merged = mergeDay(bucket, day, known, byDay.get(day) ?? [], cells[day] ?? {})
       fresh += Object.keys(merged.events).length - Object.keys(known?.events ?? {}).length
       for (const hour of Object.keys(cells[day] ?? {})) hours[merged.hours[hour].capture]++
+      // Public files are rewritten for every day this window touched (idempotent, and a failed write
+      // heals on the next run), before the state publish below.
+      if (config.published.includes(bucket)) {
+        await env.PUBLIC!.put(`${config.publicPrefix}/${bucket}/${day}.jsonl`, publicDay(merged), { httpMetadata: { contentType: 'application/x-ndjson' } })
+      }
       const text = JSON.stringify(merged)
       if (known && JSON.stringify(known) === text) continue
       const key = `agg/${bucket}/${day}/${runId}.json`
