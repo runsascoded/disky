@@ -2288,6 +2288,46 @@ def access_r2_export(
     print(json.dumps(archive["summary"], sort_keys=True))
 
 
+@access.command("r2-agg")
+@option("-d", "--asof", required=True, callback=scan_id_option, help="Scan id: requests at or after its instant are cut (the scan sees reads before it)")
+@option("-o", "--out", "out", type=Path, required=True, help="Layer-2a agg parquet to write (`path-index -x`'s input)")
+@argument("inputs", nargs=-1, required=True)
+def access_r2_agg(
+    asof: str,
+    out: Path,
+    inputs: tuple[str, ...],
+) -> None:
+    """Aggregate the R2 collector's public per-day read files (`<bucket>/<day>.jsonl` globs) into layer-2a.
+
+    The files carry object keys, times, actions and statuses only (no requester identity); see
+    `disk_tree.access.parsers.r2`. Prints the aggregate's stats as JSON; with no read before the scan's instant
+    it writes nothing (`rows_in` 0).
+    """
+    import duckdb
+
+    from disk_tree.access.aggregate import aggregate_access
+    from disk_tree.access.parsers.r2 import parse
+
+    from .scan_id import scan_time
+
+    con = duckdb.connect()
+    rels = [parse(i, con=con) for i in inputs]
+    raw = rels[0]
+    for rel in rels[1:]:
+        raw = raw.union(rel)
+    con.register("r2_access_rows", raw)
+    cut = scan_time(asof)
+    before = con.execute("SELECT count(*) FROM r2_access_rows WHERE ts < ?", [cut]).fetchone()[0]
+    if not before:
+        # Nothing read before the scan's instant (a new collector): no aggregate, and no read lens yet.
+        err(f"r2-agg: no reads before {cut.isoformat()}; {out} not written")
+        print(json.dumps({"hours": 0, "paths_out": 0, "rows_in": 0, "total_bytes_out": 0}, sort_keys=True))
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stats = aggregate_access(con, "(SELECT DISTINCT * FROM r2_access_rows)", str(out), as_of=cut)
+    print(json.dumps(stats, sort_keys=True))
+
+
 @access.command("ingest")
 @option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: $ACCESS_BUCKETS, space-separated)")
 @option("-c", "--max-chunk-gb", default=32.0, help="Max staged CSV bytes per processing chunk")
@@ -2817,10 +2857,11 @@ def cascade_a2a(bucket: str, index_path: str, as_json: bool, top: int, dirs_tier
         raise SystemExit(1)
 
 
-def _icons_dir(rel: str = "job/icons") -> Path:
-    """``rel`` (e.g. `job/icons`) in both layouts: pip-installed in the job image
-    (cwd=/app → /app/job/icons) or the repo checkout (…/parents[3]/job/icons)."""
-    cands = (Path.cwd() / rel, Path(__file__).resolve().parents[3] / rel)
+def _icons_dir(rel: str = "job/icons", config: Path | None = None) -> Path:
+    """``rel`` (e.g. `job/icons`) in every layout: beside the digest config's repo root (`/app/job/digest.yml` →
+    `/app/job/icons`: a Nextflow step runs in its task work dir, not /app, so the cwd misses it — hf, 2026-10-17),
+    the cwd (the one-VM job, cwd=/app), or the repo checkout (…/parents[3]/job/icons)."""
+    cands = (*([config.resolve().parent.parent / rel] if config else []), Path.cwd() / rel, Path(__file__).resolve().parents[3] / rel)
     return next((c for c in cands if c.exists()), cands[-1])
 
 
@@ -2914,7 +2955,7 @@ def _digest(
     from thrds.slack import SlackClient
 
     client = SlackClient(token, channel)
-    icons = icons_dir or _icons_dir(cfg.icons_dir)
+    icons = icons_dir or _icons_dir(cfg.icons_dir, config_path)
 
     def deploy(local: Path, name: str) -> str | None:
         # publish the icons dir (incl. the freshly-rendered plot) to the

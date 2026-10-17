@@ -32,6 +32,7 @@ import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { LaptopIndicator } from './laptop'
+import { readLogged, unloggedOf } from './readLens'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
 import { dateAxis, useDateScale } from './dateScale'
@@ -734,6 +735,8 @@ function AppContent() {
   const readRange = useMemo((): DateRange | null =>
     meta?.access ? { min: meta.access.from, max: meta.access.to } : null,
   [meta])
+  // Which top-level cells (source buckets) the access logs cover: in a union, the rest are unlogged.
+  const readLoggedOf = useMemo(() => readLogged(meta?.access), [meta])
   // No explicit `?c=` → a scope-appropriate default; an explicit pick always
   // wins: an attribution store colors by owner (on a one-owner view the
   // interesting axis is who else is in there), any other by tree, unless the
@@ -751,7 +754,8 @@ function AppContent() {
   // the map. The read axis needs strata that carry `a` (scans published from
   // 8/29 on) — without them it's offered disabled and the chart falls back to
   // written.
-  const ageReadRange = age.some(r => r.a != null) ? readRange : null
+  // Drilled into a bucket the logs don't cover: the read axis has nothing to say there.
+  const ageReadRange = age.some(r => r.a != null) && (!drillPath || readLoggedOf(drillPath.split('/')[0])) ? readRange : null
   // Only axes the rows actually carry a per-stratum value for are offered (no
   // dead buttons): `read` needs `a`, `user` needs `u`, `tree` needs `d1`. The
   // Phase-A per-path index carries only `(d, b, o)`, so `date` is the axis;
@@ -907,6 +911,11 @@ function AppContent() {
   // The table's path segments, stable while `mapPath` is (a fresh array per
   // render defeated every memo keyed on it).
   const tblSegs = useMemo(() => mapPath?.slice(1).map(n => n.n) ?? [], [mapPath])
+  // The view's uncovered top-level cells (the legends' "not logged" list): the root's children at the
+  // root, else the drilled bucket alone.
+  const readUnlogged = useMemo(() => !meta?.access?.buckets || !mapPath ? []
+    : unloggedOf(mapPath.length > 1 ? [mapPath[1].n] : (mapPath[0].c ?? []).map(n => n.n), readLoggedOf),
+  [meta, mapPath, readLoggedOf])
   // Each table row's listed match roots: from the table's own path's response (full, else its first paint) —
   // exact when its `matched` list is every root, a lower bound when it is capped, unknown otherwise.
   const tblPath = mapPath ? tblSegs.join('/') : null
@@ -1212,7 +1221,7 @@ function AppContent() {
             <span className="lbl">color</span>
             <Explain text={
               effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (a folder’s cell = its newest object). {store.objectsNote}</>
-              : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
+              : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then.{readUnlogged.length > 0 && <> Gray = <b>not logged</b>: no access logs are collected for {readUnlogged.join(', ')}.</>} Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
             }>
@@ -1334,6 +1343,8 @@ function AppContent() {
             userIdx={userIdx}
             dateRange={dateRange}
             readRange={readAxis}
+            readLogged={readLoggedOf}
+            readUnlogged={readUnlogged}
             hl={effHl}
             onPickUser={u => pickUser(u, false)}
             onPickUnowned={pickUnowned}
@@ -1402,6 +1413,7 @@ function AppContent() {
               rowMatches={tblRowMatches}
               brush={brush}
               onBrush={setBrush}
+              readLogged={meta?.access?.buckets ? readLoggedOf : undefined}
             /></div>
           )}
         </>
@@ -1603,7 +1615,7 @@ function AppContent() {
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} band={band} onBand={setBand} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
         )}
       </section>
       )}

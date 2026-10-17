@@ -18,7 +18,10 @@ worker_config = Path(config.get("workerConfig") or here / "wrangler.json")
 definition = json.loads(worker_config.read_text())
 account = definition["account_id"]
 variables = definition["vars"]
-bucket_name = definition["r2_buckets"][0]["bucket_name"]
+buckets = {b["binding"]: b["bucket_name"] for b in definition["r2_buckets"]}
+bucket_name = buckets["ARCHIVE"]
+# Optional: an existing bucket (not managed here) that receives the derived, public read-recency files.
+public_bucket = buckets.get("PUBLIC")
 enabled = config.get_bool("enabled") or False
 configured_retention = config.get_int("retentionDays")
 retention = 30 if configured_retention is None else configured_retention
@@ -26,6 +29,10 @@ if not re.fullmatch(r"[a-f0-9]{32}", account) or variables["ACCOUNT_ID"] != acco
     raise pulumi.RunError("Worker account and ACCOUNT_ID must match")
 if variables["ARCHIVE_BUCKET_NAME"] != bucket_name or bucket_name in json.loads(variables["SOURCE_BUCKETS"]):
     raise pulumi.RunError("Archive binding must match its name and must not be a source")
+if set(buckets) - {"ARCHIVE", "PUBLIC"}:
+    raise pulumi.RunError("Only ARCHIVE and PUBLIC R2 bindings are supported")
+if public_bucket is not None and (public_bucket == bucket_name or public_bucket in json.loads(variables["SOURCE_BUCKETS"])):
+    raise pulumi.RunError("The public bucket must be neither the private archive nor a source")
 if definition["workers_dev"] or definition["preview_urls"]:
     raise pulumi.RunError("Collector must not have public Worker URLs")
 if definition["triggers"]["crons"]:
@@ -71,6 +78,7 @@ collector = cf.WorkersScript(
     compatibility_flags=definition["compatibility_flags"],
     bindings=[
         {"name": "ARCHIVE", "type": "r2_bucket", "bucket_name": archive.name},
+        *([{"name": "PUBLIC", "type": "r2_bucket", "bucket_name": public_bucket}] if public_bucket else []),
         *[{"name": key, "type": "plain_text", "text": value} for key, value in sorted(variables.items())],
     ],
     keep_bindings=["secret_text"],

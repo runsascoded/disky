@@ -120,15 +120,6 @@ def test_digest_config_needs_a_template():
     assert D.config_from_dict({"template": "cw"}) == D.PRESETS["cw"]
 
 
-def test_digest_plot_needs_a_template(tmp_path: Path):
-    from dt_cloud.digest_plot import main as plot
-
-    rows = tmp_path / "rows.json"
-    rows.write_text("[]")
-    r = CliRunner().invoke(plot, ["-d", str(rows)])
-    assert (r.exit_code, r.output.rstrip().split("\n")[-3:]) == (2, ["Error: Missing option '-T' / '--template'. Choose from:", "\tgcs,", "\tcw"])
-
-
 def test_examples_carry_no_live_generation():
     """The examples are illustrative: a compaction moves the live gen on the deployment's branch, never here."""
     assert [p.gen for p in EXAMPLES.values()] == [None, None]

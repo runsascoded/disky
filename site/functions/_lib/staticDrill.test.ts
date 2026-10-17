@@ -851,7 +851,7 @@ describe('D1', () => {
       const looked = got.filter(g => (g as unknown[])[7] as number > 0).length
       const flagged = got.flatMap(g => (g as unknown[][])[8]).filter(r => (r as unknown[]).length === 8).length
       expect([got.length, deep, forced, looked, flagged]).toEqual([52, 24, 16, 11, 0])
-    })
+    }, 120_000)  // 52 brute-force diffs: ~5 s alone, 43 s under the full suite's parallel load (gcs, cw: past the 30 s default)
 
     it('inside a roots answer a folder drawn on one side only takes the other side\'s total from the answer, not a lookup', async () => {
       // `bin` at the fleet root: a rollup of `bk`, whose answer is its roots — `bk/s/y/a.bin` (100 → 30 bytes) and

@@ -44,11 +44,13 @@ const PAGE_SIZES = [20, 50, 100, 200]
  *  tooltip); ~60 chars fills the column's 480px at 12px mono. */
 const NAME_MAX = 60
 
-export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, onOpen, onOpenObject, filter, rowMatches, brush, onBrush }: {
+export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, onOpen, onOpenObject, filter, rowMatches, brush, onBrush, readLogged }: {
   /** The treemap's currently-viewed node. */
   node: TreeNode
   /** Path segments from the tree root to `node` (no scheme, no root). */
   segs: string[]
+  /** Whether the access logs cover a top-level cell (`readLens.ts`): an uncovered row's read reads "not logged". */
+  readLogged?: (bucket: string | undefined) => boolean
   scheme: string
   /** The store home, read as `~` in row tooltips (`Store.home`). */
   home?: string[]
@@ -398,8 +400,8 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
                     {hasYr && <td className="created yr">{yr ?? ''}</td>}
                   </>
                 })() : <td className="created none num" colSpan={createdCols}>—</td>}
-                {hasRead && <td title={k.a != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : undefined}>
-                  {k.a != null ? epochDaysToDate(k.a) : '—'}
+                {hasRead && <td title={k.a != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : readLogged && !readLogged(segs[0] ?? k.n.split('/')[0]) ? 'no access logs cover this bucket' : undefined}>
+                  {k.a != null ? epochDaysToDate(k.a) : readLogged && !readLogged(segs[0] ?? k.n.split('/')[0]) ? 'not logged' : '—'}
                 </td>}
                 {showSel && (
                   <td className="actions">

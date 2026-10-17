@@ -110,6 +110,58 @@ Each phase lands on `cloud` with tests, and deployments adopt it by profile.
   It fits buckets the deployment owns outright (m3's R2, a user's own bucket).
 - Naming: "source" already means two things (a profile's bucket URI; a federation catalog entry). This spec makes them one: a pipeline source *is* a federation source once it's a store.
 
+
+## 8. Phase 0 results (2026-10-17, partial)
+
+One gcs scan (`2026-10-16T0701`, plus `2026-10-15T1515` as the diff's `from`), rebuilt from its existing listings, attribution and access shards (read-only) into the scratch bucket (`stacks-p0/<store>/listing/<scan>/index/<gen>/`, snapshots under `snapshots/stacks-p0-<store>/`; 7-day expiry). One Batch job per store, each on a 32-vCPU highmem VM with 1.5 TB local SSD, DuckDB at 100 GB / 16 threads, the job image by digest. Seven stores: one per bucket, plus the six-bucket union rebuilt the same way (`primary`), so both sides ran on the same image, inputs and shape (n2d; two per-bucket jobs fell back to n2 after us-central1 stockouts). Footers went to a new D1 (`disky-stacks-p0`, created from `schema.sql`) with `index-sync -s <bucket>`. Labels: `app=disky,deployment=gcs,experiment=stacks-p0`.
+
+**Correctness.** The six per-bucket snapshots' bytes and objects sum exactly to the union's, which equals prod's root for the scan.
+
+### Index wall time
+
+| | stage | `path-index` | `index-sync -r` (D1 rows) | stage + index |
+|---|---|---|---|---|
+| union, one pass (rebuild) | 75 s | 2,170 s | 554 s | 2,245 s |
+| union, prod's record of the same scan | | | 513 s | 2,409 s (stage + index, one phase) |
+| per bucket, slowest (eu-west4, 40% of objects) | 21 s | 1,103 s | 309 s | 1,124 s |
+| per bucket, others | 8–21 s | 23 / 44 / 100 / 168 / 211 s | 12–111 s | ≤ 232 s |
+| per bucket, sum of all six | 95 s | 1,649 s | 594 s | |
+
+- **Wall time halves**: 2,245 s → 1,124 s (2.0×). The critical path is eu-west4 alone. Splitting it further, by top-level prefix, is the next lever.
+- **Total work drops too**: the six `path-index` runs sum to 1,649 s, 24% less than the one pass, so aggregation cost is superlinear in a store's size. Peak RSS is ~106 GB for both the union and eu-west4, and 8–84 GB for the other five, so those could run on much smaller VMs.
+- The second scan (`2026-10-15T1515`) reproduces the per-bucket `path-index` timings within 5% for every bucket but the smallest (us-east1: 20 s vs 23 s); the union's took 2,120 s.
+
+### Bytes
+
+| | `path` + `bysize` + `bysize-user` sorts | all files (+ footers, `attr.tsv`) |
+|---|---|---|
+| union, one store | 22.865 GB | 23.096 GB |
+| six per-bucket stores | 22.864 GB | 23.205 GB (+0.5%) |
+
+The sorts are the same size. The only overhead is `attr.tsv` (the attribution extras, ~22.6 MB), which every store carries in full, six times. Footer rows in D1 are about the same in total, as is the cold `.groups.*` tier.
+
+### Serving latency (`probe -c`): not measured
+
+**Blocked on read access.** The site reads its path store over GCS's S3 API with the deployment's HMAC key (the `gcs-usage-browse` service account). That account can read the data bucket but not the scratch bucket. Checked: `ListObjects` on scratch is `AccessDenied`, and only `gcs-usage-job` holds a role there. Serving the per-bucket stores needs one of:
+
+- `roles/storage.objectViewer` for `gcs-usage-browse` on the scratch bucket (Pulumi-managed: an IaC change, or a hand grant that drifts);
+- the stores written under the data bucket's `scratch/` prefix instead, which the browse key already reads. Phase 0's rules forbid writes to the data bucket.
+
+**Then the deploy.** A deployed dev stack also needs Pages secrets (the HMAC pair, `SESSION_SECRET`) on a new Pages project. Without them, the measurement can run on `wrangler pages dev` locally against the same D1. That gives an apples-to-apples single-vs-union comparison from one host, but not edge latencies. The config is ready: `primary` is the rebuilt union, the six buckets are secondary stores, and `{"union": [...], "main": true}` is their union view.
+
+**Prod reference.** Cold probe of gcs.oa.dev, which serves this scan from the interval store. Median over 3 rounds of each page's slowest request; series are edge-cached after the first round:
+
+- root: 1.6 s
+- per-bucket pages: 0.96–1.75 s
+- the two depth-3 pages: 2.5 s and 2.9 s
+- all pages: median 1.45 s
+
+**Expected shape, to be confirmed by the probe.** Below the root, a union page is answered by one member (`memberOf`), reading a per-bucket store whose footer (`.groups.json`) is 1.8× (eu-west4) to ~80× (us-east1) smaller than the union's, so it should be no slower. The union root fans out to six members' root reads plus one D1 scan-list query each, so its cold cost is the slowest member plus that overhead.
+
+### Recommendation so far
+
+On the build side, per-source is faster: half the wall time, about 24% less total compute, the same bytes. That supports §6.1 independently of the serving result. Serving needs the read grant above before gcs commits to the cut (§6.4).
+
 [federated-scans.md]: federated-scans.md
 [federated-source-catalog.md]: federated-source-catalog.md
 [done/multi-store.md]: done/multi-store.md

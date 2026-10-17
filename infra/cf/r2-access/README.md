@@ -1,6 +1,6 @@
 # R2 access-log collector
 
-Private, bounded RAC pilot for `jc-taxes`. The same code can be instantiated for HCCS/OA using separate account configuration, stacks, credentials and archives. It is not the `r2.oa.dev` dashboard or a last-read overlay yet.
+Private, bounded RAC collector for `jc-taxes`. The same code can be instantiated for HCCS/OA using separate account configuration, stacks, credentials and archives. It also feeds the r2.rbw.sh demo's read lens: a derived, public per-day file of object reads (below).
 
 ## Ownership
 
@@ -53,7 +53,8 @@ Each run, in order:
 
 1. Drains each bucket's window to an empty cursor page, writing immutable raw pages under `runs/<scheduled>/<run id>/<bucket>/NNNN.json`. These expire after 30 days.
 2. Runs one weighted-count calculation per UTC hour of the window, *after* the drain. Each hour gets `observed` (distinct events archived), `estimated` (Σ row weights), `max_sample_interval` and `capture`. `capture` is `unsampled` (all weights 1 and estimated = observed), `sampled` (provider ingestion sampling, permanent) or `inconsistent` (e.g. delivered between the drain and the count; a later overlap or the daily replay re-checks it).
-3. Merges events into **per-UTC-day aggregates**, deduplicated by provider event id: `{events: {id: [timestamp, action]}, actions, classes, hours}`. `classes` separates `content_read` (GET) from `metadata_read` (HEAD), `list`, `write`, `delete` and `other`. Changed days are written to **new immutable keys** `agg/<bucket>/<day>/<run id>.json`; an unchanged day writes nothing.
+3. Merges events into **per-UTC-day aggregates**, deduplicated by provider event id: `{events: {id: [timestamp, action, key, status, own]}, actions, classes, hours}` (`schema_version` 2; a version-1 day's `[timestamp, action]` events carry no key). `key` is the object key (null for bucket-level actions such as LIST); `own` marks a request made with one of `EXCLUDED_ACCESS_KEY_IDS` (a secret: the deployment's own scanner keys), kept here because the sampling check counts it. `classes` separates `content_read` (GET) from `metadata_read` (HEAD), `list`, `write`, `delete` and `other`. Changed days are written to **new immutable keys** `agg/<bucket>/<day>/<run id>.json`; an unchanged day writes nothing.
+   For each source named in `PUBLIC_BUCKETS`, every day the window touched is also (re)written to the `PUBLIC` binding as `<PUBLIC_PREFIX>/<bucket>/<day>.jsonl`: one line per event, `{id, bucket, ts, action, key, status}`, ordered by time. No IPs, user agents, actors or access key ids; `own` and version-1 events are left out. The RAC stack publishes `jc-taxes` to `disk-tree-demo` under `access/r2/`, which the demo's daily ingest turns into the read lens (`dt-cloud access r2-agg`, then `path-index -x`).
 4. **Publishes** with one conditional write of `state.json` (`onlyIf` the etag it read). That write repoints each day to its aggregate and advances `collected_through` (the watermark) to `to`. A run that read an older state fails with `state_conflict` and publishes nothing. The very first state write is unconditional.
 5. Writes `_SUCCESS.json`, the run manifest (windows, gaps, new events, hour sampling counts, raw page keys).
 

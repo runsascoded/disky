@@ -1,6 +1,7 @@
 # Daily r2.rbw.sh ingestion, moved off the laptop LaunchAgent to GHA (reliable
 # scheduling; the LaunchAgent never fired): list the three public buckets →
-# the union's path store (`path` + `bysize` sorts, objects included;
+# the union's path store (`path` + `bysize` sorts, objects included, with jc-taxes's
+# last-read days from the R2 access collector's public files when present;
 # specs/done/path-store.md §4.4) + snapshot → upload to
 # disk-tree-demo → append the scan to the static name index (`dt-cloud
 # static-names add`: exact `?f=` literals; the generation is the site's
@@ -81,11 +82,30 @@ jobs:
           list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" ctbk     "$HCCS_ENDPOINT"
           list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" crashes  "$HCCS_ENDPOINT"
           list "${{ secrets.R2_DEMO_SRC_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_DEMO_SRC_RO_SECRET_ACCESS_KEY }}" jc-taxes "$RAC_ENDPOINT"
+      - name: Read recency — the collector's public per-day files → layer-2a
+        # `infra/cf/r2-access` writes `access/r2/<bucket>/<day>.jsonl` (object key, time, action, status; no
+        # requester identity, the scanner's own requests left out) for the sources it collects (jc-taxes; ctbk
+        # and crashes are HCCS's, uncollected). Absent files leave the read lens off, as before.
+        if: steps.d.outputs.scanned != 'true'
+        id: reads
+        continue-on-error: true  # a failure here leaves the read lens off for the scan, never the scan itself
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "s3://$BUCKET/access/r2/" work/access/ --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
+          if compgen -G "work/access/*/*.jsonl" > /dev/null; then
+            (cd cloud && uv run dt-cloud access r2-agg -d "${{ steps.d.outputs.date }}" \
+              -o "$GITHUB_WORKSPACE/work/access-agg/r2.parquet" "$GITHUB_WORKSPACE/work/access/*/*.jsonl")
+            if [ -f work/access-agg/r2.parquet ]; then echo "agg=$GITHUB_WORKSPACE/work/access-agg/r2.parquet" >> "$GITHUB_OUTPUT"; fi
+          fi
       - name: Union → path store (path + bysize sorts) + snapshot
         if: steps.d.outputs.scanned != 'true'
         run: |
           cd cloud && uv run dt-cloud path-index -d "${{ steps.d.outputs.date }}" \
             -l "$GITHUB_WORKSPACE/work/listing/*/*.parquet" \
+            ${{ steps.reads.outputs.agg && format('-x "{0}"', steps.reads.outputs.agg) || '' }} \
             -P "$GITHUB_WORKSPACE/work/index/path-index.parquet" \
             -o "$GITHUB_WORKSPACE/work/snap"
       - name: Upload tiers + snapshot to the index bucket

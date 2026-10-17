@@ -147,6 +147,8 @@ class Ctx:
     work: Path
     run: object
     sh_impl: Callable[..., subprocess.CompletedProcess] = subprocess.run
+    #: The open phase's first `fails_phase` failure (exit code, warning): the phase ends failed with a warn alert
+    failure: tuple[int, str] | None = None
 
     # layout
 
@@ -248,23 +250,29 @@ class Ctx:
     # running
 
     def sh(self, argv: Sequence[str], *, fatal: bool = True, warn: str | None = None, env: Mapping[str, str] | None = None,
-           capture: bool = False) -> str | None:
+           capture: bool = False, fails_phase: bool = False) -> str | None:
         """Run `argv` (logged as `+ …`; secrets only ever in the env). A failure raises `StepFailed` when `fatal`, else
-        prints `WARN: <warn>` and returns None; returns stdout when `capture`, else ""."""
+        prints `WARN: <warn>` and returns None; returns stdout when `capture`, else "". `fails_phase`: a non-fatal failure
+        still ends the open phase failed (warn-alerted, never failing the run), so /scans doesn't show it done."""
         argv = [str(a) for a in argv]
         err("+ " + " ".join(argv))
         r = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True)
         if r.returncode:
             if fatal:
                 raise StepFailed(r.returncode, f"exit {r.returncode}: {' '.join(argv[:3])}")
-            err(f"WARN: {warn or ' '.join(argv[:3]) + ' failed'} (exit {r.returncode})")
+            what = warn or " ".join(argv[:3]) + " failed"
+            err(f"WARN: {what} (exit {r.returncode})")
+            if fails_phase and self.failure is None:
+                self.failure = (r.returncode, what)
             return None
         return r.stdout if capture else ""
 
     @contextmanager
     def phase(self, name: str, note: str | None = None) -> Iterator[None]:
-        """A `scan_runs` phase: begun, then ended (failed, with the exit code, when the body raises)."""
+        """A `scan_runs` phase: begun, then ended (failed, with the exit code, when the body raises; failed with a warn
+        alert after a `fails_phase` command's failure)."""
         self.run.begin(name)
+        self.failure = None
         try:
             yield
         except StepFailed as e:
@@ -273,7 +281,12 @@ class Ctx:
         except BaseException:
             self.run.end(name, 1)
             raise
-        self.run.end(name, 0, note=note)
+        finally:
+            failure, self.failure = self.failure, None
+        if failure:
+            self.run.end(name, failure[0], warn=True, msg=failure[1], note=note)
+        else:
+            self.run.end(name, 0, note=note)
 
     def done(self, path: Path, what: str | None = None) -> bool:
         """Whether `path` exists; logs the skip when it does."""
@@ -885,7 +898,7 @@ def digest(ctx: Ctx, arg: str | None) -> None:
                 continue
             ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"), "-P", platform,
                     *ctx.opt("digest", "args", []), "-r", _digest_root(ctx)], fatal=False,
-                   warn=f"{platform} usage-digest step failed",
+                   warn=f"{platform} usage-digest step failed", fails_phase=True,
                    env={"CLOUDFLARE_API_TOKEN": ctx.env["CF_PAGES_TOKEN"]} if ctx.has("CF_PAGES_TOKEN") else None)
 
 

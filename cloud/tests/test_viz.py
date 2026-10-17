@@ -185,10 +185,46 @@ def test_access_rows_on_or_after_scan_date_are_excluded(tmp_path: Path, listing:
     pidx = tmp_path / "path-index.parquet"
     meta = write_path_index((listing,), out, asof, (attribution,), identities_path, access=(access,), path_index=pidx)
     rd = epoch_day(TS["d0703"])
-    assert (meta["asof"], meta["access"]) == (asof, {"from": rd, "to": rd})
+    assert (meta["asof"], meta["access"]) == (asof, {"from": rd, "to": rd, "buckets": ["b1"]})
     a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
     assert pd.isna(a_by_path["b1/datasets"])
     assert a_by_path["b1"] == rd
+
+
+def test_r2_agg_cli_feeds_the_read_lens(tmp_path: Path, listing: str, attribution: str):
+    """`access r2-agg` over the collector's public `.jsonl` files → `path-index -x`: a GET marks its key's
+    ancestors read; a HEAD after the scan's instant is cut (the as-of rule), and a key-less LIST marks the root."""
+    ms = lambda t: int(t.timestamp() * 1000)  # noqa: E731
+    events = [
+        {"id": "g", "bucket": "b1", "ts": ms(TS["d0702"]), "action": "GetObject", "key": "users/rw/ckpt/x", "status": 200},
+        {"id": "l", "bucket": "b1", "ts": ms(TS["d0703"]), "action": "ListObjectsV2", "key": None, "status": 200},
+        {"id": "h", "bucket": "b1", "ts": ms(TS["d0720"]), "action": "HeadObject", "key": "datasets/y", "status": 200},
+    ]
+    day = tmp_path / "access" / "b1" / "2026-07-02.jsonl"
+    day.parent.mkdir(parents=True)
+    day.write_text("".join(json.dumps(e) + "\n" for e in events))
+    agg = tmp_path / "agg" / "r2.parquet"
+    result = CliRunner().invoke(main, ["access", "r2-agg", "-d", "2026-07-20", "-o", str(agg), str(tmp_path / "access/*/*.jsonl")])
+    assert (result.exit_code, json.loads(result.output)) == (0, {"hours": 2, "paths_out": 5, "rows_in": 2, "total_bytes_out": 0})
+    identities_path = tmp_path / "identities.yaml"
+    identities_path.write_text(IDENTITIES_YAML)
+    pidx = tmp_path / "path-index.parquet"
+    meta = write_path_index((listing,), tmp_path / "out", "2026-07-20", (attribution,), identities_path, access=(str(agg),), path_index=pidx)
+    assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"]), "buckets": ["b1"]}
+    a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
+    assert {p: a_by_path[p] for p in ("b1", "b1/users", "b1/users/rw/ckpt")} == {
+        "b1": epoch_day(TS["d0703"]), "b1/users": epoch_day(TS["d0702"]), "b1/users/rw/ckpt": epoch_day(TS["d0702"]),
+    }
+    assert pd.isna(a_by_path["b1/datasets"])
+
+
+def test_r2_agg_cli_writes_nothing_without_reads_before_the_scan(tmp_path: Path):
+    day = tmp_path / "b1" / "2026-07-20.jsonl"
+    day.parent.mkdir(parents=True)
+    day.write_text(json.dumps({"id": "h", "bucket": "b1", "ts": int(TS["d0720"].timestamp() * 1000), "action": "HeadObject", "key": "k", "status": 200}) + "\n")
+    agg = tmp_path / "agg.parquet"
+    result = CliRunner().invoke(main, ["access", "r2-agg", "-d", "2026-07-20", "-o", str(agg), str(day)])
+    assert (result.exit_code, json.loads(result.stdout), agg.exists()) == (0, {"hours": 0, "paths_out": 0, "rows_in": 0, "total_bytes_out": 0}, False)
 
 
 def test_age_rows_carry_last_read(tmp_path: Path, listing: str, attribution: str, access: str):
@@ -197,7 +233,7 @@ def test_age_rows_carry_last_read(tmp_path: Path, listing: str, attribution: str
     out = tmp_path / "out"
     meta = write_path_index((listing,), out, "2026-07-20", (attribution,), identities_path, access=(access,))
     rd = epoch_day(TS["d0703"])
-    assert meta["access"] == {"from": rd, "to": rd}
+    assert meta["access"] == {"from": rd, "to": rd, "buckets": ["b1"]}
     # Strata whose dir was read carry `a` (its last-read epoch day); the rest
     # omit it — the site's read axis colors those "never read".
     age = json.loads((out / "age.json").read_text())
@@ -564,7 +600,7 @@ def test_access_aggregates_mix_day_and_hour_grain(tmp_path: Path, listing: str, 
     identities_path.write_text(IDENTITIES_YAML)
     pidx = tmp_path / "path-index.parquet"
     meta = write_path_index((listing,), tmp_path / "out", "2026-07-20", (attribution,), identities_path, access=(str(parts / "*.parquet"),), path_index=pidx)
-    assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"])}
+    assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"]), "buckets": ["b1"]}
     a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
     assert (a_by_path["b1/users/rw/ckpt"], a_by_path["b1/datasets/raw"], a_by_path["b1/datasets"], a_by_path["b1"]) == (
         epoch_day(TS["d0703"]), epoch_day(TS["d0702"]), epoch_day(TS["d0702"]), epoch_day(TS["d0703"]),

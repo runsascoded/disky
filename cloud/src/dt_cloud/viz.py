@@ -445,6 +445,7 @@ def write_path_index(
     # (`day < D`), whatever shards exist when this runs — so a re-aggregation
     # of an old date reproduces it instead of leaking later reads into it.
     access_window: tuple[int, int] | None = None
+    access_buckets: list[str] = []
     con.execute("CREATE TEMP TABLE access_agg (bucket VARCHAR, dir VARCHAR, aday INTEGER, ro BIGINT, rb BIGINT)")
     if access:
         globs = "[" + ", ".join(f"'{g}'" for g in access) + "]"
@@ -477,6 +478,8 @@ def write_path_index(
         ).fetchone()
         if lo is not None:
             access_window = (int(lo), int(hi))
+            # The buckets the logs cover: in a union of sources, the others are unlogged, not unread.
+            access_buckets = [r[0] for r in con.execute(f"SELECT DISTINCT bucket FROM {acc} WHERE {day} < DATE '{asof}' ORDER BY 1").fetchall()]
         _rss("access")
 
     # --- the path index: every ancestor path, every depth (specs/done/view-serving.md) ---
@@ -624,7 +627,7 @@ def write_path_index(
     if access_window:
         # Epoch days the access logs cover — the UI's "no reads since <from>"
         # is only meaningful relative to when logging began.
-        meta["access"] = {"from": access_window[0], "to": access_window[1]}
+        meta["access"] = {"from": access_window[0], "to": access_window[1], "buckets": access_buckets}
     if attr:
         meta["users"] = [{"u": u, "b": b} for u, b in sorted(user_bytes.items(), key=lambda kv: -kv[1])]
         meta["user_class_bytes"] = {u: dict(sorted(c.items())) for u, c in sorted(user_class.items())}

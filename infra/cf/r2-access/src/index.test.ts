@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import config from '../wrangler.json'
-import worker, { actionClass, boundedText, capture, collect, parseCalculation, parsePage, settings, span, timeframe } from './index'
+import worker, { actionClass, boundedText, capture, collect, type DayAggregate, parseCalculation, parsePage, publicDay, settings, span, timeframe } from './index'
 
 const H = 3_600_000
 const time = Date.parse('2026-10-12T10:13:00Z')
@@ -12,7 +12,10 @@ const json = { httpMetadata: { contentType: 'application/json' } }
 /** A provider row: `weight` > 1 is an ingestion-sampled row (counted by
  * calculations, returned once by the events view); `hidden` rows are counted
  * but not yet returned as events (delivered between drain and calculation). */
-interface Row { id: string, timestamp: number, action: string, weight?: number, hidden?: boolean }
+interface Row { id: string, timestamp: number, action: string, weight?: number, hidden?: boolean, key?: string, status?: number, keyId?: string }
+
+/** A day aggregate's event: `[timestamp, action, key, status, own]`. */
+const ev = (ts: number, action: string, key: string | null = null, status: number | null = null, own: 0 | 1 = 0) => [ts, action, key, status, own]
 
 function eventsPage(rows: Row[], extra: Record<string, unknown> = {}) {
   return JSON.stringify({
@@ -20,7 +23,12 @@ function eventsPage(rows: Row[], extra: Record<string, unknown> = {}) {
     result: {
       run: { status: 'COMPLETED' }, statistics: { abr_level: 1 },
       events: { count: rows.length, events: rows.map(r => ({
-        dataset: 'r2', timestamp: r.timestamp, $metadata: { id: r.id }, source: { bucket: 'jc-taxes', action: r.action },
+        dataset: 'r2', timestamp: r.timestamp, $metadata: { id: r.id }, source: {
+          bucket: 'jc-taxes', action: r.action,
+          ...r.key ? { resource: { key: r.key, type: 'object', size: 5 } } : {},
+          ...r.status ? { response: { status: r.status, bytes: 5 } } : {},
+          ...r.keyId ? { actor: { type: 'S3', id: 'a-user', accessKeyId: r.keyId }, requestMetadata: { ip: '192.0.2.1', userAgent: 'ua' } } : {},
+        },
       })) }, ...extra,
     },
   })
@@ -65,7 +73,9 @@ function setup(vars: Partial<typeof config.vars> = {}) {
     const found = archive.get(key)
     return found ? { etag: found.etag, text: async () => found.text } as R2ObjectBody : null
   })
-  const env = { ...config.vars, ...vars, CF_OBSERVABILITY_TOKEN: 'test-secret', ARCHIVE: { put, get } as unknown as R2Bucket }
+  // The deployed public publish is opted into per test (`PUBLIC_*` + a `PUBLIC` stub).
+  const { PUBLIC_BUCKETS: _buckets, PUBLIC_PREFIX: _prefix, ...deployed } = config.vars
+  const env = { ...deployed, ...vars, CF_OBSERVABILITY_TOKEN: 'test-secret', ARCHIVE: { put, get } as unknown as R2Bucket }
   const read = (key: string) => JSON.parse(archive.get(key)!.text)
   return { archive, order, env, put, read }
 }
@@ -83,7 +93,10 @@ afterEach(() => vi.restoreAllMocks())
 describe('windows', () => {
   it('derives delayed hourly and daily settings', () => {
     const { env } = setup()
-    const base = { buckets: ['jc-taxes'], to, lookback: 6 * H, overlap: H, floor: to - 144 * H, pageSize: 500, maxPages: 50, maxBytes: 4194304 }
+    const base = {
+    buckets: ['jc-taxes'], to, lookback: 6 * H, overlap: H, floor: to - 144 * H, pageSize: 500, maxPages: 50, maxBytes: 4194304,
+    published: [], publicPrefix: '', excluded: new Set(),
+  }
     expect(settings(env, env.HOURLY_CRON, time)).toEqual({ ...base, replay: false })
     expect(settings(env, env.DAILY_CRON, time)).toEqual({ ...base, replay: true })
   })
@@ -166,8 +179,8 @@ describe('collect', () => {
     const agg = 'agg/jc-taxes/2026-10-12/r1.json'
     expect(order).toEqual([`${prefix('r1')}/jc-taxes/0000.json`, `${prefix('r1')}/jc-taxes/0001.json`, `${prefix('r1')}/jc-taxes/0002.json`, agg, 'state.json', `${prefix('r1')}/_SUCCESS.json`])
     expect(read(agg)).toEqual({
-      schema_version: 1, bucket: 'jc-taxes', day: '2026-10-12',
-      events: { a: [from, 'HeadObject'], b: [rows[1].timestamp, 'GetObject'], c: [rows[2].timestamp, 'ListObjectsV2'] },
+      schema_version: 2, bucket: 'jc-taxes', day: '2026-10-12',
+      events: { a: ev(from, 'HeadObject'), b: ev(rows[1].timestamp, 'GetObject'), c: ev(rows[2].timestamp, 'ListObjectsV2') },
       actions: { GetObject: 1, HeadObject: 1, ListObjectsV2: 1 },
       classes: { content_read: 1, list: 1, metadata_read: 1 },
       hours: hours({ ...quiet(from, to), '02': [1, 1, 1, 'unsampled'], '03': [1, 1, 1, 'unsampled'], '07': [1, 1, 1, 'unsampled'] }),
@@ -201,8 +214,8 @@ describe('collect', () => {
     expect(await collect(next, env.HOURLY_CRON, env, provider(live), 'r2')).toEqual({ run_id: 'r2', buckets: 1, pages: 3, events: 3, new_events: 2 })
     const agg = 'agg/jc-taxes/2026-10-12/r2.json'
     expect(read(agg).events).toEqual({
-      a: [from, 'HeadObject'], b: [rows[1].timestamp, 'GetObject'], c: [rows[2].timestamp, 'ListObjectsV2'],
-      late: [live[4].timestamp, 'HeadObject'], z: [to, 'HeadObject'],
+      a: ev(from, 'HeadObject'), b: ev(rows[1].timestamp, 'GetObject'), c: ev(rows[2].timestamp, 'ListObjectsV2'),
+      late: ev(live[4].timestamp, 'HeadObject'), z: ev(to, 'HeadObject'),
     })
     expect(read(agg).hours['07']).toEqual({ observed: 2, estimated: 2, max_sample_interval: 1, capture: 'unsampled' })
     expect(read(agg).hours['08']).toEqual({ observed: 1, estimated: 1, max_sample_interval: 1, capture: 'unsampled' })
@@ -230,7 +243,7 @@ describe('collect', () => {
     ]), 'r1')
     const agg = read('agg/jc-taxes/2026-10-12/r1.json')
     expect([agg.events, agg.hours['04'], agg.hours['05']]).toEqual([
-      { s: [at('2026-10-12T04:10:00Z'), 'ListObjectsV2'] },
+      { s: ev(at('2026-10-12T04:10:00Z'), 'ListObjectsV2') },
       { observed: 1, estimated: 2, max_sample_interval: 2, capture: 'sampled' },
       { observed: 0, estimated: 1, max_sample_interval: 1, capture: 'inconsistent' },
     ])
@@ -248,7 +261,7 @@ describe('collect', () => {
       '2026-10-12': 'agg/jc-taxes/2026-10-12/r1.json', '2026-10-13': 'agg/jc-taxes/2026-10-13/r1.json',
     })
     expect([read('agg/jc-taxes/2026-10-12/r1.json').events, read('agg/jc-taxes/2026-10-13/r1.json').events]).toEqual([
-      { d1: [edge - 1, 'HeadObject'] }, { d2: [edge, 'HeadObject'] },
+      { d1: ev(edge - 1, 'HeadObject') }, { d2: ev(edge, 'HeadObject') },
     ])
   })
 
@@ -279,12 +292,72 @@ describe('collect', () => {
     expect(order).toEqual([`${prefix('r2', time + H)}/jc-taxes/0000.json`, `${prefix('r2', time + H)}/jc-taxes/0001.json`, 'agg/jc-taxes/2026-10-12/r2.json'])
   })
 
+  it("never follows a redirect (Workers' fetch has no `redirect: 'error'`): a 3xx fails the run before archiving", async () => {
+    const { env, order } = setup()
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 302, headers: { location: 'https://example.org/' } }))
+    await expect(collect(time, env.HOURLY_CRON, env, fetcher, 'r3')).rejects.toThrow('r2-access: provider_http_302')
+    expect([fetcher.mock.calls.map(([, init]) => init?.redirect), order]).toEqual([['manual'], []])
+  })
+
+  it('publishes each touched day of a public bucket, keys only, before state; own requests stay private', async () => {
+    const pub = new Map<string, string>()
+    const order: string[] = []
+    const PUBLIC = { put: vi.fn(async (key: string, value: unknown) => { pub.set(key, String(value)); order.push(`public:${key}`); return { key } as R2Object }) }
+    const base = setup({ PUBLIC_BUCKETS: config.vars.PUBLIC_BUCKETS, PUBLIC_PREFIX: config.vars.PUBLIC_PREFIX })
+    const env = { ...base.env, PUBLIC, EXCLUDED_ACCESS_KEY_IDS: '["scanner-key"]' }
+    base.put.mockImplementation(async (key: string, value: unknown) => {
+      base.archive.set(key, { text: String(value), etag: `e${order.length}` })
+      order.push(key)
+      return { key } as R2Object
+    })
+    const ts = (h: string) => at(`2026-10-12T${h}:00:00Z`)
+    await collect(time, env.HOURLY_CRON, env, provider([
+      { id: 'g', timestamp: ts('03'), action: 'GetObject', key: 'data/2024.pqt', status: 200, keyId: 'reader-key' },
+      { id: 'l', timestamp: ts('04'), action: 'ListObjectsV2', status: 200, keyId: 'scanner-key' },
+      { id: 'h', timestamp: ts('05'), action: 'HeadObject', key: 'data/2023.pqt', status: 404 },
+    ], 500), 'r1')
+    const agg = 'agg/jc-taxes/2026-10-12/r1.json'
+    expect(order).toEqual([`${prefix('r1')}/jc-taxes/0000.json`, `${prefix('r1')}/jc-taxes/0001.json`, 'public:access/r2/jc-taxes/2026-10-12.jsonl', agg, 'state.json', `${prefix('r1')}/_SUCCESS.json`])
+    expect(base.read(agg).events).toEqual({
+      g: ev(ts('03'), 'GetObject', 'data/2024.pqt', 200), h: ev(ts('05'), 'HeadObject', 'data/2023.pqt', 404), l: ev(ts('04'), 'ListObjectsV2', null, 200, 1),
+    })
+    expect(pub.get('access/r2/jc-taxes/2026-10-12.jsonl')!.split('\n')).toEqual([
+      JSON.stringify({ id: 'g', bucket: 'jc-taxes', ts: ts('03'), action: 'GetObject', key: 'data/2024.pqt', status: 200 }),
+      JSON.stringify({ id: 'h', bucket: 'jc-taxes', ts: ts('05'), action: 'HeadObject', key: 'data/2023.pqt', status: 404 }),
+      '',
+    ])
+  })
+
+  it.each([
+    [{ PUBLIC_BUCKETS: '["other"]', PUBLIC_PREFIX: 'access/r2' }],
+    [{ PUBLIC_BUCKETS: '["jc-taxes"]' }],
+    [{ PUBLIC_BUCKETS: '["jc-taxes"]', PUBLIC_PREFIX: '/access/' }],
+  ])('refuses a public config that names a non-source bucket or lacks a prefix: %j', vars => {
+    const { env } = setup(vars)
+    expect(() => settings({ ...env, PUBLIC: { put: vi.fn() } }, env.HOURLY_CRON, time)).toThrow('r2-access: invalid_config')
+  })
+
   it('rejects repeated cursors before archiving the repeated page', async () => {
     const { env, order } = setup()
     const page = eventsPage([rows[1]])
     const fetcher = vi.fn<typeof fetch>(async () => new Response(page))
     await expect(collect(time, env.HOURLY_CRON, env, fetcher, 'r1')).rejects.toThrow('r2-access: cursor_stalled')
     expect(order).toEqual([`${prefix('r1')}/jc-taxes/0000.json`])
+  })
+})
+
+describe('publicDay', () => {
+  it('leaves out version-1 events (no key recorded) and own requests, ordered by time then id', () => {
+    const day: DayAggregate = {
+      schema_version: 2, bucket: 'jc-taxes', day: '2026-10-12', actions: {}, classes: {}, hours: {},
+      events: { b: [2, 'GetObject', 'k/b', 200, 0], a: [2, 'GetObject', 'k/a', 200, 0], old: [1, 'GetObject'], own: [3, 'ListObjectsV2', null, 200, 1], l: [4, 'ListObjectsV2', null, 200, 0] },
+    }
+    expect(publicDay(day).split('\n')).toEqual([
+      '{"id":"a","bucket":"jc-taxes","ts":2,"action":"GetObject","key":"k/a","status":200}',
+      '{"id":"b","bucket":"jc-taxes","ts":2,"action":"GetObject","key":"k/b","status":200}',
+      '{"id":"l","bucket":"jc-taxes","ts":4,"action":"ListObjectsV2","key":null,"status":200}',
+      '',
+    ])
   })
 })
 

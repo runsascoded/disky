@@ -104,8 +104,10 @@ export interface Meta {
   users?: UserInfo[]
   user_class_bytes?: Record<string, Record<string, number>>
   disk_space?: DiskSpace
-  /** Access-log observation window (epoch days) — bounds the read-recency lens. */
-  access?: { from: number; to: number }
+  /** Access-log observation window (epoch days) — bounds the read-recency lens. `buckets`: the source
+   *  buckets the logs cover (a union's others are unlogged, not unread); absent on scans published before
+   *  it, which are covered everywhere (`readLens.ts`). */
+  access?: { from: number; to: number; buckets?: string[] }
 }
 
 // GCS list prices, $/GiB·mo, US regions, by storage_class_id

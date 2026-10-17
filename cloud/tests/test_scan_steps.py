@@ -512,6 +512,41 @@ def test_digest_root_from_the_profile(tmp_path, env):
     assert c.sh_impl.calls == ["dt-cloud digest -T cw -C d.yml -P slack -r r2://idx/snapshots/hf"]
 
 
+class Ends:
+    """A fake run: records each phase's begin and end (name, rc, warn, msg)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def begin(self, name, began=None, gen=None):
+        self.calls.append(("begin", name))
+
+    def end(self, name, rc=0, warn=False, msg=None, note=None, **kw):
+        self.calls.append(("end", name, rc, warn, msg))
+        return 0 if warn else rc
+
+
+def test_digest_failure_fails_its_phase(tmp_path, env):
+    """A failed digest (cw's under Nextflow: its plot path resolved under the task's cwd) never fails the run, but its
+    phase ends failed with a warn alert, not done: /scans showed it done and the missed digest went unnoticed. The
+    next platform still runs, and a clean run ends the phase done."""
+    env.update(SLACK_BOT_TOKEN="x", SLACK_CHANNEL="C1", DISCORD_GCS_USAGE_WEBHOOK="w", DISCORD_BOT_TOKEN="b")
+    hf = hf_profile()
+    kw = {**hf, "options": {**hf["options"], "digest": {**hf["options"]["digest"], "platforms": ["slack", "discord"]}}}
+    c = ctx(tmp_path, env, Runner(tmp_path, fail=("dt-cloud digest -T",)), **kw)
+    c.run = Ends()
+    S.digest(c, None)
+    c.sh_impl, ok = Runner(tmp_path), c.run
+    S.digest(c, None)
+    assert (ok.calls, c.sh_impl.calls, c.failure) == ([
+        ("begin", "digest"), ("end", "digest", 1, True, "slack usage-digest step failed"),
+        ("begin", "digest"), ("end", "digest", 0, False, None),
+    ], [
+        "dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf",
+        "dt-cloud digest -T cw -C d.yml -P discord -r <tmp>/data/snapshots/hf",
+    ], None)
+
+
 def meta_ctx(tmp_path, env, **opts):
     """A second store's profile (`store: meta`): the steps that serve it, and the ones that can't skipped."""
     return ctx(tmp_path, env, store="meta", skip=["interval-store", "warm-cache", "probe"],

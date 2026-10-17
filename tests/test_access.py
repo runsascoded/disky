@@ -464,3 +464,56 @@ def test_parser_for_unknown_store_raises():
     from disk_tree.access.parsers import parser_for
     with pytest.raises(ValueError, match="no access-log parser"):
         parser_for('azure')
+
+
+# ---------- R2 parser (the collector's public per-day files) ----------
+
+def _write_r2_jsonl(path: Path, events: list[dict]) -> None:
+    import json
+    path.write_text(''.join(json.dumps(e) + '\n' for e in events))
+
+
+_R2_DAY = [
+    {'id': 'g', 'bucket': 'jc-taxes', 'ts': 1791802800000, 'action': 'GetObject', 'key': 'data/2024.pqt', 'status': 200},
+    {'id': 'l', 'bucket': 'jc-taxes', 'ts': 1791806400000, 'action': 'ListObjectsV2', 'key': None, 'status': 200},
+    {'id': 'h', 'bucket': 'jc-taxes', 'ts': 1791810000000, 'action': 'HeadObject', 'key': 'data/2023.pqt', 'status': 404},
+    {'id': 'x', 'bucket': 'jc-taxes', 'ts': 1791813600000, 'action': 'GetBucketCors', 'key': None, 'status': 200},
+]
+
+
+def test_r2_parse_shape_and_dedupe(tmp_path: Path):
+    """Canonical rows: key-less actions on the root, no requester identity or bytes, and an overlapping copy of
+    a day's file (a re-sync) collapses by record."""
+    from disk_tree.access.parsers import parser_for
+
+    _write_r2_jsonl(tmp_path / '2026-10-12.jsonl', _R2_DAY)
+    _write_r2_jsonl(tmp_path / 'copy.jsonl', _R2_DAY[:2])
+    con = duckdb.connect()
+    rel = parser_for('r2')(str(tmp_path / '*.jsonl'), con=con)
+    rows = rel.order('ts').project("strftime(ts AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%MZ'), * EXCLUDE (ts)").fetchall()
+    assert rows == [
+        ('2026-10-12T11:00Z', 'r2', 'jc-taxes', 'data/2024.pqt', 'GET', 'GetObject', 200, None, None, None, None, 'g'),
+        ('2026-10-12T12:00Z', 'r2', 'jc-taxes', '', 'LIST', 'ListObjectsV2', 200, None, None, None, None, 'l'),
+        ('2026-10-12T13:00Z', 'r2', 'jc-taxes', 'data/2023.pqt', 'HEAD', 'HeadObject', 404, None, None, None, None, 'h'),
+        ('2026-10-12T14:00Z', 'r2', 'jc-taxes', '', 'OTHER', 'GetBucketCors', 200, None, None, None, None, 'x'),
+    ]
+
+
+def test_r2_agg_feeds_last_read(tmp_path: Path):
+    """Through `aggregate_access` with an as-of cut: each path's `last_ts` is its latest read before the cut."""
+    from disk_tree.access.aggregate import aggregate_access
+    from disk_tree.access.parsers.r2 import parse
+
+    _write_r2_jsonl(tmp_path / 'd.jsonl', _R2_DAY)
+    con = duckdb.connect()
+    con.register('r2_rows', parse(str(tmp_path / 'd.jsonl'), con=con))
+    out = str(tmp_path / 'agg.parquet')
+    stats = aggregate_access(con, '(SELECT * FROM r2_rows)', out, as_of='2026-10-12T13:30:00+00:00')
+    assert stats == {'rows_in': 3, 'paths_out': 4, 'hours': 3, 'total_bytes_out': 0}
+    df = pd.read_parquet(out).groupby('path', as_index=False)['last_ts'].max().sort_values('path')
+    assert [(p, t.isoformat()) for p, t in zip(df.path, df.last_ts)] == [
+        ('.', '2026-10-12T13:00:00+00:00'),
+        ('data', '2026-10-12T13:00:00+00:00'),
+        ('data/2023.pqt', '2026-10-12T13:00:00+00:00'),
+        ('data/2024.pqt', '2026-10-12T11:00:00+00:00'),
+    ]
