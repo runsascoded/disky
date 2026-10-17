@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from disk_tree.env import get as env_get
 
 MANIFEST = ".manifest.jsonl"
 
@@ -29,7 +30,7 @@ class CrossVolume(OSError):
 
 
 def trash_root() -> Path:
-    return Path(os.environ.get("DISK_TREE_TRASH_DIR") or Path.home() / ".Trash" / "disky")
+    return Path(env_get('TRASH_DIR') or Path.home() / ".Trash" / "disky")
 
 
 def run_dir(run_id: str) -> Path:

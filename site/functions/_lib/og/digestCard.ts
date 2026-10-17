@@ -89,7 +89,29 @@ export function yRange(vals: number[], q: number | null): [number, number] {
   return [lo - span * 0.08, hi + span * 0.06]
 }
 
-function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: number): string {
+/** The x frame shared by a card's panels: the plot's left edge (after the y labels), its width, and time → x. */
+interface Frame { left: number; pw: number; X: (t: number) => number }
+function frame(d: { from: number; to: number }, x0: number, w: number): Frame {
+  const left = x0 + 44
+  const pw = x0 + w - left
+  return { left, pw, X: (t: number) => left + ((t - d.from) / (d.to - d.from)) * pw }
+}
+
+/** Weekly ticks below `yb`: every Monday in the span, labelled `M/D` unless `labels` is false. */
+function mondays(d: { from: number; to: number }, X: (t: number) => number, yb: number, labels = true): string[] {
+  const out: string[] = []
+  const day = 86400_000
+  for (let t = Math.ceil(d.from / day) * day; t <= d.to; t += day) {
+    if (new Date(t).getUTCDay() !== 1) continue
+    out.push(`<line x1="${r1(X(t))}" x2="${r1(X(t))}" y1="${r1(yb)}" y2="${r1(yb + 4)}" stroke="${INK3}"/>`)
+    if (labels) out.push(text(X(t), yb + 17, md(t), 11, { fill: INK3, anchor: 'middle' }))
+  }
+  return out
+}
+
+/** The usage line over `d.points` (with `d.quota`'s line and headroom, when given): y ticks, Monday ticks, the
+ *  month-start reference, and the latest point's call-out (`o.call`, default the unit's byte formatter). */
+function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: number, o: { xLabels?: boolean; call?: (bytes: number) => string } = {}): string {
   const out: string[] = []
   const pts = d.points
   const u = UNITS[d.units ?? 'TiB']
@@ -99,9 +121,7 @@ function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: numb
   let [lo, hi] = yRange(vals, q)
   const ticks = niceTicks(lo, hi)
   lo = Math.min(lo, ticks[0])
-  const left = x0 + 44
-  const pw = x0 + w - left
-  const X = (t: number) => left + ((t - d.from) / (d.to - d.from)) * pw
+  const { left, pw, X } = frame(d, x0, w)
   const Y = (v: number) => y0 + h - ((v - lo) / (hi - lo)) * h
   out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
   for (const v of ticks) {
@@ -109,13 +129,7 @@ function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: numb
     out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
     out.push(text(left - 6, Y(v) + 4, v.toLocaleString('en-US'), 11, { fill: INK3, anchor: 'end' }))
   }
-  // Weekly ticks: every Monday in the span.
-  const day = 86400_000
-  for (let t = Math.ceil(d.from / day) * day; t <= d.to; t += day) {
-    if (new Date(t).getUTCDay() !== 1) continue
-    out.push(`<line x1="${r1(X(t))}" x2="${r1(X(t))}" y1="${r1(y0 + h)}" y2="${r1(y0 + h + 4)}" stroke="${INK3}"/>`)
-    out.push(text(X(t), y0 + h + 17, md(t), 11, { fill: INK3, anchor: 'middle' }))
-  }
+  out.push(...mondays(d, X, y0 + h, o.xLabels ?? true))
   if (!pts.length) return out.join('')
   const line = pts.map(p => `${r1(X(p.t))},${r1(Y(tib(p.bytes)))}`).join(' ')
   const first = pts[0]
@@ -135,7 +149,7 @@ function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: numb
   const lx = X(last.t)
   const ly = Y(tib(last.bytes))
   out.push(`<circle cx="${r1(lx)}" cy="${r1(ly)}" r="4" fill="${S1}"/>`)
-  const call = `${u.fmt(last.bytes)}${q != null ? ` · ${Math.round((100 * tib(last.bytes)) / q)}%` : ''}`
+  const call = `${(o.call ?? u.fmt)(last.bytes)}${q != null ? ` · ${Math.round((100 * tib(last.bytes)) / q)}%` : ''}`
   const cw = interWidth(call, 15, 600)
   const right = lx + 10 + cw <= left + pw
   out.push(text(right ? lx + 10 : lx - 10, ly + 5, call, 15, { weight: 600, anchor: right ? 'start' : 'end' }))
@@ -152,11 +166,8 @@ function leaves(n: DiffNode, out: DiffNode[] = []): DiffNode[] {
 export function digestSvg(d: DigestCardInput): string {
   const w = DIGEST_W - 2 * PAD
   const { fmt } = UNITS[d.units ?? 'TiB']
-  const out: string[] = []
-  let y = PAD
-  out.push(text(PAD, y + 18, d.title, 20, { weight: 600 }))
-  out.push(text(DIGEST_W - PAD, y + 18, d.note, 12, { fill: INK3, anchor: 'end' }))
-  y += 36
+  const out = [header(d.title, d.note)]
+  let y = PAD + 36
   out.push(chartSvg(d, PAD, y, w, CHART_H))
   y += CHART_H + 30
   if (d.diff) {
@@ -185,6 +196,117 @@ export function digestSvg(d: DigestCardInput): string {
     out.push('</g>')
     y += MAP_H
   }
+  return page(y, out)
+}
+
+/** The card's `<svg>`: `DIGEST_W` wide, its content ending at `y` (+ the bottom pad), on the theme's background. */
+function page(y: number, out: string[]): string {
   const H = Math.ceil(y + PAD)
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${DIGEST_W}" height="${H}" viewBox="0 0 ${DIGEST_W} ${H}" font-family="Inter"><rect width="${DIGEST_W}" height="${H}" fill="${BG}"/>${out.join('')}</svg>`
+}
+
+/** The card's header: the title, and the note right-aligned. */
+function header(title: string, note: string): string {
+  return text(PAD, PAD + 18, title, 20, { weight: 600 }) + text(DIGEST_W - PAD, PAD + 18, note, 12, { fill: INK3, anchor: 'end' })
+}
+
+// ---- the storage-class card -------------------------------------------------------------------------------------
+
+const TOTAL_H = 150
+const STACK_H = 250
+/** The tiers' default colours, bottom → top (cold → hot: a stable archive tier at the bottom, the active one on top,
+ *  so the total's wiggle lives at the stack's readable top edge). */
+export const TIER_COLORS = ['#8a897f', S1, '#e3b341', DANGER, '#a78bfa', '#2dd4bf']
+
+export interface TierPoint {
+  /** Epoch ms of the scan. */
+  t: number
+  /** Bytes per tier, in `TiersCardInput.tiers` order. */
+  bytes: number[]
+}
+
+export interface TiersCardInput {
+  /** e.g. `marin GCS — October 2026`. */
+  title: string
+  /** Header's right side, e.g. `gcs.oa.dev · TiB`. */
+  note: string
+  /** The stack's tiers, bottom → top. */
+  tiers: { name: string; color: string }[]
+  points: TierPoint[]
+  /** The x axis' span, epoch ms (the month). */
+  from: number
+  to: number
+  /** The y axes' unit and every size label's (default `TiB`). */
+  units?: DigestUnits
+}
+
+/** Bytes in a fixed unit, as the y axes read: `3,030 TiB`, `15.4 TB` (never rescaled to the next unit up). */
+export function fmtIn(units: DigestUnits): (bytes: number) => string {
+  const per = UNITS[units].bytes
+  return b => {
+    const v = b / per
+    return `${v.toLocaleString('en-US', { maximumFractionDigits: v >= 100 ? 0 : 1 })} ${units}`
+  }
+}
+
+const sum = (xs: number[]) => xs.reduce((s, x) => s + x, 0)
+
+/** The stacked tiers: one band per tier over the scans (a lone scan: a stacked bar), y from 0. */
+function stackSvg(d: TiersCardInput, x0: number, y0: number, w: number, h: number): string {
+  const out: string[] = []
+  const per = UNITS[d.units ?? 'TiB'].bytes
+  const pts = d.points
+  const top = Math.max(...pts.map(p => sum(p.bytes) / per), 1) * 1.04
+  const ticks = niceTicks(0, top, 4)
+  const hi = Math.max(ticks[ticks.length - 1], top)
+  const { left, pw, X } = frame(d, x0, w)
+  const Y = (v: number) => y0 + h - (v / hi) * h
+  out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  for (const v of ticks) {
+    out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
+    out.push(text(left - 6, Y(v) + 4, v.toLocaleString('en-US'), 11, { fill: INK3, anchor: 'end' }))
+  }
+  out.push(...mondays(d, X, y0 + h))
+  if (!pts.length) return out.join('')
+  // cum[k][i]: the top of tier k at scan i
+  const cum: number[][] = []
+  d.tiers.forEach((_, k) => cum.push(pts.map((p, i) => (k ? cum[k - 1][i] : 0) + p.bytes[k] / per)))
+  const half = 0.4 * 86400_000
+  d.tiers.forEach(({ color }, k) => {
+    const lo = (i: number) => (k ? cum[k - 1][i] : 0)
+    if (pts.length === 1) {
+      const [xl, xr] = [X(pts[0].t - half), X(pts[0].t + half)]
+      out.push(`<rect x="${r1(xl)}" y="${r1(Y(cum[k][0]))}" width="${r1(xr - xl)}" height="${r1(Y(lo(0)) - Y(cum[k][0]))}" fill="${color}" fill-opacity="0.92"/>`)
+      return
+    }
+    const upper = pts.map((p, i) => `${r1(X(p.t))},${r1(Y(cum[k][i]))}`)
+    const lower = pts.map((p, i) => `${r1(X(p.t))},${r1(Y(lo(i)))}`).reverse()
+    out.push(`<polygon points="${[...upper, ...lower].join(' ')}" fill="${color}" fill-opacity="0.92"/>`)
+  })
+  return out.join('')
+}
+
+/** The storage-class digest image's SVG, `DIGEST_W` wide: the month's total line (autofit, dashed at its first scan,
+ *  the latest called out) over its stacked tiers, then a legend of each tier's latest size, top tier first. */
+export function tiersSvg(d: TiersCardInput): string {
+  const w = DIGEST_W - 2 * PAD
+  const units = d.units ?? 'TiB'
+  const fmt = fmtIn(units)
+  const out = [header(d.title, d.note)]
+  let y = PAD + 36
+  const totals = d.points.map(p => ({ t: p.t, bytes: sum(p.bytes) }))
+  out.push(chartSvg({ title: d.title, note: d.note, points: totals, from: d.from, to: d.to, units }, PAD, y, w, TOTAL_H, { xLabels: false, call: fmt }))
+  y += TOTAL_H + 12
+  out.push(stackSvg(d, PAD, y, w, STACK_H))
+  y += STACK_H + 30
+  const last = d.points[d.points.length - 1]
+  let x = frame(d, PAD, w).left
+  for (let k = d.tiers.length - 1; k >= 0; k--) {
+    const { name, color } = d.tiers[k]
+    const label = last ? `${name} ${fmt(last.bytes[k])}` : name
+    out.push(`<rect x="${r1(x)}" y="${r1(y + 2)}" width="12" height="12" rx="2" fill="${color}"/>`)
+    out.push(text(x + 18, y + 13, label, 13, { fill: INK2 }))
+    x += 18 + interWidth(label, 13) + 22
+  }
+  return page(y + 16, out)
 }

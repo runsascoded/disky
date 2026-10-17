@@ -24,8 +24,8 @@ SCAN_KEYS = ['path', 'time', 'blob', 'size', 'n_children', 'n_desc', 'mtime', 'e
 
 
 def _run(args: list[str], root: Path, **env_extra: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, config.DISK_TREE_ROOT_VAR: str(root)}
-    env.pop(config.DISK_TREE_SCAN_DIRS_VAR, None)
+    env = {**os.environ, config.ROOT_VAR: str(root)}
+    env.pop(config.SCAN_DIRS_VAR, None)
     env.update(env_extra)
     return subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', *args],
@@ -77,18 +77,18 @@ def test_index_to_url_writes_a_manifest_that_register_imports(tree: Path, tmp_pa
     assert r.stdout.rstrip('\n') == '1 registered, 0 skipped'
     assert r.stderr.rstrip('\n').split('\n') == [
         f'registered scan 1: {tree} @ {full_time} → {scan_a["blob"]}',
-        f'note: {blobs} is not on the blob search path — add it to {config.DISK_TREE_SCAN_DIRS_VAR} so the blobs resolve',
+        f'note: {blobs} is not on the blob search path — add it to {config.SCAN_DIRS_VAR} so the blobs resolve',
     ]
     (scan_b,) = _scans(b)
     assert {k: scan_b[k] for k in SCAN_KEYS} == {k: scan_a[k] for k in SCAN_KEYS}
 
     # Idempotent, and quiet about the search path once the dir is on it.
-    r = _ok(_run(['scans', 'register', blobs], b, **{config.DISK_TREE_SCAN_DIRS_VAR: blobs}))
+    r = _ok(_run(['scans', 'register', blobs], b, **{config.SCAN_DIRS_VAR: blobs}))
     assert r.stdout.rstrip('\n') == '0 registered, 1 skipped'
     assert r.stderr.rstrip('\n').split('\n') == [f'skipped scan 1: {tree} @ {full_time} → {scan_a["blob"]}']
 
     # …and machine b now reads the tree from the remote blob.
-    r = _ok(_run(['du', '-d', '1', str(tree)], b, **{config.DISK_TREE_SCAN_DIRS_VAR: blobs}))
+    r = _ok(_run(['du', '-d', '1', str(tree)], b, **{config.SCAN_DIRS_VAR: blobs}))
     first = re.sub(r' — .+? \(scan', ' — <size> (scan', r.stdout.split('\n')[0])
     assert first == f'{tree} — <size> (scan 1 of {tree}, {scan_b["time"]})'
 
@@ -98,7 +98,7 @@ def test_register_a_single_manifest_file(tree: Path, tmp_path: Path):
     blobs = f'file://{tmp_path / "blobs"}'
     _ok(_run(['index', '-C', '-q', '-t', blobs, str(tree)], a))
     (scan_a,) = _scans(a)
-    r = _ok(_run(['scans', 'register', f'{blobs}/{scan_a["blob"]}{SUFFIX}'], b, **{config.DISK_TREE_SCAN_DIRS_VAR: blobs}))
+    r = _ok(_run(['scans', 'register', f'{blobs}/{scan_a["blob"]}{SUFFIX}'], b, **{config.SCAN_DIRS_VAR: blobs}))
     assert r.stdout.rstrip('\n') == '1 registered, 0 skipped'
     (scan_b,) = _scans(b)
     assert {k: scan_b[k] for k in SCAN_KEYS} == {k: scan_a[k] for k in SCAN_KEYS}

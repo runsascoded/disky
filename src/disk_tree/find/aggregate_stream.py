@@ -135,8 +135,8 @@ _MAX_RUNS = 100_000
 # balance (± one batch) and the intra-run seek granularity. Env-overridable so
 # tests can force multi-batch shards on tiny fixtures even in spawned pass-1
 # workers (module constants don't survive spawn; the environment does).
-import os as _os
-_SCAN_BATCH_ROWS = int(_os.environ.get('DISK_TREE_SCAN_BATCH_ROWS', str(1 << 16)))
+from disk_tree.env import get as _env_get
+_SCAN_BATCH_ROWS = int(_env_get('SCAN_BATCH_ROWS', str(1 << 16)))
 
 
 def _merge_runs(run_srcs: list[tuple[str, Iterator[tuple]]], hw: dict):
@@ -927,7 +927,7 @@ _PRIME_ROWS = 1 << 22
 # speedup. The parallel path is a huge win at 300M rows (mgu's serial
 # finalize ran >1h53m without completing) — this only skips it where it
 # loses. Output bytes are identical either way, so the switch is invisible.
-_PARALLEL_FINALIZE_MIN_ROWS = int(_os.environ.get('DISK_TREE_PARALLEL_FINALIZE_MIN_ROWS', str(20_000_000)))
+_PARALLEL_FINALIZE_MIN_ROWS = int(_env_get('PARALLEL_FINALIZE_MIN_ROWS', str(20_000_000)))
 
 
 def _detect_runs(path: str, key: str = 'path') -> list[int]:

@@ -15,23 +15,23 @@ from disk_tree import config
 
 def test_explicit_scan_dirs_win(monkeypatch, tmp_path: Path):
     a, b = tmp_path / 'a', tmp_path / 'b'
-    monkeypatch.setenv(config.DISK_TREE_SCAN_DIRS_VAR, f'{a}:{b}')
+    monkeypatch.setenv(config.SCAN_DIRS_VAR, f'{a}:{b}')
     assert config.configured_scan_dirs() == [str(a), str(b)]
     assert config.scan_write_dir() == str(a)
 
 
 def test_explicit_root_disables_discovery(monkeypatch, tmp_path: Path):
     """An explicit root is a deliberate choice; discovery must not redirect it."""
-    monkeypatch.delenv(config.DISK_TREE_SCAN_DIRS_VAR, raising=False)
-    monkeypatch.setenv(config.DISK_TREE_ROOT_VAR, str(tmp_path))
+    monkeypatch.delenv(config.SCAN_DIRS_VAR, raising=False)
+    monkeypatch.setenv(config.ROOT_VAR, str(tmp_path))
     monkeypatch.setattr(config, 'DEFAULT_SCANS_DIR', str(tmp_path / 'scans'))
     monkeypatch.setattr(config, 'discovered_scan_dirs', lambda: ['/Volumes/x/disk-tree/scans'])
     assert config.configured_scan_dirs() == [str(tmp_path / 'scans')]
 
 
 def test_discovery_used_when_no_explicit_config(monkeypatch, tmp_path: Path):
-    monkeypatch.delenv(config.DISK_TREE_SCAN_DIRS_VAR, raising=False)
-    monkeypatch.delenv(config.DISK_TREE_ROOT_VAR, raising=False)
+    monkeypatch.delenv(config.SCAN_DIRS_VAR, raising=False)
+    monkeypatch.delenv(config.ROOT_VAR, raising=False)
     monkeypatch.setattr(config, 'DEFAULT_SCANS_DIR', str(tmp_path / 'scans'))
     monkeypatch.setattr(config, 'discovered_scan_dirs', lambda: ['/Volumes/x6/disk-tree/scans'])
     assert config.configured_scan_dirs() == ['/Volumes/x6/disk-tree/scans', str(tmp_path / 'scans')]
@@ -39,14 +39,14 @@ def test_discovery_used_when_no_explicit_config(monkeypatch, tmp_path: Path):
 
 def test_unmounted_volume_is_never_a_write_target(monkeypatch, tmp_path: Path):
     """Writing under an absent mount point would land on the boot disk."""
-    monkeypatch.setenv(config.DISK_TREE_SCAN_DIRS_VAR, f'/Volumes/gone/disk-tree/scans:{tmp_path}')
+    monkeypatch.setenv(config.SCAN_DIRS_VAR, f'/Volumes/gone/disk-tree/scans:{tmp_path}')
     monkeypatch.setattr(config, 'ismount', lambda p: False)
     assert config._volume_mounted('/Volumes/gone/disk-tree/scans') is False
     assert config.scan_write_dir() == str(tmp_path)
 
 
 def test_mounted_volume_is_preferred(monkeypatch, tmp_path: Path):
-    monkeypatch.setenv(config.DISK_TREE_SCAN_DIRS_VAR, f'/Volumes/here/disk-tree/scans:{tmp_path}')
+    monkeypatch.setenv(config.SCAN_DIRS_VAR, f'/Volumes/here/disk-tree/scans:{tmp_path}')
     monkeypatch.setattr(config, 'ismount', lambda p: p == '/Volumes/here')
     assert config.scan_write_dir() == '/Volumes/here/disk-tree/scans'
 
@@ -61,7 +61,7 @@ def test_resolve_finds_a_blob_in_a_secondary_dir(monkeypatch, tmp_path: Path):
     far.mkdir()
     (far / 'b.parquet').write_bytes(b'x')
     monkeypatch.setattr(config, 'SCANS_DIR', str(near))
-    monkeypatch.setenv(config.DISK_TREE_SCAN_DIRS_VAR, f'{near}:{far}')
+    monkeypatch.setenv(config.SCAN_DIRS_VAR, f'{near}:{far}')
     assert config.resolve_scan_blob('b.parquet') == str(far / 'b.parquet')
 
 
@@ -69,7 +69,7 @@ def test_resolve_falls_back_to_the_write_dir(monkeypatch, tmp_path: Path):
     """A missing blob resolves to where it *would* be, so the eventual open
     error names a useful path."""
     monkeypatch.setattr(config, 'SCANS_DIR', str(tmp_path))
-    monkeypatch.setenv(config.DISK_TREE_SCAN_DIRS_VAR, str(tmp_path))
+    monkeypatch.setenv(config.SCAN_DIRS_VAR, str(tmp_path))
     assert config.resolve_scan_blob('nope.parquet') == str(tmp_path / 'nope.parquet')
 
 
@@ -77,7 +77,7 @@ def test_read_dirs_lead_with_the_write_dir_and_dedupe(monkeypatch, tmp_path: Pat
     a, b = str(tmp_path / 'a'), str(tmp_path / 'b')
     monkeypatch.setattr(config, 'SCANS_DIR', b)
     monkeypatch.setattr(config, 'DEFAULT_SCANS_DIR', a)
-    monkeypatch.setenv(config.DISK_TREE_SCAN_DIRS_VAR, f'{a}:{b}')
+    monkeypatch.setenv(config.SCAN_DIRS_VAR, f'{a}:{b}')
     assert config.scan_read_dirs() == [b, a]
 
 
@@ -90,8 +90,8 @@ def test_index_require_external_skips_when_write_target_is_boot_disk(tmp_path: P
     import subprocess
     import sys
 
-    env = {**os.environ, config.DISK_TREE_ROOT_VAR: str(tmp_path)}
-    env.pop(config.DISK_TREE_SCAN_DIRS_VAR, None)
+    env = {**os.environ, config.ROOT_VAR: str(tmp_path)}
+    env.pop(config.SCAN_DIRS_VAR, None)
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'index', '-e', str(tmp_path)],
         env=env, capture_output=True, text=True, check=False,

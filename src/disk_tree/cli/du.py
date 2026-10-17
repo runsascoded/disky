@@ -29,7 +29,7 @@ def _fmt(size: int, human: bool) -> str:
 @option('-H', '--no-human', is_flag=True, help='Print raw bytes instead of human-readable sizes')
 @option('-j', '--json', 'as_json', is_flag=True, help='Emit JSON')
 @option('-n', '--top', default=15, help='Max children shown per level (0 = all)')
-@option('-p', '--path-index', 'path_index', envvar='DISK_TREE_PATH_INDEX', default=None, help="Read the site's path index instead of a scan blob: a `path-index.parquet`, or a root whose newest `<date>/index/<gen>/` is used (e.g. `r2://disk-tree/listing/laptop`; $DISK_TREE_PATH_INDEX)")
+@option('-p', '--path-index', 'path_index', envvar=['DISKY_PATH_INDEX', 'DISK_TREE_PATH_INDEX'], default=None, help="Read the site's path index instead of a scan blob: a `path-index.parquet`, or a root whose newest `<date>/index/<gen>/` is used (e.g. `r2://disk-tree/listing/laptop`; $DISK_TREE_PATH_INDEX)")
 @option('-s', '--scan-id', default=None, help='Use a specific scan id (default: freshest covering URI)')
 @argument('uri')
 def du_cmd(all_kinds: bool, depth: int, no_human: bool, as_json: bool, top: int, path_index: str | None, scan_id: str | None, uri: str):

@@ -12,7 +12,7 @@ What differs in the posts lives in two TEMPLATES — opinionated styles,
 neither intrinsic to one store:
 
 - ``gcs`` (`digest_gcs`): a reply per scan, the headline as the sender name,
-  $/mo by storage class in the body, a storage-class mosaic plot.
+  $/mo by storage class in the body, the site's storage-class image.
 - ``cw`` (`digest_cw`): a reply per UTC day in two variants (``sender``: the
   headline as the sender name, posted once from the morning scan — optionally
   preceded by a ``provisional`` reply the earlier scans edit; ``body``: bold

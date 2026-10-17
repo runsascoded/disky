@@ -292,7 +292,8 @@ def write_path_index(
 
     With ``access`` (layer-2a access-log agg parquet globs), every index row
     that has been read since logging began carries ``a`` — the epoch day of
-    its most recent read (GET/HEAD/LIST anywhere under the prefix) — and meta
+    its most recent read (GET/HEAD anywhere under the prefix; a LIST names no key, so it could only ever
+    mark the bucket root, and that's the scanner's own listing as often as anyone's) — and meta
     gains the observation window (``meta.access = {from, to}``).
     """
     from disk_tree.listing import prepare_listing
@@ -464,10 +465,10 @@ def write_path_index(
             INSERT INTO access_agg
             SELECT bucket, CASE WHEN path = '.' THEN '' ELSE path END AS dir,
               CAST(floor(epoch(MAX(last_ts)) / 86400) AS INTEGER) AS aday,
-              COALESCE(SUM(n_ops) FILTER (WHERE op IN ('GET', 'HEAD')), 0) AS ro,
-              COALESCE(SUM(bytes_out) FILTER (WHERE op IN ('GET', 'HEAD')), 0) AS rb
+              COALESCE(SUM(n_ops), 0) AS ro,
+              COALESCE(SUM(bytes_out), 0) AS rb
             FROM {acc}
-            WHERE op IN ('GET', 'HEAD', 'LIST') AND {day} < DATE '{asof}'
+            WHERE op IN ('GET', 'HEAD') AND {day} < DATE '{asof}'
             GROUP BY 1, 2
             """
         )

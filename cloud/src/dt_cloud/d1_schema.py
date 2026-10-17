@@ -145,10 +145,9 @@ def site_dir() -> Path:
 
 
 def schema_file() -> Path:
-    """The branch's schema file, `site/schema.sql`: of the repo checkout this module runs from, else of the
-    nearest `site/` up from the cwd (an installed package)."""
-    site = Path(__file__).resolve().parents[3] / "site"
-    return (site if (site / "functions").is_dir() else site_dir()) / "schema.sql"
+    """The branch's schema file, `site/schema.sql`: of the nearest `site/` up from the cwd, else of the checkout
+    this module runs from. The cwd's first: worktrees share one venv, whose `dt_cloud` may be another checkout's."""
+    return site_dir() / "schema.sql"
 
 
 def table_ddl(tables: Sequence[str], text: str | None = None) -> str:

@@ -22,13 +22,14 @@
     "PUBLIC_BUCKETS": "[\"jc-taxes\"]",
     "PUBLIC_PREFIX": "access/r2",
     "HOURLY_CRON": "13 * * * *",
-    "DAILY_CRON": "17 7 * * *",
-    "LAG_HOURS": "2",
+    "LAG_HOURS": "1",
+    "OVERLAP_HOURS": "2",
     "LOOKBACK_HOURS": "6",
-    "OVERLAP_HOURS": "1",
-    "REPLAY_HOURS": "144",
+    "RETENTION_HOURS": "144",
     "PAGE_SIZE": "500",
     "MAX_PAGES": "50",
+    "MAX_HOURS": "48",
+    "VERIFY_HOURS": "6",
     "MAX_PAGE_BYTES": "4194304"
   },
   "triggers": {"crons": []}

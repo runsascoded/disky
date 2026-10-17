@@ -12,7 +12,7 @@ from disk_tree.cli.base import cli
 
 
 @cli.command('notify')
-@option('-c', '--channels', help='Comma-separated channels, in order (default: `$DISK_TREE_NOTIFY`, else every configured one)')
+@option('-c', '--channels', help='Comma-separated channels, in order (default: `$DISKY_NOTIFY`, else every configured one)')
 @option('-f', '--first', is_flag=True, help='Stop at the first channel that succeeds (a fallback chain) instead of posting to all')
 @option('-l', '--url-title', help='Label for `-u`')
 @option('-p', '--priority', type=int, default=0, help="Pushover priority: -2 (silent) … 1 (high)")
@@ -23,11 +23,12 @@ def notify_cmd(channels: str | None, first: bool, url_title: str | None, priorit
     """Push MESSAGE to the configured channels. Exit 2 when none is configured, 1 when every attempt failed."""
     import os
 
+    from disk_tree.env import name as env_name
     from disk_tree.notify import push
 
     env = dict(os.environ)
     if channels is not None:
-        env['DISK_TREE_NOTIFY'] = channels
+        env[env_name('NOTIFY')] = channels
     chans = push.configured(env)
     if not chans:
         print('notify: no channel configured (PUSHOVER_TOKEN + PUSHOVER_USER, DISCORD_NOTIFY_WEBHOOK, or SLACK_BOT_TOKEN + SLACK_ALERT_CHANNEL)', file=sys.stderr)

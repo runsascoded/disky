@@ -269,7 +269,6 @@ def converge_gcs_discord(root: Path, month: date, state: dict, log: list, edit_r
 
 
 def _dry_run(monkeypatch, tmp_path: Path, args: list[str]) -> str:
-    pytest.importorskip("matplotlib")
     import tempfile
 
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "plots"))
@@ -279,20 +278,24 @@ def _dry_run(monkeypatch, tmp_path: Path, args: list[str]) -> str:
     return r.stdout
 
 
-def test_gcs_dry_run(monkeypatch, tmp_path: Path):
-    root = gcs_root(tmp_path)
-    golden("gcs-dry-run.txt", _dry_run(monkeypatch, tmp_path, ["digest", "-C", str(config_file(GCS_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-08"]))
-
-
 @pytest.fixture
 def site_image(monkeypatch) -> list:
-    """The cw OP image is the site's (`POST /api/digest-image`): a stub site records each request and answers a PNG."""
+    """Every OP image is the site's (`POST /api/digest-image`): a stub site records each request and answers a PNG."""
     from dt_cloud import site
 
     calls: list = []
     monkeypatch.setenv("SITE_TOKEN", "tok")
     monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
     return calls
+
+
+def test_gcs_dry_run(monkeypatch, tmp_path: Path, site_image: list):
+    root = gcs_root(tmp_path)
+    golden("gcs-dry-run.txt", _dry_run(monkeypatch, tmp_path, ["digest", "-C", str(config_file(GCS_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-08"]))
+    # the image is the site's storage-class card, over the month's daily scans (8/1 → 8/11, 8/6 missing)
+    assert [(path, body["kind"], [p["scan"] for p in body["points"]]) for _, _, path, body in site_image] == [
+        ("/api/digest-image", "tiers", [f"2026-08-{d:02d}" for d in (*range(1, 6), *range(7, 12))]),
+    ]
 
 
 @pytest.mark.parametrize("variant", ["sender", "body"])

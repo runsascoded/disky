@@ -24,8 +24,8 @@ LOW = str(10**18)  # any disk is "low" against 888 PiB
 
 
 def _run(args: list[str], root: Path, **env_extra: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, config.DISK_TREE_ROOT_VAR: str(root)}
-    for k in (config.DISK_TREE_SCAN_DIRS_VAR, LOW_SPACE_VAR, REMOTE_TARGET_VAR):
+    env = {**os.environ, config.ROOT_VAR: str(root)}
+    for k in (config.SCAN_DIRS_VAR, LOW_SPACE_VAR, REMOTE_TARGET_VAR):
         env.pop(k, None)
     env.update(env_extra)
     return subprocess.run(
@@ -63,7 +63,7 @@ def test_to_writes_the_blob_to_the_url_target_and_reads_it_back(src: Path, tmp_p
     ]
 
     # A later process finds the blob through the search path — no `--to` needed.
-    r2 = _run(['scans', 'dirs'], root, **{config.DISK_TREE_SCAN_DIRS_VAR: f'{target}:{root / "scans"}'})
+    r2 = _run(['scans', 'dirs'], root, **{config.SCAN_DIRS_VAR: f'{target}:{root / "scans"}'})
     assert r2.returncode == 0, r2.stderr
     assert r2.stdout.rstrip('\n').split('\n') == [
         f'write: {target}',

@@ -5,8 +5,8 @@ import type { Store } from '../stores'
 const store: Store = {
   key: 'r2',
   label: 'R2',
-  title: 'disk-tree — public R2 buckets',
-  desc: 'Storage usage of public Cloudflare R2 buckets (ctbk, crashes, jc-taxes) — treemap, sizes over time, and diffs. A public disk-tree demo.',
+  title: 'disky — public R2 buckets',
+  desc: 'Storage usage of public Cloudflare R2 buckets (ctbk, crashes, jc-taxes) — treemap, sizes over time, and diffs. A public disky demo.',
   path: '/',
   scheme: 'r2://',
   base: '/data/r2',
@@ -22,7 +22,7 @@ const store: Store = {
   // size and dates until that rule lists this site.
   objectBases: { ctbk: 'https://data.ctbk.dev', crashes: 'https://crashes-data.hccs.dev' },
   rootLabel: 'all buckets',
-  objectsNote: 'Public R2 buckets scanned daily by disk-tree; modified is the object’s LastModified timestamp, not its original creation time.',
+  objectsNote: 'Public R2 buckets scanned daily by disky; modified is the object’s LastModified timestamp, not its original creation time.',
   // A public deploy never shows the wall (`AUTH_MODE === 'public'`); copy
   // kept for the type, and for a gated build of the same store.
   wall: { restrict: 'This store is public.', signIn: 'Sign in' },

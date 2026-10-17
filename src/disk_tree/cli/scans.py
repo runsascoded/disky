@@ -139,7 +139,7 @@ def scans_register(src: str):
         err(f"{'registered' if created else 'skipped'} scan {scan.id}: {scan.path} @ {scan.time} → {scan.blob}")
     blobs_dir = src.rsplit('/', 1)[0] if src.endswith(SUFFIX) else src.rstrip('/')
     if blobs_dir not in config.scan_read_dirs():
-        err(f'note: {blobs_dir} is not on the blob search path — add it to {config.DISK_TREE_SCAN_DIRS_VAR} so the blobs resolve')
+        err(f'note: {blobs_dir} is not on the blob search path — add it to {config.SCAN_DIRS_VAR} so the blobs resolve')
     print(f'{n_new} registered, {n_skip} skipped')
 
 

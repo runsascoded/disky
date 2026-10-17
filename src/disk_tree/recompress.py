@@ -6,7 +6,7 @@ that is exactly `<scan_root>/<path>` (the root itself at `.`) and, from
 `--pivot-sum`, a `sum_<col>_<v>` column per pivot value — which for a
 single-class bucket equals `size` on every row. :func:`recompress` drops both
 kinds of redundancy and re-encodes under the switch codec
-(`$DISK_TREE_PARQUET_CODEC`), so the file reads back through
+(`$DISKY_PARQUET_CODEC`), so the file reads back through
 `blobfs.read_parquet` as the frame it held before, column for column.
 
 Everything streams by row group, so a multi-GB file never lands in memory

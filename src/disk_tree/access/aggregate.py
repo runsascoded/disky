@@ -128,7 +128,61 @@ def aggregate_access(
         FROM access_in
         GROUP BY bucket, path, hour, op
     """)
+    stats = _rollup(con, out_parquet, as_of)
+    return {'rows_in': int(n_rows), **stats}
 
+
+def aggregate_access_leaf(
+    con: "duckdb.DuckDBPyConnection",
+    leaf_sql: str,
+    out_parquet: str,
+    as_of: "str | datetime | None" = None,
+) -> dict:
+    """Aggregate pre-aggregated leaf rows → layer-2a parquet (same tree, same columns, + ``sampled``).
+
+    For sources that publish per-(key, hour, action) counts instead of requests (the R2 collector's public hour
+    files, :mod:`disk_tree.access.parsers.r2`): expanding them to one canonical row per request is not an option at
+    volume. ``leaf_sql`` is a parenthesized SELECT exposing ``bucket, path, hour, op, n_ops, bytes_out, bytes_in,
+    n_requesters, last_ts, sampled``; rows sharing ``(bucket, path, hour, op)`` (two actions mapped to one op) are
+    summed, and paths get the canonical ``//`` collapse. ``sampled`` (the source hour's capture held fewer events
+    than requests) rolls up as ``bool_or``, so a prefix is ``sampled`` when any of its hour's rows is.
+
+    The caller applies its as-of cut (``as_of`` is recorded in the parquet metadata only). ``rows_in`` is the
+    requests counted (Σ ``n_ops``), comparable with :func:`aggregate_access`'s rows.
+    """
+    con.execute("SET TimeZone = 'UTC'")
+    con.execute(f"""
+        CREATE OR REPLACE TABLE access_leaf AS
+        SELECT
+            bucket,
+            rtrim(regexp_replace(path, '/+', '/', 'g'), '/') AS path,
+            hour::TIMESTAMP AS hour, op,
+            SUM(n_ops)::BIGINT AS n_ops,
+            SUM(bytes_out)::BIGINT AS bytes_out,
+            SUM(bytes_in)::BIGINT AS bytes_in,
+            SUM(n_requesters)::BIGINT AS n_requesters,
+            MAX(last_ts) AS last_ts,
+            bool_or(sampled) AS sampled
+        FROM {leaf_sql}
+        GROUP BY 1, 2, 3, 4
+    """)
+    n_ops = scalar(con, "SELECT COALESCE(SUM(n_ops), 0) FROM access_leaf")
+    if n_ops == 0:
+        raise ValueError("no access rows in input")
+    stats = _rollup(con, out_parquet, as_of, sampled=True)
+    return {'rows_in': int(n_ops), **stats}
+
+
+def _rollup(
+    con: "duckdb.DuckDBPyConnection",
+    out_parquet: str,
+    as_of: "str | datetime | None",
+    sampled: bool = False,
+) -> dict:
+    """``access_leaf`` → every ancestor level → ``out_parquet``. ``sampled`` adds the boolean column (absent from
+    request-log sources, whose output stays byte-identical)."""
+    extra = ', sampled' if sampled else ''
+    extra_agg = ', bool_or(sampled) AS sampled' if sampled else ''
     # Bottom-up parent synthesis. Group current level's rows by parent path
     # (+ bucket + hour + op) to produce the next level, until nothing left.
     con.execute("CREATE OR REPLACE TABLE level_cur AS SELECT * FROM access_leaf")
@@ -151,7 +205,7 @@ def aggregate_access(
                 -- rebuilding from raw. Sum bounds it above; a HyperLogLog
                 -- sketch is the fix if this ever needs to be exact.
                 SUM(n_requesters)::BIGINT AS n_requesters,
-                MAX(last_ts) AS last_ts
+                MAX(last_ts) AS last_ts{extra_agg}
             FROM level_cur
             WHERE path != ''
             GROUP BY 1, 2, 3, 4
@@ -165,7 +219,7 @@ def aggregate_access(
 
     # Union all levels + attach kind/parent/depth for tree mechanics.
     unions = " UNION ALL ".join(
-        f"SELECT bucket, path, hour, op, n_ops, bytes_out, bytes_in, n_requesters, last_ts FROM {t}"
+        f"SELECT bucket, path, hour, op, n_ops, bytes_out, bytes_in, n_requesters, last_ts{extra} FROM {t}"
         for t in [*level_tables, 'access_leaf']
     )
     con.execute(f"""
@@ -179,7 +233,7 @@ def aggregate_access(
             SUM(bytes_out)::BIGINT AS bytes_out,
             SUM(bytes_in)::BIGINT AS bytes_in,
             SUM(n_requesters)::BIGINT AS n_requesters,
-            MAX(last_ts) AS last_ts,
+            MAX(last_ts) AS last_ts{extra_agg},
             -- 'dir' for the tree root and any synthesized parent; 'file' for
             -- leaf paths present in access_leaf (i.e. object keys that
             -- actually appeared in the raw log).
@@ -209,7 +263,7 @@ def aggregate_access(
     kv_sql = ', '.join(f"'{k}': '{v}'" for k, v in kv.items())
     con.execute(f"""
         COPY (SELECT bucket, path, parent, depth, kind, hour, op,
-                     n_ops, bytes_out, bytes_in, n_requesters, last_ts
+                     n_ops, bytes_out, bytes_in, n_requesters, last_ts{extra}
               FROM access_agg
               ORDER BY bucket, depth, path, hour, op)
         TO '{out_parquet}' (FORMAT PARQUET, COMPRESSION ZSTD, KV_METADATA {{{kv_sql}}})
@@ -221,7 +275,6 @@ def aggregate_access(
         "SELECT COALESCE(SUM(bytes_out), 0) FROM access_agg WHERE path = '.'"
     )
     return {
-        'rows_in': int(n_rows),
         'paths_out': int(n_paths),
         'hours': int(n_hours),
         'total_bytes_out': int(total_out),

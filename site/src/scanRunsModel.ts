@@ -27,6 +27,9 @@ export interface ScanRun {
   gen: string | null
   source: 'job' | 'backfill'
   updated_ts: number
+  /** What started it: the deployment's cron, or a hand submit / resume. Absent before migration `scan-run-trigger`;
+   * null for runs recorded before it, and backfills. */
+  trigger?: 'schedule' | 'manual' | null
 }
 
 export interface ScanRunPhase {

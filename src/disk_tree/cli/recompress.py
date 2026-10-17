@@ -33,10 +33,10 @@ def recompress_cmd(as_json: bool, keep: bool, dry_run: bool, paths: tuple[str, .
 
     PATHS are parquet files, directories (recursive `*.parquet`; sidecars
     skipped) or fsspec URLs (`gs://…`, `r2://…`, `s3://…`). A v2 file under
-    `$DISK_TREE_PARQUET_CODEC` is skipped; one under another codec is
+    `$DISKY_PARQUET_CODEC` is skipped; one under another codec is
     re-encoded (same columns and keys). Each rewrite streams by row group
     (never a whole file in memory), drops `uri` and the pivot columns equal to
-    `size`, re-encodes under `$DISK_TREE_PARQUET_CODEC` in ≤64K-row groups,
+    `size`, re-encodes under `$DISKY_PARQUET_CODEC` in ≤64K-row groups,
     verifies the row count and an order-insensitive digest of `(path, size,
     mtime, kind)` against the original, then swaps (atomic rename; copy +
     delete on a URL). A file that

@@ -30,7 +30,7 @@ class Mocks(pulumi.runtime.Mocks):
 def stack(config: dict) -> tuple[Mocks, dict]:
     mocks = Mocks()
     pulumi.runtime.set_mocks(mocks, project="disky-r2-access", stack="rac", preview=False)
-    pulumi.runtime.set_all_config({f"disky-r2-access:{key}": json.dumps(value) for key, value in config.items()})
+    pulumi.runtime.set_all_config({f"disky-r2-access:{key}": value if isinstance(value, str) else json.dumps(value) for key, value in config.items()})
     return mocks, run_path(str(WORKER / "__main__.py"))
 
 
@@ -61,7 +61,7 @@ def test_private_stack_and_explicit_cron_enablement(enabled: bool):
         }
         assert mocks.resources["collector-cron"] == {
             "accountId": account, "scriptName": worker,
-            "schedules": [{"cron": "13 * * * *"}, {"cron": "17 7 * * *"}] if enabled else [],
+            "schedules": [{"cron": "13 * * * *"}] if enabled else [],
         }
         worker_inputs = dict(mocks.resources["collector"])
         assert worker_inputs.pop("content") == (ROOT / "tmp/r2-access-build/index.js").read_text()
@@ -87,3 +87,13 @@ def test_invalid_config_fails_before_registration(config: dict, message: str) ->
     with pytest.raises(pulumi.RunError) as error:
         stack(config)
     assert str(error.value) == message
+
+
+@pytest.mark.parametrize("retired", ["DAILY_CRON", "REPLAY_HOURS"])
+def test_retired_daily_replay_config_refuses(tmp_path: Path, retired: str) -> None:
+    """A config from before the hour-unit collector (e.g. a deployment's own `wrangler.<stack>.json`) fails loudly."""
+    legacy = tmp_path / "wrangler.json"
+    legacy.write_text(json.dumps({**DEFINITION, "vars": {**DEFINITION["vars"], retired: "1"}}))
+    with pytest.raises(pulumi.RunError) as error:
+        stack({"workerConfig": str(legacy)})
+    assert str(error.value) == "DAILY_CRON/REPLAY_HOURS are retired: one hourly cron, RETENTION_HOURS + VERIFY_HOURS re-verify"

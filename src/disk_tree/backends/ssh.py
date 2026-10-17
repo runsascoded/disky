@@ -9,17 +9,18 @@ import os
 import shlex
 from typing import Iterator
 
+from disk_tree.env import get as env_get, name as env_name
 from .base import Backend, ErrorCollector, ProgressCallback
 from .gfind import run_gfind
 
-#: The ssh client argv prefix (`DISK_TREE_SSH`, shell-split; default `ssh`).
+#: The ssh client argv prefix (`DISKY_SSH`, else `DISK_TREE_SSH`; shell-split; default `ssh`).
 #: Tests point it at a stand-in that runs the remote command locally.
-SSH_VAR = 'DISK_TREE_SSH'
+SSH_VAR = env_name('SSH')
 
 
 def ssh_cmd(host: str, remote: list[str]) -> list[str]:
     """`ssh` argv running `remote` (quoted for the remote shell) on `host`."""
-    client = shlex.split(os.environ.get(SSH_VAR) or 'ssh')
+    client = shlex.split(env_get('SSH') or 'ssh')
     return [*client, '-o', 'BatchMode=yes', host, shlex.join(remote)]
 
 

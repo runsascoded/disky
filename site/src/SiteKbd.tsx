@@ -4,7 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
 import { SpeedDialTip } from './Tooltip'
 import { useRegistry } from './identities'
-import { hostPair, otherHostUrl } from './hosts'
+import { hostPair, otherHostUrl, peerUrl, type Peer } from './hosts'
 import { useHelpPref } from './prefs'
 import { useStore } from './store'
 import { STORES } from './stores'
@@ -19,6 +19,10 @@ import { useShare } from './sharePreview'
  * `REPO_URL` (wrangler `[vars]`, read at build time), else this repo. */
 export const REPO_URL = import.meta.env.VITE_REPO_URL || 'https://github.com/runsascoded/disky'
 const HOSTS = hostPair(import.meta.env.VITE_PROD_HOST, import.meta.env.VITE_DEV_HOST)
+/** The other deployments: the family list less this one. */
+export const PEERS: Peer[] = (STORES[0]?.peers ?? []).filter(p => p.prod !== import.meta.env.VITE_PROD_HOST)
+/** This page on a peer, from the current location. */
+export const peerHref = (p: Peer, href: string) => peerUrl(href, p, new URL(href).hostname === HOSTS?.dev)
 
 
 /**
@@ -97,9 +101,12 @@ export function SiteKbd({ extra = [], placeholder }: {
         { label: `${s.label} store (${s.path})`, group: 'Pages', handler: () => navigate(s.path) },
       ]),
     ),
-    ...(store.peer ? {
-      'page:peer': { label: `${store.peer.label} ↗ (${new URL(store.peer.href).host})`, group: 'Pages', handler: () => window.open(store.peer!.href, '_blank', 'noreferrer') },
-    } : {}),
+    ...Object.fromEntries(
+      PEERS.map(p => [
+        `peer:${p.prod}`,
+        { label: `This page on ${p.label} (${new URL(peerHref(p, location.href)).host})`, group: 'Pages', keywords: [p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
+      ]),
+    ),
     'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(REPO_URL, '_blank', 'noreferrer') },
     ...Object.fromEntries(
       USERS.filter(u => pathname !== `/user/${u}`).map(u => [

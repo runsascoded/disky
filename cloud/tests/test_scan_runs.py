@@ -252,6 +252,35 @@ def test_record_start_phases_exit():
     ]
 
 
+
+def test_record_trigger():
+    """What started the run: set at start, kept by the later writes (which don't state it)."""
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "uid-1", 100, start=True, trigger="schedule")
+    record(s, PROFILE, "2026-10-08", "uid-1", 200, phase="listing")
+    record(s, PROFILE, "2026-10-08", "uid-1", 300, exit_code=0)
+    record(s, PROFILE, "2026-10-08", "uid-2", 400, start=True)
+    assert rows(s, "SELECT run_id, status, trigger FROM scan_runs ORDER BY run_id") == [
+        ("uid-1", "succeeded", "schedule"),
+        ("uid-2", "running", None),
+    ]
+    # a write without one never names the column: a database before migration `scan-run-trigger` takes it
+    sql = scan_runs.run_sql(scan_runs.Run("uid-3", "2026-10-08", "scan", "running"), 500)
+    assert sql.split(" VALUES ")[0] == ("INSERT INTO scan_runs (run_id, scan, kind, status, source, store, parent, failed_phase, "
+                                        "error, started_ts, finished_ts, job_name, region, machine, spot, tasks, image, cost_usd, "
+                                        "gen, updated_ts)")
+    assert sql.endswith(", gen = COALESCE(excluded.gen, scan_runs.gen)")
+    assert scan_runs.run_sql(scan_runs.Run("uid-3", "2026-10-08", "scan", "running", trigger="manual"), 500).endswith(
+        ", gen = COALESCE(excluded.gen, scan_runs.gen), trigger = COALESCE(excluded.trigger, scan_runs.trigger)")
+
+
+def test_trigger_of():
+    assert [scan_runs.trigger_of(e) for e in ({}, {"DT_TRIGGER": ""}, {"DT_TRIGGER": "schedule"}, {"DT_TRIGGER": "manual"})] == [
+        None, None, "schedule", "manual"]
+    with pytest.raises(ValueError, match=r"^\$DT_TRIGGER='cron': not one of \('schedule', 'manual'\)$"):
+        scan_runs.trigger_of({"DT_TRIGGER": "cron"})
+
+
 def test_record_failure_keeps_phases_and_names_the_error():
     s = sink()
     record(s, PROFILE, "2026-10-08", "uid-2", 100, start=True)

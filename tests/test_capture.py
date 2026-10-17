@@ -27,8 +27,8 @@ HOST = socket.gethostname()
 
 
 def _run(args: list[str], root: Path, **env_extra: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, config.DISK_TREE_ROOT_VAR: str(root)}
-    env.pop(config.DISK_TREE_SCAN_DIRS_VAR, None)
+    env = {**os.environ, config.ROOT_VAR: str(root)}
+    env.pop(config.SCAN_DIRS_VAR, None)
     env.update(env_extra)
     return subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', *args],

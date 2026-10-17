@@ -4,6 +4,7 @@ from os import getcwd
 
 from click import argument, option
 
+from disk_tree.env import get as env_get, name as env_name
 from disk_tree import time
 from disk_tree.cli.base import cli
 from disk_tree.sqla.db import init
@@ -11,8 +12,8 @@ from humanize import naturalsize
 from utz import err, iec
 
 _CLOUD = ('s3://', 'gcs://', 'r2://')
-LOW_SPACE_VAR = 'DISK_TREE_LOW_SPACE_BYTES'
-REMOTE_TARGET_VAR = 'DISK_TREE_REMOTE_SCAN_TARGET'
+LOW_SPACE_VAR = env_name('LOW_SPACE_BYTES')
+REMOTE_TARGET_VAR = env_name('REMOTE_SCAN_TARGET')
 DEFAULT_LOW_SPACE_BYTES = 5 * 2**30
 
 
@@ -32,10 +33,10 @@ def _check_local_space(auto_remote: bool) -> None:
     while not os.path.exists(probe):  # the dir may not exist yet; its volume does
         probe = os.path.dirname(probe)
     free = disk_usage(probe).free
-    low = int(os.environ.get(LOW_SPACE_VAR, DEFAULT_LOW_SPACE_BYTES))
+    low = int(env_get('LOW_SPACE_BYTES', DEFAULT_LOW_SPACE_BYTES))
     if free >= low:
         return
-    remote = os.environ.get(REMOTE_TARGET_VAR)
+    remote = env_get('REMOTE_SCAN_TARGET')
     if auto_remote and remote:
         target = _config.set_write_target(remote)
         err(f"low space: {iec(free)} free on {wd} (< {iec(low)}); --auto-remote: writing blobs to {target}")

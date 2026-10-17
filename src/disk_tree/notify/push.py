@@ -11,7 +11,7 @@ injected env carries them):
 Each value is read with trailing whitespace stripped (a secret pasted with its
 newline must not become a bad header or URL).
 
-``DISK_TREE_NOTIFY`` (comma-separated, in order) picks and orders them; unset,
+``DISKY_NOTIFY`` (comma-separated, in order) picks and orders them; unset,
 every channel whose credentials are present is used, in the order above.
 :func:`send` posts to all of them, or (``first=True``) down the list until one
 succeeds: a fallback chain. Standard library only, so any image can send.
@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+
+from disk_tree.env import get as env_get
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional
 from urllib.error import HTTPError, URLError
@@ -63,21 +65,21 @@ def secret(env: Mapping[str, str], name: str) -> str:
 
 
 def configured(env: Mapping[str, str] = os.environ) -> list[str]:
-    """The channels to use, in order: ``DISK_TREE_NOTIFY``'s, else every one with credentials."""
+    """The channels to use, in order: ``DISKY_NOTIFY``'s (or ``DISK_TREE_NOTIFY``'s), else every one with credentials."""
     has = {
         'pushover': bool(secret(env, 'PUSHOVER_TOKEN') and secret(env, 'PUSHOVER_USER')),
         'discord': bool(secret(env, 'DISCORD_NOTIFY_WEBHOOK')),
         'slack': bool(secret(env, 'SLACK_BOT_TOKEN') and secret(env, 'SLACK_ALERT_CHANNEL')),
     }
-    named = env.get('DISK_TREE_NOTIFY')
+    named = env_get('NOTIFY', env=env)
     if named is None:
         return [c for c in CHANNELS if has[c]]
     chans = [c.strip() for c in named.split(',') if c.strip()]
     for c in chans:
         if c not in has:
-            raise ValueError(f'DISK_TREE_NOTIFY: unknown channel {c!r} (known: {", ".join(CHANNELS)})')
+            raise ValueError(f'DISKY_NOTIFY: unknown channel {c!r} (known: {", ".join(CHANNELS)})')
         if not has[c]:
-            raise ValueError(f'DISK_TREE_NOTIFY names {c!r}, but its credentials are not set')
+            raise ValueError(f'DISKY_NOTIFY names {c!r}, but its credentials are not set')
     return chans
 
 

@@ -13,7 +13,7 @@ tiers cut from it) comes in two shapes:
   bucket) is not written; the metadata's `implied` map names it and the column
   it equals, so readers restore it exactly.
 
-The codec is a separate switch (:func:`codec`, env `DISK_TREE_PARQUET_CODEC`,
+The codec is a separate switch (:func:`codec`, env `DISKY_PARQUET_CODEC`,
 default zstd since every reader decodes it — the site's `/files` viewer,
 `@rdub/file-tree`, was the last; `snappy` opts back out) governing the layer-2
 listing, the engine tiers and the overlay's served indexes (spec
@@ -40,6 +40,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from disk_tree.env import get as env_get, name as env_name
+
 if TYPE_CHECKING:
     import pandas as pd
     import pyarrow as pa
@@ -52,14 +54,14 @@ COLUMNS_KEY = 'disk_tree.columns'
 LISTING_FORMAT = 2
 
 #: The one codec switch (see module doc): `zstd` (default) | `snappy` (opt-out).
-CODEC_VAR = 'DISK_TREE_PARQUET_CODEC'
+CODEC_VAR = env_name('PARQUET_CODEC')
 CODECS = ('snappy', 'zstd')
 ZSTD_LEVEL = 3
 
 
 def codec() -> str:
-    """The parquet codec the listing/tier/index writers use (`$DISK_TREE_PARQUET_CODEC`)."""
-    c = os.environ.get(CODEC_VAR, 'zstd').strip().lower() or 'zstd'
+    """The parquet codec the listing/tier/index writers use (`$DISKY_PARQUET_CODEC`, or `$DISK_TREE_…`)."""
+    c = (env_get('PARQUET_CODEC') or 'zstd').strip().lower() or 'zstd'
     if c not in CODECS:
         raise ValueError(f"${CODEC_VAR}={c!r}: expected one of {CODECS}")
     return c

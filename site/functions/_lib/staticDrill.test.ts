@@ -13,6 +13,9 @@ import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
 
+// Every test in this file: tests take seconds alone but past 30 s under the full parallel suite (gcs, cw: 10-17).
+vi.setConfig({ testTimeout: 120_000 })
+
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
 // The heavy terms' drilldown (`staticDrill.ts`) over `fixtures/static-drill/` (`gen.py`): the `drill/` files
@@ -693,7 +696,7 @@ describe('D1', () => {
       }
       expect(got).toEqual(want)
       expect([got.length, nestedAny]).toEqual([52, 44])
-    })
+    }, 120_000)  // past 30 s under the full parallel suite (cw, 10-17); the file alone runs 40 tests in ~37 s
 
     it('a drawn match root\'s inside is the unfiltered view of its path (every descendant matches), `FILTER_SUBDIV_LEVELS` deep', async () => {
       /** Every node under `n` but its `(other)` folds: `[path below n, bytes, objects, kind]`, depth first. */

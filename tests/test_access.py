@@ -466,54 +466,118 @@ def test_parser_for_unknown_store_raises():
         parser_for('azure')
 
 
-# ---------- R2 parser (the collector's public per-day files) ----------
+# ---------- R2 parser (the collector's public per-hour files) ----------
 
-def _write_r2_jsonl(path: Path, events: list[dict]) -> None:
+def _ms(iso: str) -> int:
+    from datetime import datetime
+    return int(datetime.fromisoformat(iso.replace('Z', '+00:00')).timestamp() * 1000)
+
+
+def _r2_hour(root: Path, hour: str, capture: str, rows: list[tuple], bucket: str = 'jc-taxes') -> Path:
+    """Write one collector hour file, ``rows`` as ``(key, action, n, last minute)``."""
     import json
-    path.write_text(''.join(json.dumps(e) + '\n' for e in events))
+    path = root / bucket / hour[:10] / f'{hour[11:13]}.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        'schema_version': 1, 'bucket': bucket, 'hour': f'{hour}:00:00.000Z', 'capture': capture,
+        'observed': 0, 'estimated': 0, 'max_sample_interval': 1, 'excluded': 0,
+        'rows': [{'key': k, 'action': a, 'n': n, 'last_ts': _ms(f'{hour[:10]}T{t}:00Z')} for k, a, n, t in rows],
+    }))
+    return path
 
 
-_R2_DAY = [
-    {'id': 'g', 'bucket': 'jc-taxes', 'ts': 1791802800000, 'action': 'GetObject', 'key': 'data/2024.pqt', 'status': 200},
-    {'id': 'l', 'bucket': 'jc-taxes', 'ts': 1791806400000, 'action': 'ListObjectsV2', 'key': None, 'status': 200},
-    {'id': 'h', 'bucket': 'jc-taxes', 'ts': 1791810000000, 'action': 'HeadObject', 'key': 'data/2023.pqt', 'status': 404},
-    {'id': 'x', 'bucket': 'jc-taxes', 'ts': 1791813600000, 'action': 'GetBucketCors', 'key': None, 'status': 200},
+_R2_HOUR_11 = [('data/2024.pqt', 'GetObject', 2, '11:07'), (None, 'ListObjectsV2', 1, '11:20'), (None, 'ListObjects', 1, '11:30')]
+
+
+def _r2_fixture(root: Path) -> str:
+    _r2_hour(root, '2026-10-12T11', 'unsampled', _R2_HOUR_11)
+    _r2_hour(root, '2026-10-12T12', 'sampled', [
+        ('data/2023.pqt', 'GetObject', 1, '12:10'), ('data/2023.pqt', 'HeadObject', 3, '12:59'), (None, 'GetBucketCors', 1, '12:15'),
+    ])
+    _r2_hour(root, '2026-10-12T13', 'inconsistent', [])
+    return str(root / '*' / '*' / '*.json')
+
+
+def _leaf_rows(rel) -> list[tuple]:
+    return rel.order('hour, path, op, last_ts').project(
+        "bucket, path, strftime(hour, '%Y-%m-%dT%H'), op, n_ops, bytes_out, bytes_in, n_requesters, "
+        "strftime(last_ts AT TIME ZONE 'UTC', '%H:%M:%S'), sampled"
+    ).fetchall()
+
+
+_R2_LEAF = [
+    ('jc-taxes', '', '2026-10-12T11', 'LIST', 1, None, None, None, '11:20:00', False),
+    ('jc-taxes', '', '2026-10-12T11', 'LIST', 1, None, None, None, '11:30:00', False),
+    ('jc-taxes', 'data/2024.pqt', '2026-10-12T11', 'GET', 2, None, None, None, '11:07:00', False),
+    ('jc-taxes', '', '2026-10-12T12', 'OTHER', 1, None, None, None, '12:15:00', True),
+    ('jc-taxes', 'data/2023.pqt', '2026-10-12T12', 'GET', 1, None, None, None, '12:10:00', True),
+    ('jc-taxes', 'data/2023.pqt', '2026-10-12T12', 'HEAD', 3, None, None, None, '12:59:00', True),
 ]
 
 
-def test_r2_parse_shape_and_dedupe(tmp_path: Path):
-    """Canonical rows: key-less actions on the root, no requester identity or bytes, and an overlapping copy of
-    a day's file (a re-sync) collapses by record."""
-    from disk_tree.access.parsers import parser_for
-
-    _write_r2_jsonl(tmp_path / '2026-10-12.jsonl', _R2_DAY)
-    _write_r2_jsonl(tmp_path / 'copy.jsonl', _R2_DAY[:2])
-    con = duckdb.connect()
-    rel = parser_for('r2')(str(tmp_path / '*.jsonl'), con=con)
-    rows = rel.order('ts').project("strftime(ts AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%MZ'), * EXCLUDE (ts)").fetchall()
-    assert rows == [
-        ('2026-10-12T11:00Z', 'r2', 'jc-taxes', 'data/2024.pqt', 'GET', 'GetObject', 200, None, None, None, None, 'g'),
-        ('2026-10-12T12:00Z', 'r2', 'jc-taxes', '', 'LIST', 'ListObjectsV2', 200, None, None, None, None, 'l'),
-        ('2026-10-12T13:00Z', 'r2', 'jc-taxes', 'data/2023.pqt', 'HEAD', 'HeadObject', 404, None, None, None, None, 'h'),
-        ('2026-10-12T14:00Z', 'r2', 'jc-taxes', '', 'OTHER', 'GetBucketCors', 200, None, None, None, None, 'x'),
-    ]
-
-
-def test_r2_agg_feeds_last_read(tmp_path: Path):
-    """Through `aggregate_access` with an as-of cut: each path's `last_ts` is its latest read before the cut."""
-    from disk_tree.access.aggregate import aggregate_access
+def test_r2_parse_leaf_rows(tmp_path: Path):
+    """Pre-aggregated leaf rows: key-less actions on the root, no requester identity or bytes, `sampled` from the
+    hour's capture; an empty (inconsistent) hour contributes no rows."""
     from disk_tree.access.parsers.r2 import parse
 
-    _write_r2_jsonl(tmp_path / 'd.jsonl', _R2_DAY)
+    assert _leaf_rows(parse(_r2_fixture(tmp_path), con=duckdb.connect())) == _R2_LEAF
+
+
+@pytest.mark.parametrize('as_of, kept', [
+    # 12:59's minute ends at 13:00: a cut inside it drops the whole row (its 3 HEADs); the rest are exact.
+    ('2026-10-12T12:59:30Z', [r for r in _R2_LEAF if r[3] != 'HEAD']),
+    ('2026-10-12T13:00:00Z', _R2_LEAF),
+    ('2026-10-12T11:20:00Z', _R2_LEAF[2:3]),
+    ('2026-10-12T11:21:00Z', _R2_LEAF[:1] + _R2_LEAF[2:3]),
+])
+def test_r2_parse_as_of_keeps_rows_whose_last_minute_ends_by_the_cut(tmp_path: Path, as_of: str, kept: list[tuple]):
+    from disk_tree.access.parsers.r2 import parse
+
+    assert _leaf_rows(parse(_r2_fixture(tmp_path), con=duckdb.connect(), as_of=as_of)) == kept
+
+
+def test_r2_parse_collapses_a_duplicate_file_and_refuses_two_versions_of_an_hour(tmp_path: Path):
+    from disk_tree.access.parsers.r2 import parse
+
+    glob = _r2_fixture(tmp_path / 'a')
+    copy = _r2_hour(tmp_path / 'b', '2026-10-12T11', 'unsampled', _R2_HOUR_11)
+    assert _leaf_rows(parse([glob, str(copy)], con=duckdb.connect())) == _R2_LEAF
+    redrained = _r2_hour(tmp_path / 'c', '2026-10-12T11', 'unsampled', [('data/2024.pqt', 'GetObject', 3, '11:40')])
+    with pytest.raises(ValueError) as error:
+        parse([glob, str(redrained)], con=duckdb.connect())
+    assert str(error.value) == 'r2 hour files: 1 hour(s) appear in two different versions'
+
+
+def test_r2_leaf_aggregate_layer2a(tmp_path: Path):
+    """`aggregate_access_leaf`: the same tree as request logs, ops summed across actions, `last_ts` MAX and
+    `sampled` OR'd up the parents; `rows_in` counts requests."""
+    from disk_tree.access.aggregate import aggregate_access_leaf
+    from disk_tree.access.parsers.r2 import parse
+
     con = duckdb.connect()
-    con.register('r2_rows', parse(str(tmp_path / 'd.jsonl'), con=con))
+    con.register('r2_leaf', parse(_r2_fixture(tmp_path), con=con))
     out = str(tmp_path / 'agg.parquet')
-    stats = aggregate_access(con, '(SELECT * FROM r2_rows)', out, as_of='2026-10-12T13:30:00+00:00')
-    assert stats == {'rows_in': 3, 'paths_out': 4, 'hours': 3, 'total_bytes_out': 0}
-    df = pd.read_parquet(out).groupby('path', as_index=False)['last_ts'].max().sort_values('path')
-    assert [(p, t.isoformat()) for p, t in zip(df.path, df.last_ts)] == [
-        ('.', '2026-10-12T13:00:00+00:00'),
-        ('data', '2026-10-12T13:00:00+00:00'),
-        ('data/2023.pqt', '2026-10-12T13:00:00+00:00'),
-        ('data/2024.pqt', '2026-10-12T11:00:00+00:00'),
+    stats = aggregate_access_leaf(con, '(SELECT * FROM r2_leaf)', out, as_of='2026-10-13T00:00:00Z')
+    assert stats == {'rows_in': 9, 'paths_out': 4, 'hours': 2, 'total_bytes_out': 0}
+    df = pd.read_parquet(out)
+    assert list(df.columns) == [
+        'bucket', 'path', 'parent', 'depth', 'kind', 'hour', 'op', 'n_ops', 'bytes_out', 'bytes_in', 'n_requesters', 'last_ts', 'sampled',
     ]
+    rows = [
+        (r.path, r.parent, r.depth, r.kind, r.hour.strftime('%dT%H'), r.op, r.n_ops, r.last_ts.strftime('%H:%M'), r.sampled)
+        for r in df.itertuples()
+    ]
+    assert rows == [
+        ('.', '', 0, 'dir', '12T11', 'GET', 2, '11:07', False),
+        ('.', '', 0, 'dir', '12T11', 'LIST', 2, '11:30', False),
+        ('.', '', 0, 'dir', '12T12', 'GET', 1, '12:10', True),
+        ('.', '', 0, 'dir', '12T12', 'HEAD', 3, '12:59', True),
+        ('.', '', 0, 'dir', '12T12', 'OTHER', 1, '12:15', True),
+        ('data', '.', 1, 'dir', '12T11', 'GET', 2, '11:07', False),
+        ('data', '.', 1, 'dir', '12T12', 'GET', 1, '12:10', True),
+        ('data', '.', 1, 'dir', '12T12', 'HEAD', 3, '12:59', True),
+        ('data/2023.pqt', 'data', 2, 'file', '12T12', 'GET', 1, '12:10', True),
+        ('data/2023.pqt', 'data', 2, 'file', '12T12', 'HEAD', 3, '12:59', True),
+        ('data/2024.pqt', 'data', 2, 'file', '12T11', 'GET', 2, '11:07', False),
+    ]
+    assert [df.bytes_out.isna().all(), df.n_requesters.isna().all()] == [True, True]

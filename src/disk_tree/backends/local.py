@@ -5,6 +5,7 @@ import subprocess
 from os.path import abspath, isdir, isfile
 from typing import Iterator
 
+from disk_tree.env import get as env_get
 from .base import Backend, ErrorCollector, ProgressCallback
 from .gfind import run_gfind
 
@@ -91,7 +92,7 @@ class LocalBackend(Backend):
         # `one_fs`: don't descend into other filesystems mounted below the root
         # (the walker checks each dir's mount status; gfind prunes the current
         # mount points, which is equivalent for a walk's duration).
-        walker = os.environ.get('DISK_TREE_WALKER')
+        walker = env_get('WALKER')
         if one_fs and not walker:
             applicable_excludes = [*applicable_excludes, *mounts_below(path0, mount_points())]
         if walker:

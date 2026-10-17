@@ -26,6 +26,7 @@ from os import getcwd
 from click import argument, option
 from utz import err
 
+from disk_tree.env import get as env_get
 from disk_tree.cli.base import cli
 
 FORMAT = 'disk-tree-capture'
@@ -92,7 +93,7 @@ def capture_cmd(
     # `DISK_TREE_HOST` pins the capture dir's host segment: the same machine
     # reports `Mac` to a shell and `mac.lan` to a launchd job.
     # `--host` wins: a remote walk is that machine's capture, whatever this one is called.
-    host = ssh_host or os.environ.get('DISK_TREE_HOST') or socket.gethostname()
+    host = ssh_host or env_get('HOST') or socket.gethostname()
     out = capture_dir(to, root, host, now.strftime('%Y-%m-%dT%H-%M-%SZ'))
     if not blobfs.is_url(out):
         os.makedirs(out, exist_ok=True)

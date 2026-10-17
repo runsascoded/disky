@@ -86,7 +86,7 @@ AGE_FLOOR_EXP = 24
 
 def duckdb_codec() -> str:
     """The `COPY` codec clause for the served index parquet: zstd unless
-    `$DISK_TREE_PARQUET_CODEC=snappy` (spec `listing-slim.md`). The engine import
+    `$DISKY_PARQUET_CODEC=snappy` (spec `listing-slim.md`). The engine import
     is lazy: the CLI must load without `disk_tree` (`test_cli_import.py`)."""
     from disk_tree.listing_format import duckdb_codec as codec
     return codec()
