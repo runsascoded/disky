@@ -839,7 +839,7 @@ def test_partition_boundary_with_dirty_keys(tmp_path: Path, monkeypatch):
 def test_cli_engine_stream_creates_scan(tmp_path: Path):
     listing = _write_listing(tmp_path / 'listing.parquet', [('a.txt', 100), ('sub/b.txt', 200)])
     root = tmp_path / 'dt-root'
-    env = {**os.environ, 'DISK_TREE_ROOT': str(root)}
+    env = {**os.environ, 'DISKY_ROOT': str(root)}
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'import',
          '-e', 'stream', '-l', listing, '-b', 'b1', '-t', TS.isoformat()],
@@ -864,9 +864,10 @@ def test_cli_out_dir_makes_resume_reachable(tmp_path: Path, monkeypatch):
 
     listing = _write_listing(tmp_path / 'l.parquet', [('a/x', 1), ('b/y', 2)])
     out_dir = tmp_path / 'agg'
-    monkeypatch.setenv('DISK_TREE_ROOT', str(tmp_path / 'dt-root'))
+    root = tmp_path / 'dt-root'
+    root.mkdir()
     reset_backend()
-    db = init()
+    db = init(str(root / 'disk-tree.db'))
     db.create_all()
 
     def boom(*a, **kw):
@@ -885,7 +886,6 @@ def test_cli_out_dir_makes_resume_reachable(tmp_path: Path, monkeypatch):
     assert (parts_dir / 'manifest.json').exists()
 
     monkeypatch.undo()
-    monkeypatch.setenv('DISK_TREE_ROOT', str(tmp_path / 'dt-root'))
     scan = import_bucket(
         db=db, storage=get_backend(), con=None, engine='stream',
         listings=(str(listing),), bucket='b1', scheme='gcs', snap_time=TS,

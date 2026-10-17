@@ -27,8 +27,15 @@
     .sr-col-hit { fill: transparent; }
     .sr-col-total { fill: var(--other); }
     &.failed .sr-col-total { fill: color-mix(in srgb, var(--danger) 70%, transparent); }
-    &:hover .sr-col-hit { fill: color-mix(in srgb, var(--ink) 6%, transparent); }
+    &:hover .sr-col-hit, &.brushed .sr-col-hit { fill: color-mix(in srgb, var(--ink) 10%, transparent); }
+    &.dimmed { opacity: 0.35; }
   }
+  // the dragged / picked window, and the bars outside it dimmed (`.sr-col.dimmed`)
+  .sr-strip { cursor: crosshair; .sr-band { fill: color-mix(in srgb, var(--ink) 8%, transparent); stroke: var(--ink-3); stroke-dasharray: 3 3; pointer-events: none; }
+    &.dragging, &.dragging .sr-col { cursor: col-resize; } }
+  .sr-runs tr.brushed td { background: color-mix(in srgb, var(--ink) 9%, transparent); }
+  .sr-span { font: inherit; font-size: 12px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink-2); cursor: pointer;
+    &:hover { color: var(--ink); border-color: var(--ink-3); } }
   .sr-gantt { .lbl { fill: var(--ink-2); font-size: 13px; } .dur { fill: var(--ink-3); font-size: 12px; } .sr-row-hit { fill: transparent; }
     g:hover .sr-row-hit { fill: color-mix(in srgb, var(--ink) 5%, transparent); }
     rect.failed { stroke: var(--danger); stroke-width: 2; }

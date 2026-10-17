@@ -6,11 +6,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
-import { axisTicks } from './runChart'
+import { axisTicks, inSpan, type RunSpan, runSpanParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
 import { useUnits } from './units'
 import { STORES, type Store } from './stores'
@@ -85,10 +86,34 @@ const usd = (x: number | null | undefined) => (x == null ? '—' : `$${x < 10 ? 
 
 const deltaClass = (d: number | null | undefined) => (d == null || d === 0 ? 'dim' : d > 0 ? 'grew' : 'shrank')
 
-/** Duration per run over time, stacked by phase; a failed run in the danger ink. */
-function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void }) {
+/** Brushing between the strip's bars and the table's rows: the hovered run, kept `LINGER_MS` past the pointer leaving
+ * its mark (the gaps between bars don't flash every other bar back on). */
+function useHoverRun() {
+  const [id, setId] = useState<string | null>(null)
+  const timer = useRef<number | undefined>(undefined)
+  const cancel = () => { window.clearTimeout(timer.current); timer.current = undefined }
+  useEffect(() => cancel, [])
+  return {
+    id,
+    enter: (run: string) => { cancel(); setId(run) },
+    leave: () => { cancel(); timer.current = window.setTimeout(() => { timer.current = undefined; setId(null) }, LINGER_MS) },
+  }
+}
+type HoverRun = ReturnType<typeof useHoverRun>
+
+/** Below this many px a press is a click (opens the run), not a drag. */
+const DRAG_PX = 4
+
+/** Duration per run over time, stacked by phase; a failed run in the danger ink. Dragging across it picks a window
+ * (`win`; the runs outside it dim); hovering a bar brushes its table row (`hover`). */
+function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
+  runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void
+  win: RunSpan | null; onWin: (w: RunSpan | null) => void; hover: HoverRun
+}) {
   const tip = useSvgTip()
   const [ref, W] = useWidth<HTMLDivElement>()
+  const [drag, setDrag] = useState<[number, number] | null>(null)
+  const dragged = useRef(false)
   const pts = runs.filter(r => r.secs != null && r.run.started_ts != null)
   if (pts.length < 2) return null
   const H = W < 500 ? 150 : 190, L = 36, R = 6, T = 8, B = 20
@@ -102,9 +127,42 @@ function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p:
   const bw = Math.max(1.5, Math.min(14, ((W - L - R) / pts.length) * 0.7))
   const days = [...new Set(pts.map(p => runDay(p.run.started_ts!)))]
   const labelEvery = Math.max(1, Math.ceil(days.length / Math.max(2, Math.floor(W / 90))))
+  const px = (e: { clientX: number }, svg: SVGSVGElement) => Math.min(W - R, Math.max(L, e.clientX - svg.getBoundingClientRect().left))
+  // a window's ends are whole minutes, as `?w=` holds them
+  const ts = (v: number) => Math.floor((t0 + ((v - L) / (W - L - R)) * span) / 60) * 60
+  // Pointer events, so a finger drags like a mouse (`touch-action: pan-y` leaves vertical swipes to the page). The
+  // release commits wherever it lands; a press that never moved `DRAG_PX` falls through to the bar's click.
+  const onDown = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (e.button !== 0) return
+    const svg = e.currentTarget, a = px(e, svg)
+    dragged.current = false
+    const move = (ev: PointerEvent) => {
+      const b = px(ev, svg)
+      if (!dragged.current && Math.abs(b - a) < DRAG_PX) return
+      dragged.current = true
+      setDrag([a, b])
+    }
+    const up = (ev: PointerEvent) => {
+      off()
+      setDrag(null)
+      if (!dragged.current) return
+      const b = px(ev, svg)
+      onWin([ts(Math.min(a, b)), ts(Math.max(a, b))])
+      // the click this release fires (on a bar it ended over) is the drag's, not a pick
+      window.setTimeout(() => { dragged.current = false })
+    }
+    const cancel = () => { off(); setDrag(null); dragged.current = false }
+    const off = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+  }
+  const band = drag ? [Math.min(...drag), Math.max(...drag)] : win ? [x(win[0]), x(win[1])] : null
   return (
     <div className="sr-svgwrap" ref={ref}>
-      <svg className="sr-strip" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase">
+      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase; drag to pick a window"
+        onPointerDown={onDown} style={{ touchAction: 'pan-y', userSelect: 'none' }}>
+        {band && <rect className="sr-band" x={Math.max(L, band[0])} y={T} width={Math.max(1, Math.min(W - R, band[1]) - Math.max(L, band[0]))} height={H - T - B} />}
         {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
         {days.filter((_, i) => i % labelEvery === 0).map(d => {
           const t = Date.parse(`${d}T00:00:00`) / 1000
@@ -115,9 +173,13 @@ function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p:
           const failed = p.run.status === 'failed'
           const main = p.spans.filter(s => s.lane === 0)
           const where = p.failed_at ? ` · failed ${p.failed_at.startsWith('after') ? p.failed_at : `in ${p.failed_at}`}` : ''
+          const id = p.run.run_id
+          const out = !drag && !inSpan(win, p.run.started_ts)
+          const tipOn = tip.on(<><div><b>{p.run.scan}</b> · {p.run.kind} · {runOutcome(p.run, p.phase_issues)}</div><div>{fmtDur(p.secs!)}{where}</div>{p.spans.map(s => <div key={s.phase}><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase} {fmtDur(s.end - s.start)}{s.lane ? ' (beside)' : ''}{s.status === 'failed' ? ` · ${phaseOutcome(s)}` : ''}</div>)}</>)
           return (
-            <g key={p.run.run_id} className={`sr-col${failed ? ' failed' : ''}`} onClick={() => onPick(p.run.run_id)} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
-              {...tip.on(<><div><b>{p.run.scan}</b> · {p.run.kind} · {runOutcome(p.run, p.phase_issues)}</div><div>{fmtDur(p.secs!)}{where}</div>{p.spans.map(s => <div key={s.phase}><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase} {fmtDur(s.end - s.start)}{s.lane ? ' (beside)' : ''}{s.status === 'failed' ? ` · ${phaseOutcome(s)}` : ''}</div>)}</>)}>
+            <g key={id} className={`sr-col${failed ? ' failed' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
+              onClick={() => { if (!dragged.current) onPick(id) }} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
+              onPointerMove={e => { if (drag) return; tipOn.onPointerMove(e); hover.enter(id) }} onPointerLeave={() => { tipOn.onPointerLeave(); hover.leave() }}>
               <rect className="sr-col-hit" x={cx - 2} y={T} width={bw + 4} height={H - T - B} />
               <rect className="sr-col-total" x={cx} y={y(p.secs! / 3600)} width={bw} height={Math.max(1, y(0) - y(p.secs! / 3600))} />
               {!failed && main.map(s => (
@@ -154,12 +216,21 @@ export function ScansPage() {
   const { bytes, delta } = useBytes()
   const [kind, setKind] = useState('')
   const [status, setStatus] = useState('')
+  const [span, setSpan] = useUrlState('w', runSpanParam)
+  const hover = useHoverRun()
+  useEffect(() => {
+    if (!span) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSpan(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [span, setSpan])
   useDocTitle('Scans')
   const runs = q.data?.runs ?? []
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
   const kinds = [...new Set(runs.map(r => r.run.kind))].sort()
-  const shown = runs.filter(r => (!kind || r.run.kind === kind) && (!status || runOutcome(r.run, r.phase_issues) === status))
+  const filtered = runs.filter(r => (!kind || r.run.kind === kind) && (!status || runOutcome(r.run, r.phase_issues) === status))
+  const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
   return (
     <main className="staged-page scans-page">
       <SiteNav />
@@ -173,13 +244,16 @@ export function ScansPage() {
       ) : (<>
         <section className="sr-chart">
           <h3>Duration by run</h3>
-          <DurationStrip runs={shown} color={color} onPick={id => nav(scanHref(id))} />
+          <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
           <Legend order={order} color={color} />
         </section>
         <div className="run-filters">
           {kinds.length > 1 && <select aria-label="Filter by kind" value={kind} onChange={e => setKind(e.target.value)}><option value="">all kinds</option>{kinds.map(k => <option key={k}>{k}</option>)}</select>}
           <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{['succeeded', 'partial', 'recovered', 'failed', 'running', 'no-op'].map(s => <option key={s} value={s}>{s}</option>)}</select>
           <span className="dim">{shown.length} / {runs.length} runs</span>
+          {span
+            ? <Tooltip content="The runs that started in the window dragged on the chart. Esc clears it."><button type="button" className="sr-span" onClick={() => setSpan(null)}>{fmtRunTime(span[0])} → {fmtRunTime(span[1])} ✕</button></Tooltip>
+            : <span className="dim hide-md">Drag across the chart to pick a window.</span>}
         </div>
         <div className="runs-wrap">
           <table className="runs sr-runs">
@@ -196,7 +270,8 @@ export function ScansPage() {
                 const r = s.run
                 const map = r.status === 'succeeded' ? mapHref(r.scan, store.path, slug) : null
                 return (
-                  <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
+                  <tr key={r.run_id} className={[r.status === 'failed' && 'failed', hover.id === r.run_id && 'brushed'].filter(Boolean).join(' ') || undefined}
+                    onPointerEnter={() => hover.enter(r.run_id)} onPointerLeave={hover.leave}>
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && r.kind}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>

@@ -119,13 +119,13 @@ def test_import_listing_collapses_double_slashes(tmp_path: Path):
 # ---------- CLI smoke test (subprocess to sidestep the sqla singleton) ----------
 
 def test_import_cli_creates_scan(tmp_path: Path):
-    """`disk-tree import -l <listing>` creates a scan row in an isolated DISK_TREE_ROOT."""
+    """`disk-tree import -l <listing>` creates a scan row in an isolated DISKY_ROOT."""
     listing = write_listing(tmp_path / 'listing.parquet', [
         {'bucket': 'b1', 'name': 'a.txt', 'size_bytes': 100, 'created': TS_A, 'storage_class_id': 1},
         {'bucket': 'b1', 'name': 'sub/b.txt', 'size_bytes': 200, 'created': TS_A, 'storage_class_id': 1},
     ])
     root = tmp_path / 'dt-root'
-    env = {**os.environ, 'DISK_TREE_ROOT': str(root)}
+    env = {**os.environ, 'DISKY_ROOT': str(root)}
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'import',
          '-l', listing, '-b', 'b1', '-t', TS_A.isoformat()],

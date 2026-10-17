@@ -3,6 +3,7 @@
 A child process is handed the new name (:func:`name`), so a parent's ``DISKY_X`` can't shadow what it set."""
 from collections.abc import Mapping
 from os import environ
+from typing import overload
 
 PREFIX = 'DISKY_'
 OLD_PREFIX = 'DISK_TREE_'
@@ -13,6 +14,10 @@ def name(suffix: str) -> str:
     return f'{PREFIX}{suffix}'
 
 
+@overload
+def get(suffix: str, default: str, env: Mapping[str, str] | None = None) -> str: ...
+@overload
+def get(suffix: str, default: None = None, env: Mapping[str, str] | None = None) -> str | None: ...
 def get(suffix: str, default: str | None = None, env: Mapping[str, str] | None = None) -> str | None:
     """``$DISKY_<suffix>``, else ``$DISK_TREE_<suffix>``, else ``default``."""
     e = environ if env is None else env

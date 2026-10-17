@@ -305,7 +305,7 @@ def test_cli_engine_duckdb_creates_scan(tmp_path: Path):
         'storage_class_id': [1, 1],
     }).to_parquet(listing)
     root = tmp_path / 'dt-root'
-    env = {**os.environ, 'DISK_TREE_ROOT': str(root)}
+    env = {**os.environ, 'DISKY_ROOT': str(root)}
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'import',
          '-e', 'duckdb', '-l', str(listing), '-b', 'b1', '-t', TS.isoformat()],
@@ -560,7 +560,7 @@ def test_cli_engine_duckdb_partitioned_file_backed_creates_scan(tmp_path: Path):
     root = tmp_path / 'dt-root'
     db_dir = tmp_path / 'db'
     db_dir.mkdir()
-    env = {**os.environ, 'DISK_TREE_ROOT': str(root)}
+    env = {**os.environ, 'DISKY_ROOT': str(root)}
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'import',
          '-e', 'duckdb', '-l', str(listing), '-b', 'b1', '-t', TS.isoformat(),

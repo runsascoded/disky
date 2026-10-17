@@ -24,7 +24,7 @@ Today there are two: the Python engine CLI `disk-tree` (on PATH via the venv) an
 
 ### 3. Env vars and config/log dirs (with fallbacks)
 - `DISK_TREE_*` → `DISKY_*`: one helper reads `DISKY_X` and falls back to `DISK_TREE_X` (warn once). Grep-driven, mechanical. Deployments' `.envrc` / job defs / secrets move at leisure.
-- `~/.config/disk-tree/` → `~/.config/disky/`: read the new dir, fall back to the old; a `disky migrate-config` (or first run) moves it. `disky.json` already lives there.
+- `~/.config/disk-tree/` → `~/.config/disky/`: no fallback and no merge (Ryan 2026-10-17: no back-compat with pre-disky installs). The code reads only `~/.config/disky/`; when it is missing and `~/.config/disk-tree/` exists, the engine and the app refuse with the one command that moves it (`mv ~/.config/disk-tree ~/.config/disky`, with the scan/drain agents stopped). The old dir is not legacy: it is the live one today (`disky.json`, `disky-state.json`, the scan lock, `disk-tree.db`, `scans/`, written daily by the agents), so the move happens once per Mac, with the release that ships the new path. Before moving, drop what nothing reads (`scans.duckdb`, 0.9 GB, and `scans-data.sqlite`, both last written 2026-10-01; check first), and rewrite any absolute `~/.config/disk-tree` paths in `disky.json` `jobs` and the agents' plists.
 - `~/Library/Logs/disk-tree/` → `~/Library/Logs/disky/` (the app writes these; app session).
 
 ### 4. Code identifiers (mechanical)
@@ -48,12 +48,12 @@ The presentation (~10/19) sets a freeze: until then, only changes no deployment 
 | now | 1: titles / page text | `cloud` (demo title, desc, objects note), `local` (laptop + capture titles), deployment stores on their next merge | root, m3; each deployment's own store strings (hf: `stores/hf.tsx`) |
 | now | 3a: the env helper | `cloud`: `env("X")` reads `DISKY_X`, falls back to `DISK_TREE_X` (warns once); every engine read goes through it. No deployment sets anything new yet | root |
 | after 10/19 | 2: one `disky` command | app (`wt/app`) + engine console script `disky-engine`, `disk-tree` kept as an alias | app session |
-| after 10/19 | 3b: deployments set `DISKY_*` | each deployment's `.envrc` / job defs / Batch env, at its own pace; config dir fallback `~/.config/disky` → `~/.config/disk-tree` | each session |
+| after 10/19 | 3b: deployments set `DISKY_*` | each deployment's `.envrc` / job defs / Batch env, at its own pace; the config dir moves to `~/.config/disky` (one `mv` per Mac) | each session |
 | after a merge round | 4: `disk_tree` → `disky` package rename | one pure-rename commit on `cloud` right after every deployment has merged it, so their deltas are small | root, announced to all sessions first |
 | last | 5: resource names | new deploys born `disky-*` now (examples); existing stacks only alongside another migration of the same resource | each session |
-| after 2–4 everywhere | remove fallbacks | aliases, `DISK_TREE_*`, the old config dir | root |
+| after 2–4 everywhere | remove fallbacks | aliases, `DISK_TREE_*` | root |
 
 Docs (README, AGENTS.md) follow each step: prose says "disky" now; command lines say `disk-tree` until step 2 makes `disky` the command.
 
 ## Status
-- 2026-10-17: spec written (from disky-m3). Step 1: trash folder done on `local` (56a7fe38), laptop/capture tab titles on `local` (f9053265), demo title/description on `cloud`. Step 3a on `cloud`: `disk_tree.env` (`get` reads `DISKY_X`, else `DISK_TREE_X`; children are handed `DISKY_X`); every engine read goes through it (`ROOT`, `SCAN_DIRS`, `R2_ENDPOINT_URL`, `PARQUET_CODEC`, `NOTIFY`, `BACKEND`, `SCAN_BATCH_ROWS`, `PARALLEL_FINALIZE_MIN_ROWS`). No deprecation warning yet: it would only add noise until 3b gives deployments a reason to switch. The config dir waits for 3b: `~/.config/disky` already exists (the app's `disky.json`) without a DB or scans, so a naive new-dir-first fallback would point the laptop at an empty root; it needs an explicit migrate.
+- 2026-10-17: spec written (from disky-m3). Step 1: trash folder done on `local` (56a7fe38), laptop/capture tab titles on `local` (f9053265), demo title/description on `cloud`. Step 3a on `cloud`: `disk_tree.env` (`get` reads `DISKY_X`, else `DISK_TREE_X`; children are handed `DISKY_X`); every engine read goes through it (`ROOT`, `SCAN_DIRS`, `R2_ENDPOINT_URL`, `PARQUET_CODEC`, `NOTIFY`, `BACKEND`, `SCAN_BATCH_ROWS`, `PARALLEL_FINALIZE_MIN_ROWS`). No deprecation warning yet: it would only add noise until 3b gives deployments a reason to switch. The config dir waits for 3b (the rule is in step 3: a one-time move, no fallback).
