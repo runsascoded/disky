@@ -5,14 +5,14 @@ import { hostStore, resolveStores, withHosts } from './stores'
 // the client mounts each one as a secondary store, behind any store the build already has.
 
 // The build's stores: the primary, and a secondary store the build carries a module for (as m3's `nas.ts`).
-const built = [...resolveStores('laptop', ''), { ...hostStore({ id: 'nas', store: 'nas', label: 'NAS', root: 'mnt/user' }), title: 'disk-tree — nas' }]
+const built = [...resolveStores('laptop', ''), { ...hostStore({ id: 'nas', store: 'nas', label: 'NAS', root: 'mnt/user' }), title: 'disky — nas' }]
 
 describe('hostStore', () => {
   it('is a file store under `/<store>`, its `~` and root from the row', () => {
     expect(hostStore({ id: 'm1', store: 'm1', label: 'M1', home: 'Users/ryan', mark: 'laptop' })).toEqual({
       key: 'm1',
       label: 'M1',
-      title: 'disk-tree — M1',
+      title: 'disky — M1',
       desc: 'Disk usage of M1, captured by the disky app.',
       path: '/m1',
       mark: 'laptop',
@@ -45,6 +45,6 @@ describe('withHosts', () => {
     ])).toEqual([['laptop', '/'], ['nas', '/nas'], ['m1', '/m1']])
     expect(withHosts(built, undefined)).toBe(built)
     expect(withHosts(built, { m1: {} })).toBe(built)
-    expect(withHosts(built, [{ id: 'nas', store: 'nas', label: 'Other' }]).find(s => s.key === 'nas')?.title).toBe('disk-tree — nas')
+    expect(withHosts(built, [{ id: 'nas', store: 'nas', label: 'Other' }]).find(s => s.key === 'nas')?.title).toBe('disky — nas')
   })
 })

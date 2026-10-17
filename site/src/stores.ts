@@ -200,7 +200,7 @@ export function hostStore(h: HostInfo): Store {
   return {
     key: h.store,
     label: h.label,
-    title: `disk-tree — ${h.label}`,
+    title: `disky — ${h.label}`,
     desc: `Disk usage of ${h.label}, captured by the disky app.`,
     path: `/${h.store}`,
     ...(h.mark ? { mark: h.mark } : {}),

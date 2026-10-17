@@ -5,7 +5,7 @@ import type { Store } from '../stores'
 const store: Store = {
   key: 'laptop',
   label: 'Laptop',
-  title: `disk-tree — ${import.meta.env.VITE_ROOT_LABEL || 'laptop'}`,  // `ROOT_LABEL` names the deployment
+  title: `disky — ${import.meta.env.VITE_ROOT_LABEL || 'laptop'}`,  // `ROOT_LABEL` names the deployment
   desc: 'Disk usage of one laptop, captured every 12 h — treemap, sizes over time, diffs, and staged deletes executed on the laptop.',
   path: '/',
   scheme: 'file:///',  // + the root sans leading slash (dt-cloud path-index strips it)
