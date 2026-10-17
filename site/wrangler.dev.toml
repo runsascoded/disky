@@ -27,6 +27,8 @@ enabled = true
 STORE = "laptop"
 AUTH_MODE = "app"
 ROOT_LABEL = "m3 (dev)"          # distinguishes dev.disk.rbw.sh from prod at a glance
+PROD_HOST = "disk.rbw.sh"        # `g d` toggles with DEV_HOST (src/hosts.ts)
+DEV_HOST = "dev.disk.rbw.sh"
 # The tab icon (`public/icons/`, scripts/marks): the ⌘ mark on the laptop's pages; the NAS store's are its own (`src/stores/nas.ts` `mark`).
 MARK = "macos"
 BASE_SCOPE = "laptop"
