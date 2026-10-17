@@ -5,13 +5,20 @@ static-names profile start unset. No cost labels (`DISKY_LABELS`)
 leak in from the shell: a test that wants them sets them.
 
 A test against the D1 schema takes `d1_db`: a fresh SQLite holding the branch's
-schema (`site/schema.sql`), foreign keys ON (as D1 enforces them)."""
+schema (`site/schema.sql`), foreign keys ON (as D1 enforces them).
+
+The engine's root (`$DISKY_ROOT`) is a throwaway dir, set before anything imports `disk_tree` (its `config` binds
+paths at import), so no test records a Scan or writes a blob in the user's `~/.config/disk-tree`."""
 import sqlite3
+from os import environ
 from pathlib import Path
+from tempfile import mkdtemp
 
 import pytest
 
-from dt_cloud.d1_schema import replay, schema_file
+environ['DISKY_ROOT'] = mkdtemp(prefix='disky-test-root-')
+
+from dt_cloud.d1_schema import replay, schema_file  # noqa: E402 (after the root is set)
 
 
 @pytest.fixture

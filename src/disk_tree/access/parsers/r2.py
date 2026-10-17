@@ -71,7 +71,9 @@ def hours(inputs: "str | list[str]", con: "duckdb.DuckDBPyConnection") -> "duckd
     versions = {r[0] for r in rel.project('schema_version').distinct().fetchall()}
     if versions - {1}:
         raise ValueError(f"r2 hour files: unknown schema_version {sorted(versions - {1}, key=str)}")
-    n, distinct = rel.aggregate('count(*), count(DISTINCT (bucket, hour))').fetchone()
+    counts = rel.aggregate('count(*), count(DISTINCT (bucket, hour))').fetchone()
+    assert counts is not None  # an aggregate without GROUP BY is exactly one row
+    n, distinct = counts
     if n != distinct:
         raise ValueError(f"r2 hour files: {n - distinct} hour(s) appear in two different versions")
     return rel.project('bucket, hour, capture, rows')

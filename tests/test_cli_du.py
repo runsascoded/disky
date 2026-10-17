@@ -17,7 +17,7 @@ TS = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
 
 
 def _run_dt(env_root: Path, *args: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, 'DISK_TREE_ROOT': str(env_root)}
+    env = {**os.environ, 'DISKY_ROOT': str(env_root)}
     return subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', *args],
         env=env, capture_output=True, text=True, check=False,
@@ -118,7 +118,7 @@ def test_du_shows_reclaimable_when_sidecar_present(scanned: Path, monkeypatch):
     import subprocess
     from disk_tree.extents import write_reclaim_sidecar
 
-    env = {**os.environ, 'DISK_TREE_ROOT': str(scanned)}
+    env = {**os.environ, 'DISKY_ROOT': str(scanned)}
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'scans', 'list'],
         env=env, capture_output=True, text=True, check=True,
@@ -137,7 +137,7 @@ def test_du_shows_reclaimable_when_sidecar_present(scanned: Path, monkeypatch):
 
 
 def resolve_blob_env(env, blob):
-    """Resolve a blob basename to its path under the test's DISK_TREE_ROOT."""
+    """Resolve a blob basename to its path under the test's DISKY_ROOT."""
     import subprocess, sys
     code = (
         "from disk_tree.resolve import resolve_blob;"

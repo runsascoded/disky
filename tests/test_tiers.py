@@ -274,7 +274,7 @@ def test_cli_import_writes_tiers(tmp_path: Path):
     listing = _listing(tmp_path, _LISTING, 'listing.parquet')
     root = tmp_path / 'dt-root'
     tiers_dir = tmp_path / 'tiers'
-    env = {**os.environ, 'DISK_TREE_ROOT': str(root)}
+    env = {**os.environ, 'DISKY_ROOT': str(root)}
     # Bare `-i` cuts both sorts.
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'import',
@@ -303,7 +303,7 @@ def test_cli_tiers_need_a_dir_and_a_disk_engine(tmp_path: Path):
     r = subprocess.run(
         [sys.executable, '-m', 'disk_tree.cli.main', 'import',
          '-e', 'duckdb', '-l', str(listing), '-b', 'b1', '-i', 'path'],
-        env={**os.environ, 'DISK_TREE_ROOT': str(tmp_path / 'root')}, capture_output=True, text=True, check=False,
+        env={**os.environ, 'DISKY_ROOT': str(tmp_path / 'root')}, capture_output=True, text=True, check=False,
     )
     assert r.returncode != 0
     assert r.stderr.rstrip().split('\n')[-1] == 'ValueError: --tiers needs --tiers-dir (or --out-dir)'

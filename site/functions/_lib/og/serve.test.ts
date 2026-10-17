@@ -117,7 +117,7 @@ describe('restricted anonymous OG responses', () => {
   it('anonymous HTML is generic even when dynamic metadata is disabled', async () => {
     await stampPage(env(), new URL('https://cw.example/secret/path?f=private'), new Response('shell'))
     expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{
-      title: 'CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
+      title: 'disky — CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
       image: 'https://cw.example/og/map.png?policy=generic&r=8', imageType: 'image/png', page: 'https://cw.example/secret/path',
     }])
     expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls]).toEqual([[], [], []])

@@ -23,6 +23,6 @@ export const genericCard = (env: PolicyEnv): CardData => ({
 })
 
 export const genericMeta = (env: PolicyEnv, url: URL) => ({
-  title: env.ROOT_LABEL ?? 'storage', desc: 'Private storage dashboard. Sign in to explore storage.',
+  title: `disky — ${env.ROOT_LABEL ?? 'storage'}`, desc: 'Private storage dashboard. Sign in to explore storage.',
   image: url.origin + genericImagePath, imageType: 'image/png', page: url.origin + url.pathname,
 })

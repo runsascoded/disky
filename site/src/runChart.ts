@@ -35,6 +35,24 @@ export const runWindowParam: Param<RunWindow> = {
   },
 }
 
+/** A time window over the runs (`?w=<from>~<to>`, each a scan id's UTC `YYYY-MM-DDTHHMM`): the table shows the runs
+ * that started in it. */
+export type RunSpan = [number, number]
+const spanStamp = (t: number) => new Date(t * 1000).toISOString().slice(0, 16).replace(':', '')
+const stampTs = (s: string): number | null => {
+  const m = /^(\d{4}-\d\d-\d\d)T(\d\d)(\d\d)$/.exec(s)
+  return m ? Date.parse(`${m[1]}T${m[2]}:${m[3]}:00Z`) / 1000 : null
+}
+export const runSpanParam: Param<RunSpan | null> = {
+  encode: w => (w ? `${spanStamp(w[0])}~${spanStamp(w[1])}` : undefined),
+  decode: s => {
+    const [a, b] = (s ?? '').split('~').map(stampTs)
+    return a != null && b != null && a < b ? [a, b] : null
+  },
+}
+/** Whether a run started in the window (its `[from, to]` minutes, inclusive: the stamps drop seconds). */
+export const inSpan = (w: RunSpan | null, ts: number | null | undefined): boolean => !w || (ts != null && ts >= w[0] && ts < w[1] + 60)
+
 export function chartRange(points: readonly HistoryPoint[], window: RunWindow, latest: number): [number, number] {
   const end = window.end ?? latest
   const start = window.duration === null ? min(points[0]?.ts ?? end - 3600, end - 60) : end - window.duration

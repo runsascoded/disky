@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignedTicks, axisTicks, chartRange, durationLabel, parseDuration, percentOf, rollingRates, runWindowParam, shiftWindow, zoomWindow } from './runChart'
+import { alignedTicks, axisTicks, chartRange, durationLabel, inSpan, parseDuration, percentOf, rollingRates, runSpanParam, runWindowParam, shiftWindow, zoomWindow } from './runChart'
 import type { HistoryPoint } from './runHistory'
 
 describe('run time range and axes', () => {
@@ -39,5 +39,20 @@ describe('run time range and axes', () => {
   it('aligns dual axes at nice shared ticks in display units', () => {
     expect(alignedTicks(175466921, 50.4)).toEqual([[0, 50000000, 100000000, 150000000, 200000000], [0, 20, 40, 60, 80]])
     expect(alignedTicks(5952, 50.4)).toEqual([[0, 2000, 4000, 6000], [0, 20, 40, 60]])
+  })
+})
+
+describe("the scans page's window (`?w=`)", () => {
+  const ts = (iso: string) => Date.parse(iso) / 1000
+  const w: [number, number] = [ts('2026-10-11T06:02:00Z'), ts('2026-10-17T12:02:00Z')]
+  it('round-trips as scan-id stamps, and refuses anything else', () => {
+    expect([
+      runSpanParam.encode(w), runSpanParam.decode('2026-10-11T0602~2026-10-17T1202'), runSpanParam.encode(null),
+      runSpanParam.decode(undefined), runSpanParam.decode('2026-10-17T1202~2026-10-11T0602'), runSpanParam.decode('2026-10-11~2026-10-17'), runSpanParam.decode('2026-10-11T0602'),
+    ]).toEqual(['2026-10-11T0602~2026-10-17T1202', w, undefined, null, null, null, null])
+  })
+  it('holds the runs that started in its minutes, both ends inclusive', () => {
+    expect(['2026-10-11T06:01:59Z', '2026-10-11T06:02:00Z', '2026-10-17T12:02:59Z', '2026-10-17T12:03:00Z'].map(s => inSpan(w, ts(s)))).toEqual([false, true, true, false])
+    expect([inSpan(null, null), inSpan(w, null)]).toEqual([true, false])
   })
 })
