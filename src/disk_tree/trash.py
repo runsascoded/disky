@@ -1,7 +1,7 @@
 """Trash, not ``rm``: where the laptop drainer puts what a real run deletes (spec
 ``specs/m3-site.md`` Phase 3).
 
-Each path is *renamed* into ``<root>/<run>/<path>`` — ``~/.Trash/disk-tree/``
+Each path is *renamed* into ``<root>/<run>/<path>`` — ``~/.Trash/disky/``
 by default (``DISK_TREE_TRASH_DIR`` overrides; tests point it at a tmp dir) —
 a same-volume rename: instant, no copy, and Finder shows it in the Trash. A
 per-run ``.manifest.jsonl`` records ``original → trashed``, so :func:`restore`
@@ -29,7 +29,7 @@ class CrossVolume(OSError):
 
 
 def trash_root() -> Path:
-    return Path(os.environ.get("DISK_TREE_TRASH_DIR") or Path.home() / ".Trash" / "disk-tree")
+    return Path(os.environ.get("DISK_TREE_TRASH_DIR") or Path.home() / ".Trash" / "disky")
 
 
 def run_dir(run_id: str) -> Path:
