@@ -33,7 +33,7 @@ def _check_local_space(auto_remote: bool) -> None:
     while not os.path.exists(probe):  # the dir may not exist yet; its volume does
         probe = os.path.dirname(probe)
     free = disk_usage(probe).free
-    low = int(env_get('LOW_SPACE_BYTES', DEFAULT_LOW_SPACE_BYTES))
+    low = int(env_get('LOW_SPACE_BYTES', str(DEFAULT_LOW_SPACE_BYTES)))
     if free >= low:
         return
     remote = env_get('REMOTE_SCAN_TARGET')
