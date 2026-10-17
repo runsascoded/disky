@@ -196,7 +196,7 @@ def test_plan_by_ref_resolves_id_name_and_default(session):
 
 
 def _run_dt(env_root: Path, *args: str) -> subprocess.CompletedProcess:
-    env = {**os.environ, "DISK_TREE_ROOT": str(env_root)}
+    env = {**os.environ, "DISKY_ROOT": str(env_root)}
     return subprocess.run(
         [sys.executable, "-m", "disk_tree.cli.main", *args],
         env=env, capture_output=True, text=True, check=False,
