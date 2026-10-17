@@ -8,6 +8,9 @@ import { fixture, readJson } from './testStore'
 import { abandoned, BOUND, hangFirst } from './testHang'
 import { JOIN, Req } from './shared'
 
+// Every test in this file: runs take ~50 s for the file alone; under the full parallel suite single tests passed 60 s (gcs, 10-17).
+vi.setConfig({ testTimeout: 300_000 })
+
 // The drilldown's runs (`staticDrill.ts` over base ⊕ runs) on `fixtures/static-drill-runs/` (`gen.py`): a base
 // generation's `drill/` over three scans and two runs' `deltas/<scan>/drill/` on one day (`2026-08-04T0600`,
 // `2026-08-04T1800`), built by `dt_cloud.static_drill` (R = 3, K = 2; 4-row base and 2-row run groups), the runs
@@ -377,5 +380,5 @@ describe('mutations: each reader rule, broken, makes the views wrong', () => {
       baseBound: await wrong({ ...DRILL_RULES, bound: metas => metas[0].dispatch_rows }),
     }
     expect(got).toEqual({ rules: 0, maxVt: 2075, noStop: 107, newestCanon: 139, baseCanon: 38, baseBound: 20 })
-  }, 120_000)
+  }, 300_000)  // mutation runs: past 120 s under a busy laptop's full parallel suite (r2 and the mosaic port, 10-17); the file alone runs 18 tests in ~50 s
 })

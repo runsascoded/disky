@@ -52,6 +52,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from disk_tree.env import name as env_name
+
 from .scan_profile import ScanProfile
 
 
@@ -436,7 +438,7 @@ def _import(ctx: Ctx, bucket: str, kind: str, listing: Path) -> None:
     root = ctx.work / "l2" / bucket
     args = ctx.expand(ctx.opt("list", "import_args", DEFAULT_IMPORT_ARGS))
     ctx.sh(["disk-tree", "import", *args, "-s", kind, "-t", f"{ctx.date}T00:00:00+00:00",
-            "-l", f"{listing}/shard-*.parquet", "-b", bucket], env={"DISK_TREE_ROOT": str(root)})
+            "-l", f"{listing}/shard-*.parquet", "-b", bucket], env={env_name("ROOT"): str(root)})
     blobs = sorted((root / "scans").glob("*.parquet"))
     if not blobs:
         raise StepFailed(1, f"import wrote no layer-2 under {root}/scans")
@@ -937,7 +939,7 @@ def setup_env(profile: ScanProfile, env: dict[str, str]) -> None:
 def r2_profile(env: dict[str, str], home: Path | None = None) -> None:
     """The R2 archive through blobfs (`R2_ARCHIVE=r2://$R2_BUCKET`): R2's own credentials profile (`r2`) + a
     `buckets.yml` entry with its endpoint, so a source's `AWS_*` keys (another provider's) stay the lister's. Never
-    `DISK_TREE_R2_ENDPOINT_URL`: it would override every bucket's endpoint."""
+    `DISKY_R2_ENDPOINT_URL`: it would override every bucket's endpoint."""
     if not all(env.get(k) for k in ("R2_ENDPOINT", "R2_BUCKET", "R2_ACCESS_KEY_ID")):
         return
     creds = Path(env.get("TMPDIR") or "/tmp") / "r2-credentials"

@@ -35,6 +35,8 @@ if public_bucket is not None and (public_bucket == bucket_name or public_bucket 
     raise pulumi.RunError("The public bucket must be neither the private archive nor a source")
 if definition["workers_dev"] or definition["preview_urls"]:
     raise pulumi.RunError("Collector must not have public Worker URLs")
+if "DAILY_CRON" in variables or "REPLAY_HOURS" in variables:
+    raise pulumi.RunError("DAILY_CRON/REPLAY_HOURS are retired: one hourly cron, RETENTION_HOURS + VERIFY_HOURS re-verify")
 if definition["triggers"]["crons"]:
     raise pulumi.RunError("Pulumi owns schedules; Wrangler crons must remain empty")
 if not 7 <= retention <= 90:
@@ -97,7 +99,7 @@ schedules = cf.WorkersCronTrigger(
     "collector-cron",
     account_id=account,
     script_name=collector.script_name,
-    schedules=[{"cron": variables[key]} for key in ("HOURLY_CRON", "DAILY_CRON")] if enabled else [],
+    schedules=[{"cron": variables["HOURLY_CRON"]}] if enabled else [],
     opts=pulumi.ResourceOptions(depends_on=[private_worker]),
 )
 

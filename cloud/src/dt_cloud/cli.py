@@ -2297,35 +2297,34 @@ def access_r2_agg(
     out: Path,
     inputs: tuple[str, ...],
 ) -> None:
-    """Aggregate the R2 collector's public per-day read files (`<bucket>/<day>.jsonl` globs) into layer-2a.
+    """Aggregate the R2 collector's public per-hour files (`<bucket>/<YYYY-MM-DD>/<HH>.json` globs) into layer-2a.
 
-    The files carry object keys, times, actions and statuses only (no requester identity); see
-    `disk_tree.access.parsers.r2`. Prints the aggregate's stats as JSON; with no read before the scan's instant
-    it writes nothing (`rows_in` 0).
+    The files carry per-(object key, action) counts and minute-truncated last-request times per UTC hour (no
+    requester identity, no per-request events); see `disk_tree.access.parsers.r2`, whose as-of rule keeps a row
+    only when its last request's minute ends by the scan's instant. Each output row's `sampled` says its hour's
+    capture undercounts requests. Prints the aggregate's stats and the hours' captures as JSON; with no request
+    before the scan's instant it writes nothing (`rows_in` 0).
     """
     import duckdb
 
-    from disk_tree.access.aggregate import aggregate_access
-    from disk_tree.access.parsers.r2 import parse
+    from disk_tree.access.aggregate import aggregate_access_leaf
+    from disk_tree.access.parsers.r2 import hours, parse
 
     from .scan_id import scan_time
 
     con = duckdb.connect()
-    rels = [parse(i, con=con) for i in inputs]
-    raw = rels[0]
-    for rel in rels[1:]:
-        raw = raw.union(rel)
-    con.register("r2_access_rows", raw)
     cut = scan_time(asof)
-    before = con.execute("SELECT count(*) FROM r2_access_rows WHERE ts < ?", [cut]).fetchone()[0]
+    con.register("r2_leaf", parse(list(inputs), con=con, as_of=cut))
+    captures = dict(hours(list(inputs), con).filter(f"hour < TIMESTAMP '{cut.replace(tzinfo=None).isoformat()}'").aggregate("capture, count(*)").fetchall())
+    before = con.execute("SELECT COALESCE(sum(n_ops), 0) FROM r2_leaf").fetchone()[0]
     if not before:
-        # Nothing read before the scan's instant (a new collector): no aggregate, and no read lens yet.
-        err(f"r2-agg: no reads before {cut.isoformat()}; {out} not written")
-        print(json.dumps({"hours": 0, "paths_out": 0, "rows_in": 0, "total_bytes_out": 0}, sort_keys=True))
+        # Nothing requested before the scan's instant (a new collector): no aggregate, and no read lens yet.
+        err(f"r2-agg: no requests before {cut.isoformat()}; {out} not written")
+        print(json.dumps({"captures": captures, "hours": 0, "paths_out": 0, "rows_in": 0, "total_bytes_out": 0}, sort_keys=True))
         return
     out.parent.mkdir(parents=True, exist_ok=True)
-    stats = aggregate_access(con, "(SELECT DISTINCT * FROM r2_access_rows)", str(out), as_of=cut)
-    print(json.dumps(stats, sort_keys=True))
+    stats = aggregate_access_leaf(con, "(SELECT * FROM r2_leaf)", str(out), as_of=cut)
+    print(json.dumps({"captures": captures, **stats}, sort_keys=True))
 
 
 @access.command("ingest")

@@ -1,10 +1,10 @@
 """The `gcs` digest template: a reply per scan, cost by storage class.
 
-Each reply's SENDER is the scan's size headline (date · TB · Δ), its BODY the
+Each reply's SENDER is the scan's size headline (date · TiB · Δ), its BODY the
 $/mo (priced from the scan's storage-class bytes, ``cfg.prices``) + a linked
 arrow to the day's diff, its avatar the colour-coded trend arrow
 (`av_deg{N}.png?v=REV`). The OP: month-to-date headline, per-ISO-week bullets
-(TB + $/mo), and a storage-class mosaic plot (`digest_plot.render_tiers`).
+(TiB + $/mo), and a storage-class image drawn by the site (`POST /api/digest-image`, `kind: tiers`).
 Scan ids are `YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM` (UTC): a day may hold
 several scans, each its own reply, delta and link (specs/done/scan-ids-not-dates.md);
 meta.json carries `total_bytes` + `class_bytes`. Design + rationale: specs/done/slack-digest-shape-c.md; the
@@ -16,7 +16,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .digest import AVATAR_REV, GIB, MINUS, TIB, DigestConfig, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
+from .digest import AVATAR_REV, GIB, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
 
 
 def _usd(v: float) -> str:
@@ -95,7 +95,7 @@ def op_body(rows: list[Scan], month: dt.date, plot_url: str | None, cfg: DigestC
     mdtb = rows[-1].tb - base_tb
     mweekly = (mdtb / base_tb * 100 * 7 / len(rows)) if base_tb else 0
     lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TB** month-to-date · [dashboard]({site_url}/)",
+        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** month-to-date · [dashboard]({site_url}/)",
         "",
         "*Weekly summaries*",
     ]
@@ -121,7 +121,7 @@ def op_body(rows: list[Scan], month: dt.date, plot_url: str | None, cfg: DigestC
         # with the Diff section right below it
         lines.append(
             f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({site_url}/?d={_dlink(end.date, end.slug)}-{_span(b_at, scan_ts(end.date))}#over-time){partial} — "
-            f"**{end.tb:,.0f} TB** ({_tb(wdtb)}, {_pct(wdtb, end.tb)}%) · ${end.cost:,}/mo ({_usd(end.cost - b_cost)})"
+            f"**{end.tb:,.0f} TiB** ({_tb(wdtb)}, {_pct(wdtb, end.tb)}%) · ${end.cost:,}/mo ({_usd(end.cost - b_cost)})"
         )
         prev_end = end
     if plot_url is not None:
@@ -129,13 +129,25 @@ def op_body(rows: list[Scan], month: dt.date, plot_url: str | None, cfg: DigestC
     return "\n".join(lines)
 
 
-def plot_rows(rows: list[Scan]) -> list[dict]:
-    """The mosaic's per-day points (`digest_plot.render_tiers` plots days):
-    each day's latest scan, keyed by its date."""
+# the image's tiers, bottom → top (cold → hot), as `Scan` fields
+TIERS = (("arch", "Archive"), ("cold", "Coldline"), ("near", "Nearline"), ("std", "Standard"))
+
+
+def image_body(rows: list[Scan], month: dt.date, cfg: DigestConfig) -> dict:
+    """`POST /api/digest-image`'s request for ``month`` (`kind: tiers`): each day's latest scan's bytes per storage
+    class, bottom → top (cold → hot), drawn as the month's total line over the stacked classes."""
     by_day: dict[str, Scan] = {}
     for r in rows:
         by_day[r.date[:10]] = r
-    return [{"date": d, "std": r.std, "near": r.near, "cold": r.cold, "arch": r.arch} for d, r in by_day.items()]
+    return {
+        "kind": "tiers",
+        "title": f"{cfg.title} — {month:%B %Y}",
+        "note": f"{cfg.host} · TiB",
+        "month": f"{month:%Y-%m}",
+        "units": "TiB",
+        "tiers": [name for _, name in TIERS],
+        "points": [{"scan": r.date, "bytes": [round(getattr(r, k) * TIB) for k, _ in TIERS]} for r in by_day.values()],
+    }
 
 
 def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
@@ -154,7 +166,7 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     dcost = r.dcost or 0
     # A sub-daily scan names its UTC time: a day's scans are distinct replies.
     when = f"{d.month}/{d.day}" + (f" {r.date[11:13]}:{r.date[13:15]}Z" if "T" in r.date else "")
-    sender = f"{when} — {r.tb:,.0f} TB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
+    sender = f"{when} — {r.tb:,.0f} TiB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
     # ↗︎ = NE arrow + text-presentation selector: renders as a font
     # glyph in link colour (bare ↗ gets emoji-ized by Slack into the
     # cartoonish :arrow_upper_right:)
@@ -206,8 +218,12 @@ class Gcs:
         return None
 
     def render_plot(self, rows: list[Scan], month: dt.date, out: Path, root: str | None = None) -> None:
-        """The storage-class mosaic (needs the `[plot]` extra — matplotlib)."""
-        from .digest_plot import render_tiers
+        """The OP's image, drawn by the site (`POST /api/digest-image`, `kind: tiers`): the month's total line over
+        its stacked storage classes. Authenticated as the job (`$SITE_TOKEN`); ``root`` is unused."""
+        from .deploy import site_token
+        from .site import post_json
 
-        tiers = plot_rows(rows)
-        render_tiers(tiers, Path(out), f"{self.cfg.title} — {month:%B %Y}", self.cfg.host)
+        token = site_token()
+        if not token:
+            raise PlotUnavailable("digest image: no site token ($SITE_TOKEN)")
+        Path(out).write_bytes(post_json(self.cfg.site_url, token, "/api/digest-image", image_body(rows, month, self.cfg)))

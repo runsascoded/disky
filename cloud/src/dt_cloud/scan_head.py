@@ -11,6 +11,10 @@ failed scan (`SNAP_ID=<scan> GEN=<its gen>`), anywhere, re-runs only the tasks t
 A TERM / INT (a cancelled or preempted head job) stops Nextflow's process group (the JVM is the launcher script's
 child), waits `NF_SWEEP_DELAY` (30 s: a submit in flight lands after Nextflow exits), cancels whatever Batch job still
 carries the session's `nf-session` label, and finishes the record.
+
+What started the run (`$DT_TRIGGER`: `schedule` from the deployment's cron body, `manual` from its hand submits; unset:
+not recorded) goes on its run record; a scan's trigger is its first run's (the digest's `scan_triggers`). Not into the
+steps' params: a resume of a cron scan by hand must hit the same Nextflow cache.
 """
 from __future__ import annotations
 
@@ -308,13 +312,14 @@ def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
          dry_run: bool = False, env: dict[str, str] | None = None) -> int:
     from . import scan_profile
-    from .scan_runs import PROFILE_ENV, finish_cmd, start_cmd
+    from .scan_runs import PROFILE_ENV, TRIGGER_ENV, finish_cmd, start_cmd, trigger_of
 
     env = os.environ if env is None else env
     profile = scan_profile.load(profile_path)
     profile_json = scan_profile.to_json(profile_path)
     now = dt.datetime.now(dt.timezone.utc)
     scan, gen, job_start = identity(env, now)
+    trigger = trigger_of(env)
     run_id = env.get("DT_RUN_ID") or env.get("BATCH_JOB_UID") or ""
     env.update(SNAP_ID=scan, SCAN_ID=scan, GEN=gen, DT_JOB_START=job_start, DT_RUN_ID=run_id)
     for k in (PROFILE_ENV, "D1_DB_ID", "D1_DB_NAME", "SLACK_ALERT_CHANNEL", "DT_ALERTS"):
@@ -344,7 +349,8 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     nf_env = {**env, "NXF_ANSI_LOG": "false"}
     if cloud:
         nf_env["NXF_CLOUDCACHE_PATH"] = profile.work.rstrip("/") + "/cache"
-    err(f"scan head: {profile.deployment}{'' if profile.primary else f' [{profile.store}]'} scan {scan} gen {gen} session {session} in {launch}")
+    err(f"scan head: {profile.deployment}{'' if profile.primary else f' [{profile.store}]'} scan {scan} gen {gen} session {session} "
+        f"({trigger or f'${TRIGGER_ENV} unset'}) in {launch}")
     err("+ " + " ".join(argv))
     if dry_run:
         return 0

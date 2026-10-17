@@ -24,14 +24,17 @@ import os
 from datetime import datetime
 from functools import lru_cache
 from os.path import exists as _local_exists, getmtime, getsize, join as _local_join
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+
+from disk_tree.env import get as env_get, name as env_name
 
 if TYPE_CHECKING:
     import pandas as pd
     import pyarrow as pa
 
-R2_ENDPOINT_VAR = 'DISK_TREE_R2_ENDPOINT_URL'
+R2_ENDPOINT_VAR = env_name('R2_ENDPOINT_URL')
 
 # gcsfs ≥ 2026.8.1 reads through an "adaptive prefetcher" by default
 # (`USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`, formerly opt-in): every read handle
@@ -104,9 +107,9 @@ def _bucket_field(bucket: str, field: str) -> str | None:
 
 
 def r2_endpoint(bucket: str) -> str | None:
-    """Cloudflare R2's S3 endpoint for `bucket`: `DISK_TREE_R2_ENDPOINT_URL`, else
+    """Cloudflare R2's S3 endpoint for `bucket`: `DISKY_R2_ENDPOINT_URL` (or `DISK_TREE_…`), else
     the bucket's (or `defaults`) `endpoint_url` in `~/.config/disk-tree/buckets.yml`."""
-    ep = os.environ.get(R2_ENDPOINT_VAR)
+    ep = env_get('R2_ENDPOINT_URL')
     if ep:
         return ep
     return _bucket_field(bucket, 'endpoint_url')
@@ -408,15 +411,13 @@ def read_text(path: str) -> str:
 
 
 def write_text(path: str, text: str) -> None:
-    if not is_url(path):
-        with open(path, 'w') as f:
-            f.write(text)
-        return
     write_bytes(path, text.encode())
 
 
 def write_bytes(path: str, data: bytes) -> None:
+    """Write ``data`` to ``path``; a local path's missing parent dirs are created, as an object store has none."""
     if not is_url(path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'wb') as f:
             f.write(data)
         return

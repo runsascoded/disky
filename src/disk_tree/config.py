@@ -4,10 +4,11 @@ from os import environ as env, makedirs, pathsep, sep
 from os.path import expanduser, exists, ismount, join
 from typing import Callable
 
+from disk_tree.env import get as env_get, name as env_name
 from disk_tree.blobfs import exists as blob_exists, is_url, join as blob_join
 
-DISK_TREE_ROOT_VAR = 'DISK_TREE_ROOT'
-DISK_TREE_SCAN_DIRS_VAR = 'DISK_TREE_SCAN_DIRS'
+ROOT_VAR = env_name('ROOT')
+SCAN_DIRS_VAR = env_name('SCAN_DIRS')
 HOME = env['HOME']
 CONFIG_DIR = join(HOME, '.config')
 DEFAULT_ROOT_DIR = join(CONFIG_DIR, 'disk-tree')
@@ -83,16 +84,16 @@ _DIRS_SEP = re.compile(re.escape(pathsep) + r'(?!//)')
 
 
 def split_dirs(raw: str) -> list[str]:
-    """Entries of a `DISK_TREE_SCAN_DIRS` value — local dirs and URLs alike."""
+    """Entries of a `DISKY_SCAN_DIRS` value — local dirs and URLs alike."""
     return [p for p in _DIRS_SEP.split(raw) if p]
 
 
 def configured_scan_dirs() -> list[str]:
     """Scan dirs in priority order — first writable one wins for new blobs."""
-    raw = env.get(DISK_TREE_SCAN_DIRS_VAR)
+    raw = env_get('SCAN_DIRS')
     if raw:
         return [p if is_url(p) else expanduser(p) for p in split_dirs(raw)]
-    if DISK_TREE_ROOT_VAR in env:
+    if env_get('ROOT') is not None:
         # An explicit root is a deliberate choice; discovery must not silently
         # redirect writes out of it.
         return [DEFAULT_SCANS_DIR]
@@ -175,9 +176,9 @@ def set_write_target(target: str) -> str:
     else:
         target = expanduser(target)
         _ensure_dir(target)
-    raw = env.get(DISK_TREE_SCAN_DIRS_VAR)
+    raw = env_get('SCAN_DIRS')
     rest = [d for d in (split_dirs(raw) if raw else configured_scan_dirs()) if d != target]
-    env[DISK_TREE_SCAN_DIRS_VAR] = pathsep.join([target, *rest])
+    env[SCAN_DIRS_VAR] = pathsep.join([target, *rest])
     SCANS_DIR = target
     for cb in list(_write_target_hooks):
         cb()
@@ -188,4 +189,4 @@ def set_write_target(target: str) -> str:
 #: `SCANS_DIR`) from the env at import.
 #: `SCANS_DIR` is the write target, resolved once here; re-plugging a volume
 #: mid-run won't be noticed, but a new blob never lands somewhere unreadable.
-_apply_root(env.get(DISK_TREE_ROOT_VAR, DEFAULT_ROOT_DIR))
+_apply_root(env_get('ROOT', DEFAULT_ROOT_DIR))

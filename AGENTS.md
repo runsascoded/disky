@@ -392,7 +392,7 @@ Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full f
 - **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
 - **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
 - **Serving:** the interval store as the Map's path store (`PATH_STORE = "intervals"`, following `interval-store/CURRENT.json`, once `interval-store verify` / a `ps=iv` parity check passes on the first scans); search from the prebuilt static name index only (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`, `FILTER_INDEXED_ONLY = "1"`), no per-scan search sidecars. Per-scan `path`/`bysize` sorts are on their way out (`specs/lean-scans.md`).
-- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread.
+- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread.
 - **Meta:** the "data behind this site" store (`STORES_JSON` `meta`) with its own static index.
 
 A deployment's spec lists the baseline items it doesn't have yet as gaps, and those gaps are open work, not follow-ups to propose.

@@ -30,7 +30,7 @@ import { AUTH_MODE, signInUrl, useCanAssign, useCanStage, useIdent, useIsAdmin, 
 import { ShareDialog } from './ShareDialog'
 import { closeDialog, openDialog, useDialog } from './dialogs'
 import { useRegistry } from './identities'
-import { REPO_URL } from './SiteKbd'
+import { PEERS, REPO_URL, peerHref } from './SiteKbd'
 import { buildLine } from './build'
 import { useMyUser, useUserEmails } from './owners'
 import ProfileModal from './ProfileModal'
@@ -253,7 +253,7 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
                 <button key={e.key} type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); e.onClick() }}>{e.label}</button>
               ))}
               <hr />
-              {DEFAULT_STORE.peer && <a role="menuitem" className="mi" href={DEFAULT_STORE.peer.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.peer.label} ↗</a>}
+              {PEERS.map(p => <a key={p.prod} role="menuitem" className="mi" href={peerHref(p, location.href)} onPointerDown={e => { e.currentTarget.href = peerHref(p, location.href) }} onClick={() => m.setOpen(false)}>{p.label} <span className="dim">this page</span></a>)}
               {DEFAULT_STORE.liveTotals && <a role="menuitem" className="mi" href={DEFAULT_STORE.liveTotals.href} target="_blank" rel="noreferrer">{DEFAULT_STORE.liveTotals.label} ↗</a>}
               <a role="menuitem" className="mi" href={REPO_URL} target="_blank" rel="noreferrer"><FaGithub aria-hidden /> Source on GitHub ↗</a>
               <BuildLine />

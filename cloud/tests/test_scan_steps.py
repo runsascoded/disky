@@ -37,7 +37,7 @@ class Runner:
         self.envs.append(env)
         key = " ".join(argv[:3])
         if argv[:2] == ["disk-tree", "import"]:
-            scans = Path(env["DISK_TREE_ROOT"]) / "scans"
+            scans = Path(env["DISKY_ROOT"]) / "scans"
             scans.mkdir(parents=True)
             (scans / "u1.parquet").write_text(f"l2 of {argv[argv.index('-b') + 1]}")
         if argv[:2] == ["dt-cloud", "index-write"]:

@@ -198,6 +198,7 @@ export function ScansPage() {
                 return (
                   <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
+                      {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && r.kind}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
                     <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} /></td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
@@ -526,6 +527,7 @@ export function ScanRunPage() {
           {r.job_name && <div><dt>{tasks.length ? 'head Batch job' : 'Batch job'}</dt><dd>{d.project && r.region ? <a href={batchHref(d.project, r.region, r.job_name)} target="_blank" rel="noreferrer"><code>{r.job_name}</code></a> : <code>{r.job_name}</code>}{r.region && <span className="dim"> · {r.region}</span>}</dd></div>}
           {r.gen && <div><dt>index generation</dt><dd><code>{r.gen}</code></dd></div>}
           {r.image && <div><dt>image</dt><dd><code>{r.image}</code></dd></div>}
+          {r.trigger && <div><dt>started by</dt><dd>{r.trigger === 'schedule' ? 'the schedule (cron)' : 'hand (a submit or a resume)'}</dd></div>}
           <div><dt>recorded by</dt><dd>{r.source === 'job' ? 'the job' : 'backfill (Batch, logs, the bucket)'}</dd></div>
         </dl>
         {d.dag && <>

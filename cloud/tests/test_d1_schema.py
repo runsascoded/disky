@@ -208,3 +208,13 @@ def test_pending_recipes_in_arrival_order(tmp_path):
     _commit(repo, "x-neutral", {"site/schema.sql": "y\n", "site/migrations/scan-run-dags-neutral.sql": "y\n"})
     (site / "migrations/a-new.sql").write_text("z\n")
     assert [r.name for r in pending(site)] == ["scan-run-dags.sql", "scan-run-dags-neutral.sql", "a-new.sql"]
+
+
+def test_schema_file_is_the_cwd_checkouts(tmp_path: Path, monkeypatch):
+    """From a worktree, the worktree's `site/schema.sql`, not that of the checkout the (shared) venv installed
+    `dt_cloud` from (cw, 10-17: `d1-schema check -d` compared a live D1 against the root's)."""
+    site = tmp_path / "wt" / "site"
+    (site / "functions").mkdir(parents=True)
+    (site / "schema.sql").write_text("-- the worktree's\n")
+    monkeypatch.chdir(tmp_path / "wt")
+    assert schema_file() == site / "schema.sql"

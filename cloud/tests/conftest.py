@@ -27,6 +27,10 @@ def _deployment_env(monkeypatch):
     # Deployment config the generic code requires (no defaults): unset unless a test sets it.
     for v in ("LAYER2_PREFIX", "STATIC_NAMES_PROFILE", "STATIC_NAMES_GEN", "SCAN_RUN_ID", "SCAN_ID"):
         monkeypatch.delenv(v, raising=False)
+    # the cw digest's scan triggers come from the site (`/api/scan-runs`): none recorded, unless a test says otherwise
+    from dt_cloud import digest_cw
+
+    monkeypatch.setattr(digest_cw, "site_triggers", lambda cfg: {})
 
 
 @pytest.fixture

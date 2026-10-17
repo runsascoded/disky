@@ -82,10 +82,11 @@ jobs:
           list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" ctbk     "$HCCS_ENDPOINT"
           list "${{ secrets.R2_HCCS_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_HCCS_RO_SECRET_ACCESS_KEY }}" crashes  "$HCCS_ENDPOINT"
           list "${{ secrets.R2_DEMO_SRC_RO_ACCESS_KEY_ID }}" "${{ secrets.R2_DEMO_SRC_RO_SECRET_ACCESS_KEY }}" jc-taxes "$RAC_ENDPOINT"
-      - name: Read recency — the collector's public per-day files → layer-2a
-        # `infra/cf/r2-access` writes `access/r2/<bucket>/<day>.jsonl` (object key, time, action, status; no
-        # requester identity, the scanner's own requests left out) for the sources it collects (jc-taxes; ctbk
-        # and crashes are HCCS's, uncollected). Absent files leave the read lens off, as before.
+      - name: Read recency — the collector's public per-hour files → layer-2a
+        # `infra/cf/r2-access` writes `access/r2/<bucket>/<YYYY-MM-DD>/<HH>.json` (per object key and action: a
+        # count and the minute of the latest request, plus the hour's capture status; no requester identity, the
+        # scanner's own requests left out) for the sources it collects (jc-taxes; ctbk and crashes are HCCS's,
+        # uncollected). A re-drained hour's file is replaced in place. Absent files leave the read lens off.
         if: steps.d.outputs.scanned != 'true'
         id: reads
         continue-on-error: true  # a failure here leaves the read lens off for the scan, never the scan itself
@@ -95,9 +96,9 @@ jobs:
         run: |
           set -euo pipefail
           aws s3 cp "s3://$BUCKET/access/r2/" work/access/ --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
-          if compgen -G "work/access/*/*.jsonl" > /dev/null; then
+          if compgen -G "work/access/*/*/*.json" > /dev/null; then
             (cd cloud && uv run dt-cloud access r2-agg -d "${{ steps.d.outputs.date }}" \
-              -o "$GITHUB_WORKSPACE/work/access-agg/r2.parquet" "$GITHUB_WORKSPACE/work/access/*/*.jsonl")
+              -o "$GITHUB_WORKSPACE/work/access-agg/r2.parquet" "$GITHUB_WORKSPACE/work/access/*/*/*.json")
             if [ -f work/access-agg/r2.parquet ]; then echo "agg=$GITHUB_WORKSPACE/work/access-agg/r2.parquet" >> "$GITHUB_OUTPUT"; fi
           fi
       - name: Union → path store (path + bysize sorts) + snapshot

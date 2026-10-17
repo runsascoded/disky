@@ -2,7 +2,7 @@
 through fsspec) reaches Cloudflare R2, not only `blobfs`'s own helpers.
 
 It is `s3fs` with each bucket's endpoint and credential profile resolved the way `blobfs.fs_for` resolves them:
-`DISK_TREE_R2_ENDPOINT_URL`, else the bucket's (or `defaults`) `endpoint_url` in `buckets.yml`, and the bucket's
+`DISKY_R2_ENDPOINT_URL`, else the bucket's (or `defaults`) `endpoint_url` in `buckets.yml`, and the bucket's
 `profile` there (a deployment whose ambient `AWS_*` keys are another provider's names R2's by profile). fsspec builds a
 filesystem from the URL (`_get_kwargs_from_urls`), so `r2://a/…` and `r2://b/…` each get their own bucket's settings.
 Registered by `disk_tree`'s `fsspec.specs` entry point, and by importing `blobfs`.

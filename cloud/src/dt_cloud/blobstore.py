@@ -1,5 +1,5 @@
 """The store seam: a generation store's keys under one root, a local dir or an fsspec URL (`gs://`, `r2://`, `s3://`,
-`memory://`; `r2://` takes its endpoint from `DISK_TREE_R2_ENDPOINT_URL` or `buckets.yml`, `disk_tree.blobfs.fs_for`).
+`memory://`; `r2://` takes its endpoint from `DISKY_R2_ENDPOINT_URL` or `buckets.yml`, `disk_tree.blobfs.fs_for`).
 Keys are relative to the root and `/`-separated, as the readers' `INDEX_R2` keys are relative to their bucket.
 
 The static name index's single-machine path (`static_local`) and the interval store (`interval_store`,

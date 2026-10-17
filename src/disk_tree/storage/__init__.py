@@ -1,3 +1,4 @@
+from disk_tree.env import get as env_get
 from .base import StorageBackend
 from .parquet import ParquetBackend
 
@@ -10,7 +11,7 @@ def get_backend(backend_type: str | None = None) -> StorageBackend:
     """Get or create the storage backend singleton.
 
     Args:
-        backend_type: 'parquet' or 'hybrid'. If None, uses DISK_TREE_BACKEND
+        backend_type: 'parquet' or 'hybrid'. If None, uses $DISKY_BACKEND (or $DISK_TREE_BACKEND)
                       env var or defaults to 'hybrid'.
     """
     global _backend_instance
@@ -19,7 +20,7 @@ def get_backend(backend_type: str | None = None) -> StorageBackend:
         return _backend_instance
 
     import os
-    backend_type = backend_type or os.environ.get('DISK_TREE_BACKEND', 'hybrid')
+    backend_type = backend_type or env_get('BACKEND', 'hybrid')
 
     if backend_type == 'parquet':
         from .parquet import ParquetBackend

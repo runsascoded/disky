@@ -33,6 +33,19 @@ err = partial(print, file=sys.stderr)
 PROFILE_ENV = "SCAN_RUNS_PROFILE"
 TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs", "scan_run_dags")
 STATUSES = ("running", "succeeded", "failed", "nop")
+#: What started the run, as GitHub Actions' `event_name`: the deployment's cron (its job body sets `DT_TRIGGER=schedule`)
+#: or a hand submit / resume (its submitter sets `manual`). Opt-in per deployment, with migration `scan-run-trigger`:
+#: unset, nothing is recorded, and the digest goes by the clock. A scan's trigger is its first run's (`digest_cw.scan_triggers`).
+TRIGGER_ENV = "DT_TRIGGER"
+TRIGGERS = ("schedule", "manual")
+
+
+def trigger_of(env: Mapping[str, str]) -> str | None:
+    """`$DT_TRIGGER` (one of `TRIGGERS`); None when unset (a deployment that doesn't state its triggers)."""
+    t = (env.get(TRIGGER_ENV) or "").strip() or None
+    if t is not None and t not in TRIGGERS:
+        raise ValueError(f"${TRIGGER_ENV}={t!r}: not one of {TRIGGERS}")
+    return t
 
 
 # ── The record ──────────────────────────────────────────────────────────────
@@ -59,6 +72,8 @@ class Run:
     image: str | None = None
     cost_usd: float | None = None
     gen: str | None = None
+    #: `TRIGGERS`; None: unknown (a backfilled run, or a write that doesn't state it)
+    trigger: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,7 +131,7 @@ def lit(v: object) -> str:
 
 # Columns an upsert never clears: a later partial write (a phase, the exit trap) leaves what it doesn't name alone.
 _KEEP = ("parent", "failed_phase", "error", "started_ts", "finished_ts", "job_name", "region", "machine", "spot", "tasks",
-         "image", "cost_usd", "gen")
+         "image", "cost_usd", "gen", "trigger")
 
 
 def run_sql(run: Run, now: int) -> str:
@@ -125,11 +140,12 @@ def run_sql(run: Run, now: int) -> str:
     writer's (a backfill completing a job-written run stays `job`)."""
     if run.status not in STATUSES:
         raise ValueError(f"scan run {run.run_id}: status {run.status!r} not one of {STATUSES}")
-    cols = [f.name for f in fields(Run)] + ["updated_ts"]
+    # `trigger` only when known, so a database without the column (migration `scan-run-trigger`) still takes the run
+    cols = [f.name for f in fields(Run) if f.name != "trigger" or run.trigger is not None] + ["updated_ts"]
     vals = [getattr(run, c) for c in cols[:-1]] + [now]
     sets = ["scan = excluded.scan", "kind = excluded.kind", "status = excluded.status", "store = excluded.store",
             "updated_ts = excluded.updated_ts"]
-    sets += [f"{c} = COALESCE(excluded.{c}, scan_runs.{c})" for c in _KEEP]
+    sets += [f"{c} = COALESCE(excluded.{c}, scan_runs.{c})" for c in _KEEP if c in cols]
     return (f"INSERT INTO scan_runs ({', '.join(cols)}) VALUES ({', '.join(lit(v) for v in vals)}) "
             f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(sets)}")
 
@@ -668,6 +684,7 @@ def record(
     extra_cost: float | None = None,
     task: Mapping[str, str] | None = None,
     dag: tuple[str, str] | None = None,
+    trigger: str | None = None,
 ) -> Record:
     """One incremental write of run `run_id` (scan `scan`): start it, start/close a phase (measuring completed outputs tied to
     it), measure named outputs, finish it (`exit_code`, or `nop`). The run row is upserted every time, so any call
@@ -678,7 +695,7 @@ def record(
     plus `extra_cost` (the jobs it ran apart from its own: `labelled_cost`).
 
     `task`: where phase `phase` ran: its Batch job when not the run's own (`job_name`, `machine`) and its pipeline node
-    (`task`; `JobRun.task`). `dag`: the run's pipeline DAG, (engine, graph JSON)."""
+    (`task`; `JobRun.task`). `dag`: the run's pipeline DAG, (engine, graph JSON). `trigger`: what started it (`TRIGGERS`)."""
     check_scan_id(scan)
     if phase_start and not phase:
         raise ValueError("scan-run: a phase start needs a phase name")
@@ -692,7 +709,7 @@ def record(
     elif start or (phase and not phase_start):
         status = "running" if status != "nop" else status
     run = Run(run_id=run_id, scan=scan, kind=kind, status=status, store=profile.store, parent=parent,
-              started_ts=now if start and not started else None, gen=gen, source="job")
+              started_ts=now if start and not started else None, gen=gen, source="job", trigger=trigger)
     if exit_code is not None or nop:
         run = replace(run, finished_ts=now)
         if exit_code:
@@ -851,7 +868,7 @@ def kinds_filter(kinds: Iterable[str]) -> Callable[[str], bool]:
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
-from click import IntRange, argument, group, option  # noqa: E402
+from click import Choice, IntRange, argument, group, option  # noqa: E402
 
 
 @group("scan-run")
@@ -1544,6 +1561,7 @@ def _phase_end_opts(f):
 @option("-k", "--kind", default="scan", help="The run's kind: scan | reproc | compute | access | … (default scan)")
 @option("-K", "--store", "store_key", default=None, help="The store the run belongs to (default the profile's `store`)")
 @option("-m", "--machine", default=None, help="Job fact: the machine (a key of the profile's `prices` gets a cost)")
+@option("-o", "--trigger", type=Choice(TRIGGERS), default=None, help=f"What started the run (default ${TRIGGER_ENV}; unset: not recorded)")
 @option("-p", "--parent", default=None, help="The orchestrating run's id")
 @option("-R", "--region", default=None, help="Job fact: the region (or with -J / -B where to look the job up)")
 @option("--spot/--no-spot", default=None, help="Job fact: the run ran on spot capacity")
@@ -1551,11 +1569,16 @@ def _phase_end_opts(f):
 @option("-T", "--tasks", type=int, default=None, help="Job fact: the job's task count")
 @_wrapper_opts
 @argument("scan", required=False)
-def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key, machine, parent, region, spot, at, tasks,
-              profile_path, d1, dry_run, run_id, sqlite, scan) -> None:
-    """Start the job's run of SCAN (default $SCAN_ID): record it running (`record -S`) and keep its scan, kind,
-    parent and job facts for the phases and `finish`. Never fails the job."""
+def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key, machine, trigger, parent, region, spot, at,
+              tasks, profile_path, d1, dry_run, run_id, sqlite, scan) -> None:
+    """Start the job's run of SCAN (default $SCAN_ID): record it running (`record -S`) with what started it, and keep
+    its scan, kind, parent and job facts for the phases and `finish`. Never fails the job."""
     j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
+    try:
+        trigger = trigger or trigger_of(j.env)
+    except ValueError as e:
+        report_failure(e)
+        trigger = None
     scan = scan or j.env.get("SCAN_ID")
     j.clear()
     j.save(fresh=True, scan=scan, kind=kind, parent=parent, gen=gen, store=store_key, region=region, job_name=job_name)
@@ -1567,7 +1590,7 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
             report_failure(e)
     facts = dict(job_name=job_name, region=None if (batch_job_name or from_batch) else region, machine=machine, spot=spot,
                  tasks=tasks, image=image)
-    rec = j.write(at, start=True, job=job, facts=facts)
+    rec = j.write(at, start=True, job=job, facts=facts, trigger=trigger)
     if rec is not None:
         j.save(region=rec.run.region, job_name=rec.run.job_name)
     j.point_supervisor(profile_path, d1, dry_run, sqlite)

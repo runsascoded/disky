@@ -7,6 +7,8 @@ Exact-equality against a hand-built month (no Slack, no GCS): a lead-in scan
 unambiguous). Totals chosen so every derived string is checkable by hand."""
 from datetime import date
 
+import pytest
+
 from dt_cloud import digest as E
 from dt_cloud import digest_gcs as D
 
@@ -56,7 +58,7 @@ def test_rows_from_meta_deltas():
 
 def test_reply_grow():
     assert D.reply(ROWS[0], CFG) == E.Reply(
-        "8/3 — 3,030 TB (+30.0, 1.0%)",
+        "8/3 — 3,030 TiB (+30.0, 1.0%)",
         "$19,784/mo (+$615) [\u2197\ufe0e](https://site.example.org/?d=260803#diff)",
         icon_url="https://icons.example.org/arrows/av_deg50.png?v=4",
     )
@@ -64,7 +66,7 @@ def test_reply_grow():
 
 def test_reply_shrink():
     assert D.reply(ROWS[1], CFG) == E.Reply(
-        "8/4 — 3,010 TB (−20.0, 0.7%)",
+        "8/4 — 3,010 TiB (−20.0, 0.7%)",
         "$19,374/mo (−$410) [\u2197\ufe0e](https://site.example.org/?d=260804#diff)",
         icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4",
     )
@@ -77,10 +79,10 @@ def test_reply_discord_link_text():
 
 def test_op_body():
     assert D.op_body(ROWS, date(2026, 8, 1), "https://x/p.png", CFG).split("\n") == [
-        ":arrow_deg20: **+10.0 TB** month-to-date · [dashboard](https://site.example.org/)",
+        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
         "",
         "*Weekly summaries*",
-        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TB** (+10.0, 0.3%) · $19,374/mo (+$205)",
+        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
         "",
         "![GCS usage — August 2026](https://x/p.png)",
     ]
@@ -118,12 +120,12 @@ def test_sub_daily_replies_are_distinct_units():
     # projects the Δ over the real interval (30h, then 12h) to a weekly rate
     assert TPL.units(SUB, "sender") == [
         E.Unit("2026-08-03T0601", "2026-08-03T0601", E.Reply(
-            "8/3 06:01Z — 3,030 TB (+30.0, 1.0%)",
+            "8/3 06:01Z — 3,030 TiB (+30.0, 1.0%)",
             "$19,784/mo (+$615) [\u2197\ufe0e](https://site.example.org/?d=26080306#diff)",
             icon_url="https://icons.example.org/arrows/av_deg40.png?v=4",
         )),
         E.Unit("2026-08-03T1801", "2026-08-03T1801", E.Reply(
-            "8/3 18:01Z — 3,010 TB (−20.0, 0.7%)",
+            "8/3 18:01Z — 3,010 TiB (−20.0, 0.7%)",
             "$19,374/mo (−$410) [\u2197\ufe0e](https://site.example.org/?d=26080318#diff)",
             icon_url="https://icons.example.org/arrows/av_deg-50.png?v=4",
         )),
@@ -133,12 +135,49 @@ def test_sub_daily_replies_are_distinct_units():
 def test_sub_daily_op_body_spans_from_the_lead_scan():
     # one day of the week seen (partial), the span from the 8/2 lead-in to 8/3 18:01Z
     assert D.op_body(SUB, date(2026, 8, 1), None, CFG).split("\n")[3] == (
-        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=26080318-1d18h#over-time) _(partial)_ — **3,010 TB** (+10.0, 0.3%) · $19,374/mo (+$205)"
+        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=26080318-1d18h#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)"
     )
 
 
-def test_sub_daily_plot_rows_are_per_day():
-    assert D.plot_rows(SUB) == [{"date": "2026-08-03", "std": 310.0, "near": 600.0, "cold": 1500.0, "arch": 600.0}]
+def test_image_body():
+    # `POST /api/digest-image`'s tiers card: each scan's bytes per class, bottom → top (Archive … Standard)
+    assert D.image_body(ROWS, AUG, CFG) == {
+        "kind": "tiers",
+        "title": "GCS usage — August 2026",
+        "note": "site.example.org · TiB",
+        "month": "2026-08",
+        "units": "TiB",
+        "tiers": ["Archive", "Coldline", "Nearline", "Standard"],
+        "points": [
+            {"scan": "2026-08-03", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 330 * TIB]},
+            {"scan": "2026-08-04", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]},
+        ],
+    }
+
+
+def test_image_body_sub_daily_is_per_day():
+    # a day's scans plot as its latest (8/3 18:01Z), under its own scan id
+    assert D.image_body(SUB, AUG, CFG)["points"] == [{"scan": "2026-08-03T1801", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]}]
+
+
+def test_render_plot_posts_to_site(monkeypatch, tmp_path):
+    from dt_cloud import site
+
+    calls = []
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
+    TPL.render_plot(ROWS, AUG, tmp_path / "op.png")
+    assert calls == [("https://site.example.org", "tok", "/api/digest-image", D.image_body(ROWS, AUG, CFG))]
+    assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
+
+
+def test_render_plot_without_site_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("SITE_TOKEN", raising=False)
+    monkeypatch.delenv("GCS_USAGE_TOKEN", raising=False)
+    with pytest.raises(E.PlotUnavailable) as e:
+        TPL.render_plot(ROWS, AUG, tmp_path / "op.png")
+    assert str(e.value) == "digest image: no site token ($SITE_TOKEN)"
+    assert sorted(tmp_path.iterdir()) == []
 
 
 # ---- Discord twin ---------------------------------------------------------
@@ -147,10 +186,10 @@ def test_sub_daily_plot_rows_are_per_day():
 def test_op_body_without_plot():
     # `plot_url=None` (Discord attaches the PNG) drops the trailing image lines only
     assert D.op_body(ROWS, date(2026, 8, 1), None, CFG).split("\n") == [
-        ":arrow_deg20: **+10.0 TB** month-to-date · [dashboard](https://site.example.org/)",
+        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
         "",
         "*Weekly summaries*",
-        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TB** (+10.0, 0.3%) · $19,374/mo (+$205)",
+        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
     ]
 
 
@@ -218,16 +257,16 @@ class _FakeBot:
 # One scan in (8/3: +30 on 3000, 1 day → 7%/wk-equivalent → deg50; the week's
 # bullet is +1.0% → deg20), then both scans (+10 net → deg20; week +0.3% → deg0).
 OP_ONE_SCAN = "\n".join([
-    "<:arrow_deg50:5> **+30.0 TB** month-to-date · [dashboard](https://site.example.org/)",
+    "<:arrow_deg50:5> **+30.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
     "",
     "*Weekly summaries*",
-    "<:arrow_deg20:2> [wk of 8/3](https://site.example.org/?d=260803-1d#over-time) _(partial)_ — **3,030 TB** (+30.0, 1.0%) · $19,784/mo (+$615)",
+    "<:arrow_deg20:2> [wk of 8/3](https://site.example.org/?d=260803-1d#over-time) _(partial)_ — **3,030 TiB** (+30.0, 1.0%) · $19,784/mo (+$615)",
 ])
 OP_TWO_SCANS = "\n".join([
-    "<:arrow_deg20:2> **+10.0 TB** month-to-date · [dashboard](https://site.example.org/)",
+    "<:arrow_deg20:2> **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
     "",
     "*Weekly summaries*",
-    "<:arrow_deg0:1> [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TB** (+10.0, 0.3%) · $19,374/mo (+$205)",
+    "<:arrow_deg0:1> [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
 ])
 CAL = "https://icons.example.org/calendar.png?v=2"
 AV = "https://icons.example.org/arrows/av_deg"
@@ -240,7 +279,7 @@ def test_converge_discord_fresh_then_incremental():
     state = E.converge_discord(TPL, ROWS[:1], AUG, {}, hook=hook, bot=bot, emoji=EMOJI, plot=plot, save=lambda s: saves.append(dict(s)))
     assert hook.calls == [
         ("post", OP_ONE_SCAN, None, "GCS usage — August 2026", CAL, [plot]),
-        ("post", "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)", "t1", "8/3 — 3,030 TB (+30.0, 1.0%)", f"{AV}50.png?v=4", []),
+        ("post", "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)", "t1", "8/3 — 3,030 TiB (+30.0, 1.0%)", f"{AV}50.png?v=4", []),
     ]
     assert bot.calls == [("create_thread", "m1", "GCS usage — August 2026")]
     assert state == {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03": "m2"}}
@@ -256,7 +295,7 @@ def test_converge_discord_fresh_then_incremental():
     state = E.converge_discord(TPL, ROWS, AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot=plot)
     assert hook.calls == [
         ("edit", "m1", OP_TWO_SCANS, [plot]),
-        ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
+        ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TiB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
     ]
     assert bot.calls == []
     assert state == {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03": "m2", "2026-08-04": "m3"}}
@@ -280,21 +319,8 @@ def test_converge_discord_edit_replies():
     assert state["posted"] == {"2026-08-03": "m2", "2026-08-04": "m3"}
 
 
-def test_plot_takes_sub_daily_scan_ids(tmp_path) -> None:
-    """Two scans on one day (`2026-10-09` and `2026-10-09T1236`) plot as two
-    instants; a `T` id crashed `render_tiers` (`date.fromisoformat`) in the
-    2026-10-09T1236 job's digest steps."""
-    from dt_cloud.digest_plot import render_tiers
-
-    rows = [
-        {"date": "2026-10-08", "std": 30.0, "near": 1.0, "cold": 2900.0, "arch": 0.0},
-        {"date": "2026-10-09", "std": 30.0, "near": 1.0, "cold": 2910.0, "arch": 0.0},
-        {"date": "2026-10-09T1236", "std": 30.0, "near": 1.0, "cold": 2620.0, "arch": 0.0},
-    ]
-    out = tmp_path / "tiers.png"
-    render_tiers(rows, out, "marin GCS — October 2026", "gcs.oa.dev")
-    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
-    assert E._md("2026-10-09T1236") == "10/9"
+def test_md_takes_sub_daily_scan_ids() -> None:
+    assert [E._md(s) for s in ("2026-10-09", "2026-10-09T1236")] == ["10/9", "10/9"]
 
 
 def test_links_use_each_scans_canonical_slug():

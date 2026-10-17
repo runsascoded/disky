@@ -12,6 +12,7 @@
 // Baking the JSONs into `public/` was the other option; it was rejected because
 // publishing a scan would then require a site redeploy, which is exactly the
 // staleness the data Function was introduced to fix.
+import type { Peer } from './hosts'
 import type { ReactNode } from 'react'
 import type { RuleShape } from './lifecycle'
 import type { ColorMode } from './types'
@@ -96,8 +97,9 @@ export interface Store {
    *  default; what a bare `lifecycle.json` `Rules[]` from before the
    *  multi-bucket scan belongs to). */
   buckets: string[]
-  /** The sibling deployment the site menu links to (each store is its own host). */
-  peer?: { label: string; href: string }
+  /** The sibling deployments (each its own host): the omnibar and site menu open this page on each (`peerUrl`).
+   * May list this deployment too (one shared family list); its own prod host is skipped. */
+  peers?: Peer[]
   /** Fresher bucket totals than the scans (a provider's metrics dashboard): the ☰ menu links it, and so does the
    *  size-over-time chart, whose newest point is the newest scan's. Unset = no link. */
   liveTotals?: { label: string; href: string }

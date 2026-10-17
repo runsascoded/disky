@@ -104,7 +104,7 @@ def test_fs_for_r2_without_endpoint_is_a_pointed_error(monkeypatch, tmp_path: Pa
     with pytest.raises(RuntimeError) as e:
         blobfs.fs_for('r2://ctbk/scans')
     assert str(e.value) == (
-        'r2://ctbk: no endpoint — set DISK_TREE_R2_ENDPOINT_URL, or give the bucket an `endpoint_url` in buckets.yml'
+        'r2://ctbk: no endpoint — set DISKY_R2_ENDPOINT_URL, or give the bucket an `endpoint_url` in buckets.yml'
     )
 
 
