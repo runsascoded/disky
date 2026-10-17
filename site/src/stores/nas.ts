@@ -6,7 +6,7 @@ import type { Store } from '../stores'
 const store: Store = {
   key: 'nas',
   label: 'NAS',
-  title: 'disk-tree — nas',
+  title: 'disky — nas',
   desc: 'Disk usage of a NAS array (Unraid: XFS data disks + a btrfs cache), captured over ssh.',
   path: '/nas',
   mark: 'nas',
