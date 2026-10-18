@@ -21,13 +21,14 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .interval_store import CLASS_COLS
 from .static_names import OPEN
 
 MIN_AREA = 12
 ATTEN = 2.0
 HARD_CAP = 50_000
 #: The columns a view decodes from the path versions (all but nothing: every column is a `Row` field).
-VIEW_COLS = ["depth", "path", "vf", "vt", "kind", "size", "n_files", "n_children", "n_desc", "mtime", "wts", "wb", "c2", "c3", "c4", "us", "last_read"]
+VIEW_COLS = ["depth", "path", "vf", "vt", "kind", "size", "n_files", "n_children", "n_desc", "mtime", "wts", "wb", *CLASS_COLS.values(), "us", "last_read"]
 
 
 @dataclass
@@ -172,9 +173,9 @@ def agg_of(r: dict) -> Agg:
             m=r["mtime"] if r.get("mtime") is not None and r["mtime"] >= 0 else None)
     if r["wb"] > 0:
         a.wts, a.wb = r["wts"], r["wb"]
-    for k in ("c2", "c3", "c4"):
-        if r[k]:
-            a.cb[k[1]] = r[k]
+    for cls, c in CLASS_COLS.items():
+        if r[c]:
+            a.cb[str(cls)] = r[c]
     a.ub = us_map(r["us"], r["size"])
     return a
 

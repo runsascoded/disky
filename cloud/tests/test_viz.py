@@ -787,3 +787,30 @@ def test_home_capture_object_depth(tmp_path: Path):
         ("Users/ryan/c", "dir", 3), ("Users/ryan/top.txt", "file", 3),
         ("Users/ryan/c/a.bin", "file", 4),
     ]
+
+
+def test_generation_is_opt_in(tmp_path: Path, listing: str):
+    """`path-index -G` (gcs): each object row carries the listing's `generation` as the store's last column, NULL on
+    every dir row, in both sorts. Off (every other deployment), the same listing's sorts have no such column."""
+    df = pd.read_parquet(listing)
+    df["generation"] = [1001, 1002, 1003, 1004]
+    gl = tmp_path / "listing-gen.parquet"
+    df.to_parquet(gl)
+    on, off = tmp_path / "on" / "path-index.parquet", tmp_path / "off" / "path-index.parquet"
+    write_path_index((str(gl),), tmp_path / "o1", "2026-07-20", path_index=on, generation=True)
+    write_path_index((str(gl),), tmp_path / "o2", "2026-07-20", path_index=off)
+    want = [
+        ("b1", "dir", None),
+        ("b1/datasets", "dir", None), ("b1/top.bin", "file", 1004), ("b1/users", "dir", None),
+        ("b1/datasets/raw", "dir", None), ("b1/users/rw", "dir", None),
+        ("b1/datasets/raw/part0", "file", 1003), ("b1/users/rw/ckpt", "dir", None),
+        ("b1/users/rw/ckpt/model.bin", "file", 1001), ("b1/users/rw/ckpt/opt.bin", "file", 1002),
+    ]
+    path = pd.read_parquet(on)
+    assert list(path.columns) == [*STORE_COLS, "generation"]
+    assert _rows(path, ["path", "kind", "generation"]) == want
+    bysize = pd.read_parquet(on.with_name("path-index-bysize.parquet"))
+    assert list(bysize.columns) == [*STORE_COLS, "generation", "tot"]
+    assert sorted(_rows(bysize, ["path", "kind", "generation"]), key=str) == sorted(want, key=str)
+    assert list(pd.read_parquet(off).columns) == STORE_COLS
+    assert list(pd.read_parquet(off.with_name("path-index-bysize.parquet")).columns) == [*STORE_COLS, "tot"]

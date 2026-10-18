@@ -14,6 +14,7 @@
   --grew: #1a8f3a; --shrank: #d7302f;
   --danger: #c4302a;  // destructive actions (a real delete, its arming) and error copy
   --never-read: #b0685e;  // read lens: no GET/HEAD/LIST since logging began
+  --age-bar: #8d9bab;  // the age chart's bars when no color axis applies (the date gradient would only repeat the x-axis)
   // @disk-tree/react: opaque base under each cell's paint layer (gutters/title
   // bars); the core default is a dark constant, so follow the theme instead.
   --dt-treemap-container-bg: var(--panel);
@@ -55,6 +56,7 @@
     --grew: #4ade80; --shrank: #ff7b72;
     --danger: #f2635a;
     --never-read: #6e332b;
+    --age-bar: #5b6876;
   }
 }
 :root[data-theme='dark'] {
@@ -69,6 +71,7 @@
   --grew: #4ade80; --shrank: #ff7b72;
   --danger: #f2635a;
   --never-read: #6e332b;
+  --age-bar: #5b6876;
 }
 
 * { box-sizing: border-box; }
@@ -1388,6 +1391,12 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .agechart {
   svg { width: 100%; height: auto; display: block; }
   .tick { fill: var(--ink-3); font-size: 10px; }
+  // Bar value labels (`placeBarLabels`): ink with a ground-colored halo, legible on any bar fill.
+  .val {
+    fill: var(--ink); font-size: 9.5px; font-variant-numeric: tabular-nums; pointer-events: none;
+    stroke: var(--surface); stroke-width: 2.5px; stroke-linejoin: round; paint-order: stroke;
+    &.above, &.peak { fill: var(--ink-2); stroke-width: 2px; }
+  }
   .hoverband { fill: var(--ink); opacity: 0.06; }
   .zeroline { stroke: var(--ink-3); stroke-width: 0.5; opacity: 0.5; }
   .legend {

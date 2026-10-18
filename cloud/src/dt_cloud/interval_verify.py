@@ -378,6 +378,25 @@ def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, 
     return summary
 
 
+def generation_parity(con, scan_file: str, served: str, runs: list[str], ts: int) -> dict | None:
+    """The objects' `generation` at a scan, store against the scan's own sort, where both carry it (None otherwise): the
+    scan's objects with one (a key that is also a folder's prefix excepted: the store folds it into the folder), and how
+    many the store's version live at the scan (the `path` sort, base and runs) gives the same."""
+    from .interval_store import GENERATION, GENERATION_SORT, file_has_generation
+
+    files = [f"{served}/{GENERATION_SORT}.parquet", *(f"{r}/{GENERATION_SORT}.parquet" for r in runs)]
+    if not file_has_generation(files[0]) or not file_has_generation(scan_file):
+        return None
+    union = " UNION ALL ".join(f"SELECT depth, path, vf, vt, kind, {GENERATION} FROM read_parquet({q(f)})" for f in files)
+    live = f"""SELECT depth, path, {GENERATION} FROM (SELECT * FROM ({union}) QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
+        WHERE vf <= {ts} AND {ts} < vt AND kind = 'file'"""
+    own = f"""SELECT depth::UTINYINT AS depth, path, any_value({GENERATION}) AS {GENERATION} FROM read_parquet({q(scan_file)})
+        GROUP BY depth, path HAVING bool_and(kind = 'file') AND count(*) = 1 AND any_value({GENERATION}) IS NOT NULL"""
+    n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{GENERATION} = o.{GENERATION})
+        FROM ({own}) o LEFT JOIN ({live}) l USING (depth, path)""").fetchone()
+    return {"objects": n, "equal": eq}
+
+
 def _footers(src, key: str, version: int) -> dict[str, Footer]:
     d = key.rsplit("/", 1)[0]
     if version == 2:
@@ -421,7 +440,11 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
             err(f"{date}: per-scan path sort copied ({local.stat().st_size:,} B, {monotonic() - t0:.0f}s)")
             scan = Scan(con, str(local), s["version"], s["src"])
             if date == first_own or (first_own and sampled.index(date) > sampled.index(first_own)):
-                summaries.append(run_date(store, scan, date, s["ts"], prev, out, src))
+                summary = run_date(store, scan, date, s["ts"], prev, out, src)
+                if (g := generation_parity(con, str(local), served, list(runs), s["ts"])) is not None:
+                    summary["generation"] = g
+                    err(f"  {date} generation: {g['equal']:,} of {g['objects']:,} objects equal")
+                summaries.append(summary)
             if prev:
                 os.unlink(prev[0].file)
             prev = (scan, date, s["ts"])
@@ -437,10 +460,15 @@ def marker_key(prefix: str, scan: str) -> str:
 
 
 def marker(summary: dict, gen: str) -> dict:
-    """A scan's parity marker from its `run_date` summary: its views and diffs, and `pass` when it had views and every
-    view and diff was equal."""
+    """A scan's parity marker from its `run_date` summary: its views and diffs (and objects' `generation`, where the store
+    and the scan carry it: `generation_parity`), and `pass` when it had views and every view, diff and generation was
+    equal."""
     ok = summary["views"] > 0 and summary["views"] == summary["view_eq"] and summary["diffs"] == summary["diff_eq"]
-    return {"scan": summary["date"], "gen": gen, "pass": ok, **{k: summary[k] for k in ("views", "view_eq", "diffs", "diff_eq")}}
+    g = summary.get("generation")
+    if g is not None:
+        ok = ok and g["objects"] == g["equal"]
+    return {"scan": summary["date"], "gen": gen, "pass": ok, **{k: summary[k] for k in ("views", "view_eq", "diffs", "diff_eq")},
+            **({"generation": g} if g is not None else {})}
 
 
 def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path) -> dict[str, dict]:

@@ -34,6 +34,8 @@ from collections.abc import Callable
 from pathlib import Path
 from time import monotonic
 
+import pyarrow.parquet as pq
+
 from . import append_runner as ar
 from . import interval_append as ia
 from . import interval_store as ist
@@ -126,13 +128,28 @@ def resolve_gen(store: Store, gen: str | None, log: Callable[[str], None] = err)
 # ── Folding base + runs into range files ───────────────────────────────────
 
 
-def _versions_sql(base: str, runs: list[str], t: str, name: str) -> str:
+def _class_renames(path: str) -> dict[str, str]:
+    """A range file's or delta's storage-class columns under other names than `interval_store.CLASS_COLS` (a generation
+    written before a rename): `{old: new}`, by position — they follow `wb` in every version table."""
+    names = pq.read_schema(path).names
+    i = names.index("wb") + 1
+    old = names[i:i + len(ist.CLS)]
+    return {o: n for o, n in zip(old, ist.CLS) if o != n}
+
+
+def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: bool = False) -> str:
     """Key range `name`'s versions of table `t`: the base's range file and every run's delta, one row per version
-    (`IDENT`, `usr` as '') with the smallest `vt`, in the base's columns (`interval_store.SUB_SCHEMA[t]`, `usr` '')."""
-    cols = [("coalesce(usr, '') AS usr" if c == "usr" else c) for c in ist.SUB_SCHEMA[t].names]
-    sel = ", ".join(cols)
-    parts = [f"SELECT {sel} FROM read_parquet({q(f'{base}/{t}/{name}.parquet')})",
-             *(f"SELECT {sel} FROM read_parquet({q(f'{r}/{t}/{name}.parquet')})" for r in runs)]
+    (`IDENT`, `usr` as '') with the smallest `vt`, in the base's columns (`interval_store.SUB_SCHEMA[t]`, `usr` '';
+    `GENERATION` last in `pvl` with `generation`). Class columns of an older generation are read by position, under
+    `CLASS_COLS`' names."""
+    names = ist.with_generation(ist.SUB_SCHEMA[t], generation and t == "pvl").names
+
+    def sel(path: str) -> str:
+        back = {n: o for o, n in _class_renames(path).items()}
+        return ", ".join("coalesce(usr, '') AS usr" if c == "usr" else f"{back[c]} AS {c}" if c in back else c for c in names)
+
+    files = [f"{base}/{t}/{name}.parquet", *(f"{r}/{t}/{name}.parquet" for r in runs)]
+    parts = [f"SELECT {sel(f)} FROM read_parquet({q(f)})" for f in files]
     ident = ", ".join(ia.IDENT[t])
     return f"""SELECT * FROM ({" UNION ALL ".join(parts)}) QUALIFY row_number() OVER (PARTITION BY {ident} ORDER BY vt) = 1"""
 
@@ -148,20 +165,36 @@ def _islands_sql(src: str, same: list[str], keep: list[str], where: str = "true"
         SELECT depth, path, min(vf) AS vf, max(vt) AS vt, {first} FROM g GROUP BY depth, path, __run"""
 
 
-def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True) -> dict:
+#: A `compact_range` hook: `(con, name)` sets `GENERATION` on table `pv` (the range's path versions, the column added
+#: NULL), which the folded pieces (`pvl`) then take from their path version (`interval_backfill`).
+Fill = Callable[[object, str], None]
+
+
+def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True, generation: bool = False,
+                  fill: Fill | None = None) -> dict:
     """Key range `name` of the generation folded from the base under `base` and the runs `runs` (dirs, oldest first) into
     `out`'s range files, as `build` writes them: `pvl/`, `pv/` and `rd/` (the islands of `pvl`'s pieces), and with the
-    owner axis `sv/` and `svt/`. Returns their row counts."""
+    owner axis `sv/` and `svt/`. `generation`: the path versions carry `GENERATION` — read from the inputs, or, with
+    `fill`, set by it on the path versions and taken by their pieces. Returns their row counts."""
     rf = lambda sub: out / sub / f"{name}.parquet"
-    con.execute(f"CREATE OR REPLACE TABLE pvl AS {_versions_sql(base, runs, 'pvl', name)}")
-    doc = {"pvl": sn.write_sorted(sn._batches(con, f"SELECT {', '.join(ist.PVL_SCHEMA.names)} FROM pvl ORDER BY depth, path, vf"), rf("pvl"),
-                                  ist.PVL_SCHEMA, ist.RANGE_RG, dictionary=["kind", "us"])}
-    # A path version is the run of its pieces with equal change columns (`dr` as `build` derives it); `wts` is carried
-    # from the version's first scan, which every piece shares (`fold`).
+    gen_in = generation and fill is None
+    gcol = [ist.GENERATION] if gen_in else []
+    con.execute(f"CREATE OR REPLACE TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in)}")
+    # A path version is the run of its pieces with equal change columns (`dr` as `build` derives it); `wts` (and
+    # `GENERATION`) is carried from the version's first scan, which every piece shares (`fold`).
     change = [c for c in ist.CHANGE_COLS if c != "dr"]
     pv_src = f"SELECT *, {ia.DR} AS dr FROM pvl"
-    con.execute(f"CREATE OR REPLACE TABLE pv AS {_islands_sql(pv_src, ist.CHANGE_COLS, [*change, 'wts'])}")
-    doc["pv"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(ist.PV_COLS)} FROM pv ORDER BY depth, path, vf"), rf("pv"), ist.PV_SCHEMA,
+    con.execute(f"CREATE OR REPLACE TABLE pv AS {_islands_sql(pv_src, ist.CHANGE_COLS, [*change, 'wts', *gcol])}")
+    if fill is not None:
+        for t in ("pv", "pvl"):
+            con.execute(f"ALTER TABLE {t} ADD COLUMN {ist.GENERATION} BIGINT")
+        fill(con, name)
+        con.execute(f"""UPDATE pvl SET {ist.GENERATION} = p.{ist.GENERATION} FROM pv p
+            WHERE p.depth = pvl.depth AND p.path = pvl.path AND p.vf <= pvl.vf AND pvl.vf < p.vt""")
+    pvl_schema, pv_schema = (ist.with_generation(s, generation) for s in (ist.PVL_SCHEMA, ist.PV_SCHEMA))
+    doc = {"pvl": sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pvl_schema.names)} FROM pvl ORDER BY depth, path, vf"), rf("pvl"),
+                                  pvl_schema, ist.RANGE_RG, dictionary=["kind", "us"])}
+    doc["pv"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pv_schema.names)} FROM pv ORDER BY depth, path, vf"), rf("pv"), pv_schema,
                                 ist.RANGE_RG, dictionary=["kind", "us"])
     con.execute(f"CREATE OR REPLACE TABLE rd AS {_islands_sql('SELECT * FROM pvl', ['last_read'], ['last_read'], 'last_read >= 0')}")
     doc["rd"] = sn.write_sorted(sn._batches(con, "SELECT depth, path, vf, vt, last_read FROM rd ORDER BY depth, path, vf"), rf("rd"),
@@ -180,19 +213,9 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
     return doc
 
 
-def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, level: int | None, rg_rows: int = ist.SERVED_RG,
-                threads: int = 4, mem: str = "4GB") -> dict:
-    """The generation `gen` (its base and the newest manifest's runs, in `gen_dir`) folded into the new generation
-    `new_gen` in `out`: its range files (`compact_range`, the old `ranges.json`), served sorts and churn
-    (`interval_store.cut_gen`), `scans.json` and `compaction.json`. Returns a summary."""
-    t0 = monotonic()
-    store = LocalRunStore(gen_dir, work / "lease", gen)
-    base = store.read_json("scans.json")
-    sliced = ist.sliced(base)
-    newest = latest_key(store.keys("manifests/"))
-    if newest is None:
-        raise SystemExit(f"{gen}: no runs to compact")
-    runs = store.read_json(newest)["runs"]
+def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
+    """The `scans.json` entries of every scan the runs `runs` hold (their `deltas/<id>/scans.json`, kept on folded runs by
+    `interval_append.FOLDED_RETAIN`)."""
     docs = []
     for r in runs:
         for sid in r["scans"]:
@@ -200,7 +223,21 @@ def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str,
             if not p.is_file():
                 raise SystemExit(f"{gen}: {p.relative_to(gen_dir)} missing: scan {sid}'s entry for the compacted `scans.json`")
             docs.append(json.loads(p.read_text())["scans"][0])
-    doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices")}, "scans": [*base["scans"], *docs], "slices": sliced}
+    return docs
+
+
+def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
+             mem: str = "4GB", fill: Fill | None = None) -> tuple[dict, dict, dict, dict]:
+    """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
+    (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
+    (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
+    carries `GENERATION` as the hook sets it. Returns `(scans.json, rows per table, sorts, stats)`."""
+    base = json.loads((gen_dir / "scans.json").read_text())
+    sliced = ist.sliced(base)
+    generation = ist.has_generation(base) or fill is not None
+    doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices", ist.GENERATION)},
+           "scans": [*base["scans"], *run_scans(gen_dir, gen, runs)], "slices": sliced}
+    doc = ist.record_generation(doc, generation)
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -209,10 +246,25 @@ def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str,
     con = sn.connect(threads, mem, work / "duckdb-compact")
     rows: dict[str, int] = {}
     for i in range(k):
-        for t, n in compact_range(con, str(gen_dir), [str(gen_dir / r["key"]) for r in runs], f"r{i:04d}", out, sliced).items():
+        for t, n in compact_range(con, str(gen_dir), [str(gen_dir / r["key"]) for r in runs], f"r{i:04d}", out, sliced, generation, fill).items():
             rows[t] = rows.get(t, 0) + n
     sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows)
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
+    return doc, rows, sorts, stats
+
+
+def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, level: int | None, rg_rows: int = ist.SERVED_RG,
+                threads: int = 4, mem: str = "4GB") -> dict:
+    """The generation `gen` (its base and the newest manifest's runs, in `gen_dir`) folded into the new generation
+    `new_gen` in `out` (`fold_gen`), and `compaction.json`. Returns a summary."""
+    t0 = monotonic()
+    store = LocalRunStore(gen_dir, work / "lease", gen)
+    base = store.read_json("scans.json")
+    newest = latest_key(store.keys("manifests/"))
+    if newest is None:
+        raise SystemExit(f"{gen}: no runs to compact")
+    runs = store.read_json(newest)["runs"]
+    doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem)
     comp = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "base_scans": len(base["scans"]), "scans": len(doc["scans"]),
             "level": level}
     (out / COMPACTION).write_text(json.dumps(comp, indent=1) + "\n")

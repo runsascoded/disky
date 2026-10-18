@@ -204,6 +204,12 @@ def _tables(acct: str, tok: str) -> list[tuple[str, bool]]:
     return [*([("footer_cache", True)] if F.footer_cache_present(acct, tok) else []), ("index_row_groups", True), ("index_schema", False)]
 
 
+def _has_d1() -> bool:
+    """Whether D1 credentials are at hand (a deployment without D1 pointers has none)."""
+    tok, acct = F._creds()
+    return bool(tok and acct)
+
+
 def d1_plan(dates: list[str], store: str, drop_path: bool) -> list[dict]:
     """The D1 rows retiring `dates` deletes: per table, `(date, variant, gen)` and its row count."""
     if not dates:
@@ -340,7 +346,13 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             "totals": {"delete": _totals(r["delete"] for r in rows), "keep": _totals(r["keep"] for r in rows),
                        "pending": _totals(scans[r["id"]].by_class(DELETE) for r in pending)},
             "d1": d1_plan(retiring, d1_store, drop_path) if d1 else None,
+            # `-R` (another copy of the files): the pointer rows the retiring scans still have, which this pass won't
+            # delete; a scan only this copy holds needs a pass with D1, or its rows outlive its files
+            "d1_left": d1_plan(retiring, d1_store, drop_path) if not d1 and _has_d1() else None,
         }
+        if report["d1_left"]:
+            left = sorted({d["date"] for d in report["d1_left"]})
+            err(f"retire: -R leaves D1 rows for {len(left)} retiring scans ({', '.join(left)}): retire them with D1 too")
         if not execute:
             return report
         doomed = {k: n for sid in retiring for k, n in scans[sid].deletable().items()}
@@ -382,6 +394,8 @@ def render(report: dict) -> list[str]:
     if report["d1"] is not None:
         for d in report["d1"]:
             out.append(f"d1 {d['table']} {d['date']} {d['variant']} {d['gen']}: {d['rows']} rows")
+    for d in report.get("d1_left") or []:
+        out.append(f"d1 left (-R) {d['table']} {d['date']} {d['variant']} {d['gen']}: {d['rows']} rows")
     return out
 
 

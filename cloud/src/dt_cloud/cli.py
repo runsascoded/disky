@@ -407,6 +407,7 @@ def wandb_mine(
 @option("-c", "--dir-cache", "dir_cache", type=Path, default=None, help="Layer-2 cache dir (dir-stats/age-days parquet): attribution-independent rollups reused by re-attribution runs — see gcs:specs/dir-agg-cache.md")
 @option("-d", "--asof", required=True, callback=scan_id_option, help="Scan id the listing came from (YYYY-MM-DD or YYYY-MM-DDTHHMM)")
 @option("-g", "--age-strata", is_flag=True, help="Add bytes-by-age columns (`age_b0`…`age_b6`, specs/done/row-age-strata.md) to every store row; off by default, so a store keeps its schema until it opts in")
+@option("-G", "--generation", is_flag=True, envvar="PATH_INDEX_GENERATION", show_envvar=True, help="Carry each object's native version (the listing's `generation`, GCS) as the store's last column, NULL on dirs; opt-in per deployment (gcs), absent otherwise. The interval store built over such sorts carries it per object version (`interval-store backfill-generation`, specs/lean-scans.md §3.1)")
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, default=None, help=f"identities.yaml path or URL, needed with -a (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", "out_dir", type=Path, default=None, help="Output dir for JSON files [default: site/public/data/<asof>]")
@@ -421,6 +422,7 @@ def build_path_index(
     dir_cache: Path | None,
     asof: str,
     age_strata: bool,
+    generation: bool,
     identities_path: str | None,
     listings: tuple[str, ...],
     out_dir: Path | None,
@@ -444,7 +446,7 @@ def build_path_index(
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
         listings, out_dir, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-        user_sorts=user_sorts, row_group_rows=row_group_rows, age_strata=age_strata, search=search,
+        user_sorts=user_sorts, row_group_rows=row_group_rows, age_strata=age_strata, search=search, generation=generation,
         user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
@@ -1670,11 +1672,15 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
+@option("-g", "--iv-gen", default=None, help="The interval store's generation an `as_of` hold reads (default its current)")
+@option("-H", "--holds", type=Choice(["auto", "listing", "store"]), default="auto", show_default=True, help="Where an `as_of` scan's object identities come from: its raw listing, the interval store (-i), or the listing when it is there and the store otherwise")
+@option("-i", "--interval-store", default=None, help="The interval store (a dir or URL, the readers' INDEX_R2 root) that answers for an `as_of` scan whose listing is gone (specs/lean-scans.md §3.1)")
 @option("-j", "--workers", default=0, type=int, help="Concurrent listing shards (default 2 × CPUs, ≤ 64)")
 @option("-o", "--out", default=None, help="Output dir (default gs://$DATA_BUCKET/sweep/<date>-p<plan_id>)")
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
-def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: str | None, plan_path: str, root: str | None) -> None:
+def sweep_manifest(only_buckets: tuple[str, ...], date: str, iv_gen: str | None, holds: str, interval_store: str | None, workers: int, out: str | None,
+                   plan_path: str, root: str | None) -> None:
     """Object-level manifest of a staged plan (specs/done/staged-delete.md): scan
     the pinned listing (every shard in parallel, row groups outside the staged
     prefixes pruned — `sweep_manifest.py`) and write per-bucket parquets of the
@@ -1682,14 +1688,18 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: 
     The plan is the whole intent: nothing carves out. An item staged as of
     another scan (plan.json `as_of`) keeps only the keys that scan's listing
     has with the same generation (else `created`); the rest are counted as
-    `skipped_after_as_of`. Pure read + artifact write — deletes nothing."""
+    `skipped_after_as_of`. A scan whose listing is gone answers from the
+    interval store (`-i`: the versions live at it, with their `generation`).
+    Pure read + artifact write — deletes nothing."""
     import time
 
     import fsspec
 
     from .staged_plan import CATEGORIES, load_plan
-    from .sweep_manifest import build_manifests
+    from .sweep_manifest import HoldSource, build_manifests
 
+    if holds == "store" and interval_store is None:
+        raise SystemExit("-H store needs the interval store (-i)")
     sp = load_plan(plan_path)
     buckets = [b for b in sp.buckets if not only_buckets or b in only_buckets]
     if not buckets:
@@ -1719,6 +1729,7 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: 
     summary["buckets"] = build_manifests(
         root, date, {b: sp.sweep.get(b, ()) for b in buckets}, out, workers=workers or None, as_of=sp.as_of,
         objects_by_bucket={b: sp.objects[b] for b in buckets if b in sp.objects},
+        hold_source=HoldSource(holds, interval_store, iv_gen),
     )
     err(f"manifest: {time.monotonic() - t0:.0f}s")
 
@@ -3246,11 +3257,13 @@ from .interval_store import cli as _interval_store  # noqa: E402
 from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
 from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
 from .interval_export import export_cmd as _interval_export  # noqa: E402
+from .interval_backfill import backfill_cmd as _interval_backfill  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
 _interval_store.add_command(_interval_local_current)
 _interval_store.add_command(_interval_export)
+_interval_store.add_command(_interval_backfill)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)

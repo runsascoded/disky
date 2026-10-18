@@ -170,6 +170,14 @@ def test_markers_only_and_no_d1(fx, d1):
     assert rep["d1"] is None
 
 
+def test_no_d1_reports_the_rows_its_scans_still_have(fx, d1):
+    """`-R` (a second copy) leaves D1 alone; a retired scan whose pointer rows still exist (its first copy was never
+    retired with D1, e.g. a scan only this copy holds) is listed in `d1_left`, so its rows don't outlive its files."""
+    plan = _run(fx, "-m")["d1"]
+    rep = _run(fx, "-m", "-R")
+    assert (rep["d1"], rep["d1_left"], sorted({d["date"] for d in plan})) == (None, plan, ["2026-07-30", "2026-08-04", "2026-08-04T1236"])
+
+
 def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path):
     before = _files(fx["root"])
     backup = tmp_path / "backup"

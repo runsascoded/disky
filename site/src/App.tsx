@@ -1674,7 +1674,7 @@ function AppContent() {
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} mapMode={effMode} picked={ageModeP === ageMode} dateAxis={dateRange} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
         )}
       </section>
       )}

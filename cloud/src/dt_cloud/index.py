@@ -54,6 +54,9 @@ L2_REQUIRED = ("path", "size", "depth", "kind", "n_files", "n_children", "n_desc
 #: Always in the store, NULL where a source lacks them (`mtime_mean` is
 #: `import -m`; `created` / `last_read` are gcs's).
 L2_OPTIONAL: dict[str, str] = {"mtime_mean": "DOUBLE", "created": "BIGINT", "last_read": "INTEGER"}
+#: An object's native version (GCS `generation`, `path-index -G`): the store's last column when any source carries
+#: it (NULL on dirs and where a source lacks it), absent otherwise — never an all-NULL column on a store without it.
+GENERATION = "generation"
 #: The label column (`import --label`), right after `path` when any source has it.
 LABEL_COL = "usr"
 #: Bytes by age at the scan date (specs/row-age-strata.md): `age_b<i>` holds the
@@ -117,14 +120,15 @@ def _l2_shape(con: "duckdb.DuckDBPyConnection", l2: str) -> tuple[list[str], dic
 def store_columns(shapes: list[tuple[list[str], dict[str, str]]]) -> list[str]:
     """The store's column order for a scan whose sources have `shapes`: the
     layer-2's, label first (so `write_tiers` reads `usr` as the label block),
-    then the pivots present in any source (implied ones included)."""
+    then the pivots present in any source (implied ones included), then `GENERATION` when any source has it."""
     pivots = sorted(
         {c for cols, implied in shapes for c in (*cols, *implied) if c.startswith(PIVOT_PREFIX)},
         key=lambda c: int(c[len(PIVOT_PREFIX):]),
     )
     label = [LABEL_COL] if any(LABEL_COL in cols for cols, _ in shapes) else []
     ages = list(AGE_COLS) if any(AGE_COLS[0] in cols for cols, _ in shapes) else []
-    return ["path", *label, "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", *L2_OPTIONAL, *ages, *pivots]
+    gen = [GENERATION] if any(GENERATION in cols for cols, _ in shapes) else []
+    return ["path", *label, "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", *L2_OPTIONAL, *ages, *pivots, *gen]
 
 
 def store_rows_sql(l2: str, bucket: str, shape: tuple[list[str], dict[str, str]], columns: list[str]) -> str:
@@ -153,6 +157,7 @@ def store_rows_sql(l2: str, bucket: str, shape: tuple[list[str], dict[str, str]]
         "n_desc": "n_desc::BIGINT",
         "mtime": "mtime::BIGINT",
         **{c: (f"{c}::{t}" if c in cols else f"NULL::{t}") for c, t in L2_OPTIONAL.items()},
+        GENERATION: f"{GENERATION}::BIGINT" if GENERATION in cols else "NULL::BIGINT",
     }
     sel = ",\n          ".join(f"{exprs[c] if c in exprs else pivot(c)} AS {c}" for c in columns)
     return f"""

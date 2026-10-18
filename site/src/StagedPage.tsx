@@ -201,7 +201,7 @@ export function StagedPage() {
     return (r: { prefix: string, stat?: PrefixStat }) => r.stat ? idleness(r.stat.a, r.stat.d, access, logged(prefixBucket(r.prefix))) : null
   }, [access])
   const ownerIdx = useOwnerIndex(useOwners(!!store.owners).data)
-  const error = unstage.error ?? dispatch.error ?? runAction.error ?? staged.error ?? statsQ.error ?? history.error
+  const error = unstage.error ?? runAction.error ?? staged.error ?? statsQ.error ?? history.error
 
   const rows: Row[] = useMemo(() => items.map(it => ({ ...it, name: it.prefix, to: `/${prefixToPath(it.prefix)}`, stat: stats?.[it.prefix] })), [items, stats])
   // The view lives in the URL, so a link carries it: `?q=hedy|grace&s=-b`
@@ -545,18 +545,19 @@ export function StagedPage() {
                 {!armed
                   ? <button type="button" className="danger" disabled={busy || !date || !activeRows.length || !onBuckets.length} onClick={() => setArmed(true)}>real delete…</button>
                   : <>
-                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
+                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
                         confirm REAL delete of {cutItems} {cutItems === 1 ? 'prefix' : 'prefixes'}{cut && <> ({onBuckets.length} of {planBuckets.length} buckets)</>}
                       </button>
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
                     </>}
               </div>
+              {dispatch.error && <p className="staged-err" role="alert">{dispatch.error.message}</p>}
               {pendingJob && (
                 <p className="dispatch-pending">
                   Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Its run appears below {CAPS.startHint}.
                 </p>
               )}
-              <p className="dispatch-note dim">A run reads the scan you pick and deletes only what it listed; new objects since are left alone.{machine && <> Runs on <code>{machine}</code>.</>}</p>
+              <p className="dispatch-note dim">A dry run reads the scan you pick; a real run deletes only what its dry run listed, at that scan. New objects since are left alone.{machine && <> Runs on <code>{machine}</code>.</>}</p>
             </div>
           )}
         </>
