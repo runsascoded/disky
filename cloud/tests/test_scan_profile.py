@@ -107,11 +107,12 @@ def test_skip_and_fold_apply():
 
 def test_step_requirements():
     d = minimal(layout={"layer2": "l2/", "snapshots": None}, options={"index": {"mode": "path-index", "access": "a"}})
+    d["data"] = "s3://dvx"
     assert problems(d) == [
         "layout.layer2: a template with `{scan}`",
         "layout.snapshots: required (\"\" for `snapshots/` itself)",
         "layout.listing: required unless options.list.import is true (index reads the listings from the data store)",
-        "data: a gs:// bucket with options.index.mode path-index (its inputs are staged from GCS)",
+        "data: a gs:// bucket or a local dir with options.index.mode path-index (its inputs are staged from GCS or read in place)",
         "options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, or gen: the one-machine path, or skip: [static-names])",
         "options.digest.template: required (or skip: [digest])",
         "options.digest.config: required (or skip: [digest])",

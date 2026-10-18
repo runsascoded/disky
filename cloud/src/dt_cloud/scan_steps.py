@@ -515,8 +515,8 @@ def _index_check(p: ScanProfile) -> list[str]:
         problems = [f"options.index.{k}: only with mode layer2" for k in ("webdata", "threads") if k in o]
         if p.opts("list").get("import"):
             problems.append("options.list.import: path-index reads the listings themselves (no per-source layer-2)")
-        if urlparse(p.data).scheme not in ("gs", "gcs"):
-            problems.append("data: a gs:// bucket with options.index.mode path-index (its inputs are staged from GCS)")
+        if urlparse(p.data).scheme not in ("gs", "gcs", ""):
+            problems.append("data: a gs:// bucket or a local dir with options.index.mode path-index (its inputs are staged from GCS or read in place)")
         return problems
     return [f"options.index.{k}: only with mode path-index" + (" (index-write writes the age pyramids itself)" if k == "age_pyramids" else "")
             for k in ("attribution", "access", "rules", "age_pyramids", "verify") if k in o]
@@ -623,26 +623,29 @@ def path_index(ctx: Ctx) -> None:
     it), beside the sorts. `options.index.verify`: `dt-cloud index-verify` checks the index against the listings it was
     built from (per-bucket and total bytes / objects, the snapshot totals and age histogram, the age pyramids and the
     `bysize` sort, where written) and writes `verification.json` beside the tiers; a mismatch fails the step."""
-    store = ctx.data_uri.split("://", 1)[1]  # `<bucket>[/<prefix>]`
     key_dir = ctx.data_root / ctx.index_key
     for s in ctx.profile.sources:
         ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
     if ctx.done(key_dir / "path-index.parquet", "index tiers") and ctx.done(ctx.data_root / ctx.snapshots / ctx.scan / "meta.json", "snapshot"):
         return
-    gcs = lambda key: f"/gcs/{store}/{key}"  # noqa: E731 — `dt-cloud stage`'s glob form
-    lglobs = [gcs(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
-    attr = [gcs(a) for a in ctx.opt("index", "attribution", [])]
+    # A local data dir (the local executor's: one machine, no FUSE) is read in place; a GCS one is staged first.
+    on_disk = not urlparse(ctx.profile.data).scheme
+    store = ctx.data_uri.split("://", 1)[-1]  # `<bucket>[/<prefix>]`, or the dir
+    src = (lambda key: str(ctx.data_root / key)) if on_disk else (lambda key: f"/gcs/{store}/{key}")  # `dt-cloud stage`'s glob form
+    lglobs = [src(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
+    attr = [src(a) for a in ctx.opt("index", "attribution", [])]
     access = ctx.opt("index", "access")
-    xglobs = [gcs(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
+    xglobs = [src(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
     if access and not xglobs:
         err(f"no access shards at {access}: the index runs without read recency")
     stage = ctx.work / "stage"
-    local = lambda g: str(stage / g.removeprefix("/gcs/"))  # noqa: E731
+    local = (lambda g: g) if on_disk else (lambda g: str(stage / g.removeprefix("/gcs/")))
     pi = ctx.work / "path-index"
     snap = ctx.work / "snap"
     pi.mkdir(parents=True, exist_ok=True)
     with ctx.phase("path-index"):
-        ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
+        if not on_disk:
+            ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
         tmp = stage / ".duckdb-tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *[a for g in lglobs for a in ("-l", local(g))],
@@ -662,7 +665,11 @@ def path_index(ctx: Ctx) -> None:
         files = sorted((f for f in pi.iterdir() if f.is_file() and not f.name.startswith(".")),
                        key=lambda f: (f.name == "path-index.parquet", f.name))
         err(f"uploading {len(files)} files ({sum(f.stat().st_size for f in files) / 1e9:.1f} GB) to {ctx.data_uri}/{ctx.index_key}/")
-        upload(files, f"{ctx.data_uri}/{ctx.index_key}")
+        if on_disk:
+            for f in files:
+                copy_atomic(f, key_dir / f.name)
+        else:
+            upload(files, f"{ctx.data_uri}/{ctx.index_key}")
     _publish(ctx, snap)
 
 

@@ -744,3 +744,53 @@ def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
     free = S.Ctx.__new__(S.Ctx)
     free.env = {"DT_CGROUP": str(tmp_path / "absent")}
     assert [capped.nproc, free.nproc] == [2, 8]
+
+
+def test_path_index_on_a_local_data_dir_reads_in_place_and_copies_out(tmp_path, env, monkeypatch):
+    """The local executor's shape (one machine, no FUSE): `data:` a dir, read in place (no `stage`), the tiers copied
+    into it, `path-index.parquet` last."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 2))
+    (tmp_path / "t").mkdir(exist_ok=True)
+    data = tmp_path / "data"
+    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": str(tmp_path / "work"), "data": str(data),
+               "layout": {"layer2": "listing/laptop/{scan}/", "snapshots": "laptop", "listing": "capture/{scan}/"},
+               "sources": ["r2://disk-tree"], "skip": ["static-names", "digest"],
+               "options": {"index": {"mode": "path-index", "args": ["-g"], "age_pyramids": True}}})
+    (data / "capture/2026-10-16T1200/disk-tree").mkdir(parents=True)
+    (data / "capture/2026-10-16T1200/disk-tree/_SUCCESS.json").write_text("{}")
+    c = S.make_ctx(p, env)
+    runner = Runner(tmp_path)
+    copied = []
+    real_copy = S.copy_atomic
+    monkeypatch.setattr(S, "copy_atomic", lambda src, dst: (copied.append(dst.relative_to(data).as_posix()), real_copy(src, dst)))
+
+    def run(argv, env, stdout=None, text=True):
+        r = runner(argv, env, stdout, text)
+        if argv[:2] == ["dt-cloud", "path-index"]:
+            pi = Path(argv[argv.index("-P") + 1]).parent
+            for n in ("path-index.parquet", "path-index-bysize.parquet"):
+                (pi / n).write_text(n)
+            out = Path(argv[argv.index("-o") + 1])
+            out.mkdir(parents=True)
+            (out / "meta.json").write_text("{}")
+        if argv[:2] == ["dt-cloud", "age-pyramid"]:
+            (Path(argv[argv.index("-o") + 1]) / "age-pyramid-1d.parquet").write_text("")
+        return r
+
+    c.sh_impl = run
+    S.index(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    assert runner.calls == [
+        f"dt-cloud path-index -d 2026-10-16T1200 -l <tmp>/data/capture/2026-10-16T1200/disk-tree/*.parquet -o {w}/snap "
+        f"-c <tmp>/data/capture/2026-10-16T1200/dir-cache -P {w}/path-index/path-index.parquet -g",
+        f"dt-cloud age-pyramid -c -t 2 -o {w}/path-index {w}/path-index/path-index.parquet",
+    ]
+    assert copied == [
+        "listing/laptop/2026-10-16T1200/index/G1/age-pyramid-1d.parquet",
+        "listing/laptop/2026-10-16T1200/index/G1/path-index-bysize.parquet",
+        "listing/laptop/2026-10-16T1200/index/G1/path-index.parquet",
+        "snapshots/laptop/2026-10-16T1200/meta.json",
+    ]
+    runner.calls.clear()
+    S.index(c, None)
+    assert runner.calls == []
