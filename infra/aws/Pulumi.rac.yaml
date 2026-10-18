@@ -16,7 +16,12 @@ config:
     - cloud/src
     - infra/aws/Dockerfile
     - infra/aws/ingest.sh
+    - infra/aws/scan.sh
+    - infra/aws/entry.sh
+    - infra/aws/age-backfill.sh
     - infra/aws/scan-runs.json
+    - job/nf
+    - job/profiles
   disk-tree-m3:vcpu: "2"
   disk-tree-m3:memory_mib: "16384"
   disk-tree-m3:ephemeral_gib: "120"

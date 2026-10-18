@@ -8,8 +8,15 @@
 # `disk-tree` engine it depends on.
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
-# GNU time: ingest.sh reports path-index's peak RSS (the spike's question).
-RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends time ca-certificates && rm -rf /var/lib/apt/lists/*
+# GNU time: ingest.sh reports path-index's peak RSS (the spike's question). Nextflow (the scan pipeline, `scan.sh`,
+# specs/m3-scan-nf.md), as the OA images': a JRE (Nextflow takes 17–26), `ps` (procps: its task wrapper refuses to
+# run without it), the launcher pinned by NXF_VER and its runtime fetched at build time. The local executor needs no
+# plugins.
+ENV NXF_VER=26.10.2 NXF_HOME=/opt/nextflow
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends time ca-certificates default-jre-headless procps curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://github.com/nextflow-io/nextflow/releases/download/v$NXF_VER/nextflow" -o /usr/local/bin/nextflow \
+    && chmod +x /usr/local/bin/nextflow && nextflow -version
 RUN uv tool install awscli==1.44.*
 
 WORKDIR /app
@@ -21,12 +28,16 @@ COPY cloud/src ./cloud/src
 # The wheel force-includes the built UI; the ingest never serves it.
 RUN mkdir -p ui/dist && uv sync --frozen --no-dev --package dt-cloud
 
+# The pipeline's steps call `dt-cloud` / `disk-tree` bare.
+ENV PATH=/app/.venv/bin:$PATH
 # chmod: the source zip (Pulumi `AssetArchive`) doesn't carry file modes.
-COPY infra/aws/ingest.sh /ingest.sh
-RUN chmod 755 /ingest.sh
+COPY infra/aws/ingest.sh infra/aws/scan.sh infra/aws/entry.sh infra/aws/age-backfill.sh /
+RUN chmod 755 /ingest.sh /scan.sh /entry.sh /age-backfill.sh
+COPY job/nf ./job/nf
+COPY job/profiles ./job/profiles
 # The scan-run profile ingest.sh records with (`SCAN_RUNS_PROFILE`).
 COPY infra/aws/scan-runs.json ./infra/aws/scan-runs.json
-# `supervise` runs the script in its own process group: a TERM reaches every phase at once, and a
-# terminated or killed job is recorded failed (specs/scan-job-wrapper.md). Its alert channels come
-# from the container env, as the script's do.
-ENTRYPOINT ["/app/.venv/bin/dt-cloud", "scan-run", "supervise", "--", "bash", "/ingest.sh"]
+# `entry.sh`: the scan pipeline under `INGEST_PIPELINE=nf`, else the bash ingest under `supervise`, which runs it in its
+# own process group (a TERM reaches every phase at once) and records a terminated or killed job failed
+# (specs/scan-job-wrapper.md). Alert channels come from the container env.
+ENTRYPOINT ["bash", "/entry.sh"]

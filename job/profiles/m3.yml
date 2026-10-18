@@ -1,0 +1,44 @@
+# disk.rbw.sh's laptop scans (the primary store, `snapshots/laptop/`) on the scan pipeline (`job/nf/scan.nf`,
+# specs/m3-scan-nf.md): one capture per run, adopted as the listing (`DT_CAPTURE`, set by `infra/aws/scan.sh` from the
+# capture the R2 trigger submitted), indexed with age strata, annotated with the capture's disk/VM bytes, published to
+# R2, appended to the interval store and the static name index, then listed in D1. Nextflow's local executor inside the
+# Fargate task: `data:` and `work:` are its ephemeral disk, R2 the store of record.
+deployment: m3
+executor: {kind: local}
+work: /work/nf
+data: /work/data
+layout:
+  layer2: listing/laptop/{scan}/
+  snapshots: laptop
+  listing: capture/{scan}/
+sources:
+  - uri: r2://disk-tree
+    listing: "{env:DT_CAPTURE}"
+machines:
+  small: {cpus: 1, memory: 2GB}
+  medium: {cpus: 2, memory: 8GB}
+  big: {cpus: 2, memory: 14GB}
+  list: {cpus: 1, memory: 2GB}
+  post: {cpus: 1, memory: 2GB}
+skip: [bucket-check, over-time, warm-cache, probe, digest]
+fold: []
+env:
+  SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
+  D1_DB_ID: e5288564-a010-4177-9f3c-77e25fad9f72   # disk-tree-m3-db (site/wrangler.toml)
+  D1_DB_NAME: disk-tree-m3-db
+  R2_BUCKET: disk-tree
+  AWS_DEFAULT_REGION: auto
+labels: {deployment: m3}
+options:
+  index:
+    mode: path-index
+    args: [-g]
+    age_pyramids: true
+    annotate: [disk-tree, capture-meta, -c, "r2://disk-tree/snapshots/laptop/{scan}/meta.json", "{listing}/_SUCCESS.json", "{snap}/meta.json"]
+  # the site's STATIC_GEN (site/wrangler.toml; the job env's, a test pins them equal)
+  static-names: {gen: "2026-10-15", mem: 5GB}
+  interval-store: {mem: 10GB}
+  index-sync:
+    variants: [path, bysize, age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d,
+               age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
+  index-gc: {dry: true}

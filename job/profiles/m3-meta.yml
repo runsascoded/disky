@@ -1,0 +1,37 @@
+# disk.rbw.sh's "data behind this site" store (`/meta`, `site/src/stores/meta.ts`; specs/pipelines-everywhere.md §3.1):
+# the `disk-tree` R2 bucket itself, listed and indexed as the store `meta` at the laptop scan's id, a second head in the
+# same task after `m3.yml`'s (`infra/aws/scan.sh`). A secondary store is served per scan: no interval store.
+deployment: m3
+store: meta
+executor: {kind: local}
+work: /work/nf-meta
+data: /work/data
+layout:
+  layer2: meta-l2/{scan}/
+  snapshots: meta
+  listing: meta-listing/{scan}/
+sources:
+  - r2://disk-tree
+machines:
+  small: {cpus: 1, memory: 2GB}
+  medium: {cpus: 2, memory: 8GB}
+  big: {cpus: 2, memory: 8GB}
+  list: {cpus: 2, memory: 4GB}
+  post: {cpus: 1, memory: 2GB}
+skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]
+fold: []
+env:
+  SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
+  D1_DB_ID: e5288564-a010-4177-9f3c-77e25fad9f72   # disk-tree-m3-db (site/wrangler.toml)
+  D1_DB_NAME: disk-tree-m3-db
+  R2_BUCKET: disk-tree
+  AWS_DEFAULT_REGION: auto
+labels: {deployment: m3}
+options:
+  index: {mode: path-index, age_pyramids: true}
+  # the site's STORES_JSON meta STATIC_GEN (the job env's META_STATIC_GEN; a test pins them equal)
+  static-names: {gen: 2026-10-18meta, mem: 4GB, build_args: [-x, "off"]}
+  index-sync:
+    variants: [path, bysize, age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d,
+               age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
+  index-gc: {dry: true}

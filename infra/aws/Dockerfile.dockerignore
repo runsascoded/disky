@@ -6,5 +6,10 @@
 !cloud/pyproject.toml
 !cloud/src
 !infra/aws/ingest.sh
+!infra/aws/scan.sh
+!infra/aws/entry.sh
+!infra/aws/age-backfill.sh
+!job/nf
+!job/profiles
 !infra/aws/scan-runs.json
 **/__pycache__
