@@ -223,8 +223,10 @@ def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch, d1_db):
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';",
         "DELETE FROM footer_cache WHERE date = '2026-09-01' AND gen <> COALESCE("
         "(SELECT s.gen FROM index_schema s WHERE s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
-        "DELETE FROM index_row_groups WHERE date = '2026-09-01' AND gen <> COALESCE("
-        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '') RETURNING 1 AS n;",
+        # `d1_delete`: bounded statements until one deletes nothing
+        *["DELETE FROM index_row_groups WHERE rowid IN (SELECT rowid FROM index_row_groups WHERE date = '2026-09-01' AND gen <> COALESCE("
+          "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '') "
+          "LIMIT 5000) RETURNING 1 AS n;"] * 2,
     ]
     assert con.execute("SELECT date, variant, gen, rg FROM index_row_groups ORDER BY 1, 2, 3, 4").fetchall() == [
         ("2026-09-01", "path", "g2", 0),

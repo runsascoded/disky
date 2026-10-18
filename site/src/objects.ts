@@ -4,7 +4,7 @@
 // `objects.test.ts`; the components (`Treemap`, `ChildrenTable`,
 // `DiffTreemap`, `DiffTable`, `ObjectPanel`, `FilesRedirect`) only call them.
 import type { PlanItem } from './batches'
-import { isFold } from './pathCrumbs'
+import { isFold, toUrlPath, storeUrlSegs } from './pathCrumbs'
 import type { Store } from './stores'
 
 /** The sorts a store generation's view is answered from (`View.tier`,
@@ -57,18 +57,23 @@ export function rowTarget(segs: string[], name: string, k: 'file' | 'dir' | unde
   return { kind: k === 'file' ? 'open' : 'drill', segs: [...segs, name] }
 }
 
+/** A store's page URL for a store path (segments from its data root): under the store's route, its home as `~` or
+ * else its `root` left out (`storeUrlSegs`). */
+export function treeHref(store: Pick<Store, 'path' | 'root' | 'home'>, segs: string[]): string {
+  const rel = storeUrlSegs(store, segs)
+  return rel.length ? `${store.path === '/' ? '' : store.path}/${toUrlPath(rel)}` : store.path
+}
+
 /** The page URL that opens `segs` (an object's path from the store root):
  * its directory is the drill path, its basename the `open` param; the
  * page's other params (scan, color, scope) ride along. */
-export function openHref(storePath: string, segs: string[], search: string): { pathname: string; search: string } {
-  const base = storePath === '/' ? '' : storePath
-  const dir = segs.slice(0, -1)
+export function openHref(store: Pick<Store, 'path' | 'root' | 'home'>, segs: string[], search: string): { pathname: string; search: string } {
   const q = new URLSearchParams(search)
   // A consumed share key / preview token never rides a navigation.
   q.delete('key')
   q.delete('og')
   q.set('open', segs[segs.length - 1])
-  return { pathname: dir.length ? `${base}/${dir.map(encodeURIComponent).join('/')}` : storePath, search: `?${q}` }
+  return { pathname: treeHref(store, segs.slice(0, -1)), search: `?${q}` }
 }
 
 /** The deployment's scan-store proxy (one bucket, a prefix allow-list). */
@@ -128,7 +133,7 @@ export const publicUrl = (base: string, key: string): string =>
  * under its directory. No store scans the bucket (or the proxy is unknown):
  * no redirect, so the route can show a 404. The old link's query (file-tree's
  * paging) doesn't carry over. */
-export function filesRedirect(splat: string, proxy: ProxyInfo | null, stores: Pick<Store, 'path' | 'buckets'>[]): { pathname: string; search: string } | null {
+export function filesRedirect(splat: string, proxy: ProxyInfo | null, stores: Pick<Store, 'path' | 'root' | 'buckets'>[]): { pathname: string; search: string } | null {
   const bucket = proxy ? proxyBucket(proxy.uri) : null
   const target = bucket ? stores.find(s => s.buckets.includes(bucket)) : undefined
   if (!target || !bucket) return null
@@ -140,11 +145,7 @@ export function filesRedirect(splat: string, proxy: ProxyInfo | null, stores: Pi
   }
   const segs = [bucket, ...decoded.split('/').filter(Boolean)]
   const isDir = splat === '' || splat.endsWith('/')
-  if (isDir) {
-    const base = target.path === '/' ? '' : target.path
-    return { pathname: `${base}/${segs.join('/')}`, search: '' }
-  }
-  return openHref(target.path, segs, '')
+  return isDir ? { pathname: treeHref(target, segs), search: '' } : openHref(target, segs, '')
 }
 
 /** What a row's trash / assign acts on: an object row is that one exact key

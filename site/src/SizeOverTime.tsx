@@ -3,7 +3,7 @@ import { SectionAnchor } from './SectionAnchor'
 import { Explain } from './Help'
 import { TimeSeries } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
-import { DEFAULT_PALETTE } from '@rdub/treemap'
+import { slotColor } from './colors'
 import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useMemo, useRef, useState } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
@@ -227,6 +227,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   // share a prefix spelling), its `store=` on the request.
   const store = useStore()
   const sfetch = useStoreFetch()
+  // at a mixed-provider store's root the traces are its buckets, each named with its scheme (`r2://…`)
+  const rootName = (k: string) => (!prefix && store.bucketSchemes?.[k] ? store.bucketSchemes[k] + k : k)
   const seriesQ = useQuery<Series>({
     queryKey: ['series', store.key, prefix, scope, scans.length, user || pool ? ledgerRev : null],
     // Under a filter, wait for its match roots: the whole-store series is not
@@ -264,15 +266,16 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     const m = new Map((seriesQ.data?.points ?? []).map(p => [xOfScan(p.date, times), p.date]))
     return (x: number) => m.get(x) ?? dateOfX(x)
   }, [seriesQ.data, times])
-  // The roots' traces (split mode), keyed by bucket, coloured by slot (largest
-  // at the latest scan = slot 0, as the map colours the root's children).
+  // The roots' traces (split mode), keyed by bucket, in the map's colours: slot by size at the latest scan (largest =
+  // slot 0; a root that scan doesn't hold ranks last), each slot's `slotColor`, as the map colours the root's children.
   const roots = useMemo(() => {
     const rs = seriesQ.data?.roots ?? []
     if (rs.length < 2) return []
-    const latest = (r: { points: { date: string; b: number }[] }) => r.points[r.points.length - 1]?.b ?? 0
+    const end = rs.reduce((m, r) => { const d = r.points[r.points.length - 1]?.date; return d && d > m ? d : m }, '')
+    const latest = (r: { points: { date: string; b: number }[] }) => { const p = r.points[r.points.length - 1]; return p?.date === end ? p.b : -1 }
     const bySize = [...rs].sort((a, b) => latest(b) - latest(a))
     const slot = new Map(bySize.map((r, i) => [r.path, i]))
-    return rs.map(r => ({ key: r.path, color: DEFAULT_PALETTE[slot.get(r.path)! % DEFAULT_PALETTE.length], points: toPts(r.points) }))
+    return rs.map(r => ({ key: r.path, color: slotColor(slot.get(r.path)!), points: toPts(r.points) }))
   }, [seriesQ.data, xFrom, times])
   // The x before which the total lacks a root — the total is dashed there.
   const genesis = useMemo(() => youngestGenesis(roots), [roots])
@@ -291,13 +294,14 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
       // tooltip lists it and the pre-genesis stretch reads as incomplete.
       // `y0: 0` keeps its tooltip value the whole total, not a band height;
       // `fit` makes the y-axis "fit" zoom to it.
-      const bands: TsSeries<Pt>[] = stackSeries(roots).map((s, i) => ({ key: s.key, label: s.key, color: roots[i].color, points: s.points as Band[] }))
+      const bands: TsSeries<Pt>[] = stackSeries(roots).map((s, i) => ({ key: s.key, label: rootName(s.key), color: roots[i].color, points: s.points as Band[] }))
       return [...bands, { ...totalLine, fit: true, points: total.map(p => ({ ...p, y0: 0 })), dashBeforeX: genesis ?? undefined }]
     }
     // Lines: the total is drawn only on a relative axis, where it's the same
     // scale as its parts; in bytes it would dwarf them, so it's tooltip-only.
-    return [...relRoots.map(r => ({ key: r.key, label: r.key, color: r.color, area: false, points: r.points })), { ...totalLine, plot: relative, points: relTotal, dashBeforeX: genesis ?? undefined }]
-  }, [total, roots, stacked, relative, relTotal, relRoots, label, genesis])
+    return [...relRoots.map(r => ({ key: r.key, label: rootName(r.key), color: r.color, area: false, points: r.points })), { ...totalLine, plot: relative, points: relTotal, dashBeforeX: genesis ?? undefined }]
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [total, roots, stacked, relative, relTotal, relRoots, label, genesis, prefix, store.bucketSchemes])
   // A scope that owns nothing here in any scan is a flat zero line — say so
   // instead of drawing an empty axis.
   const allZero = series.length === 1 && total.every(p => p.y === 0)
@@ -503,7 +507,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           {roots.map(r => (
             <span className="li" key={r.key}>
               <span className="sw" style={{ background: r.color }} />
-              {r.key}
+              {rootName(r.key)}
               {r.points[0] && firstX != null && r.points[0].x > firstX && <span className="since"> · since {fmtX(r.points[0].x)}</span>}
             </span>
           ))}

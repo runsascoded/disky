@@ -74,7 +74,9 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # ROOT_TITLE = "the buckets this deployment scans"   # optional: the root crumb's tooltip (default: the store's scope word)
 # QUERY_SYNTAX = "simple"                     # the path filter's default syntax (`simple` | `regex`); unset = `simple`
 # OBJECT_BUCKETS = "my-bucket"                # comma-separated scanned buckets `/v1/objects` serves to members
-# STORES_JSON = '{"meta": {"scope": "meta"}}'  # secondary stores: `{"<key>": {"scope": …, "vars": {…}, "secrets": {…}}}`
+# STORES_JSON = '{"meta": {"scope": "meta", "path": "/meta"}}'  # secondary stores: `{"<key>": {"scope": …, "path": …, "vars": {…}, "secrets": {…}}}`
+#   `path`: the store's page path, its `Store.path` (a `STORES_EXTRA` key's): the link unfurls under it are that store's
+#   (its ROOT_LABEL, STORE_SCHEME, data, and its own mount `"vars": {"STORE_ROOT": …}`); no `path` = no cards of its own
 #   a store's own static name index: `"vars": {"STATIC_GEN": "<gen>", …}` (its generation in INDEX_R2; FILTER_STATIC_HEAVY /
 #   FILTER_STATIC_ANCHORS per store too, FILTER_STATIC / FILTER_INDEXED_ONLY / SEARCH_PATH_TERMS inherited unless set) — none: `scan-not-indexed`
 #   …and union views: `"<key>": {"union": ["primary", "<store>"…], "main": true}` — the stores' roots side by side
@@ -90,6 +92,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # --- Plans and deletion (_lib/plans.ts, _lib/dispatch.ts) ---
 # STORE_SCHEME = "s3://"                      # the URI scheme staged prefixes carry
 # STORE_BUCKETS = "my-bucket,my-other-bucket"  # comma-separated scanned buckets, first = primary
+# STORE_ROOT = "my-bucket"                    # the store's mount (`Store.root`), `/`-separated: its page URLs leave it out (`/dir`, not `/my-bucket/dir`); the server's cards read it
 # STAGING = "1"                               # any value: viewers stage deletions into a shared open plan
 # EXECUTOR = "plan-sweep"                     # `plan-sweep` (default) | `sweep`
 # JOB_SA = "<job>@<project>.iam.gserviceaccount.com"  # the service account dispatched Batch jobs run as (with GCP_SA_KEY)

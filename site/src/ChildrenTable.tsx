@@ -50,7 +50,7 @@ const PAGE_SIZES = [20, 50, 100, 200]
  *  tooltip); ~60 chars fills the column's 480px at 12px mono. */
 const NAME_MAX = 60
 
-export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, filter, rowMatches, brush, onBrush, readLogged, access }: {
+export function ChildrenTable({ node, segs, scheme, home, bucketSchemes, scan, flatOk = false, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, filter, rowMatches, brush, onBrush, readLogged, access }: {
   /** The treemap's currently-viewed node. */
   node: TreeNode
   /** Path segments from the tree root to `node` (no scheme, no root). */
@@ -63,6 +63,9 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
   scheme: string
   /** The store home, read as `~` in row tooltips (`Store.home`). */
   home?: string[]
+  /** A mixed-provider store's per-bucket schemes (`Store.bucketSchemes`): paths under those buckets read with theirs,
+   *  and the root's rows name it. */
+  bucketSchemes?: Record<string, string>
   /** The page's scan: the flat modes' listing is its. */
   scan?: string | null
   /** Whether the flat modes (largest files / folders below) apply: a scan that lists objects, and no scope (lens,
@@ -183,7 +186,8 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
   const pages = Math.max(1, Math.ceil(kids.length / PAGE) + (canGrow ? 1 : 0))
   const pg = Math.min(page, pages - 1)
   const shown = useMemo(() => kids.slice(pg * PAGE, (pg + 1) * PAGE), [kids, pg, PAGE])
-  const uriOfKid = (k: TreeNode) => scheme + segsOf(k).join('/')
+  const schemeOf = (s: readonly string[]) => bucketSchemes?.[s[0]] ?? scheme
+  const uriOfKid = (k: TreeNode) => schemeOf(segsOf(k)) + segsOf(k).join('/')
   // Rows select (click / shift / ⌘, checkboxes, j/k) into one set keyed by
   // uri; the bar above the table stages or assigns the whole selection at once.
   // Under a filter a row stands for its matches (resolved on the click), never its whole prefix.
@@ -228,7 +232,7 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
   const rowData = useMemo(() => shown.map(k => {
     const synthetic = k.n.startsWith('(')
     const kidSegs = segsOf(k)
-    const uri = scheme + kidSegs.join('/')
+    const uri = schemeOf(kidSegs) + kidSegs.join('/')
     const cl = ownerIdx && !synthetic ? ownerIdx.assignmentOf(uri, k.k === 'file' ? 'object' : 'prefix') : null
     // Under a filter a row holding exactly one match shows (and opens) the path down to it, as its treemap
     // tile does (`marin-eu-west4/tomat`); one holding several says how many (`marin-us-east5 · 9 matches`).
@@ -241,7 +245,7 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
     const mark = staged && !synthetic ? staged.markOf(uri, k.k !== 'file') : null
     return { k, synthetic, kidSegs, fullSegs, label, count: lab?.count, atLeast: !!lab?.atLeast, uri, to, shares: ownerShares(k), cl, si: selectable.indexOf(k), mark }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [shown, path, scheme, ownerIdx, selectable, filter, rowMatches, staged, flat])
+  }), [shown, path, scheme, bucketSchemes, ownerIdx, selectable, filter, rowMatches, staged, flat])
   // Every hook above runs on every render: an empty page (a drill can leave
   // no children) must not shorten the hook list, or React throws "Rendered
   // fewer hooks than expected" on the way in. A flat mode keeps its header (the toggle back) with nothing listed.
@@ -299,7 +303,7 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
     if (sel.selected.size && !(e.target as HTMLElement).closest('tr, button, input, select, a, .sel-bar')) sel.clear()
   }
   const what = mode === 'folders' ? 'folders' : 'files'
-  const where = <code>{pathText(scheme, segs, home, true)}</code>
+  const where = <code>{pathText(schemeOf(segs), segs, home, true)}</code>
   const modes = (
     <span className="gran tbl-modes" role="radiogroup" aria-label="Table rows">
       {MODES.map(([m, label]) => {
@@ -376,13 +380,15 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
                 {showSel && <td className="col-sel" onClick={e => { e.stopPropagation(); if (si >= 0 && !(e.target as HTMLElement).closest('input')) sel.toggle(si) }}>{si >= 0 && <input type="checkbox" aria-label={`select ${label}`} checked={sel.isSelected(k)} onChange={() => sel.toggle(si)} />}</td>}
                 <td className="prefix">
                   {(() => {
+                    // at a mixed-provider store's root, each bucket row says which cloud it's on
+                    const rootScheme = bucketSchemes && segs.length === 0 && bucketSchemes[k.n] && <span className="scheme">{bucketSchemes[k.n]}</span>
                     const name = to ? (
                       <a role="link" tabIndex={0}
                         onClick={() => (to.kind === 'open' ? onOpenObject : onOpen)(to.segs)}
                         onKeyDown={e => { if (e.key === 'Enter') (to.kind === 'open' ? onOpenObject : onOpen)(to.segs) }}>
-                        {elideMid(label, NAME_MAX)}
+                        {rootScheme}{elideMid(label, NAME_MAX)}
                       </a>
-                    ) : <span>{elideMid(label, NAME_MAX)}</span>
+                    ) : <span>{rootScheme}{elideMid(label, NAME_MAX)}</span>
                     // A flat row: its folder part below the node, muted, drills there; the last segment opens the row.
                     const rel = flat ? k.n.split('/') : []
                     const relDir = rel.slice(0, -1)
@@ -406,9 +412,9 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
                     // The full path, only when it says more than the cell: the
                     // name is elided, or the view is drilled (at the root a row
                     // is just its bucket). To the right, clear of the row above.
-                    const cell = flatName ? <Tooltip content={<code className="elide-full">{pathText(scheme, fullSegs, home)}</code>} placement="right">{flatName}</Tooltip>
+                    const cell = flatName ? <Tooltip content={<code className="elide-full">{pathText(schemeOf(fullSegs), fullSegs, home)}</code>} placement="right">{flatName}</Tooltip>
                       : label.length > NAME_MAX || segs.length > 0
-                      ? <Tooltip content={<code className="elide-full">{pathText(scheme, fullSegs, home)}</code>} placement="right">{name}</Tooltip>
+                      ? <Tooltip content={<code className="elide-full">{pathText(schemeOf(fullSegs), fullSegs, home)}</code>} placement="right">{name}</Tooltip>
                       : name
                     const inside = mark?.as === 'inside' && <Tooltip content={`${mark.n.toLocaleString('en-US')} staged ${mark.n === 1 ? 'item' : 'items'} inside: review them at /staged`}><a className="row-n staged-n" href="/staged"> · {mark.n.toLocaleString('en-US')} staged</a></Tooltip>
                     // A union root's row: its store's mark, that store's scan in its tip (`src`/`at`).
@@ -454,7 +460,7 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
                 {showSel && (
                   <td className="actions">
                     {!synthetic && filter && (
-                      <RowActs key={filter.key} path={kidSegs.join('/')} src={filter} intent={hovered === k.n} scheme={scheme}
+                      <RowActs key={filter.key} path={kidSegs.join('/')} src={filter} intent={hovered === k.n} scheme={schemeOf(kidSegs)}
                         canTrash={canTrash} assigning={assigning} fmtBytes={fmtBytes} />
                     )}
                     {!synthetic && !filter && (

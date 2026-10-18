@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { actionItem, cellAction, filesRedirect, listsObjects, objectSource, openHref, publicUrl, rowTarget, type CellNode } from './objects'
+import { actionItem, cellAction, filesRedirect, listsObjects, objectSource, openHref, publicUrl, rowTarget, treeHref, type CellNode } from './objects'
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
@@ -81,14 +81,31 @@ describe('rowTarget', () => {
 
 describe('openHref', () => {
   it('encodes the directory and leaves consumed access/preview tokens out of navigation', () => {
-    expect(openHref('/', ['bk', '2025 tax returns', 'a #1?.pdf'], '?key=private&og=preview&d=261011')).toEqual({
+    expect(openHref({ path: '/' }, ['bk', '2025 tax returns', 'a #1?.pdf'], '?key=private&og=preview&d=261011')).toEqual({
       pathname: '/bk/2025%20tax%20returns', search: '?d=261011&open=a+%231%3F.pdf',
     })
   })
   it('the object’s directory is the drill path, its basename `open`; the page’s other params stay', () => {
-    expect(openHref('/', ['ctbk', 'gbfs', 'a b.parquet'], '?d=260930&c=w')).toEqual({ pathname: '/ctbk/gbfs', search: '?d=260930&c=w&open=a+b.parquet' })
-    expect(openHref('/', ['jc-taxes', 'x.json'], '?open=y.json')).toEqual({ pathname: '/jc-taxes', search: '?open=x.json' })
-    expect(openHref('/meta', ['my-data', 'listing', 'k.parquet'], '')).toEqual({ pathname: '/meta/my-data/listing', search: '?open=k.parquet' })
+    expect(openHref({ path: '/' }, ['ctbk', 'gbfs', 'a b.parquet'], '?d=260930&c=w')).toEqual({ pathname: '/ctbk/gbfs', search: '?d=260930&c=w&open=a+b.parquet' })
+    expect(openHref({ path: '/' }, ['jc-taxes', 'x.json'], '?open=y.json')).toEqual({ pathname: '/jc-taxes', search: '?open=x.json' })
+    expect(openHref({ path: '/meta' }, ['my-data', 'listing', 'k.parquet'], '')).toEqual({ pathname: '/meta/my-data/listing', search: '?open=k.parquet' })
+  })
+})
+
+describe('treeHref: a mounted store (`Store.root`) leaves its root out of URLs', () => {
+  const hf = { path: '/', root: ['open-athena'] }
+  it('its paths below the root, and the root itself, at the store’s route', () => {
+    expect([
+      treeHref(hf, ['open-athena']),
+      treeHref(hf, ['open-athena', 'models', 'a b']),
+      treeHref({ path: '/nas', root: ['mnt', 'user'] }, ['mnt', 'user', 'media']),
+      treeHref({ path: '/' }, ['bk', 'x']),
+      treeHref({ path: '/' }, []),
+    ]).toEqual(['/', '/models/a%20b', '/nas/media', '/bk/x', '/'])
+  })
+  it('an opened object’s directory too', () => {
+    expect(openHref(hf, ['open-athena', 'models', 'm', 'w.bin'], '?d=261018')).toEqual({ pathname: '/models/m', search: '?d=261018&open=w.bin' })
+    expect(openHref(hf, ['open-athena', 'README.md'], '')).toEqual({ pathname: '/', search: '?open=README.md' })
   })
 })
 

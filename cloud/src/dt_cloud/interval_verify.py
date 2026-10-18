@@ -408,10 +408,12 @@ def _footers(src, key: str, version: int) -> dict[str, Footer]:
 
 
 def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
-                runs: list[str] = ()) -> list[dict]:
+                runs: list[str] = (), on_summary=None) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
     each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
-    a URL, a dir, or a bare GCS bucket name). `runs`: the newest manifest's runs' served dirs, read beside the base."""
+    a URL, a dir, or a bare GCS bucket name). `runs`: the newest manifest's runs' served dirs, read beside the base.
+    `on_summary(summary)` runs as each scan completes (its marker written then: a later scan killed mid-task loses only
+    itself)."""
     import duckdb
 
     from .blobstore import Store, store_url
@@ -445,6 +447,8 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
                     summary["generation"] = g
                     err(f"  {date} generation: {g['equal']:,} of {g['objects']:,} objects equal")
                 summaries.append(summary)
+                if on_summary is not None:
+                    on_summary(summary)
             if prev:
                 os.unlink(prev[0].file)
             prev = (scan, date, s["ts"])
@@ -481,10 +485,12 @@ def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path) -> di
     download_served(store, prefix, tmp / "served")
     runs = verify_runs(store, prefix, tmp / "runs", {"scans": []})
     doc = {"bucket": root, "scans": scans}
-    sums = verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs)
     out = {}
-    for s in sums:
+
+    def write(s: dict) -> None:
         m = marker(s, gen)
         store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
         out[s["date"]] = m
+
+    verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write)
     return out

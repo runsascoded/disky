@@ -22,8 +22,8 @@ import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
-import { fromUrlPath, pathCopy, pathDisplay, pathText, toUrlPath, toUrlSegs } from './pathCrumbs'
-import { listsObjects, openHref } from './objects'
+import { fromUrlPath, mountedSegs, pathCopy, pathDisplay, pathText } from './pathCrumbs'
+import { listsObjects, openHref, treeHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useHashSpy } from './hashSpy'
@@ -168,9 +168,8 @@ function AppContent() {
     const legacy = q.get('path')
     if (legacy == null) return
     q.delete('path')
-    const base = store.path === '/' ? '' : store.path
     const rest = q.toString()
-    navigate({ pathname: legacy ? `${base}/${legacy.replace(/^\/+|\/+$/g, '')}` : store.path, search: rest ? `?${rest}` : '', hash: window.location.hash }, { replace: true })
+    navigate({ pathname: treeHref(store, legacy.split('/').filter(Boolean)), search: rest ? `?${rest}` : '', hash: window.location.hash }, { replace: true })
   }, [search, navigate, store])
   const canAssign = useCanAssign()
   const isAdmin = useIsAdmin()
@@ -418,8 +417,8 @@ function AppContent() {
   // and every level of the drilled path gets its own subtree query, grafted
   // in depth order — interactive drills hit each level's cache as they go,
   // and a cold deep link fans the whole chain out in parallel.
-  // The URL's `~` (a store home) expanded: `/~/c` → `Users/ryan/c`; each segment decoded once.
-  const graftPath = fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length), store.home).join('/')
+  // The URL's `~` (a store home) expanded and its mount (`Store.root`) led: `/~/c` → `Users/ryan/c`; each segment decoded once.
+  const graftPath = mountedSegs(store.root, fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length), store.home)).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
@@ -680,16 +679,17 @@ function AppContent() {
   // `/my-bucket/some/dir`, not `/?p=my-bucket/some/dir`. View
   // options stay query params (`?c`, `?mt`, …); the section stays in the `#hash`.
   const storeBase = store.path === '/' ? '' : store.path
-  // A store home reads as `~` in the URL (`/~/c`); the path itself is the
-  // expanded one (`Users/ryan/c`), each name travels encoded (`toUrlPath`), and a home URL spelled out is replaced by
-  // its `~` form below.
+  // A store home reads as `~` in the URL (`/~/c`) and a store's root (`Store.root`) is its mount, left out of its URLs;
+  // the path itself is the full one (`Users/ryan/c`), each name travels encoded (`toUrlPath`), and a URL that spells
+  // either out is replaced by the short form below (`treeHref`).
   const urlPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
-  const drillPath = fromUrlPath(urlPath, store.home).join('/')
-  const urlOf = (segs: string[]) => toUrlPath(segs, store.home)
-  const canonUrlPath = urlOf(drillPath ? drillPath.split('/').filter(Boolean) : store.root ?? [])
+  const drillSegs = mountedSegs(store.root, fromUrlPath(urlPath, store.home))
+  const drillPath = drillSegs.join('/')
+  const canonHref = treeHref(store, drillSegs)
   useEffect(() => {
-    if (urlPath.replace(/\/+$/, '') !== canonUrlPath) navigate({ pathname: `${storeBase}/${canonUrlPath}`, search, hash: window.location.hash }, { replace: true })
-  }, [urlPath, canonUrlPath]) // eslint-disable-line react-hooks/exhaustive-deps
+    const here = urlPath.replace(/\/+$/, '')
+    if ((here ? `${storeBase}/${here}` : store.path) !== canonHref) navigate({ pathname: canonHref, search, hash: window.location.hash }, { replace: true })
+  }, [urlPath, canonHref]) // eslint-disable-line react-hooks/exhaustive-deps
   // The series' and the diff's path: at a filtered union root whose matches sit under one root (which the map
   // opens inside), that root — its member answers, where the union root refuses `q=` (`scopedPath`; undefined:
   // the root's answer isn't here yet).
@@ -755,13 +755,13 @@ function AppContent() {
   const drillTo = (segs: string[]) => {
     const q = new URLSearchParams(search)
     q.delete('open')
-    navigate({ pathname: segs.length ? `${storeBase}/${urlOf(segs)}` : store.path, search: q.size ? `?${q}` : '' })
+    navigate({ pathname: treeHref(store, segs), search: q.size ? `?${q}` : '' })
   }
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
   // Back closes it.
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
-  const openObject = (segs: string[]) => navigate(openHref(store.path, toUrlSegs(segs, store.home), search))
+  const openObject = (segs: string[]) => navigate(openHref(store, segs, search))
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
   // Where the scan's read data ends (`access.through`, spec `access-log-freshness.md`): the lens is then
@@ -1458,6 +1458,7 @@ function AppContent() {
               segs={tblSegs}
               scheme={store.scheme}
               home={store.home}
+              bucketSchemes={store.bucketSchemes}
               scan={asof}
               flatOk={objects && !scopeQs}
               ownerIdx={ownersMode ? ownerIdx : undefined}

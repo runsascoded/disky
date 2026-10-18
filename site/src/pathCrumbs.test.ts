@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fromUrlPath, fromUrlSegs, isFold, pathCopy, pathCrumbs, pathDisplay, pathText, pathUri, toUrlPath, toUrlSegs } from './pathCrumbs'
+import { fromUrlPath, fromUrlSegs, isFold, mountedSegs, pathCopy, pathCrumbs, pathDisplay, pathLead, pathText, pathUri, storeSegsOfUrl, storeUrlSegs, toUrlPath, toUrlSegs, urlSegsOf } from './pathCrumbs'
 import type { Crumb } from './pathCrumbs'
 
 describe('pathCrumbs', () => {
@@ -83,5 +83,49 @@ describe('browser path encoding', () => {
     expect(toUrlPath(segs, home)).toBe('~/Downloads/2025%20tax%20returns/100%25%20%231%3F%20caf%C3%A9/%2520')
     expect(fromUrlPath('~/Downloads/2025%20tax%20returns/100%25%20%231%3F%20caf%C3%A9/%2520', home)).toEqual(segs)
     expect(fromUrlPath('/bucket/100%/')).toEqual(['bucket', '100%'])
+  })
+})
+
+describe('a store’s mount (`Store.root`)', () => {
+  const root = ['open-athena']
+  it('leads every path read off a URL; a URL from before the mount (the root spelled out) reads the same', () => {
+    expect([[], ['models'], ['open-athena'], ['open-athena', 'models']].map(u => mountedSegs(root, u))).toEqual([
+      ['open-athena'], ['open-athena', 'models'], ['open-athena'], ['open-athena', 'models'],
+    ])
+    expect(mountedSegs(undefined, ['bk', 'x'])).toEqual(['bk', 'x'])
+  })
+  it('is left out of a path’s URL segments', () => {
+    expect([['open-athena'], ['open-athena', 'models'], ['other']].map(s => urlSegsOf(root, s))).toEqual([[], ['models'], ['other']])
+    expect(urlSegsOf([], ['bk'])).toEqual(['bk'])
+  })
+})
+
+describe('storeUrlSegs / storeSegsOfUrl', () => {
+  const laptop = { home: ['Users', 'ryan'] }
+  const nas = { root: ['mnt', 'user'] }
+  const both = { root: ['Volumes', 'x6'], home: ['Volumes', 'x6', 'ryan'] }
+  it('folds a home to `~`, else leaves the mount out', () => {
+    expect([
+      storeUrlSegs(laptop, ['Users', 'ryan', 'c']),
+      storeUrlSegs(laptop, ['Applications']),
+      storeUrlSegs(nas, ['mnt', 'user', 'media']),
+      storeUrlSegs(nas, ['mnt', 'user']),
+      storeUrlSegs(both, ['Volumes', 'x6', 'ryan', 'c']),
+      storeUrlSegs(both, ['Volumes', 'x6', 'other']),
+    ]).toEqual([['~', 'c'], ['Applications'], ['media'], [], ['~', 'c'], ['other']])
+  })
+  it('reads each back, and a URL spelling the mount or home out as the same path', () => {
+    expect([
+      storeSegsOfUrl(laptop, ['~', 'c']),
+      storeSegsOfUrl(laptop, ['Users', 'ryan', 'c']),
+      storeSegsOfUrl(nas, ['media']),
+      storeSegsOfUrl(nas, ['mnt', 'user', 'media']),
+      storeSegsOfUrl(nas, []),
+      storeSegsOfUrl(both, ['~', 'c']),
+      storeSegsOfUrl(both, ['other']),
+    ]).toEqual([
+      ['Users', 'ryan', 'c'], ['Users', 'ryan', 'c'], ['mnt', 'user', 'media'], ['mnt', 'user', 'media'], ['mnt', 'user'],
+      ['Volumes', 'x6', 'ryan', 'c'], ['Volumes', 'x6', 'other'],
+    ])
   })
 })

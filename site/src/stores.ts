@@ -57,8 +57,10 @@ export interface Store {
    *  `HOME` var; unset = no fold, and the share console's Hide field refuses
    *  `~` lines (`hideScopes`). */
   home?: string[]
-  /** A file store's scan root as segments under `/` (`['mnt', 'user']`) when its paths keep the full path: the map
-   *  opens there (an empty drill path redirects to it), and the crumbs start there. Unset: `/`. */
+  /** The store's mount: segments that lead every path it holds (a file store's scan root `['mnt', 'user']`, when its
+   *  paths keep the full path; a one-bucket store's bucket). Its URLs leave them out (`/media` is `mnt/user/media`;
+   *  a link that spells them out is redirected), the map opens there, and the crumbs start there. The server's cards
+   *  read the same from `STORE_ROOT` (`/`-separated). Unset: `/`. */
   root?: string[]
   /** Mixed-provider stores can label each bucket with its actual URI scheme. */
   bucketSchemes?: Record<string, string>

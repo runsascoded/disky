@@ -161,6 +161,7 @@ def test_dry_run_reports_and_deletes_nothing(fx, d1):
         for d in retired
         for v, g, n in rows(d)
     ]
+    assert rep["d1_rows"] == {"footer_cache": 3, "index_row_groups": 17, "index_schema": 4}
     assert (_files(fx["root"]), _files(fx["store"]), d1.state()) == (before, store_before, db_before)
 
 
@@ -178,7 +179,10 @@ def test_no_d1_reports_the_rows_its_scans_still_have(fx, d1):
     assert (rep["d1"], rep["d1_left"], sorted({d["date"] for d in plan})) == (None, plan, ["2026-07-30", "2026-08-04", "2026-08-04T1236"])
 
 
-def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path):
+@pytest.mark.parametrize("rows", [F.D1_DELETE_ROWS, 1])
+def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path, monkeypatch, rows):
+    """With D1 deletes of any batch size (`rows` a statement, until one deletes none): the same rows go."""
+    monkeypatch.setattr(F, "D1_DELETE_ROWS", rows)
     before = _files(fx["root"])
     backup = tmp_path / "backup"
     rep = _run(fx, "-x", "-b", str(backup), "-w", str(tmp_path / "work"))
@@ -191,8 +195,8 @@ def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path):
             or k in ("idx/2026-07-30/b1.parquet", "idx/2026-08-04T1236/b1.parquet")}
     assert _files(fx["root"]) == {k: n for k, n in before.items() if k not in gone}
     assert _files(backup) == gone
-    assert rep["backup"] == {"objects": len(gone), "bytes": sum(gone.values())}
-    assert rep["deleted"] == rep["backup"]
+    assert rep["backup"] == {"objects": len(gone), "bytes": sum(gone.values()), "server_side": False, "present": 0}
+    assert rep["deleted"] == {"objects": len(gone), "bytes": sum(gone.values())}
     seeded = [(d, v, g, n) for d, vs in SEEDED.items() for v, g, n in vs]
     assert d1.state() == [
         # Pointers: the sorts' go, but `path` (the site's scan list), the age pyramid's and over-time's stay.
@@ -208,6 +212,68 @@ def test_drop_path_pointer(fx, d1):
     _run(fx, "-x", "-m", "-P")
     assert [r for r in d1.state() if r[0] == "index_schema" and r[2] == "path"] == [
         ("index_schema", d, "path", "g1") for d in DATES if d not in ("2026-07-30", "2026-08-04", "2026-08-04T1236")]
+
+
+LAYER1 = "listing/{id}/*/shard-*.parquet"
+
+
+def _shard(path: Path, generation: list[int | None]) -> int:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = len(generation)
+    pq.write_table(pa.table({"bucket": ["b"] * n, "name": [f"o{i}" for i in range(n)], "size_bytes": [1] * n,
+                             "generation": pa.array(generation, pa.int64())}), path)
+    return path.stat().st_size
+
+
+def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
+    """Raw listing shards (`-1`) retire with their scan. One whose shards carry a non-null `generation` keeps them unless
+    its marker compared every object's generation equal; an all-null column (S3, an older GCS listing) is no
+    generation. Keys the template doesn't match (a sibling cache) stay."""
+    root, verify = fx["root"], fx["store"] / "interval-store" / "g" / "verify"
+    sizes = {
+        "2026-07-30": _shard(root / "listing/2026-07-30/b/shard-000.parquet", [None, None]),
+        "2026-08-04": _shard(root / "listing/2026-08-04/b/shard-000.parquet", [None, 7]),
+        "2026-08-04T1236": _shard(root / "listing/2026-08-04T1236/b/shard-000.parquet", [5, 6]),
+    }
+    _shard(root / "listing/2026-07-30/dir-cache/age-days.parquet", [1])
+    m = verify / "2026-08-04T1236.json"
+    m.write_text(json.dumps({**json.loads(m.read_text()), "generation": {"objects": 2, "equal": 2}}))
+    rep = _run(fx, "-m", "-1", LAYER1)
+    held = "layer1: its listing has `generation`, which its marker didn't compare equal"
+    assert {r["id"]: (r["delete"].get("layer1"), r["keep"].get("layer1"), r.get("held")) for r in rep["scans"] if r["status"] == "retire"} == {
+        "2026-07-30": ([1, sizes["2026-07-30"]], None, None),
+        "2026-08-04": (None, [1, sizes["2026-08-04"]], held),
+        "2026-08-04T1236": ([1, sizes["2026-08-04T1236"]], None, None),
+    }
+    before = _files(root)
+    _run(fx, "-x", "-m", "-1", LAYER1)
+    assert sorted(k for k in before if k.startswith("listing/") and k not in _files(root)) == [
+        "listing/2026-07-30/b/shard-000.parquet", "listing/2026-08-04T1236/b/shard-000.parquet"]
+
+
+def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
+    """Two buckets of one filesystem: the copy never comes through the host (`get`/`put` refused here), sizes checked."""
+    from dt_cloud.blobstore import Store
+
+    src, dst = Store("memory://retire-src"), Store("memory://retire-bk")
+    src.write_bytes("a/x.parquet", b"x" * 10)
+    src.write_bytes("a/y.parquet", b"y" * 20)
+
+    def refuse(*a, **k):
+        raise AssertionError("copied through the host")
+    monkeypatch.setattr(Store, "get", refuse)
+    monkeypatch.setattr(Store, "put", refuse)
+    objs = {"a/x.parquet": 10, "a/y.parquet": 20}
+    rep = sr.backup(src, dst, objs, tmp_path)
+    assert (rep, dst.listing("a")) == ({"objects": 2, "bytes": 30, "server_side": True, "present": 0}, objs)
+    # A rerun (its first run stopped after the backup, e.g. on a D1 failure) copies only what isn't there at its size.
+    dst.write_bytes("a/y.parquet", b"y" * 5)
+    monkeypatch.setattr(src.fs, "copy", lambda a, b: (_ for _ in ()).throw(AssertionError(f"copied {a}")) if a.endswith("x.parquet") else
+                        dst.write_bytes("a/y.parquet", b"y" * 20))
+    assert (sr.backup(src, dst, objs, tmp_path), dst.listing("a")) == ({"objects": 2, "bytes": 30, "server_side": True, "present": 1}, objs)
 
 
 @pytest.mark.parametrize("name,cls", [

@@ -999,11 +999,18 @@ def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) ->
     outp.mkdir(parents=True, exist_ok=True)
     sampled = scan_ids.split(",") if scan_ids else load_profile(profile)["verify_scans"]
     tag = f"t{t:02d}" if not scan_ids else f"t{t:02d}-{sampled[0]}"
-    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs)
+    done: list[dict] = []
+
+    def publish(s: dict) -> None:
+        """Each scan's parity marker (`scan retire`'s gate) and the task's summaries so far, up as the scan completes:
+        a task killed later (an OOM on a later scan's diffs) keeps every scan it finished."""
+        done.append(s)
+        store.write_text(f"{prefix}/verify/{s['date']}.json", json.dumps(iv.marker(s, gen)) + "\n")
+        store.write_text(f"{prefix}/verify/{tag}.json", json.dumps(done, indent=1) + "\n")
+        store.put(outp / f"{tag}.jsonl", f"{prefix}/verify/{tag}.jsonl")
+
+    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs, on_summary=publish)
     (outp / f"{tag}.json").write_text(json.dumps(summaries, indent=1) + "\n")
-    for s in summaries:  # each scan's parity marker (`scan retire`'s gate)
-        (outp / f"{s['date']}.json").write_text(json.dumps(iv.marker(s, gen)) + "\n")
-    store.put_tree(outp, f"{prefix}/verify")
     print(json.dumps(summaries), flush=True)
 
 

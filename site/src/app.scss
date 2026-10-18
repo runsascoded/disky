@@ -1895,6 +1895,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     }
     .prefix {
       a { cursor: pointer; &:hover { text-decoration: underline; } }
+      .scheme { color: var(--ink-3); }
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 12px;
       max-width: 480px;

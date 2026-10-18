@@ -275,6 +275,76 @@ def test_backfill_refuses_an_existing_generation_or_one_that_has_it(world, backf
     assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2: already carries `generation`")
 
 
+def test_backfill_refuses_a_template_matching_files_with_and_without_generation(world, off, tmp_path):
+    """A template that also matches a non-listing parquet sorting first (gcs's `listing/{id}/dir-cache/age-days.parquet`
+    under `listing/{id}/*/*.parquet`) is refused, naming it, instead of skipping every scan."""
+    root = tmp_path / "world"
+    shutil.copytree(world, root)
+    stray = root / "listing" / SCANS[GEN_FROM] / "dir-cache" / "age-days.parquet"
+    stray.parent.mkdir(parents=True)
+    pq.write_table(pa.table({"age_days": [1]}), stray)
+    store = tmp_path / "store"
+    shutil.copytree(off["store"], store)
+    args = ["-o", str(store), "-O", "g2", "-s", str(root), "-l", LISTING, "-w", str(tmp_path / "w")]
+    res = CliRunner().invoke(ib.backfill_cmd, args)
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (
+        1, f"{SCANS[GEN_FROM]}: {LISTING!r} matches 2 files, 1 without a `generation` column ({stray}): narrow it to the listing shards")
+
+
+def test_gen_index_reads_every_shard_of_a_bucket(tmp_path):
+    """A scan's listing in several shards per bucket (every real lister's): each shard's objects are indexed, not only
+    the first's."""
+    root = tmp_path / "root"
+    for i, names in enumerate((["d/a.bin", "d/b.bin"], ["d/c.bin"])):
+        shard = root / "listing" / SCANS[0] / B / f"shard-{i:02d}.parquet"
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        n = len(names)
+        pq.write_table(pa.table({"bucket": [B] * n, "name": names, "size_bytes": [1] * n, "created": pa.array([None] * n, pa.timestamp("us", "UTC")),
+                                 "storage_class_id": [1] * n, "generation": pa.array([10 + i * 10 + j for j in range(n)], pa.int64())}), shard)
+    con = duckdb.connect()
+    work = tmp_path / "w"
+    work.mkdir()
+    out = ib.gen_index(con, Store(str(root)), LISTING, [{"id": SCANS[0], "ts": T0}], work)
+    assert (out, con.execute(f"SELECT depth, path, generation FROM read_parquet('{work / ib.GEN_INDEX}')").fetchall()) == (
+        {"scans": [SCANS[0]], "skipped": [], "rows": 3},
+        [(3, "b/d/a.bin", 10), (3, "b/d/b.bin", 11), (3, "b/d/c.bin", 20)])
+
+
+def test_verify_generation_checks_the_store_against_each_listing(world, backfilled, tmp_path):
+    """`verify-generation`: per scan of the backfilled generation, its listed generations against the store's at that scan,
+    recorded on the scan's marker (from the source generation; `pass` then needs them all equal). A scan whose listing
+    has none is skipped, one without a marker gets none, and a listing the store disagrees with fails its marker."""
+    store = tmp_path / "store"
+    shutil.copytree(backfilled["store"], store)
+    root = tmp_path / "world"
+    shutil.copytree(world, root)
+    shard = root / "listing" / SCANS[3] / B / "shard-00.parquet"
+    t = pq.read_table(shard)
+    gens = [99 if n == "d/keep.bin" else g for n, g in zip(t["name"].to_pylist(), t["generation"].to_pylist())]
+    pq.write_table(t.set_column(t.schema.get_field_index("generation"), "generation", pa.array(gens, pa.int64())), shard)
+    verify = store / ist.PREFIX / "g" / "verify"
+    verify.mkdir(parents=True, exist_ok=True)
+    for d in (*SCANS[:4], SCANS[5]):
+        (verify / f"{d}.json").write_text(json.dumps({"scan": d, "gen": "g", "pass": True, "views": 9, "view_eq": 9, "diffs": 1, "diff_eq": 1}))
+    args = ["-o", str(store), "-g", "g2", "-s", str(root), "-l", LISTING, "-w", str(tmp_path / "w")]
+    res = CliRunner().invoke(ib.verify_generation_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    g = lambda n, eq: {"objects": n, "equal": eq, "missing": 0, "against": "listing"}  # noqa: E731
+    assert json.loads(res.stdout) == {"gen": "g2", "scans": {
+        SCANS[0]: {"status": "no-generation", "generation": None},
+        SCANS[1]: {"status": "no-generation", "generation": None},
+        SCANS[2]: {"status": "pass", "generation": g(5, 5)},
+        SCANS[3]: {"status": "fail", "generation": g(5, 4)},
+        SCANS[4]: {"status": "no-marker", "generation": g(6, 6)},
+        SCANS[5]: {"status": "pass", "generation": g(6, 6)},
+    }}
+    written = {p.stem: json.loads(p.read_text()) for p in sorted((store / ist.PREFIX / "g2" / "verify").glob("*.json"))}
+    assert written == {
+        d: {"scan": d, "gen": "g2", "views_gen": "g", "pass": ok, "views": 9, "view_eq": 9, "diffs": 1, "diff_eq": 1, "generation": gen}
+        for d, ok, gen in ((SCANS[2], True, g(5, 5)), (SCANS[3], False, g(5, 4)), (SCANS[5], True, g(6, 6)))
+    }
+
+
 def test_a_backfilled_generation_takes_appends_and_verifies(world, backfilled, tmp_path):
     store = tmp_path / "store"
     shutil.copytree(backfilled["store"], store)

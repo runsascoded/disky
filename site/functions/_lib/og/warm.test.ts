@@ -21,4 +21,13 @@ describe('warmUrls: the first-paint reads a card view would make', () => {
       [],
     ])
   })
+  it('a secondary store\'s view asks with `store=` last, as its page does (`storeUrl`)', () => {
+    expect([
+      warmUrls('map', { store: 'meta', path: 'snapshots' }, '2026-10-02'),
+      warmUrls('map', { store: 'meta', f: 'json' }, '2026-10-02'),
+    ]).toEqual([
+      ['/api/subtree?date=2026-10-02&path=snapshots&w=1536&h=922&depth=1&store=meta', '/api/subtree?date=2026-10-02&path=snapshots&w=1536&h=922&store=meta'],
+      ['/api/subtree?date=2026-10-02&path=&w=1536&h=922&q=json&full=1&store=meta'],
+    ])
+  })
 })

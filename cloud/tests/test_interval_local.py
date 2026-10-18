@@ -168,6 +168,19 @@ def test_base_and_runs_are_a_full_rebuild(world, local, tmp_path, t):
         assert combine([_rows(gen, t), *(_rows(r, t) for r in runs)], t) == want
 
 
+def test_changes_counts_the_same_a_group_at_a_time(world, local):
+    """`Store.changes` (verify's diff stat) reads its groups in chunks: any chunk size counts what one read does, between
+    every pair of consecutive scans, at the root and below."""
+    from dt_cloud import interval_read as ir
+
+    st = ir.Store(local["gen"] / "served")
+    ts = [s["ts"] for s in world["scans"]]
+    paths = ["", *sorted({p for p in world["paths"] if "." not in p.rsplit("/", 1)[-1]})]
+    counts = lambda chunk: [st.changes(a, b, p, ir.Cost(), chunk=chunk) for a, b in zip(ts, ts[1:]) for p in paths]  # noqa: E731
+    whole = counts(10 ** 9)
+    assert (counts(1), sum(whole) > 0) == (whole, True)
+
+
 def test_every_view_at_every_scan_is_the_per_scan_readers(world, local):
     """The generation as the reader opens it (the base's served sorts, the newest manifest's runs' served sorts): at
     every scan, base or appended, every directory's view is the per-scan reference's, tile for tile."""
@@ -469,6 +482,30 @@ def test_verify_reads_a_non_gcs_store(world, local, tmp_path):
     assert sum(s["views"] for s in summaries) > 0
     recs = [json.loads(ln) for ln in (tmp_path / "out" / "verify" / f"t00-{sampled[0]}.jsonl").read_text().splitlines()]
     assert sorted({r["ps_cost"] is None for r in recs if r["kind"] == "view" and "ps_cost" in r}) == [True]
+
+
+def test_verify_keeps_the_markers_of_scans_it_finished_when_killed_later(world, local, tmp_path, monkeypatch):
+    """Each scan's marker and the task's summaries so far go up as the scan completes: a task killed on a later scan (an
+    OOM in its diffs) keeps every scan before it."""
+    from dt_cloud import interval_verify as iv
+
+    store = tmp_path / "store"
+    shutil.copytree(local["store"], store)
+    shutil.rmtree(store / "interval-store" / "g" / "verify", ignore_errors=True)  # the module's earlier verify runs'
+    real = iv.run_date
+
+    def oom(st, scan, date, *a, **k):
+        if date == DATES[2]:
+            raise MemoryError(date)
+        return real(st, scan, date, *a, **k)
+    monkeypatch.setattr(iv, "run_date", oom)
+    with pytest.raises(MemoryError):
+        CliRunner().invoke(ist.cli, ["verify", "-b", str(store), "-g", "g", "-s", ",".join(DATES[:4]), "-o", str(tmp_path / "out"),
+                                     "-T", str(tmp_path / "tmp"), "-i", "0"], catch_exceptions=False)
+    verify = store / "interval-store" / "g" / "verify"
+    tag = f"t00-{DATES[0]}"
+    assert (sorted(p.name for p in verify.iterdir()), [s["date"] for s in json.loads((verify / f"{tag}.json").read_text())]) == (
+        sorted([f"{DATES[0]}.json", f"{DATES[1]}.json", f"{tag}.json", f"{tag}.jsonl"]), DATES[:2])
 
 
 def test_verify_samples_the_appended_scans(world, local, tmp_path):
