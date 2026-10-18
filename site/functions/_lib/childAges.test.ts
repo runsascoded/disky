@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { AGE_EDGES_DAYS, bucketOf, completed, datedAges, scanDay, strata, withChildAges } from './childAges'
+import { AGE_EDGES_DAYS, bucketOf, completed, datedAges, fileAges, scanDay, strata, withChildAges } from './childAges'
 import { openIndex, readAt, readUnder } from './index'
 import { sqliteD1 } from './testD1'
 import { type D1Variant, readJson, seedGeneration } from './testStore'
@@ -54,8 +54,8 @@ describe('strata', () => {
 })
 
 describe('withChildAges', () => {
-  it('gives the interval store’s view exactly the per-scan view’s bars, undated bytes in the oldest', async () => {
-    for (const path of ['', 'bk', 'bk/deep', 'bk/deep/x']) {
+  it('gives the interval store’s view exactly the per-scan view’s bars, epoch-dated bytes in the oldest, files’ from their day', async () => {
+    for (const path of ['', 'bk', 'bk/deep', 'bk/deep/x', 'bk/new', 'bk/mixed', 'bk/old']) {
       const want = await perScanView(path)
       expect({ path, bars: bars(await withChildAges(env, DATE, path, unaged(want))) }).toEqual({ path, bars: bars(want) })
     }
@@ -86,6 +86,15 @@ describe('withChildAges', () => {
     const t: ViewNode = { n: 'bk', k: 'dir', b: 1, o: 1, c: [{ n: 'mixed', k: 'dir', b: 1, o: 1 }] }
     expect(await withChildAges(env, '2026-10-17T2207', 'bk', t)).toBe(t)
     expect(await datedAges(env, '2026-10-17T2207', 'bk')).toBe(null)
+  })
+})
+
+describe('fileAges', () => {
+  it('puts a file’s bytes in its day’s bucket', () => {
+    const day = scanDay(DATE)
+    expect([fileAges(5, day, day), fileAges(5, day - 400, day), fileAges(5, 0, day)]).toEqual([
+      [5, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 5, 0], [0, 0, 0, 0, 0, 0, 5],
+    ])
   })
 })
 
