@@ -31,6 +31,7 @@ params.over_time_label = 'post'
 params.post = []           // the post task's steps, in order
 params.fold = []
 params.skip_list = false   // REPROC: run from `index`
+params.static_after_publish = false   // a local data dir: static-names reads the serving store, after publish-r2
 params.secrets = []        // `ENV=SECRET`, fetched in-task (never Nextflow's `secret`: it lands in .command.run)
 params.step_secrets = [:]  // step → its whole `ENV=SECRET` list, where `options.<step>.secrets` overlays the profile's
 params.secrets_project = ''
@@ -176,8 +177,9 @@ workflow {
     if (!params.skip_list) ready = ready.mix(list_source(Channel.fromList(params.sources)))
     def indexed = index(gathered(ready))
     def none = Channel.value('skipped')
-    def st = on('static-names') ? static_names(indexed) : none
     def pub = on('publish-r2') ? publish_r2(indexed) : indexed
+    // On a local data dir the static index reads earlier scans from the serving store, so it waits for this one's publish
+    def st = on('static-names') ? static_names(params.static_after_publish ? pub : indexed) : none
     def iv = on('interval-store') ? interval_store(pub) : pub
     def rows = index_rows(indexed)
     def serving = gathered(rows.mix(st, iv))

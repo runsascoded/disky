@@ -378,3 +378,17 @@ def test_reproc_still_fetches_an_adopted_listing():
          "skip_list": False},
         {"sources": [], "skip_list": True},
     ]
+
+
+def test_a_local_data_dir_orders_static_names_after_publish():
+    """On a local data dir `static-names` reads earlier scans from the serving store, so `scan.nf` runs it after this
+    scan's publish (`static_after_publish`); on a GCS one it overlaps publish as before."""
+    from dt_cloud.scan_profile import parse
+
+    def prof(data, skip):
+        return parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": data,
+                      "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "cap/{scan}/"}, "sources": ["r2://b"],
+                      "skip": ["digest", *skip], "options": {"static-names": {"gen": "g"}}})
+    got = [H.params(prof(d, skip), "{}", "2026-10-16", "G", "1", "", "S", {})["static_after_publish"]
+           for d, skip in (("/d", []), ("gs://dvx", []), ("/d", ["publish-r2"]))]
+    assert got == [True, False, False]

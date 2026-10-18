@@ -76,6 +76,7 @@
   "scan_id": "2026-10-16t1200"
  },
  "cache": true,
+ "static_after_publish": false,
  "queue_size": 20,
  "work_bucket": "example-data"
 }

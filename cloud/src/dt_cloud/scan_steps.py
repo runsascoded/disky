@@ -727,7 +727,9 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
             err(f"static-names: not appending {ctx.scan} (no store: options.static-names.store or R2)")
             return
         layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
-        args = ["-g", gen, "-L", layout, "-s", ctx.data_uri, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
+        # a local data dir holds only this scan, so the store (where publish-r2 put it, before this step) is the source
+        source = ctx.data_uri if urlparse(ctx.profile.data).scheme else store
+        args = ["-g", gen, "-L", layout, "-s", source, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
                 *(["-M", ctx.opt("static-names", "mem")] if ctx.opt("static-names", "mem") else [])]
         with ctx.phase("static-names", note="overlapped"):
             sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json")

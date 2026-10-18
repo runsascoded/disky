@@ -131,6 +131,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "profile_json": profile_json,
         "labels": labels(profile, env, scan),
         "cache": not fresh,
+        "static_after_publish": not urlparse(profile.data).scheme and "publish-r2" in enabled,
         "queue_size": profile.queue_size,
         "work_bucket": urlparse(profile.work).netloc if profile.executor.kind == "google-batch" else "",
     }
