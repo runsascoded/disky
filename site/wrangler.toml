@@ -58,8 +58,7 @@ FILTER_STATIC_HEAVY = "1"
 # `{ error, code }`, `_lib/indexedOnly.ts`).
 FILTER_INDEXED_ONLY = "1"
 # The interval store (`interval-store/CURRENT.json`, appended by each ingest; specs/m3-interval-store.md) serves the
-# path sorts; `?ps=scan` reads a request from the per-scan sorts instead (the parity check). Scans before its base
-# (2026-09-29/30) read per-scan.
+# path sorts; `?ps=scan` reads a request from the per-scan sorts instead (the parity check).
 PATH_STORE = "intervals"
 # The meta store (`/meta`, `src/stores/meta.ts`, admins only): the bucket itself, scanned beside each laptop
 # capture (`meta-l2/`, `snapshots/meta/`, D1 store `meta`); its STATIC_GEN is the job env's META_STATIC_GEN.
