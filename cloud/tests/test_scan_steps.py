@@ -725,6 +725,59 @@ def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     ]
 
 
+class AggRunner(Runner):
+    """`Runner`, and `access r2-agg` writes its `-o` (unless `empty`: a collector with no reads before the scan)."""
+
+    def __init__(self, tmp: Path, empty: bool = False, **kw):
+        super().__init__(tmp, **kw)
+        self.empty = empty
+
+    def __call__(self, argv, env, stdout=None, text=True):
+        if argv[:3] == ["dt-cloud", "access", "r2-agg"] and not self.empty:
+            out = Path(argv[argv.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(f"agg as of {argv[argv.index('-d') + 1]}")
+        return super().__call__(argv, env, stdout, text)
+
+
+R2_BASE = {"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
+
+
+def r2_ctx(tmp_path, env, runner=None):
+    c = ctx(tmp_path, env, runner or AggRunner(tmp_path), steps=["access-r2"], options={
+        **R2_BASE, "access-r2": {"state": "r2://logs/state.json"}})
+    c.env["R2_ENDPOINT"] = "https://acct.r2.example.org"
+    return c
+
+
+def test_access_r2_aggregates_the_collectors_hours_to_the_scan_into_one_key(tmp_path, env):
+    """`r2-agg -s` (the collector's state names each hour's current aggregate) cut at the scan, written to the task's
+    work dir and then over the data store's one key (the aggregate is cumulative: every read before the scan)."""
+    c = r2_ctx(tmp_path, env)
+    S.access_r2(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access r2-agg -d 2026-10-16T1200 -o <tmp>/t/dt-scan/2026-10-16T1200/access-r2/agg.parquet -s r2://logs/state.json"]
+    assert c.sh_impl.envs[0]["DISK_TREE_R2_ENDPOINT_URL"] == "https://acct.r2.example.org"
+    assert sorted(p.relative_to(tmp_path / "data").as_posix() for p in (tmp_path / "data").rglob("*") if p.is_file()) == ["access/r2/agg.parquet"]
+    assert (tmp_path / "data/access/r2/agg.parquet").read_text() == "agg as of 2026-10-16T1200"
+
+
+def test_access_r2_keeps_the_last_aggregate_when_there_is_nothing_new_or_it_fails(tmp_path, env):
+    """No reads before the scan (nothing written), or a failure: the earlier aggregate stays (valid as of its scan), and
+    the step never fails the run."""
+    key = tmp_path / "data/access/r2/agg.parquet"
+    key.parent.mkdir(parents=True)
+    key.write_text("agg as of 2026-10-15T1200")
+    S.access_r2(r2_ctx(tmp_path, env, AggRunner(tmp_path, empty=True)), None)
+    S.access_r2(r2_ctx(tmp_path, env, AggRunner(tmp_path, fail=("dt-cloud access r2-agg",))), None)
+    assert key.read_text() == "agg as of 2026-10-15T1200"
+
+
+def test_access_r2_needs_the_state(tmp_path):
+    with pytest.raises(ValueError) as e:
+        profile(tmp_path, steps=["access-r2"], options={**R2_BASE, "access-r2": {}})
+    assert str(e.value) == "profile: options.access-r2.state: required (the collector archive's `state.json`, e.g. `r2://<archive>/state.json`)"
+
+
 def test_cpu_quota_reads_cgroup_v2_then_v1(tmp_path) -> None:
     v2, v1, none, unlimited = (tmp_path / d for d in ("v2", "v1", "none", "max"))
     (v1 / "cpu").mkdir(parents=True)

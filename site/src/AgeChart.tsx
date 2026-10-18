@@ -9,6 +9,8 @@ import { MODE_LABELS } from './types'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
 import { listingTime } from './listingTime'
+import { ageFill, placeBarLabels, textWidth } from './ageBars'
+import type { DateAxis } from './dateScale'
 
 const SLOTS = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8']
 
@@ -24,6 +26,11 @@ const WRITTEN = 'w'
 const readRank = (k: string): number => k.startsWith(WRITTEN) ? 1e9 + Number(k.slice(1)) : Number(k)
 
 const dateBarColor = (i: number, n: number): string => dateColor(n > 1 ? i / (n - 1) : 1)
+
+// Value labels (viewBox units): font size, padding, and the room above the plot for the tallest bars'.
+const LBL_FS = 9.5
+const LBL_PAD = 2
+const PAD_T = LBL_FS + 2 * LBL_PAD
 
 const dayToDate = (d: number): Date => new Date(d * 86400_000)
 const iso = (d: number): string => dayToDate(d).toISOString().slice(0, 10)
@@ -51,7 +58,7 @@ const bucketLabel = (b: number, gran: Granularity): string =>
 /** Stacked bars of bytes by created date (month/week/day), split per color mode.
  *  `readRange` null means the read axis is unavailable for this scan (no access
  *  window, or age strata published before they carried `a`). */
-export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, readThrough, readTint = 'hatch', readUnlogged = [], scheme = 'gs://', band, onBand }: {
+export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, mapMode, picked = false, dateAxis, onMode, modes = AGE_MODES, userIdx, readRange, readThrough, readTint = 'hatch', readUnlogged = [], scheme = 'gs://', band, onBand }: {
   rows: AgeRow[]
   /** The diff window's "before" scan, same path — enables the diff toggle. When
    *  present the chart can show per-vintage growth/shrink (created-date bucket
@@ -63,6 +70,13 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   /** Axes to offer (caller drops the ones this scan can't color by — never a dead button). */
   modes?: ColorMode[]
   mode: ColorMode
+  /** The map's color mode: `date` bars take the date gradient only when it is the map's lens
+   *  (or `picked`), else one neutral color (`ageFill`). */
+  mapMode?: ColorMode
+  /** The chart's axis was chosen in its own picker (`?ac=`), not followed from the map. */
+  picked?: boolean
+  /** The map's date axis: gradient bars are colored on it, so a bar matches the map's cells of its dates. */
+  dateAxis?: DateAxis | null
   onMode?: (m: ColorMode) => void
   userIdx: Map<string, UserIndexEntry>
   readRange?: { min: number; max: number } | null
@@ -84,6 +98,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   usePerfCommit('age')
   const time = listingTime(scheme)
   const { fmtBytes } = useUnits()
+  const fill = ageFill(mode, mapMode, picked)
   // Default to the finest granularity that still fits on screen: the most
   // bars we'll draw is MAX (≈8px each across the 900-unit viewBox), and finer
   // beats coarser — CoreWeave's ~8-week history gets /day, GCS's years get
@@ -193,6 +208,17 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   const dspan = diff ? Math.max(diff.up + diff.down, 1) : 1
   const zeroY = diff ? (diff.up / dspan) * H : H
   const diffByBk = showDiff ? new Map(diff!.rowsD.map(d => [d.bk, d])) : null
+  const totals = showDiff ? [] : bars.map(bk => [...byBucket.get(bk)!.values()].reduce((a, v) => a + v, 0))
+  const texts = totals.map(fmtBytes)
+  const labels = showDiff ? [] : placeBarLabels(
+    bars.map((_, i) => ({ x: i * bw, w: bw, h: (totals[i] / maxB) * H, textW: textWidth(texts[i], LBL_FS) })),
+    { W, H, padT: PAD_T, textH: LBL_FS, pad: LBL_PAD, peaks: 4, peakMin: 0.25 },
+  )
+  const barFill = (bk: number, i: number, k: string): string =>
+    fill === 'facet' ? colorOf(k)
+    : fill === 'neutral' ? 'var(--age-bar)'
+    : dateAxis ? dateColor(dateAxis.t((bk + bucketEnd(bk, gran)) / 2))
+    : dateBarColor(i, bars.length)
 
   return (
     <div className="agechart">
@@ -203,13 +229,13 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
             <span className="li"><span className="sw" style={{ background: 'var(--shrank)' }} />shrank</span>
             {diffLabels && <span className="li lbl">{diffLabels.from} → {diffLabels.to}</span>}
           </>
-        ) : mode === 'date' ? (
+        ) : fill === 'gradient' ? (
           <span className="li gradli">
             older
             <span className="gradbar" style={{ background: dateGradientCss() }} />
             newer
           </span>
-        ) : mode === 'read' ? (
+        ) : fill === 'neutral' ? null : mode === 'read' ? (
           <>
             <span className="li"><span className="sw" style={{ background: 'var(--never-read)' }} />{neverLabel}</span>
             {readRange && (
@@ -241,7 +267,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
             <span className="gran" role="radiogroup" aria-label="Color by">
               <span className="lbl">color by</span>
               {modes.map(m => (
-                <button key={m} role="radio" aria-checked={mode === m} className={mode === m ? 'on' : ''} onClick={() => onMode(m)}>
+                <button key={m} role="radio" aria-checked={fill !== 'neutral' && mode === m} className={fill !== 'neutral' && mode === m ? 'on' : ''} onClick={() => onMode(m)}>
                   {MODE_LABELS[m]}
                 </button>
               ))}
@@ -256,7 +282,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
           </span>
         </span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H + 24}`} preserveAspectRatio="none" role="img" aria-label={showDiff ? `Bytes changed by ${time.label} ${gran}` : `Bytes by ${time.label} ${gran}`}>
+      <svg viewBox={`0 ${-PAD_T} ${W} ${H + 24 + PAD_T}`} preserveAspectRatio="none" role="img" aria-label={showDiff ? `Bytes changed by ${time.label} ${gran}` : `Bytes by ${time.label} ${gran}`}>
         <defs>
           <pattern id="age-xhatch" width={6} height={6} patternUnits="userSpaceOnUse">
             <path d="M0 0L6 6M6 0L0 6" stroke="rgb(0 0 0 / 0.35)" strokeWidth={1} />
@@ -277,7 +303,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
               const h = (b / maxB) * H
               y -= h
               const r = { x: i * bw + gap, y, width: Math.max(bw - 2 * gap, 0.8), height: Math.max(h - gap, 0), rx: bw > 4 ? 1.5 : 0 }
-              const rect = <rect key={k} {...r} fill={mode === 'date' ? dateBarColor(i, bars.length) : colorOf(k)} />
+              const rect = <rect key={k} {...r} fill={barFill(bk, i, k)} />
               return mode === 'read' && k.startsWith(WRITTEN) ? <g key={k}>{rect}<rect {...r} fill="url(#age-xhatch)" /></g> : rect
             })
           }
@@ -299,6 +325,9 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
             </g>
           )
         })}
+        {labels.map(l => (
+          <text key={`l${bars[l.i]}`} x={l.cx} y={l.y + LBL_FS * 0.8} textAnchor="middle" className={`val ${l.pos}`}>{texts[l.i]}</text>
+        ))}
       </svg>
       {hover && (
         <div className="tip" style={{ left: Math.min(hover.x + 14, window.innerWidth - 300), top: hover.y + 14 }}>

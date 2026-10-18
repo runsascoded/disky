@@ -60,10 +60,24 @@ SERVED_RG = 8192
 RANGE_RG = 65536
 
 KEY_COLS = ["depth", "path"]
+#: The store's storage-class byte columns, by class id: their one definition. Every schema, statement, hash and reader
+#: of the store names them from here (and the site's interval reader from `IV_CLASS_COLS`, `_lib/index.ts`), so a
+#: deployment whose classes have names (gcs: Nearline, Coldline, Archive) renames them in one place; a new generation
+#: (`backfill-generation`, which reads an older one's class columns by position) carries the rename.
+CLASS_COLS = {2: "c2", 3: "c3", 4: "c4"}
+CLS = list(CLASS_COLS.values())
+#: The object's native version (GCS `generation`), opt-in per generation (`scans.json` `"generation": true`, set by a
+#: build over sources that carry it, or by `backfill-generation`): absent from every file of a generation without it.
+#: On object versions only (NULL on dirs), in the path versions (`pv/`, `pvl/`, a run's `pvl` deltas and state) and the
+#: served `path` sort, as their last column (a reader's column span never reaches it). Carried from the version's first
+#: scan that has one, never a change column: a GCS rewrite is a new object, created (and `updated`, the `mtime`) after
+#: the scan that saw the old one, so a new generation always opens a version by `mtime` already.
+GENERATION = "generation"
+GENERATION_FIELD = pa.field(GENERATION, pa.int64())
 #: The values whose change opens a version. `dr` is the size-weighted mean stamp rounded to the second
 #: (the change test; the exact `wts` is carried from the version's first scan), `us` the owner slices.
 #: `last_read` is not here: it moves from scan to scan on read paths and lives in its own intervals (`rd/`).
-CHANGE_COLS = ["kind", "size", "n_files", "n_children", "n_desc", "mtime", "dr", "wb", "c2", "c3", "c4", "us"]
+CHANGE_COLS = ["kind", "size", "n_files", "n_children", "n_desc", "mtime", "dr", "wb", *CLS, "us"]
 CARRIED = {"wts": "first"}
 STATE_COLS = [*CHANGE_COLS, "wts"]
 
@@ -80,9 +94,7 @@ PV_SCHEMA = pa.schema([
     pa.field("mtime", pa.int64(), nullable=False),
     pa.field("wts", pa.float64(), nullable=False),  # Σ mtime_mean·mtime_w over the path's rows
     pa.field("wb", pa.int64(), nullable=False),  # Σ mtime_w
-    pa.field("c2", pa.int64(), nullable=False),
-    pa.field("c3", pa.int64(), nullable=False),
-    pa.field("c4", pa.int64(), nullable=False),
+    *(pa.field(c, pa.int64(), nullable=False) for c in CLS),
     pa.field("us", pa.string(), nullable=False),  # owner slices (`us_sql_from_raw`)
 ])
 RD_SCHEMA = pa.schema([
@@ -110,7 +122,51 @@ SVT_SCHEMA = SV_SCHEMA.append(pa.field("tot", pa.int64(), nullable=False))
 SV_KEY = ["depth", "path", "usr"]
 SV_CHANGE = [c for c in CHANGE_COLS if c != "us"] + ["last_read"]
 SV_STATE = [*SV_CHANGE, "wts"]
-SV_HASH = "hash(depth, path, usr, kind, size, n_files, n_children, n_desc, mtime, dr, wb, c2, c3, c4, last_read)"
+SV_HASH = f"hash(depth, path, usr, kind, size, n_files, n_children, n_desc, mtime, dr, wb, {', '.join(CLS)}, last_read)"
+
+
+def with_generation(schema: pa.Schema, generation: bool) -> pa.Schema:
+    """`schema`, with `generation` as its last column when the generation carries it."""
+    return schema.append(GENERATION_FIELD) if generation else schema
+
+
+def has_generation(scans: dict) -> bool:
+    """Whether a generation (its `scans.json`) carries the objects' native version (`GENERATION`)."""
+    return bool(scans.get(GENERATION))
+
+
+def file_has_generation(path: str | Path) -> bool:
+    """Whether a parquet file (a range file, a run's delta) carries `GENERATION`."""
+    return GENERATION in pq.read_schema(path).names
+
+
+def source_has_generation(con, src: str) -> bool:
+    """Whether a scan's per-scan sort carries `GENERATION` (a v2 `path` sort from a listing that has it, `path-index -G`)."""
+    return GENERATION in {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(src)})").fetchall()}
+
+
+def generation_of(con, scans: dict, mount: str | None) -> bool:
+    """A generation's `GENERATION` flag: its `scans.json`'s when recorded, else whether some scan's sort carries the
+    column (a base build's measurement, recorded by it)."""
+    if GENERATION in scans:
+        return has_generation(scans)
+    return any(s.get("version") == 2 and source_has_generation(con, sn._src(scans["bucket"], s["src"], mount)) for s in scans["scans"])
+
+
+def record_generation(doc: dict, generation: bool) -> dict:
+    """`doc` (a `scans.json`) with `"generation": true` when the generation carries it; without the key otherwise."""
+    out = {k: v for k, v in doc.items() if k != GENERATION}
+    return {**out, GENERATION: True} if generation else out
+
+
+def state_cols(generation: bool) -> list[str]:
+    """The path versions' state columns (`STATE_COLS`, `GENERATION` carried when the generation has it)."""
+    return [*STATE_COLS, GENERATION] if generation else STATE_COLS
+
+
+def carried(generation: bool) -> dict[str, str]:
+    """The path versions' carried columns: `wts`, and `GENERATION` (the first scan's that has one) when present."""
+    return {**CARRIED, GENERATION: "first"} if generation else CARRIED
 
 # ── Per-scan rows → one row per path ───────────────────────────────────────
 
@@ -120,32 +176,45 @@ V2_ROW = """depth::UTINYINT AS depth, path, coalesce({usr}, '') AS usr, kind = '
     n_files::BIGINT AS n_files, coalesce({n_children}, -1)::BIGINT AS n_children, coalesce({n_desc}, -1)::BIGINT AS n_desc,
     coalesce({mtime}, -1)::BIGINT AS mtime, CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE size END::BIGINT AS mw,
     CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE {mtime_mean}::DOUBLE * size::DOUBLE END AS wt,
-    coalesce({last_read}, -1)::INTEGER AS last_read, coalesce({c2}, 0)::BIGINT AS c2, coalesce({c3}, 0)::BIGINT AS c3, coalesce({c4}, 0)::BIGINT AS c4"""
+    coalesce({last_read}, -1)::INTEGER AS last_read, """ + ", ".join(f"coalesce({{c{k}}}, 0)::BIGINT AS {c}" for k, c in CLASS_COLS.items())
 V1_ROW = """depth::UTINYINT AS depth, path, coalesce(usr, '') AS usr, false AS is_file, b::BIGINT AS size, o::BIGINT AS n_files,
     -1::BIGINT AS n_children, -1::BIGINT AS n_desc, -1::BIGINT AS mtime, coalesce(wb, 0)::BIGINT AS mw,
     CASE WHEN coalesce(wb, 0) > 0 THEN (coalesce(wts, 0)::DOUBLE / wb::DOUBLE) * wb::DOUBLE ELSE 0 END AS wt,
-    coalesce(a, -1)::INTEGER AS last_read, coalesce(c2, 0)::BIGINT AS c2, coalesce(c3, 0)::BIGINT AS c3, coalesce(c4, 0)::BIGINT AS c4"""
+    coalesce(a, -1)::INTEGER AS last_read, """ + ", ".join(f"coalesce(c{k}, 0)::BIGINT AS {c}" for k, c in CLASS_COLS.items())
+#: The class sums over a group of raw rows.
+CLS_SUMS = ", ".join(f"sum({c})::BIGINT AS {c}" for c in CLS)
 
 
-def path_rows_sql(con, src: str, preds: list[str], version: int | None = None) -> str:
-    """One scan's rows in the range, one per `(depth, path)`: the sums and maxima the reader's `merge`
-    takes over a path's rows (owner slices, a v1 index's duplicate rows), `kind` = `dir` if any row is,
-    `us` = the owner slices, `dr` = the mean stamp to the second."""
+def _raw_sql(con, src: str, preds: list[str], version: int | None, generation: bool) -> str:
+    """A scan's raw rows in the range (`V2_ROW` / `V1_ROW`), with the object's `GENERATION` (NULL on a dir row, and
+    where the sort has none) when the generation carries it."""
     version = version or sn.source_version(con, src)
     if version == 2:
         cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(src)})").fetchall()}
         sel = V2_ROW.format(**{k: (c if c in cols else "NULL") for k, c in sn.V2_OPTIONAL.items()})
+        gen = f"CASE WHEN kind = 'file' THEN {GENERATION} END" if GENERATION in cols else "NULL"
     else:
-        sel = V1_ROW
-    raw = " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(src)}) WHERE {p}" for p in preds)
-    one = """SELECT depth, path, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
+        sel, gen = V1_ROW, "NULL"
+    if generation:
+        sel += f", ({gen})::BIGINT AS {GENERATION}"
+    return " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(src)}) WHERE {p}" for p in preds)
+
+
+def path_rows_sql(con, src: str, preds: list[str], version: int | None = None, generation: bool = False) -> str:
+    """One scan's rows in the range, one per `(depth, path)`: the sums and maxima the reader's `merge`
+    takes over a path's rows (owner slices, a v1 index's duplicate rows), `kind` = `dir` if any row is,
+    `us` = the owner slices, `dr` = the mean stamp to the second; with `generation`, an object's `GENERATION`
+    last (NULL on a dir, a key that is also a folder's prefix included)."""
+    raw = _raw_sql(con, src, preds, version, generation)
+    gen = f", CASE WHEN bool_and(is_file) THEN max({GENERATION}) END AS {GENERATION}" if generation else ""
+    one = f"""SELECT depth, path, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
         sum(n_files)::BIGINT AS n_files, max(n_children) AS n_children, max(n_desc) AS n_desc, max(mtime) AS mtime,
         sum(wt)::DOUBLE AS wts, sum(mw)::BIGINT AS wb, max(last_read) AS last_read,
-        sum(c2)::BIGINT AS c2, sum(c3)::BIGINT AS c3, sum(c4)::BIGINT AS c4
+        {CLS_SUMS}{gen}
         FROM raw GROUP BY depth, path"""
     return f"""WITH raw AS ({raw}), one AS ({one}), sl AS ({us_sql_from_raw()})
         SELECT one.depth, one.path, kind, size, n_files, n_children, n_desc, mtime,
-            CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE AS dr, wb, c2, c3, c4, sl.us, wts, last_read
+            CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE AS dr, wb, {', '.join(CLS)}, sl.us, wts, last_read{f', {GENERATION}' if generation else ''}
         FROM one JOIN sl USING (depth, path)"""
 
 
@@ -166,23 +235,17 @@ def us_sql_from_raw() -> str:
 def slice_rows_sql(con, src: str, preds: list[str], version: int | None = None) -> str:
     """One scan's owner slices in the range, one row per `(depth, path, usr)` (`usr` '' where none is
     named): `path_rows_sql`'s sums and maxima per slice instead of per path."""
-    version = version or sn.source_version(con, src)
-    if version == 2:
-        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(src)})").fetchall()}
-        sel = V2_ROW.format(**{k: (c if c in cols else "NULL") for k, c in sn.V2_OPTIONAL.items()})
-    else:
-        sel = V1_ROW
-    raw = " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(src)}) WHERE {p}" for p in preds)
+    raw = _raw_sql(con, src, preds, version, False)
     return f"""WITH raw AS ({raw})
         SELECT depth, path, usr, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
             sum(n_files)::BIGINT AS n_files, max(n_children) AS n_children, max(n_desc) AS n_desc, max(mtime) AS mtime,
             CASE WHEN sum(mw) > 0 THEN round(sum(wt) / sum(mw), 0) ELSE 0 END::DOUBLE AS dr, sum(mw)::BIGINT AS wb,
-            sum(c2)::BIGINT AS c2, sum(c3)::BIGINT AS c3, sum(c4)::BIGINT AS c4, sum(wt)::DOUBLE AS wts, max(last_read) AS last_read
+            {CLS_SUMS}, sum(wt)::DOUBLE AS wts, max(last_read) AS last_read
         FROM raw GROUP BY depth, path, usr"""
 
 
 #: Per-version hash of the change columns: what a version and a scan's row are compared by.
-ROW_HASH = "hash(depth, path, kind, size, n_files, n_children, n_desc, mtime, dr, wb, c2, c3, c4, us)"
+ROW_HASH = f"hash(depth, path, kind, size, n_files, n_children, n_desc, mtime, dr, wb, {', '.join(CLS)}, us)"
 RD_HASH = "hash(depth, path, last_read)"
 
 
@@ -210,7 +273,8 @@ def build_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mount: str
     """One key range over every scan: `pv/r####.parquet` (path versions, `PV_SCHEMA`, sorted
     `(depth, path, vf)`), `rd/r####.parquet` (`last_read` versions, `RD_SCHEMA`) and
     `digest/r####.json`: counts, and per scan the rows and Σ hash of the scan's per-path rows next to
-    those of the versions live at it — equal iff the versions reconstruct every scan exactly."""
+    those of the versions live at it — equal iff the versions reconstruct every scan exactly. The path versions carry
+    `GENERATION` when the generation does (`generation_of`)."""
     from pyrmts.intervals import islands_sql, stamped_sql
 
     t0 = monotonic()
@@ -218,18 +282,19 @@ def build_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mount: str
     preds = range_preds(r)
     srcs = [(sn._src(scans["bucket"], s["src"], mount), s["ts"], s.get("version")) for s in scans["scans"]]
     stamps = [ts for _, ts, _ in srcs]
+    gen = generation_of(con, scans, mount)
     for t in ("lng", "pv", "rd"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     # One scan at a time: a single 71-way `UNION ALL` runs every scan's per-path aggregation at once and
     # ran out of memory on the widest ranges (`failed to pin block`, 59.6 GiB of 60).
     for j, (p, _, v) in enumerate(srcs):
-        sql = f"SELECT {j}::BIGINT AS __scan, * FROM ({path_rows_sql(con, p, preds, v)})"
+        sql = f"SELECT {j}::BIGINT AS __scan, * FROM ({path_rows_sql(con, p, preds, v, gen)})"
         con.execute(f"CREATE TABLE lng AS {sql}" if j == 0 else f"INSERT INTO lng {sql}")
     t_long = monotonic() - t0
     src_dig = {j: [n, int(s) % U64] for j, n, s in con.execute(f"SELECT __scan, count(*), sum({ROW_HASH}::HUGEINT) FROM lng GROUP BY __scan").fetchall()}
     rd_src = {j: [n, int(s) % U64] for j, n, s in con.execute(f"SELECT __scan, count(*), sum({RD_HASH}::HUGEINT) FROM lng WHERE last_read >= 0 GROUP BY __scan").fetchall()}
-    runs = islands_sql("SELECT * FROM lng", KEY_COLS, STATE_COLS, carried=CARRIED)
-    con.execute(f"CREATE TABLE pv AS {stamped_sql(runs, KEY_COLS, STATE_COLS, stamps, OPEN)}")
+    runs = islands_sql("SELECT * FROM lng", KEY_COLS, state_cols(gen), carried=carried(gen))
+    con.execute(f"CREATE TABLE pv AS {stamped_sql(runs, KEY_COLS, state_cols(gen), stamps, OPEN)}")
     rd_runs = islands_sql("SELECT __scan, depth, path, last_read FROM lng WHERE last_read >= 0", KEY_COLS, ["last_read"])
     con.execute(f"CREATE TABLE rd AS {stamped_sql(rd_runs, KEY_COLS, ['last_read'], stamps, OPEN)}")
     t_kernel = monotonic() - t0 - t_long
@@ -242,9 +307,10 @@ def build_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mount: str
         ra, rb = rd_src.get(j, [0, 0]), rd_dig[j]
         per_scan.append({"id": s["id"], "rows": a[0], "live": b[0], "eq": a == b, "reads": ra[0], "reads_live": rb[0], "reads_eq": ra == rb})
     name = f"r{i:04d}"
-    cols = ", ".join(PV_COLS)
+    pv_schema = with_generation(PV_SCHEMA, gen)
+    cols = ", ".join(pv_schema.names)
     n_pv = write_sorted(sn._batches(con, f"SELECT {cols} FROM pv ORDER BY depth, path, vf"), out / "pv" / f"{name}.parquet",
-                        PV_SCHEMA, RANGE_RG, dictionary=["kind", "us"])
+                        pv_schema, RANGE_RG, dictionary=["kind", "us"])
     n_rd = write_sorted(sn._batches(con, "SELECT depth, path, vf, vt, last_read FROM rd ORDER BY depth, path, vf"), out / "rd" / f"{name}.parquet",
                         RD_SCHEMA, RANGE_RG)
     kinds = {k: {"versions": n, "open": o, "paths": p} for k, n, o, p in con.execute(
@@ -315,14 +381,14 @@ def build_slices_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mou
 # ── Read days folded into the path versions ──────────────────────────────
 
 
-def fold_sql(pv: str, rd: str) -> str:
+def fold_sql(pv: str, rd: str, generation: bool = False) -> str:
     """`pv`'s versions split where `rd` (the read-day versions of the same paths) changes, each piece
     carrying its `last_read` (-1 where none is live), adjacent pieces with the same path version and
     read day merged: `PVL_SCHEMA` rows, unsorted. Equal to versioning the scans with `last_read` as one
     more change column (`test_fold_equals_versioning_with_read_days`). Paths without read versions pass
-    through untouched."""
-    cols = ", ".join(f"p.{c}" for c in PV_COLS if c not in ("vf", "vt"))
-    keep = ", ".join(c for c in PV_COLS if c not in ("depth", "path", "vf", "vt"))
+    through untouched. With `generation`, `pv` carries `GENERATION` (last), and so does every piece."""
+    pv_cols = with_generation(PV_SCHEMA, generation).names
+    cols = ", ".join(f"p.{c}" for c in pv_cols if c not in ("vf", "vt"))
     return f"""WITH rp AS (SELECT DISTINCT depth, path FROM {rd}),
         pr AS (SELECT p.* FROM {pv} p SEMI JOIN rp USING (depth, path)),
         b AS (SELECT depth, path, vf AS t FROM pr UNION SELECT depth, path, vt FROM pr
@@ -335,21 +401,24 @@ def fold_sql(pv: str, rd: str) -> str:
         m AS (SELECT *, CASE WHEN lag(hi) OVER w = lo AND lag(pvf) OVER w = pvf AND lag(last_read) OVER w = last_read THEN 0 ELSE 1 END AS new
               FROM j WINDOW w AS (PARTITION BY depth, path ORDER BY lo)),
         g AS (SELECT *, sum(new) OVER (PARTITION BY depth, path ORDER BY lo ROWS UNBOUNDED PRECEDING) AS run FROM m)
-        SELECT depth, path, min(lo) AS vf, max(hi) AS vt, {", ".join(f"any_value({c}) AS {c}" for c in PV_COLS if c not in ("depth", "path", "vf", "vt"))}, any_value(last_read) AS last_read
+        SELECT depth, path, min(lo) AS vf, max(hi) AS vt, {", ".join(f"any_value({c}) AS {c}" for c in pv_cols if c not in ("depth", "path", "vf", "vt"))}, any_value(last_read) AS last_read
         FROM g GROUP BY depth, path, pvf, run
         UNION ALL
         SELECT p.*, -1 AS last_read FROM {pv} p ANTI JOIN rp USING (depth, path)"""
 
 
 def fold_range(root: str, i: int, out: Path, con) -> dict:
-    """Range `i`'s `pvl/r####.parquet` from its `pv/` and `rd/` (sorted `(depth, path, vf)`)."""
+    """Range `i`'s `pvl/r####.parquet` from its `pv/` and `rd/` (sorted `(depth, path, vf)`); `GENERATION` (last)
+    when `pv/` carries it."""
     t0 = monotonic()
     name = f"r{i:04d}"
     pv, rd = f"read_parquet({q(f'{root}/pv/{name}.parquet')})", f"read_parquet({q(f'{root}/rd/{name}.parquet')})"
+    gen = GENERATION in {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {pv}").fetchall()}
+    schema = with_generation(PVL_SCHEMA, gen)
     con.execute("DROP TABLE IF EXISTS pvl")
-    con.execute(f"CREATE TABLE pvl AS {fold_sql(pv, rd)}")
-    n = write_sorted(sn._batches(con, f"SELECT {', '.join(PVL_SCHEMA.names)} FROM pvl ORDER BY depth, path, vf"), out / "pvl" / f"{name}.parquet",
-                     PVL_SCHEMA, RANGE_RG, dictionary=["kind", "us"])
+    con.execute(f"CREATE TABLE pvl AS {fold_sql(pv, rd, gen)}")
+    n = write_sorted(sn._batches(con, f"SELECT {', '.join(schema.names)} FROM pvl ORDER BY depth, path, vf"), out / "pvl" / f"{name}.parquet",
+                     schema, RANGE_RG, dictionary=["kind", "us"])
     n_pv = con.execute(f"SELECT count(*) FROM {pv}").fetchone()[0]
     con.execute("DROP TABLE pvl")
     doc = {"i": i, "pv": n_pv, "pvl": n, "s": round(monotonic() - t0, 1)}
@@ -413,6 +482,15 @@ SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHE
 #: owner (`usr` NULL or '' on every row: cw-s3, r2.rbw.sh) has no owner axis and builds none of them: its slices would
 #: be its path rows again, each slice sort about the size of `path`.
 SLICE_SUBS = ("sv", "svt")
+#: The served sort that carries `GENERATION` in a generation that has it: the identity lookup's (a sweep's hold,
+#: `export`), by path. The others never do: no reader of theirs needs it.
+GENERATION_SORT = "path"
+
+
+def served_schema(sort: str, generation: bool = False) -> pa.Schema:
+    """A served sort's columns: its range files' (`SUB_SCHEMA`), and `GENERATION` last in `GENERATION_SORT` when the
+    generation carries it."""
+    return with_generation(SUB_SCHEMA[SORTS[sort][0]], generation and sort == GENERATION_SORT)
 
 
 def owners_of(digests) -> bool:
@@ -461,12 +539,13 @@ def gen_sliced(store: Store, prefix: str) -> bool:
     return owners_of(store.read_json(x) for x in keys)
 
 
-def record_slices(store: Store, prefix: str, scans: dict, has_slices: bool) -> None:
-    """`scans.json` under `prefix` with the generation's `slices` (the reader's flag), unless it says so already."""
+def record_slices(store: Store, prefix: str, scans: dict, has_slices: bool, generation: bool = False) -> None:
+    """`scans.json` under `prefix` with the generation's `slices` (the reader's flag) and `GENERATION` (only when it
+    has it: `record_generation`), unless it says so already."""
     key = f"{prefix}/scans.json"
     cur = store.read_json(key) if store.exists(key) else None
-    if cur is None or cur.get("slices") != has_slices:
-        store.write_text(key, json.dumps({**scans, "slices": has_slices}, indent=1) + "\n")
+    if cur is None or cur.get("slices") != has_slices or has_generation(cur) != generation:
+        store.write_text(key, json.dumps(record_generation({**scans, "slices": has_slices}, generation), indent=1) + "\n")
 
 GROUPS_SCHEMA = pa.schema([
     pa.field("rg", pa.int32(), nullable=False),
@@ -623,10 +702,11 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG) -> tup
     Returns `({sort: {rows, groups, bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
     served, sorts = gen_dir / "served", {}
+    gen = has_generation(scans)
     for sort in served_sorts(scans["slices"]):
         sub, _, _ = SORTS[sort]
         t1 = monotonic()
-        sd = write_served(con, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", SUB_SCHEMA[sub],
+        sd = write_served(con, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen),
                           rg_rows=rg_rows, stamps=stamps)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
@@ -804,6 +884,9 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
     root = _root(store, prefix, mount)
     scans = store.read_json(f"{prefix}/scans.json")
     has_slices = gen_sliced(store, prefix)
+    # The objects' native version: recorded, else whether the folded path versions carry it.
+    has_gen = has_generation(scans) or GENERATION in {
+        r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(root + '/pvl/r*.parquet')})").fetchall()}
     out_dir = Path(out) / "served"
     if todo == ["stats"]:
         doc = {**churn_stats(con, root, scans), "slices": has_slices}
@@ -812,7 +895,7 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         if not no_upload:
             _refuse_overwrite(store, [f"{dst_prefix}/served/stats.json"])
             store.put_tree(out_dir, f"{dst_prefix}/served")
-            record_slices(store, dst_prefix, scans, has_slices)
+            record_slices(store, dst_prefix, scans, has_slices, has_gen)
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
         return
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
@@ -821,7 +904,7 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         if sort not in served_sorts(has_slices):
             err(f"cut {sort}: {prefix} names no owner; no slice sorts")
             continue
-        schema = SUB_SCHEMA[sub]
+        schema = served_schema(sort, has_gen)
         if not no_upload:
             _refuse_overwrite(store, [f"{dst_prefix}/served/{sort}{x}" for x in (".parquet", ".groups.parquet", ".json")])
         t0 = monotonic()
@@ -836,7 +919,7 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         print(json.dumps(doc), flush=True)
     if not no_upload:
         # The generation's scans and owner axis (the reader's `scans.json`; under `-O`, the new generation's).
-        record_slices(store, dst_prefix, scans, has_slices)
+        record_slices(store, dst_prefix, scans, has_slices, has_gen)
 
 
 def download_served(store: Store, prefix: str, dst: Path, *, workers: int = 16) -> None:

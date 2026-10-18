@@ -347,15 +347,41 @@ def test_finish_args(tmp_path):
     assert H.finish_args(0, None, [], dag) == ["-x", "0", "-D", str(dag)]
 
 
-def test_run_config_escapes_into_a_groovy_env_scope():
+def test_run_config_is_a_groovy_env_scope():
     """The run id and the profile JSON reach every task through the head's `run.config` `env` scope (out of the task
-    hash, so a resume from a new head job keeps the cache); quotes, backslashes and newlines survive Groovy."""
-    assert H.run_config("run-1", '{"a": "it\'s", "b": "x\\\\y\\n"}') == (
+    hash, so a resume from a new head job keeps the cache): the JSON base64'd (`profile_env_value`), a run id that
+    can't need quoting."""
+    import base64
+
+    profile_json = '{"a": "it\'s", "b": "x\\\\y\\n"}'
+    assert H.run_config("oa-r2-scan-manual-c51e504f-ecbc-495200", profile_json) == (
         "env {\n"
-        "    DT_RUN_ID = 'run-1'\n"
-        "    DT_SCAN_PROFILE_JSON = '{\"a\": \"it\\'s\", \"b\": \"x\\\\\\\\y\\\\n\"}'\n"
+        "    DT_RUN_ID = 'oa-r2-scan-manual-c51e504f-ecbc-495200'\n"
+        f"    DT_SCAN_PROFILE_JSON = 'base64:{base64.b64encode(profile_json.encode()).decode()}'\n"
         "}\n"
     )
+    assert H.run_config("", profile_json).split("\n")[1] == "    DT_RUN_ID = ''"  # a local run that isn't recorded
+    with pytest.raises(ValueError) as e:
+        H.run_config('run "1"', profile_json)
+    assert str(e.value) == "run id 'run \"1\"': Nextflow exports it into each task's script unescaped"
+
+
+def test_profile_json_survives_nextflows_task_export(tmp_path):
+    """Nextflow writes an `env` scope value into each task's `.command.run` as `export NAME="<value>"`, inner double
+    quotes unescaped: raw JSON reached the task as `{data:…}` and every task failed (r2's manual scan 2026-10-18T1626).
+    The value the head puts there must come through that export, and the task decode it to the same profile."""
+    import subprocess
+
+    from dt_cloud import scan_steps as S
+
+    profile_json = '{"deployment": "d", "say": "it\'s \\"q\\" $HOME `x` \\\\ \\n"}'
+    run_id = "oa-r2-scan-manual-c51e504f-ecbc-495200"
+    value = S.profile_env_value(profile_json)
+    exported = subprocess.run(["bash", "-c", f'export X="{value}" R="{run_id}"; printf "%s\\n%s" "$X" "$R"'],
+                              capture_output=True, text=True, check=True).stdout.split("\n")
+    assert exported[1] == run_id
+    assert S.profile_env_json({S.PROFILE_JSON_ENV: exported[0]}) == profile_json
+    assert S.profile_env_json({S.PROFILE_JSON_ENV: profile_json}) == profile_json  # a hand-set raw JSON still reads
 
 
 def test_reproc_still_fetches_an_adopted_listing():

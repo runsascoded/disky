@@ -417,6 +417,42 @@ def access_ingest(ctx: Ctx, arg: str | None) -> None:
                warn="access ingest failed (read recency lags until the next run's ingest)")
 
 
+#: Where `access-r2` keeps the read aggregate in the data store (`options.index.access` names it).
+ACCESS_R2_KEY = "access/r2/agg.parquet"
+
+
+def _access_r2_check(p: ScanProfile) -> list[str]:
+    if p.opts("access-r2").get("state"):
+        return []
+    return ["options.access-r2.state: required (the collector archive's `state.json`, e.g. `r2://<archive>/state.json`)"]
+
+
+@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str}, requires=_access_r2_check)
+def access_r2(ctx: Ctx, arg: str | None) -> None:
+    """The R2 access collector's read aggregates → one layer-2a parquet for `index` (`options.index.access`), beside
+    `list`: `dt-cloud access r2-agg -s <state>`, every hour the collector's `state.json` names, cut at the scan's
+    instant. Cumulative (all reads before the scan), so it replaces the data store's one key (`out`, default
+    `access/r2/agg.parquet`) rather than adding a shard. No reads yet, or a failure: the earlier aggregate stays (valid as
+    of its scan) and `index` runs with it. The collector archive's key goes in `options.access-r2.secrets`, its endpoint
+    in `endpoint` (default `$R2_ENDPOINT`), set for this one command only."""
+    if ctx.reproc:
+        err("access-r2 off under REPROC")
+        return
+    local = ctx.work / "access-r2" / "agg.parquet"
+    endpoint = ctx.opt("access-r2", "endpoint") or ctx.env.get("R2_ENDPOINT")
+    env = {"DISK_TREE_R2_ENDPOINT_URL": str(endpoint)} if endpoint else {}
+    with ctx.phase("access-r2"):
+        ran = ctx.sh(["dt-cloud", "access", "r2-agg", "-d", ctx.scan, "-o", local, "-s", ctx.opt("access-r2", "state")], fatal=False,
+                     env=env, warn="r2 read aggregate failed (the index reads the previous one)")
+        if ran is None or not local.exists():
+            return
+        key = ctx.data_root / str(ctx.opt("access-r2", "out", ACCESS_R2_KEY))
+        key.parent.mkdir(parents=True, exist_ok=True)
+        tmp = key.with_name(key.name + ".tmp")
+        shutil.copyfile(local, tmp)
+        tmp.replace(key)
+
+
 def s3_client(endpoint: str | None):
     """A virtual-hosted client (CAIOS rejects path-style object calls, `PathStyleRequestNotAllowed`)."""
     import boto3
@@ -1061,13 +1097,34 @@ def r2_profile(env: dict[str, str], home: Path | None = None) -> None:
     env["R2_ARCHIVE"] = f"r2://{env['R2_BUCKET']}"
 
 
+#: The prefix of a base64-encoded `$DT_SCAN_PROFILE_JSON` (`profile_env_value`).
+PROFILE_B64 = "base64:"
+
+
+def profile_env_value(profile_json: str) -> str:
+    """The head's `$DT_SCAN_PROFILE_JSON` for its tasks: base64, since Nextflow writes an `env` scope value into each
+    task's script as `export NAME="<value>"` with inner double quotes unescaped (raw JSON reached the task as
+    `{data:…}`); base64's alphabet means the same inside double quotes."""
+    import base64
+
+    return PROFILE_B64 + base64.b64encode(profile_json.encode()).decode()
+
+
+def profile_env_json(env: Mapping[str, str]) -> str:
+    """`$DT_SCAN_PROFILE_JSON` as JSON: decoded when the head encoded it (`profile_env_value`), as is when set by hand."""
+    import base64
+
+    v = env[PROFILE_JSON_ENV]
+    return base64.b64decode(v.removeprefix(PROFILE_B64), validate=True).decode() if v.startswith(PROFILE_B64) else v
+
+
 def load_profile_env(env: Mapping[str, str], path: str | None = None) -> ScanProfile:
     from . import scan_profile
 
     if path:
         return scan_profile.load(path)
     if env.get(PROFILE_JSON_ENV):
-        return scan_profile.parse(json.loads(env[PROFILE_JSON_ENV]), where=f"${PROFILE_JSON_ENV}")
+        return scan_profile.parse(json.loads(profile_env_json(env)), where=f"${PROFILE_JSON_ENV}")
     if env.get(PROFILE_PATH_ENV):
         return scan_profile.load(env[PROFILE_PATH_ENV])
     raise StepFailed(2, f"no profile: pass -p FILE, or set ${PROFILE_JSON_ENV} (the head does) or ${PROFILE_PATH_ENV}")

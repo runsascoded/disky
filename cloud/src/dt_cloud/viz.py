@@ -134,19 +134,21 @@ def _write_store(
     asof_day: int = 0,
     age_cols: tuple[str, ...] = (),
     search: bool = False,
+    generation: bool = False,
 ) -> dict[str, dict]:
     """The store's sorts beside ``path_index`` (specs/done/path-store.md §4.3) from
     the rolled-up dir slices (``ptu``, ``dir_stats``, ``dir_attr`` when
     attributing) and the listing's object rows (``src``): one layer-2 shaped
     union (`index.STORE_L2`, streamed to disk, removed after) cut by the
     engine into `path` + `bysize` (+ `-by-user` when attributing). Returns
-    `index.write_sorts`'s summary.
+    `index.write_sorts`'s summary. ``generation``: the objects' native version
+    (`index.GENERATION`, the listing's) as the last column, NULL on dirs.
 
     Structural counts are per path, from the dir set itself (cheap: dirs, not
     objects × depth): `n_children` = the dir's own objects + its direct
     subdirs; `n_desc` = own objects + Σ over subdirs of (`n_desc` + 1), folded
     bottom-up one depth at a time."""
-    from .index import write_sorts
+    from .index import GENERATION, write_sorts
 
     if path_index.name != "path-index.parquet":
         raise ValueError(f"the store's `path` sort is served as path-index.parquet; got {path_index}")
@@ -179,7 +181,7 @@ def _write_store(
             """
         )
     _rss("dstruct")
-    columns = store_columns([([*STORE_L2_SHAPE[0], *age_cols], STORE_L2_SHAPE[1])])
+    columns = [*store_columns([([*STORE_L2_SHAPE[0], *age_cols], STORE_L2_SHAPE[1])]), *([GENERATION] if generation else [])]
     dir_exprs = {
         "path": "p.path", "usr": "p.usr", "size": "p.b::BIGINT", "depth": "p.depth::INTEGER", "kind": "'dir'",
         "n_files": "p.o::BIGINT", "n_children": "(d.own_o + d.n_subdirs)::BIGINT", "n_desc": "n.n_desc::BIGINT",
@@ -190,6 +192,7 @@ def _write_store(
         "sum_storage_class_id_3": "coalesce(p.c3, 0)::BIGINT",
         "sum_storage_class_id_4": "coalesce(p.c4, 0)::BIGINT",
         **{c: f"coalesce(p.{c}, 0)::BIGINT" for c in age_cols},
+        GENERATION: "NULL::BIGINT",
     }
     # An object is attributed to its dir's owner (the same deepest-prefix join
     # `dir_attr` resolved per dir; a leaf needs no explosion). The access log is
@@ -205,6 +208,7 @@ def _write_store(
         "created": "floor(epoch(x.created))::BIGINT", "last_read": "NULL::INTEGER",
         **{f"sum_storage_class_id_{c}": f"(CASE WHEN x.storage_class_id = {c} THEN x.size_bytes ELSE 0 END)::BIGINT" for c in (2, 3, 4)},
         **{c: f"(CASE WHEN x.created IS NOT NULL AND {age_bucket_sql('x.created', str(asof_day))} = {i} THEN x.size_bytes ELSE 0 END)::BIGINT" for i, c in enumerate(age_cols)},
+        GENERATION: f"x.{GENERATION}::BIGINT",
     }
     sel = lambda exprs: ", ".join(f"{exprs[c]} AS {c}" for c in columns)  # noqa: E731
     store = path_index.with_name(STORE_L2)
@@ -256,6 +260,7 @@ def write_path_index(
     age_strata: bool = False,
     user_sort_tiers: tuple[str, ...] | None = None,
     search: bool = False,
+    generation: bool = False,
 ) -> dict:
     """Write age.json / meta.json under ``out_dir`` (+ the path store's sorts
     beside ``path_index``); returns meta.
@@ -266,7 +271,9 @@ def write_path_index(
     fleet's top rows (gcs 9/30: 413) — so gcs keeps ``("bysize",)``: one
     copy instead of two. ``row_group_rows`` overrides the 8K default.
     ``search`` writes the search sidecars beside the `path` sort
-    (specs/path-store-search.md).
+    (specs/path-store-search.md). ``generation`` (`path-index -G`, gcs) adds
+    each object's `generation` from the listing as the store's last column
+    (NULL on dirs); off, the sorts have no such column.
 
     ``path_index`` (``<dir>/path-index.parquet``) writes the store
     (specs/done/path-store.md §4.3): every dir row — every ancestor path ×
@@ -557,7 +564,7 @@ def write_path_index(
     _rss("ptu")
     sorts: dict[str, dict] = {}
     if path_index is not None:
-        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows, user_sort_tiers=user_sort_tiers, asof_day=asof_day, age_cols=age_cols, search=search)
+        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows, user_sort_tiers=user_sort_tiers, asof_day=asof_day, age_cols=age_cols, search=search, generation=generation)
         _rss("store")
         # Provenance sidecar: the attributing prefixes' user/source/evidence.
         from .extras import write_extras

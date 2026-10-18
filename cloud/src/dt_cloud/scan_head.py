@@ -22,6 +22,7 @@ import csv
 import datetime as dt
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -33,7 +34,7 @@ from urllib.parse import urlparse
 
 from .cost_labels import check_label
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
-from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS
+from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS, profile_env_value
 
 
 def err(*a: object) -> None:
@@ -340,7 +341,9 @@ def run_config(run_id: str, profile_json: str) -> str:
     """The run's own task env, as a Nextflow `env` scope: this head's run id and the profile JSON. Nextflow's task hash
     leaves the `env` scope out (unlike anything in a task's script), so a resume from a new head job (a new
     `BATCH_JOB_UID`), or after a profile edit, still finds the finished tasks in the cache."""
-    return f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    DT_SCAN_PROFILE_JSON = {_groovy(profile_json)}\n}}\n"
+    if not re.fullmatch(r"[A-Za-z0-9._-]*", run_id):  # empty: a local run that isn't recorded
+        raise ValueError(f"run id {run_id!r}: Nextflow exports it into each task's script unescaped")
+    return f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    DT_SCAN_PROFILE_JSON = {_groovy(profile_env_value(profile_json))}\n}}\n"
 
 
 def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:

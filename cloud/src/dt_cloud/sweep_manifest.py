@@ -15,6 +15,13 @@ overwrite rule. Those listings are read once, up front, restricted to the held
 items (``AsOfHold``); items as of the dispatch scan need no extra read. What is
 held back is counted as ``skipped_after_as_of``.
 
+Once an ``as_of`` scan's raw listing is gone (specs/lean-scans.md §3.1), the
+interval store answers the same question (``HoldSource``): the objects live at
+that scan in its ``path`` sort, each with its version's ``generation`` (a
+generation that carries it) and created second
+(``interval_export.object_identities``). By default the listing is read when
+it exists and the store otherwise.
+
 Exact items (specs/file-assign.md) ride beside the bands: an exact key matches
 ``name == key`` only — in row-group pruning, the eligible mask and the
 ``as_of`` hold — never ``key.bak`` or ``key/…``. An exact key under a staged
@@ -162,6 +169,18 @@ def minimal_items(bands: tuple[str, ...] | list[str], exact: tuple[str, ...] | l
     """``minimal_bands(bands)`` and the sorted exact keys no band covers."""
     mb = minimal_bands(bands)
     return mb, sorted(k for k in set(exact) if not any(k.startswith(b) for b in mb))
+
+
+@dataclass(frozen=True)
+class HoldSource:
+    """Where an ``as_of`` scan's object identities come from: ``listing`` (its
+    raw listing shards, required), ``store`` (the interval store at ``store``,
+    generation ``gen`` or its current), or ``auto`` — the listing when it has
+    shards for the bucket (or no store is given), else the store."""
+
+    mode: str = "auto"
+    store: str | None = None
+    gen: str | None = None
 
 
 def _upper(prefix: str) -> str:
@@ -483,20 +502,27 @@ def build_manifests(
     window: int | None = None,
     as_of: dict[str, dict[str, str]] | None = None,
     objects_by_bucket: dict[str, tuple[str, ...]] | None = None,
+    hold_source: HoldSource = HoldSource(),
 ) -> dict[str, dict]:
     """Write one manifest parquet per bucket and return summary entries.
 
     ``as_of[bucket][item]`` is the scan a band (or exact key) was staged
     against; one whose scan is not ``date`` keeps only the objects that scan
     vouches for (``AsOfHold``). ``objects_by_bucket[bucket]`` are exact keys
-    (``name == key``)."""
+    (``name == key``). ``hold_source``: where an ``as_of`` scan's identities
+    are read (``HoldSource``: its listing when there, else the interval store)."""
     workers = workers or min(64, 2 * (os.cpu_count() or 4))
     window = window or 2 * workers
     objects = objects_by_bucket or {}
     buckets = list(dict.fromkeys([*bands_by_bucket, *objects]))
     items = {b: (tuple(bands_by_bucket.get(b, ())), tuple(objects.get(b, ()))) for b in buckets}
     with ManifestProgress(workers, window) as progress:
-        return _build_manifests(root, date, items, out, workers, window, progress, as_of or {})
+        return _build_manifests(root, date, items, out, workers, window, progress, as_of or {}, hold_source)
+
+
+def _has_shards(fs: pafs.FileSystem, rootpath: str, date: str, bucket: str) -> bool:
+    selector = pafs.FileSelector(f"{rootpath}/listing/{date}/{bucket}", allow_not_found=True)
+    return any(info.is_file and info.path.endswith(".parquet") for info in fs.get_file_info(selector))
 
 
 def _shards(fs: pafs.FileSystem, rootpath: str, root: str, date: str, bucket: str) -> list[str]:
@@ -515,10 +541,12 @@ def load_holds(
     items_by_bucket: dict[str, tuple[tuple[str, ...], tuple[str, ...]]],
     as_of: dict[str, dict[str, str]],
     workers: int,
+    source: HoldSource = HoldSource(),
 ) -> dict[str, AsOfHold]:
     """Each bucket's ``AsOfHold`` (buckets whose items are all as of ``date``
     have none): every held band's (and exact key's) rows from its own
-    ``as_of`` listing, read with the same row-group pruning as the manifest.
+    ``as_of`` listing, read with the same row-group pruning as the manifest,
+    or from the interval store (``source``).
     ``items_by_bucket[bucket]`` = ``(bands, exact keys)``."""
     holds: dict[str, AsOfHold] = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -535,13 +563,20 @@ def load_holds(
                     by_scan.setdefault(scan, ([], []))[1].append(key)
             if not by_scan:
                 continue
-            futures = [
-                pool.submit(scan_shard, fs, shard, mb, **({"exact": mx} if mx else {}))
-                for scan, (hb, hx) in sorted(by_scan.items())
-                for mb, mx in [minimal_items(hb, hx)]
-                for shard in _shards(fs, rootpath, root, scan, bucket)
-            ]
-            tables = [t.select(["name", "generation", "created"]) for f in futures if (t := f.result().table) is not None]
+            futures, tables, sources = [], [], {}
+            for scan, (hb, hx) in sorted(by_scan.items()):
+                mb, mx = minimal_items(hb, hx)
+                if source.mode == "listing" or (source.mode == "auto" and (source.store is None or _has_shards(fs, rootpath, scan, bucket))):
+                    sources[scan] = "listing"
+                    futures += [pool.submit(scan_shard, fs, shard, mb, **({"exact": mx} if mx else {})) for shard in _shards(fs, rootpath, root, scan, bucket)]
+                    continue
+                if source.store is None:
+                    raise SystemExit(f"no listing shards for {bucket} under {root}/listing/{scan}/, and no interval store to read the as_of scan from")
+                from .interval_export import object_identities
+
+                sources[scan] = "interval store"
+                tables.append(object_identities(source.store, scan, bucket, mb, mx, gen=source.gen))
+            tables += [t.select(["name", "generation", "created"]) for f in futures if (t := f.result().table) is not None]
             ref = (
                 pa.concat_tables(tables).sort_by("name").combine_chunks()
                 if tables
@@ -552,7 +587,7 @@ def load_holds(
             current = tuple(minimal_bands([b for b in bands if scans.get(b) in (None, date)]))
             current_exact = tuple(sorted(k for k in exact if scans.get(k) in (None, date)))
             holds[bucket] = AsOfHold(current=current, held=held, ref=ref, current_exact=current_exact, held_exact=held_exact)
-            err(f"  {bucket}: {len(held) + len(held_exact)} item(s) as of {', '.join(sorted(by_scan))} — {ref.num_rows:,} objects vouched for")
+            err(f"  {bucket}: {len(held) + len(held_exact)} item(s) as of {', '.join(f'{s} ({sources[s]})' for s in sorted(by_scan))} — {ref.num_rows:,} objects vouched for")
     return holds
 
 
@@ -565,6 +600,7 @@ def _build_manifests(
     window: int,
     progress: ManifestProgress,
     as_of: dict[str, dict[str, str]],
+    hold_source: HoldSource = HoldSource(),
 ) -> dict[str, dict]:
     fs, rootpath = resolve_fs(root)
     tasks: list[tuple] = []
@@ -573,7 +609,7 @@ def _build_manifests(
         progress.set_phase("discovering", bucket)
         shards_by_bucket[bucket] = _shards(fs, rootpath, root, date, bucket)
     progress.set_phase("reading-as-of")
-    holds = load_holds(fs, rootpath, root, date, bands_by_bucket, as_of, workers)
+    holds = load_holds(fs, rootpath, root, date, bands_by_bucket, as_of, workers, hold_source)
     for bucket, (bands, exact) in bands_by_bucket.items():
         minimal, keys = minimal_items(bands, exact)
         hold = holds.get(bucket)

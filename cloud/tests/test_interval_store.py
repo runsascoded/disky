@@ -15,6 +15,9 @@ import pytest
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
 
+#: The store's class columns, as its rows name them (the oracles key them `c2`/`c3`/`c4`).
+C2, C3, C4 = (ist.CLASS_COLS[k] for k in (2, 3, 4))
+
 DATES = ["2026-07-30", "2026-07-31", "2026-08-02", "2026-08-03", "2026-08-04", "2026-08-05"]
 V2_FROM = 3  # scans from here on are store generations (v2); earlier ones v1 indexes
 
@@ -167,7 +170,7 @@ def test_slice_versions_reconstruct_every_scan(built):
         for r in _live(out, "sv", s["ts"]):
             got[(r["depth"], r["path"], r["usr"])] = {"kind": r["kind"], "size": r["size"], "n_files": r["n_files"], "n_children": r["n_children"],
                                                       "n_desc": r["n_desc"], "mtime": r["mtime"], "dr": round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,
-                                                      "wb": r["wb"], "c2": r["c2"], "c3": r["c3"], "c4": r["c4"], "last_read": r["last_read"]}
+                                                      "wb": r["wb"], "c2": r[C2], "c3": r[C3], "c4": r[C4], "last_read": r["last_read"]}
         want = _slice_oracle(root, s)
         assert got == want, s["id"]
         n += len(want)
@@ -196,7 +199,7 @@ def test_path_versions_reconstruct_every_scan(built):
         for r in _live(out, "pv", s["ts"]):
             got[(r["depth"], r["path"])] = {"kind": r["kind"], "size": r["size"], "n_files": r["n_files"], "n_children": r["n_children"],
                                             "n_desc": r["n_desc"], "mtime": r["mtime"], "dr": round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,
-                                            "wb": r["wb"], "c2": r["c2"], "c3": r["c3"], "c4": r["c4"], "us": r["us"]}
+                                            "wb": r["wb"], "c2": r[C2], "c3": r[C3], "c4": r[C4], "us": r["us"]}
         assert got == {k: {c: v for c, v in a.items() if c != "last_read"} for k, a in want.items()}, s["id"]
 
 
@@ -216,10 +219,10 @@ def test_fold_equals_versioning_with_read_days(built):
         for r in _live(out, "pvl", s["ts"]):
             got[(r["depth"], r["path"])] = {"kind": r["kind"], "size": r["size"], "n_files": r["n_files"], "n_children": r["n_children"],
                                             "n_desc": r["n_desc"], "mtime": r["mtime"], "dr": round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,
-                                            "wb": r["wb"], "c2": r["c2"], "c3": r["c3"], "c4": r["c4"], "us": r["us"], "last_read": r["last_read"]}
+                                            "wb": r["wb"], "c2": r[C2], "c3": r[C3], "c4": r[C4], "us": r["us"], "last_read": r["last_read"]}
         assert got == want, s["id"]
     t = pa.concat_tables([pq.read_table(p) for p in sorted((out / "pvl").glob("r*.parquet"))]).to_pylist()
-    key = lambda r: tuple(r[c] for c in ("kind", "size", "n_files", "n_children", "n_desc", "mtime", "wb", "c2", "c3", "c4", "us", "last_read")) + (round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,)
+    key = lambda r: tuple(r[c] for c in ("kind", "size", "n_files", "n_children", "n_desc", "mtime", "wb", C2, C3, C4, "us", "last_read")) + (round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,)
     assert [(a["path"], a["vt"]) for a, b in zip(t, t[1:]) if (a["depth"], a["path"]) == (b["depth"], b["path"]) and a["vt"] == b["vf"] and key(a) == key(b)] == []
     assert (len(t), sum(1 for p in sorted((out / "pv").glob("r*.parquet")) for _ in pq.read_table(p).to_pylist())) == (116, 113)
 
@@ -229,7 +232,7 @@ def test_versions_are_runs_of_change(built):
     out = built[0]
     t = pa.concat_tables([pq.read_table(p) for p in sorted((out / "pv").glob("r*.parquet"))]).to_pylist()
     key = lambda r: (r["kind"], r["size"], r["n_files"], r["n_children"], r["n_desc"], r["mtime"],
-                     round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0, r["wb"], r["c2"], r["c3"], r["c4"], r["us"])
+                     round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0, r["wb"], r[C2], r[C3], r[C4], r["us"])
     adjacent_equal = [(a["path"], a["vt"]) for a, b in zip(t, t[1:]) if (a["depth"], a["path"]) == (b["depth"], b["path"]) and a["vt"] == b["vf"] and key(a) == key(b)]
     assert adjacent_equal == []
 
