@@ -1,5 +1,5 @@
 import { FaGithub } from 'react-icons/fa'
-import { MdBrightnessAuto, MdDarkMode, MdHelpOutline, MdLightMode } from 'react-icons/md'
+import { MdBrightnessAuto, MdDarkMode, MdHelpOutline, MdLightMode, MdLink } from 'react-icons/md'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
 import { SpeedDialTip } from './Tooltip'
@@ -75,6 +75,7 @@ export function SiteKbd({ extra = [], placeholder }: {
       },
     } : {}),
     'dialog:about': { label: 'About — the data, axes & colors', group: 'Site', handler: () => openDialog('about') },
+    'dialog:params': { label: 'URL params — what this link sets', group: 'Site', keywords: ['query', 'parameters', 'link'], handler: () => openDialog('params') },
     ...(canShare ? { 'dialog:share': { label: 'Share…', group: 'Share', handler: () => openDialog('share') } } : {}),
     ...(ident && !ident.guest ? { 'dialog:profile': { label: 'Profile… (name + avatar)', group: 'Site', handler: () => openDialog('profile') } } : {}),
     ...(canAssign ? { 'dialog:token': { label: 'Agent / CLI token…', group: 'Site', handler: () => openDialog('token') } } : {}),
@@ -143,6 +144,7 @@ export function SiteKbd({ extra = [], placeholder }: {
         { key: 'github', label: 'GitHub', icon: <FaGithub />, href: REPO_URL },
         ...extra,
         { key: 'help', label: `Help line: ${help}`, icon: <MdHelpOutline />, onClick: toggleHelp },
+        { key: 'params', label: 'URL params', icon: <MdLink />, onClick: () => openDialog('params') },
         {
           key: 'theme',
           label: `Theme: ${theme}`,

@@ -37,7 +37,7 @@
     "react-icons": "^5.7.0",
     "react-router-dom": "^6.30.6",
     "use-kbd": "https://github.com/runsascoded/use-kbd#9db5013f5e4034a14530dff37f1c015dc37c8c77",
-    "use-prms": "^0.5.0"
+    "use-prms": "https://github.com/runsascoded/use-prms#661e994157d9a595ebb0ab5276d5c579c9cc1ca9"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261013.1",
