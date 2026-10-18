@@ -47,6 +47,9 @@ config:
     STATIC_GEN: "2026-10-15"
     # The meta store's (site/wrangler.toml STORES_JSON meta STATIC_GEN): each capture also scans the bucket as `meta`.
     META_STATIC_GEN: "2026-10-18meta"
+    # Each capture runs the scan pipeline (`entry.sh` → `scan.sh`: `job/nf/scan.nf`, the local executor,
+    # `job/profiles/m3*.yml`); unset falls back to `ingest.sh` (specs/m3-scan-nf.md).
+    INGEST_PIPELINE: nf
   # Created empty; values set out of band by `aws/put-secrets` (never in state).
   disk-tree-m3:secrets:
     AWS_ACCESS_KEY_ID: disk-tree-m3/r2-access-key-id
