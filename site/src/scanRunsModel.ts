@@ -226,6 +226,17 @@ export interface RunSummary {
 
 /** The run behind `scan` among `rows` (`summarize`'s, newest first): its newest succeeded run (a failed attempt's resume),
  *  else its newest; undefined when no run recorded it. */
+/** The scans a hand submit started: a scan's trigger is its first run's (a manual resume of a scheduled scan stays
+ *  scheduled), and a scan with no recorded trigger is neither. */
+export function manualScans(rows: readonly RunSummary[]): Set<string> {
+  const first = new Map<string, ScanRun>()
+  for (const { run } of rows) {
+    const f = first.get(run.scan)
+    if (!f || (run.started_ts ?? Infinity) < (f.started_ts ?? Infinity)) first.set(run.scan, run)
+  }
+  return new Set([...first].filter(([, r]) => r.trigger === 'manual').map(([scan]) => scan))
+}
+
 export function scanRunOf(rows: readonly RunSummary[], scan: string): ScanRun | undefined {
   const runs = rows.map(r => r.run).filter(r => r.scan === scan)
   return runs.find(r => r.status === 'succeeded') ?? runs[0]

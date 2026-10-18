@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Iterable, Callable
 from pathlib import Path
 from time import monotonic
 
@@ -283,6 +283,22 @@ def due(gen_dir: Path, level: int | None) -> bool:
 # ── Pruning compacted generations ──────────────────────────────────────────
 
 
+def carry_markers(store: Store, old: str, into: str, files: Iterable[str] | None = None) -> int:
+    """Generation `old`'s parity markers (`verify/<id>.json`: `scan retire`'s gate) copied into `into` (a generation
+    holding the same versions: one `old` was compacted or backfilled into), each unless `into` has one for the scan;
+    returns how many. Before `old` is deleted, so its scans stay vouched for."""
+    pre = f"{PREFIX}/{old}/verify/"
+    keys = [k for k in (files if files is not None else store.keys(pre)) if k.startswith(pre) and k.endswith(".json") and "/" not in k[len(pre):]]
+    have = set(store.keys(f"{PREFIX}/{into}/verify/"))
+    n = 0
+    for k in sorted(keys):
+        dst = f"{PREFIX}/{into}/verify/{k[len(pre):]}"
+        if dst not in have:
+            store.write_bytes(dst, store.read_bytes(k))
+            n += 1
+    return n
+
+
 def prune_predecessors(store: Store, gen: str, *, now: float, grace_s: float = ar.GRACE_S, dry_run: bool = False,
                        log: Callable[[str], None] = err) -> list[dict]:
     """Each generation `gen` was compacted from (its `compaction.json`'s `from`, and theirs while unpruned), deleted from
@@ -305,6 +321,7 @@ def prune_predecessors(store: Store, gen: str, *, now: float, grace_s: float = a
         go = age >= grace_s and old != cur
         rec = {"gen": old, "objects": len(files), "bytes": sum(files.values()), "age_s": round(age), "deleted": 0}
         if go and not dry_run:
+            rec["markers"] = carry_markers(store, old, gen, files)
             rec["deleted"] = store.delete(sorted(files))
         log(f"prune {old} (compacted into {g} {round(age)}s ago): {len(files)} objects, {rec['bytes']:,} B "
             + ("deleted" if go and not dry_run else "would be deleted" if go else f"kept (grace {grace_s:.0f}s" + (", current" if old == cur else "") + ")"))

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cardSvg, type CardData } from './card'
 import { expDay, imagePath, ogKey } from './sign'
 import { anonymousPage, pageOf, serveCard, siteOf, stampPage, type OgEnv } from './serve'
-import { anonymousPolicy } from './policy'
+import { anonymousPolicy, genericTitle } from './policy'
 import { fullTier, mint } from './tokens'
 import { EPOCH } from './sign'
 import { sqliteD1 } from '../testD1'
@@ -261,11 +261,19 @@ describe('restricted anonymous OG responses', () => {
   })
 })
 
+describe('genericTitle', () => {
+  it('prefixes disky unless the label names it already', () => {
+    expect([genericTitle('CW storage'), genericTitle(undefined), genericTitle('m3 disky metadata'), genericTitle('Disky demo'), genericTitle('diskyard')])
+      .toEqual(['disky — CW storage', 'disky — storage', 'm3 disky metadata', 'Disky demo', 'disky — diskyard'])
+  })
+})
+
 describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)', () => {
   const STORES_JSON = JSON.stringify({
     meta: { path: '/meta', vars: { ROOT_LABEL: 'CW — meta', STORE_SCHEME: 'r2://' } },
     nas: { path: '/nas', vars: { ROOT_LABEL: 'nas', STORE_SCHEME: 'file:///', STORE_ROOT: 'mnt/user' } },
-    staff: { path: '/staff', scope: 'admin', vars: { ROOT_LABEL: 'staff only' } },
+    staff: { path: '/staff', scope: 'admin', vars: { ROOT_LABEL: 'staff only', OG_ANONYMOUS: 'generic' } },
+    ops: { path: '/ops', scope: 'admin', vars: { ROOT_LABEL: 'ops' } },
     hidden: { vars: { ROOT_LABEL: 'no page path' } },
   })
   const deployment = (extra: Partial<OgEnv> = {}) => env({ OG_CARDS: '1', STORES_JSON, STORE_ROOT: 'cw-root', OG_DEFAULT_COLOR: 'user', ...extra } as Partial<OgEnv>)
@@ -334,7 +342,15 @@ describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)
     expect(await stampPage(env({ OG_CARDS: '1', OG_ANONYMOUS: 'shape' }), new URL('https://cw.example/meta/snapshots'), html)).toBe(html)
   })
 
-  it('a store with its own scope is generic to anonymous fetches, whatever the deployment\'s policy', async () => {
+  it('a store\'s anonymous cards follow the deployment\'s `OG_ANONYMOUS` whatever its `scope` (that gates its pages), unless its vars set one', () => {
+    const policy = (e: Partial<OgEnv>, page: string) => anonymousPolicy(pageOf(deployment(e), new URL(`https://cw.example${page}`))!.env)
+    expect([
+      policy({ OG_ANONYMOUS: 'full' }, '/ops/x'), policy({}, '/ops/x'), policy({ OG_ANONYMOUS: 'shape' }, '/meta/x'),
+      policy({ OG_ANONYMOUS: 'full' }, '/staff/x'), policy({ OG_ANONYMOUS: 'full' }, '/x'),
+    ]).toEqual(['full', 'generic', 'shape', 'generic', 'full'])
+  })
+
+  it('a store setting its own `OG_ANONYMOUS = generic` is generic to anonymous fetches, whatever the deployment\'s policy', async () => {
     const open = deployment({ OG_ANONYMOUS: 'full' })
     await stampPage(open, new URL('https://cw.example/staff/secret'), new Response('shell'))
     expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{

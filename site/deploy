@@ -2,8 +2,10 @@
 # Build and deploy to Cloudflare Pages — the project named in wrangler.toml.
 # The deployment's own settings come from `site/deploy.env` (on its branch;
 # specs/oa-decoupling.md): `CLOUDFLARE_ACCOUNT_ID` (required), `PTR_SHORT` (the
-# local deploy-pointer prefix; default the project name) and `PUSH_REMOTE`
-# (default the branch's configured push remote).
+# local deploy-pointer prefix; default the project name), `PUSH_REMOTE`
+# (default the branch's configured push remote), and `PROD_BRANCH` / `DEV_BRANCH`
+# (the Pages branches a deploy / `--dev` deploy targets: the project's production
+# branch and its dev alias's; default `main` / `dev`).
 set -euo pipefail
 cd "$(dirname "$0")"
 # The Pages project this checkout deploys: `name = "…"` in wrangler.toml.
@@ -34,7 +36,7 @@ if [ "${1:-}" = "--status" ]; then exec ./cf-status; fi
 # otherwise agents reading the repo infer from stale source (bit us 8/27+8/28).
 # `-P`/`--no-push` keeps a deploy local (rare: experiments off the main branch).
 #
-# `-d`/`--dev`: a PREVIEW deploy — `--branch dev` → https://dev.<project>.pages.dev
+# `-d`/`--dev`: a PREVIEW deploy — `--branch $DEV_BRANCH` (default `dev`) → https://<branch>.<project>.pages.dev
 # (the Access app covers `*.<project>.pages.dev`, so it is gated like prod). Same
 # D1 + vars as production unless `[env.preview]` in wrangler.toml overrides them
 # (Pages: overriding ANY of vars/d1/kv there means restating ALL of them), and
@@ -53,7 +55,7 @@ if [ "$mode" = dev ]; then push=false; fi
 # A preview build takes the `[env.preview.vars]` overrides (`vite.config.ts`
 # reads `CLOUDFLARE_ENV`, as wrangler does): the dev stack's `STORE`/`AUTH_MODE`
 # are its own, not production's.
-branch=main; [ "$mode" = dev ] && branch=dev
+branch=${PROD_BRANCH:-main}; [ "$mode" = dev ] && branch=${DEV_BRANCH:-dev}
 if [ "$mode" = dev ]; then CLOUDFLARE_ENV=preview pnpm build; else pnpm build; fi
 pnpm exec wrangler pages deploy dist --project-name "$PROJECT" --branch "$branch"
 
@@ -92,7 +94,7 @@ short=${PTR_SHORT:-$PROJECT}
 ptr="$short-prod"; [ "$mode" = dev ] && ptr="$short-dev"
 git branch -f "$ptr" "$sha"
 echo "moved local $ptr → ${sha:0:9}"
-[ "$mode" = dev ] && echo "preview: https://dev.$PROJECT.pages.dev"
+[ "$mode" = dev ] && echo "preview: https://$branch.$PROJECT.pages.dev"
 if $push; then
   branch=$(git rev-parse --abbrev-ref HEAD)
   remote=${PUSH_REMOTE:-}
