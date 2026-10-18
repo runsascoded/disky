@@ -1,31 +1,52 @@
 {
   "name": "@rdub/treemap",
-  "version": "0.1.0-dist.5b6a9b7",
+  "version": "0.1.0-dist.0e485ff",
   "description": "SOTA React treemap: SVG + canvas renderers, shared-edge (gapless) tiling, dust-texturing for the long tail, rich per-cell coloring + emphasis rings, hover/pin events, Voronoi variant. Accessor-based, chart-lib-free.",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./squarify": "./src/squarify.ts",
-    "./parseColor": "./src/parseColor.ts",
-    "./divergingColor": "./src/divergingColor.ts",
-    "./svg": "./src/svg.ts",
-    "./styles.css": "./src/styles.css",
-    "./voronoi": "./src/voronoi/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./squarify": {
+      "types": "./dist/squarify.d.ts",
+      "import": "./dist/squarify.js"
+    },
+    "./parseColor": {
+      "types": "./dist/parseColor.d.ts",
+      "import": "./dist/parseColor.js"
+    },
+    "./divergingColor": {
+      "types": "./dist/divergingColor.d.ts",
+      "import": "./dist/divergingColor.js"
+    },
+    "./svg": {
+      "types": "./dist/svg.d.ts",
+      "import": "./dist/svg.js"
+    },
+    "./voronoi": {
+      "types": "./dist/voronoi/index.d.ts",
+      "import": "./dist/voronoi/index.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
-    "src",
+    "dist",
     "README.md"
   ],
   "sideEffects": [
     "*.css"
   ],
   "peerDependencies": {
-    "react": ">=18",
-    "react-dom": ">=18",
     "d3-hierarchy": ">=3",
-    "d3-voronoi-treemap": ">=1.1"
+    "d3-voronoi-treemap": ">=1.1",
+    "react": ">=18",
+    "react-dom": ">=18"
   },
   "peerDependenciesMeta": {
     "d3-hierarchy": {
@@ -45,13 +66,15 @@
     "d3-hierarchy": "^3.1.2",
     "d3-voronoi-treemap": "^1.1.2",
     "jsdom": "^25.0.1",
+    "tsup": "8.5.0",
     "typescript": "~5.9.3",
     "vitest": "^2.1.9"
   },
   "scripts": {
-    "build": "pnpm run typecheck",
+    "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -b --noEmit"
-  }
+  },
+  "module": "./dist/index.js"
 }
