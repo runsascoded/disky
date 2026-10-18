@@ -29,6 +29,7 @@ import { Avatar } from './Avatar'
 import { AUTH_MODE, signInUrl, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut, useStores } from './auth'
 import { ShareDialog } from './ShareDialog'
 import { closeDialog, openDialog, useDialog } from './dialogs'
+import { UrlParamsModal } from './UrlParamsModal'
 import { useRegistry } from './identities'
 import { PEERS, REPO_URL, peerHref } from './SiteKbd'
 import { buildLine } from './build'
@@ -186,6 +187,7 @@ function SiteDialogs() {
       {d === 'share' && <ShareDialog onClose={closeDialog} />}
       {d === 'profile' && <ProfileModal onClose={closeDialog} />}
       {d === 'token' && <TokenModal onClose={closeDialog} />}
+      {d === 'params' && <UrlParamsModal onClose={closeDialog} />}
     </FloatingPortal>
   )
 }
@@ -252,6 +254,7 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
                 <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('share') }}>Share…</button>
               )}
               <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('about') }}>About — the data, axes &amp; colors</button>
+              <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('params') }}>URL params — what this link sets</button>
               {noUserMenu && <DisplayMenu side="right" />}
               {extra?.map(e => (
                 <button key={e.key} type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); e.onClick() }}>{e.label}</button>

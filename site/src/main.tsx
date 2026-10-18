@@ -11,6 +11,7 @@ import { UnitsProvider } from './units'
 import { withoutOg } from './sharePreview'
 import { bootSessionLog } from './sessionLogBoot'
 import { forwardPs } from './pathStoreParam'
+import { describeUrlParams } from './urlParams'
 import 'use-kbd/styles.css'
 import './app.scss'
 
@@ -35,6 +36,8 @@ if (clean != null) history.replaceState(history.state, '', clean)
 
 // `?ps=…`: every `/api/` request reads the path store the page names (`pathStoreParam.ts`).
 forwardPs(window)
+// The URL params' descriptions, for the "URL params" dialog (`urlParams.ts`).
+describeUrlParams()
 
 // The session log (specs/session-log.md): off unless the deployment's window is open; never awaited.
 void bootSessionLog()

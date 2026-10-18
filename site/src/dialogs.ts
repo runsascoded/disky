@@ -1,8 +1,8 @@
-// The site's one open dialog (About, Share, Profile, Agent token): a module
+// The site's one open dialog (About, Share, Profile, Agent token, URL params): a module
 // store, so the ☰ / user menus and the ⌘K omnibar open the same instance.
 import { useSyncExternalStore } from 'react'
 
-export type Dialog = 'about' | 'share' | 'profile' | 'token'
+export type Dialog = 'about' | 'share' | 'profile' | 'token' | 'params'
 
 let current: Dialog | null = null
 const listeners = new Set<() => void>()
