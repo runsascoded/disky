@@ -173,6 +173,39 @@ s3 cp "$work/snap/"  "s3://$bucket/snapshots/$store/$date/" --recursive
 echo "[ingest] uploaded to s3://$bucket/{listing/$store/$date/index/$gen,snapshots/$store/$date}/ in $(( $(date +%s) - t0 ))s"
 ended upload -o "index=r2://$bucket/listing/$store/$date/index/$gen/" -o "snapshot=r2://$bucket/snapshots/$store/$date/"
 
+# ── The interval store (`dt-cloud interval-store`; specs/m3-interval-store.md): the primary store's scans ──
+# Each scan appends as a run to the store's current generation (`interval-store/CURRENT.json`, which the
+# site follows under PATH_STORE), compacting every 2^5 scans. The base generation is a build over every
+# scan so far: too big for the scheduled job, so only a job submitted for it (`aws/submit -c 4 -m 16384
+# -e IS_BUILD=1 <capture>`) runs one, and until then each ingest skips. Before index-sync, as the r2 demo's
+# daily ingest: a listed scan is already on the store. A failed append doesn't block the publish; the run
+# fails at the end.
+is_rc=
+if [[ $d1_store == primary ]]; then
+  is_common=(-L "listing/$store/{id}/index/{gen}/path-index.parquet" -s "r2://$bucket" -o "r2://$bucket"
+    -w "$work/interval-store" -p "$(vcpus)" -M "${IS_MEM:-10GB}")
+  is_cmd=
+  is_gen=$(cd "$app/cloud" && "$app/.venv/bin/dt-cloud" interval-store current -o "r2://$bucket") || is_rc=$?
+  if [[ -n $is_rc ]]; then
+    echo "[ingest] interval-store current failed (exit $is_rc); publishing the scan anyway" >&2
+  elif [[ -n $is_gen ]]; then is_cmd=add
+  elif [[ ${IS_BUILD:-} == 1 ]]; then is_cmd=build; is_gen=$date
+  else echo "[ingest] interval-store: no generation yet; skipping (IS_BUILD=1 builds it)"; fi
+  if [[ -n $is_cmd ]]; then
+    begin interval-store
+    t0=$(date +%s)
+    is_args=("${is_common[@]}")
+    [[ $is_cmd == build ]] && is_args=(-g "$is_gen" "${is_args[@]}")
+    if ( cd "$app/cloud" && "$time_bin" -v -o "$work/is-time.txt" "$app/.venv/bin/dt-cloud" interval-store "$is_cmd" "${is_args[@]}" ); then
+      echo "[ingest] interval-store $is_cmd (gen $is_gen) in $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/is-time.txt")"
+      ended interval-store -o "interval-store=r2://$bucket/interval-store/"
+    else
+      is_rc=$?
+      echo "[ingest] interval-store $is_cmd failed (exit $is_rc); publishing the scan anyway" >&2
+    fi
+  fi
+fi
+
 begin index-sync
 t0=$(date +%s)
 : "${D1_DB_ID:?}" "${CLOUDFLARE_API_TOKEN:?}" "${CLOUDFLARE_ACCOUNT_ID:?}"
@@ -199,11 +232,16 @@ if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
     # A base build over every scan needs a bigger box than the scheduled job's: only a job submitted
     # for it (`aws/submit -c 4 -m 16384 -e STATIC_BUILD=1 …`) runs one; until then each ingest skips.
     echo "[ingest] static-names: generation $STATIC_GEN not built yet; skipping (STATIC_BUILD=1 builds it)"
-    exit 0
+  else
+    begin static-names
+    ( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
+        -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(vcpus)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
+    echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/static-time.txt")"
+    ended static-names -o "static-names=r2://$bucket/static-names/$STATIC_GEN/"
   fi
-  begin static-names
-  ( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$STATIC_GEN" -L "listing/$store/{id}/index/{gen}/path-index.parquet" \
-      -s "r2://$bucket" -o "r2://$bucket" -w "$work/static-names" -p "$(vcpus)" -M "${STATIC_MEM:-5GB}" ${hex[@]+"${hex[@]}"} )
-  echo "[ingest] static-names $cmd -g $STATIC_GEN in $(( $(date +%s) - t0 ))s, peak RSS $(awk -F': ' '/Maximum resident/{printf "%.2f GiB", $2/1048576}' "$work/static-time.txt")"
-  ended static-names -o "static-names=r2://$bucket/static-names/$STATIC_GEN/"
+fi
+
+if [[ -n $is_rc ]]; then
+  SR_ERR="exit $is_rc: interval-store ${is_cmd:-current} (the scan is published; its store append is not)"
+  exit "$is_rc"
 fi
