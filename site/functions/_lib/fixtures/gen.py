@@ -346,12 +346,14 @@ AGES_ASOF = '2026-10-18T1014'
 AGES_EDGE_DAYS = (0, 1, 6, 7, 29, 30, 90, 91, 364, 365, 1094, 1095, 4000)
 
 
-def ages_rows() -> list[tuple[str, int, int, int]]:
+def ages_rows() -> list[tuple[str, int, int | str, int]]:
     rows = [(f'mixed/d{age}', 1000 + age, age, 13) for age in AGES_EDGE_DAYS]
     rows += [('mixed/future', 777, -3, 2)]
     rows += [(f'old/o{k}', 5000 * (k + 1), 2000 + 400 * k, 23) for k in range(3)]
     rows += [(f'new/n{k}', 300 * (k + 1), k, 0) for k in range(3)]
     rows += [(f'deep/x/y/z{age}', 64 << (age % 7), age, 6) for age in AGES_EDGE_DAYS]
+    # An epoch-dated object (`mtime` 0): the oldest `age_b*` bucket, no pyramid row.
+    rows += [('old/epoch', 999, 'epoch', 0)]
     return rows
 
 
@@ -367,7 +369,7 @@ def write_v2_ages(here: str) -> None:
             'bucket': ['bk'] * len(rows),
             'name': [n for n, *_ in rows],
             'size_bytes': [b for _, b, *_ in rows],
-            'created': [day0 - pd.Timedelta(days=age) + pd.Timedelta(hours=hour) for *_, age, hour in rows],
+            'created': [pd.Timestamp(0, tz='UTC') if age == 'epoch' else day0 - pd.Timedelta(days=age) + pd.Timedelta(hours=hour) for *_, age, hour in rows],
             'storage_class_id': [1] * len(rows),
         }).to_parquet(listing)
         pi = join(tmp, 'pi', 'path-index.parquet')
