@@ -74,7 +74,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # ROOT_TITLE = "the buckets this deployment scans"   # optional: the root crumb's tooltip (default: the store's scope word)
 # QUERY_SYNTAX = "simple"                     # the path filter's default syntax (`simple` | `regex`); unset = `simple`
 # OBJECT_BUCKETS = "my-bucket"                # comma-separated scanned buckets `/v1/objects` serves to members
-# STORES_JSON = '{"meta": {"scope": "meta", "path": "/meta"}}'  # secondary stores: `{"<key>": {"scope": …, "path": …, "vars": {…}, "secrets": {…}}}`
+# STORES_JSON = '{"meta": {"scope": "meta", "path": "/meta", "vars": {"ROOT_LABEL": "<deployment> disky metadata"}}}'  # secondary stores: `{"<key>": {"scope": …, "path": …, "vars": {…}, "secrets": {…}}}`; the meta store's `ROOT_LABEL` is its title and link-preview title: "<deployment's name> disky metadata"
 #   `path`: the store's page path, its `Store.path` (a `STORES_EXTRA` key's): the link unfurls under it are that store's
 #   (its ROOT_LABEL, STORE_SCHEME, data, and its own mount `"vars": {"STORE_ROOT": …}`); no `path` = no cards of its own
 #   a store's own static name index: `"vars": {"STATIC_GEN": "<gen>", …}` (its generation in INDEX_R2; FILTER_STATIC_HEAVY /

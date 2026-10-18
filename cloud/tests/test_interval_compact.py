@@ -170,6 +170,61 @@ def test_compacted_generations_leave_after_the_grace(run, tmp_path, monkeypatch)
     assert add(run["world"], store, tmp_path / "work")["predecessors"] == []
 
 
+def test_a_pruned_generations_verify_markers_move_to_its_successor(run, tmp_path, monkeypatch):
+    """A predecessor's parity markers (`verify/<id>.json`, `scan retire`'s gate) survive its prune: each is copied into
+    the generation it was compacted into, unless that one has its own for the scan (newer: kept); then `scan retire`'s
+    lineage still finds every scan's."""
+    store = tmp_path / "store"
+    shutil.copytree(run["store"], store)
+    root = store / ist.PREFIX
+    marker = lambda g, d: {"scan": d, "gen": g, "pass": True, "views": 1, "view_eq": 1, "diffs": 0, "diff_eq": 0}  # noqa: E731
+    for g, d in (("g", DATES[0]), ("g", DATES[1]), ("g.c001", DATES[2]), ("g.c002", DATES[1])):
+        (root / g / "verify").mkdir(exist_ok=True)
+        (root / g / "verify" / f"{d}.json").write_text(json.dumps(marker(g, d)))
+    t = max(p.stat().st_mtime for p in root.rglob("compaction.json"))
+    monkeypatch.setattr(sl, "now", lambda: t + ar.GRACE_S)
+    add(run["world"], store, tmp_path / "work")
+    assert {p.stem: json.loads(p.read_text())["gen"] for p in sorted((root / "g.c002" / "verify").glob("*.json"))} == {
+        DATES[0]: "g", DATES[1]: "g.c002", DATES[2]: "g.c001"}
+    assert [sorted(files(root / g)) for g in ("g", "g.c001")] == [["successor.json"], ["successor.json"]]
+
+
+def test_store_gc_deletes_superseded_generations_past_the_grace(run, tmp_path):
+    """`store-gc`: `-l` (the scan step's mode) deletes only the current generation's lineage (`g`, `g.c001`: each but
+    its `successor.json`, its markers moved first); without `-l` a rebuild's leftover (`old`) goes too unless `-k`;
+    within the grace nothing goes; static-names needs every live generation named."""
+    import time
+
+    from dt_cloud import store_gen_gc as sg
+    from dt_cloud.blobstore import Store
+
+    store = tmp_path / "store"
+    shutil.copytree(run["store"], store)
+    root = store / ist.PREFIX
+    shutil.copytree(root / "g.c002", root / "old")
+    (root / "g" / "verify").mkdir(exist_ok=True)
+    (root / "g" / "verify" / f"{DATES[0]}.json").write_text(json.dumps({"scan": DATES[0], "gen": "g", "pass": True}))
+    for g in ("s1", "s2"):
+        (store / "static-names" / g).mkdir(parents=True)
+        (store / "static-names" / g / "meta.json").write_text("{}")
+    st, later = Store(str(store)), time.time() + sg.GRACE_S
+    acts = lambda recs: [(r["gen"], r["action"]) for r in recs]  # noqa: E731
+    assert acts(sg.run(st, "interval-store", [], lineage_only=True, now=time.time())) == [
+        ("g", "keep"), ("g.c001", "keep"), ("g.c002", "keep"), ("old", "keep")]
+    assert acts(sg.run(st, "interval-store", [], lineage_only=True, now=later)) == [
+        ("g", "delete"), ("g.c001", "delete"), ("g.c002", "keep"), ("old", "keep")]
+    assert sorted(files(root / "g")) == sorted(files(run["store"] / ist.PREFIX / "g")) + ["verify/2026-07-30.json"]  # dry run
+    recs = sg.run(st, "interval-store", ["old"], now=later, execute=True)
+    assert ([(r["gen"], r["action"], r.get("markers")) for r in recs], [sorted(files(root / g)) for g in ("g", "g.c001")]) == (
+        [("g", "delete", 1), ("g.c001", "delete", 0), ("g.c002", "keep", None), ("old", "keep", None)], [["successor.json"], ["successor.json"]])
+    assert json.loads((root / "g.c002" / "verify" / f"{DATES[0]}.json").read_text())["gen"] == "g"
+    assert acts(sg.run(st, "interval-store", [], now=later)) == [("g.c002", "keep"), ("old", "delete")]
+    with pytest.raises(SystemExit):
+        sg.run(st, "static-names", [], now=later)
+    assert acts(sg.run(st, "static-names", ["s2"], now=later, execute=True)) == [("s1", "delete"), ("s2", "keep")]
+    assert sorted(p.name for p in (store / "static-names").iterdir() if any(p.iterdir())) == ["s2"]
+
+
 def test_an_interrupted_compaction_is_redone(run, tmp_path):
     """An earlier `add` died mid-compaction (part of `g.c001` uploaded, no successor record, the pointer unmoved): the
     next `add` replaces the attempt's keys and publishes the generation a clean compaction does."""

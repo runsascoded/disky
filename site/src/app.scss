@@ -111,6 +111,11 @@ header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: 
   display: flex; flex-direction: column; gap: 8px;
   .allowances-note { margin: 0; .nowrap { white-space: nowrap; } }
 }
+.non-live {
+  margin: 0; font-size: 12px; font-variant-numeric: tabular-nums;
+  .non-live-class { cursor: help; }
+  .nowrap { white-space: nowrap; }
+}
 header .hrow {
   display: flex;
   align-items: baseline;

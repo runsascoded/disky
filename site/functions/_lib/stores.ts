@@ -69,10 +69,11 @@ import { withReq } from './shared.js'
  * migration lineage serves several deploys, each with its own `STORE`). */
 export const PRIMARY_STORE = 'primary'
 
-/** The deployment's filter policy a secondary store inherits unless its config sets its own: whether the map's
- * filter is the static name index's (`FILTER_STATIC`), whether it is indexed-only (`FILTER_INDEXED_ONLY`) and whether
- * it answers path terms (`SEARCH_PATH_TERMS`). */
-export const INHERITED_VARS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY', 'SEARCH_PATH_TERMS'] as const
+/** The deployment's policy a secondary store inherits unless its config sets its own: whether the map's filter is the
+ * static name index's (`FILTER_STATIC`), whether it is indexed-only (`FILTER_INDEXED_ONLY`), whether it answers path
+ * terms (`SEARCH_PATH_TERMS`), and its link cards' anonymous tier (`OG_ANONYMOUS`: the store's pages unfurl as the
+ * deployment's do, its own `scope` gating the pages, not the previews; a store sets `generic` to keep its own). */
+export const INHERITED_VARS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY', 'SEARCH_PATH_TERMS', 'OG_ANONYMOUS'] as const
 
 /** The vars a store config may set; all but `INHERITED_VARS` are cleared for a secondary store. The static name
  * index's are per store (`STATIC_GEN`, `FILTER_STATIC_HEAVY`, `FILTER_STATIC_ANCHORS`): a store reads a static

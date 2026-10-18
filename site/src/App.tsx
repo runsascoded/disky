@@ -13,6 +13,7 @@ import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
+import { NonLive } from './NonLive'
 import { DiskSpace } from './DiskSpace'
 import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
@@ -1365,6 +1366,7 @@ function AppContent() {
 
       <DiskSpace space={meta?.disk_space} />
       {atRoot && <Allowances spec={store.allowances} classBytes={meta?.class_bytes} />}
+      {atRoot && <NonLive store={store} scan={asof} />}
 
       {mapTree && !mapFailed ? (
         <>

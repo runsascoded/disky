@@ -200,6 +200,10 @@ export interface TimeSeriesProps<T> {
    *  across them instead of joining its neighbours — a missing value is never
    *  drawn as a value. */
   gaps?: number[]
+  /** x's whose dots are drawn hollow (e.g. scans taken off the schedule). */
+  hollowXs?: number[]
+  /** x's marked by a small tick under the x-axis (the same scans, styled apart from the dots). */
+  tickXs?: number[]
   /** Vertical markers (`placeMarkers`): those inside the x-span get a line and a lane label above the plot. */
   markers?: Marker[]
   /** Wrap a marker's lane label (e.g. in a tooltip); `node` is the label (or a compact handle) as drawn. */
@@ -283,6 +287,8 @@ export function TimeSeries<T>({
   onBrush,
   window: xWindow,
   gaps,
+  hollowXs,
+  tickXs,
   markers,
   renderMarker,
   className,
@@ -358,6 +364,7 @@ export function TimeSeries<T>({
     : niceTicks(yMin, yMax, yTicks, yScale === 'log')
 
   // Collect all distinct x's across series for hover snapping.
+  const hollow = useMemo(() => new Set(hollowXs ?? []), [hollowXs])
   const allXs = useMemo(() => {
     const s = new Set<number>()
     for (const ser of series) for (const p of ser.points) s.add(getX(p))
@@ -676,19 +683,22 @@ export function TimeSeries<T>({
                 {drawn.map((d, i) => d.areaPath && <path key={`a${i}`} d={d.areaPath} fill={color} fillOpacity={getY0 ? 0.35 : 0.15} />)}
                 {drawn.map((d, i) => d.dashed && <path key={`d${i}`} d={d.dashed} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} strokeDasharray="4 4" />)}
                 {drawn.map((d, i) => <path key={`s${i}`} className="dt-ts-line" d={d.solid} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} />)}
-                {(s.dots ?? true) && sortedPts.map((p, i) => (
-                  <circle
-                    key={i}
-                    cx={xToPx(getX(p))}
-                    cy={yToPx(getY(p))}
-                    r={2.5}
-                    fill={color}
-                  />
-                ))}
+                {(s.dots ?? true) && sortedPts.map((p, i) => hollow.has(getX(p))
+                  ? <circle key={i} className="dt-ts-dot-hollow" cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={3.5} fill="var(--dt-ts-bg, #0d1117)" stroke={color} strokeWidth={2} />
+                  : <circle key={i} cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={2.5} fill={color} />)}
               </g>
             )
           })}
           </g>
+          {/* Ticks: a small triangle under the x-axis at each `tickXs` x. */}
+          {tickXs && tickXs.length > 0 && (
+            <g pointerEvents="none" className="dt-ts-ticks">
+              {tickXs.filter(x => x >= xMin && x <= xMax).map(x => {
+                const px = xToPx(x), y = pad.top + plotH + 1
+                return <path key={`t${x}`} className="dt-ts-tick" d={`M${px},${y}l3.5,6h-7z`} fill="var(--dt-ts-tick, rgba(139,148,158,0.9))" />
+              })}
+            </g>
+          )}
           {/* Markers: a thin dashed line from the lane down through the plot. */}
           {placedMarkers.length > 0 && (
             <g pointerEvents="none" className="dt-ts-markers">

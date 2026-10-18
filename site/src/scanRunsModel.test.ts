@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, scanRunOf, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
+  type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
 } from './scanRunsModel'
 
 export const run = (o: Partial<ScanRun> & Pick<ScanRun, 'run_id' | 'scan'>): ScanRun => ({
@@ -69,6 +69,19 @@ describe('scanRunOf: the run behind a scan (the map\'s "scanned … ago" tip lin
     expect(['2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09'].map(scan => scanRunOf(rows, scan)?.run_id ?? null)).toEqual([
       'a', 'b', 'c', null,
     ])
+  })
+})
+
+describe('manualScans: the scans a hand submit started (the size chart marks them)', () => {
+  it('a scan takes its first run\'s trigger: a manual resume of a scheduled scan stays scheduled; no trigger is neither', () => {
+    const rows = summarize([
+      run({ run_id: 's1', scan: '2026-10-17', trigger: 'schedule', started_ts: 100 }),
+      run({ run_id: 's1r', scan: '2026-10-17', trigger: 'manual', started_ts: 200 }),
+      run({ run_id: 'm1', scan: '2026-10-18T1354', trigger: 'manual', started_ts: 300 }),
+      run({ run_id: 'm2', scan: '2026-10-18T2009', trigger: 'manual', started_ts: null }),
+      run({ run_id: 'old', scan: '2026-10-15', started_ts: 50 }),
+    ], [], [], 3500)
+    expect([...manualScans(rows)].sort()).toEqual(['2026-10-18T1354', '2026-10-18T2009'])
   })
 })
 
