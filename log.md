@@ -12,7 +12,8 @@ Running record of disk-cleanup passes on this Mac. Newest first. Each entry: wha
   - 37 agent worktrees (clean, every commit reachable elsewhere; plain `git worktree remove`; `tmp/`s kept in `~/c/disky/tmp/worktree-cleanup-20261018/`, 711 M; root ok'd): **1.85 GiB**. 4 left (2 uncommitted, 2 locked by root).
   - Playwright chromium + headless shell 1200/1208/1217 (awair, ctbk, crashes, discord-agent, file-tree; re-download on `pw-install`). Kept 1223–1248 because slidev uses 1223/1228/1234/1243: **1.51 GiB**.
   - Emptied `~/.Trash` (no `disky/` runs in it): **0.83 GiB**.
-- End: **52 G free (89%)**, about 33 G recovered. Not touched: Signal (23 G, hands off), Docker (8.2 G, Ryan's call), `~/.codex`, Chrome caches (refill fast), the 14 staged Downloads items (0.65 GiB, dispatch from the UI).
+  - Docker: `docker system prune -a` (Ryan) freed 0 B, because the space was a `docker-container` buildx builder's state volume (`buildx_buildkit_friendly_visvesvaraya0_state`, 5.2 GB), which prune doesn't see. `docker buildx prune -a --builder friendly_visvesvaraya`: **4.88 GiB**; `Docker.raw` went from 8.1 G to 3.2 G allocated. Refill: the next local buildx build.
+- End: **52 G free (89%)**, about 33 G recovered. Not touched: Signal (23 G, hands off), `~/.codex`, Chrome caches (refill fast), the 14 staged Downloads items (0.65 GiB, dispatch from the UI).
 
 ## Parent synchronization and palette routes (2026-10-13)
 
