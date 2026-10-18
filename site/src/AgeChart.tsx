@@ -9,7 +9,7 @@ import { MODE_LABELS } from './types'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
 import { listingTime } from './listingTime'
-import { ageFill, placeBarLabels, textWidth } from './ageBars'
+import { ageFill, placeBarLabels, textWidth, yTicks } from './ageBars'
 import type { DateAxis } from './dateScale'
 
 const SLOTS = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8']
@@ -31,6 +31,8 @@ const dateBarColor = (i: number, n: number): string => dateColor(n > 1 ? i / (n 
 const LBL_FS = 9.5
 const LBL_PAD = 2
 const PAD_T = LBL_FS + 2 * LBL_PAD
+/** The y-axis labels' gutter, left of the bars (viewBox units). */
+const GUTTER = 36
 
 const dayToDate = (d: number): Date => new Date(d * 86400_000)
 const iso = (d: number): string => dayToDate(d).toISOString().slice(0, 10)
@@ -97,7 +99,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, mapMode, 
 }) {
   usePerfCommit('age')
   const time = listingTime(scheme)
-  const { fmtBytes } = useUnits()
+  const { fmtBytes, units } = useUnits()
   const fill = ageFill(mode, mapMode, picked)
   // Default to the finest granularity that still fits on screen: the most
   // bars we'll draw is MAX (≈8px each across the 900-unit viewBox), and finer
@@ -208,6 +210,8 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, mapMode, 
   const dspan = diff ? Math.max(diff.up + diff.down, 1) : 1
   const zeroY = diff ? (diff.up / dspan) * H : H
   const diffByBk = showDiff ? new Map(diff!.rowsD.map(d => [d.bk, d])) : null
+  const ticks = yTicks(H, units === 'iec' ? 1024 : 1000, showDiff ? { up: diff!.up, down: diff!.down } : { max: maxB })
+  const tickLabel = (v: number): string => (v < 0 ? `−${fmtBytes(-v)}` : showDiff && v > 0 ? `+${fmtBytes(v)}` : fmtBytes(v))
   const totals = showDiff ? [] : bars.map(bk => [...byBucket.get(bk)!.values()].reduce((a, v) => a + v, 0))
   const texts = totals.map(fmtBytes)
   const labels = showDiff ? [] : placeBarLabels(
@@ -282,12 +286,18 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, mapMode, 
           </span>
         </span>
       </div>
-      <svg viewBox={`0 ${-PAD_T} ${W} ${H + 24 + PAD_T}`} preserveAspectRatio="none" role="img" aria-label={showDiff ? `Bytes changed by ${time.label} ${gran}` : `Bytes by ${time.label} ${gran}`}>
+      <svg viewBox={`${-GUTTER} ${-PAD_T} ${W + GUTTER} ${H + 24 + PAD_T}`} preserveAspectRatio="none" role="img" aria-label={showDiff ? `Bytes changed by ${time.label} ${gran}` : `Bytes by ${time.label} ${gran}`}>
         <defs>
           <pattern id="age-xhatch" width={6} height={6} patternUnits="userSpaceOnUse">
             <path d="M0 0L6 6M6 0L0 6" stroke="rgb(0 0 0 / 0.35)" strokeWidth={1} />
           </pattern>
         </defs>
+        {ticks.map(t => (
+          <g key={`y${t.v}`}>
+            {!(showDiff && t.v === 0) && <line x1={0} y1={t.y} x2={W} y2={t.y} className="grid" />}
+            <text x={-5} y={t.y} dy="0.32em" textAnchor="end" className="tick">{tickLabel(t.v)}</text>
+          </g>
+        ))}
         {showDiff && <line x1={0} y1={zeroY} x2={W} y2={zeroY} className="zeroline" />}
         {bars.map((bk, i) => {
           let body

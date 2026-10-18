@@ -1399,6 +1399,7 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
   }
   .hoverband { fill: var(--ink); opacity: 0.06; }
   .zeroline { stroke: var(--ink-3); stroke-width: 0.5; opacity: 0.5; }
+  .grid { stroke: var(--ink-3); stroke-width: 0.5; opacity: 0.25; }
   .legend {
     display: flex;
     gap: 10px;
