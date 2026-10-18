@@ -946,7 +946,8 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     listing shards under `layout.listing`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
-    first, then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left to the first). `store` / `static_store`: the
+    first (`$R2_ARCHIVE` when the data store is a local dir), then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left
+    to the first). `store` / `static_store`: the
     stores (default the interval-store / static-names steps', else `$R2_ARCHIVE`); `static_gen` (default
     `options.static-names.gen`); `backup`: copy what goes there first; `markers_only`: never verify in the task. Never
     fatal: a failure warns, the files stay, the next run retries."""
@@ -971,9 +972,11 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
               *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
-    roots = [ctx.data_uri, *(archive if c == "r2" else c for c in o.get("copies", []))]
+    # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
+    first = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
+    roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
     with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
-        for i, root in enumerate(r for r in roots if r):
+        for i, root in enumerate(roots):
             d1 = [] if i == 0 and ctx.has(*CF) else ["-R"]
             backup = ["-b", o["backup"]] if i == 0 and o.get("backup") else []
             ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False, fails_phase=True,

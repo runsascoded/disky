@@ -697,17 +697,28 @@ def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
     without either; a dry run unless `execute`. The layout is the other steps' `<layer2>index/{gen}/path-index.parquet`."""
     env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ARCHIVE="r2://idx")
     opts = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}}
-    c = ctx(tmp_path, env, steps=["retire"], options={**opts, "retire": {"keep": 3, "layer2": True, "copies": ["r2"], "backup": "gs://bak"}})
+    c = ctx(tmp_path, env, data="gs://d", steps=["retire"], options={**opts, "retire": {"keep": 3, "layer2": True, "copies": ["r2"], "backup": "gs://bak"}})
     S.retire(c, None)
     w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
     common = f"-G s1 -k 3 -L l2/{{id}}/index/{{gen}}/path-index.parquet -l l2/{{id}}/*.parquet -o r2://idx -S r2://idx -w {w}"
     assert c.sh_impl.calls == [
-        f"dt-cloud scan retire -b gs://bak {common} -s <tmp>/data",
+        f"dt-cloud scan retire -b gs://bak {common} -s gs://d",
         f"dt-cloud scan retire {common} -R -s r2://idx",
     ]
-    x = ctx(tmp_path, env, steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
+    x = ctx(tmp_path, env, data="gs://d", steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
     S.retire(x, None)
-    assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s <tmp>/data"]
+    assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s gs://d"]
+
+
+def test_retire_local_data_retires_the_archive(tmp_path, env):
+    """A local data store (m3's: the task's ephemeral disk, R2 the store of record) holds only this scan: the archive is
+    the first root, with D1, and a `copies: [r2]` is that same root, not a second pass."""
+    env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ARCHIVE="r2://idx")
+    opts = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 7, "copies": ["r2"]}}
+    c = ctx(tmp_path, env, steps=["retire"], options=opts)
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 7 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o r2://idx -S r2://idx -w {w} -s r2://idx"]
 
 
 def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
