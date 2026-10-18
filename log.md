@@ -2,6 +2,18 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Pass (2026-10-18): 19 G → 52 G free, no user data touched
+
+- Start: `/` 19 G free (96%), from the 10/18 06:14 scan's map + diff (`c/disky/.claude/worktrees` +27 G, `wt/app` +13 G, `.cache/uv` 44 G since 10/03).
+- `overcount` first: the 41 agent worktrees were 30.3 GiB apparent but **2.57 GiB exclusive** (92% shared: pnpm hardlinks / clones); `wt/app/apps/tauri/target` 12.1 of 13.3 GiB exclusive; `~/Library/Caches` 25.5 GiB (Google 10.1, ms-playwright 4.75); Docker 8.24 GiB; `~/.codex` 6.39 GiB; `~/c/disky/tmp` 5.27 GiB.
+- Deleted (each `df` delta measured):
+  - `cargo clean --profile dev` in `wt/app/apps/tauri` (debug only; release kept, disky-app ok'd): **7.94 GiB**. Refill: next debug build.
+  - `uv cache prune` (unreferenced entries only; reported 35.6 GiB of files): **20.99 GiB**. Refill: only for packages no venv holds.
+  - 37 agent worktrees (clean, every commit reachable elsewhere; plain `git worktree remove`; `tmp/`s kept in `~/c/disky/tmp/worktree-cleanup-20261018/`, 711 M; root ok'd): **1.85 GiB**. 4 left (2 uncommitted, 2 locked by root).
+  - Playwright chromium + headless shell 1200/1208/1217 (awair, ctbk, crashes, discord-agent, file-tree; re-download on `pw-install`). Kept 1223–1248 because slidev uses 1223/1228/1234/1243: **1.51 GiB**.
+  - Emptied `~/.Trash` (no `disky/` runs in it): **0.83 GiB**.
+- End: **52 G free (89%)**, about 33 G recovered. Not touched: Signal (23 G, hands off), Docker (8.2 G, Ryan's call), `~/.codex`, Chrome caches (refill fast), the 14 staged Downloads items (0.65 GiB, dispatch from the UI).
+
 ## Parent synchronization and palette routes (2026-10-13)
 
 - Integrated committed cloud checkpoint `c56a1525` into local, retaining laptop support; advanced local to `7c2da9ba`, including the SSH capture, occupied-slot/timestamp and VM metadata picks. Merged that local checkpoint into m3 in `86a5d59b`, preserving guest path filtering, disk/VM diffs, capture labels and private deployment configuration.
