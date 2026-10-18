@@ -534,12 +534,12 @@ def _index_check(p: ScanProfile) -> list[str]:
             problems.append("data: a gs:// bucket or a local dir with options.index.mode path-index (its inputs are staged from GCS or read in place)")
         return problems
     return [f"options.index.{k}: only with mode path-index" + (" (index-write writes the age pyramids itself)" if k == "age_pyramids" else "")
-            for k in ("attribution", "access", "rules", "age_pyramids", "verify") if k in o]
+            for k in ("attribution", "access", "rules", "age_pyramids", "verify", "annotate") if k in o]
 
 
 @step("index", skippable=False, stage="index", requires=_index_check,
       options={"mode": str, "webdata": list, "lifecycle": bool, "mem": str, "threads": int, "args": list,
-               "attribution": list, "access": str, "rules": bool, "age_pyramids": bool, "verify": bool})
+               "attribution": list, "access": str, "rules": bool, "age_pyramids": bool, "verify": bool, "annotate": list})
 def index(ctx: Ctx, arg: str | None) -> None:
     """Every source's layer-2 (imported here from the listings unless `list` did), the snapshot JSONs
     (`options.index.webdata`: the deployment's command, `{web}` its out dir, `{sources}` the `<bucket>=<layer-2>` args),
@@ -637,7 +637,9 @@ def path_index(ctx: Ctx) -> None:
     `options.index.age_pyramids`: the age chart's tiers from the `path` sort (`dt-cloud age-pyramid -c`, checked against
     it), beside the sorts. `options.index.verify`: `dt-cloud index-verify` checks the index against the listings it was
     built from (per-bucket and total bytes / objects, the snapshot totals and age histogram, the age pyramids and the
-    `bysize` sort, where written) and writes `verification.json` beside the tiers; a mismatch fails the step."""
+    `bysize` sort, where written) and writes `verification.json` beside the tiers; a mismatch fails the step.
+    `options.index.annotate`: a command run on the snapshot after the aggregation, before the checks and the publish
+    (`{snap}`: its dir; `{listing}`: the first source's listing dir)."""
     key_dir = ctx.data_root / ctx.index_key
     for s in ctx.profile.sources:
         ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
@@ -667,6 +669,12 @@ def path_index(ctx: Ctx) -> None:
                 *[a for g in attr for a in ("-a", local(g))], *[a for g in xglobs for a in ("-x", local(g))],
                 "-o", snap, "-c", ctx.data_root / ctx.listing_key("dir-cache"), "-P", pi / "path-index.parquet",
                 *ctx.opt("index", "args", [])], env={"DUCKDB_TMP": str(tmp)})
+    annotate = ctx.opt("index", "annotate")
+    if annotate:
+        # the deployment's own stamp on the snapshot before it's checked and published (m3: `disk-tree capture-meta`,
+        # the capture's physical disk/VM bytes); `{snap}` the snapshot dir, `{listing}` the first source's listing dir
+        with ctx.phase("annotate"):
+            ctx.sh(ctx.expand(annotate, snap=snap, listing=ctx.listing_dir(ctx.profile.sources[0].bucket)))
     duck = [*(["-m", ctx.opt("index", "mem")] if ctx.opt("index", "mem") else []), "-t", ctx.nproc]
     if ctx.opt("index", "age_pyramids", False):
         with ctx.phase("age-index"):

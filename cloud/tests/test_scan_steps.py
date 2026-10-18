@@ -747,15 +747,17 @@ def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
 
 
 def test_path_index_on_a_local_data_dir_reads_in_place_and_copies_out(tmp_path, env, monkeypatch):
-    """The local executor's shape (one machine, no FUSE): `data:` a dir, read in place (no `stage`), the tiers copied
-    into it, `path-index.parquet` last."""
+    """The local executor's shape (one machine, no FUSE): `data:` a dir, read in place (no `stage`), the snapshot
+    annotated (`options.index.annotate`), the tiers copied into it, `path-index.parquet` last."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 2))
     (tmp_path / "t").mkdir(exist_ok=True)
     data = tmp_path / "data"
     p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": str(tmp_path / "work"), "data": str(data),
                "layout": {"layer2": "listing/laptop/{scan}/", "snapshots": "laptop", "listing": "capture/{scan}/"},
                "sources": ["r2://disk-tree"], "skip": ["static-names", "digest"],
-               "options": {"index": {"mode": "path-index", "args": ["-g"], "age_pyramids": True}}})
+               "options": {"index": {"mode": "path-index", "args": ["-g"], "age_pyramids": True,
+                                     "annotate": ["disk-tree", "capture-meta", "-c", "r2://disk-tree/snapshots/laptop/{scan}/meta.json",
+                                                  "{listing}/_SUCCESS.json", "{snap}/meta.json"]}}})
     (data / "capture/2026-10-16T1200/disk-tree").mkdir(parents=True)
     (data / "capture/2026-10-16T1200/disk-tree/_SUCCESS.json").write_text("{}")
     c = S.make_ctx(p, env)
@@ -783,6 +785,8 @@ def test_path_index_on_a_local_data_dir_reads_in_place_and_copies_out(tmp_path, 
     assert runner.calls == [
         f"dt-cloud path-index -d 2026-10-16T1200 -l <tmp>/data/capture/2026-10-16T1200/disk-tree/*.parquet -o {w}/snap "
         f"-c <tmp>/data/capture/2026-10-16T1200/dir-cache -P {w}/path-index/path-index.parquet -g",
+        f"disk-tree capture-meta -c r2://disk-tree/snapshots/laptop/2026-10-16T1200/meta.json "
+        f"<tmp>/data/capture/2026-10-16T1200/disk-tree/_SUCCESS.json {w}/snap/meta.json",
         f"dt-cloud age-pyramid -c -t 2 -o {w}/path-index {w}/path-index/path-index.parquet",
     ]
     assert copied == [
