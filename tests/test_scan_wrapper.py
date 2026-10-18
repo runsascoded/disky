@@ -16,7 +16,7 @@ import json, os, sys
 from pathlib import Path
 name, args = Path(sys.argv[0]).name, sys.argv[1:]
 KEYS = ('DT_CAPTURE', 'SNAP_ID', 'GEN', 'DT_RUN_ID', 'DT_RUN_KIND', 'DT_RUN_MACHINE', 'DT_RUN_SPOT', 'DT_RUN_REGION', 'DT_RUN_AT',
-        'DT_RUN_TASKS', 'DT_PRE_PHASES', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'AWS_DEFAULT_REGION')
+        'DT_RUN_TASKS', 'DT_PRE_PHASES', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'DISKY_R2_ENDPOINT_URL', 'AWS_DEFAULT_REGION')
 with open(os.environ['FAKE_TRACE'], 'a') as f:
     f.write(json.dumps([name, *args, {k: os.environ[k] for k in KEYS if k in os.environ}]) + '\n')
 if name == 'aws':
@@ -68,7 +68,8 @@ def test_a_primary_capture_runs_the_laptop_profile_then_the_meta_store(scan):
     r, calls = scan('m3')
     assert r.returncode == 0, r.stderr
     t = 1792318485  # 2026-10-18T10:14:45Z
-    base = {'R2_ENDPOINT': 'https://r2.example', 'R2_ACCESS_KEY_ID': 'kid', 'R2_SECRET_ACCESS_KEY': 'sec', 'AWS_DEFAULT_REGION': 'auto',
+    base = {'R2_ENDPOINT': 'https://r2.example', 'R2_ACCESS_KEY_ID': 'kid', 'R2_SECRET_ACCESS_KEY': 'sec', 'DISKY_R2_ENDPOINT_URL': 'https://r2.example',
+            'AWS_DEFAULT_REGION': 'auto',
             'SNAP_ID': '2026-10-18T1014', 'GEN': '202610181014', 'DT_RUN_MACHINE': 'fargate-arm64-2vcpu-16gib', 'DT_RUN_SPOT': '1',
             'DT_RUN_REGION': 'us-east-1', 'DT_RUN_TASKS': '1'}
     (laptop, env1), (meta, env2) = heads(calls)

@@ -6,7 +6,7 @@
 Prints the job id; `-w` also follows the job's CloudWatch log until it ends
 (exit status = the job's). `-c`/`-m` size this one job past the job def's (a
 Fargate vCPU/memory pair, e.g. `-c 4 -m 16384` for a static name index build),
-`-e KEY=VALUE` adds to its env (e.g. `STATIC_MEM=12GB`). The account is `.envrc`'s `AWS_PROFILE` (`r`, RAC).
+`-e KEY=VALUE` adds to its env (e.g. `STATIC_MEM=12GB`; `DT_TRIGGER=manual` unless given). The account is `.envrc`'s `AWS_PROFILE` (`r`, RAC).
 """
 import sys
 import time
@@ -62,11 +62,12 @@ def main(vcpus: str | None, envs: tuple[str, ...], memory: int | None, watch: bo
     resources = [{'type': t, 'value': str(v)} for t, v in (('VCPU', vcpus), ('MEMORY', memory)) if v is not None]
     if resources:
         overrides['resourceRequirements'] = resources
-    if envs:
-        pairs = [e.split('=', 1) for e in envs]
-        if any(len(p) != 2 for p in pairs):
-            raise SystemExit(f'-e takes KEY=VALUE: {envs}')
-        overrides['environment'] = [{'name': k, 'value': v} for k, v in pairs]
+    pairs = [e.split('=', 1) for e in envs]
+    if any(len(p) != 2 for p in pairs):
+        raise SystemExit(f'-e takes KEY=VALUE: {envs}')
+    # A hand submit is a `manual` run (`/scans`' trigger) unless `-e DT_TRIGGER=…` says otherwise.
+    env = {'DT_TRIGGER': 'manual', **dict(pairs)}
+    overrides['environment'] = [{'name': k, 'value': v} for k, v in env.items()]
     job_id = batch.submit_job(
         jobName=name,
         jobQueue=QUEUE,

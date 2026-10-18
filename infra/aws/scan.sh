@@ -51,8 +51,10 @@ else
   sed "s/@STORE@/$store/g" "$profiles/m3-host.yml" > "$profile"
 fi
 
-# The steps' R2 names (the scan pipeline's: `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, …); `R2_BUCKET` is the profile's.
+# The steps' R2 names (the scan pipeline's: `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, …); `R2_BUCKET` is the profile's. The head's
+# own `r2://` reads (sizing a pre-job phase's outputs) take the engine's endpoint variable.
 export R2_ENDPOINT=$R2_ENDPOINT_URL R2_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+export DISKY_R2_ENDPOINT_URL=$R2_ENDPOINT_URL
 export DT_CAPTURE=$capture SNAP_ID=$date GEN=$gen DT_JOB_START=$job_t0 DT_RUN_ID=${AWS_BATCH_JOB_ID:-}
 export DT_RUN_KIND=ingest DT_RUN_MACHINE=${INGEST_MACHINE:-} DT_RUN_SPOT=${INGEST_SPOT:-} DT_RUN_REGION=$region
 export DT_RUN_AT=$captured DT_RUN_TASKS=1
