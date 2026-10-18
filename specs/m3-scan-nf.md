@@ -16,6 +16,23 @@ What m3 needs from the generic layer, to check against `specs/demo-branch.md` pa
 
 Each gap closes as a `[cloud]` commit with tests (the root picks them); the profile and image changes are m3's; the switch is a `pulumi up` (Ryan's go).
 
+### Gap map (2026-10-18)
+
+The task's FUSE-less Fargate disk is the constraint: with `kind: local` every task runs on one machine, so `data:` is a local dir (`/work/data`, the 120 GiB ephemeral disk) and outputs are copied to R2.
+
+`[cloud]`, in order, each tested in `cloud/tests/test_scan_*.py`:
+1. `Ctx.nproc` honours the cgroup CPU quota (Fargate's `sched_getaffinity` reports the host's CPUs; `ingest.sh`'s `vcpus()` is the reference).
+2. `index` in `path-index` mode on a local `data:` dir: no `/gcs/` staging, listings read in place, outputs copied (`copy_atomic`); today it refuses any non-`gs://` data (`scan_steps.py` `_index_check`).
+3. `publish-r2` from a local dir or fsspec root (today GCS only, `publish.py`).
+4. An adopted listing: `sources[].listing` (a URL template, e.g. `{env:DT_CAPTURE}`), whose `list` copies the shards + `_SUCCESS.json` into the listing dir instead of running `bulk-list`; REPROC still fetches it (it has no other copy on an ephemeral disk).
+5. `options.index.annotate`: a command run between `path-index` and the publish, for `disk-tree capture-meta` (the snapshot's physical disk/VM bytes, which `index-sync` then reads).
+6. The head's scan-run facts: kind, run id from `$AWS_BATCH_JOB_ID`, machine/spot/region, the capture and queue phases dated before the job.
+7. Maybe `options.static-names.source` (an `add` over a local data dir sees only this scan).
+
+m3: profiles `m3.yml` (store `laptop`), `m3-nas.yml`, `m3-meta.yml`; the image (Java 17–26 ARM64, `procps`, pinned Nextflow, `job/nf` + `job/profiles`, the venv on `PATH`) and the Pulumi sources; the R2 key/endpoint/bucket names in the job env; `ingest.sh` slimmed to host → profile → head(s) (the head records the run itself, so the `scan-run supervise` entrypoint goes); `scan-runs.json`'s phase names. `-resume` is lost between jobs (local work dir, no cloudcache): a resubmit reruns everything, minutes at m3's size.
+
+The age-pyramid backfill doesn't need the DAG: `dt-cloud age-pyramid -c` over each held scan's `path` sort, then `index-sync` of the new variants, in one submitted job once the image can run it.
+
 ## 2. Age bars from the age pyramid
 
 The children table's age bars (`ag`, from the per-scan `age_b0…6` columns) are missing from interval-store answers. The store must not carry them: the strata are relative to the scan day, so nearly every active dir's strata change every scan, the per-scan churn the store removes.
