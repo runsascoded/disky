@@ -241,6 +241,43 @@ if [[ -n ${STATIC_GEN:-} && $d1_store == primary ]]; then
   fi
 fi
 
+# ── The meta store (`/meta`, "the data behind this site"; specs/pipelines-everywhere.md §3.1): the bucket itself ──
+# With META_STATIC_GEN (the site's `STORES_JSON` meta `STATIC_GEN`), each primary capture also scans the serving
+# bucket as the store `meta` at the same scan id: its listing (`meta-listing/<scan>/`), path index
+# (`meta-l2/<scan>/index/<gen>/`), snapshot (`snapshots/meta/<scan>/`), D1 rows (store `meta`) and static name
+# index. The bucket is small (thousands of objects): seconds, so no build job of its own. Its sizes include the
+# primary scan's outputs, not its own. A failure here never blocks the primary's publish; the run fails at the end.
+meta_rc=
+meta_scan() {
+  local ml=$work/meta-listing mi=$work/meta-index ms=$work/meta-snap cmd=add
+  mkdir -p "$mi" &&
+  "$app/.venv/bin/disk-tree" bulk-list "r2://$bucket" -E "$R2_ENDPOINT_URL" -o "$ml" -P "$(vcpus)" -x clear &&
+  ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" path-index -g -d "$date" -l "$ml/*.parquet" -P "$mi/path-index.parquet" -o "$ms" ) &&
+  s3 cp "$ml/" "s3://$bucket/meta-listing/$date/" --recursive &&
+  s3 cp "$mi/" "s3://$bucket/meta-l2/$date/index/$gen/" --recursive &&
+  s3 cp "$ms/" "s3://$bucket/snapshots/meta/$date/" --recursive &&
+  ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" index-sync "$date" -g "$gen" -b "r2://$bucket" -k "meta-l2/$date/index/$gen" \
+      -s meta -d "$mi" -v path -v bysize -m "$ms/meta.json" -M "r2://$bucket/snapshots/meta" ) &&
+  { aws s3api head-object --bucket "$bucket" --key "static-names/$META_STATIC_GEN/scans.json" --endpoint-url "$R2_ENDPOINT_URL" > /dev/null 2>&1 || cmd=build; } &&
+  ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$META_STATIC_GEN" -L "meta-l2/{id}/index/{gen}/path-index.parquet" \
+      -s "r2://$bucket" -o "r2://$bucket" -w "$work/meta-static-names" -p "$(vcpus)" -M "${STATIC_MEM:-5GB}" )
+}
+if [[ -n ${META_STATIC_GEN:-} && $d1_store == primary ]]; then
+  begin meta
+  t0=$(date +%s)
+  if meta_scan; then
+    echo "[ingest] meta store: scanned r2://$bucket in $(( $(date +%s) - t0 ))s"
+    ended meta -o "index=r2://$bucket/meta-l2/$date/index/$gen/" -o "snapshot=r2://$bucket/snapshots/meta/$date/"
+  else
+    meta_rc=$?
+    echo "[ingest] meta store scan failed (exit $meta_rc)" >&2
+  fi
+fi
+
+if [[ -n $meta_rc && -z $is_rc ]]; then
+  SR_ERR="exit $meta_rc: the meta store's scan (the primary scan is published)"
+  exit "$meta_rc"
+fi
 if [[ -n $is_rc ]]; then
   SR_ERR="exit $is_rc: interval-store ${is_cmd:-current} (the scan is published; its store append is not)"
   exit "$is_rc"
