@@ -1,10 +1,12 @@
 // The children table's age bars (`TreeNode.ag`) from a scan's age pyramid, for views the interval store answers
 // (its rows carry no `age_b*`: the strata are relative to the scan day, so every active dir's would change each
-// scan). The pyramid's `1d` tier holds each path's bytes per created UTC day, the day `age_b<i>` buckets against the
-// scan's, so the strata it gives equal the per-scan columns exactly. A path under the pyramid's floor has no rows,
-// so no bar.
+// scan). The pyramid's `1d` tier holds each path's dated bytes per created UTC day, the day `age_b<i>` buckets against
+// the scan's, so its strata equal the per-scan columns exactly in every bucket but the oldest, which also holds the
+// epoch-dated bytes the pyramid leaves out (`mtime` 0): that one is the node's bytes less the newer ones. (Exact where
+// every object has a `created`, as a capture's: the per-scan columns leave one without out of every bucket.)
+// A path under the pyramid's floor has no rows, so no bar.
 import type { Env } from './auth.js'
-import { num, openIndex, perScan, readUnder, str } from './index.js'
+import { num, openIndex, perScan, readAt, readUnder, str } from './index.js'
 
 /** `AGE_EDGES_DAYS` (`cloud/src/dt_cloud/index.py`): `age_b<i>` holds the bytes created under `AGE_EDGES_DAYS[i]`
  *  days before the scan day (and at least the previous edge); the last bucket is everything older. */
@@ -33,11 +35,11 @@ export function strata(rows: Record<string, unknown>[], asofDay: number): Map<st
   return out
 }
 
-/** `path`'s children's strata at scan `date`, keyed by child name, in one read of the pyramid's `1d` tier. `null`
- *  when the scan has no pyramid, or its children span more row groups than one view may read: the view then
- *  carries no bars at all, never some. */
-export async function childAges(env: Env, date: string, path: string): Promise<Map<string, number[]> | null> {
-  const depth = path === '' ? 1 : path.split('/').length + 1
+/** The dated strata (pyramid rows only) of `path` itself (`node`, absent without a row) and of its children
+ *  (`kids`, by name) at scan `date`, in two reads of the pyramid's `1d` tier. `null` when the scan has no pyramid, or
+ *  the children span more row groups than one view may read: the view then carries no bars at all, never some. */
+export async function datedAges(env: Env, date: string, path: string): Promise<{ node?: number[]; kids: Map<string, number[]> } | null> {
+  const depth = path === '' ? 0 : path.split('/').length
   let h
   try {
     h = await openIndex(perScan(env), date, 'age-pyramid-1d')
@@ -45,17 +47,30 @@ export async function childAges(env: Env, date: string, path: string): Promise<M
     if (/not synced/.test((e as Error).message)) return null
     throw e
   }
-  const rows = await readUnder(h, depth, path, ['path', 'depth', 'binstart', 'b'])
-  if (!rows) return null
-  const byPath = strata(rows, scanDay(date))
-  return new Map([...byPath].map(([p, ag]) => [p.slice(p.lastIndexOf('/') + 1), ag]))
+  const cols = ['path', 'depth', 'binstart', 'b']
+  const [rows, own] = await Promise.all([readUnder(h, depth + 1, path, cols), readAt(h, depth, path, cols)])
+  if (!rows || !own) return null
+  const day = scanDay(date)
+  const kids = new Map([...strata(rows, day)].map(([p, ag]) => [p.slice(p.lastIndexOf('/') + 1), ag]))
+  return { node: strata(own, day).get(path), kids }
 }
 
-/** A view's top node with its children's bars set from the pyramid, for an unscoped view the interval store answered
- *  (a lens, owner, class or query view's children are scoped bytes, which whole-path strata don't describe). */
-export async function withChildAges<T extends { n: string; c?: T[] } & Record<string, unknown>>(env: Env, date: string, path: string, tree: T): Promise<T> {
+/** `b` bytes' strata from their dated ones: the oldest bucket is what the newer ones leave (dated or not). */
+export const completed = (dated: number[], b: number): number[] => {
+  const newer = dated.slice(0, -1)
+  return [...newer, b - newer.reduce((t, x) => t + x, 0)]
+}
+
+/** A view's top node and its children with their bars from the pyramid, for an unscoped view the interval store
+ *  answered (a lens, owner, class or query view's children are scoped bytes, which whole-path strata don't describe).
+ *  `(other)` is the node's less the kept children's, when every kept child has one. */
+export async function withChildAges<T extends { n: string; b: number; ag?: unknown; c?: T[] }>(env: Env, date: string, path: string, tree: T): Promise<T> {
   if (!tree.c?.length) return tree
-  const ages = await childAges(env, date, path)
-  if (!ages) return tree
-  return { ...tree, c: tree.c.map(k => (ages.has(k.n) ? { ...k, ag: ages.get(k.n) } : k)) }
+  const got = await datedAges(env, date, path)
+  if (!got) return tree
+  const node = got.node && completed(got.node, tree.b)
+  const c = tree.c.map(k => { const d = got.kids.get(k.n); return d ? { ...k, ag: completed(d, k.b) } : k })
+  const kept = c.filter(k => k.n !== '(other)')
+  const fold = node && kept.every(k => k.ag) ? node.map((x, i) => x - kept.reduce((t, k) => t + (k.ag as number[])[i], 0)) : undefined
+  return { ...tree, ...(node ? { ag: node } : {}), c: c.map(k => (k.n === '(other)' && fold ? { ...k, ag: fold } : k)) }
 }

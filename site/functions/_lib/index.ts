@@ -2798,15 +2798,26 @@ export async function readPoint(h: IndexHandle, depth: number, path: string, col
  *  caller refuses rather than reads part of the range. */
 export async function readUnder(h: IndexHandle, depth: number, under: string, columns?: string[], maxGroups = 60): Promise<Record<string, unknown>[] | null> {
   const rect: Rect = under === '' ? { dLo: depth, dHi: depth, pLo: '', pHi: '\uffff' } : askRect({ depth, under })
-  const holds = (g: Span): boolean => g.dMax >= depth && g.dMin <= depth && (under === '' || g.dMin !== g.dMax || !(g.pMax < rect.pLo || g.pMin > rect.pHi))
+  const prefix = under === '' ? '' : under + '/'
+  return readRect(h, rect, under === '', r => str(r.path).startsWith(prefix), columns, maxGroups)
+}
+
+/** The rows of exactly (`depth`, `path`), from a tier sorted `(depth, path, …)`: a node's own (its pyramid bins). */
+export async function readAt(h: IndexHandle, depth: number, path: string, columns?: string[], maxGroups = 60): Promise<Record<string, unknown>[] | null> {
+  return readRect(h, { dLo: depth, dHi: depth, pLo: path, pHi: path }, false, r => str(r.path) === path, columns, maxGroups)
+}
+
+/** The rows at one depth in `rect` that `keep`, in one span selection; `null` past `maxGroups` row groups. */
+async function readRect(h: IndexHandle, rect: Rect, whole: boolean, keep: (r: Record<string, unknown>) => boolean, columns: string[] | undefined, maxGroups: number): Promise<Record<string, unknown>[] | null> {
+  const depth = rect.dLo
+  const holds = (g: Span): boolean => g.dMax >= depth && g.dMin <= depth && (whole || g.dMin !== g.dMax || !(g.pMax < rect.pLo || g.pMin > rect.pHi))
   const spans = (await selectSpans(h, [rect])).filter(holds)
   if (spans.length > maxGroups) return null
   const jsons = await fetchGroupJson(h, spans.map(s => s.rg))
-  const prefix = under === '' ? '' : under + '/'
   const perGroup = await mapLimit(spans, GROUP_READS, async s => {
     const j = jsons.get(s.rg)
     if (!j) return []
-    return (await readGroupRaw(h, j, columns)).filter(r => num(r.depth) === depth && str(r.path).startsWith(prefix))
+    return (await readGroupRaw(h, j, columns)).filter(r => num(r.depth) === depth && keep(r))
   })
   return perGroup.flat()
 }
