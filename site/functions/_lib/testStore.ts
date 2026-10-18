@@ -124,7 +124,7 @@ export function seedGeneration(raw: Sqlite, o: {
     // (whose factory imports this file) and hang the test file at load.
     const tier = variant.endsWith('-user') ? variant.slice(0, -'-user'.length) : variant
     const sort = variant === 'user' || variant.endsWith('-user') ? '-by-user' : ''
-    const key = `${o.dir}/path-index${tier === 'path' || tier === 'user' ? '' : `-${tier}`}${sort}.parquet`
+    const key = variant.startsWith('age-pyramid-') ? `${o.dir}/${variant}.parquet` : `${o.dir}/path-index${tier === 'path' || tier === 'user' ? '' : `-${tier}`}${sort}.parquet`
     FILES.set(key, fixture(f.parquet))
     FILES.set(key.replace(/\.parquet$/, '.groups.json'), fixture(f.groups))
     if (f.footer) FILES.set(key.replace(/\.parquet$/, '.groups.parquet'), fixture(f.footer))
