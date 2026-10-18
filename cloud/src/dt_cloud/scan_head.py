@@ -109,8 +109,11 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     return {
         "scan": scan, "gen": gen, "job_start": job_start, "run_id": run_id, "session": session,
         # a source's `secrets`: its list call's whole binding list (else the list step's), when it has its own
+        # REPROC runs from `index`, but an adopted listing (`sources[].listing`) is still fetched: its shards have no
+        # other copy on a local data dir
         "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk),
-                     **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})} for s in profile.sources],
+                     **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})}
+                    for s in profile.sources if not reproc or s.listing],
         "list_default": {"machine": lst.type if lst else None, "disk": _disk(lst.disk) if lst else None},
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
@@ -120,7 +123,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "over_time": "over-time" in enabled,
         "over_time_label": "over_time" if "over_time" in profile.machines else "post",
         "fold": list(profile.fold),
-        "skip_list": reproc,
+        "skip_list": reproc and not any(s.listing for s in profile.sources),
         "secrets": _bindings(profile.secrets),
         "step_secrets": step_secrets(profile),
         "secrets_project": profile.executor.project or "",

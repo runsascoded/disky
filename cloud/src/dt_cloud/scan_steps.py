@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -251,6 +252,15 @@ class Ctx:
         cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
+
+    def fill_env(self, template: str) -> str:
+        """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""
+        def var(m: re.Match[str]) -> str:
+            v = (self.env.get(m[1]) or "").strip()
+            if not v:
+                raise StepFailed(2, f"{template}: ${m[1]} unset")
+            return v
+        return re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", var, template)
 
     def expand(self, args: Sequence[str], **extra: object) -> list[str]:
         """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root,
@@ -484,10 +494,15 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
         return
     if not imports and ctx.done(listing / "_SUCCESS.json", "listing"):
         return
-    _raise_nofile()
-    threads = src.threads or ctx.opt("list", "threads")
     # an `r2://` source without its own endpoint is the deployment's R2 (`$R2_ENDPOINT`, a secret where the profile is public)
     endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
+    if src.listing:
+        url = ctx.fill_env(src.listing)
+        with ctx.phase(f"list {b}"):
+            ctx.sh(["dt-cloud", "fetch-listing", "-o", listing, url], env={env_name("R2_ENDPOINT_URL"): endpoint} if endpoint else None)
+        return
+    _raise_nofile()
+    threads = src.threads or ctx.opt("list", "threads")
     weights: list[str] = []
     if ctx.opt("list", "weights", False):
         prior = ctx.prior_listing(b)

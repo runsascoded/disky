@@ -76,7 +76,7 @@ _EXECUTOR_KEYS = {
 _TOP = {"deployment", "store", "executor", "work", "data", "layout", "sources", "machines", "steps", "skip", "fold", "secrets",
         "env", "pass", "labels", "queue_size", "options"}
 _LAYOUT = {"layer2", "snapshots", "listing"}
-_SOURCE = {"uri", "machine", "disk", "procs", "threads", "endpoint", "region", "args", "secrets"}
+_SOURCE = {"uri", "machine", "disk", "procs", "threads", "endpoint", "region", "args", "secrets", "listing"}
 _MACHINE = {"type", "disk", "cpus", "memory", "time", "fallback", "queue_timeout"}
 _DISK = {"request", "type"}
 _DISK_TYPES = ("local-ssd", "pd-balanced", "pd-ssd", "pd-standard")
@@ -130,6 +130,9 @@ class Source:
     args: tuple[str, ...] = ()
     #: This source's list task's bindings, over the profile's and `options.list.secrets`.
     secrets: Mapping[str, str] = field(default_factory=dict)
+    #: An existing listing this source adopts instead of listing the bucket (`list` fetches its shards): a URL or dir
+    #: template, `{env:NAME}` filled from the task's env (e.g. a laptop capture's `r2://…/captures/<host>/<root>/<stamp>`).
+    listing: str | None = None
 
     @property
     def kind(self) -> str:
@@ -415,9 +418,13 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
         if region and region != executor.region:
             problems.append(f"{p}.region: {region!r} ≠ the executor's ({executor.region!r}); nf-google 1.29.1 has no "
                             f"per-task location (spec §4 'Per-source region')")
+        listing = s.get("listing")
+        if listing is not None and (not isinstance(listing, str) or not listing):
+            problems.append(f"{p}.listing: a URL or dir template")
+            listing = None
         sources.append(Source(uri, s.get("machine"), _disk(s.get("disk"), f"{p}.disk", problems), s.get("procs"),
                               s.get("threads"), s.get("endpoint"), region, _str_list(s.get("args"), f"{p}.args", problems),
-                              _str_map(s.get("secrets"), f"{p}.secrets", problems, _ENV_NAME)))
+                              _str_map(s.get("secrets"), f"{p}.secrets", problems, _ENV_NAME), listing))
 
     machines: dict[str, Machine] = {}
     ms = d.get("machines") or {}

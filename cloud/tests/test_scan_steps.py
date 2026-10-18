@@ -794,3 +794,32 @@ def test_path_index_on_a_local_data_dir_reads_in_place_and_copies_out(tmp_path, 
     runner.calls.clear()
     S.index(c, None)
     assert runner.calls == []
+
+
+def test_list_adopts_a_sources_listing_from_the_env(tmp_path, env, monkeypatch):
+    """`sources[].listing`: `list` fetches that listing (`{env:…}` filled) instead of listing the bucket, the deployment's
+    R2 endpoint handed to the reader; an unset variable fails the step."""
+    (tmp_path / "t").mkdir(exist_ok=True)
+    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": str(tmp_path / "work"), "data": str(tmp_path / "data"),
+               "layout": {"layer2": "listing/laptop/{scan}/", "snapshots": "laptop", "listing": "capture/{scan}/"},
+               "sources": [{"uri": "r2://disk-tree", "listing": "{env:DT_CAPTURE}"}], "skip": ["static-names", "digest"],
+               "options": {"index": {"mode": "path-index"}}})
+    seen = []
+    runner = Runner(tmp_path)
+
+    def run(argv, env, stdout=None, text=True):
+        seen.append(env.get("DISKY_R2_ENDPOINT_URL"))
+        return runner(argv, env, stdout, text)
+
+    c = S.make_ctx(p, {**env, "DT_CAPTURE": "r2://disk-tree/captures/m3/root/2026-10-16T12-00-01Z", "R2_ENDPOINT": "https://r2.example"})
+    c.sh_impl = run
+    S.list_source(c, "r2://disk-tree")
+    assert (runner.calls, seen) == (
+        ["dt-cloud fetch-listing -o <tmp>/data/capture/2026-10-16T1200/disk-tree r2://disk-tree/captures/m3/root/2026-10-16T12-00-01Z"],
+        ["https://r2.example"],
+    )
+    unset = S.make_ctx(p, env)
+    unset.sh_impl = run
+    with pytest.raises(S.StepFailed) as e:
+        S.list_source(unset, "r2://disk-tree")
+    assert str(e.value) == "{env:DT_CAPTURE}: $DT_CAPTURE unset"
