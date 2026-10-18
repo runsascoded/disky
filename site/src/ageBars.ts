@@ -1,3 +1,4 @@
+import { unitTicks } from './series'
 import type { ColorMode } from './types'
 
 /** How the age chart's snapshot bars are filled:
@@ -107,4 +108,17 @@ export function placeBarLabels(bars: LabelBar[], o: LabelOpts): PlacedLabel[] {
     if (p && clear(p[1])) { placed.push(p); extra++ }
   }
   return placed.map(([p]) => p).sort((a, b) => a.i - b.i)
+}
+
+/** A y-axis tick: its value (bytes; signed on a diff) and its y in the chart's `H`-tall plot. */
+export interface YTick { v: number; y: number }
+
+/** The y-axis ticks of the bars (`unitTicks` in the viewer's `base`): a snapshot's from 0 up to the tallest bar
+ *  (`max`) measured from the floor; a diff's from the biggest loss (`down`) to the biggest gain (`up`) about the
+ *  zero line, which sits `up / (up + down)` of the way down. */
+export function yTicks(H: number, base: number, scale: { max: number } | { up: number; down: number }): YTick[] {
+  if ('max' in scale) return scale.max > 0 ? unitTicks(0, scale.max, base).map(v => ({ v, y: H - (v / scale.max) * H })) : []
+  const span = Math.max(scale.up + scale.down, 1)
+  const zeroY = (scale.up / span) * H
+  return unitTicks(-scale.down, scale.up, base).map(v => ({ v, y: zeroY - (v / span) * H }))
 }

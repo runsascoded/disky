@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ageFill, barLabelPos, type LabelOpts, placeBarLabels, textWidth } from './ageBars'
+import { ageFill, barLabelPos, type LabelOpts, placeBarLabels, textWidth, yTicks } from './ageBars'
 import type { ColorMode } from './types'
 
 describe('ageFill: the date gradient only where it encodes a lens', () => {
@@ -83,5 +83,21 @@ describe('placeBarLabels', () => {
 
   it('no bars, no labels', () => {
     expect(placeBarLabels([], opts)).toEqual([])
+  })
+})
+
+describe('yTicks', () => {
+  const G = 1e9, Gi = 2 ** 30
+  it('ticks a snapshot from the floor to the tallest bar, in the viewer’s units', () => {
+    expect(yTicks(200, 1000, { max: 35 * G })).toEqual([
+      { v: 0, y: 200 }, { v: 10 * G, y: 200 - (10 / 35) * 200 }, { v: 20 * G, y: 200 - (20 / 35) * 200 }, { v: 30 * G, y: 200 - (30 / 35) * 200 },
+    ])
+    expect(yTicks(200, 1024, { max: 35 * Gi }).map(t => t.v / Gi)).toEqual([0, 10, 20, 30])
+    expect(yTicks(200, 1000, { max: 0 })).toEqual([])
+  })
+  it('ticks a diff about its zero line, losses below', () => {
+    expect(yTicks(200, 1000, { up: 30 * G, down: 10 * G })).toEqual([
+      { v: -10 * G, y: 200 }, { v: 0, y: 150 }, { v: 10 * G, y: 100 }, { v: 20 * G, y: 50 }, { v: 30 * G, y: 0 },
+    ])
   })
 })
