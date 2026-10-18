@@ -722,3 +722,25 @@ def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
         "  options.retire.keep: required, ≥ 1 (the newest scans never retired)",
         "  options.retire.static_gen: required unless options.static-names.gen names the static index's generation",
     ]
+
+
+def test_cpu_quota_reads_cgroup_v2_then_v1(tmp_path) -> None:
+    v2, v1, none, unlimited = (tmp_path / d for d in ("v2", "v1", "none", "max"))
+    (v1 / "cpu").mkdir(parents=True)
+    for d in (v2, none, unlimited):
+        d.mkdir()
+    (v2 / "cpu.max").write_text("150000 100000\n")
+    (unlimited / "cpu.max").write_text("max 100000\n")
+    (v1 / "cpu/cpu.cfs_quota_us").write_text("200000\n")
+    (v1 / "cpu/cpu.cfs_period_us").write_text("100000\n")
+    assert [S.cpu_quota(d) for d in (v2, v1, none, unlimited)] == [2, 2, None, None]
+
+
+def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
+    (tmp_path / "cpu.max").write_text("200000 100000\n")
+    monkeypatch.setattr(S.os, "sched_getaffinity", lambda _: set(range(8)), raising=False)
+    capped = S.Ctx.__new__(S.Ctx)
+    capped.env = {"DT_CGROUP": str(tmp_path)}
+    free = S.Ctx.__new__(S.Ctx)
+    free.env = {"DT_CGROUP": str(tmp_path / "absent")}
+    assert [capped.nproc, free.nproc] == [2, 8]

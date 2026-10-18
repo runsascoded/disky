@@ -138,6 +138,22 @@ class _Printer:
         return 0 if warn else rc
 
 
+def cpu_quota(cgroup: Path) -> int | None:
+    """The CPUs a cgroup's quota allows, rounded up (v2 `cpu.max`, else v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`);
+    None without one. A container's affinity can list the host's CPUs (Fargate: 4 on a 1-vCPU task), and threads past
+    the quota only add contention."""
+    try:
+        quota, period = (cgroup / "cpu.max").read_text().split()
+        return None if quota == "max" else -(-int(quota) // int(period))
+    except (OSError, ValueError):
+        pass
+    try:
+        q, p = int((cgroup / "cpu/cpu.cfs_quota_us").read_text()), int((cgroup / "cpu/cpu.cfs_period_us").read_text())
+    except (OSError, ValueError):
+        return None
+    return -(-q // p) if q > 0 else None
+
+
 @dataclass
 class Ctx:
     """One step's view: the profile, the scan's identity, its environment (also every command's), a local scratch dir,
@@ -232,7 +248,9 @@ class Ctx:
 
     @property
     def nproc(self) -> int:
-        return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+        quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+        return min(cpus, quota) if quota else cpus
 
     def expand(self, args: Sequence[str], **extra: object) -> list[str]:
         """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root,
