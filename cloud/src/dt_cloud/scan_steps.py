@@ -853,8 +853,10 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
 def _sync_args(ctx: Ctx) -> list[str]:
     """Both halves' arguments: the generation, the store, and `options.index-sync.variants` (`-v` each; default every
-    variant the generation holds)."""
-    return [*store_args(ctx), "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
+    variant the generation holds). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
+    the R2 bucket (`publish-r2` filled it first), where the pointer flip checks the generation is uploaded."""
+    site = ["-b", f"r2://{ctx.env['R2_BUCKET']}"] if ctx.profile.data_bucket is None and ctx.has(*R2) else []
+    return [*store_args(ctx), *site, "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
             *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)]]
 
 
