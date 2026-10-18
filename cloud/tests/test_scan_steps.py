@@ -151,8 +151,8 @@ def test_serving_steps_commands(tmp_path, env):
     assert c.sh_impl.calls == [
         "dt-cloud static-names runs add -c 2026-10-16T1200",
         "dt-cloud publish-r2 -b <tmp>/data -a 2026-10-16T1200",
-        f"dt-cloud index-sync -r -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
-        f"dt-cloud index-sync -p -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
+        f"dt-cloud index-sync -r -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
+        f"dt-cloud index-sync -p -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
         "dt-cloud index-gc 2026-10-16T1200",
         "dt-cloud over-time-groups -g G1 -o <tmp>/t/dt-scan/2026-10-16T1200/over-time -p r2://r2b",
         "dt-cloud index-gc -R -m 2d -F <tmp>/data -F r2",
@@ -564,8 +564,8 @@ def test_store_passes_through(tmp_path, env):
         f(c, None)
     k = "l2/2026-10-16T1200/index/G1"
     assert c.sh_impl.calls == [
-        f"dt-cloud index-sync -r -s meta -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h 2026-10-16T1200",
-        f"dt-cloud index-sync -p -s meta -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h -M <tmp>/data/snapshots/sub 2026-10-16T1200",
+        f"dt-cloud index-sync -r -s meta -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h 2026-10-16T1200",
+        f"dt-cloud index-sync -p -s meta -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h -M <tmp>/data/snapshots/sub 2026-10-16T1200",
         "dt-cloud index-gc -s meta -r 7 2026-10-16T1200",
         "dt-cloud over-time-groups -s meta -g G1 -o <tmp>/t/dt-scan/2026-10-16T1200/over-time -p r2://r2b",
         "dt-cloud index-gc -s meta -R -n -m 36h -F <tmp>/data -F r2",
