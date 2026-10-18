@@ -6,7 +6,7 @@ import type { Store } from '../stores'
 const store: Store = {
   key: 'meta',
   label: 'Meta',
-  title: 'disky — meta',
+  title: 'm3 disky metadata',
   desc: 'The data behind disk.rbw.sh: captures, path indexes, snapshots and search indexes in the disk-tree R2 bucket.',
   path: '/meta',
   scheme: 'r2://',
@@ -19,7 +19,7 @@ const store: Store = {
   executor: 'laptop',
   scope: 'admin',
   buckets: ['disk-tree'],
-  rootLabel: 'this deployment’s storage',
+  rootLabel: 'm3 disky metadata',
   objectsNote: 'Objects are captures and derived indexes. A meta scan runs after its laptop scan’s outputs land, so it counts them.',
   wall: {
     restrict: 'The meta store is limited to this deployment’s admins.',

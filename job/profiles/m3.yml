@@ -21,6 +21,9 @@ machines:
   list: {cpus: 1, memory: 2GB}
   post: {cpus: 1, memory: 2GB}
 skip: [bucket-check, over-time, warm-cache, probe, digest]
+# `retire`: drop the per-scan `path`/`bysize` sorts, footers and D1 rows of every scan but the newest `keep` once the
+# interval store vouches for it (specs/lean-scans.md §2). A dry run (the plan in the task log) until a reviewed run.
+steps: [retire]
 fold: []
 env:
   SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
@@ -42,3 +45,5 @@ options:
     variants: [path, bysize, age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d,
                age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
   index-gc: {dry: true}
+  # Not `layer1`: the captures (`captures/m3/root/<stamp>/`) aren't keyed by scan id, and §3 keeps 30 days anyway.
+  retire: {keep: 7, execute: false}
