@@ -260,7 +260,7 @@ meta_scan() {
       -s meta -d "$mi" -v path -v bysize -m "$ms/meta.json" -M "r2://$bucket/snapshots/meta" ) &&
   { aws s3api head-object --bucket "$bucket" --key "static-names/$META_STATIC_GEN/scans.json" --endpoint-url "$R2_ENDPOINT_URL" > /dev/null 2>&1 || cmd=build; } &&
   ( cd "$app/cloud" && "$app/.venv/bin/dt-cloud" static-names "$cmd" -g "$META_STATIC_GEN" -L "meta-l2/{id}/index/{gen}/path-index.parquet" \
-      -s "r2://$bucket" -o "r2://$bucket" -w "$work/meta-static-names" -p "$(vcpus)" -M "${STATIC_MEM:-5GB}" )
+      -s "r2://$bucket" -o "r2://$bucket" -w "$work/meta-static-names" -p "$(vcpus)" -M "${STATIC_MEM:-5GB}" $([[ $cmd == build ]] && echo -x off) )
 }
 if [[ -n ${META_STATIC_GEN:-} && $d1_store == primary ]]; then
   begin meta

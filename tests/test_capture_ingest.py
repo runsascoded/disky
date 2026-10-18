@@ -493,7 +493,7 @@ def test_meta_store_scans_the_bucket_beside_each_primary_capture(pipeline) -> No
     gens = sorted(p.parent.name for p in bucket.glob('meta-l2/*/index/*/path-index.parquet'))
     assert len(gens) == 2
     assert calls == [
-        lst, sync('2026-10-14T0600', gens[0]), ['static-names', 'build', *sn],
+        lst, sync('2026-10-14T0600', gens[0]), ['static-names', 'build', *sn, '-x', 'off'],
         lst, sync('2026-10-14T1800', gens[1]), ['static-names', 'add', *sn],
     ]
     assert sorted(p.relative_to(bucket).as_posix() for p in bucket.glob('*meta*/**/*') if p.is_file()) == [
