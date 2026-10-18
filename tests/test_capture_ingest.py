@@ -444,6 +444,9 @@ def test_the_job_and_the_site_read_the_same_static_generation() -> None:
     env = yaml.safe_load((REPO / 'infra/aws/Pulumi.rac.yaml').read_text())['config']['disk-tree-m3:env']
     sites = [re.search(r'^STATIC_GEN = "([^"]*)"', (REPO / 'site' / f).read_text(), re.M) for f in ('wrangler.toml', 'wrangler.dev.toml')]
     assert [env['STATIC_GEN'], *(m and m[1] for m in sites)] == [env['STATIC_GEN']] * 3
+    metas = [json.loads(re.search(r"^STORES_JSON = '(.*)'$", (REPO / 'site' / f).read_text(), re.M)[1])['meta']['vars']['STATIC_GEN']
+             for f in ('wrangler.toml', 'wrangler.dev.toml')]
+    assert [env['META_STATIC_GEN'], *metas] == [env['META_STATIC_GEN']] * 3
 
 
 def interval_calls(trace: Path) -> list[list[str]]:
