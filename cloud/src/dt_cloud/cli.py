@@ -3136,9 +3136,26 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
     print(api.webhook_url(hook))
 
 
+@main.command("fetch-listing")
+@option("-o", "--out", required=True, type=Path, help="Local dir to copy the listing into")
+@argument("src")
+def fetch_listing_cmd(out: Path, src: str) -> None:
+    """Copy an existing listing (SRC: a URL or dir of `*.parquet` shards + `_SUCCESS.json`) into OUT, the marker last.
+
+    The scan pipeline's `list` for a source that adopts its listing (`sources[].listing`, e.g. a laptop capture) instead
+    of listing a bucket. `r2://` reads through `$DISKY_R2_ENDPOINT_URL`. Refuses SRC without `_SUCCESS.json`."""
+    from .listing_fetch import fetch_listing
+
+    try:
+        names = fetch_listing(src, out)
+    except FileNotFoundError as e:
+        raise UsageError(str(e)) from e
+    err(f"fetch-listing: {len(names)} shards {src} → {out}")
+
+
 @main.command("publish-r2")
 @option("-a", "--all-gens", is_flag=True, help="Copy every `index/<gen>/` under the scan, pointed or not (no D1 read); default: only the generations a D1 `index_schema` row names")
-@option("-b", "--bucket", "src_bucket", default=None, help="Source GCS scan store (default $DATA_BUCKET)")
+@option("-b", "--bucket", "src_bucket", default=None, help="Source scan store: a GCS bucket, or an absolute local dir (the local executor's data store) (default $DATA_BUCKET)")
 @option("-l", "--layer2", default=None, help="Layer-2 dir template, `{scan}` = the scan id (default $LAYER2_PREFIX; one of the two is required)")
 @option("-L", "--no-listings", is_flag=True, help="Leave the canonical per-bucket listings (`<layer-2 dir>/<bucket>.parquet`) in GCS only; copy the tiers + snapshot JSONs")
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")

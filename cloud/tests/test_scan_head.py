@@ -52,6 +52,30 @@ def test_start_args_carry_the_run_and_the_store():
     )
 
 
+def test_start_args_take_a_non_batch_heads_facts_from_its_env():
+    """A head its launcher started (m3's AWS Batch wrapper) records the facts the launcher knows: kind, machine, spot,
+    region, when the run started (its capture's start) and the task count; a GCP Batch head (`-B`) ignores them."""
+    cw = load(FIX / "cw-s3.yml")
+    env = {"DT_RUN_KIND": "ingest", "DT_RUN_MACHINE": "fargate-arm64-2vcpu-16gib", "DT_RUN_SPOT": "1", "DT_RUN_REGION": "us-east-1",
+           "DT_RUN_AT": "1792152001", "DT_RUN_TASKS": "1"}
+    assert (H.start_args(cw, "G", "2026-10-16T1200", "aws-job-1", batch=False, env=env), H.start_args(cw, "G", "2026-10-16T1200", "uid1", env=env)) == (
+        ["-r", "aws-job-1", "-k", "ingest", "-m", "fargate-arm64-2vcpu-16gib", "-R", "us-east-1", "-t", "1792152001", "-T", "1",
+         "--spot", "-g", "G", "2026-10-16T1200"],
+        ["-r", "uid1", "-B", "-g", "G", "2026-10-16T1200"],
+    )
+
+
+def test_pre_phases_from_the_env():
+    """`DT_PRE_PHASES`: phases that ran before the head (a capture, the queue wait), each as its `phase-begin` and
+    `phase-end` arguments."""
+    env = {"DT_PRE_PHASES": '[{"name": "capture", "began": 100, "ended": 460, "outputs": ["capture=r2://b/captures/m3/root/s/"]},'
+                            ' {"name": "queue", "began": 460, "ended": 506}]'}
+    assert (H.pre_phases(env), H.pre_phases({})) == ([
+        (["-b", "100", "capture"], ["-t", "460", "-o", "capture=r2://b/captures/m3/root/s/", "capture"]),
+        (["-b", "460", "queue"], ["-t", "506", "queue"]),
+    ], [])
+
+
 def test_head_image_pins_the_tasks():
     """`$DT_SCAN_IMAGE` (the head's own image, by digest) replaces the profile's tag as every task's container, and the
     run records it (`start -i`): a rebuild of the tag mid-run can't split the run across images."""
@@ -332,3 +356,39 @@ def test_run_config_escapes_into_a_groovy_env_scope():
         "    DT_SCAN_PROFILE_JSON = '{\"a\": \"it\\'s\", \"b\": \"x\\\\\\\\y\\\\n\"}'\n"
         "}\n"
     )
+
+
+def test_reproc_still_fetches_an_adopted_listing():
+    """REPROC runs from `index`, but a source adopting its listing (`sources[].listing`) keeps its `list` task: on a
+    local data dir the shards have no other copy. Without one, `list` is skipped as before."""
+    from dt_cloud.scan_profile import parse
+
+    def prof(sources):
+        return parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
+                      "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "cap/{scan}/"}, "sources": sources,
+                      "skip": ["digest", "static-names"]})
+
+    adopted = prof([{"uri": "r2://disk-tree", "listing": "{env:DT_CAPTURE}"}, "r2://other"])
+    listed = prof(["r2://disk-tree"])
+    got = [{k: H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {}, reproc=r)[k] for k in ("sources", "skip_list")}
+           for p, r in ((adopted, True), (adopted, False), (listed, True))]
+    assert got == [
+        {"sources": [{"uri": "r2://disk-tree", "machine": None, "disk": None}], "skip_list": False},
+        {"sources": [{"uri": "r2://disk-tree", "machine": None, "disk": None}, {"uri": "r2://other", "machine": None, "disk": None}],
+         "skip_list": False},
+        {"sources": [], "skip_list": True},
+    ]
+
+
+def test_a_local_data_dir_orders_static_names_after_publish():
+    """On a local data dir `static-names` reads earlier scans from the serving store, so `scan.nf` runs it after this
+    scan's publish (`static_after_publish`); on a GCS one it overlaps publish as before."""
+    from dt_cloud.scan_profile import parse
+
+    def prof(data, skip):
+        return parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": data,
+                      "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "cap/{scan}/"}, "sources": ["r2://b"],
+                      "skip": ["digest", *skip], "options": {"static-names": {"gen": "g"}}})
+    got = [H.params(prof(d, skip), "{}", "2026-10-16", "G", "1", "", "S", {})["static_after_publish"]
+           for d, skip in (("/d", []), ("gs://dvx", []), ("/d", ["publish-r2"]))]
+    assert got == [True, False, False]
