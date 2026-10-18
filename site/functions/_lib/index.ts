@@ -497,14 +497,16 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
 export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals' && !!env.INTERVAL_STORE_GEN && !!env.INDEX_R2
 
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
- *  `ps=iv` (so one deployment serves both, side by side); a secondary store (`store=`) never does. The
+ *  `ps=iv` (so one deployment serves both, side by side), `intervals` for every request but one asking `ps=scan` (the
+ *  per-scan sorts, for a parity check); a secondary store (`store=`) never does. The
  *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivCurrentGen`), fixed for the
  *  request: none (no pointer yet) reads per-scan stores. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const { env } = ctx
   if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return ctx
   const u = new URL(ctx.request.url).searchParams
-  const on = !u.get('store') && (env.PATH_STORE === 'intervals' || u.get('ps') === 'iv')
+  const ps = u.get('ps')
+  const on = !u.get('store') && ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
   const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
   const w = (ctx as { waitUntil?: unknown }).waitUntil
   return { ...ctx, env: { ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined }, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) }

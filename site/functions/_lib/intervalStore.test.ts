@@ -108,10 +108,11 @@ describe('interval store', () => {
     await expect(openIndex(env, '2026-08-03', 'bysize-user')).rejects.toThrow("index variant 'bysize-user' not synced for 2026-08-03")
   })
 
-  it('opts a request in with `ps=iv` under `PATH_STORE=opt-in`, never for a secondary store', async () => {
+  it('opts a request in with `ps=iv` under `PATH_STORE=opt-in`, out with `ps=scan` under `intervals`, never for a secondary store', async () => {
     const at = async (q: string, mode = 'opt-in') => (await withPathStore({ request: new Request(`https://x/api/subtree?${q}`), env: { ...env, PATH_STORE: mode } })).env.PATH_STORE
-    expect(await Promise.all([at('date=d'), at('date=d&ps=iv'), at('date=d&ps=iv&store=meta'), at('date=d', 'intervals'), at('date=d&store=meta', 'intervals')]))
-      .toEqual([undefined, 'intervals', undefined, 'intervals', undefined])
+    expect(await Promise.all([at('date=d'), at('date=d&ps=iv'), at('date=d&ps=iv&store=meta'), at('date=d', 'intervals'), at('date=d&store=meta', 'intervals'),
+      at('date=d&ps=scan', 'intervals'), at('date=d&ps=scan')]))
+      .toEqual([undefined, 'intervals', undefined, 'intervals', undefined, undefined, undefined])
   })
 
   it('serves the store\'s current generation when unpinned, and a pin over it', async () => {

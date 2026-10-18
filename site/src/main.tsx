@@ -10,6 +10,7 @@ import { TooltipGroup } from './Tooltip'
 import { UnitsProvider } from './units'
 import { withoutOg } from './sharePreview'
 import { bootSessionLog } from './sessionLogBoot'
+import { forwardPs } from './pathStoreParam'
 import 'use-kbd/styles.css'
 import './app.scss'
 
@@ -31,6 +32,9 @@ if (import.meta.env.DEV || location.search.includes('spy=1')) (window as unknown
 // A preview link's `og=` is for unfurlers only: drop it before the router reads the URL.
 const clean = withoutOg(location.href)
 if (clean != null) history.replaceState(history.state, '', clean)
+
+// `?ps=…`: every `/api/` request reads the path store the page names (`pathStoreParam.ts`).
+forwardPs(window)
 
 // The session log (specs/session-log.md): off unless the deployment's window is open; never awaited.
 void bootSessionLog()
