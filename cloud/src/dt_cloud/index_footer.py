@@ -324,6 +324,24 @@ D1_TIMEOUT = 60.0
 INSERT_BYTES = 64_000
 
 
+#: Rows one D1 `DELETE` removes at most (`d1_delete`). D1 fails a statement that deletes millions of rows (gcs's
+#: `scan retire` of 50 scans' `index_row_groups`, 2M+ rows: `7500 internal error`, 2026-10-18).
+D1_DELETE_ROWS = 5000
+
+
+def d1_delete(table: str, where: str, acct: str, tok: str, db_id: str = "", *, batch: int | None = None) -> int:
+    """Delete `table`'s rows matching `where` (a SQL predicate, no `WHERE`; it may refer to `table` by name) in
+    statements of at most `batch` rows (default `D1_DELETE_ROWS`), until one deletes none; returns rows deleted.
+    **Every D1 delete that can match more than a few thousand rows goes through this**, never one `DELETE … WHERE`.
+    A failure part way leaves the rest, and a rerun deletes them."""
+    batch = batch or D1_DELETE_ROWS
+    n = 0
+    while k := len(_d1_query(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where} LIMIT {batch}) RETURNING 1 AS n;",
+                             acct, tok, db_id)):
+        n += k
+    return n
+
+
 def _d1_query(sql: str, acct: str, tok: str, db_id: str = "") -> list[dict]:
     """Run one SQL string against D1 over the HTTP API (no Node/wrangler).
     Returns the statement's result rows (`[]` for writes); `meta` per row batch
@@ -662,8 +680,7 @@ def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool 
             "(SELECT s.gen FROM index_schema s WHERE s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
             acct, tok, db_id,
         )
-    rows = _d1_query(f"DELETE FROM index_row_groups {where} RETURNING 1 AS n;", acct, tok, db_id)
-    return len(rows)
+    return d1_delete("index_row_groups", where.removeprefix("WHERE "), acct, tok, db_id)
 
 
 def started_sql(date: str, started: str, store: str = PRIMARY_STORE) -> str:
@@ -826,11 +843,11 @@ def retire_d1(
                 "ON CONFLICT (date, variant, gen) DO UPDATE SET state = 'evicting', started_ts = excluded.started_ts;",
                 acct, tok, db_id,
             )
-        rows = _d1_query(f"DELETE FROM index_row_groups WHERE {sw}{dv} RETURNING 1 AS n;", acct, tok, db_id)
+        n = d1_delete("index_row_groups", f"{sw}{dv}", acct, tok, db_id)
         if cache:
             _d1_query(f"DELETE FROM footer_cache WHERE {dv};", acct, tok, db_id)
-        if rows:
-            retired.append((d, v, len(rows)))
+        if n:
+            retired.append((d, v, n))
     return retired, skipped
 
 
@@ -939,7 +956,7 @@ def evict(
     due = [Entry(**r) for r in _d1_query(f"SELECT {cols} FROM footer_cache WHERE state = 'evicting' AND started_ts <= {now - grace} {order};", acct, tok, db_id)]
     if not dry_run:
         for e in due:
-            _d1_query(f"DELETE FROM index_row_groups WHERE {_key(e)};", acct, tok, db_id)
+            d1_delete("index_row_groups", _key(e), acct, tok, db_id)
             _d1_query(f"DELETE FROM footer_cache WHERE {_key(e)} AND state = 'evicting';", acct, tok, db_id)
     return Eviction(hot=totals, demoted=demoted, deleted=due)
 

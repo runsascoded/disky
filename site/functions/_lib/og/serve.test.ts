@@ -1,8 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cardSvg, type CardData } from './card'
 import { expDay, imagePath, ogKey } from './sign'
-import { anonymousPage, serveCard, siteOf, stampPage, type OgEnv } from './serve'
+import { anonymousPage, pageOf, serveCard, siteOf, stampPage, type OgEnv } from './serve'
 import { anonymousPolicy } from './policy'
+import { fullTier, mint } from './tokens'
+import { EPOCH } from './sign'
+import { sqliteD1 } from '../testD1'
+
+// 2026-10-02T12:00Z: day 274.
+const NOW = EPOCH + 274 * 86400 + 12 * 3600
 
 const mocks = vi.hoisted(() => ({
   data: vi.fn(), scan: vi.fn(), head: vi.fn(), warm: vi.fn(), live: vi.fn(), tier: vi.fn(),
@@ -252,5 +258,116 @@ describe('restricted anonymous OG responses', () => {
       const image = new URL(call[1].image)
       return [image.origin, image.pathname, Object.fromEntries(image.searchParams)]
     })]).toEqual(['private, no-store', [['https://public.example', '/og/map.png', { c: 't', policy: 'shape', r: '8', s: '2026-10-12T1201' }]]])
+  })
+})
+
+describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)', () => {
+  const STORES_JSON = JSON.stringify({
+    meta: { path: '/meta', vars: { ROOT_LABEL: 'CW — meta', STORE_SCHEME: 'r2://' } },
+    nas: { path: '/nas', vars: { ROOT_LABEL: 'nas', STORE_SCHEME: 'file:///', STORE_ROOT: 'mnt/user' } },
+    staff: { path: '/staff', scope: 'admin', vars: { ROOT_LABEL: 'staff only' } },
+    hidden: { vars: { ROOT_LABEL: 'no page path' } },
+  })
+  const deployment = (extra: Partial<OgEnv> = {}) => env({ OG_CARDS: '1', STORES_JSON, STORE_ROOT: 'cw-root', OG_DEFAULT_COLOR: 'user', ...extra } as Partial<OgEnv>)
+  const storeOf = (e: unknown) => (e as { STORE_KEY?: string }).STORE_KEY ?? 'primary'
+  const full = () => mocks.tier.mockResolvedValue({ tier: 'full', day: expDay(Math.floor(Date.now() / 1000), 7), cred: { t: 'TokMetaAAA' } })
+
+  it('page meta: its title, its data, and an image view carrying `store`; the image renders it from that store', async () => {
+    full()
+    mocks.live.mockResolvedValue(true)
+    await stampPage(deployment(), new URL('https://cw.example/meta/snapshots?d=261012&og=TokMetaAAA'), new Response('shell'))
+    const meta = mocks.stamp.mock.calls[0][1]
+    const image = new URL(meta.image)
+    const { sig, ...params } = Object.fromEntries(image.searchParams)
+    expect([meta.title, meta.desc, image.pathname, params, sig.length]).toEqual([
+      'snapshots', 'scan 2026-10-12T1201 · 99 TiB · 123 objects', '/og/map.png',
+      { d: '261012', path: 'snapshots', policy: 'generic', r: '8', s: '2026-10-12T1201', store: 'meta', t: 'TokMetaAAA' }, 12,
+    ])
+    expect([
+      mocks.tier.mock.calls.map(call => [storeOf(call[0]), call[1], call[2]]),
+      mocks.scan.mock.calls.map(call => [storeOf(call[0]), call[1]]),
+      mocks.data.mock.calls.map(call => [storeOf(call[0]), call[1], call[2], call[3], call[4]]),
+    ]).toEqual([
+      [['meta', 'map', { store: 'meta', path: 'snapshots', d: '261012' }]],
+      [['meta', '261012']],
+      [['meta', { name: 'CW — meta', scheme: 'r2://' }, 'snapshots', { store: 'meta', path: 'snapshots', d: '2026-10-12T1201' }, 'full']],
+    ])
+    mocks.data.mockClear()
+    const response = await serveCard({ request: new Request(image), env: deployment() })
+    expect([response.status, response.headers.get('x-og-tier')]).toEqual([200, 'full'])
+    expect([
+      mocks.live.mock.calls.map(call => [storeOf(call[0]), call[1], call[2], call[3]]),
+      mocks.data.mock.calls.map(call => [storeOf(call[0]), call[1], call[2], call[3], call[4]]),
+    ]).toEqual([
+      [['meta', 'map', { store: 'meta', path: 'snapshots', d: '261012' }, { t: 'TokMetaAAA' }]],
+      [['meta', { name: 'CW — meta', scheme: 'r2://' }, 'snapshots', { store: 'meta', path: 'snapshots', d: '2026-10-12T1201' }, 'full']],
+    ])
+  })
+
+  it('its root is titled by its label; its own mount leads its paths; diffs too', async () => {
+    const shape = deployment({ OG_ANONYMOUS: 'shape' })
+    for (const p of ['/meta', '/nas', '/nas/media/tv', '/meta/snapshots?section=diff&d=261012-261010']) await stampPage(shape, new URL(`https://cw.example${p}`), new Response('shell'))
+    expect(mocks.stamp.mock.calls.map(call => {
+      const image = new URL(call[1].image)
+      return [call[1].title, image.pathname, Object.fromEntries(image.searchParams)]
+    })).toEqual([
+      ['CW — meta', '/og/map.png', { policy: 'shape', r: '8', s: '2026-10-12T1201', store: 'meta' }],
+      ['nas', '/og/map.png', { path: 'mnt/user', policy: 'shape', r: '8', s: '2026-10-12T1201', store: 'nas' }],
+      ['media/tv', '/og/map.png', { path: 'mnt/user/media/tv', policy: 'shape', r: '8', s: '2026-10-12T1201', store: 'nas' }],
+      ['secret/path', '/og/diff.png', { b: '2026-10-10T1201', d: '261012-261010', path: 'snapshots', policy: 'shape', r: '8', s: '2026-10-12T1201', store: 'meta' }],
+    ])
+    expect(mocks.diff.mock.calls.map(call => [storeOf(call[0]), call[1], call[2]])).toEqual([['meta', { name: 'CW — meta', scheme: 'r2://' }, 'snapshots · changes']])
+    expect(mocks.pair.mock.calls.map(call => [storeOf(call[0]), call[1]])).toEqual([['meta', '261012-261010']])
+  })
+
+  it('the primary\'s pages are as before: no `store`, its label, scheme and mount', async () => {
+    const shape = deployment({ OG_ANONYMOUS: 'shape' })
+    for (const p of ['/', '/marin/x', '/metadata']) await stampPage(shape, new URL(`https://cw.example${p}`), new Response('shell'))
+    expect(mocks.stamp.mock.calls.map(call => [call[1].title, Object.fromEntries(new URL(call[1].image).searchParams)])).toEqual([
+      ['CW storage', { path: 'cw-root', policy: 'shape', r: '8', s: '2026-10-12T1201' }],
+      ['marin/x', { path: 'cw-root/marin/x', policy: 'shape', r: '8', s: '2026-10-12T1201' }],
+      ['metadata', { path: 'cw-root/metadata', policy: 'shape', r: '8', s: '2026-10-12T1201' }],
+    ])
+    expect(mocks.scan.mock.calls.map(call => storeOf(call[0]))).toEqual(['primary', 'primary', 'primary'])
+    // without a store there, `/meta` is still no card
+    const html = new Response('shell')
+    expect(await stampPage(env({ OG_CARDS: '1', OG_ANONYMOUS: 'shape' }), new URL('https://cw.example/meta/snapshots'), html)).toBe(html)
+  })
+
+  it('a store with its own scope is generic to anonymous fetches, whatever the deployment\'s policy', async () => {
+    const open = deployment({ OG_ANONYMOUS: 'full' })
+    await stampPage(open, new URL('https://cw.example/staff/secret'), new Response('shell'))
+    expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{
+      title: 'disky — staff only', desc: 'Private storage dashboard. Sign in to explore storage.',
+      image: 'https://cw.example/og/map.png?policy=generic&r=8', imageType: 'image/png', page: 'https://cw.example/staff/secret',
+    }])
+    const response = await serveCard({ request: request('/og/map.png?store=staff&path=secret&policy=full&r=8'), env: open })
+    expect([response.headers.get('x-og-tier'), textNodes(await response.text())])
+      .toEqual(['anon', ['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', '']])
+    expect([mocks.data.mock.calls, mocks.scan.mock.calls]).toEqual([[], []])
+    const assets = vi.fn(async (_request: Request) => new Response('safe shell'))
+    const shell = await anonymousPage({ ...open, ASSETS: { fetch: assets } }, new URL('https://cw.example/staff/secret'))
+    expect([await shell!.text(), await anonymousPage(open, new URL('https://cw.example/meta/x'))]).toEqual(['safe shell', null])
+  })
+
+  it('a share token minted on its page is for its view (`store` included), never the primary\'s same path', async () => {
+    const { db } = await sqliteD1()
+    const dep = deployment()
+    const m = (await mint(db, u => pageOf(dep, u)?.pv ?? null, new URL('https://cw.example/meta/snapshots?d=261012#diff'), 'ann@example.org', NOW, 30, 'TokMetaAAA'))!
+    expect([
+      m.url,
+      await fullTier(db, 'diff', { store: 'meta', path: 'snapshots', d: '261012' }, 'TokMetaAAA', NOW),
+      await fullTier(db, 'diff', { path: 'cw-root/snapshots', d: '261012' }, 'TokMetaAAA', NOW),
+      await fullTier(db, 'diff', { path: 'snapshots', d: '261012' }, 'TokMetaAAA', NOW),
+    ]).toEqual(['https://cw.example/meta/snapshots?d=261012&section=diff&og=TokMetaAAA#diff', { day: 304 }, null, null])
+    expect([pageOf(dep, new URL('https://cw.example/staff/x'))?.env.STORE_SCOPE, pageOf(dep, new URL('https://cw.example/meta/x'))?.env.STORE_SCOPE]).toEqual(['admin', undefined])
+  })
+
+  it('an image naming no such store, or a store on a kind it has no page of, is not a card', async () => {
+    const statuses: number[] = []
+    for (const p of ['/og/map.png?store=nope', '/og/map.png?store=constructor', '/og/staged.png?store=meta', '/og/users.png?store=meta']) {
+      statuses.push((await serveCard({ request: request(p), env: deployment({ OG_ANONYMOUS: 'shape' }) })).status)
+    }
+    expect([statuses, mocks.data.mock.calls, mocks.scan.mock.calls]).toEqual([[404, 404, 404, 404], [], []])
   })
 })

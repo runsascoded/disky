@@ -1,6 +1,7 @@
 /** Which card a page URL gets (specs/done/dogi.md): its kind, the canonical view
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
+import { mountedSegs, urlSegsOf } from '../../../src/pathCrumbs.js'
 import { canonicalSel } from '../../../src/scanSlug.js'
 
 export type OgKind = 'map' | 'diff' | 'staged' | 'users' | 'user' | 'assignments'
@@ -39,12 +40,33 @@ const pick = (sp: URLSearchParams, keys: readonly string[]): Record<string, stri
   return out
 }
 
+/** A secondary store's page path (`STORES_JSON` `path`, `/`-led, no trailing `/`): its key and URL prefix. */
+export interface StorePath { key: string; path: string }
+
+/** The secondary store whose `path` leads `pathname` (the longest, as the frontend's `storeForPath`), with the
+ * pathname below it (`/meta/a/b` → `/a/b`, `/meta` → `/`); null = the primary's page. */
+export function storeOfPath(pathname: string, stores: readonly StorePath[]): { key: string; rest: string } | null {
+  const s = [...stores].sort((a, b) => b.path.length - a.path.length).find(s => pathname === s.path || pathname.startsWith(`${s.path}/`))
+  return s ? { key: s.key, rest: pathname.slice(s.path.length) || '/' } : null
+}
+
+/** First segments under a secondary store's path that are not its map: the object opener and the OG render page
+ * (`src/Root.tsx`'s `<path>/files/*`, `<path>/og`). */
+const NOT_STORE_MAP = new Set(['files', 'og'])
+
 /** The page's view, or null for pages with no card of their own (API routes,
- * `/files`, `/admin`, unknown asset-looking paths). `site` names the root. */
-export function pageView(url: URL, site: string): PageView | null {
+ * `/files`, `/admin`, unknown asset-looking paths). `site` names the root; `root` is the store's mount
+ * (`Store.root`), which leads every map path and which its URLs leave out. `store`: a secondary store's key, `url`
+ * then being the page below its path (`storeOfPath`'s `rest`); its pages are map and diff only, and their view
+ * carries `store` (what the card reads, as the data Functions do). */
+export function pageView(url: URL, site: string, root: readonly string[] = [], store?: string): PageView | null {
   const segs = url.pathname.split('/').filter(Boolean).map(s => { try { return decodeURIComponent(s) } catch { return s } })
   const sp = url.searchParams
   const head = segs[0] ?? ''
+  if (store !== undefined) {
+    if (NOT_STORE_MAP.has(head) || segs.some(s => s.includes('..'))) return null
+    return mapView(segs, sp, site, root, { store })
+  }
   if (head === 'staged' && segs.length === 1) {
     const params = pick(sp, ['q'])
     return { kind: 'staged', params, title: params.q ? `Staged for deletion: “${params.q}”` : 'Staged for deletion' }
@@ -57,9 +79,15 @@ export function pageView(url: URL, site: string): PageView | null {
   if (NOT_MAP.has(head) || segs.some(s => s.includes('..'))) return null
   // A file-looking single segment at the root (`/og.jpg`, `/favicon.svg`) is an asset.
   if (segs.length === 1 && /\.(?:png|jpe?g|svg|ico|txt|json|js|css|webmanifest|wasm|ttf)$/i.test(head)) return null
-  const path = segs.join('/')
-  const params: Record<string, string> = { ...(path ? { path } : {}), ...pick(sp, MAP_KEYS) }
-  const where = path || site
+  return mapView(segs, sp, site, root, {})
+}
+
+/** A map page's view (`segs` below the store's path) and its diff section's; `lead` leads the params. */
+function mapView(segs: string[], sp: URLSearchParams, site: string, root: readonly string[], lead: Record<string, string>): PageView {
+  const tree = mountedSegs(root, segs)
+  const path = tree.join('/')
+  const params: Record<string, string> = { ...lead, ...(path ? { path } : {}), ...pick(sp, MAP_KEYS) }
+  const where = urlSegsOf(root, tree).join('/') || site
   const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
   if (sp.get('section') === 'diff') {
     const dm = sp.get('dm')

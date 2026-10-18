@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { hashToken } from '@open-athena/auth'
 import { sqliteD1 } from '../testD1'
 import { DAY_S, EPOCH, expDay } from './sign'
-import { fullTier, listTokens, mint, NEVER_DAY, revoke, shareKeyLive, tokenDays, TOKEN_DAYS_DEFAULT } from './tokens'
+import { fullTier, grantLive, listTokens, mint, NEVER_DAY, revoke, shareKeyGrant, shareKeyLive, tokenDays, TOKEN_DAYS_DEFAULT } from './tokens'
 import { pageView } from './routes'
 
 // 2026-10-02T12:00Z: day 274.
@@ -14,8 +14,8 @@ describe('D1', () => {
   describe('og_tokens: the row is the whole truth (foreign keys on)', () => {
     it('a mint is good for exactly its view until its expiry day ends; revoking one mint leaves the others', async () => {
       const { db } = await sqliteD1()
-      const m = await mint(db, 'marin GCS', page('/marin-a/ckpt?d=261002&n=50&og=stale'), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
-      const m2 = await mint(db, 'marin GCS', page('/marin-a/ckpt?d=261002'), 'bo@example.org', NOW + 60, 30, 'TokBBBBBBB')
+      const m = await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a/ckpt?d=261002&n=50&og=stale'), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
+      const m2 = await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a/ckpt?d=261002'), 'bo@example.org', NOW + 60, 30, 'TokBBBBBBB')
       expect([m, m2]).toEqual([
         { token: 'TokAAAAAAA', url: 'https://site.example.org/marin-a/ckpt?d=261002&n=50&og=TokAAAAAAA', expDay: 304 },
         { token: 'TokBBBBBBB', url: 'https://site.example.org/marin-a/ckpt?d=261002&og=TokBBBBBBB', expDay: 304 },
@@ -42,8 +42,8 @@ describe('D1', () => {
     })
     it('a non-admin revokes only their own mints', async () => {
       const { db } = await sqliteD1()
-      await mint(db, 'marin GCS', page('/marin-a'), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
-      await mint(db, 'marin GCS', page('/marin-a'), 'bo@example.org', NOW, 30, 'TokBBBBBBB')
+      await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a'), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
+      await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a'), 'bo@example.org', NOW, 30, 'TokBBBBBBB')
       expect([
         await revoke(db, 'TokBBBBBBB', 'ann@example.org', NOW, 'ann@example.org'),
         await revoke(db, 'TokAAAAAAA', 'ann@example.org', NOW, 'ann@example.org'),
@@ -53,13 +53,13 @@ describe('D1', () => {
     })
     it('each mint is a fresh random token', async () => {
       const { db } = await sqliteD1()
-      const a = await mint(db, 'marin GCS', page('/marin-a'), 'ann@example.org', NOW)
-      const b = await mint(db, 'marin GCS', page('/marin-a'), 'ann@example.org', NOW)
+      const a = await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a'), 'ann@example.org', NOW)
+      const b = await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a'), 'ann@example.org', NOW)
       expect([a!.token.length, b!.token.length, a!.token === b!.token]).toEqual([10, 10, false])
     })
     it('pages without a card mint nothing', async () => {
       const { db } = await sqliteD1()
-      expect(await mint(db, 'marin GCS', page('/api/subtree'), 'ann@example.org', NOW)).toBe(null)
+      expect(await mint(db, u => pageView(u, 'marin GCS'), page('/api/subtree'), 'ann@example.org', NOW)).toBe(null)
     })
   })
 
@@ -86,6 +86,18 @@ describe('D1', () => {
       ]).toEqual([true, true, false, false, false, true, false, false, false, false])
       expect(raw.prepare('SELECT SUM(redeems) AS r, COUNT(last_used_at) AS used FROM grants').all()).toEqual([{ r: 1, used: 0 }])
     })
+    it('a secondary store\'s own scope (`need`): the link must carry it too, as its reads demand', async () => {
+      const { db, raw } = await sqliteD1()
+      const K = (s: string) => `${s}-share-link-key-000000`
+      for (const [id, scopes] of [['viewer', 'gcs'], ['staff', 'gcs,admin'], ['star', '*'], ['admin-only', 'admin']]) {
+        raw.prepare('INSERT INTO grants (id, token_hash, scopes, created_at, created_by) VALUES (?, ?, ?, 1, ?)').run(id, await hashToken(K(id)), scopes, 'admin@example.org')
+      }
+      const grant = (k: string, need?: string) => shareKeyGrant(db, K(k), ['gcs', 'gcs:read'], NOW, need)
+      expect([
+        await grant('viewer'), await grant('viewer', 'admin'), await grant('staff', 'admin'), await grant('star', 'admin'), await grant('admin-only', 'admin'),
+        await grantLive(db, 'viewer', ['gcs', 'gcs:read'], NOW, 'admin'), await grantLive(db, 'staff', ['gcs', 'gcs:read'], NOW, 'admin'),
+      ]).toEqual(['viewer', null, 'staff', 'star', null, false, true])
+    })
   })
 
   describe('share-link expiry (any length, or never)', () => {
@@ -93,7 +105,7 @@ describe('D1', () => {
 
     async function minted(days: number, token: string) {
       const { db } = await sqliteD1()
-      const m = (await mint(db, 'Demo', new URL('https://demo.example/bucket'), 'demo', now, days, token))!
+      const m = (await mint(db, u => pageView(u, 'Demo'), new URL('https://demo.example/bucket'), 'demo', now, days, token))!
       const view = pageView(new URL(m.url), 'Demo')!
       return { m, valid: (t: number) => fullTier(db, view.kind, view.params, m.token, t) }
     }

@@ -33,13 +33,17 @@ export function pathUri(scheme: string, segs: string[], dir = false): string {
  * filesystem paths (`/Applications/…`); a store `home` (its segments, e.g.
  * `['Users', 'ryan']`) folds to `~`. Other schemes read as their URI. `lead`
  * stands for the first `leadSegs` segments; `rest` follows it. */
+/** How a path's root reads on screen. A `file:///` store's paths are plain
+ * filesystem paths (`/Applications/…`); other schemes read as their URI. */
+export const pathLead = (scheme: string): string => (scheme === 'file:///' ? '/' : scheme)
+
 export interface PathDisplay { lead: string; leadSegs: number; rest: string[] }
 
 export function pathDisplay(scheme: string, segs: string[], home?: string[]): PathDisplay {
   if (home?.length && segs.length >= home.length && home.every((h, i) => segs[i] === h)) {
     return { lead: '~', leadSegs: home.length, rest: segs.slice(home.length) }
   }
-  return { lead: scheme === 'file:///' ? '/' : scheme, leadSegs: 0, rest: segs }
+  return { lead: pathLead(scheme), leadSegs: 0, rest: segs }
 }
 
 /** {@link pathDisplay} as one string: `~/c/disky`, `/Applications`, `gs://b/x`
@@ -80,3 +84,26 @@ export function fromUrlPath(path: string, home?: string[]): string[] {
 /** Encode each actual directory name, including URL delimiters and literal `%`. */
 export const toUrlPath = (segs: string[], home?: string[]): string =>
   toUrlSegs(segs, home).map(encodeURIComponent).join('/')
+
+const leads = (segs: readonly string[], head: readonly string[]): boolean => head.every((h, i) => segs[i] === h)
+
+/** A store path (segments from the store's data root) from a URL path's segments below the store's route: a store's
+ * `root` (`Store.root`) is its mount, left out of its URLs, so it leads every path. A URL that still spells the root
+ * out (a link from before the mount) reads as the same path. */
+export const mountedSegs = (root: readonly string[] | undefined, urlSegs: string[]): string[] =>
+  !root?.length || leads(urlSegs, root) ? urlSegs : [...root, ...urlSegs]
+
+/** `mountedSegs`' inverse: a store path's URL segments, its root left out. */
+export const urlSegsOf = (root: readonly string[] | undefined, segs: string[]): string[] =>
+  root?.length && leads(segs, root) ? segs.slice(root.length) : segs
+
+/** A store path's URL segments (below the store's route): under the store's home, `~` and the rest
+ * (`toUrlSegs`); else the path with its `root` (the mount) left out (`urlSegsOf`). */
+export function storeUrlSegs(store: { root?: readonly string[]; home?: string[] }, segs: string[]): string[] {
+  const u = toUrlSegs(segs, store.home)
+  return store.home?.length && u[0] === '~' ? u : urlSegsOf(store.root, segs)
+}
+
+/** {@link storeUrlSegs}' inverse: a URL's segments (each decoded) as a store path, `~` expanded and the mount led. */
+export const storeSegsOfUrl = (store: { root?: readonly string[]; home?: string[] }, urlSegs: string[]): string[] =>
+  mountedSegs(store.root, fromUrlSegs(urlSegs, store.home))

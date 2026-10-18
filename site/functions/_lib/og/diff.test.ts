@@ -46,7 +46,7 @@ describe('D1', () => {
   it('minting a fragment-only diff link scopes it to the comparison, not its snapshot map', async () => {
     const { db } = await sqliteD1()
     const now = Date.UTC(2026, 9, 13) / 1000
-    const result = await mint(db, 'Demo', new URL('https://demo.example/bucket?d=26092812-26091700#diff'), 'demo', now, 30, 'DiffTokAAA')
+    const result = await mint(db, u => pageView(u, 'Demo'), new URL('https://demo.example/bucket?d=26092812-26091700#diff'), 'demo', now, 30, 'DiffTokAAA')
     expect(result?.url).toBe('https://demo.example/bucket?d=26092812-26091700&section=diff&og=DiffTokAAA#diff')
     const view = pageView(new URL(result!.url), 'Demo')!
     expect([view.kind, await fullTier(db, 'diff', view.params, result!.token, now), await fullTier(db, 'map', view.params, result!.token, now)])

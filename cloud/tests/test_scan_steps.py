@@ -710,6 +710,19 @@ def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
     assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s <tmp>/data"]
 
 
+def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
+    """`layer1: true`: the raw listing shards under `layout.listing` (`-1`); without a `layout.listing`, none (warned)."""
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "layer1": True, "store": "gs://iv"}}
+    c = ctx(tmp_path, env, steps=["retire"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -1 listing/{{id}}/*/shard-*.parquet "
+                               f"-o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+    n = ctx(tmp_path, env, steps=["retire"], options={**opts, "list": {"import": True}})
+    S.retire(n, None)
+    assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+
+
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},

@@ -25,6 +25,13 @@
  * `secrets` maps a per-store var to the NAME of a Pages secret holding its
  * value, so no secret sits in the (public) `wrangler.toml`.
  *
+ * `path` is the store's page path: the URL prefix its pages live under, the frontend's `Store.path` for the same key
+ * (mounted by `STORES_EXTRA`). The link unfurls (`og/serve.ts`) read it: a page below it is that store's (its
+ * `ROOT_LABEL`, `STORE_SCHEME`, `STORE_ROOT` mount and data, the card's view carrying `store=<key>`). No `path`: the
+ * store's pages get no card of their own. A store's mount is its own `STORE_ROOT` (`/`-separated; unset = `/`):
+ *
+ *   STORES_JSON = {"nas": {"path": "/nas", "vars": {"ROOT_LABEL": "nas", "STORE_ROOT": "mnt/user", …}}}
+ *
  * The static name index is per store too: a store with its own sets
  * `STATIC_GEN` (its generation in the deployment's `INDEX_R2`) and, as its
  * generation was built, `FILTER_STATIC_HEAVY` / `FILTER_STATIC_ANCHORS`. One
@@ -41,6 +48,9 @@
  * and `store=<view key>` names the view either way:
  *
  *   STORES_JSON = {"meta": {…}, "all": {"union": ["primary", "meta"], "main": true}}
+ *
+ * A view has no page path of its own: a main view's pages are the primary's (`/`), and a view's `store=` is reached
+ * from those only.
  *
  * A view may say how the scan picker and the map mark each member (`sources`, keyed by member): a `label`
  * (default: the member's `ROOT_LABEL`, else its key) and an `icon` — an absolute `http(s)://` URL or a path the
@@ -72,6 +82,8 @@ export const INHERITED_VARS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY', 'SEARCH_P
 export const STORE_VARS = [
   'ROOT_LABEL',
   'ROOT_TITLE',
+  'STORE_ROOT',
+  'OG_DEFAULT_COLOR',
   'SNAPSHOTS_SUBDIR',
   'STORE_SCHEME',
   'STORE_BUCKETS',
@@ -101,6 +113,8 @@ export interface StoreConfig {
   vars?: Partial<Record<StoreVar, string>>
   /** Per-store var → name of the secret (env binding) holding its value. */
   secrets?: Partial<Record<StoreVar, string>>
+  /** The store's page path (`/meta`): the URL prefix its pages live under (normalized: no trailing `/`). */
+  path?: string
 }
 
 const KEY_RE = /^[a-z0-9][a-z0-9-]*$/
@@ -120,6 +134,9 @@ export interface UnionView {
 
 /** A union member's mark in the picker and on the map: its `label` and an optional `icon` (a URL or a site path). */
 export interface SourceDisplay { label?: string; icon?: string }
+
+/** A page path: `/`-led segments, no empty segment (a trailing `/` is dropped first). */
+const PATH_RE = /^(\/[A-Za-z0-9._~-]+)+$/
 
 const ICON_RE = /^(https?:\/\/[^\s]+|\/[^\s/][^\s]*)$/
 
@@ -160,9 +177,13 @@ function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Re
       unions[key] = cfg as Record<string, unknown>
       continue
     }
-    const { scope, vars, secrets, ...rest } = cfg as Record<string, unknown>
+    const { scope, vars, secrets, path, ...rest } = cfg as Record<string, unknown>
     if (Object.keys(rest).length) throw new StoreConfigError(`STORES_JSON.${key}: unknown field(s) ${Object.keys(rest).join(', ')}`)
     if (scope !== undefined && typeof scope !== 'string') throw new StoreConfigError(`STORES_JSON.${key}.scope: want a string`)
+    const page = typeof path === 'string' ? path.replace(/(.)\/$/, '$1') : path
+    if (page !== undefined && (typeof page !== 'string' || !PATH_RE.test(page) || page.split('/').some(s => s === '.' || s === '..'))) throw new StoreConfigError(`STORES_JSON.${key}.path: want a page path like '/${key}' (not '/')`)
+    const taken = Object.entries(stores).find(([, c]) => c.path === page)
+    if (page !== undefined && taken) throw new StoreConfigError(`STORES_JSON.${key}.path: '${page}' is also '${taken[0]}'s`)
     for (const [field, m] of [['vars', vars], ['secrets', secrets]] as const) {
       if (m === undefined) continue
       if (!m || typeof m !== 'object' || Array.isArray(m)) throw new StoreConfigError(`STORES_JSON.${key}.${field}: want an object`)
@@ -171,7 +192,7 @@ function parseStores(env: Env): { stores: Record<string, StoreConfig>; views: Re
         if (typeof v !== 'string') throw new StoreConfigError(`STORES_JSON.${key}.${field}.${k}: want a string`)
       }
     }
-    stores[key] = cfg as StoreConfig
+    stores[key] = page === undefined ? cfg as StoreConfig : { ...(cfg as StoreConfig), path: page as string }
   }
   const views: Record<string, UnionView> = {}
   for (const [key, cfg] of Object.entries(unions)) {
@@ -206,6 +227,10 @@ function sourceDisplays(key: string, members: readonly string[], raw: unknown): 
   }
   return out
 }
+
+/** The secondary stores with a page path (`path`), as `{key, path}`: what a page URL's store is read from. */
+export const storePaths = (env: Env): { key: string; path: string }[] =>
+  Object.entries(secondaryStores(env)).flatMap(([key, c]) => (c.path ? [{ key, path: c.path }] : []))
 
 /** The store a (possibly overlaid) env serves: `PRIMARY_STORE` or a key. */
 export const storeKey = (env: Env): string => env.STORE_KEY ?? PRIMARY_STORE
@@ -267,7 +292,7 @@ export function withStore<C extends { request: Request; env: Env }>(ctx: C): C |
   } catch (e) {
     return jsonErr((e as Error).message, 500)
   }
-  const cfg = stores[key]
+  const cfg = Object.hasOwn(stores, key) ? stores[key] : undefined
   if (!cfg) return jsonErr(`unknown store '${key}'`, 404)
   return as(storeEnv(ctx.env, key, cfg))
 }

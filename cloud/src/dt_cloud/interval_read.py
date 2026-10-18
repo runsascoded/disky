@@ -117,6 +117,10 @@ class Sort:
         return self.pf.read_row_groups([g["rg"] for g in gs], columns=columns)
 
 
+#: Row groups `Store.changes` reads at a time.
+CHANGES_CHUNK = 64
+
+
 def live(g: dict, D: int) -> bool:
     """A group can hold a version live at D."""
     return g["vf_min"] <= D < g["vt_max"]
@@ -399,16 +403,21 @@ class Store:
         rs = self.point(D, depth_of(path), path, path, cost).to_pylist()
         return agg_of(rs[0]) if rs else None
 
-    def changes(self, D1: int, D2: int, path: str, cost: Cost) -> int:
+    def changes(self, D1: int, D2: int, path: str, cost: Cost, *, chunk: int = CHANGES_CHUNK) -> int:
         """Versions under P that opened or closed in `(D1, D2]` — the diff's changed paths — from `path`
-        groups whose open or close stamps can fall in the span: the read a change-only diff would make."""
+        groups whose open or close stamps can fall in the span: the read a change-only diff would make. Counted
+        `chunk` groups at a time: across the v1 → v2 cutover every object opens, and the whole span at once held
+        gcs's 09-29→09-30 root (hundreds of millions of paths) in memory past 256 GB."""
         lo, hi = p_range(path)
         gs = [g for g in self.path.groups if ((D1 < g["vf_max"] and g["vf_min"] <= D2) or (D1 < g["vt_max"] and g["vt_min"] <= D2))
               and g["p_max"] >= lo and g["p_min"] < hi]
-        t = self.path.read(gs, ["depth", "path", "vf", "vt"], cost)
-        m = pc.and_(pc.and_(pc.greater_equal(t["path"], lo), pc.less(t["path"], hi)),
-                    pc.or_(pc.and_(pc.greater(t["vf"], D1), pc.less_equal(t["vf"], D2)), pc.and_(pc.greater(t["vt"], D1), pc.less_equal(t["vt"], D2))))
-        return t.filter(m).num_rows
+        n = 0
+        for i in range(0, max(len(gs), 1), chunk):
+            t = self.path.read(gs[i:i + chunk], ["depth", "path", "vf", "vt"], cost)
+            m = pc.and_(pc.and_(pc.greater_equal(t["path"], lo), pc.less(t["path"], hi)),
+                        pc.or_(pc.and_(pc.greater(t["vf"], D1), pc.less_equal(t["vf"], D2)), pc.and_(pc.greater(t["vt"], D1), pc.less_equal(t["vt"], D2))))
+            n += pc.sum(m.cast(pa.int64())).as_py() or 0
+        return n
 
 
 # ── Diff (both sides' kept tiles at one threshold, one-sided paths looked up) ──

@@ -12,7 +12,7 @@ export const WARM_W = 1536
 /** The first-paint subtree URLs (path + query) the map page would request
  * for a card's view, or none for kinds without one. Mirrors `App.tsx`'s
  * `scopeQs`: `f` → `q` (+ `qs`), a person in `o` → `lens=user:`, a pool or
- * `!` negation stays `o`, `cl` as is. `date` is the resolved scan. */
+ * `!` negation stays `o`, `cl` as is, a secondary store's `store` too. `date` is the resolved scan. */
 export function warmUrls(kind: string, params: Record<string, string>, date: string, canon: (u: string) => string = u => u): string[] {
   if (kind !== 'map' && kind !== 'user') return []
   const path = kind === 'user' ? '' : params.path ?? ''
@@ -26,5 +26,7 @@ export function warmUrls(kind: string, params: Record<string, string>, date: str
   const base = `/api/subtree?${sp}`
   // A filtered page's first paint is the full read; an unfiltered one paints
   // `depth=1` first, then the full view.
-  return params.f ? [`${base}&full=1`] : [`${base}&depth=1`, base]
+  // A secondary store's page asks with `store=<key>` last (`src/stores.ts` `storeUrl`).
+  const store = params.store ? `&store=${encodeURIComponent(params.store)}` : ''
+  return params.f ? [`${base}&full=1${store}`] : [`${base}&depth=1${store}`, `${base}${store}`]
 }

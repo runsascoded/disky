@@ -8,7 +8,7 @@ import { isPathScope } from '../restrict.js'
 import type { D1Database } from '@cloudflare/workers-types'
 import { canRedeem, hashToken } from '@open-athena/auth'
 import { d1GrantStore } from '@open-athena/auth/d1'
-import { pageView } from './routes.js'
+import type { PageView } from './routes.js'
 import { B62, canonical, expDay, expired, randomToken } from './sign.js'
 import { shareSection } from '../../../src/shareSection.js'
 
@@ -32,12 +32,12 @@ export interface Mint {
   expDay: number
 }
 
-/** Mint a token for `pageUrl`'s view and record it, good for `days` (`tokenDays`;
- * 0 = never expires). Null when the URL has no card of its own. */
-export async function mint(db: D1Database, site: string, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = randomToken(TOKEN_CHARS)): Promise<Mint | null> {
+/** Mint a token for `pageUrl`'s view (`view`: the deployment's `pageView`, its stores' included: `og/serve.ts`
+ * `pageOf`) and record it, good for `days` (`tokenDays`; 0 = never expires). Null when the URL has no card of its own. */
+export async function mint(db: D1Database, view: (u: URL) => PageView | null, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = randomToken(TOKEN_CHARS)): Promise<Mint | null> {
   const u = shareSection(pageUrl)
   u.searchParams.delete('og')
-  const pv = pageView(u, site)
+  const pv = view(u)
   if (!pv) return null
   const day = tokenExpDay(now, tokenDays(days))
   await db.prepare('INSERT INTO og_tokens (token, kind, view, page, minted_by, minted_ts, exp_day) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -90,13 +90,13 @@ export async function revoke(db: D1Database, token: string, by: string, now: num
 /** A `key=` share link that would let its bearer in right now, by the
  * gate's own rule for a presented token (`canRedeem`: unrevoked, enabled,
  * unexpired; the redeem cap only limits new sessions), carrying one of
- * `scopes`. Read-only: nothing is redeemed or touched. Such a page unfurls
+ * `scopes` (and `need`, a secondary store's own scope, when set). Read-only: nothing is redeemed or touched. Such a page unfurls
  * with the full card, since the bearer gets access anyway. */
-export async function shareKeyGrant(db: D1Database | undefined, key: string | null, scopes: readonly string[], now: number): Promise<string | null> {
+export async function shareKeyGrant(db: D1Database | undefined, key: string | null, scopes: readonly string[], now: number, need?: string): Promise<string | null> {
   if (!db || !key || key.length < 16 || key.length > 256) return null
   try {
     const g = await d1GrantStore(db as never).byTokenHash(await hashToken(key))
-    return g && grantOk(g, scopes, now) ? g.id : null
+    return g && grantOk(g, scopes, now, need) ? g.id : null
   } catch {
     return null
   }
@@ -106,8 +106,10 @@ export const shareKeyLive = async (db: D1Database | undefined, key: string | nul
   (await shareKeyGrant(db, key, scopes, now)) != null
 
 type GrantLike = { revokedAt: number | null; disabledAt: number | null; expiresAt: number | null; scopes: string[] } & Parameters<typeof canRedeem>[0]
-const grantOk = (g: GrantLike, scopes: readonly string[], now: number): boolean =>
+const grantOk = (g: GrantLike, scopes: readonly string[], now: number, need?: string): boolean =>
   canRedeem(g, now) && g.scopes.some((sc: string) => sc === '*' || scopes.includes(sc))
+  // A secondary store's own scope (`STORES_JSON` `scope`), as `requireViewer` demands of its reads.
+  && (!need || g.scopes.some((sc: string) => sc === '*' || sc === need))
   // A path-restricted link (specs/path-scopes.md) never earns a full card:
   // its tiles would name what the link hides.
   && !g.scopes.some(isPathScope)
@@ -115,11 +117,11 @@ const grantOk = (g: GrantLike, scopes: readonly string[], now: number): boolean 
 /** The share-link grant `id` is still live (same rule as `shareKeyGrant`):
  * what a `key=` page's full card image re-checks on every fetch, so
  * revoking the link also reverts its cards. */
-export async function grantLive(db: D1Database | undefined, id: string, scopes: readonly string[], now: number): Promise<boolean> {
+export async function grantLive(db: D1Database | undefined, id: string, scopes: readonly string[], now: number, need?: string): Promise<boolean> {
   if (!db || !id) return false
   try {
     const g = await d1GrantStore(db as never).byId(id)
-    return !!g && grantOk(g, scopes, now)
+    return !!g && grantOk(g, scopes, now, need)
   } catch {
     return false
   }

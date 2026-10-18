@@ -5,7 +5,7 @@ import { cacheKeyFor } from './edgeCache'
 import { indexDir, openIndex, pathScans, storeTarget, storeCreds } from './index'
 import { overTimeDataset } from './overTime'
 import { REQ, Req, reqOf, snapshotsPrefix } from './shared'
-import { LENS_PRIMARY_ONLY, primaryOnly, secondaryStores, storeEnv, storeKey, withStore } from './stores'
+import { LENS_PRIMARY_ONLY, primaryOnly, secondaryStores, storeEnv, storeKey, storePaths, withStore } from './stores'
 import { sqliteD1 } from './testD1'
 import { onRequestGet as subtree } from '../api/subtree'
 
@@ -52,6 +52,25 @@ describe('secondaryStores', () => {
     expect(err({ meta: { vars: { BASE_SCOPE: 'admin' } } })).toBe("STORES_JSON.meta.vars: unknown var 'BASE_SCOPE'")
     expect(err([])).toBe('STORES_JSON: want an object of store configs')
   })
+  it('`path`: the store\'s page path, a trailing `/` dropped; stores without one have no page path', () => {
+    const env = { STORES_JSON: JSON.stringify({ meta: { ...META, path: '/meta/' }, nas: { path: '/nas/tv', vars: { STORE_ROOT: 'mnt/user' } }, scratch: {} }) } as Env
+    expect([secondaryStores(env), storePaths(env)]).toEqual([
+      { meta: { ...META, path: '/meta' }, nas: { path: '/nas/tv', vars: { STORE_ROOT: 'mnt/user' } }, scratch: {} },
+      [{ key: 'meta', path: '/meta' }, { key: 'nas', path: '/nas/tv' }],
+    ])
+  })
+  it('refuses a bad or shared `path`, and a `path` on a union view (its pages are the primary\'s)', () => {
+    const err = (json: unknown) => {
+      try { secondaryStores({ STORES_JSON: JSON.stringify(json) } as Env) } catch (e) { return (e as Error).message }
+      return null
+    }
+    const bad = "STORES_JSON.meta.path: want a page path like '/meta' (not '/')"
+    expect(['/', '', 'meta', '/meta//x', '/a/../b', '/a/./b', '/me ta', 7].map(path => err({ meta: { path } })))
+      .toEqual([bad, bad, bad, bad, bad, bad, bad, bad])
+    expect(err({ meta: { path: '/m' }, nas: { path: '/m/' } })).toBe("STORES_JSON.nas.path: '/m' is also 'meta's")
+    expect(err({ meta: {}, all: { union: ['primary', 'meta'], path: '/all' } }))
+      .toBe('STORES_JSON.all: unknown field(s) path (a union view takes union, main, sources)')
+  })
 })
 
 describe('storeEnv', () => {
@@ -81,6 +100,16 @@ describe('storeEnv', () => {
       { FILTER_STATIC: '1', FILTER_INDEXED_ONLY: '0', STATIC_GEN: 'g-meta', FILTER_STATIC_ANCHORS: '0' },
     ])
     expect(secondaryStores({ STORES_JSON: JSON.stringify({ meta: own }) } as Env)).toEqual({ meta: own })
+  })
+  it('the card vars are per store: the primary\'s mount and card colour cleared, a store config sets its own', () => {
+    const env = { ...PRIMARY, STORE_ROOT: 'open-athena', OG_DEFAULT_COLOR: 'user' } as Env
+    const pick = (e: Env) => { const r = e as unknown as Record<string, string | undefined>; return [r.STORE_ROOT, r.OG_DEFAULT_COLOR] }
+    const nas = { vars: { STORE_ROOT: 'mnt/user', OG_DEFAULT_COLOR: 'w' } }
+    expect([pick(env), pick(storeEnv(env, 'meta', META)), pick(storeEnv(env, 'nas', nas))]).toEqual([
+      ['open-athena', 'user'],
+      [undefined, undefined],
+      ['mnt/user', 'w'],
+    ])
   })
   it('the overlay drives the existing seams: snapshots dir, store target, creds, store key', () => {
     const env = storeEnv(PRIMARY, 'meta', META)
@@ -133,6 +162,8 @@ describe('withStore', () => {
     }
     expect(await res('store=nope')).toEqual([404, '{"error":"unknown store \'nope\'"}\n'])
     expect(await res('store=Me%2Fta')).toEqual([400, '{"error":"bad store"}\n'])
+    // an inherited property of the parsed object is no store
+    expect(await res('store=constructor')).toEqual([404, '{"error":"unknown store \'constructor\'"}\n'])
     expect(await res('store=meta', { STORES_JSON: '{' } as Env)).toEqual([500, `{"error":"STORES_JSON: ${(() => { try { JSON.parse('{') } catch (e) { return (e as Error).message } })()}"}\n`])
   })
   it('primaryOnly: null for the primary, a 404 for another store', async () => {

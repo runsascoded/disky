@@ -10,6 +10,7 @@ import { loadRegistry, canonId } from '../identity.js'
 import { scanTimes } from '../scanTimes.js'
 import { parseOwner, queryParam, QueryError } from '../scope.js'
 import { snapshotsPrefix } from '../shared.js'
+import { isPrimary } from '../stores.js'
 import { decodeSel, fmtScanUtc, resolveAfter } from '../../../src/scanSlug.js'
 import { ATTEN_DEFAULT, buildView, MIN_AREA_DEFAULT, NotFound, type View } from '../view.js'
 import { hexQuery } from '../staticFilter.js'
@@ -203,7 +204,7 @@ export function legendOf(tree: TreeNode, color: (u: string | null) => string, na
 
 const fmtN = (n: number) => n.toLocaleString('en-US')
 
-export interface Site { name: string; scheme: string; defaultColor?: ColorMode }
+export interface Site { name: string; scheme: string; root?: string[]; defaultColor?: ColorMode }
 
 /** The map card for a view (`routes.ts` params), its depth by `depthPlan`'s budget (`deepen: false`: the
  * floor view alone, for callers that need only the totals). Errors become a card that says so, never a

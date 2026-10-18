@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { pageView } from './routes'
+import { pageView, storeOfPath } from './routes'
 
 const pv = (p: string) => pageView(new URL(`https://site.example.org${p}`), 'marin GCS')
 
@@ -79,3 +79,63 @@ describe('the card view keys the scan by the canonical ?d= (legacy and ISO spell
     expect(pv(path)?.params.d).toBe(d)
   })
 })
+
+describe('pageView: a mounted store (`STORE_ROOT`)', () => {
+  const pvm = (p: string) => pageView(new URL(`https://site.example.org${p}`), 'Open Athena Hugging Face', ['open-athena'])
+  it('reads its URLs below the root, titled without it; a link from before the mount reads the same', () => {
+    expect([pvm('/'), pvm('/models/m?d=261018'), pvm('/open-athena/models/m?d=261018')]).toEqual([
+      { kind: 'map', params: { path: 'open-athena' }, title: 'Open Athena Hugging Face' },
+      { kind: 'map', params: { path: 'open-athena/models/m', d: '261018' }, title: 'models/m' },
+      { kind: 'map', params: { path: 'open-athena/models/m', d: '261018' }, title: 'models/m' },
+    ])
+  })
+})
+
+describe('storeOfPath: a page URL below a secondary store\'s `path` is that store\'s', () => {
+  const STORES = [{ key: 'meta', path: '/meta' }, { key: 'nas', path: '/nas' }, { key: 'nas-tv', path: '/nas/tv' }]
+  it('the longest matching path, and the pathname below it; anything else is the primary\'s', () => {
+    expect(['/meta', '/meta/', '/meta/snapshots/x', '/nas/media', '/nas/tv/shows', '/metadata', '/', '/a/meta'].map(p => storeOfPath(p, STORES))).toEqual([
+      { key: 'meta', rest: '/' },
+      { key: 'meta', rest: '/' },
+      { key: 'meta', rest: '/snapshots/x' },
+      { key: 'nas', rest: '/media' },
+      { key: 'nas-tv', rest: '/shows' },
+      null,
+      null,
+      null,
+    ])
+    expect(storeOfPath('/meta/x', [])).toBe(null)
+  })
+})
+
+describe('pageView: a secondary store\'s page (below its path)', () => {
+  const pvs = (p: string, site = 'Marin GCS — meta', root: string[] = []) => pageView(new URL(`https://site.example.org${p}`), site, root, 'meta')
+  it('map and diff pages, titled by its label at its root; the view carries `store`', () => {
+    expect([
+      pvs('/'),
+      pvs('/snapshots/meta?d=261018&f=json&n=50'),
+      pvs('/snapshots?d=261018-261017&section=diff'),
+    ]).toEqual([
+      { kind: 'map', params: { store: 'meta' }, title: 'Marin GCS — meta' },
+      { kind: 'map', params: { store: 'meta', path: 'snapshots/meta', d: '261018', f: 'json' }, title: 'snapshots/meta · filter: json' },
+      { kind: 'diff', params: { store: 'meta', path: 'snapshots', d: '261018-261017' }, title: 'snapshots · changes' },
+    ])
+  })
+  it('its paths are its own: the primary\'s reserved and file-looking names are folders here; `files` and `og` have no card', () => {
+    expect([pvs('/staged'), pvs('/users'), pvs('/scans.json'), pvs('/files/x'), pvs('/og')]).toEqual([
+      { kind: 'map', params: { store: 'meta', path: 'staged' }, title: 'staged' },
+      { kind: 'map', params: { store: 'meta', path: 'users' }, title: 'users' },
+      { kind: 'map', params: { store: 'meta', path: 'scans.json' }, title: 'scans.json' },
+      null,
+      null,
+    ])
+  })
+  it('its own mount (`STORE_ROOT`): left out of its URLs and titles, leading its paths', () => {
+    expect([pvs('/', 'nas', ['mnt', 'user']), pvs('/media/tv', 'nas', ['mnt', 'user']), pvs('/mnt/user/media', 'nas', ['mnt', 'user'])]).toEqual([
+      { kind: 'map', params: { store: 'meta', path: 'mnt/user' }, title: 'nas' },
+      { kind: 'map', params: { store: 'meta', path: 'mnt/user/media/tv' }, title: 'media/tv' },
+      { kind: 'map', params: { store: 'meta', path: 'mnt/user/media' }, title: 'media' },
+    ])
+  })
+})
+

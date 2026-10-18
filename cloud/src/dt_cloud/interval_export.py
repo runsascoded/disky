@@ -172,6 +172,7 @@ def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None
     """Scan `scan`'s per-scan sorts from the store at `store_root` (generation `gen`, default the store's current,
     followed to its newest successor) into `dest` (a dir or URL): `path-index.parquet` (+ `path-index-bysize.parquet`
     for a v2 scan, when `tiers` names it). Returns `{scan, gen, version, sliced, rows, files: {name: bytes}}`."""
+    from disk_tree import listing_format as lf
     from disk_tree.find.tiers import write_tiers
 
     store = Store(store_root)
@@ -221,7 +222,7 @@ def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None
             sel = ", ".join(["path", *(f"{e} AS {c}" for c, e in cols)])
             dst = out / TIER_FILES["path"]
             con.execute(f"COPY (SELECT {sel} FROM live ORDER BY depth, path, usr NULLS FIRST) TO {q(str(dst))} "
-                        "(FORMAT PARQUET, ROW_GROUP_SIZE 8192)")
+                        f"(FORMAT PARQUET, {lf.duckdb_codec()}, ROW_GROUP_SIZE 8192)")
             rows = con.execute(f"SELECT count(*) FROM read_parquet({q(str(dst))})").fetchone()[0]
             names = {dst.name: dst.stat().st_size}
         dst_store = Store(dest)

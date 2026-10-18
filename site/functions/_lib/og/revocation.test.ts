@@ -10,6 +10,7 @@ import { imageParams, splitImageParams } from './cred'
 import { EPOCH, expDay, IMAGE_TTL_DAYS, imagePath, ogKey, resolveImage } from './sign'
 import { credLive, pageTier } from './tier'
 import { mint, revoke } from './tokens'
+import { pageView } from './routes'
 
 const NOW = EPOCH + 274 * 86400 + 12 * 3600
 const ORIGIN = 'https://site.example.org'
@@ -36,7 +37,7 @@ describe('D1', () => {
       const { db } = await sqliteD1()
       const env = { DB: db, BASE_SCOPE: 'gcs' }
       const key = await ogKey('s3cret')
-      const m = (await mint(db, 'marin GCS', new URL(`${ORIGIN}/marin-a`), 'ann@example.org', NOW, 30, 'TokAAAAAAA'))!
+      const m = (await mint(db, u => pageView(u, 'marin GCS'), new URL(`${ORIGIN}/marin-a`), 'ann@example.org', NOW, 30, 'TokAAAAAAA'))!
       const image = await stamped(env, key, `/marin-a?og=${m.token}`)
       expect(image.replace(/sig=.*/, 'sig=…')).toBe(`${ORIGIN}/og/map.png?path=marin-a&t=TokAAAAAAA&sig=…`)
       const before = await served(env, key, image)
@@ -48,7 +49,7 @@ describe('D1', () => {
       const { db } = await sqliteD1()
       const env = { DB: db, BASE_SCOPE: 'gcs' }
       const key = await ogKey('s3cret')
-      await mint(db, 'marin GCS', new URL(`${ORIGIN}/marin-a`), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
+      await mint(db, u => pageView(u, 'marin GCS'), new URL(`${ORIGIN}/marin-a`), 'ann@example.org', NOW, 30, 'TokAAAAAAA')
       // A validly signed full URL for marin-b naming marin-a's token (as if the signer were tricked).
       const forged = ORIGIN + await imagePath(key, 'map', { path: 'marin-b', t: 'TokAAAAAAA' }, 'full', expDay(NOW, IMAGE_TTL_DAYS))
       expect(await served(env, key, forged)).toBe('anon (revoked)')

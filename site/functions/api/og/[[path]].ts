@@ -10,8 +10,9 @@
  *   DELETE /api/og/tokens/<token>     → revoke it (admins any; a minter their own)
  */
 import { type Ctx, json, requireAdmin, requireStager } from '../../_lib/auth.js'
-import { deploymentKey, siteOf, type OgEnv } from '../../_lib/og/serve.js'
+import { deploymentKey, pageOf, type OgEnv } from '../../_lib/og/serve.js'
 import { listTokens, mint, revoke, tokenDays } from '../../_lib/og/tokens.js'
+import { shareSection } from '../../../src/shareSection.js'
 
 const now = () => Math.floor(Date.now() / 1000)
 
@@ -34,8 +35,11 @@ export const onRequest = async (ctx: Ctx & { env: OgEnv }): Promise<Response> =>
       return json({ error: 'url required' }, 400)
     }
     if (page.origin !== url.origin) return json({ error: 'url must be on this site' }, 400)
+    // A secondary store's page: only a viewer of that store (its `STORES_JSON` `scope`, as `requireViewer`).
+    const need = pageOf(env, shareSection(page))?.env.STORE_SCOPE
+    if (need && !id.scopes.includes(need) && !id.scopes.includes('*')) return json({ error: 'forbidden' }, 403)
     try {
-      const m = await mint(env.DB, siteOf(env).name, page, id.email ?? id.name ?? 'unknown', now(), tokenDays(body?.days))
+      const m = await mint(env.DB, u => pageOf(env, u)?.pv ?? null, page, id.email ?? id.name ?? 'unknown', now(), tokenDays(body?.days))
       if (!m) return json({ error: 'this page has no card' }, 400)
       return json({ url: m.url, token: m.token, exp_day: m.expDay }, 201)
     } catch (e) {

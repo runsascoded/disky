@@ -276,6 +276,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const staged = useStagedIndex()
   const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
   const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
+  // a mixed-provider store's buckets title with their scheme (`r2://…`), so the map says which cloud each is on
+  const bucketLabels = useMemo(() => {
+    const bs = store.bucketSchemes
+    return bs ? new Map((root.c ?? []).filter(b => bs[b.n]).map(b => [b, bs[b.n] + b.n])) : null
+  }, [root, store.bucketSchemes])
 
   // Fold merger: first-class TreeNode aggregating us/d so folded tiles keep
   // real tooltips (upstream calls this at every nesting level).
@@ -725,7 +730,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       }}
       getSize={n => n.b}
       getChildren={n => n.c}
-      getLabel={n => n.n}
+      getLabel={n => bucketLabels?.get(n) ?? n.n}
       getId={(_n, p) => uriOf(p)}
       formatSize={fmtBytes}
       collapseChains
