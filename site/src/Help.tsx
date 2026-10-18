@@ -43,8 +43,14 @@ export function Explain({ text, label, children, className }: { text: ReactNode;
   const blur = useCallback(() => send?.({ type: 'blur', id }), [send, id])
   const live = on === 'on' && !!send
   const active = live && ctx?.target?.id === id
+  // While shown, follow the explanation (a click on the control can change it: the color toggle)
+  const ref = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    if (active && ref.current) send?.({ type: 'update', target: target(ref.current) })
+  }, [active, send, target])
   return (
     <span
+      ref={ref}
       className={`has-help${active ? ' help-active' : ''}${className ? ` ${className}` : ''}`}
       aria-describedby={id}
       onPointerEnter={live ? enter : undefined}

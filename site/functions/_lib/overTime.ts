@@ -11,7 +11,7 @@
 // is the load-bearing part). So a line is ⌈N/K⌉ pruned reads, not one giant
 // file; the unsealed ≤K-scan tip is served by `/api/series`'s per-scan fallback.
 import type { Env } from './auth.js'
-import { openIndex, readPoint } from './index.js'
+import { openIndex, perScan, readPoint } from './index.js'
 import { type Dim, type Metric, type MultiScan, type MultiScanIndexEntry, type Pyramid, seriesAcrossGroups } from 'pyrmts'
 import { MultiScanD1Index } from 'pyrmts-cfw'
 import { PRIMARY_STORE, storeKey } from './stores.js'
@@ -64,7 +64,7 @@ export async function readOverTime(env: Env, path: string): Promise<OverTime | n
   const load = async (archiveKey: string): Promise<MultiScan> => {
     const entry = byKey.get(archiveKey)
     if (!entry) return { rows: [], scans: [], encoder: 'interval' }
-    const rows = await readPoint(await openIndex(env, archiveKey, 'over-time'), depth, path, COLS)
+    const rows = await readPoint(await openIndex(perScan(env), archiveKey, 'over-time'), depth, path, COLS)
     // Parquet int64 columns (`depth` as DuckDB wrote it, `b`/`o`, the scan
     // bounds) arrive as BigInt; pyrmts' own reader normalizes to number and
     // its key/interval code `JSON.stringify`s the key, which throws on BigInt

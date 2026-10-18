@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom'
 import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
-import { overlappingFailures, phaseFill, phaseOutcome, runOutcome, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
+import { overlappingFailures, phaseFill, phaseOutcome, runOutcome, scanRunOf, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
 import { DEFAULT_STORE, STORES, type Store, storeQuery, storeUrl } from './stores'
 
@@ -42,6 +42,15 @@ export const scanRunsApi = (store: Store, id?: string, primary: Store = DEFAULT_
 export const useScanRuns = (store: Store = DEFAULT_STORE) => useQuery<ListResponse, Error>({
   queryKey: ['scan-runs', store.key], queryFn: () => getJson(scanRunsApi(store)), refetchInterval: 60_000, staleTime: 15_000,
 })
+
+/** A link to the run that produced `scan` (its /scans page), for a tip about the scan: nothing until the store's runs
+ *  load, or when none recorded it (a scan from before run records, or a viewer without access). */
+export function ScanRunLink({ store, scan }: { store: Store; scan: string }) {
+  const { data } = useScanRuns(store)
+  const r = data && scanRunOf(data.runs, scan)
+  if (!r) return null
+  return <div><Link to={scansHref(store, r.run_id)}>scan run</Link>{r.status !== 'succeeded' && <> ({r.status})</>}{r.trigger && <> · {r.trigger}</>}</div>
+}
 
 /** `fmtDur`, with seconds under a minute (a 3 s publish isn't `0m`). */
 export const fmtDur = (s: number): string => (s < 60 ? `${Math.round(s)}s` : fmtDurM(s))

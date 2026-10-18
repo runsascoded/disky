@@ -481,3 +481,7 @@ def test_verify_samples_the_appended_scans(world, local, tmp_path):
     assert [s["date"] for s in summaries] == DATES
     assert [(s["views"] == s["view_eq"], s["diffs"] == s["diff_eq"]) for s in summaries] == [(True, True)] * len(DATES)
     assert min(s["views"] for s in summaries) > 0
+    # Each scan's parity marker (`scan retire`'s gate), uploaded beside the run's records.
+    markers = {d: json.loads((local["gen"] / "verify" / f"{d}.json").read_text()) for d in DATES}
+    assert markers == {s["date"]: {"scan": s["date"], "gen": "g", "pass": True, **{k: s[k] for k in ("views", "view_eq", "diffs", "diff_eq")}}
+                       for s in summaries}

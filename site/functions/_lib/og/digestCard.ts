@@ -170,33 +170,37 @@ export function digestSvg(d: DigestCardInput): string {
   let y = PAD + 36
   out.push(chartSvg(d, PAD, y, w, CHART_H))
   y += CHART_H + 30
-  if (d.diff) {
-    const { root, title } = d.diff
-    const ls = leaves(root)
-    const grew = ls.reduce((s, n) => s + n.added, 0)
-    const shrank = ls.reduce((s, n) => s + n.removed, 0)
-    y += 16
-    out.push(text(PAD, y + 4, title, 17, { weight: 600 }))
-    out.push(text(DIGEST_W - PAD, y + 4, `grew ${fmtSigned(grew, fmt)} · shrank ${fmtSigned(-shrank, fmt)} · area = |Δ|`, 12, { fill: INK3, anchor: 'end' }))
-    y += 14
-    const label = (n: DiffNode) => (n.first ? `${n.label} (first scanned)` : n.label)
-    const cells = staticLayout(root, {
-      width: w, height: MAP_H,
-      getSize: n => n.weight, getLabel: label, getChildren: n => n.children,
-      collapseChains: true, tiling: 'shared', borderWidth: diffBorderWidth,
-    })
-    out.push(`<g transform="translate(${PAD},${y})">`)
-    out.push(treemapSvg(cells, {
-      width: w, height: MAP_H,
-      getSize: n => n.weight, getLabel: label, formatSize: fmt, formatCell: n => fmtSigned(n.delta, fmt),
-      colorForCell: n => diffCellStyle(n, 'delta'),
-      measure: (s, px) => interWidth(s, px), vars: VARS, fontFamily: 'Inter',
-      labelPx: 11.5, labelPxSm: 9.5, depthFade: 1, rootFade: 1,
-    }))
-    out.push('</g>')
-    y += MAP_H
-  }
+  if (d.diff) y = diffSection(d.diff, fmt, y, out)
   return page(y, out)
+}
+
+/** The headline interval's diff map under a card's charts, from `y`: its title and grew/shrank totals, then the
+ *  treemap (the in-app diff's tree, `MAP_H` tall). Returns the y below it. */
+function diffSection({ root, title }: { root: DiffNode; title: string }, fmt: (b: number) => string, y: number, out: string[]): number {
+  const w = DIGEST_W - 2 * PAD
+  const ls = leaves(root)
+  const grew = ls.reduce((s, n) => s + n.added, 0)
+  const shrank = ls.reduce((s, n) => s + n.removed, 0)
+  y += 16
+  out.push(text(PAD, y + 4, title, 17, { weight: 600 }))
+  out.push(text(DIGEST_W - PAD, y + 4, `grew ${fmtSigned(grew, fmt)} · shrank ${fmtSigned(-shrank, fmt)} · area = |Δ|`, 12, { fill: INK3, anchor: 'end' }))
+  y += 14
+  const label = (n: DiffNode) => (n.first ? `${n.label} (first scanned)` : n.label)
+  const cells = staticLayout(root, {
+    width: w, height: MAP_H,
+    getSize: n => n.weight, getLabel: label, getChildren: n => n.children,
+    collapseChains: true, tiling: 'shared', borderWidth: diffBorderWidth,
+  })
+  out.push(`<g transform="translate(${PAD},${y})">`)
+  out.push(treemapSvg(cells, {
+    width: w, height: MAP_H,
+    getSize: n => n.weight, getLabel: label, formatSize: fmt, formatCell: n => fmtSigned(n.delta, fmt),
+    colorForCell: n => diffCellStyle(n, 'delta'),
+    measure: (s, px) => interWidth(s, px), vars: VARS, fontFamily: 'Inter',
+    labelPx: 11.5, labelPxSm: 9.5, depthFade: 1, rootFade: 1,
+  }))
+  out.push('</g>')
+  return y + MAP_H
 }
 
 /** The card's `<svg>`: `DIGEST_W` wide, its content ending at `y` (+ the bottom pad), on the theme's background. */
@@ -238,6 +242,8 @@ export interface TiersCardInput {
   to: number
   /** The y axes' unit and every size label's (default `TiB`). */
   units?: DigestUnits
+  /** The headline interval's diff map, under the legend (as `DigestCardInput.diff`). */
+  diff?: { root: DiffNode; title: string } | null
 }
 
 /** Bytes in a fixed unit, as the y axes read: `3,030 TiB`, `15.4 TB` (never rescaled to the next unit up). */
@@ -287,7 +293,8 @@ function stackSvg(d: TiersCardInput, x0: number, y0: number, w: number, h: numbe
 }
 
 /** The storage-class digest image's SVG, `DIGEST_W` wide: the month's total line (autofit, dashed at its first scan,
- *  the latest called out) over its stacked tiers, then a legend of each tier's latest size, top tier first. */
+ *  the latest called out) over its stacked tiers, then a legend of each tier's latest size, top tier first, then the
+ *  headline interval's diff map when given. */
 export function tiersSvg(d: TiersCardInput): string {
   const w = DIGEST_W - 2 * PAD
   const units = d.units ?? 'TiB'
@@ -308,5 +315,7 @@ export function tiersSvg(d: TiersCardInput): string {
     out.push(text(x + 18, y + 13, label, 13, { fill: INK2 }))
     x += 18 + interWidth(label, 13) + 22
   }
-  return page(y + 16, out)
+  y += 16
+  if (d.diff) y = diffSection(d.diff, UNITS[units].fmt, y + 14, out)
+  return page(y, out)
 }

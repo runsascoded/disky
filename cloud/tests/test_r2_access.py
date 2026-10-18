@@ -67,6 +67,24 @@ def test_export_refuses_stalled_cursor():
         export_window(BODY, fetch=lambda body: page(["a"]))
 
 
+def test_export_ends_at_a_short_page_of_events_already_drained():
+    """A twice-delivered last event: the cursor at its first copy returns only the second (marin-na 2026-10-17T16)."""
+    body = query_body("jc-taxes", "2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z", limit=2)
+    responses = iter([page(["a", "b"]), page(["b"])])
+    result = export_window(body, fetch=lambda b: next(responses), max_pages=3)
+    assert result["summary"] == {
+        "pages": 2, "events": 2, "query_exhausted": True,
+        "query_abr_levels": [1], "capture_sampling": "unknown", "provider_delivery": "best_effort",
+        "actions": {"HeadObject": 2},
+    }
+
+
+def test_export_refuses_a_full_page_repeating_its_cursor():
+    body = query_body("jc-taxes", "2026-10-11T00:00:00Z", "2026-10-12T00:00:00Z", limit=2)
+    with pytest.raises(RuntimeError, match="^pagination cursor did not advance$"):
+        export_window(body, fetch=lambda b: page(["a", "b"]), max_pages=3)
+
+
 def test_export_refuses_page_count_shortfall():
     with pytest.raises(RuntimeError, match="^page event count does not match returned events$"):
         export_window(BODY, fetch=lambda body: page(["a"], count=2))

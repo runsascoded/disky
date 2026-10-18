@@ -298,6 +298,17 @@ header .hrow {
   &.scan { font-variant-numeric: tabular-nums; }
 }
 
+// A two-option top-bar control (the color mode when a scan has two): both options shown, one click switches.
+.tb-seg {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+  button {
+    font: inherit; font-size: 12.5px; font-weight: 600; padding: 2px 7px; cursor: pointer;
+    background: var(--panel); color: var(--ink-3); border: none;
+    &.on { background: var(--line); color: var(--ink); }
+    & + button { border-left: 1px solid var(--line); }
+  }
+}
+
 // The deepest breadcrumb taps open this path card (PathPopover, portaled to
 // <body>): the full prefix + a copy button. Tap-only, so it never rides in on a
 // fresh page load the way a hover tip did.
@@ -1116,14 +1127,15 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
     font-variant-numeric: tabular-nums;
     font-weight: 600;
   }
-  .date-scale {
-    display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
-    button {
-      font: inherit; font-size: 10px; padding: 0 5px; cursor: pointer;
-      background: transparent; color: var(--ink-3); border: none;
-      &.on { background: var(--line); color: var(--ink); }
-      & + button { border-left: 1px solid var(--line); }
-    }
+}
+// The legend's pill toggles: the date scale (`log | lin | rank`) and the read lens's tint (`hatch | touch`).
+.legend :is(.date-scale, .read-tint) {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+  button {
+    font: inherit; font-size: 10px; padding: 0 5px; cursor: pointer;
+    background: transparent; color: var(--ink-3); border: none;
+    &.on { background: var(--line); color: var(--ink); }
+    & + button { border-left: 1px solid var(--line); }
   }
 }
 
@@ -2064,6 +2076,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
 // "no reads since …" callout in treemap tooltips (dark tip bg → soft red tint)
 .dt-treemap-tip .never-read { color: #e0917f; }
+.dt-treemap-tip .written-unread { color: var(--ink-2); font-style: italic; }
+.li.read-through { color: var(--ink-2); .provisional { color: var(--ink-3); font-style: italic; } }
+.read-through-banner {
+  display: inline-block; margin: 0 0 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel); color: var(--ink-2); font-size: 12.5px;
+  .provisional { color: var(--ink-3); font-style: italic; }
+}
 
 .typed-modal {
   .sub { margin: 0 0 10px; font-size: 13px; }
@@ -2457,6 +2476,50 @@ a.staged-chip {
 
 // Size over time: the scans a filter's index doesn't cover (gaps in the line).
 .gap-note { color: var(--ink-3); font-size: 0.85em; margin: 2px 0 0; }
+
+// Size over time: hand-written notes (spec `chart-annotations.md`) — an amber dashed line per note and its label
+// in the lane above the plot; darker amber on light, brighter on dark.
+:root { --dt-ts-marker: #9a6700; --dt-ts-marker-ink: #7d5400; }
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme='light'])) { --dt-ts-marker: #d29922; --dt-ts-marker-ink: #e3b341; }
+}
+:root[data-theme='dark'] { --dt-ts-marker: #d29922; --dt-ts-marker-ink: #e3b341; }
+#over-time {
+  .dt-ts-marker-lane { font-weight: 600; .tt-ref { cursor: default; outline-offset: 1px; } }
+  .note-add {
+    font: inherit; font-size: 12px; font-weight: 400; padding: 1px 7px; border-radius: 4px; cursor: pointer;
+    background: transparent; color: var(--ink-2); border: 1px dashed var(--ink-3);
+    &:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-2); }
+    &:disabled { opacity: 0.5; cursor: not-allowed; }
+  }
+  .note-form {
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; margin: 0 0 8px; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 12px;
+    label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+    input, textarea {
+      font: inherit; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px;
+    }
+    input.bad { border-color: var(--danger); }
+    textarea { flex: 1 1 260px; min-width: 0; resize: vertical; }
+    .note-form-actions { display: flex; align-items: center; gap: 6px; }
+    button { font: inherit; padding: 2px 9px; border-radius: 4px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+    button[type='submit'] { border-color: var(--dt-ts-marker); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .err { color: var(--danger); }
+  }
+  > .err { color: var(--danger); font-size: 12px; margin: 2px 0; }
+}
+.note-tip {
+  max-width: 340px;
+  .note-text { white-space: pre-wrap; color: var(--ink); }
+  .note-meta { margin-top: 4px; color: var(--ink-3); font-size: 11px; }
+  .note-actions { display: flex; gap: 6px; margin-top: 6px; }
+  .note-actions button {
+    font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--line); background: transparent; color: var(--ink-2);
+    &.danger { color: var(--danger); }
+  }
+}
 
 // An anchored section parks a little below the sticky bar — not under it, not
 // flush against it (the bar's height is published as --topbar-h; it wraps to

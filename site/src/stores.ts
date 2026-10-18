@@ -103,6 +103,9 @@ export interface Store {
   /** Fresher bucket totals than the scans (a provider's metrics dashboard): the ☰ menu links it, and so does the
    *  size-over-time chart, whose newest point is the newest scan's. Unset = no link. */
   liveTotals?: { label: string; href: string }
+  /** A scope viewers need on top of the deployment's viewer scope (mirrors its `STORES_JSON` `scope`, which the
+   *  Functions enforce): the store's links and pickers hide from a viewer without it (`useStores`). */
+  scope?: string
   /** The data bucket's `/meta` tree when another deployment serves it (gcs: cw-s3's):
    *  the site menu links there and this host's `/meta` redirects to it. Unset when the
    *  build mounts `/meta` itself (a secondary store) or has none. */
@@ -295,3 +298,8 @@ export const storeForPath = (pathname: string, stores: Store[] = STORES): Store 
     .sort((a, b) => b.path.length - a.path.length)
     .find(s => pathname === s.path || pathname.startsWith(`${s.path}/`))
   ?? stores[0]
+
+/** Whether `scopes` read `store`: a store with a `scope` needs it (or `*`), as `requireViewer` demands of its
+ *  requests; the rest need nothing past the page's own gate. */
+export const canRead = (store: Pick<Store, 'scope'>, scopes: string[] | null): boolean =>
+  !store.scope || (scopes !== null && [store.scope, '*'].some(s => scopes.includes(s)))

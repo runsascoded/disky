@@ -19,7 +19,7 @@ const tree: TreeNode = {
       { n: 'a1', b: 50, o: 5, d: 10, a: 10, us: [['ann', 50]] },
       { n: 'a2', b: 10, o: 1, d: 20 },
     ] },
-    { n: 'b', b: 30, o: 3, d: 30, a: 14 },
+    { n: 'b', k: 'dir', b: 30, o: 3, d: 30, a: 14 },
     { n: '(other)', b: 10, o: 1, f: 4 },
   ],
 }
@@ -59,9 +59,12 @@ describe('map cards honor the dashboard color axis', () => {
     ])
   })
 
-  it.each(['r', 'read'])('c=%s uses the logging window, distinguishing missing observations', async c => {
+  // a1 read on its write day (read since: the read's age); a2 written since logging began, nothing read
+  // (`readLens.ts` `written`: the write's age; a card draws no hatch); b a directory with a read (day 14)
+  // older than its newest write (day 30): the read's age (a folder hatches only when nothing in it was read).
+  it.each(['r', 'read'])('c=%s uses the logging window: read since the write by the read, else by the write', async c => {
     expect(colors(await card(c))).toEqual([
-      { name: 'a', color: '#232322', kids: [{ name: 'a1', color: 'rgb(68,1,84)' }, { name: 'a2', color: '#6e332b' }] },
+      { name: 'a', color: '#232322', kids: [{ name: 'a1', color: 'rgb(68,1,84)' }, { name: 'a2', color: 'rgb(33,145,140)' }] },
       { name: 'b', color: 'rgb(61,66,128)' },
       { name: '(other)', color: '#2b2e35' },
     ])

@@ -3,7 +3,7 @@ import type { Env } from '../_lib/auth'
 import { onRequestGet } from './age-pyramid'
 
 const { openIndex, readPoint } = vi.hoisted(() => ({ openIndex: vi.fn(), readPoint: vi.fn() }))
-vi.mock('../_lib/index.js', () => ({ openIndex, readPoint, storeReady: () => true, num: Number }))
+vi.mock('../_lib/index.js', () => ({ openIndex, perScan: (e: Env) => e, readPoint, storeReady: () => true, num: Number }))
 vi.mock('../_lib/auth.js', () => ({ requireViewer: async () => ({}) }))
 vi.mock('../_lib/scanArg.js', () => ({ scanArg: async () => '2026-10-12T1809' }))
 

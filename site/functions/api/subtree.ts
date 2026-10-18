@@ -13,7 +13,7 @@
  */
 import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
 import { type Env, type Identity, requireViewer } from '../_lib/auth.js'
-import { ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
+import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, type ViewNode } from '../_lib/view.js'
@@ -168,7 +168,8 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     // The worker's answer: the view's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
     const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; trace?: typeof st.trace } = {}) => {
-      // A broken interval-store run is cut out and the view read again (its scans per-scan): never a failed request.
+      // A broken interval-store run is cut out and the view read again: a scan before it answers, its own scans are a
+      // 503 + `Retry-After` (`ivRefusal`), never read per-scan.
       const view = await ivRetry(() => buildView(ctx.env, { date, path, w, h, minArea, atten, lens, owner, by, maxDepth: depth, query, classes, firstPaint: !!query && !full, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
       // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
       const keep = keepFor(view)
@@ -207,6 +208,8 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     const res = await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keep)
     return out(keep === true ? res : upgrade(res))
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     if (e instanceof NotFound) return new Response('path not found', { status: 404 })
     if (e instanceof FilterRejected) return new Response(rejectBody(e.reject), { status: 400, headers: { 'content-type': 'application/json' } })
     // 409 (not 500): a lens index missing for this scan is deterministic —
@@ -336,6 +339,8 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
       tree,
     }), { headers: unionHeaders(reads) })
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     const msg = String((e as Error).message ?? e)
     if (e instanceof UnionOverlap) return new Response(msg, { status: 500 })
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })

@@ -106,8 +106,10 @@ export interface Meta {
   disk_space?: DiskSpace
   /** Access-log observation window (epoch days) — bounds the read-recency lens. `buckets`: the source
    *  buckets the logs cover (a union's others are unlogged, not unread); absent on scans published before
-   *  it, which are covered everywhere (`readLens.ts`). */
-  access?: { from: number; to: number; buckets?: string[] }
+   *  it, which are covered everywhere (`readLens.ts`). `through`: the newest log hour the read data
+   *  includes (`YYYY-MM-DDTHH:00Z`; absent on scans published before it): the lens's "last touch" and the
+   *  idle rule count from it (spec `access-log-freshness.md`). */
+  access?: { from: number; to: number; buckets?: string[]; through?: string }
 }
 
 // GCS list prices, $/GiB·mo, US regions, by storage_class_id

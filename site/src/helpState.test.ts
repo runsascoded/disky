@@ -38,6 +38,13 @@ describe('helpReducer', () => {
     expect(helpReducer(HELP_EMPTY, { type: 'leave', id: 'a' })).toBe(HELP_EMPTY)
     expect(helpReducer(HELP_EMPTY, { type: 'blur' })).toBe(HELP_EMPTY)
   })
+  it('an update replaces a hovered or focused control\'s text and label in place (its explanation changed: a toggle was clicked); a control that is neither is ignored', () => {
+    const A2: HelpTarget = { id: 'a', text: 'about a, now', label: 'A2' }
+    expect(run([{ type: 'enter', target: A }, { type: 'update', target: A2 }])).toEqual({ hover: A2, focus: null })
+    expect(run([{ type: 'focus', target: A }, { type: 'enter', target: B }, { type: 'update', target: A2 }])).toEqual({ hover: B, focus: A2 })
+    const s = run([{ type: 'enter', target: B }])
+    expect(helpReducer(s, { type: 'update', target: A2 })).toBe(s)
+  })
   it('nothing hovered or focused shows nothing', () => {
     expect(helpTarget(HELP_EMPTY)).toBeNull()
     expect(helpText(HELP_EMPTY)).toBeNull()

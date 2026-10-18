@@ -224,6 +224,13 @@ export interface RunSummary {
   phase_issues: PhaseIssue[]
 }
 
+/** The run behind `scan` among `rows` (`summarize`'s, newest first): its newest succeeded run (a failed attempt's resume),
+ *  else its newest; undefined when no run recorded it. */
+export function scanRunOf(rows: readonly RunSummary[], scan: string): ScanRun | undefined {
+  const runs = rows.map(r => r.run).filter(r => r.scan === scan)
+  return runs.find(r => r.status === 'succeeded') ?? runs[0]
+}
+
 export function summarize(runs: readonly ScanRun[], phases: readonly ScanRunPhase[], outputs: readonly ScanRunOutput[], now: number): RunSummary[] {
   const index = outputIndex(runs, outputs)
   const kids = new Map<string, ScanRun[]>()

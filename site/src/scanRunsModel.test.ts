@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
+  type ScanRunPhase, scanRunOf, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
 } from './scanRunsModel'
 
 export const run = (o: Partial<ScanRun> & Pick<ScanRun, 'run_id' | 'scan'>): ScanRun => ({
@@ -59,6 +59,15 @@ describe('summarize: one row per orchestrating run, newest first', () => {
       ['b', 600, 145, 33, 1, 2.5, null, 3],
       ['b-fail', 100, 999, 899, 0, null, 'after listing', 1],
       ['a', 300, 105, null, 0, 1, null, 0],
+    ])
+  })
+})
+
+describe('scanRunOf: the run behind a scan (the map\'s "scanned … ago" tip links it)', () => {
+  it('its newest succeeded run (a failed attempt then a resume), else its newest; none for an unknown scan', () => {
+    const rows = summarize(RUNS, PHASES, OUTS, 3500)
+    expect(['2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09'].map(scan => scanRunOf(rows, scan)?.run_id ?? null)).toEqual([
+      'a', 'b', 'c', null,
     ])
   })
 })

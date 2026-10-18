@@ -102,6 +102,54 @@ function placeAnnotations(
   return placed
 }
 
+/** A vertical marker at an x (e.g. a hand-written note pinned to a date): a thin line through the plot, its
+ *  label in a lane above it — clear of the point callouts, which stay inside the plot. */
+export interface Marker {
+  key: string
+  x: number
+  /** Short text for the lane; the caller's `renderMarker` can wrap it (a tooltip with the full note). */
+  label: string
+}
+
+/** Marker lane height (px), added above the plot when any marker is in view. */
+export const MARKER_LANE = 16
+/** The lane labels' box: at the very top of the chart, clear of the point callouts above the plot's top edge
+ *  (a callout over the top point reaches ~9 px above it, i.e. into the bottom of the lane). */
+const LANE_TOP = 2
+const LANE_LABEL_H = 14
+const MARKER_PT = 10.5
+const MARKER_CHAR_W = MARKER_PT * 0.6
+/** A compact marker's handle width (px): what's left when its label would overlap a neighbour's. */
+const MARKER_DOT_W = 9
+
+export interface PlacedMarker {
+  m: Marker
+  px: number
+  /** `start`: the label runs right from the line; `end`: it ends at the line (near the right edge). */
+  anchor: 'start' | 'end'
+  /** Its label would overlap one already placed: drawn as a small handle instead. */
+  compact: boolean
+}
+
+/** Where each marker's lane label goes, by x: markers off the plot's x-span are dropped; a label that would run
+ *  past the right edge (`right`, px) ends at its line instead; one whose (estimated) box overlaps a label already
+ *  placed, left to right, is compact. */
+export function placeMarkers(markers: readonly Marker[], xToPx: (x: number) => number, left: number, plotW: number, right = 0): PlacedMarker[] {
+  const out: PlacedMarker[] = []
+  let lastEnd = -Infinity
+  for (const m of [...markers].sort((a, b) => a.x - b.x)) {
+    const px = xToPx(m.x)
+    if (px < left - 0.5 || px > left + plotW + 0.5) continue
+    const w = m.label.length * MARKER_CHAR_W + 6
+    const anchor = px + w > left + plotW + right ? 'end' : 'start'
+    const x0 = anchor === 'start' ? px : px - w
+    const compact = x0 < lastEnd
+    lastEnd = Math.max(lastEnd, compact ? px + MARKER_DOT_W / 2 : x0 + w)
+    out.push({ m, px, anchor, compact })
+  }
+  return out
+}
+
 export interface TimeSeriesProps<T> {
   series: Series<T>[]
   getX: (p: T) => number
@@ -152,6 +200,10 @@ export interface TimeSeriesProps<T> {
    *  across them instead of joining its neighbours — a missing value is never
    *  drawn as a value. */
   gaps?: number[]
+  /** Vertical markers (`placeMarkers`): those inside the x-span get a line and a lane label above the plot. */
+  markers?: Marker[]
+  /** Wrap a marker's lane label (e.g. in a tooltip); `node` is the label (or a compact handle) as drawn. */
+  renderMarker?: (m: Marker, node: ReactNode) => ReactNode
   /** Extra CSS on the outer wrapper. */
   className?: string
   style?: CSSProperties
@@ -231,6 +283,8 @@ export function TimeSeries<T>({
   onBrush,
   window: xWindow,
   gaps,
+  markers,
+  renderMarker,
   className,
   style,
   height,
@@ -279,19 +333,24 @@ export function TimeSeries<T>({
     }
   }, [series, getX, getY, yScale, yFrom, gaps])
 
-  const plotW = Math.max(0, dims.w - PAD.left - PAD.right)
-  const plotH = Math.max(0, dims.h - PAD.top - PAD.bottom)
+  // A marker in view reserves its lane above the plot.
+  const lane = markers?.some(m => m.x >= xMin && m.x <= xMax) ? MARKER_LANE : 0
+  const pad = lane ? { ...PAD, top: PAD.top + lane } : PAD
+  const plotW = Math.max(0, dims.w - pad.left - pad.right)
+  const plotH = Math.max(0, dims.h - pad.top - pad.bottom)
 
-  const xToPx = (x: number) => PAD.left + ((x - xMin) / Math.max(1, xMax - xMin)) * plotW
+  const xToPx = (x: number) => pad.left + ((x - xMin) / Math.max(1, xMax - xMin)) * plotW
   const yToPx = (y: number) => {
     if (yScale === 'log') {
       const lmin = Math.log10(Math.max(1, yMin))
       const lmax = Math.log10(Math.max(10, yMax))
       const ly = Math.log10(Math.max(1, y))
-      return PAD.top + plotH - ((ly - lmin) / Math.max(0.001, lmax - lmin)) * plotH
+      return pad.top + plotH - ((ly - lmin) / Math.max(0.001, lmax - lmin)) * plotH
     }
-    return PAD.top + plotH - ((y - yMin) / Math.max(0.001, yMax - yMin)) * plotH
+    return pad.top + plotH - ((y - yMin) / Math.max(0.001, yMax - yMin)) * plotH
   }
+
+  const placedMarkers = lane && dims.w > 0 ? placeMarkers(markers ?? [], xToPx, pad.left, plotW, pad.right) : []
 
   const xTickVals = niceTicks(xMin, xMax, xTicks)
   const yTickVals = yTickValues
@@ -346,7 +405,7 @@ export function TimeSeries<T>({
     const el = svgRef.current
     if (!el || !inWindow(x)) return false
     const y = clientY - el.getBoundingClientRect().top
-    return y >= PAD.top && y <= PAD.top + GRIP
+    return y >= pad.top && y <= pad.top + GRIP
   }
   const [hoverGrip, setHoverGrip] = useState(false)
   const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -434,10 +493,10 @@ export function TimeSeries<T>({
       const pt = s.points.find(p => getX(p) === hoverX)
       return pt && s.plot !== false ? [yToPx(getY(pt))] : []
     })
-    const high = tops.length > 0 && Math.min(...tops) < PAD.top + plotH / 2
+    const high = tops.length > 0 && Math.min(...tops) < pad.top + plotH / 2
     return {
-      ...(px > PAD.left + plotW / 2 ? { right: dims.w - px + 8 } : { left: px + 8 }),
-      ...(high ? { bottom: PAD.bottom + 4 } : { top: PAD.top + 4 }),
+      ...(px > pad.left + plotW / 2 ? { right: dims.w - px + 8 } : { left: px + 8 }),
+      ...(high ? { bottom: pad.bottom + 4 } : { top: pad.top + 4 }),
     }
   })()
 
@@ -465,7 +524,7 @@ export function TimeSeries<T>({
             <g pointerEvents="none">
               <rect
                 x={xToPx(band[0])}
-                y={PAD.top}
+                y={pad.top}
                 width={Math.max(0, xToPx(band[1]) - xToPx(band[0]))}
                 height={plotH}
                 fill={drag ? 'var(--dt-ts-brush, rgba(255,255,255,0.14))' : 'var(--dt-ts-window, rgba(255,255,255,0.07))'}
@@ -475,8 +534,8 @@ export function TimeSeries<T>({
                   key={`w${i}`}
                   x1={xToPx(x)}
                   x2={xToPx(x)}
-                  y1={PAD.top}
-                  y2={PAD.top + plotH}
+                  y1={pad.top}
+                  y2={pad.top + plotH}
                   stroke="var(--dt-ts-window-edge, rgba(255,255,255,0.35))"
                   strokeDasharray={drag ? undefined : '2 3'}
                 />
@@ -486,7 +545,7 @@ export function TimeSeries<T>({
                 <rect
                   className="dt-ts-grip"
                   x={xToPx(band[0])}
-                  y={PAD.top}
+                  y={pad.top}
                   width={Math.max(0, xToPx(band[1]) - xToPx(band[0]))}
                   height={GRIP}
                   fill={hoverGrip || drag ? 'var(--dt-ts-grip-hover, rgba(255,255,255,0.28))' : 'var(--dt-ts-grip, rgba(255,255,255,0.14))'}
@@ -502,7 +561,7 @@ export function TimeSeries<T>({
                   key={`g${a}`}
                   className="dt-ts-gap"
                   x={xToPx(a) - (a === b ? 1 : 0)}
-                  y={PAD.top}
+                  y={pad.top}
                   width={Math.max(2, xToPx(b) - xToPx(a))}
                   height={plotH}
                   fill="var(--dt-ts-gap, rgba(139,148,158,0.12))"
@@ -515,21 +574,21 @@ export function TimeSeries<T>({
               painting over the axis. */}
           <defs>
             <clipPath id={clipId}>
-              <rect x={PAD.left} y={PAD.top} width={plotW} height={plotH} />
+              <rect x={pad.left} y={pad.top} width={plotW} height={plotH} />
             </clipPath>
           </defs>
           {/* Y grid + ticks */}
           {yTickVals.map((y, i) => (
             <g key={`y${i}`}>
               <line
-                x1={PAD.left}
-                x2={PAD.left + plotW}
+                x1={pad.left}
+                x2={pad.left + plotW}
                 y1={yToPx(y)}
                 y2={yToPx(y)}
                 stroke={y === 0 && yMin < 0 ? 'var(--dt-ts-axis, rgba(255,255,255,0.2))' : 'var(--dt-ts-grid, rgba(255,255,255,0.08))'}
               />
               <text
-                x={PAD.left - 6}
+                x={pad.left - 6}
                 y={yToPx(y)}
                 textAnchor="end"
                 dominantBaseline="middle"
@@ -546,13 +605,13 @@ export function TimeSeries<T>({
               <line
                 x1={xToPx(x)}
                 x2={xToPx(x)}
-                y1={PAD.top + plotH}
-                y2={PAD.top + plotH + 4}
+                y1={pad.top + plotH}
+                y2={pad.top + plotH + 4}
                 stroke="var(--dt-ts-axis, rgba(255,255,255,0.2))"
               />
               <text
                 x={xToPx(x)}
-                y={PAD.top + plotH + 16}
+                y={pad.top + plotH + 16}
                 textAnchor="middle"
                 fontSize={10}
                 fill="var(--dt-ts-axis-ink, #8b949e)"
@@ -563,27 +622,27 @@ export function TimeSeries<T>({
           ))}
           {/* Axis lines */}
           <line
-            x1={PAD.left}
-            x2={PAD.left + plotW}
-            y1={PAD.top + plotH}
-            y2={PAD.top + plotH}
+            x1={pad.left}
+            x2={pad.left + plotW}
+            y1={pad.top + plotH}
+            y2={pad.top + plotH}
             stroke="var(--dt-ts-axis, rgba(255,255,255,0.2))"
           />
           <line
-            x1={PAD.left}
-            x2={PAD.left}
-            y1={PAD.top}
-            y2={PAD.top + plotH}
+            x1={pad.left}
+            x2={pad.left}
+            y1={pad.top}
+            y2={pad.top + plotH}
             stroke="var(--dt-ts-axis, rgba(255,255,255,0.2))"
           />
           {yLabel && (
             <text
               x={12}
-              y={PAD.top + plotH / 2}
+              y={pad.top + plotH / 2}
               textAnchor="middle"
               fontSize={10}
               fill="var(--dt-ts-axis-ink, #8b949e)"
-              transform={`rotate(-90, 12, ${PAD.top + plotH / 2})`}
+              transform={`rotate(-90, 12, ${pad.top + plotH / 2})`}
             >
               {yLabel}
             </text>
@@ -603,7 +662,7 @@ export function TimeSeries<T>({
               // drops to the axis.
               const base = getY0
                 ? [...run].reverse().map(p => `L ${xToPx(getX(p))} ${yToPx(getY0(p))}`).join(' ')
-                : `L ${xToPx(getX(run[run.length - 1]))} ${PAD.top + plotH} L ${xToPx(getX(run[0]))} ${PAD.top + plotH}`
+                : `L ${xToPx(getX(run[run.length - 1]))} ${pad.top + plotH} L ${xToPx(getX(run[0]))} ${pad.top + plotH}`
               const areaPath = (s.area ?? area) ? `${linePath} ${base} Z` : null
               // `dashBeforeX`: the line up to (and joining) the first point at or
               // past it is dashed; the rest solid.
@@ -630,12 +689,30 @@ export function TimeSeries<T>({
             )
           })}
           </g>
+          {/* Markers: a thin dashed line from the lane down through the plot. */}
+          {placedMarkers.length > 0 && (
+            <g pointerEvents="none" className="dt-ts-markers">
+              {placedMarkers.map(({ m, px }) => (
+                <line
+                  key={m.key}
+                  className="dt-ts-marker"
+                  x1={px}
+                  x2={px}
+                  y1={LANE_TOP}
+                  y2={pad.top + plotH}
+                  stroke="var(--dt-ts-marker, #d29922)"
+                  strokeWidth={1}
+                  strokeDasharray="3 2"
+                />
+              ))}
+            </g>
+          )}
           {/* Annotations: a haloed label beside the point, leaning away from
               the nearest side edge; a band callout (`y0`) sits inside the
               band, centred, and only where the band is tall enough. A label
               whose box would overlap one already placed is dropped, so the
               caller's order is the priority. */}
-          {placeAnnotations(annotations ?? [], xToPx, yToPx, PAD.left, PAD.top, plotW, plotH).map(({ a, px, py, anchor, dx }, i) => (
+          {placeAnnotations(annotations ?? [], xToPx, yToPx, pad.left, pad.top, plotW, plotH).map(({ a, px, py, anchor, dx }, i) => (
             <text
               key={`a${i}`}
               x={px + dx}
@@ -659,8 +736,8 @@ export function TimeSeries<T>({
             <line
               x1={xToPx(hoverX)}
               x2={xToPx(hoverX)}
-              y1={PAD.top}
-              y2={PAD.top + plotH}
+              y1={pad.top}
+              y2={pad.top + plotH}
               stroke="var(--dt-ts-cross, rgba(255,255,255,0.4))"
               strokeDasharray="3 3"
               pointerEvents="none"
@@ -668,6 +745,33 @@ export function TimeSeries<T>({
           )}
         </svg>
       )}
+      {/* Marker lane labels (HTML, so a caller's tooltip can anchor to them). */}
+      {placedMarkers.map(({ m, px, anchor, compact }) => {
+        const node = compact
+          ? <span className="dt-ts-marker-dot" style={{ display: 'inline-block', width: MARKER_DOT_W - 2, height: MARKER_DOT_W - 2, borderRadius: '50%', background: 'var(--dt-ts-marker, #d29922)' }} />
+          : <span className="dt-ts-marker-label">{m.label}</span>
+        return (
+          <div
+            key={m.key}
+            className={'dt-ts-marker-lane' + (compact ? ' compact' : '')}
+            style={{
+              position: 'absolute',
+              top: LANE_TOP,
+              height: LANE_LABEL_H,
+              display: 'flex',
+              alignItems: 'center',
+              ...(compact ? { left: px - MARKER_DOT_W / 2 + 1 } : anchor === 'start' ? { left: px + 3 } : { right: dims.w - px + 3 }),
+              fontSize: MARKER_PT,
+              lineHeight: 1,
+              whiteSpace: 'nowrap',
+              color: 'var(--dt-ts-marker-ink, var(--dt-ts-marker, #d29922))',
+              cursor: 'default',
+            }}
+          >
+            {renderMarker ? renderMarker(m, node) : node}
+          </div>
+        )
+      })}
       {/* Tooltip */}
       {tip && hoverX != null && (
         <div

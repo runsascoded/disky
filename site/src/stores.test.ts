@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { knownBucket, resolveStores, storeDefaultColor, storeEmailAuth, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
+import { canRead, knownBucket, resolveStores, storeDefaultColor, storeEmailAuth, storeFetch, storeForPath, storeQuery, storeUrl, withPageConfig, type Store } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
 // The build-time store resolution (specs/done/multi-store.md phase 2): `VITE_STORE`
@@ -132,5 +132,19 @@ describe('withPageConfig', () => {
   it('no page config (any hosted deploy): the store as built', () => {
     expect(withPageConfig(laptop, undefined)).toBe(laptop)
     expect(withPageConfig(laptop, {})).toEqual(laptop)
+  })
+})
+
+describe('canRead', () => {
+  it("a store's scope (or `*`) reads it, as `requireViewer` demands; a store without one needs nothing", () => {
+    const meta = { scope: 'admin' }, primary = {}
+    expect([
+      canRead(meta, ['cw', 'admin']),
+      canRead(meta, ['*']),
+      canRead(meta, ['cw', 'cw:assign']),
+      canRead(meta, null),
+      canRead(primary, ['cw:read']),
+      canRead(primary, null),
+    ]).toEqual([true, true, false, false, true, true])
   })
 })

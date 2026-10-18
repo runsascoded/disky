@@ -4,15 +4,24 @@
  *    quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → `digestSvg`: the usage line against its quota, over the headline interval's diff map (the cw template)
  *   {kind: 'tiers', title, note, month, tiers: [name, …] (bottom → top), points: [{scan, bytes: [per tier]}],
- *    units?: 'TiB' | 'TB'}
- *     → `tiersSvg`: the total line over the stacked storage classes (the gcs template)
+ *    diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
+ *     → `tiersSvg`: the total line over the stacked storage classes, over the headline interval's diff map (the gcs
+ *       template)
  *
- * A body without `kind` is `usage` (the cw job's request predates the field). */
+ * A body without `kind` is `usage` (the cw job's request predates the field). Either kind's `diff` is resolved by the
+ * endpoint (`buildDiff`). */
 import { type DigestPoint, type DigestUnits, TIER_COLORS, type TierPoint } from './digestCard.js'
 import { isScanId, scanTime } from '../../../src/scanSlug.js'
 
 /** The most tiers a card stacks (one default colour each). */
 export const MAX_TIERS = TIER_COLORS.length
+
+export interface DiffSpec {
+  from: string
+  to: string
+  path: string
+  title: string
+}
 
 interface Common {
   title: string
@@ -28,13 +37,24 @@ export type DigestRequest =
     kind: 'usage'
     points: DigestPoint[]
     quota: { bytes: number; name: string } | null
-    diff: { from: string; to: string; path: string; title: string } | null
+    diff: DiffSpec | null
   }
-  | Common & { kind: 'tiers'; tiers: { name: string; color: string }[]; points: TierPoint[] }
+  | Common & { kind: 'tiers'; tiers: { name: string; color: string }[]; points: TierPoint[]; diff: DiffSpec | null }
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
 const isBytes = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
+
+/** A request's `diff` (absent: null), or the 400's message. */
+function parseDiff(d: unknown): DiffSpec | null | string {
+  if (d === undefined || d === null) return null
+  if (!isObj(d)) return 'diff: from < to, scan ids'
+  const { from: f, to: t, path, title } = d
+  if (!isScanId(f) || !isScanId(t) || f >= t) return 'diff: from < to, scan ids'
+  if (typeof path !== 'string' || path.includes('..') || path.startsWith('/')) return 'diff: bad path'
+  if (typeof title !== 'string') return 'diff: title required'
+  return { from: f, to: t, path, title }
+}
 
 /** The request, or the 400's message. */
 export function parseDigestRequest(b: unknown): DigestRequest | string {
@@ -51,6 +71,8 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
     const [y, mo] = [Number(m[1]), Number(m[2]) - 1]
     return { from: Math.min(Date.UTC(y, mo, 1) - 16 * 3600_000, ...ts), to: Date.UTC(y, mo + 1, 1) - 8 * 3600_000 }
   }
+  const diff = parseDiff(b.diff)
+  if (typeof diff === 'string') return diff
   const common = { title: b.title, note: b.note, units }
   if (kind === 'tiers') {
     const names = b.tiers
@@ -66,7 +88,7 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
     }
     points.sort((x, y) => x.t - y.t)
     const tiers = (names as string[]).map((name, i) => ({ name, color: TIER_COLORS[i] }))
-    return { kind, ...common, ...frame(points.map(p => p.t)), tiers, points }
+    return { kind, ...common, ...frame(points.map(p => p.t)), tiers, points, diff }
   }
   const points: DigestPoint[] = []
   for (const p of raw) {
@@ -76,14 +98,5 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
   points.sort((x, y) => x.t - y.t)
   const q = b.quota
   const quota = isObj(q) && typeof q.bytes === 'number' && typeof q.name === 'string' ? { bytes: q.bytes, name: q.name } : null
-  let diff = null
-  if (b.diff) {
-    if (!isObj(b.diff)) return 'diff: from < to, scan ids'
-    const { from: f, to: t, path, title } = b.diff
-    if (!isScanId(f) || !isScanId(t) || f >= t) return 'diff: from < to, scan ids'
-    if (typeof path !== 'string' || path.includes('..') || path.startsWith('/')) return 'diff: bad path'
-    if (typeof title !== 'string') return 'diff: title required'
-    diff = { from: f, to: t, path, title }
-  }
   return { kind, ...common, ...frame(points.map(p => p.t)), points, quota, diff }
 }

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from click.testing import CliRunner
 
 from dt_cloud import scan_head as H
@@ -119,6 +120,26 @@ def test_params_reproc_fresh_and_extras():
     }
 
 
+@pytest.mark.parametrize("poller, steps, pre", [
+    (False, ["bucket-check", "access-ingest", "list", "index", "index-rows", "index-sync"], ["access-ingest"]),
+    (True, ["bucket-check", "list", "index", "index-rows", "index-sync"], []),
+])
+def test_access_ingest_poller_leaves_the_scan(poller: bool, steps: list[str], pre: list[str]):
+    """`options.access-ingest.poller` (specs/access-log-freshness.md, Order 2): the deployment's hourly poller runs the
+    ingest, so the scan has no `pre` task and `index` waits on the lists only, reading `options.index.access` as it
+    stands. Off (the default), the step runs in `pre` as before."""
+    from dt_cloud.scan_profile import parse
+
+    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "gs://d",
+               "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "l2/{scan}/"}, "sources": ["gs://a"],
+               "steps": ["access-ingest"],
+               "skip": ["static-names", "publish-r2", "interval-store", "over-time", "index-gc", "warm-cache", "probe", "digest"],
+               "options": {"access-ingest": {"args": ["-P", "4"], "poller": poller},
+                           "index": {"mode": "path-index", "access": "access/agg/*/*.parquet"}}})
+    got = H.params(p, "{}", "2026-10-18T0700", "G", "1", "", "S", {})
+    assert (got["steps"], got["pre"], p.opts("index")["access"]) == (steps, pre, "access/agg/*/*.parquet")
+
+
 def test_local_executor_config():
     from dt_cloud.scan_profile import parse
 
@@ -212,15 +233,16 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     r = CliRunner().invoke(main, ["scan", "head", "-n", "-N", str(tmp_path / "nf"), "-w", str(launch), str(FIX / "cw-s3.yml")])
     assert r.exit_code == 0, r.output
     session = H.session_id("cw-s3", "2026-10-16T1200")
-    assert sorted(p.name for p in launch.iterdir()) == [".nextflow", "executor.config", "params.json"]
+    assert sorted(p.name for p in launch.iterdir()) == [".nextflow", "executor.config", "params.json", "run.config"]
     assert (launch / "executor.config").read_text() == (FIX / "cw-s3.executor.config").read_text()
     params = json.loads((launch / "params.json").read_text())
     assert (params["scan"], params["gen"], params["job_start"], params["session"]) == ("2026-10-16T1200", "G1", "100", session)
     assert json.loads(params["profile_json"])["deployment"] == "cw-s3"
+    assert (launch / "run.config").read_text() == H.run_config(params["run_id"], params["profile_json"])
     line = (launch / ".nextflow" / "history").read_text().split("\t")
     assert line[1:] == ["-", "scan_2026_10_16T1200", "OK", "-", session, "nextflow run scan.nf\n"]
     assert r.stderr.rstrip().split("\n")[-1] == (
-        f"+ nextflow run {tmp_path}/nf/scan.nf -c {tmp_path}/nf/base.config -c {launch}/executor.config "
+        f"+ nextflow run {tmp_path}/nf/scan.nf -c {tmp_path}/nf/base.config -c {launch}/executor.config -c {launch}/run.config "
         f"-params-file {launch}/params.json -resume {session} -with-trace {launch}/trace.tsv "
         f"-with-dag {launch}/dag.mmd -with-timeline {launch}/timeline.html -with-report {launch}/report.html"
     )
@@ -299,3 +321,14 @@ def test_finish_args(tmp_path):
     assert H.finish_args(1, "nextflow exit 1", ["-l", "nf-session=s"], dag, "uid1") == ["-r", "uid1", "-x", "1", "-e", "nextflow exit 1", "-l", "nf-session=s"]
     dag.write_text("flowchart TB\n")
     assert H.finish_args(0, None, [], dag) == ["-x", "0", "-D", str(dag)]
+
+
+def test_run_config_escapes_into_a_groovy_env_scope():
+    """The run id and the profile JSON reach every task through the head's `run.config` `env` scope (out of the task
+    hash, so a resume from a new head job keeps the cache); quotes, backslashes and newlines survive Groovy."""
+    assert H.run_config("run-1", '{"a": "it\'s", "b": "x\\\\y\\n"}') == (
+        "env {\n"
+        "    DT_RUN_ID = 'run-1'\n"
+        "    DT_SCAN_PROFILE_JSON = '{\"a\": \"it\\'s\", \"b\": \"x\\\\\\\\y\\\\n\"}'\n"
+        "}\n"
+    )

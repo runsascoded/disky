@@ -1,13 +1,19 @@
-# Per-source stacks: a small disky stack per public bucket, and r2.rbw.sh as a thin aggregator
+# Stacks per cloud account, turnkey
 
-**Status:** design only, 2026-10-17. Research from the root checkout (`cloud`) and the deployment branches (`gcs`, `cw`, `hf`, `r2`, `m3`). Nothing here has been built, applied or deployed. Ryan decides §5's open questions.
+**Status:** design only, 2026-10-17. Research from the root checkout (`cloud`) and the deployment branches (`gcs`, `cw`, `hf`, `r2`, `m3`). Nothing here has been built, applied or deployed. §0 records Ryan's decisions (2026-10-17); §1–2 are the research behind them.
 
 **Question (Ryan):** should each public demo bucket get its own small disky stack (e.g. `disky.ctbk.dev` for `ctbk`, `disky.crashes.hccs.dev` for `crashes`, `disky.jct.rbw.sh` for `jc-taxes`), with r2.rbw.sh either retired or turned into a "thin" multi-source aggregator over them? The design goal: standing up a stack should be turnkey, especially a one-bucket one, so per-project tailoring stays inside that project's stack, and scaling doesn't concentrate in an aggregator.
 
-**Short answer:**
-- **Both, in order:** per-source stacks first, then the aggregator. A per-source stack is the unit [stacks-and-sources.md] and [federated-scans.md] already point at. Its build-side case is measured (gcs phase 0: wall time halved, compute −24%, same bytes). For the demo the stronger case is ownership: the HCCS buckets get scanned by an HCCS-account stack, and no HCCS key is held in disky's repo secrets.
-- **Keep r2.rbw.sh, as an aggregator.** Don't retire it. It becomes thin only once the union reader has a **remote member** kind (API fan-out to member sites), which isn't built. Until then it stays the central scanner. It gets retired as a scanner, not as a site, after the members have published for a week.
-- **Not turnkey today.** A public one-bucket stack is ~15 manual steps, about 5 of them console-only, and needs a code file and a branch (§1.4). Six pieces of work (§4) would make it `dt-cloud stack new` + `stack up` plus ~2 console steps, both Cloudflare-side.
+## 0. Decisions (Ryan, 2026-10-17)
+
+- **One disky ≈ one cloud account.** A stack's scope is a billing account: the same boundary as its credentials, its bill and its owner. So a stack never holds keys into another account, and "which stack scans this bucket" has one answer. R2 to start:
+  - **RAC** keeps r2.rbw.sh (`demo` branch): jc-taxes, plus Awair when it lands (RAC's GitHub org and Cloudflare account).
+  - **HCCS** gets its own R2 disky, `r2.hccs.dev`: ctbk and crashes, in HCCS's Cloudflare account, its own IaC token and Pulumi state, its digest in HCCS's Slack.
+  - **OA** has its deployments already (gcs/cw/hf/r2.oa.dev).
+- **The aggregator is shelved** (§3): a spec, not work. It costs more than a single stack even when implemented well, and it draws org lines (one site reading many accounts) that don't match the ones that matter (billing, ownership, access).
+- **Ruthless turnkey** (§4): every manual step removed is worth removing, even where some remain.
+
+The per-bucket framing below (`disky.jct.rbw.sh` etc.) is the research's starting question; the decisions replace it with per-account stacks. jc-taxes stays in r2.rbw.sh; crashes and ctbk move to r2.hccs.dev, after which r2.rbw.sh drops them and the HCCS key leaves disky's repo secrets.
 
 ## 1. Turnkey inventory: what a new stack needs today
 
@@ -51,7 +57,7 @@ No spec covers a turnkey or bootstrap command. [iac-templates.md] goes furthest.
 | First index: static-names `build`, interval-store `build` | yes | yes | the demo's workflow does `build` when absent, `add` otherwise | automated by the workflow |
 | `PATH_STORE = "intervals"` after `interval-store verify` | yes | yes | flip in `wrangler.toml`, redeploy | by hand |
 | R2 access collector (read recency) | optional | optional | `infra/cf/r2-access` (Pulumi stack per account + `wrangler secret put CF_OBSERVABILITY_TOKEN` + a second apply to enable the cron); the source bucket's **Data Access Logs** enabled in the dashboard | Pulumi + 2 manual (Observability token, dashboard toggle) |
-| Slack digest + alerts (`#<d>-usage`, `#<d>-admin`) | **no** (no audience) | yes | Slack app from a manifest (api.slack.com, by hand), channels, bot token into Secret Manager, icons Pages project (Pulumi) + avatars deploy | manual |
+| Slack digest + alerts (`#<d>-usage`, `#<d>-admin`) | **yes** when the owner has a Slack (HCCS; Ryan 2026-10-17) | yes | Slack app from a manifest (api.slack.com, by hand), channels, bot token into Secret Manager, icons Pages project (Pulumi) + avatars deploy | manual |
 | Run records (`scan-run supervise`, `/scans`, `DT_TRIGGER`) | optional | yes | needs D1 + the job's D1 token | config |
 | Meta store ("data behind this site") | **no** for a one-bucket demo | yes | a second profile + `STORES_JSON` | config |
 
@@ -61,7 +67,7 @@ No spec covers a turnkey or bootstrap command. [iac-templates.md] goes furthest.
 - **Skip:**
   - auth (Google OIDC, email codes, staff domain, admin console, agent tokens);
   - the job's site grant (warm-cache and probe read anonymously);
-  - the Slack digest thread and alert channels (GHA's own failure email is the alert);
+  - (not skipped: the Slack digest, when the owner has a Slack; see §5)
   - the meta store (a one-bucket stack's own index bucket is tiny; the aggregator can show it if wanted);
   - staging / sweeps (read-only by definition).
 - **Keep:**
@@ -181,20 +187,21 @@ Needed:
 - **Version skew:** each member deploys separately, and a breaking API change needs coordinated deploys or versioned endpoints.
 - **Search ranking across members** is a concat (heaviest first), not one global index.
 
-## 3. Recommendation
+## 3. The aggregator (shelved)
 
-**Both: per-source stacks for the work, and r2.rbw.sh as a thin aggregator over them.** Retiring r2.rbw.sh loses the cross-project view, which is the demo's pitch ("union of roots"). Aggregator-only, the status quo, keeps every project's tailoring and every account's keys in one stack, the opposite of the goal.
+Kept as a design note, not planned. What it would take, and where it costs more than one stack:
 
-Order:
-1. **Make a one-bucket public stack turnkey** (§4), and stand up **jc-taxes first**. It's same-account on RAC, its collector already runs, and `jct.rbw.sh` is its project. Then crashes and ctbk in HCCS's account, which needs HCCS's IaC token: one console step, once.
-2. **Remote member kind** in the union reader, measured with `probe -c` against the current single store on the same three buckets. The legacy union history stays a separate legacy source, never summed with the new members ([federated-scans.md] slice 4).
-3. **Cut r2.rbw.sh over** to `{"union": [jct, crashes, ctbk(, awair)], "main": true}` over remote members. Retire `daily-ingest.yml`'s central listing, and the HCCS key in disky's repo secrets, after a clean week. Keep the old index read-only for history.
+- **Not inherent, just not built:** owners, `largest`/`prefixes`, `name-summary`, the OG card and `q=` on series/diff at a union root. Sums and counts merge exactly.
+- **Thresholds compose with one extra round trip.** The Map's cutoff today is computed from the viewport and the total bytes to render; an aggregator first asks each member for its total under the current query (cheap, cacheable), computes the global cutoff, then sends it to every member, which short-circuits below it exactly as a single stack does. Top-k is exact by over-fetch: the global top k is within the union of each member's top k. Page P of a largest-files table needs the top (P+1)·k from each member, so cost grows with page depth where a single stack does one index lookup. The zero-overhead answer is to materialize: a cron that merges members' indexes into one, which is a single stack again.
+- **API drift** between members deploying separately: each response carries an API version; the aggregator requires a minimum per feature and degrades per member (that member shown stale or omitted for that view) instead of failing the page.
+- **Latency:** a cold root is the slowest member plus a hop.
+- Reading another stack's artifacts directly works only for the path store (cross-account keys, which §0 rules out); footers, the static name index and the interval store are read through the reader's own D1 / `INDEX_R2`. So an aggregator would be API fan-out (a "remote member" kind; the merge code is transport-agnostic).
 
-For the demo's sizes (~1M objects; GHA lists all three in minutes), the scaling argument is weak and the ownership argument carries it. For gcs, phase 0 says the build side favors per-source regardless.
+Worth an experiment some day for the perf numbers and the design problems it surfaces; not before the turnkey work.
 
 ## 4. Work that makes a one-bucket stack turnkey
 
-Target: `dt-cloud stack new jct --source r2://jc-taxes --account rac --domain disky.jct.rbw.sh --public`, then `dt-cloud stack up jct`. What's left manual: the source's read-only token (and the IaC token on a first-time account), plus the Data Access Logs toggle if the collector is wanted.
+Target: `dt-cloud stack new hccs-r2 --source r2://ctbk --source r2://crashes --account hccs --domain r2.hccs.dev --public`, then `dt-cloud stack up hccs-r2`. What's left manual: the source's read-only token (and the IaC token on a first-time account), plus the Data Access Logs toggle if the collector is wanted.
 
 1. **Store descriptor as data.** A JSON store descriptor (`stacks/<name>/store.json`, or a `STORE_JSON` var) covers `Store`'s plain fields: `label`, `title`, `desc`, `buckets`, `scheme`, `objectBases`, `rootLabel`, `objectsNote`. The SPA reads it at runtime (`/api/config`, or a static `/store.json`). The TS modules stay for function-valued fields (`externalLink`, `about`, `allowances`). `AUTH_MODE` / `MARK` / `PROD_HOST` / `DEV_HOST` move to runtime too, with a generic mark. Then one `dist` built on `cloud` (a GHA artifact per `cloud` SHA) serves every public stack, and **no branch or build per stack** is needed. It's also the precondition for "someone who isn't us" ([iac-templates.md] goal).
 2. **Tokens in the shared CF program.** Upstream `hf_stack.py`'s site reader and job D1 tokens into `infra/cf/stack/` (`siteReaderToken`, `jobD1Token`), plus an optional `sourceReaderToken: {buckets: [...]}` when the source is in the stack's own account. All are exported as secrets. A source in another account stays a console step: the point of per-source stacks is to make that case rare.
@@ -212,18 +219,20 @@ Target: `dt-cloud stack new jct --source r2://jc-taxes --account rac --domain di
 
    `up` stops at the first missing manual input (the source token) and names it. Pulumi `up`, secret writes and deploys stay human-confirmed per run, as today.
 
-**Where stack config lives (proposed):** demo stacks' config goes on `cloud`, as `stacks/<name>/`, beside r2.rbw.sh's own `wrangler.r2.toml` (the precedent: `cloud` deploys the demo). It holds no code, so "each branch carries exactly its deployments' code" holds. Later, the same generator can run in the owning project's repo (`ctbk`'s `disky/` dir, consuming disky's reusable workflow, released `dist` and `infra` package by SHA). That's [federated-scans.md] phase 4's ownership boundary: "the aggregate deployment does not orchestrate source scans or hold source listing/write credentials".
-
 Org stacks (gcs/cw/hf/r2) benefit from 2–4 and 6 too. They keep their branches for auth, Slack, the GCP program and owner policy. The GCP program as one config-only program is still [iac-templates.md]'s open item.
 
-## 5. Open
+## 5. Answers and remaining choices
 
-- **Runtime vs build-time site config (§4.1):** does the SPA fetch its descriptor at boot (one more request on first paint, cacheable), or does `stack up` inject it into a prebuilt `index.html` at deploy (no request, one tiny per-stack asset rewrite)? The latter keeps first paint unchanged.
-- **Stack config home:** `cloud`'s `stacks/<name>/`, or each project's repo from day one?
-- **Accounts:** does HCCS get its own Cloudflare IaC token and Pulumi state (passphrase + local `state/` as RAC does), and are `ctbk.dev` / `hccs.dev` zones in the HCCS account (unverified)?
-- **Names:** `disky.ctbk.dev`, `disky.crashes.hccs.dev`, `disky.jct.rbw.sh` as proposed, or `<project>.disky.dev`-style under one zone? One zone would put every stack in one account, which undercuts the ownership split.
-- **Awair:** does it join as a member through the same per-source stack template, or through its own producer export ([awair-public-r2-demo.md])? The template makes the former cheap.
-- **Scan ids:** member stacks should use timestamped ids (`YYYY-MM-DDTHHMM`, as hf), not date ids. The demo's date-id same-day re-run hazard is noted in `daily-ingest.yml`.
+- **Cloudflare tokens by IaC:** yes. The Cloudflare provider creates API tokens (`cloudflare.ApiToken`, account-owned `AccountToken`), and an R2 S3 key pair is derived from a token (access key id = the token id, secret = SHA-256 of the token value), so the site's reader token, the job's D1 token and a same-account source reader can all be Pulumi resources (hf's `hf_stack.py` already makes two). What stays manual is one bootstrap token per account, with permission to create tokens; the access-log toggle may stay a console click (no API found yet; verify).
+- **Google OAuth clients:** Google has no public API to create OAuth client IDs or edit their redirect URIs for ordinary web apps (the IAP OAuth admin API covered only IAP clients and is deprecated). That's deliberate (consent-screen review, abuse), and hostile to automation. Mitigations: public stacks need none; email-code sign-in needs none; an org's stacks can share one client (one redirect URI to add per stack, by hand), or a central auth host per org with one client that the stacks delegate to (removes the per-stack step entirely; a separate spec).
+- **Hugging Face:** no Pulumi provider, and as far as I know no API to mint fine-grained tokens; HF stacks are rare, so the token stays a documented console step.
+- **Workers + Assets instead of Pages:** yes, worth it (Cloudflare steers new projects to Workers; one deploy model for the site, the collector and cron-dispatch; Pulumi-managed Worker scripts and routes). It's a port of every `functions/` route to one Worker router: its own spec, for every deployment, after 10/19. r2.rbw.sh's hand-built Pages project, D1 and DNS get imported into Pulumi either way (`pulumi import`), or are recreated by the turnkey path when it moves to W+A.
+- **Site config at boot vs deploy:** with W+A the Worker can inject the stack's descriptor into `index.html` as it serves it: no extra request, no build per stack, and the same hook stamps per-stack meta/OG tags. So: one prebuilt site, config injected at serve time. (On Pages, the equivalent is `stack up` rewriting `index.html` at deploy.)
+- **Where stack config lives:** with one stack per account, each stack's config lives with its owner. RAC's (r2.rbw.sh) on `demo`; HCCS's in an HCCS repo (or a `hccs` branch here until it has one), consuming disky's reusable workflow and released site by SHA. Account ids and other identifiers come from Pulumi config/outputs, not tracked files (this repo is public).
+- **Names:** `r2.hccs.dev` for HCCS's R2 disky; r2.rbw.sh stays RAC's. Verify `hccs.dev` is in the HCCS Cloudflare account.
+- **Awair:** joins r2.rbw.sh (RAC), through the same descriptor + source mechanism.
+- **Slack digest:** public stacks still post their digest; HCCS's goes to HCCS's Slack (its own bot token: one Slack-side install per workspace, then a secret).
+- **Scan ids:** stacks use timestamped ids (`YYYY-MM-DDTHHMM`, as hf), not date ids.
 
 [stacks-and-sources.md]: stacks-and-sources.md
 [federated-scans.md]: federated-scans.md

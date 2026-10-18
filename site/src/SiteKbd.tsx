@@ -9,7 +9,7 @@ import { useStore } from './store'
 import { STORES } from './stores'
 import { useTheme } from './theme'
 import { useUnits } from './units'
-import { AUTH_MODE, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut } from './auth'
+import { AUTH_MODE, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut, useStores } from './auth'
 import { pageAction } from './pageAction'
 import { openDialog } from './dialogs'
 import { useShare } from './sharePreview'
@@ -52,6 +52,7 @@ export function SiteKbd({ extra = [], placeholder }: {
   const canAssign = useCanAssign()
   const ident = useIdent()
   const isAdmin = useIsAdmin()
+  const stores = useStores()
   const signOut = useSignOut()
   // The ☰ menu's pages, gated as it gates them.
   const PAGES: [string, string][] = [
@@ -91,7 +92,7 @@ export function SiteKbd({ extra = [], placeholder }: {
       ]),
     ),
     ...Object.fromEntries(
-      STORES.filter(s => s.key !== store.key).map(s => [
+      stores.filter(s => s.key !== store.key).map(s => [
         `store:${s.key}`,
         { label: `${s.label} store (${s.path})`, group: 'Pages', handler: () => navigate(s.path) },
       ]),

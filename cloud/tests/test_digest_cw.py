@@ -138,8 +138,8 @@ def test_units_tb():
         f":arrow_deg30: [wk of 9/28]({SITE}/?d=261002-2d#over-time) _(partial)_: **+0.4 TB** → 15 TB · 6.1% of 253 TB public",
     ]
     assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
-        E.Reply("10/1 — 16 TB (+0.5, 3.3%)", f"[org]({SITE}/?d=261001-1d#over-time): 6.1% of 253T (237.5 T free)", icon_url="https://icons.example.org/arrows/av_deg60.png?v=4"),
-        E.Reply("10/2 — 15 TB (−0.1, 0.6%)", f"[org]({SITE}/?d=261002-1d#over-time): 6.1% of 253T (237.6 T free)", icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4"),
+        E.Reply("10/1 — 16 TB (+0.5, 3.3%)", f"6.1% of 253T (237.5 T free) [↗︎]({SITE}/?d=261001-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg60.png?v=4"),
+        E.Reply("10/2 — 15 TB (−0.1, 0.6%)", f"6.1% of 253T (237.6 T free) [↗︎]({SITE}/?d=261002-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4"),
     ]
     assert D.image_body(month, oct1, cfg) == {
         "title": "HF usage — October 2026",
@@ -186,7 +186,7 @@ def test_class_scoped_quotas():
         f":arrow_deg50: [wk of 9/28]({SITE}/?d=261001-1d#over-time) _(partial)_: **+1.0 TB** → 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private",
     ]
     assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
-        E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"[org]({SITE}/?d=261001-1d#over-time): 6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free)",
+        E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free) [↗︎]({SITE}/?d=261001-1d#over-time)",
                 icon_url="https://icons.example.org/arrows/av_deg70.png?v=4"),
     ]
     assert D.image_body(month, oct1, cfg)["points"] == [{"scan": "2026-09-30T0800", "bytes": 15 * TB}, {"scan": "2026-10-01T0800", "bytes": 15_500_000_000_000}]
@@ -463,7 +463,8 @@ def test_config_file_invalid(tmp_path: Path):
 
 
 def test_no_quota():
-    # no quota on the primary (or any bucket): the `% of quota` clauses drop out, the tail shows raw TiB
+    # no quota on the primary (or any bucket): the `% of quota` clauses drop out, the tail shows raw TiB (one bucket,
+    # so unlabeled, the over-time link a trailing ↗)
     from dataclasses import replace
 
     cfg = replace(CFG, buckets={})
@@ -474,7 +475,7 @@ def test_no_quota():
         "*Weekly summaries*",
         f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB",
     ]
-    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"[main-data]({SITE}/main-data?d=26090112-1d#over-time): 713 Ti"
+    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"713 Ti [↗︎]({SITE}/main-data?d=26090112-1d#over-time)"
 
 
 def test_op_body():
@@ -639,6 +640,26 @@ def test_post_digest_sender_variant(tmp_path: Path):
     assert [_post(c) for c in fake.calls] == [("edit", "m1"), ("post", "m1", "9/2 — 715 TiB (+2.0, 0.3%)", f"{AV}30.png?v=4", None)]
     assert state["posted"]["2026-09-02"] == {"ts": "m3", "scan": "2026-09-02T1200"}
     assert state["plot_name"] == plot
+
+
+def test_post_digest_edit_replies(tmp_path: Path):
+    # `-E`: a format change's backfill re-edits every posted sender reply's body to its current render, in place
+    # (the name + avatar were fixed at post time); the state is unchanged, and without `-E` the same scans edit nothing
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    state = post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
+    assert state["posted"] == {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T1200"}, "2026-09-02": {"ts": "m3", "scan": "2026-09-02T1200"}}
+    fake.calls.clear()
+    assert E.converge_slack(_tpl(), str(root), SEP, fake, "C1", "sender", edit_replies=True) == state
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    assert fake.calls[1:] == [
+        ("edit", "m2", f"[main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)"),
+        ("edit", "m3", f"[main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)"),
+    ]
+    fake.calls.clear()
+    post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
+    assert [_post(c) for c in fake.calls] == [("edit", "m1")]
 
 
 def test_post_digest_body_variant(tmp_path: Path):

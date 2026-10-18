@@ -76,6 +76,28 @@ describe('D1', () => {
       // owner mode keeps the view's own children as they are
       expect(tilesOf(lone, color)[0].color).toBe(UNOWNED_COLOR)
     })
+    it('read mode: read since its write by the read, written-unread by the write, never; the window runs to `through`', () => {
+      const flat: TreeNode = {
+        n: 'root', b: 135, o: 13,
+        c: [
+          { n: 'read', b: 40, o: 4, a: 105, d: 90 },
+          // a folder with a read older than its newest write: the read's age (it hatches only when nothing in it was read)
+          { n: 'busy', k: 'dir', b: 35, o: 3, a: 102, d: 108 },
+          // an object read before its last write: the write's age
+          { n: 'rewritten', k: 'file', b: 30, o: 1, a: 102, d: 108 },
+          { n: 'fresh', b: 20, o: 2, d: 104 },
+          { n: 'cold', b: 10, o: 1, d: 95 },
+        ],
+      }
+      const tiles = (access: Parameters<typeof tilesOf>[3]) => tilesOf(flat, color, 'read', access).map(t => [t.name, t.color])
+      expect(tiles({ from: 100, to: 110 })).toEqual([
+        ['read', dateColor(0.5)], ['busy', dateColor(0.2)], ['rewritten', dateColor(0.8)], ['fresh', dateColor(0.4)], ['cold', '#6e332b'],
+      ])
+      // logs through day 120: the window (and the scale) runs to it
+      expect(tiles({ from: 100, to: 110, through: '1970-05-01T15:00Z' })).toEqual([
+        ['read', dateColor(0.25)], ['busy', dateColor(0.1)], ['rewritten', dateColor(0.4)], ['fresh', dateColor(0.2)], ['cold', '#6e332b'],
+      ])
+    })
     it('date mode: containers neutral at every depth; the scale spans the drawn leaves', () => {
       const deep: TreeNode = {
         n: 'root', b: 100, o: 10, d: 5,

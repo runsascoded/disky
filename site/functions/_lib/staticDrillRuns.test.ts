@@ -136,7 +136,7 @@ describe('Drill over base ⊕ runs: every view = brute force', () => {
     expect(got).toEqual(want)
     // 409 terms × 20 paths: the fleet root's heavy members read the tiers' catalog; `nomatch` is no member.
     expect(sources).toEqual({ roots: 7826, rollup: 77, catalog: 77, plain: 180, none: 20 })
-  }, 60_000)
+  })
 
   it('the dispatch and every rollup header = the Python `TieredDrill`', async () => {
     const drill = wired()
@@ -149,7 +149,7 @@ describe('Drill over base ⊕ runs: every view = brute force', () => {
       want.push([t, P, E.py.run2[t][P]])
     }
     expect(got).toEqual(want)
-  }, 60_000)
+  })
 
   it('run 2\'s drill not there yet: the base and run 1, their scans exact and the dispatch = Python\'s over the same tiers', async () => {
     const drill = wired({ hide: [`${RUN2}/drill/meta.json`] })
@@ -165,7 +165,7 @@ describe('Drill over base ⊕ runs: every view = brute force', () => {
       py.push([t, P, E.py.run1[t][P]])
     }
     expect(dispatch).toEqual(py)
-  }, 60_000)
+  })
 
   it('a run without its drill stops the tiers there, even with a later run\'s live; no runs = the base alone', async () => {
     const at = async (hide: string[], runs = true) => {
@@ -243,7 +243,7 @@ describe('a broken drill tier: cut there, the scans before it answer exactly, ne
       const { got, want } = await check(drill, THROUGH_RUN1(), E.members1)
       expect(got).toEqual(want)
     } finally { slow.mockRestore() }
-  }, 60_000)
+  })
 
   it('run 2\'s drill index files missing, the cut\'s life over: the next answer re-checks run 2, cuts it again (logged again), and answers through run 1', async () => {
     let clock = 0
@@ -278,7 +278,7 @@ describe('a broken drill tier: cut there, the scans before it answer exactly, ne
     expect([st.version, st.tiers.map(x => x.dir), st.scans]).toEqual([RUN1, [null, RUN1], THROUGH_RUN1()])
     const { got, want } = await check(drill, THROUGH_RUN1(), E.members1)
     expect(got).toEqual(want)
-  }, 60_000)
+  })
 
   it('run 2\'s catalog index corrupt, found at the fleet root: that answer covers the scans through run 1 only, and is not held', async () => {
     const drill = wired({ corrupt: [`${RUN2}/catalog/index.parquet`] })
@@ -349,7 +349,7 @@ describe('requests sharing the isolate\'s memos while every read outlasts the jo
     } finally {
       Object.assign(JOIN, join0)
     }
-  }, 60_000)
+  })
 })
 
 describe('mutations: each reader rule, broken, makes the views wrong', () => {

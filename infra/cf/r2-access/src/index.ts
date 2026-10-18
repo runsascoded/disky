@@ -273,6 +273,9 @@ export class HourAccumulator {
 
   get observed(): number { return this.ids.size }
 
+  /** The drain already holds this event (a page can repeat one: the provider delivers some events twice). */
+  has(id: string): boolean { return this.ids.has(id) }
+
   finish(bucket: string, hour: number, estimated: number, maxInterval: number): HourAggregate {
     const classes: Record<string, number> = {}
     for (const [action, n] of Object.entries(this.actions)) classes[actionClass(action)] = (classes[actionClass(action)] ?? 0) + n
@@ -492,6 +495,10 @@ export async function collect(
       const page = parsePage(text, bucket, hour, to, config.excluded)
       pagesLeft--
       if (page.length > config.pageSize) throw new CollectionError('page_size_exceeded')
+      // A short page of events already drained is the end: an event delivered twice sorts beside its copy, so the
+      // cursor at the last event's first copy returns the second (marin-na 2026-10-17T16 ended on one such page
+      // where every other hour ended on an empty one). The count reconciliation still flags anything missing.
+      if (page.length && page.length < config.pageSize && page.every(event => acc.has(event.id))) break
       const next = page.at(-1)?.id
       if (next && cursors.has(next)) throw new CollectionError('cursor_stalled')
       const key = `${prefix}/${bucket}/${hourKey(hour)}/${String(keys.length).padStart(4, '0')}.json`

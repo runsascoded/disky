@@ -4,7 +4,8 @@ Each reply's SENDER is the scan's size headline (date · TiB · Δ), its BODY th
 $/mo (priced from the scan's storage-class bytes, ``cfg.prices``) + a linked
 arrow to the day's diff, its avatar the colour-coded trend arrow
 (`av_deg{N}.png?v=REV`). The OP: month-to-date headline, per-ISO-week bullets
-(TiB + $/mo), and a storage-class image drawn by the site (`POST /api/digest-image`, `kind: tiers`).
+(TiB + $/mo), and a storage-class image drawn by the site (`POST /api/digest-image`, `kind: tiers`, with the
+month-to-date diff map).
 Scan ids are `YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM` (UTC): a day may hold
 several scans, each its own reply, delta and link (specs/done/scan-ids-not-dates.md);
 meta.json carries `total_bytes` + `class_bytes`. Design + rationale: specs/done/slack-digest-shape-c.md; the
@@ -16,7 +17,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .digest import AVATAR_REV, GIB, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
+from .digest import AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
 
 
 def _usd(v: float) -> str:
@@ -135,11 +136,12 @@ TIERS = (("arch", "Archive"), ("cold", "Coldline"), ("near", "Nearline"), ("std"
 
 def image_body(rows: list[Scan], month: dt.date, cfg: DigestConfig) -> dict:
     """`POST /api/digest-image`'s request for ``month`` (`kind: tiers`): each day's latest scan's bytes per storage
-    class, bottom → top (cold → hot), drawn as the month's total line over the stacked classes."""
+    class, bottom → top (cold → hot), drawn as the month's total line over the stacked classes, over the month-to-date
+    diff map (the first scan's lead-in → the latest, the OP's headline span; none until the month spans two scans)."""
     by_day: dict[str, Scan] = {}
     for r in rows:
         by_day[r.date[:10]] = r
-    return {
+    body = {
         "kind": "tiers",
         "title": f"{cfg.title} — {month:%B %Y}",
         "note": f"{cfg.host} · TiB",
@@ -148,6 +150,11 @@ def image_body(rows: list[Scan], month: dt.date, cfg: DigestConfig) -> dict:
         "tiers": [name for _, name in TIERS],
         "points": [{"scan": r.date, "bytes": [round(getattr(r, k) * TIB) for k, _ in TIERS]} for r in by_day.values()],
     }
+    base, last = rows[0].prev or rows[0].date, rows[-1].date
+    if base < last:
+        a, z = scan_ts(base), scan_ts(last)
+        body["diff"] = {"from": base, "to": last, "path": "", "title": f"What changed — {a.month}/{a.day} → {z.month}/{z.day}"}
+    return body
 
 
 def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
@@ -167,11 +174,8 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     # A sub-daily scan names its UTC time: a day's scans are distinct replies.
     when = f"{d.month}/{d.day}" + (f" {r.date[11:13]}:{r.date[13:15]}Z" if "T" in r.date else "")
     sender = f"{when} — {r.tb:,.0f} TiB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
-    # ↗︎ = NE arrow + text-presentation selector: renders as a font
-    # glyph in link colour (bare ↗ gets emoji-ized by Slack into the
-    # cartoonish :arrow_upper_right:)
     url = f"{cfg.site_url}/?d={_dlink(r.date, r.slug)}#diff"
-    link = f"· [view →]({url})" if platform == "discord" else f"[↗︎]({url})"
+    link = f"· [view →]({url})" if platform == "discord" else f"[{LINK_ARROW}]({url})"
     body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
     # project the scan's Δ% over its real interval to a weekly rate (a day: ×7)
     # (a daily scan keeps the fixed ×7 even across a missed day)

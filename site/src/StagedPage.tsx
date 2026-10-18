@@ -37,6 +37,7 @@ import { PrefixRecovery } from './PrefixRecovery'
 import { prefixExecution } from './prefixExecution'
 import type { PrefixExecution } from './prefixExecution'
 import { RunsSection } from './StagedRuns'
+import { idleLabel, idleness, idleSortKey, prefixBucket, readLogged, readThrough } from './readLens'
 import { type PrefixSortKey, type PrefixStat, relAgo, sortPrefixRows, usePrefixes } from './prefixes'
 import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, stagedState, type StagedState } from './stagedCompletion'
 import { batchAnchor } from './runHistory'
@@ -187,6 +188,15 @@ export function StagedPage() {
     staleTime: Infinity,
   })
   const userIdx = useMemo(() => buildUserIndex(metaQ.data?.users ?? []), [metaQ.data])
+  // The review's idle rule (spec `access-log-freshness.md` §C): idle only when a prefix's last read and
+  // last write both precede the logs' end (`access.through`), counted from it; no column on a scan
+  // published before `through`.
+  const access = metaQ.data?.access
+  const thru = useMemo(() => readThrough(access), [access])
+  const idleOf = useMemo(() => {
+    const logged = readLogged(access)
+    return (r: { prefix: string, stat?: PrefixStat }) => r.stat ? idleness(r.stat.a, r.stat.d, access, logged(prefixBucket(r.prefix))) : null
+  }, [access])
   const error = unstage.error ?? runAction.error ?? staged.error ?? statsQ.error ?? history.error
 
   const rows: Row[] = useMemo(() => items.map(it => ({ ...it, name: it.prefix, to: `/${prefixToPath(it.prefix)}`, stat: stats?.[it.prefix] })), [items, stats])
@@ -208,7 +218,7 @@ export function StagedPage() {
   // staged before batches existed fall into one "earlier" group. Each group
   // sorts by the table's key.
   const groups: Group[] = useMemo(() => {
-    if (flat) return [{ id: -1, ids: [], rows: sortPrefixRows(shownRows, sort.k, sort.asc, r => r.added_ts) }]
+    if (flat) return [{ id: -1, ids: [], rows: sortPrefixRows(shownRows, sort.k, sort.asc, r => sort.k === 'idle' ? idleSortKey(idleOf(r)) : r.added_ts) }]
     const byBatch = new Map<number | null, Row[]>()
     for (const r of shownRows) {
       const k = r.batch_id == null ? null : lead(r.batch_id)
@@ -229,10 +239,10 @@ export function StagedPage() {
     }
     const ids = (id: number | null) => id == null ? [] : membersOf.get(id) ?? [id]
     return [...[...byBatch.entries()]
-      .map(([id, rs]): Group => ({ id, ids: ids(id), batch: id != null ? batchById.get(id) : undefined, rows: sortPrefixRows(rs, sort.k, sort.asc, r => r.added_ts) })),
+      .map(([id, rs]): Group => ({ id, ids: ids(id), batch: id != null ? batchById.get(id) : undefined, rows: sortPrefixRows(rs, sort.k, sort.asc, r => sort.k === 'idle' ? idleSortKey(idleOf(r)) : r.added_ts) })),
       ...[...gone.values()].map((e): Group => ({ id: e.id, ids: ids(e.id), batch: e, rows: [], emptied: e }))]
       .sort((a, b) => (b.batch?.created_ts ?? 0) - (a.batch?.created_ts ?? 0))
-  }, [shownRows, batchById, leadOf, membersOf, emptied, sP, flat]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [shownRows, batchById, leadOf, membersOf, emptied, sP, flat, idleOf]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const outcomes = new Map(rows.map(r => {
     const execution = rowExecution(r)
@@ -370,7 +380,13 @@ export function StagedPage() {
               onSort={onSort}
               shareOf={all.b}
               loading={!stats}
-              extra={[{
+              extra={[...(thru ? [{
+                key: 'idle', label: 'idle', className: 'nb idle', sort: (r: Row) => idleSortKey(idleOf(r)),
+                cell: (r: Row) => (i => i == null ? <span className="dim">—</span>
+                  : <Tooltip content={i.idle ? `No read or write since, counted from the access logs' end (${thru.label}); at least this long (reads before logging began are unknown)` : `Written on or after the access logs' end (${thru.label}): reads since are not delivered yet, so not idle`}>
+                    <span className={i.idle ? '' : 'dim'}>{idleLabel(i)}</span>
+                  </Tooltip>)(idleOf(r)),
+              }] : []), {
                 key: 'execution', label: 'execution / recovery', className: 'nb',
                 cell: r => <PrefixRecovery execution={outcomes.get(r.prefix)!.execution} fmtBytes={fmtBytes} />,
               }, {

@@ -426,3 +426,37 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
                 os.unlink(prev[0].file)
             prev = (scan, date, s["ts"])
     return summaries
+
+
+# ── Per-scan parity markers (`scan retire`'s gate) ─────────────────────────
+
+
+def marker_key(prefix: str, scan: str) -> str:
+    """Scan `scan`'s parity marker in the generation at `prefix` (`interval-store/<gen>`)."""
+    return f"{prefix}/verify/{scan}.json"
+
+
+def marker(summary: dict, gen: str) -> dict:
+    """A scan's parity marker from its `run_date` summary: its views and diffs, and `pass` when it had views and every
+    view and diff was equal."""
+    ok = summary["views"] > 0 and summary["views"] == summary["view_eq"] and summary["diffs"] == summary["diff_eq"]
+    return {"scan": summary["date"], "gen": gen, "pass": ok, **{k: summary[k] for k in ("views", "view_eq", "diffs", "diff_eq")}}
+
+
+def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path) -> dict[str, dict]:
+    """Parity of `scans` (`{id, src, ts, version}`, oldest first; `src` under `root`, a dir or URL) against generation
+    `gen` of `store` (a `blobstore.Store`: base + the newest manifest's runs, as the reader serves them), each scan's
+    marker written to `verify/<id>.json` in the generation; returns the markers by scan id."""
+    from .interval_store import PREFIX, download_served, verify_runs
+
+    prefix = f"{PREFIX}/{gen}"
+    download_served(store, prefix, tmp / "served")
+    runs = verify_runs(store, prefix, tmp / "runs", {"scans": []})
+    doc = {"bucket": root, "scans": scans}
+    sums = verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs)
+    out = {}
+    for s in sums:
+        m = marker(s, gen)
+        store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
+        out[s["date"]] = m
+    return out

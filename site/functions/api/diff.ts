@@ -14,7 +14,7 @@
  */
 import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
 import { type Env, type Identity, json, requireViewer } from '../_lib/auth.js'
-import { ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
+import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
@@ -169,6 +169,8 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     const res = await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keep)
     return out(keep === true ? res : upgrade(res))
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     if (e instanceof NotFound) return new Response('path not found in either scan', { status: 404 })
     if (e instanceof FilterRejected) return new Response(rejectBody(e.reject), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof LensUnavailable) return new Response('lens index not available for a scan', { status: 409 })
@@ -258,6 +260,8 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
     } })
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     const msg = String((e as Error).message ?? e)
     if (e instanceof UnionOverlap) return new Response(msg, { status: 500 })
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })

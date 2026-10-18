@@ -21,11 +21,13 @@
  * `PATH_STORE=intervals` a scan the interval store holds is read from its
  * `bysize` sort as of that scan (`readLargest` → `readLargestIv`: its runs' close
  * records applied, exactly the scan's own answer), any other from the scan's own
- * size sort — never another scan's files.
+ * size sort — never another scan's files. A scan the store holds never reads its
+ * per-scan sort (retired once the store holds it): a scan a broken run cut out is a
+ * 503 + `Retry-After` (`ivRefusal`).
  */
 import { filterJson, hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { type LargestKind, openIndex, pathGens, readLargest, sizeVariant, storeReady, withPathStore } from '../_lib/index.js'
+import { ivRefusal, ivRetry, type LargestKind, openIndex, pathGens, readLargest, sizeVariant, storeReady, withPathStore } from '../_lib/index.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { storeKey, withStore } from '../_lib/stores.js'
 import { scanArg } from '../_lib/scanArg.js'
@@ -77,14 +79,15 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
     const cacheKey = cacheKeyFor('largest', cacheEnvTag(ctx.env, ctx.request), `${date}/${encodeURIComponent(path)}?n=${n}${kind === 'dir' ? '&k=dir' : ''}&g=${g}`, storeKey(ctx.env))
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return out(hit)
-    let h
+    // A broken interval-store run is cut out and the read tried again: a scan before it answers, the run's own
+    // scans are a 503 + `Retry-After` (`ivRefusal`), never a per-scan read.
+    let r
     try {
-      h = await openIndex(env, date, sizeVariant('path'))
+      r = await ivRetry(async () => readLargest({ ...(await openIndex(env, date, sizeVariant('path'))), trace: st.trace }, path, n, undefined, kind))
     } catch (e) {
       if (String((e as Error).message).includes('not synced')) return new Response('no size sort for this scan (objects not indexed)', { status: 409 })
       throw e
     }
-    const r = await readLargest({ ...h, trace: st.trace }, path, n, undefined, kind)
     const body = JSON.stringify({
       date,
       path,
@@ -99,6 +102,8 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
     })
     return await out(cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx)))
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     const msg = String((e as Error).message ?? e)
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
     return new Response(`largest failed: ${msg}`, { status: 500 })

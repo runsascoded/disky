@@ -901,7 +901,8 @@ def verify_runs(store: Store, prefix: str, dst: Path, scans: dict) -> list[str]:
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) -> None:
     """Parity against the per-scan path store over the profile's `verify_scans`: every
-    view's tiles and every diff's rows, with both sides' read cost; `verify/t##.jsonl` + `.json`."""
+    view's tiles and every diff's rows, with both sides' read cost; `verify/t##.jsonl` + `.json`, and each sampled
+    scan's parity marker `verify/<id>.json` (`interval_verify.marker`: `pass` when every view and diff is equal)."""
     store = Store(_bucket(bucket, profile))
     from . import interval_verify as iv
 
@@ -917,6 +918,8 @@ def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) ->
     tag = f"t{t:02d}" if not scan_ids else f"t{t:02d}-{sampled[0]}"
     summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs)
     (outp / f"{tag}.json").write_text(json.dumps(summaries, indent=1) + "\n")
+    for s in summaries:  # each scan's parity marker (`scan retire`'s gate)
+        (outp / f"{s['date']}.json").write_text(json.dumps(iv.marker(s, gen)) + "\n")
     store.put_tree(outp, f"{prefix}/verify")
     print(json.dumps(summaries), flush=True)
 
