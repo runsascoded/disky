@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
-import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRetry, IvGroup, openIndex, pathGens, planRects, planSizeRects, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
+import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, planRects, planSizeRects, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
 import { type D1Variant, fixture, readJson, seedGeneration } from './testStore'
@@ -53,6 +53,13 @@ function r2(reads: string[], hide: (key: string) => boolean = () => false, { hea
   }
   return { get, list, ...(head ? { head: async (key: string) => (await there(key) ? { key } : null) } : {}) } as unknown as R2Bucket
 }
+
+/** `db`, recording each statement prepared on it (a per-scan read starts with an `index_schema` lookup). */
+const recording = (db: D1Database, sqls: string[]): D1Database =>
+  new Proxy(db, { get: (t, k) => (k === 'prepare' ? (q: string) => { sqls.push(q); return t.prepare(q) } : Reflect.get(t, k)) })
+
+/** How a promise failed (`<name>: <message>`), or null when it didn't. */
+const failure = (p: Promise<unknown>): Promise<string | null> => p.then(() => null, (e: Error) => `${e.name}: ${e.message}`)
 
 /** A node without its children as canonical JSON (`interval_read.canon`: sorted keys, compact). */
 function canon(n: ViewNode): string {
@@ -631,18 +638,34 @@ describe('interval store: base + runs', () => {
     })
   })
 
-  it('cuts the stack at a run whose files are missing: its scans leave the store, the ones before it answer as before', async () => {
-    // g3's second run listed before its sorts reached R2: its footers (and the data, `head`) are not there.
+  it('cuts the stack at a run whose files are missing: its scans are refused (503), never read per-scan; the ones before it answer as before', async () => {
+    // g3's second run listed with its sorts missing (a bug, or a read error: the store publishes a run's data before
+    // the manifest listing it): its footers (and the data, `head`) are not there.
     const hide = (k: string) => k.startsWith('interval-store/g3/deltas/2026-08-05/')
-    const e = at('g3', [], hide, { rev: 'cut1' })
-    await expect(openIndex(e, '2026-08-05', 'path')).rejects.toThrow("index variant 'path' not synced for 2026-08-05")
+    const sqls: string[] = []
+    const e = { ...at('g3', [], hide, { rev: 'cut1' }), DB: recording(env.DB!, sqls) } as Env
+    const refusal = async (variant: string) => {
+      const err = await openIndex(e, '2026-08-05', variant).then(() => null, (x: unknown) => x)
+      const r = ivRefusal(err)!
+      return [(err as Error).name, r.status, r.headers.get('retry-after'), r.headers.get('cache-control'), await r.text()]
+    }
+    const want = ['IvUnavailable', 503, '30', 'no-store', `scan 2026-08-05 is unavailable: interval store run deltas/2026-08-05 is broken (a bug or a transient read error: the store publishes append-only, so never a half-written run); retry in 30s\n`]
+    // Every variant of the cut-out scan, served by the store or not, once a read found the run broken (in turn: a
+    // variant the store doesn't serve opens no run, so read before the first `path` it is "not synced").
+    const got = []
+    for (const v of ['path', 'bysize', 'coarse20', 'user']) got.push(await refusal(v))
+    expect(got).toEqual([want, want, want, want])
+    // A variant the store doesn't serve, of a scan it holds: "not synced", not a per-scan read either.
+    expect(await failure(openIndex(e, '2026-08-04', 'coarse20'))).toEqual("Error: index variant 'coarse20' not synced for 2026-08-04 (the interval store holds the scan and doesn't serve the variant)")
+    // No per-scan pointer was looked up (`index_schema`): nothing was asked of D1 at all.
+    expect(sqls).toEqual([])
     const h = await openIndex(e, '2026-08-04', 'path')
     expect((h.runs ?? []).map(r => r.run)).toEqual(['deltas/2026-08-04'])
     const c = cases.find(x => x.date === '2026-08-04' && x.path === '' && x.w === 30 && x.depth == null)!
     expect(flatten((await buildView(e, { date: c.date, path: '', w: 30, h: 30, minArea: 12, atten: 2 })).tree)).toEqual(c.tiles)
   })
 
-  it('cuts a run a read finds broken, and the retry reads around it: never a failed request', async () => {
+  it('cuts a run a read finds broken: the retry answers a scan before it, and refuses the run\'s own (503)', async () => {
     // A run's data file gone with its footer still there, on a binding without `head`: only a read finds it. A
     // view or diff reads only the runs begun by its scans (`asOfScans`), so the read here is one of every tier as
     // of a base scan (as `openIndex` alone opens it): the run's close records are read, and its versions tested.
@@ -655,10 +678,17 @@ describe('interval store: base + runs', () => {
     expect(want.length).toBeGreaterThan(0)
     // As a request reads it (`ivRetry`): the first try finds the run broken and cuts it, the retry reads the base.
     expect(await ivRetry(() => rowsAt(at4('a')))).toEqual(want)
-    // The same read without the retry fails once, then the stack is cut: the run's scans read per-scan (none here:
-    // "not synced"), the base's from the base alone.
-    await expect(rowsAt(at4('b'))).rejects.toThrow('interval store run deltas/2026-08-04_2026-08-05 is broken')
-    await expect(openIndex(at4('b'), '2026-08-05', 'path')).rejects.toThrow("index variant 'path' not synced for 2026-08-05")
+    // The same read without the retry fails once (itself a 503: `ivRefusal`), then the stack is cut: the run's scans
+    // are refused, the base's read from the base alone.
+    const first = await rowsAt(at4('b')).then(() => null, (x: unknown) => x)
+    expect([(first as Error).name, ivRefusal(first)?.status, ivRefusal(first)?.headers.get('retry-after')]).toEqual(['IvTierBroken', 503, '30'])
+    const run = 'deltas/2026-08-04_2026-08-05'
+    for (const d of ['2026-08-04', '2026-08-05']) {
+      const err = await openIndex(at4('b'), d, 'path').then(() => null, (x: unknown) => x) as IvUnavailable
+      expect([err.name, err.date, err.run, err.retryAfter]).toEqual(['IvUnavailable', d, run, 30])
+      // …and a request retrying it (`ivRetry`) gets the same refusal, not a per-scan read.
+      expect(await failure(ivRetry(() => openIndex(at4('b'), d, 'path')))).toEqual(`IvUnavailable: scan ${d} is unavailable: interval store run ${run} is broken (a bug or a transient read error: the store publishes append-only, so never a half-written run); retry in 30s`)
+    }
     expect((await openIndex(at4('b'), date, 'path')).runs).toBeUndefined()
     expect(await rowsAt(at4('b'))).toEqual(want)
     // Healed (the file is there again) once the cut expires.

@@ -13,7 +13,7 @@ import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
 import { hasLedger } from '../_lib/ledger.js'
 import { ownerTotals } from '../_lib/ownerTotals.js'
-import { storeReady } from '../_lib/index.js'
+import { ivRefusal, storeReady } from '../_lib/index.js'
 import { scanArg } from '../_lib/scanArg.js'
 
 interface Cell { by: string; to: string; bytes: number; objects: number; prefixes: string[] }
@@ -57,6 +57,8 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
     const out = [...cells.values()].sort((a, b) => b.bytes - a.bytes)
     return json({ scan: t.scan, head: t.head, cells: out }, 200, { 'cache-control': 'private, no-store' })
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     return json({ error: (e as Error).message }, 503)
   }
 }

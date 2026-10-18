@@ -376,9 +376,11 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
   }
   let h = 0x811c9dc5
   // The interval store's dates: their answers are the store's generation's (and its reader's, `IV_ANSWER_V`), keyed apart.
+  // A date a broken run cuts out (`IvState.refused`) keeps its key: what was cached for it was the store's answer
+  // (the store is append-only), and a miss refuses (`IvUnavailable`), never reads per-scan.
   if (intervalsOn(env)) {
-    const held = await ivScans(env)
-    for (const d of uniq) if (held.has(d)) gens.set(d, `iv:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
+    const st = await ivState(env)
+    for (const d of uniq) if (st.scans.has(d) || st.refused.has(d)) gens.set(d, `iv:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
   }
   for (const d of [...uniq].sort()) {
     for (const ch of `${d}=${gens.get(d) ?? ''};`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193)
@@ -440,6 +442,11 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
   if (intervalsOn(env)) {
     const h = await openInterval(env, date, variant)
     if (h) return h
+    // A date the store holds never reads per-scan (its per-scan sorts are retired once the store holds it:
+    // `dt-cloud scan retire`): a broken run's scan is a 503 (`IvUnavailable`), a variant the store doesn't serve
+    // (a v1 `user` / `coarse*` tier, a sliced read of a generation without slice sorts) is "not synced". What
+    // stays per-scan (age pyramids, the over-time archive, search sidecars) asks for it: `perScan(env)`.
+    await ivRefuseHeld(env, date, variant)
   }
   const ck = `${storeKey(env)}:${date}:${variant}`
   const at = handleAt.get(ck)
@@ -484,8 +491,9 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
 
 /** `PATH_STORE=intervals` with `INTERVAL_STORE_GEN` (a pin, or the current generation `withPathStore` resolved for
  *  the request: `ivGen`) and the `INDEX_R2` binding: a date the generation holds reads its `path` / `bysize` sorts
- *  from the interval store, as of that scan; any other date or variant (a lens's user-first sort, the age index, a
- *  date past the generation) reads as before. */
+ *  from the interval store, as of that scan, and never per-scan (a variant the store doesn't serve is "not synced",
+ *  a scan a broken run cut out a 503: `openIndex`); a date the generation doesn't hold reads per-scan stores, and
+ *  what stays per scan (age pyramids, the over-time archive) reads through `perScan`. */
 export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals' && !!env.INTERVAL_STORE_GEN && !!env.INDEX_R2
 
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
@@ -550,11 +558,12 @@ export async function ivGen(env: Env): Promise<string | null> {
  *  generation (folded or sliced). A per-isolate memo of what a date has keys by it, as by `storeKey`:
  *  under `PATH_STORE=opt-in` one isolate serves both stores. */
 export const pathStoreKey = (env: Env): string => (intervalsOn(env) ? `iv:${env.INTERVAL_STORE_GEN}${ivRev(env)}${isSliced(env) ? ':s' : ''}` : '')
-/** `env` reading per-scan stores only: what a read needs whose rows must be owner slices (a user lens,
- *  an owner pool, owner totals) — the interval store folds a path's slices into one row. */
+/** `env` reading per-scan stores only: what stays per scan whatever the store holds (age pyramids, the over-time
+ *  archive, search sidecars). A store-held date's sorts are never read through it (`openIndex` refuses them). */
 export const perScan = (env: Env): Env => (intervalsOn(env) ? { ...env, PATH_STORE: undefined } : env)
 /** `env` reading owner-slice rows (a user lens, an owner pool, owner totals, class scopes): the interval
- *  store's slice sorts where its generation has them (`openInterval`), else per-scan stores. */
+ *  store's slice sorts where its generation has them (`openInterval`); a held date of a generation without them is
+ *  "not synced" (`openIndex`), a date the store doesn't hold reads per-scan stores. */
 export const slices = (env: Env): Env => (intervalsOn(env) ? { ...env, [IV_SLICED]: true } as Env : env)
 /** `env` reading the interval store's folded sorts (one row per path, exact totals) again. */
 export const folded = (env: Env): Env => (isSliced(env) ? { ...env, [IV_SLICED]: false } as Env : env)
@@ -584,7 +593,7 @@ const IV_SLICE_SORTS = new Map([['path', 'slices'], ['bysize', 'slices-bytotal']
  *  NULL: `path` and `bysize` are its `slices` and `slices-bytotal`, and `bysize` (all owners NULL, first) its
  *  `slices-bysize-user` — no owners, as the per-scan reader reads a scan without `usr`. */
 const IV_UNSLICED_SORTS = new Map([['path', 'path'], ['bysize', 'bysize'], ['bysize-user', 'bysize']])
-/** Generations found without slice sorts (their sliced reads go per-scan), held a minute. */
+/** Generations found without slice sorts (their held dates' sliced reads are "not synced"), held a minute. */
 const ivNoSlices = new Map<string, number>()
 /** The sort a read of each sort also opens (its footer is prefetched with it). */
 const IV_SIBLING = new Map([['path', 'bysize'], ['bysize', 'path'], ['slices', 'slices-bytotal'], ['slices-bytotal', 'slices']])
@@ -619,16 +628,23 @@ export function r2Bytes(r2: R2Bucket): ByteStore {
 // A base generation plus one small run per newer scan under `deltas/<first>[_<last>]/served/` (the base's sorts, cut
 // from the scan's changes: versions opened there and close records), merged on a binary counter and listed by the
 // newest immutable `manifests/<scan id>.json` (ids sort in time order). A run is read as one more tier of every sort
-// (`IndexHandle.runs`). A broken run — its files missing or unreadable (a publish caught mid-copy, a corrupt object) —
-// cuts the stack there for `IV_BROKEN_TTL`: its scans and every later run's leave the store (they read per-scan), the
-// ones before it answer as before, never a failed request (`ivRetry`).
+// (`IndexHandle.runs`).
+//
+// A broken run — its files missing or unreadable — cuts the stack there for `IV_BROKEN_TTL`: the scans before it
+// answer as before (a later run only adds versions opened after them and close records of versions they still
+// see live, so reading without it is their exact answer), and its scans and every later run's are refused with a
+// 503 + `Retry-After` (`IvUnavailable`, `ivRefusal`): never read per-scan (their per-scan sorts are retired once
+// the store holds them) and never answered from part of the stack. The store publishes append-only (a run's data,
+// then the `meta.json`s, then the manifest that lists it, last), so a listed run is whole: a broken one is a bug
+// or a transient read error, not a half-written state, and the window heals the transient kind.
 
 /** A run a manifest lists (`interval_append.manifest`). */
 interface IvRun { key: string; first: string; last: string; level: number; scans: string[] }
 interface IvManifest { gen: string; date: string; scans: string[]; stamps: Record<string, number>; runs: IvRun[] }
 /** The store's scans (id → epoch), the base's alone, and the usable runs (oldest first). `cut`: a broken run cut the
- *  stack. `slices`: the generation has the owner axis (its slice sorts). */
-interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; slices: boolean }
+ *  stack; `refused`: the scans it cut out (its and every later run's) → that run's key. `slices`: the generation has
+ *  the owner axis (its slice sorts). */
+interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; refused: Map<string, string>; slices: boolean }
 /** How long a state stands before the manifests are listed again (a new scan's run shows up within it). */
 export const IV_STATE_TTL = 60_000
 /** How long a broken run stays cut out (then it is tried again: a publish caught mid-copy heals). */
@@ -646,12 +662,59 @@ const ivBroken = new Map<string, { at: number; error: string }>()
 const ivGenKey = (env: Env): string => `${storeKey(env)}|${env.INTERVAL_STORE_GEN}${ivRev(env)}`
 
 /** A read of an interval store's run failed: the run is cut out (`ivMarkBroken`) and the read can be retried
- *  (`ivRetry`), when the run's scans read per-scan. */
+ *  (`ivRetry`): a scan before the run then answers without it, the run's scans (and later runs') are refused
+ *  (`IvUnavailable`). Uncaught, it is itself a 503 (`ivRefusal`). */
 export class IvTierBroken extends Error {
+  readonly retryAfter = IV_BROKEN_TTL / 1000
   constructor(readonly run: string, cause: unknown) {
     super(`interval store run ${run} is broken: ${cause instanceof Error ? cause.message : String(cause)}`)
     this.name = 'IvTierBroken'
   }
+}
+
+/** A read of a scan a broken run cut out of the store (`IvState.refused`): refused until the cut expires
+ *  (`retryAfter` seconds), never answered per-scan nor from the stack below the run. A 503 (`ivRefusal`). */
+export class IvUnavailable extends Error {
+  constructor(readonly date: string, readonly run: string, readonly retryAfter: number) {
+    super(`scan ${date} is unavailable: interval store run ${run} is broken (a bug or a transient read error: the store publishes append-only, so never a half-written run); retry in ${retryAfter}s`)
+    this.name = 'IvUnavailable'
+  }
+}
+
+/** The 503 + `Retry-After` a broken run's read answers (`IvUnavailable`, or an uncaught `IvTierBroken`); null for
+ *  any other error. Never cached (`no-store`). */
+export function ivRefusal(e: unknown): Response | null {
+  if (!(e instanceof IvUnavailable || e instanceof IvTierBroken)) return null
+  return new Response(`${e.message}\n`, { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(e.retryAfter) } })
+}
+
+/** `date` cut out of `env`'s store by a broken run (`IvState.refused`): its `IvUnavailable`, else null. */
+function ivCutOut(env: Env, st: IvState, date: string): IvUnavailable | null {
+  const run = st.refused.get(date)
+  if (run == null) return null
+  const b = ivBroken.get(`${ivGenKey(env)}|${run}`)
+  const left = b ? b.at + IV_BROKEN_TTL - Date.now() : IV_BROKEN_TTL
+  return new IvUnavailable(date, run, Math.max(1, Math.ceil(left / 1000)))
+}
+
+/** `openIndex` past `openInterval`'s null: a date the store holds (or a broken run cut out) never reads per-scan. */
+async function ivRefuseHeld(env: Env, date: string, variant: string): Promise<void> {
+  const st = await ivState(env)
+  const cut = ivCutOut(env, st, date)
+  if (cut) throw cut
+  if (st.scans.has(date)) throw new Error(`index variant '${variant}' not synced for ${date} (the interval store holds the scan and doesn't serve the variant)`)
+}
+
+/** The interval-store generation holding `date` for `env`'s deployment, whether or not the request reads the store
+ *  (`PATH_STORE=intervals` or `opt-in`, the primary store), a scan a broken run cut out included; null when none
+ *  does. What a per-scan sort's raw download (`/api/path-index`) refuses: such a scan's sorts are retired. */
+export async function ivHolder(env: Env, date: string): Promise<string | null> {
+  if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return null
+  const gen = await ivGen(env)
+  const on = { ...env, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: gen ?? undefined } as Env
+  if (!intervalsOn(on)) return null
+  const st = await ivState(on)
+  return st.scans.has(date) || st.refused.has(date) ? gen : null
 }
 
 /** Cut run `key` out of the env's store for `IV_BROKEN_TTL` (logged once per window), and drop the held state. */
@@ -661,14 +724,14 @@ export function ivMarkBroken(env: Env, key: string, error: unknown): IvTierBroke
   const was = ivBroken.get(k)
   if (!was || Date.now() - was.at >= IV_BROKEN_TTL) {
     ivBroken.set(k, { at: Date.now(), error: e.message })
-    console.error(`${e.message}; its scans and every later run's read per-scan for ${IV_BROKEN_TTL / 1000}s`)
+    console.error(`${e.message}; its scans and every later run's are refused (503) for ${IV_BROKEN_TTL / 1000}s`)
   }
   ivStates.delete(ivGenKey(env))
   return e
 }
 
-/** `f`, once more when it failed on a broken run (`IvTierBroken`): the stack is cut by then, so the retry reads the
- *  run's scans per-scan and the rest as before. */
+/** `f`, once more when it failed on a broken run (`IvTierBroken`): the stack is cut by then, so the retry answers a
+ *  scan before the run as before, and refuses the run's scans and later runs' (`IvUnavailable`: a 503, `ivRefusal`). */
 export async function ivRetry<T>(f: () => Promise<T>): Promise<T> {
   try {
     return await f()
@@ -726,15 +789,22 @@ async function loadIvState(env: Env): Promise<IvState> {
   const base = new Set(scans.keys())
   const m = doc.manifest
   const runs: IvState['runs'] = []
-  let cut = false
+  const refused = new Map<string, string>()
+  let cutAt: string | null = null
   for (const r of m?.runs ?? []) {
-    const b = ivBroken.get(`${ivGenKey(env)}|${r.key}`)
-    const ts = r.scans.map(x => m!.stamps[x])
-    if ((b && Date.now() - b.at < IV_BROKEN_TTL) || ts.some(t => typeof t !== 'number')) { cut = true; break }
-    runs.push(r)
-    r.scans.forEach((x, i) => scans.set(x, ts[i]))
+    if (cutAt == null) {
+      const b = ivBroken.get(`${ivGenKey(env)}|${r.key}`)
+      const ts = r.scans.map(x => m!.stamps[x])
+      if (!(b && Date.now() - b.at < IV_BROKEN_TTL) && !ts.some(t => typeof t !== 'number')) {
+        runs.push(r)
+        r.scans.forEach((x, i) => scans.set(x, ts[i]))
+        continue
+      }
+      cutAt = r.key
+    }
+    for (const x of r.scans) if (!scans.has(x)) refused.set(x, cutAt)
   }
-  return { scans, base, runs, cut, slices: doc.slices !== false }
+  return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false }
 }
 
 /** The store's state, re-read once it is `IV_STATE_TTL` old (`IV_BROKEN_TTL` when cut); a failed re-read keeps
@@ -794,7 +864,7 @@ function ivOwn(env: Env, h: IndexHandle): IndexHandle {
  *  name, so lens-sorted logic holds); a held date's other variants (a v1 `user` sort) are refused, so a
  *  sliced read of a held date never mixes in per-scan rows. A generation without the owner axis (`IvState.slices`)
  *  answers a sliced read from its folded sorts (`IV_UNSLICED_SORTS`: no owners). A generation found without its
- *  slice sorts: null. */
+ *  slice sorts: null (`openIndex` then refuses a date the store holds, never reads it per-scan). */
 export async function openInterval(env: Env, date: string, variant: string, retried = false): Promise<IndexHandle | null> {
   const wants = isSliced(env)
   const sortOf = (sl: boolean) => (sl ? IV_SLICE_SORTS.get(variant) : wants ? IV_UNSLICED_SORTS.get(variant) : IV_SORTS.has(variant) ? variant : undefined)
@@ -812,6 +882,8 @@ export async function openInterval(env: Env, date: string, variant: string, retr
   const sliced = wants && st.slices
   const file0 = sortOf(sliced)
   if (!file0) return null
+  const cutOut = ivCutOut(env, st, date)
+  if (cutOut) throw cutOut
   const asOf = st.scans.get(date)
   if (asOf == null) return null
   // The standalone `reads` sort has no runs: it answers the base's scans only.
@@ -842,10 +914,10 @@ export async function openInterval(env: Env, date: string, variant: string, retr
       return { ...h, runs: await Promise.all(runs.map(r => openIvRun(env, h, r.key, file0))) }
     }, 300_000, ivJoin(env, 'handle')))
   } catch (e) {
-    // A run that won't open is cut out; the date is then the store's (an older run's or the base's) or per-scan.
+    // A run that won't open is cut out; the date is then the store's (an older run's or the base's) or refused.
     if (e instanceof IvTierBroken && !retried) return openInterval(env, date, variant, true)
     if (!sliced || (e as Error).name !== 'NotFoundError') throw e
-    if (!ivNoSlices.has(gen)) console.error(`interval store ${gen}: no slice sorts (${(e as Error).message}); sliced reads go per-scan for 60s`)
+    if (!ivNoSlices.has(gen)) console.error(`interval store ${gen}: no slice sorts (${(e as Error).message}); its sliced reads are refused for 60s`)
     ivNoSlices.set(gen, Date.now())
     return null
   }

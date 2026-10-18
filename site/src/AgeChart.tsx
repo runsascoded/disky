@@ -1,4 +1,5 @@
-import { readState } from './readLens'
+import { readDay, type ReadThrough, type ReadTint, readState, WRITTEN_HATCH } from './readLens'
+import { ReadThroughLi } from './ReadThroughLi'
 import { useMemo, useState } from 'react'
 import { dateColor, dateGradientCss, epochDaysToDate, userColor } from './colors'
 import type { UserIndexEntry } from './colors'
@@ -17,6 +18,10 @@ export const AGE_MODES: ColorMode[] = ['date', 'read', 'user', 'tree']
 // Read-mode key for "no read observed in the logging window"; sorts first so
 // the never-read slab is the base of every stack (the sweep-interesting part).
 const NEVER = -1
+// Read-mode keys for strata written since logging began and not read since (`readLens.ts` `written`):
+// `w<day>`, by the write's day; cross-hatched, stacked above the read strata.
+const WRITTEN = 'w'
+const readRank = (k: string): number => k.startsWith(WRITTEN) ? 1e9 + Number(k.slice(1)) : Number(k)
 
 const dateBarColor = (i: number, n: number): string => dateColor(n > 1 ? i / (n - 1) : 1)
 
@@ -46,7 +51,7 @@ const bucketLabel = (b: number, gran: Granularity): string =>
 /** Stacked bars of bytes by created date (month/week/day), split per color mode.
  *  `readRange` null means the read axis is unavailable for this scan (no access
  *  window, or age strata published before they carried `a`). */
-export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, readUnlogged = [], scheme = 'gs://', band, onBand }: {
+export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, modes = AGE_MODES, userIdx, readRange, readThrough, readTint = 'hatch', readUnlogged = [], scheme = 'gs://', band, onBand }: {
   rows: AgeRow[]
   /** The diff window's "before" scan, same path — enables the diff toggle. When
    *  present the chart can show per-vintage growth/shrink (created-date bucket
@@ -61,6 +66,12 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   onMode?: (m: ColorMode) => void
   userIdx: Map<string, UserIndexEntry>
   readRange?: { min: number; max: number } | null
+  /** Where the scan's read data ends (`meta.access.through`): the legend says so. */
+  readThrough?: ReadThrough | null
+  /** The read lens's tint (`?rt=`). A row is a set of objects written on its day `d` under a directory
+   *  last read on `a` (a subtree max), so `hatch` applies the object rule: `written` when `a` is absent
+   *  or older than `d` (then nothing under the directory was read since those objects' write). */
+  readTint?: ReadTint
   /** Top-level cells in view the access logs don't cover: their bytes have no `a`, so they land in the
    *  no-read stratum, which then says so (the strata carry no bucket to split them out by). */
   readUnlogged?: string[]
@@ -114,12 +125,14 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
   }, [baseRows, rows, gran])
   const showDiff = diffOn && !!diff
 
-  const neverLabel = readUnlogged.length ? `no observed reads, or not logged (${readUnlogged.join(', ')})` : 'no observed reads'
+  const neverBase = readTint === 'touch' ? 'not touched' : 'no observed reads'
+  const neverLabel = readUnlogged.length ? `${neverBase}, or not logged (${readUnlogged.join(', ')})` : neverBase
   const { buckets, byBucket, colorOf, labelOf, segOrder, legend } = useMemo(() => {
     const slotMap = new Map(catOrder.slice(0, 8).map((k, i) => [k, SLOTS[i]]))
     const userMode = mode === 'user'
     const keyOf = (r: AgeRow) =>
-      mode === 'read' ? String(r.a ?? NEVER)
+      mode === 'read' ? (rs => rs.kind === 'written' ? `${WRITTEN}${r.d}` : String((readRange ? readDay(r.a, true, readRange.min, { d: r.d, tint: readTint }) : r.a) ?? NEVER))(
+        readState(r.a, true, readRange, { d: r.d, tint: readTint }))
       : userMode ? (r.u ?? 'unattributed')
       : r.d1 && slotMap.has(r.d1) ? r.d1 : '(other)'
     const byBucket = new Map<number, Map<string, number>>()
@@ -134,18 +147,20 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
     const buckets = [...byBucket.keys()].sort((a, b) => a - b)
     const colorOf = (k: string): string =>
       mode === 'read'
-        ? (k === String(NEVER) ? 'var(--never-read)' : (rs => rs.kind === 'read' ? dateColor(rs.t) : 'var(--never-read)')(readState(Number(k), true, readRange)))
+        ? (k === String(NEVER) ? 'var(--never-read)'
+          : (rs => rs.kind === 'read' || rs.kind === 'written' ? dateColor(rs.t) : 'var(--never-read)')(
+            k.startsWith(WRITTEN) ? readState(null, true, readRange, { d: Number(k.slice(1)) }) : readState(Number(k), true, readRange)))
       : userMode ? (k === 'unattributed' ? 'var(--t-unattr)' : userColor(k, userIdx))
       : `var(${slotMap.get(k) ?? '--other'})`
     const labelOf = (k: string): string =>
-      mode === 'read' ? (k === String(NEVER) ? neverLabel : `read ${epochDaysToDate(Number(k))}`)
+      mode === 'read' ? (k === String(NEVER) ? neverLabel : k.startsWith(WRITTEN) ? 'written, not read since' : `${readTint === 'touch' ? 'touched' : 'read'} ${epochDaysToDate(Number(k))}`)
       : k === 'unattributed' ? 'unowned' // internal key; display name is standardized
       : k
     // Stack order: categorical modes put the biggest slice at the base; the
     // read axis stacks by time instead (never-read base, then older → newer
     // reads), so the un-touched share of each vintage is one contiguous slab.
     const segOrder = (a: [string, number], b: [string, number]): number =>
-      mode === 'read' ? Number(a[0]) - Number(b[0]) : b[1] - a[1]
+      mode === 'read' ? readRank(a[0]) - readRank(b[0]) : b[1] - a[1]
     const legend: [string, string][] =
       userMode
         ? [
@@ -157,7 +172,7 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
             ['(other)', 'var(--other)'],
           ]
     return { buckets, byBucket, colorOf, labelOf, segOrder, legend }
-  }, [rows, catOrder, mode, userIdx, gran, readRange, neverLabel])
+  }, [rows, catOrder, mode, userIdx, gran, readRange, readThrough, readTint, neverLabel])
 
   const maxB = useMemo(
     () => Math.max(...buckets.map(b => [...byBucket.get(b)!.values()].reduce((a, v) => a + v, 0))),
@@ -204,6 +219,8 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
                 {epochDaysToDate(readRange.max)}
               </span>
             )}
+            {readRange && readTint === 'hatch' && <span className="li"><span className="sw" style={{ background: `${WRITTEN_HATCH}, ${dateGradientCss()}` }} />written, not read since</span>}
+            {readThrough && <ReadThroughLi through={readThrough} />}
           </>
         ) : (
           legend.map(([k, v]) => (
@@ -240,6 +257,11 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
         </span>
       </div>
       <svg viewBox={`0 0 ${W} ${H + 24}`} preserveAspectRatio="none" role="img" aria-label={showDiff ? `Bytes changed by ${time.label} ${gran}` : `Bytes by ${time.label} ${gran}`}>
+        <defs>
+          <pattern id="age-xhatch" width={6} height={6} patternUnits="userSpaceOnUse">
+            <path d="M0 0L6 6M6 0L0 6" stroke="rgb(0 0 0 / 0.35)" strokeWidth={1} />
+          </pattern>
+        </defs>
         {showDiff && <line x1={0} y1={zeroY} x2={W} y2={zeroY} className="zeroline" />}
         {bars.map((bk, i) => {
           let body
@@ -254,7 +276,9 @@ export function AgeChart({ rows, baseRows, diffLabels, catOrder, mode, onMode, m
             body = [...parts.entries()].sort(segOrder).map(([k, b]) => {
               const h = (b / maxB) * H
               y -= h
-              return <rect key={k} x={i * bw + gap} y={y} width={Math.max(bw - 2 * gap, 0.8)} height={Math.max(h - gap, 0)} fill={mode === 'date' ? dateBarColor(i, bars.length) : colorOf(k)} rx={bw > 4 ? 1.5 : 0} />
+              const r = { x: i * bw + gap, y, width: Math.max(bw - 2 * gap, 0.8), height: Math.max(h - gap, 0), rx: bw > 4 ? 1.5 : 0 }
+              const rect = <rect key={k} {...r} fill={mode === 'date' ? dateBarColor(i, bars.length) : colorOf(k)} />
+              return mode === 'read' && k.startsWith(WRITTEN) ? <g key={k}>{rect}<rect {...r} fill="url(#age-xhatch)" /></g> : rect
             })
           }
           return (

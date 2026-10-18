@@ -174,6 +174,21 @@ Call sites to migrate before removing `disk-tree` / `dt-cloud`:
 
 **P5: remove aliases** once §3.4's call-site table is empty on every deployment branch and in `disky.json`: drop `disk-tree`, `dt-cloud` console scripts; [`disky-rename.md`] step 4's package rename can coincide.
 
+## 4b. Notes from Ryan's review (2026-10-17)
+
+- **Rename the crates and binaries** with the CLI work (after 10/19): `dt-walker` / `dt-capture` / `dt-index` / `dt-serve` → crates `disky-walk`, `disky-capture`, `disky-index`, folded into one `disky-core` binary (§3.2); `DISK_TREE_WALKER` → `DISKY_WALKER` through the env helper. Tracked as a row in `disky-rename.md`'s sequence.
+- **Python → Rust today:** one case. `disky agent` sets `DISK_TREE_WALKER` to the bundled `dt-walker`, so a Python `disk-tree index` / `capture` run under the app walks with Rust. Nothing else calls a Rust binary; `disky-core` doesn't exist yet (four dev binaries do, one of which ships).
+- **Packaging a Rust binary for Python users:** the uv/ruff model. maturin's `bindings = "bin"` builds platform wheels that carry the binary, so `pip install` gets it with no Rust toolchain. That needs a release workflow building a wheel matrix (macOS arm64/x86_64, Linux x86_64/arm64), which we don't have; until then, images build `disky-core` in a Docker stage and the app bundles it.
+- **Rust rewrites are justified by measurement, not taste.** Before porting any Python stage, an exp-sweep-sized experiment on real inputs: e.g. `dt-walker` vs `gfind` on the same tree (wall, CPU, syscalls), `dt-index` vs `dt-cloud path-index -g` on the latest real capture (wall, peak RSS). Most of `dt-cloud`'s time is already in DuckDB / pyarrow (C++), so the expected gain there is small and the bar is high; the walker and capture, where Python shells out per entry or pays per-object overhead, are where Rust plausibly wins.
+- **Where native code makes disky feel native** (candidates; macOS first, Linux analogues in parentheses):
+  - APFS clones: what a delete actually frees (`ATTR_CMNEXT_PRIVATESIZE`, extents), shown unobtrusively next to apparent size (Linux: reflinks on btrfs/XFS via `FIEMAP`);
+  - hardlinks: count shared inodes once;
+  - iCloud / File Provider placeholders (dataless files): local bytes vs cloud-only bytes, so "evicted" files don't count against the disk;
+  - transparent compression (APFS/HFS `decmpfs`): logical vs physical;
+  - last-opened dates from Spotlight (`kMDItemLastUsedDate`): a "not opened in N months" lens that mtime can't give;
+  - purgeable space and local Time Machine / OS-update snapshots (`volumes`): the bytes no walk shows;
+  - sparse files (already exact: block counts).
+
 ## 5. Open questions
 
 1. Does anyone run `disk-tree capture` or `disk-tree index` on Linux (EC2 nodes, `SshBackend`)? If not, the Python walk/capture path is deletable outright; if so, it stays as the Linux implementation and D1/D2 remain intentional.

@@ -673,3 +673,52 @@ def test_store_has_reads_with_the_steps_credentials(tmp_path, env, monkeypatch):
     assert c.store_has("r2://idx", "static-names/G/scans.json") is True
     assert seen == [("r2://idx", "static-names/G/scans.json", "/t/r2-credentials", "step")]
     assert (os.environ.get("AWS_SHARED_CREDENTIALS_FILE"), os.environ.get("AWS_PROFILE")) == (None, "outer")
+
+
+def test_list_r2_source_defaults_to_the_deployments_endpoint(tmp_path, env, monkeypatch):
+    """An `r2://` source without `endpoint` lists through `$R2_ENDPOINT` (the deployment's own R2, a secret where the
+    profile is public: hf's meta store lists its serving bucket); an explicit `endpoint` wins."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 2))
+    sources = [{"uri": "r2://idx"}, {"uri": "r2://other", "endpoint": "https://other.example"}]
+    c = ctx(tmp_path, {**env, "R2_ENDPOINT": "https://r2.example"}, sources=sources)
+    S.list_source(c, "r2://idx")
+    S.list_source(c, "r2://other")
+    assert c.sh_impl.calls == [
+        "disk-tree bulk-list -a r2://idx -E https://r2.example -o <tmp>/t/dt-scan/2026-10-16T1200/listing/idx -P 2 -w 8 -x clear",
+        "disk-tree import -e stream -j 2 -m -s r2 -t 2026-10-16T00:00:00+00:00 -l <tmp>/t/dt-scan/2026-10-16T1200/listing/idx/shard-*.parquet -b idx",
+        "disk-tree bulk-list -a r2://other -E https://other.example -o <tmp>/t/dt-scan/2026-10-16T1200/listing/other -P 2 -w 8 -x clear",
+        "disk-tree import -e stream -j 2 -m -s r2 -t 2026-10-16T00:00:00+00:00 -l <tmp>/t/dt-scan/2026-10-16T1200/listing/other/shard-*.parquet -b other",
+    ]
+
+
+def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
+    """`retire` (listed in `steps`): the data store with D1 (when the CF creds are set) and the backup, then each copy
+    without either; a dry run unless `execute`. The layout is the other steps' `<layer2>index/{gen}/path-index.parquet`."""
+    env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ARCHIVE="r2://idx")
+    opts = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}}
+    c = ctx(tmp_path, env, steps=["retire"], options={**opts, "retire": {"keep": 3, "layer2": True, "copies": ["r2"], "backup": "gs://bak"}})
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    common = f"-G s1 -k 3 -L l2/{{id}}/index/{{gen}}/path-index.parquet -l l2/{{id}}/*.parquet -o r2://idx -S r2://idx -w {w}"
+    assert c.sh_impl.calls == [
+        f"dt-cloud scan retire -b gs://bak {common} -s <tmp>/data",
+        f"dt-cloud scan retire {common} -R -s r2://idx",
+    ]
+    x = ctx(tmp_path, env, steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
+    S.retire(x, None)
+    assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s <tmp>/data"]
+
+
+def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
+            options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
+                     "retire": {"keep": 2, "store": "r2://idx"}})
+    S.retire(c, None)
+    assert c.sh_impl.calls == ["dt-cloud scan retire -G s1 -k 2 -L l2/{id}/index/{gen}/path-index.parquet -o r2://idx -S r2://idx "
+                               "-w <tmp>/t/dt-scan/2026-10-16T1200/retire -R -s <tmp>/data"]
+    with pytest.raises(ValueError) as e:
+        profile(tmp_path, steps=["retire"], options={"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {}})
+    assert str(e.value).splitlines()[1:] == [
+        "  options.retire.keep: required, ≥ 1 (the newest scans never retired)",
+        "  options.retire.static_gen: required unless options.static-names.gen names the static index's generation",
+    ]

@@ -47,7 +47,8 @@ Every problem is reported at once (`ProfileError`, one line each).
     labels: {key: value}          # Batch labels on every task (+ `$DISKY_LABELS`, `component: scan`, `nf-session`)
     queue_size: 20                # Nextflow `executor.queueSize`
     options: {<step>: {…}}        # per-step settings, each step's keys in `scan_steps.STEPS[<step>].options`, plus
-                                  # `secrets` (any step)
+                                  # `secrets` (any step); a step taking `poller` (access-ingest) leaves the scan when
+                                  # it is true: the deployment runs that command as its own scheduled job
 """
 from __future__ import annotations
 
@@ -214,10 +215,12 @@ class ScanProfile:
         return self.options.get(step, {})
 
     def enabled(self) -> tuple[str, ...]:
-        """Every step this deployment runs, in `STEPS` order: the core minus `skip`, plus `steps`."""
+        """Every step this deployment runs, in `STEPS` order: the core minus `skip`, plus `steps`, minus any step whose
+        `options.<step>.poller` is set (its command runs as the deployment's own scheduled job, not in the scan)."""
         from .scan_steps import STEPS
 
-        return tuple(n for n, s in STEPS.items() if (s.core and n not in self.skip) or n in self.steps)
+        return tuple(n for n, s in STEPS.items()
+                     if ((s.core and n not in self.skip) or n in self.steps) and not self.opts(n).get("poller"))
 
     @property
     def data_bucket(self) -> str | None:

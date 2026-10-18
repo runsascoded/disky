@@ -16,7 +16,7 @@
 import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
-import { ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
+import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, ownerKey, ownerOk, type OwnerScope, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
@@ -335,6 +335,9 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
       const a = await ivRetry(() => readRootAgg(env, { date, path, lens, owner, classes }))
       return a ? { date, ...a } : null
     } catch (e) {
+      // A scan a broken interval-store run cut out: the whole series is refused (503 + `Retry-After`), not drawn
+      // without the point.
+      if (ivRefusal(e)) throw e
       const msg = (e as Error).message
       if (tries > 1 && /internal error/i.test(msg)) return point(date, tries - 1)
       console.log(`series ${path || '/'} ${lensTag || owner || ''}: no point for ${date}: ${msg}`)
@@ -344,9 +347,15 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   }
   // Scans are independent reads (each a few D1 round trips and one range
   // GET); a dozen at a time keeps a 40-scan history to ~4 rounds.
-  for (let i = 0; i < dates.length; i += 12) {
-    const got = await st.time('points', Promise.all(dates.slice(i, i + 12).map(d => point(d))))
-    for (const g of got) if (g) points.push(g)
+  try {
+    for (let i = 0; i < dates.length; i += 12) {
+      const got = await st.time('points', Promise.all(dates.slice(i, i + 12).map(d => point(d))))
+      for (const g of got) if (g) points.push(g)
+    }
+  } catch (e) {
+    const r = ivRefusal(e)
+    if (r) return r
+    throw e
   }
   // A single-bucket store's tier-less history belongs to its sole root: the
   // earliest indexed scan having exactly one root says which.

@@ -19,7 +19,7 @@ import { primaryOnly } from '../_lib/stores.js'
 import { hasLedger } from '../_lib/ledger.js'
 import { canonId, loadRegistry } from '../_lib/identity.js'
 import { ownerTotals } from '../_lib/ownerTotals.js'
-import { storeReady } from '../_lib/index.js'
+import { ivRefusal, storeReady } from '../_lib/index.js'
 import { ME_UNRESOLVED, resolveUser } from '../_lib/me.js'
 import { scanArg } from '../_lib/scanArg.js'
 
@@ -55,6 +55,8 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
     const objects = assignments.filter(c => !c.repainted_by).reduce((s, c) => s + c.objects, 0)
     return json({ user, date, head: totals.head, bytes: owned?.b ?? 0, objects, mix: owned?.mix ?? {}, assignments }, 200, { 'cache-control': 'private, no-store' })
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     return json({ error: (e as Error).message }, 503)
   }
 }

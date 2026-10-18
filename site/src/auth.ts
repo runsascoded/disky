@@ -5,7 +5,7 @@
 // (`/auth/google`), an emailed code (`/auth/email/*`), or by redeeming a
 // `?key=` share link (specs/done/oidc-cutover-cw.md).
 import { displayName, useForgetWhoami, useWhoami, type Whoami, type WhoamiSource } from '@open-athena/auth/react'
-import { DEFAULT_STORE } from './stores'
+import { canRead, DEFAULT_STORE, STORES, type Store } from './stores'
 
 // Deployment seam (specs/done/denovo-factor.md): a build-time flag from
 // `wrangler.toml` `[vars]` `AUTH_MODE` (vite.config.ts). `app` = the app
@@ -95,6 +95,13 @@ export function useCanAssign(): boolean {
 export function useIsAdmin(): boolean {
   const scopes = useScopes()
   return scopes !== null && ['admin', '*'].some(s => scopes.includes(s))
+}
+
+/** The stores this viewer can read, in `STORES` order: the pickers and links offer only these (a staff-only store's
+ *  link would otherwise land on its "forbidden"). */
+export function useStores(): Store[] {
+  const scopes = useScopes()
+  return STORES.filter(s => canRead(s, scopes))
 }
 
 /**

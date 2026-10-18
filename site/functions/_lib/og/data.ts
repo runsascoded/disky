@@ -18,6 +18,7 @@ import { dateColor, HI_CONTRAST, slotColor } from '../../../src/colors.js'
 import { mapColorMode } from '../../../src/colorMode.js'
 import { barControls } from '../../../src/pageBar.js'
 import { listingTime } from '../../../src/listingTime.js'
+import { readState, readThrough } from '../../../src/readLens.js'
 import { applyLedger } from '../../../src/ledgerOverlay.js'
 import { ownerIndex } from '../../../src/ownerIndex.js'
 import type { ColorMode, Meta, TreeNode, UserInfo } from '../../../src/types.js'
@@ -163,7 +164,12 @@ export function tilesOf(tree: TreeNode, color: (u: string | null) => string, mod
     if (mode === 'user') return color(dominant(n))
     if (container) return FRAME_COLOR
     if (mode === 'date') return n.d != null && hi > lo ? dateColor((n.d - lo) / (hi - lo)) : '#5d5c55'
-    return n.a != null && access && access.to > access.from ? dateColor((n.a - access.from) / (access.to - access.from)) : '#6e332b'
+    // The app's read lens (`readLens.ts`); its window runs to `access.through`'s day when the scan has it.
+    if (!access) return '#6e332b'
+    const thru = readThrough(access)
+    // A card has no hatch and no `?rt=` (always the default tint): a `written` cell takes its write's age.
+    const rs = readState(n.a, true, { min: access.from, max: Math.max(access.to, thru?.day ?? access.to) }, { d: n.d, dir: n.k !== 'file' })
+    return rs.kind === 'read' || rs.kind === 'written' ? dateColor(rs.t) : '#6e332b'
   }
   /** `depth` 1 is the view's child; `slot`/`i`/`count` its tree-mode colour key. */
   // Tree mode's slot level: below each lone top-level dir that has children of its own.

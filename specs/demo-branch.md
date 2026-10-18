@@ -1,6 +1,6 @@
 # The r2.rbw.sh demo on its own branch (`demo`), scanned by the Nextflow pipeline's local executor
 
-Status: 2026-10-17, design. Ryan's go on both parts (the branch split, the NF-local scan); sequencing below keeps the daily ingest unbroken through ~10/19.
+Status: 2026-10-17, design. Ryan's go on both parts (the branch split, the NF-local scan). `cloud` stays the default branch, with placeholder stubs for the demo's workflows.
 
 ## Why
 
@@ -27,16 +27,24 @@ Generic code that mentions the demo only as an example or a test fixture (`union
 
 ### GitHub mechanics (the part that can break the daily)
 
-`runsascoded/disky`'s default branch is `cloud`. GitHub reads `workflow_run` and `schedule` triggers only from the default branch's workflow files, and a `workflow_dispatch` needs the workflow to be known to the repo. So moving the two workflows off `cloud` breaks both triggers unless one of these holds:
+`runsascoded/disky`'s default branch is `cloud`, and stays `cloud` (Ryan 2026-10-17): it is the front door to the whole ecosystem on GitHub. GitHub reads `schedule` and `workflow_run` triggers only from the default branch's workflow files, and a `workflow_dispatch` needs the workflow registered there. So:
 
-1. **Make `demo` the default branch of `runsascoded/disky`** (recommended). Both triggers keep working unchanged (`deploy-r2.yml`'s `branches:` become `[demo, dev]`), and the public repo's landing page is the demo's branch, which is the deployment people arrive from. Costs: the landing README is `demo`'s (= `cloud`'s plus the demo's few lines); new PRs default to `demo` (unused: this repo takes direct pushes). `Open-Athena/disky` is unaffected.
-2. Keep `cloud` default and move the deploy into `demo`'s own workflow on `push` (which reads the pushed branch's files), gated on CI via `workflow_call`. The cron still needs a workflow file registered on the default branch, i.e. a demo stub on `cloud`. Rejected: that's the demo leaking back into `cloud`.
+- **Placeholder stubs on `cloud`** (`~/.rc/git/github/github-placeholder-main.py`'s pattern): `cloud` keeps a `daily-ingest.yml` with the same `name:`, `on: workflow_dispatch` only, and one step that says where the real one lives, with the full URL of the workflow on `demo` (`https://github.com/runsascoded/disky/blob/demo/.github/workflows/daily-ingest.yml`). The stub registers the workflow; `cron-dispatch` dispatches it with `ref: demo`, which runs `demo`'s file. The stub doubles as documentation on `cloud`.
+- **The deploy can't stay a `workflow_run` on CI** (that trigger reads only `cloud`'s files). On `demo`, `deploy-demo.yml` runs `on: push` (`[demo, dev]`), calls CI as a reusable workflow (`ci.yml` gains `on: workflow_call`), and deploys `needs:` it, so a red build never deploys. CI's own `push` trigger then also fires on `demo`; its already-passed-inputs skip (55a1a1f4) makes the second run cheap, or `ci.yml` ignores branches that carry a deploy wrapper. Decide when implementing.
+- GitHub's own `schedule:` (today the ~4 h-late duplicate of the 07:15 dispatch, which acts as a catch-up) is lost with the move: `schedule` reads only the default branch. A second `cron-dispatch` entry later in the day replaces it if the catch-up is wanted.
 
 `dev` (dev.r2.rbw.sh's Pages branch) becomes the demo's dev branch: fast-forwarded to `demo`, not to `cloud`.
 
+### Docs per branch
+
+Every branch's README says what that branch is and links the related branches; `cloud`'s is the ecosystem's front door:
+- `cloud`: what disky is, the engine/overlay/site layout, how to stand up a deployment, and the live deployments with their branches: r2.rbw.sh (`demo`), OA's gcs/cw/hf/r2.oa.dev (`Open-Athena/disky`), disk.rbw.sh (`m3`), the macOS app (`app`, `local`).
+- each deployment branch: its host(s), what it scans, its stack/infra, what it changes from `cloud`, and a link back to `cloud`.
+- The placeholder stubs on `cloud` link to the real workflows on their branches.
+
 ### Keeping the demo current
 
-Today a push to `cloud` deploys the demo; after the split, `cloud` must be merged into `demo`, like every deployment. To keep the demo a live canary for `cloud`, add a workflow on `demo` (`push` on `cloud` doesn't trigger it, so it runs on the cron dispatch and on `workflow_dispatch`): merge `cloud` into `demo` when it merges cleanly and push (which then deploys after CI); on a conflict, fail with the conflicting paths so a session resolves it. The root session's push routine becomes: push `cloud`, then merge it into `demo`, push `demo` and fast-forward `dev`.
+Today a push to `cloud` deploys the demo; after the split, `cloud` must be merged into `demo`, like every deployment. To keep the demo a live canary for `cloud`, add a workflow on `demo` (`push` on `cloud` doesn't trigger it, so it runs on the cron dispatch and on `workflow_dispatch`, registered by a placeholder stub on `cloud` like the ingest's): merge `cloud` into `demo` when it merges cleanly and push (which then deploys after CI); on a conflict, fail with the conflicting paths so a session resolves it. The root session's push routine becomes: push `cloud`, then merge it into `demo`, push `demo` and fast-forward `dev`.
 
 ### Credentials
 
@@ -44,12 +52,12 @@ The collector stack's only tie to `wt/m3` was its Pulumi passphrase: the RAC Clo
 
 ### Steps
 
-1. Create `demo` at `cloud`'s tip. On `cloud`, one commit that only removes the files above and makes `index.html` generic; merge it into `demo` with `git merge -s ours` (records the merge without its changes, so later `cloud` merges don't delete the demo's files).
-2. Set `demo` as the default branch; point `deploy-r2.yml` at `[demo, dev]`; change `cron-dispatch`'s `DISPATCH` `ref` to `demo` and redeploy that Worker (Ryan's go: it's a prod deploy).
-3. `wt/demo` worktree + `.envrc`; move the collector stack's `state/` there.
-4. Verify: a `workflow_dispatch` of the ingest on `demo`, a deploy of `demo` to dev.r2.rbw.sh, then prod.
+1. Create `demo` at `cloud`'s tip. On `cloud`, one commit that removes the files above, adds the placeholder stub(s) and makes `index.html` generic; merge it into `demo` with `git merge -s ours` (records the merge without its changes, so later `cloud` merges don't delete the demo's files).
+2. On `demo`: `deploy-demo.yml` (push → CI via `workflow_call` → deploy) in place of `deploy-r2.yml`; `ci.yml` gains `workflow_call` on `cloud` first. Change `cron-dispatch`'s `DISPATCH` `ref` to `demo` and redeploy that Worker (Ryan's go: it's a prod deploy).
+3. `wt/demo` worktree + `.envrc`; move the collector stack's `state/` there. READMEs per "Docs per branch".
+4. Verify right away: a `workflow_dispatch` of the ingest with `ref: demo` (it no-ops past the listing on an already-scanned date), and a push of `demo` deploying to dev.r2.rbw.sh, then prod.
 
-Sequencing: steps 1–4 can happen before 10/19 (the ingest is unchanged, only its branch moves) if they land early on a day, right after the 07:15 run, leaving ~24 h to fix the next one. Otherwise after 10/19.
+Sequencing: the only thing that can break is the daily's trigger, and step 4 tests it by hand the same day, so the split doesn't need a particular time of day; doing it right after the 07:15 run just leaves the most slack before the next one. Before or after 10/19 either way.
 
 ## Part 2: the demo's scan on the Nextflow pipeline's local executor
 
@@ -98,7 +106,6 @@ After 10/19.
 
 ## Open questions
 
-- Default branch: does making `demo` the default break anything that reads `runsascoded/disky`'s default branch (`pds gh` dist pins use `dist/*` branches, unaffected; GH Pages: none)?
 - Should `cloud` stay deployable on its own (a stack with no stores, as a smoke target), or is "every push to `cloud` reaches the demo via the auto-merge" enough canary?
 
 [branch-layout.md]: branch-layout.md

@@ -26,6 +26,8 @@ export type HelpEvent =
   | { type: 'leave'; id: string }
   | { type: 'focus'; target: HelpTarget }
   | { type: 'blur'; id?: string }
+  /** The control's explanation changed while it is shown (a toggle was clicked): replace it in place. */
+  | { type: 'update'; target: HelpTarget }
 
 export const HELP_EMPTY: HelpState = { hover: null, focus: null }
 
@@ -40,6 +42,11 @@ export function helpReducer(s: HelpState, e: HelpEvent): HelpState {
     case 'leave': return s.hover === null || s.hover.id !== e.id ? s : { ...s, hover: null }
     case 'focus': return s.focus?.id === e.target.id ? s : { ...s, focus: e.target }
     case 'blur': return s.focus === null || (e.id != null && s.focus.id !== e.id) ? s : { ...s, focus: null }
+    case 'update': {
+      const hover = s.hover?.id === e.target.id ? e.target : s.hover
+      const focus = s.focus?.id === e.target.id ? e.target : s.focus
+      return hover === s.hover && focus === s.focus ? s : { hover, focus }
+    }
   }
 }
 

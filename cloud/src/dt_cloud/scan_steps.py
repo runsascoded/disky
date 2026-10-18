@@ -373,10 +373,14 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
                 f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
-@step("access-ingest", core=False, stage="pre", soft=True, options={"args": list})
+@step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool})
 def access_ingest(ctx: Ctx, arg: str | None) -> None:
     """The buckets' access logs → the read-recency shards (`dt-cloud access ingest`, incremental and watermarked: its
-    settings in the env), beside `list`. Soft: `index` runs without the newest shards, and the next run catches up."""
+    settings in the env), beside `list`. Soft: `index` runs without the newest shards, and the next run catches up.
+
+    `options.access-ingest.poller: true`: the deployment runs `access ingest` as its own scheduled job (the hourly
+    poller, specs/access-log-freshness.md §A), so the scan leaves this step out (`ScanProfile.enabled`) and `index`
+    reads `access/agg` as it stands, its `meta.access.through` saying how far that reaches."""
     if ctx.reproc:
         err("access-ingest off under REPROC")
         return
@@ -464,6 +468,8 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
         return
     _raise_nofile()
     threads = src.threads or ctx.opt("list", "threads")
+    # an `r2://` source without its own endpoint is the deployment's R2 (`$R2_ENDPOINT`, a secret where the profile is public)
+    endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
     weights: list[str] = []
     if ctx.opt("list", "weights", False):
         prior = ctx.prior_listing(b)
@@ -473,7 +479,7 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
             weights = ["-W", f"{prior}/*.parquet"]
     with ctx.phase(f"list {b}"):
         ctx.sh(["disk-tree", "bulk-list", *ctx.opt("list", "bulk_args", []), uri,
-                *(["-E", src.endpoint] if src.endpoint else []), "-o", ctx.listing_out(b),
+                *(["-E", endpoint] if endpoint else []), "-o", ctx.listing_out(b),
                 # the Hub lister is one rate-limited process (`-w` requests in flight); it refuses `-P`
                 *(["-P", src.procs or ctx.nproc] if src.kind != "hf" else []),
                 *(["-w", threads] if threads else []), "-x", "clear", *weights, *src.args])
@@ -832,6 +838,54 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
         dry = ["-n"] if ctx.opt("index-gc", "dry", False) else []
         ctx.sh(["dt-cloud", "index-gc", *store_args(ctx), "-R", *dry, "-m", ctx.opt("index-gc", "grace", "2d"), *targets], fatal=False,
                warn="index-gc -F failed (superseded generations stay until the next run)")
+
+
+def _retire_check(p: ScanProfile) -> list[str]:
+    o = p.opts("retire")
+    problems = [] if isinstance(o.get("keep"), int) and o["keep"] >= 1 else ["options.retire.keep: required, ≥ 1 (the newest scans never retired)"]
+    if not (o.get("static_gen") or p.opts("static-names").get("gen")):
+        problems.append("options.retire.static_gen: required unless options.static-names.gen names the static index's generation")
+    return problems
+
+
+@step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
+                                                "layer2": bool, "copies": list, "backup": str, "markers_only": bool},
+      requires=_retire_check)
+def retire(ctx: Ctx, arg: str | None) -> None:
+    """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings) of every scan but the
+    newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
+    Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
+    first, then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left to the first). `store` / `static_store`: the
+    stores (default the interval-store / static-names steps', else `$R2_ARCHIVE`); `static_gen` (default
+    `options.static-names.gen`); `backup`: copy what goes there first; `markers_only`: never verify in the task. Never
+    fatal: a failure warns, the files stay, the next run retries."""
+    if ctx.reproc:
+        err("retire off under REPROC")
+        return
+    o = ctx.profile.opts("retire")
+    archive = ctx.env.get("R2_ARCHIVE")
+    store = o.get("store") or ctx.opt("interval-store", "store") or archive
+    static_gen = o.get("static_gen") or ctx.opt("static-names", "gen")
+    static_store = o.get("static_store") or ctx.opt("static-names", "store") or archive or store
+    if not store:
+        err("retire: no interval store (options.retire.store, options.interval-store.store or R2): nothing retired")
+        return
+    l2 = ctx.profile.layout.layer2.replace("{scan}", "{id}")
+    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []),
+              *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
+              *(["-x"] if o.get("execute") else [])]
+    roots = [ctx.data_uri, *(archive if c == "r2" else c for c in o.get("copies", []))]
+    with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
+        for i, root in enumerate(r for r in roots if r):
+            d1 = [] if i == 0 and ctx.has(*CF) else ["-R"]
+            backup = ["-b", o["backup"]] if i == 0 and o.get("backup") else []
+            ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False, fails_phase=True,
+                   warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
+
+
+def store_args_t(ctx: Ctx) -> list[str]:
+    """`-t <store>` for `scan retire` (its `-s` is the scans root): nothing for the primary."""
+    return [] if ctx.profile.primary else ["-t", ctx.profile.store]
 
 
 def _snap_root(ctx: Ctx) -> str:

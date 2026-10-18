@@ -1,11 +1,18 @@
 name: CI
 
 # Every long-lived branch (cloud, local and the deployments that merge them);
-# `dist/**` branches are build outputs.
+# `dist/**` branches are build outputs, and a deployment's `<deploy>-prod` /
+# `<deploy>-dev` pointers are pushed at a sha its own branch already tested
+# (`dev`, the demo's dev branch, stays: `deploy-r2.yml` deploys on its CI).
 on:
   push:
-    branches-ignore: ['dist/**']
+    branches-ignore: ['dist/**', '*-prod', '*-dev']
   pull_request:
+
+# A newer push to the same branch supersedes a run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

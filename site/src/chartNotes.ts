@@ -1,0 +1,39 @@
+// Chart annotations on "Size over time" (spec `chart-annotations.md`): which notes the chart shows, where, and
+// their lane labels — pure, so the placement and range filtering are tested apart from the chart.
+import type { Marker } from '@disk-tree/react'
+import type { ChartAnnotation } from '../functions/_lib/annotationShape'
+
+export type { AnnotationsBody, ChartAnnotation } from '../functions/_lib/annotationShape'
+
+/** A note as a chart marker. */
+export interface NoteMarker extends Marker {
+  note: ChartAnnotation
+}
+
+/** The lane label's longest text: a note's first line, cut with an ellipsis. */
+export const LABEL_MAX = 28
+
+export function shortLabel(text: string, max = LABEL_MAX): string {
+  const line = text.split('\n')[0].trim()
+  return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line
+}
+
+/**
+ * The notes the chart draws: each at `xOf(at)` (the scan's own x when `at` is a scan the chart plots; a date
+ * with no scan sits at its UTC midnight), kept only inside `[xMin, xMax]` — the plotted span, so the `1w` / `1m`
+ * ranges hide older notes — and ordered by x (ties by id). The y-axis mode (`abs` / `Δ` / `%`) never moves
+ * a note: it is pinned to a date, not a value.
+ */
+export function notesInView(notes: readonly ChartAnnotation[], xOf: (at: string) => number, xMin: number, xMax: number): NoteMarker[] {
+  return notes
+    .map(note => ({ key: `note-${note.id}`, x: xOf(note.at), label: shortLabel(note.text), note }))
+    .filter(m => Number.isFinite(m.x) && m.x >= xMin && m.x <= xMax)
+    .sort((a, b) => a.x - b.x || a.note.id - b.note.id)
+}
+
+/** The date a new note's form starts at: the diff window's end when one is set, else the latest plotted scan. */
+export const defaultNoteAt = (window: [string, string] | undefined, latest: string | undefined): string =>
+  window?.[1] ?? latest ?? ''
+
+/** The author as shown (an email's local part: a public deployment never shows an address). */
+export const authorName = (author: string): string => author.split('@')[0]

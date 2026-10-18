@@ -26,7 +26,7 @@ import { Link, useLocation } from 'react-router-dom'
 import { AboutModal } from './About'
 import { VIEW_URL, offerAppLink, openInApp } from './appLink'
 import { Avatar } from './Avatar'
-import { AUTH_MODE, signInUrl, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut } from './auth'
+import { AUTH_MODE, signInUrl, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut, useStores } from './auth'
 import { ShareDialog } from './ShareDialog'
 import { closeDialog, openDialog, useDialog } from './dialogs'
 import { useRegistry } from './identities'
@@ -200,6 +200,7 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
   const noUserMenu = !useIdent()
   const canAssign = useCanAssign()
   const isAdmin = useIsAdmin()
+  const stores = useStores()
   // Full viewers share with a detailed preview (guest links can't: a token
   // outlives the session that minted it).
   const canShare = useCanStage()
@@ -236,10 +237,10 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
               {/* The store switcher — only a multi-store deploy has one
                   (specs/done/multi-store.md phase 2): each configured store at its
                   own path, the current one marked. */}
-              {STORES.length > 1 && (
+              {stores.length > 1 && (
                 <>
                   <hr />
-                  {STORES.map(s => (
+                  {stores.map(s => (
                     <Link key={`store:${s.key}`} role="menuitem" className="mi store-link" to={s.path} aria-current={s.key === store.key ? 'true' : undefined} onClick={() => m.setOpen(false)}>
                       {s.label} <span className="dim">{s.path}</span>
                     </Link>

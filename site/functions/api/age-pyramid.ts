@@ -14,7 +14,7 @@
 import { hiddenNotFound, isHidden, isHideRoot, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { withStore } from '../_lib/stores.js'
-import { num, openIndex, readPoint, storeReady } from '../_lib/index.js'
+import { num, openIndex, perScan, readPoint, storeReady } from '../_lib/index.js'
 import { AGE_TIERS, planAge } from '../_lib/agePyramid.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
@@ -113,7 +113,7 @@ async function ageOf(ctx0: AgeCtx): Promise<Response> {
   // only pass `path` (+ optional bin_budget). from/to override the extent.
   let baseRows: Record<string, unknown>[]
   try {
-    baseRows = await readPoint(await openIndex(ctx.env, date, `age-pyramid-${fine}`), depth, path, COLS)
+    baseRows = await readPoint(await openIndex(perScan(ctx.env), date, `age-pyramid-${fine}`), depth, path, COLS)
   } catch (e) {
     if (/not synced/.test((e as Error).message)) return json({ records: [], plan: { outputBin: fine, tier: fine, binBudget } })
     throw e
@@ -130,7 +130,7 @@ async function ageOf(ctx0: AgeCtx): Promise<Response> {
   const bin = plan ? plan.outputTier?.bin ?? plan.outputBin : fine
   const meta = { outputBin: bin, tier: plan ? plan.outputTier?.name ?? null : fine, binBudget }
   // Reuse the finest rows when the planner chose that tier; else read the coarser one.
-  const rows = bin === fine ? baseRows : await readPoint(await openIndex(ctx.env, date, `age-pyramid-${bin}`), depth, path, COLS)
+  const rows = bin === fine ? baseRows : await readPoint(await openIndex(perScan(ctx.env), date, `age-pyramid-${bin}`), depth, path, COLS)
   // Planner extents select a tier; only caller-supplied bounds trim its bins.
   const lo = Number.isNaN(fromMs) ? -Infinity : fromMs
   const hi = Number.isNaN(toMs) ? Infinity : toMs

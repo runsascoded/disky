@@ -125,8 +125,8 @@ describe('batched root owner history', () => {
 
 describe('an owner-scoped root read of a held scan with no sort to read', () => {
   it('throws, never a null point (a gap a series would cache)', async () => {
-    // The store's slice sorts unreadable (a generation found "without slices": every sliced read goes per-scan
-    // for a minute) and the scan's per-scan index retired, as a v1 scan's lens tiers are.
+    // The store's slice sorts unreadable (a generation found "without slices": every sliced read of a held scan is
+    // "not synced" for a minute, never read per-scan) and the scan's per-scan index retired.
     vi.resetModules()
     const { readRootAgg: fresh } = await import('./view')
     const { iv: env } = await seed()
@@ -136,7 +136,7 @@ describe('an owner-scoped root read of a held scan with no sort to read', () => 
     const got = await Promise.allSettled([{ lens: { key: 'alice' } }, { owner: 'owned' as const }].map(scope => fresh(hidden, { date: S1, path: '', ...scope })))
     // A lens fails earlier, folding its ledger on the scan's `path` sort.
     expect(got.map(g => g.status === 'fulfilled' ? g.value : String(g.reason))).toEqual([
-      `Error: index variant 'path' not synced for ${S1}`,
+      `Error: index variant 'path' not synced for ${S1} (the interval store holds the scan and doesn't serve the variant)`,
       `Error: no owner-scoped sort of ${S1} to read`,
     ])
   })

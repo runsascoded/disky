@@ -17,7 +17,8 @@ import { OwnerFactChip } from './OwnerFactChip'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction'
 import { actionItem, rowTarget } from './objects'
-import type { TreeNode } from './types'
+import { idleLabel, idleness, readThrough } from './readLens'
+import type { Meta, TreeNode } from './types'
 import { fmtN } from './types'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
@@ -49,13 +50,16 @@ const PAGE_SIZES = [20, 50, 100, 200]
  *  tooltip); ~60 chars fills the column's 480px at 12px mono. */
 const NAME_MAX = 60
 
-export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, filter, rowMatches, brush, onBrush, readLogged }: {
+export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, ownerIdx, userIdx, onPickUser, onOpen, onOpenObject, filter, rowMatches, brush, onBrush, readLogged, access }: {
   /** The treemap's currently-viewed node. */
   node: TreeNode
   /** Path segments from the tree root to `node` (no scheme, no root). */
   segs: string[]
   /** Whether the access logs cover a top-level cell (`readLens.ts`): an uncovered row's read reads "not logged". */
   readLogged?: (bucket: string | undefined) => boolean
+  /** The scan's access window: with `through`, each row's read cell carries the idle rule (`readLens.ts`
+   *  `idleness`: idle only when read and write both precede the logs' end, counted from it). */
+  access?: Meta['access']
   scheme: string
   /** The store home, read as `~` in row tooltips (`Store.home`). */
   home?: string[]
@@ -424,9 +428,17 @@ export function ChildrenTable({ node, segs, scheme, home, scan, flatOk = false, 
                     {hasYr && <td className="created yr">{yr ?? ''}</td>}
                   </>
                 })() : <td className="created none num" colSpan={createdCols}>—</td>}
-                {hasRead && <td title={k.a != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : readLogged && !readLogged(segs[0] ?? k.n.split('/')[0]) ? 'no access logs cover this bucket' : undefined}>
-                  {k.a != null ? epochDaysToDate(k.a) : readLogged && !readLogged(segs[0] ?? k.n.split('/')[0]) ? 'not logged' : '—'}
-                </td>}
+                {hasRead && (() => {
+                  const logged = !readLogged || readLogged(segs[0] ?? k.n.split('/')[0])
+                  const idle = idleness(k.a, k.d, access, logged)
+                  const thru = idle && readThrough(access)
+                  const idleTip = idle && thru ? (idle.idle
+                    ? ` · ${idleLabel(idle)}: no read or write since, counted from the logs' end (${thru.label})`
+                    : ` · written on or after the logs' end (${thru.label}): reads since are not delivered yet, so not idle`) : ''
+                  return <td title={(k.a != null ? 'most recent GET/HEAD/LIST under this prefix (access logs)' : !logged ? 'no access logs cover this bucket' : 'no observed reads since logging began') + idleTip}>
+                    {k.a != null ? epochDaysToDate(k.a) : !logged ? 'not logged' : idle && !idle.idle ? <span className="dim">{idleLabel(idle)}</span> : '—'}
+                  </td>
+                })()}
                 {/* An assignee, or a single attributed owner, by name; a mix
                     as a bar (names and shares on hover). */}
                 {hasOwners && (

@@ -22,6 +22,7 @@ stragglers inside the lag window are picked up instead of skipped.
 
 Data-bucket layout::
 
+    access/state/.lease                 one ingest at a time (`acquire_lease`)
     access/state/<bucket>.json          watermark + ingested tail
     access/raw/<bucket>/part-<first>--<last>.parquet    layer-1a (lossless)
     access/agg/<bucket>/part-<first>--<last>.parquet    layer-2a (tree shards)
@@ -104,8 +105,9 @@ def acquire_lease(client, data_bucket: str, owner: str) -> int | None:
 
     Two concurrent ingests would race the per-bucket watermarks and cut
     different chunk spans over the same CSVs → double-counted rows under
-    different part names. The scheduled /6h job and any manual/backfill run
-    both take this lease; a crashed holder's lease is stolen after its TTL.
+    different part names. The hourly poller, a scan's `access-ingest` step and
+    any manual/backfill run all take this lease; a held one makes the newcomer
+    skip (exit 0), and a crashed holder's lease is stolen after its TTL.
     """
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
@@ -172,9 +174,26 @@ def save_state(client, data_bucket: str, bucket: str, watermark: str, tail: list
     )
 
 
+@dataclass
+class Pending:
+    """One bucket's listing from ``watermark − LAG_HOURS``: the CSVs needing ingest (``todo``, names + sizes) and the
+    newest delivery time over everything listed (``newest``, ingested or not; `None`: nothing listed)."""
+    todo: list[tuple[str, int]]
+    newest: dt.datetime | None
+
+
 def list_new(client, log_bucket: str, bucket: str, state: dict) -> list[tuple[str, int]]:
-    """Names (with sizes) needing ingest: everything past the watermark, plus
-    any straggler inside the lag window not in the ingested tail."""
+    """`pending`'s ``todo``."""
+    return pending(client, log_bucket, bucket, state).todo
+
+
+def pending(client, log_bucket: str, bucket: str, state: dict) -> Pending:
+    """Names (with sizes) needing ingest: everything past the watermark, plus any straggler inside the lag window not
+    in the ingested tail; and the newest `time_created` listed.
+
+    The watermark's own CSV stays in ``usage/`` until a later watermark sweeps it (`sweep_ingested` moves only names
+    below ``watermark − LAG_HOURS``), so a bucket whose logs still arrive always lists something here: ``newest`` is
+    its last delivery, the stalled-delivery check's input."""
     prefix = f"usage/{bucket}_usage_"
     wm = state.get("watermark")
     start = None
@@ -184,7 +203,11 @@ def list_new(client, log_bucket: str, bucket: str, state: dict) -> list[tuple[st
             start = prefix + _ts_minus_hours(wm_ts, LAG_HOURS)
     done = set(state.get("ingested_tail") or [])
     out = []
+    newest = None
     for b in client.list_blobs(log_bucket, prefix=prefix, start_offset=start):
+        created = b.time_created
+        if created is not None and (newest is None or created > newest):
+            newest = created
         base = b.name.rsplit("/", 1)[-1]
         if base in done:
             continue
@@ -193,7 +216,7 @@ def list_new(client, log_bucket: str, bucket: str, state: dict) -> list[tuple[st
         # both get ingested.
         out.append((b.name, int(b.size or 0)))
     out.sort()
-    return out
+    return Pending(out, newest)
 
 
 def sweep_ingested(
@@ -299,7 +322,19 @@ def ingest_bucket(
     workers: int = 16,
     max_chunks: int | None = None,
 ) -> dict:
-    """Ingest all new usage CSVs for one source bucket. Returns stats."""
+    """Ingest all new usage CSVs for one source bucket. Returns stats, with ``newest_delivery`` (ISO, or `None`): the
+    newest CSV delivery listed, the stalled-delivery check's input.
+
+    Nothing pending is the hourly poller's common case: a state read and a listing or two, and no DuckDB."""
+    state = load_state(client, data_bucket, bucket)
+    found = pending(client, log_bucket, bucket, state)
+    todo = found.todo
+    newest = found.newest.isoformat(timespec="seconds") if found.newest else None
+    if not todo:
+        err(f"[{bucket}] up to date (watermark {state.get('watermark')})")
+        sweep_ingested(client, log_bucket, bucket, state.get("watermark"), workers=workers)
+        return {"bucket": bucket, "files": 0, "bytes": 0, "chunks": 0, "rows": 0, "newest_delivery": newest}
+
     import duckdb
     from google.cloud.storage import transfer_manager
 
@@ -307,13 +342,6 @@ def ingest_bucket(
     from disk_tree.access.parsers import parser_for
     from disk_tree.access.parsers.gcs import DEDUPE_WARN_FRACTION, dropped_fraction
     from disk_tree.access.read_sizes import aggregate_read_sizes
-
-    state = load_state(client, data_bucket, bucket)
-    todo = list_new(client, log_bucket, bucket, state)
-    if not todo:
-        err(f"[{bucket}] up to date (watermark {state.get('watermark')})")
-        sweep_ingested(client, log_bucket, bucket, state.get("watermark"), workers=workers)
-        return {"bucket": bucket, "files": 0, "bytes": 0, "chunks": 0}
 
     chunks = plan_chunks(todo, max_chunk_bytes)
     if max_chunks is not None:
@@ -415,7 +443,23 @@ def ingest_bucket(
         "bytes": total_b,
         "chunks": len(chunks),
         "rows": n_rows_total,
+        "newest_delivery": newest,
     }
+
+
+#: A logged bucket with no CSV delivered for this long is "stalled": its logging is off, or GCS delivery stopped.
+#: GCS delivers a CSV per bucket-hour (empty hours included), ~9–16.5 h after the hour (specs/access-log-freshness.md).
+STALL_HOURS = 24.0
+
+
+def stalled(results: list[dict], now: dt.datetime, stall_hours: float = STALL_HOURS) -> list[str]:
+    """The buckets in ``results`` (`ingest_bucket`'s stats) whose newest delivery is more than ``stall_hours`` before
+    ``now``, or that list no CSV at all."""
+    cut = now - dt.timedelta(hours=stall_hours)
+    return [
+        r["bucket"] for r in results
+        if r["newest_delivery"] is None or dt.datetime.fromisoformat(r["newest_delivery"]) < cut
+    ]
 
 
 @monitor_resources(prefix="ACCESS_RESOURCE")
@@ -428,8 +472,21 @@ def ingest(
     max_chunk_gb: float,
     workers: int,
     max_chunks: int | None = None,
-) -> list[dict]:
-    import os
+    parallel: int = 1,
+    stall_hours: float = STALL_HOURS,
+    now: dt.datetime | None = None,
+) -> dict:
+    """Every bucket's new CSVs, under the deployment's lease (`acquire_lease`).
+
+    Returns ``{"lease": "taken" | "held", "buckets": [<ingest_bucket stats>], "stalled": [<bucket>]}``. A held lease
+    returns at once, ``buckets`` / ``stalled`` empty (the holder reports them): the hourly poller's overlap case.
+
+    ``parallel`` > 1 ingests that many buckets at once (threads; each bucket's DuckDB takes ``memory_limit``, so the
+    peak is ``parallel`` × it): the fan-out when a backlog builds. Buckets are independent (per-bucket state, stage
+    dirs and output names), so the one lease covers them all. A failed bucket doesn't stop the others; the first
+    failure is re-raised once they finish, after the lease is released."""
+    import contextvars
+    import signal
     import socket
 
     from google.cloud import storage
@@ -438,39 +495,66 @@ def ingest(
     owner = os.environ.get("BATCH_JOB_UID") or f"{socket.gethostname()}:{os.getpid()}"
     gen = acquire_lease(client, data_bucket, owner)
     if gen is None:
-        return []
-    out = []
+        return {"lease": "held", "buckets": [], "stalled": []}
+
+    def one(b: str) -> dict:
+        resource_stage("bucket", bucket=b)
+        return ingest_bucket(
+            client,
+            b,
+            log_bucket=log_bucket,
+            data_bucket=data_bucket,
+            stage_dir=stage_dir,
+            memory_limit=memory_limit,
+            max_chunk_bytes=int(max_chunk_gb * 1e9),
+            workers=workers,
+            max_chunks=max_chunks,
+        )
+
     # A TERM (a cancelled or preempted Batch task, a Nextflow head stopping its tasks) unwinds through the `finally`
     # below, so the lease is released, not held for its TTL (gcs 2026-10-17: a stopped run's lease made the next
     # ingest skip).
-    import signal
-
     def _term(sig, frame):  # noqa: ANN001
         raise SystemExit(128 + sig)
 
     prev = signal.signal(signal.SIGTERM, _term)
+    out: list[dict] = []
+    failures: list[Exception] = []
     try:
-        for b in buckets:
-            resource_stage("bucket", bucket=b)
-            out.append(
-                ingest_bucket(
-                    client,
-                    b,
-                    log_bucket=log_bucket,
-                    data_bucket=data_bucket,
-                    stage_dir=stage_dir,
-                    memory_limit=memory_limit,
-                    max_chunk_bytes=int(max_chunk_gb * 1e9),
-                    workers=workers,
-                    max_chunks=max_chunks,
-                )
-            )
+        if parallel <= 1 or len(buckets) <= 1:
+            out = [one(b) for b in buckets]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            pool = ThreadPoolExecutor(max_workers=parallel, thread_name_prefix="access-ingest")
+            try:
+                futs = [pool.submit(contextvars.copy_context().run, one, b) for b in buckets]
+                for b, f in zip(buckets, futs):
+                    try:
+                        out.append(f.result())
+                    except Exception as e:  # noqa: BLE001 — re-raised below, once every bucket has had its run
+                        err(f"[{b}] ingest FAILED: {type(e).__name__}: {e}")
+                        failures.append(e)
+            except BaseException as e:
+                # A TERM mid-fan-out: the worker threads can't be interrupted, and an interpreter exit would join them
+                # (each still writing its bucket's chunk) after the lease is gone. Release, then end the process now.
+                pool.shutdown(wait=False, cancel_futures=True)
+                signal.signal(signal.SIGTERM, prev)
+                release_lease(client, data_bucket, gen)
+                os._exit(e.code if isinstance(e, SystemExit) and isinstance(e.code, int) else 1)
+            pool.shutdown()
     finally:
         signal.signal(signal.SIGTERM, prev)
         release_lease(client, data_bucket, gen)
+    if failures:
+        raise failures[0]
+    late = stalled(out, now or dt.datetime.now(dt.timezone.utc), stall_hours)
     done = [r for r in out if r["files"]]
     err(
         "access ingest done: "
         + (", ".join(f"{r['bucket']}: {r['files']}f/{r['bytes'] / 1e9:.0f}GB" for r in done) if done else "all up to date")
     )
-    return out
+    for r in out:
+        if r["bucket"] in late:
+            err(f"[{r['bucket']}] STALLED: no usage CSV delivered in {stall_hours:g} h (newest: {r['newest_delivery'] or 'none listed'})")
+    return {"lease": "taken", "buckets": out, "stalled": late}

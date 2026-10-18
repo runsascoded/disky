@@ -30,7 +30,13 @@ describe('parseDigestRequest: tiers', () => {
         { t: Date.UTC(2026, 9, 1, 12, 36), bytes: [0, 2910 * T, 1 * T, 30 * T] },
         { t: Date.UTC(2026, 9, 2), bytes: [0, 2900 * T, 1 * T, 30 * T] },
       ],
+      diff: null,
     })
+  })
+  it('takes a diff as the usage card does (and refuses a bad one)', () => {
+    const diff = { from: '2026-09-30T0701', to: '2026-10-17T0701', path: '', title: 'What changed — 10/1 → 10/17' }
+    const ok = parseDigestRequest({ ...tiers, diff })
+    expect([typeof ok === 'string' ? ok : ok.diff, parseDigestRequest({ ...tiers, diff: { ...diff, path: '../x' } })]).toEqual([diff, 'diff: bad path'])
   })
   it('refuses tiers that are missing, empty, too many or not names', () => {
     const msg = `tiers: 1–${TIER_COLORS.length} names, bottom → top`

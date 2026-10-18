@@ -5,7 +5,7 @@ import { TimeSeries } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
 import { DEFAULT_PALETTE } from '@rdub/treemap'
 import { useQuery } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { type ReactNode, useMemo, useRef, useState } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
 import { shortName } from './UserChip'
 import { useStore, useStoreFetch } from './store'
@@ -21,6 +21,8 @@ import { ApiError, apiError } from './filterCaps'
 import { LoadFailure } from './LoadFailure'
 import { SeriesEmpty } from './SeriesEmpty'
 import { SeriesMissingNote } from './UnionNotes'
+import { defaultNoteAt, notesInView, type ChartAnnotation, type NoteMarker } from './chartNotes'
+import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -141,7 +143,7 @@ const fmtPct = (y: number) => {
   return a === 0 ? '0%' : signed(y, `${a >= 10 ? a.toFixed(0) : a.toFixed(1)}%`)
 }
 
-export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, ledgerRev, scopeReady = true, onPickDate, onBrush, window: win, scopeLabel = 'all buckets', refused, paths, pathsTotal, queryOnly, filterLabel, filterQs }: {
+export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, ledgerRev, scopeReady = true, onPickDate, onBrush, window: win, admin = false, scopeLabel = 'all buckets', refused, paths, pathsTotal, queryOnly, filterLabel, filterQs }: {
   /** The store's root scope word for the unscoped subtitle (`all buckets`, `the whole bucket`). */
   scopeLabel?: string
   /** The page view's filter refusal (`term-too-common`, …): no match roots to sum, so the series is never asked
@@ -182,6 +184,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   onBrush?: (from: string, to: string) => void
   /** The page's current diff window (scan ids), shaded on the chart. */
   window?: [string, string]
+  /** The viewer is an admin (`useIsAdmin`): may add, edit and delete the chart's notes. */
+  admin?: boolean
 }) {
   const { fmtBytes, units, suffixB } = useUnits()
   const [fitP, setFitP] = useUrlState('fit', boolParam)
@@ -345,6 +349,39 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   }, [series, relTotal, roots, stacked, relative, win, extrema, radiusDays, floorPct, fmtY, fmtBytes])
 
 
+  // Hand-written notes pinned to dates (spec `chart-annotations.md`): drawn inside the plotted span only, so a
+  // `1w` / `1m` range hides older ones; the y-axis mode never moves them. Admins add (the button, or alt-click a
+  // point for its date), edit and delete; everyone else reads.
+  const { notes, applied } = useChartNotes()
+  const isAdmin = admin
+  const noteWrite = useNoteWrite()
+  const [noteForm, setNoteForm] = useState<{ at: string; note?: ChartAnnotation } | null>(null)
+  const markers = useMemo(
+    () => (total.length ? notesInView(notes, at => xOfScan(at, times), total[0].x, total[total.length - 1].x) : []),
+    [notes, total, times],
+  )
+  const latestId = total.length ? idOfX(total[total.length - 1].x) : undefined
+  // Alt held on the press that becomes a pick: an admin's alt-click opens the form at that point's scan.
+  const altRef = useRef(false)
+  const canNote = isAdmin && applied
+  const pickX = (x: number) => {
+    if (altRef.current && canNote) setNoteForm({ at: idOfX(x) })
+    else onPickDate?.(idOfX(x))
+  }
+  const renderMarker = (m: { key: string }, node: ReactNode) => {
+    const { note } = m as NoteMarker
+    return (
+      <Tooltip pinnable={isAdmin} content={
+        <NoteTip
+          note={note}
+          fmt={fmt}
+          onEdit={canNote ? () => setNoteForm({ at: note.at, note }) : undefined}
+          onDelete={canNote ? () => noteWrite.mutate({ method: 'DELETE', id: note.id }) : undefined}
+        />
+      }>{node}</Tooltip>
+    )
+  }
+
   const firstX = total[0]?.x
   if (scans.length < 2) return null
   return (
@@ -384,6 +421,11 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             style={{ background: 'none', border: 'none', cursor: 'pointer', font: 'inherit', color: 'inherit', opacity: gearOpen ? 1 : 0.55, padding: '0 2px' }}
           >⚙</button>
         </Explain>
+        {isAdmin && (
+          <Explain text={applied ? 'Add a note pinned to a date on this chart (or alt-click a point to note that scan)' : 'Notes are off here: this deployment’s D1 lacks the chart-annotations migration'}>
+            <button type="button" className="note-add" disabled={!applied} aria-expanded={!!noteForm} onClick={() => setNoteForm(f => (f ? null : { at: defaultNoteAt(win, latestId) }))}>+ note</button>
+          </Explain>
+        )}
         {store.liveTotals && (
           <a className="over-time-live" href={store.liveTotals.href} target="_blank" rel="noreferrer"
              style={{ marginLeft: 'auto', fontSize: '0.6em', fontWeight: 'normal', opacity: 0.8 }}>
@@ -415,6 +457,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           </label>
         </div>
       )}
+      {noteForm && <NoteForm key={noteForm.note?.id ?? 'new'} at={noteForm.at} note={noteForm.note} onClose={() => setNoteForm(null)} />}
+      {noteWrite.isError && <p className="err sub">note: {(noteWrite.error as Error).message}</p>}
       {/* A refetch's failure over a chart still drawn; with no chart, the slot below states it. */}
       {seriesQ.isError && !tooMany && (allZero || series.length > 0) && <LoadFailure err={seriesQ.error} what="series" className="sub" onRetry={() => void seriesQ.refetch()} />}
       {tooMany ? (
@@ -426,6 +470,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
               : <>nothing{prefix ? <> under <code>{prefix}</code></> : ''} in any scan</>}
         </p>
       ) : series.length > 0 ? (
+        <div onPointerDownCapture={e => { altRef.current = e.altKey }}>
         <TimeSeries<Pt>
           series={series}
           getX={p => p.x}
@@ -439,11 +484,14 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           yLabel={values === 'pct' ? 'growth' : relative ? 'bytes since start' : 'stored bytes'}
           height={220}
           annotations={annotations}
-          onPickX={onPickDate && (x => onPickDate(idOfX(x)))}
+          onPickX={onPickDate || canNote ? pickX : undefined}
           onBrush={onBrush && ((x0, x1) => onBrush(idOfX(x0), idOfX(x1)))}
           window={win && [xOfScan(win[0], times), xOfScan(win[1], times)]}
           gaps={gaps.xs}
+          markers={markers}
+          renderMarker={renderMarker}
         />
+        </div>
       ) : (
         <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />
       )}

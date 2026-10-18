@@ -1,8 +1,9 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
-import { type D1Variant, fixture, GETS, readJson, seedGeneration } from '../_lib/testStore'
+import { type D1Variant, fixture, fixtureSize, GETS, readJson, seedGeneration } from '../_lib/testStore'
 import { onRequestGet as largest } from './largest'
+import { onRequest as pathIndex, pathIndexGone } from './path-index'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_lib/testStore')).S3Store }))
 
@@ -21,14 +22,14 @@ const [S1, S2, S3] = ['2026-09-30T0007', '2026-09-30T0008', '2026-09-30T0009']
 const PATHS = ['', 'bk', 'bk/m', 'bk/m/big', 'bk/m/deep', 'bk/m/split', 'bk/m/twin', 'bk/w', 'bk/w/d0000', 'bk/flat', 'nope']
 const NS = [1, 3, 10, 499]
 
-/** `INDEX_R2` over `fixtures/iv/`, recording the keys read. */
-function r2(reads: string[]): R2Bucket {
+/** `INDEX_R2` over `fixtures/iv/`, recording the keys read; `hide(key)`: an object that isn't there (to `get` and `head`). */
+function r2(reads: string[], hide: (key: string) => boolean = () => false): R2Bucket {
   type Fs = { existsSync(p: string): boolean; readFileSync(p: string): Uint8Array; readdirSync(p: string, o: { recursive: true }): string[]; statSync(p: string): { isFile(): boolean } }
   const fs = async () => (await import(/* @vite-ignore */ 'node:fs' as string)) as Fs
   const get = async (key: string, o?: { range?: { offset: number; length: number } | { suffix: number } }) => {
     const f = await fs()
     const file = fixture(`iv/${key}`)
-    if (!f.existsSync(file)) return null
+    if (hide(key) || !f.existsSync(file)) return null
     reads.push(key)
     const buf = f.readFileSync(file)
     const r = o?.range
@@ -43,7 +44,7 @@ function r2(reads: string[]): R2Bucket {
     const keys = f.existsSync(root) ? f.readdirSync(root, { recursive: true }).map(x => `${dir}${x}`).filter(k => k.startsWith(prefix) && f.statSync(fixture(`iv/${k}`)).isFile()).sort() : []
     return { objects: keys.map(key => ({ key })), truncated: false, cursor }
   }
-  const head = async (key: string) => ((await fs()).existsSync(fixture(`iv/${key}`)) ? { key } : null)
+  const head = async (key: string) => (!hide(key) && (await fs()).existsSync(fixture(`iv/${key}`)) ? { key } : null)
   return { get, list, head } as unknown as R2Bucket
 }
 
@@ -141,4 +142,38 @@ describe('`/api/largest?kind=dir` from the interval store = the scan\'s own size
       expect(want.filter(w => (w[1] as DirBody).dirs.length).length).toBeGreaterThan(30)
     })
   }
+})
+
+// A broken run (its files missing: a bug or a read error, never a half-written publish) refuses its scans: a 503 with
+// `Retry-After` (the cut's window), never the scan's own size sort — which is seeded here, so a fallback would answer.
+describe('`/api/largest` over a broken run', () => {
+  it('refuses the run\'s scan (503 + Retry-After), reading nothing per-scan; a base scan answers as with the run whole', async () => {
+    const env = { ...ivEnv('g5'), INDEX_R2: r2(ivReads, k => k.startsWith('interval-store/g5/deltas/')), INTERVAL_STORE_REV: 'broken-run' } as Env
+    const whole = await ask(ivEnv('g5'), S1, 'bk', 3)
+    const gets = GETS.length
+    const r = await largest({ request: new Request(`http://localhost/api/largest?date=${S3}&path=bk&n=3`), env })
+    expect([r.status, r.headers.get('retry-after'), r.headers.get('cache-control'), await r.text()]).toEqual([
+      503, '30', 'no-store',
+      `scan ${S3} is unavailable: interval store run deltas/${S3} is broken (a bug or a transient read error: the store publishes append-only, so never a half-written run); retry in 30s\n`,
+    ])
+    expect(await ask(env, S1, 'bk', 3)).toEqual(whole)
+    expect(GETS.length - gets).toBe(0)
+  })
+})
+
+// `/api/path-index` (the raw per-scan `path` sort): a scan the deployment's interval store holds is a 410 naming the
+// export command, whether or not the request reads the store (`opt-in`), and before any per-scan read.
+describe('`/api/path-index` of a scan the interval store holds', () => {
+  const call = async (env: Env, date: string, method = 'HEAD') => {
+    const r = await pathIndex({ request: new Request(`http://localhost/api/path-index?date=${date}`, { method }), env })
+    return [r.status, r.headers.get('content-length'), r.status === 200 ? null : await r.text()]
+  }
+  it('410s with the export command under `PATH_STORE=intervals` or `opt-in`; a deployment without the store serves the file', async () => {
+    const gets = GETS.length
+    const gone = [410, null, pathIndexGone(S3, 'g5')]
+    expect(await Promise.all([call(ivEnv('g5'), S3), call(ivEnv('g5'), S3, 'GET'), call({ ...ivEnv('g5'), PATH_STORE: 'opt-in' } as Env, S3)])).toEqual([gone, gone, gone])
+    expect(GETS.length - gets).toBe(0)
+    expect(pathIndexGone(S3, 'g5')).toEqual(`scan ${S3} is held by the interval store (generation g5); its per-scan path index is retired.\nExport its rows as a path sort with: dt-cloud interval-store export -g g5 -d ${S3} -o <path>\n`)
+    expect(await call(perScan, S3)).toEqual([200, String(await fixtureSize('v2-slices/path-index.parquet')), null])
+  })
 })

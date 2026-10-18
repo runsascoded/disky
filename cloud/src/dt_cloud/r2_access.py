@@ -200,7 +200,10 @@ def export_window(
         if count != len(events):
             raise RuntimeError("page event count does not match returned events")
         pages.append(response)
-        if not events:
+        # A short page of events already drained is the end, as an empty one is: an event delivered twice sorts
+        # beside its copy, so the cursor at its first copy returns the second (marin-na 2026-10-17T16).
+        echo = 0 < len(events) < body["limit"] and all(e["$metadata"]["id"] in seen for e in events)
+        if not events or echo:
             return {
                 "query": body,
                 "pages": pages,

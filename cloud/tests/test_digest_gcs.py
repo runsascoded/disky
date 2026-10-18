@@ -152,7 +152,15 @@ def test_image_body():
             {"scan": "2026-08-03", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 330 * TIB]},
             {"scan": "2026-08-04", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]},
         ],
+        # month-to-date: the first scan's lead-in (8/2) → the latest
+        "diff": {"from": "2026-08-02", "to": "2026-08-04", "path": "", "title": "What changed — 8/2 → 8/4"},
     }
+
+
+def test_image_body_no_diff_without_two_scans():
+    # a month's lone scan with no lead-in: nothing to diff
+    lone = D.rows_from_meta([("2026-08-03", _meta(3030, 330, 600, 1500, 600))], CFG.prices)
+    assert "diff" not in D.image_body(lone, AUG, CFG)
 
 
 def test_image_body_sub_daily_is_per_day():

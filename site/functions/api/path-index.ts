@@ -13,6 +13,9 @@
 //   SELECT * FROM read_parquet('https://gcs.oa.dev/api/path-index?date=2026-08-26')
 //   WHERE depth = 2 ORDER BY b DESC LIMIT 20;
 //
+// A scan the deployment's interval store holds is a 410 (`pathIndexGone`): its per-scan sorts are retired, and
+// `dt-cloud interval-store export` writes its rows as a `path` sort instead.
+//
 // Schema: one row per rolled-up path × attribution slice —
 // (path, depth, usr, b, o, wts, wb, c2, c3, c4, a), sorted (depth, path).
 //
@@ -22,11 +25,16 @@
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { withStore } from '../_lib/stores.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { indexDir, storeCreds, storePrefixes, storeReady, storeTarget } from '../_lib/index.js'
+import { indexDir, ivHolder, storeCreds, storePrefixes, storeReady, storeTarget } from '../_lib/index.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
 
 const MAX_RANGE = 64 * 1024 * 1024 // 64MB per request — plenty for parquet pages
+
+/** The 410's body for scan `date` of interval-store generation `gen`. */
+export const pathIndexGone = (date: string, gen: string): string =>
+  `scan ${date} is held by the interval store (generation ${gen}); its per-scan path index is retired.\n` +
+  `Export its rows as a path sort with: dt-cloud interval-store export -g ${gen} -d ${date} -o <path>\n`
 
 export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<Response> => {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
@@ -49,6 +57,19 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
   const scan = await scanArg(env, url.searchParams)
   if (scan instanceof Response) return scan
   const date = scan
+
+  // A scan the deployment's interval store holds: its per-scan sorts are retired (`dt-cloud scan retire`), so its
+  // rows are the store's, exported as a `path` sort by `dt-cloud interval-store export` — never served from here
+  // (nor a per-scan file a retire hasn't reached yet: the answer must not depend on retirement timing).
+  if (!url.searchParams.get('store')) {
+    let gen: string | null
+    try {
+      gen = await ivHolder(env, date)
+    } catch (e) {
+      return new Response(`interval store unavailable, retry: ${(e as Error).message}\n`, { status: 503, headers: { 'retry-after': '30', 'cache-control': 'no-store' } })
+    }
+    if (gen) return new Response(pathIndexGone(date, gen), { status: 410, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' } })
+  }
 
   const store = S3Store({ ...storeTarget(env), prefixes: storePrefixes(env, ['listing/']), ...storeCreds(env) })
   // The file lives under the generation dir D1 points at (a run never

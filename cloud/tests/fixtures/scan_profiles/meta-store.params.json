@@ -72,7 +72,8 @@
  "profile_json": "<profile>",
  "labels": {
   "deployment": "example",
-  "component": "scan"
+  "component": "scan",
+  "scan_id": "2026-10-16t1200"
  },
  "cache": true,
  "queue_size": 20,

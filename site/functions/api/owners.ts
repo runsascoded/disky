@@ -11,7 +11,7 @@ import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { primaryOnly } from '../_lib/stores.js'
 import { hasLedger } from '../_lib/ledger.js'
 import { ownerTotals } from '../_lib/ownerTotals.js'
-import { storeReady } from '../_lib/index.js'
+import { ivRefusal, storeReady } from '../_lib/index.js'
 import { scanArg } from '../_lib/scanArg.js'
 
 export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
@@ -32,6 +32,8 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
     const t = await ownerTotals(env, date)
     return json({ scan: t.scan, head: t.head, bytes: t.bytes, objects: t.objects, users: t.users, computed: t.computed }, 200, { 'cache-control': 'private, no-store' })
   } catch (e) {
+    const refused = ivRefusal(e)
+    if (refused) return refused
     return json({ error: (e as Error).message }, 503)
   }
 }

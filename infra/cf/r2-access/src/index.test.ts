@@ -500,9 +500,20 @@ describe('collect', () => {
     expect([fetcher.mock.calls.map(([, init]) => init?.redirect), order]).toEqual([['manual'], []])
   })
 
-  it('rejects repeated cursors before archiving the repeated page', async () => {
-    const { env, order } = setup()
-    const repeated = eventsPage([rows[2]])
+  it("ends an hour at a short page of events it already drained (the provider echoes a twice-delivered last event; marin-na 2026-10-17T16)", async () => {
+    const { env, read } = setup()
+    const twice = { id: 'a', timestamp: from, action: 'HeadObject', key: 'data/a' }
+    expect(await collect(time, env.HOURLY_CRON, env, provider([...rows, twice]), 'r1')).toEqual({ run_id: 'r1', buckets: 1, hours: 6, pages: 10, events: 5, changed: 6, waiting: 0 })
+    expect(read(agg('03', 'r1'))).toEqual(hourAgg('03', {
+      events: 3, actions: { GetObject: 2, HeadObject: 1 }, classes: { content_read: 2, metadata_read: 1 },
+      sampling: { ...sampling(3, 4, 1), capture: 'inconsistent' },
+      rows: [['data/a', 'GetObject', 2, at('2026-10-12T03:30:00Z'), at('2026-10-12T03:45:00Z')], ['data/a', 'HeadObject', 1, from, from]],
+    }))
+  })
+
+  it('rejects a full page that repeats a cursor before archiving it', async () => {
+    const { env, order } = setup({ PAGE_SIZE: '2' })
+    const repeated = eventsPage([rows[2], rows[1]])
     const fetcher = vi.fn<typeof fetch>(async (_url, init) =>
       new Response(JSON.parse(String(init?.body)).view === 'calculations' ? calculationPage([{ count: 1, sampleInterval: 1 }]) : repeated))
     await expect(collect(time, env.HOURLY_CRON, env, fetcher, 'r1')).rejects.toThrow('r2-access: cursor_stalled')

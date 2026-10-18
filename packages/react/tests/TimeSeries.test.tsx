@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render } from '@testing-library/react'
-import { BytesOverTime, gapStretches, splitAtGaps, TimeSeries } from '../src/TimeSeries'
+import { BytesOverTime, gapStretches, placeMarkers, splitAtGaps, TimeSeries } from '../src/TimeSeries'
 
 // jsdom has no `PointerEvent`: without one, `fireEvent.pointer*` builds a bare
 // `Event` that drops `clientX`/`button`/`isPrimary`.
@@ -610,5 +610,45 @@ describe('gaps (x\'s without data)', () => {
       [['ML', 'ML'], [[56, 54.7], [273.7, 2]]],
       [['MLLL'], []],
     ])
+  })
+})
+
+describe('markers (vertical notes at an x)', () => {
+  const id = (x: number) => x
+  it('placeMarkers: by x; off-span dropped; a label running past the right edge ends at its line; an overlapping one is compact', () => {
+    const ms = [
+      { key: 'c', x: 150, label: 'abcdefghij' }, // 10 chars ≈ 69 px from b's line at 100: overlaps
+      { key: 'b', x: 100, label: 'abcdefghij' },
+      { key: 'out', x: 20, label: 'x' },
+      { key: 'e', x: 380, label: 'abcdefghij' }, // past the right edge (400): ends at its line
+      { key: 'a', x: 50, label: 'ab' },
+    ]
+    expect(placeMarkers(ms, id, 40, 360).map(p => [p.m.key, p.px, p.anchor, p.compact])).toEqual([
+      ['a', 50, 'start', false],
+      ['b', 100, 'start', false],
+      ['c', 150, 'start', true],
+      ['e', 380, 'end', false],
+    ])
+  })
+
+  it('a marker in view reserves a lane above the plot and draws a line through it; none in view, no lane', () => {
+    const pts = [{ t: 0, y: 10 }, { t: 10, y: 20 }]
+    const draw = (markers: { key: string; x: number; label: string }[]) => withSize(() => render(
+      <TimeSeries
+        series={[{ key: 'a', points: pts }]}
+        getX={p => p.t}
+        getY={p => p.y}
+        markers={markers}
+        renderMarker={(m, node) => <span data-note={m.key}>{node}</span>}
+      />,
+    ).container)
+    const lines = (c: HTMLElement) => [...c.querySelectorAll('line.dt-ts-marker')].map(l => [l.getAttribute('x1'), l.getAttribute('y1'), l.getAttribute('y2')])
+    const labels = (c: HTMLElement) => [...c.querySelectorAll('[data-note]')].map(e => [e.getAttribute('data-note'), e.textContent])
+    const yAxis = (c: HTMLElement) => [...c.querySelectorAll('svg > line')].map(l => [l.getAttribute('y1'), l.getAttribute('y2')]).at(-1)
+    // 400×200: x 0..10 → 56..384 px; with the lane the plot spans y 12 + 16 = 28 .. 200 − 24 = 176.
+    const inView = draw([{ key: 'n1', x: 5, label: 'scope change' }, { key: 'late', x: 11, label: 'after' }])
+    expect([lines(inView), labels(inView), yAxis(inView)]).toEqual([[['220', '2', '176']], [['n1', 'scope change']], ['28', '176']])
+    const none = draw([{ key: 'late', x: 11, label: 'after' }])
+    expect([lines(none), labels(none), yAxis(none)]).toEqual([[], [], ['12', '176']])
   })
 })

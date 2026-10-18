@@ -83,7 +83,8 @@
   "deployment": "cw-s3",
   "stack": "prod",
   "team": "x",
-  "component": "scan"
+  "component": "scan",
+  "scan_id": "2026-10-16t1200"
  },
  "cache": true,
  "queue_size": 20,

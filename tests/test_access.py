@@ -548,6 +548,97 @@ def test_r2_parse_collapses_a_duplicate_file_and_refuses_two_versions_of_an_hour
     assert str(error.value) == 'r2 hour files: 1 hour(s) appear in two different versions'
 
 
+def _r2_agg(root: Path, hour: str, capture: str, rows: list[tuple], bucket: str = 'jc-taxes', version: int = 4, run: str = 'r1') -> Path:
+    """Write one private aggregate (`agg/<bucket>/<day>/<HH>/<run>.json`), ``rows`` as ``(key, action, n, last
+    minute)``; ``first_ts`` is the hour's start (the parser doesn't read it)."""
+    import json
+    path = root / 'agg' / bucket / hour[:10] / hour[11:13] / f'{run}.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        'schema_version': version, 'bucket': bucket, 'hour': f'{hour}:00:00.000Z', 'events': 0, 'own': 0,
+        'actions': {}, 'classes': {}, 'sampling': {'observed': 0, 'estimated': 0, 'max_sample_interval': 1, 'capture': capture},
+        'rows': [[k, a, n, _ms(f'{hour}:00:00Z'), _ms(f'{hour[:10]}T{t}:00Z')] for k, a, n, t in rows],
+    }))
+    return path
+
+
+_R2_HOUR_12 = [('data/2023.pqt', 'GetObject', 1, '12:10'), ('data/2023.pqt', 'HeadObject', 3, '12:59'), (None, 'GetBucketCors', 1, '12:15')]
+
+
+def test_r2_parse_private_aggregates_as_the_public_files(tmp_path: Path):
+    """The private aggregate's array rows and `sampling.capture` parse to the same leaf rows as the public files."""
+    from disk_tree.access.parsers.r2 import parse
+
+    _r2_agg(tmp_path, '2026-10-12T11', 'unsampled', _R2_HOUR_11, version=3)
+    _r2_agg(tmp_path, '2026-10-12T12', 'sampled', _R2_HOUR_12)
+    _r2_agg(tmp_path, '2026-10-12T13', 'inconsistent', [])
+    assert _leaf_rows(parse(str(tmp_path / 'agg' / '*' / '*' / '*' / '*.json'), con=duckdb.connect())) == _R2_LEAF
+
+
+def test_r2_parse_mixes_forms_and_refuses_two_versions_of_an_hour(tmp_path: Path):
+    from disk_tree.access.parsers.r2 import parse
+
+    public = _r2_hour(tmp_path / 'pub', '2026-10-12T11', 'unsampled', _R2_HOUR_11)
+    private = _r2_agg(tmp_path, '2026-10-12T12', 'sampled', _R2_HOUR_12)
+    _r2_agg(tmp_path, '2026-10-12T13', 'inconsistent', [])
+    assert _leaf_rows(parse([str(public), str(private), str(tmp_path / 'agg/*/*/13/*.json')], con=duckdb.connect())) == _R2_LEAF
+    redrained = _r2_agg(tmp_path, '2026-10-12T12', 'sampled', _R2_HOUR_12[:1], run='r2')
+    with pytest.raises(ValueError) as error:
+        parse([str(private), str(redrained)], con=duckdb.connect())
+    assert str(error.value) == 'r2 hour files: 1 hour(s) appear in two different versions'
+
+
+def test_r2_parse_refuses_an_unknown_version(tmp_path: Path):
+    from disk_tree.access.parsers.r2 import parse
+
+    path = _r2_agg(tmp_path, '2026-10-12T11', 'unsampled', _R2_HOUR_11, version=5)
+    with pytest.raises(ValueError) as error:
+        parse(str(path), con=duckdb.connect())
+    assert str(error.value) == 'r2 hour files: unknown schema_version [5]'
+
+
+def _r2_state(**buckets: dict) -> dict:
+    return {'schema_version': 2, 'account': 'a', 'scheduled_time': 0, 'run_id': 'r', 'buckets': {
+        b: {'collected_through': 0, 'first_from': 0, 'gaps': [], 'verify_cursor': None, 'frozen': {}, **v} for b, v in buckets.items()
+    }}
+
+
+def test_r2_state_aggs_names_each_hours_current_aggregate():
+    """`hours[*].agg` within retention and `frozen` past it, across buckets, sorted; `before` drops hours starting at
+    or after it (a scan never reads them)."""
+    from datetime import datetime, timezone
+
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    state = _r2_state(
+        **{'marin-na': {'frozen': {'2026-10-10T23': 'agg/marin-na/2026-10-10/23/r0.json'}, 'hours': {
+            '2026-10-11T00': {'agg': 'agg/marin-na/2026-10-11/00/r3.json', 'digest': 'd'},
+            '2026-10-11T01': {'agg': 'agg/marin-na/2026-10-11/01/r1.json', 'digest': 'd'},
+        }}},
+        a={'hours': {'2026-10-11T00': {'agg': 'agg/a/2026-10-11/00/r1.json', 'digest': 'd'}}},
+    )
+    assert state_aggs(state) == [
+        'agg/a/2026-10-11/00/r1.json',
+        'agg/marin-na/2026-10-10/23/r0.json', 'agg/marin-na/2026-10-11/00/r3.json', 'agg/marin-na/2026-10-11/01/r1.json',
+    ]
+    assert state_aggs(state, before=datetime(2026, 10, 11, 1, tzinfo=timezone.utc)) == [
+        'agg/a/2026-10-11/00/r1.json', 'agg/marin-na/2026-10-10/23/r0.json', 'agg/marin-na/2026-10-11/00/r3.json',
+    ]
+
+
+@pytest.mark.parametrize('state, message', [
+    ({'schema_version': 1, 'buckets': {}}, 'r2 state: unknown schema_version 1'),
+    (_r2_state(b={'hours': {}, 'legacy_days': {'2026-10-10': 'agg/b/2026-10-10/r.json'}}),
+     "r2 state: b has version-1 per-day aggregates (legacy_days), which this parser doesn't read"),
+])
+def test_r2_state_aggs_refuses(state: dict, message: str):
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    with pytest.raises(ValueError) as error:
+        state_aggs(state)
+    assert str(error.value) == message
+
+
 def test_r2_leaf_aggregate_layer2a(tmp_path: Path):
     """`aggregate_access_leaf`: the same tree as request logs, ops summed across actions, `last_ts` MAX and
     `sampled` OR'd up the parents; `rows_in` counts requests."""

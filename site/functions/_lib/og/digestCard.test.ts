@@ -107,6 +107,7 @@ describe('digest PNG', () => {
     await mkdir('tmp', { recursive: true })
     await writeFile('tmp/digest-tiers-sample.png', png)
     await writeFile('tmp/digest-tiers-sample-1.png', svgToPng(tiersSvg(tiersInput(1)), fonts, 1.5))  // a month's first scan
+    await writeFile('tmp/digest-tiers-diff-sample.png', svgToPng(tiersSvg({ ...tiersInput(), diff: { root: diffRoot(data, 'delta', true, false, 'all')!.root, title: 'What changed — 10/1 → 10/17' } }), fonts, 1.5))
   })
 })
 
@@ -148,6 +149,23 @@ describe('tiersSvg', () => {
       ['#3987e5', '92.7,255.1 118.5,254.6 118.5,462.8 92.7,462.8'],
       ['#e3b341', '92.7,253.9 118.5,253.5 118.5,254.6 92.7,255.1'],
       ['#f2635a', '92.7,232.4 118.5,231.6 118.5,253.5 92.7,253.9'],
+    ])
+  })
+  it('adds the diff map under the legend: the page grows by its section, and its texts follow the legend\'s', () => {
+    const svg = tiersSvg({ ...tiersInput(), diff: { root: diffRoot(data, 'delta', true, false, 'all')!.root, title: 'What changed — 10/1 → 10/17' } })
+    const layout = (svg: string) => ({
+      height: /<svg [^>]*height="(\d+)"/.exec(svg)![1],
+      maps: [...svg.matchAll(/<g transform="translate\(([^)]*)\)">/g)].map(m => m[1]),
+    })
+    expect([layout(tiersSvg(tiersInput())), layout(svg)]).toEqual([
+      // the legend ends the card at 542; with a diff, its title row then the 440px map from y 562
+      { height: '542', maps: [] },
+      { height: '1026', maps: ['24,562'] },
+    ])
+    expect(texts(svg).slice(texts(tiersSvg(tiersInput())).length)).toEqual([
+      'What changed — 10/1 → 10/17', 'grew +60.0 TiB · shrank −30.0 TiB · area = |Δ|',
+      'checkpoints/run-a', '+60.0 TiB',
+      'scratch', '−30.0 TiB',
     ])
   })
   it('a lone scan is a stacked bar', () => {
