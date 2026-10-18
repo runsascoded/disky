@@ -78,6 +78,17 @@ elif name == 'dt-cloud':
         index.parent.mkdir(parents=True, exist_ok=True)
         index.write_bytes(b'index')
         (out / 'meta.json').write_text(json.dumps({'asof': args[args.index('-d') + 1], 'total_bytes': 4096}))
+    elif args[0] == 'interval-store':
+        # the store's generation is its `CURRENT.json`; `build` writes one, `add` needs one
+        store = root / args[args.index('-o') + 1].split('://', 1)[1] / 'interval-store'
+        current = store / 'CURRENT.json'
+        if args[1] == 'current':
+            print(json.loads(current.read_text())['gen'] if current.exists() else '')
+        elif args[1] == 'build':
+            store.mkdir(parents=True, exist_ok=True)
+            current.write_text(json.dumps({'gen': args[args.index('-g') + 1]}))
+        else:
+            assert args[1] == 'add' and current.exists(), args
     elif args[0] == 'static-names':
         # a generation exists once its manifest does
         gen = Path(args[args.index('-o') + 1].split('://', 1)[1], 'static-names', args[args.index('-g') + 1])
@@ -428,3 +439,40 @@ def test_the_job_and_the_site_read_the_same_static_generation() -> None:
     env = yaml.safe_load((REPO / 'infra/aws/Pulumi.rac.yaml').read_text())['config']['disk-tree-m3:env']
     sites = [re.search(r'^STATIC_GEN = "([^"]*)"', (REPO / 'site' / f).read_text(), re.M) for f in ('wrangler.toml', 'wrangler.dev.toml')]
     assert [env['STATIC_GEN'], *(m and m[1] for m in sites)] == [env['STATIC_GEN']] * 3
+def interval_calls(trace: Path) -> list[list[str]]:
+    return [[re.sub(r'^/.*/work/', '<work>/', a) for a in c[1:]] for c in map(json.loads, trace.read_text().splitlines())
+            if c[:2] == ['dt-cloud', 'interval-store']]
+
+
+def test_interval_store_builds_the_generation_once_then_appends_primary_scans_only(pipeline) -> None:
+    run, bucket, trace = pipeline
+    for stamp, host, env in [
+        ('2026-10-14T06-00-01Z', 'm3', {}),                  # no generation, not a build job: skipped
+        ('2026-10-14T10-00-01Z', 'm3', {'IS_BUILD': '1'}),   # the build job
+        ('2026-10-14T12-00-01Z', 'nas', {}),                 # a secondary store: never on it
+        ('2026-10-14T18-00-02Z', 'm3', {}),                  # appends
+    ]:
+        result = run(stamp, host, **env)
+        assert result.returncode == 0, result.stderr
+    common = ['-L', 'listing/laptop/{id}/index/{gen}/path-index.parquet', '-s', 'r2://bucket', '-o', 'r2://bucket',
+              '-w', '<work>/interval-store', '-p', '1', '-M', '10GB']
+    assert interval_calls(trace) == [
+        ['interval-store', 'current', '-o', 'r2://bucket'],
+        ['interval-store', 'current', '-o', 'r2://bucket'],
+        ['interval-store', 'build', '-g', '2026-10-14T1000', *common],
+        ['interval-store', 'current', '-o', 'r2://bucket'],
+        ['interval-store', 'add', *common],
+    ]
+    assert json.loads((bucket / 'interval-store/CURRENT.json').read_text()) == {'gen': '2026-10-14T1000'}
+
+
+def test_a_failed_interval_store_call_still_publishes_then_fails_the_run(pipeline) -> None:
+    run, bucket, trace = pipeline
+    (bucket / 'interval-store').mkdir(parents=True)
+    (bucket / 'interval-store/CURRENT.json').write_text(json.dumps({'gen': 'g1'}))
+    result = run('2026-10-14T06-00-01Z', FAKE_FAIL='interval-store', SCAN_RUNS_PROFILE='/app/p.json')
+    assert result.returncode == 3
+    calls = [c[:2] for c in map(json.loads, trace.read_text().splitlines()) if c[0] == 'dt-cloud' and c[1] != 'scan-run']
+    assert calls == [['dt-cloud', 'hosts'], ['dt-cloud', 'path-index'], ['dt-cloud', 'interval-store'], ['dt-cloud', 'index-sync']]
+    finished = [s[:3] for s in steps(trace, 0, 2 ** 40) if s[0] == 'finish']
+    assert finished == [['finish', '-x', '3']]
