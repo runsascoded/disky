@@ -100,6 +100,11 @@ elif name == 'dt-cloud':
         meta = json.loads(Path(args[args.index('-m') + 1]).read_text())
         with open(os.environ['FAKE_TRACE'], 'a') as f:
             f.write(json.dumps(['index-sync-meta', meta.get('started')]) + '\n')
+elif name == 'disk-tree' and args[0] == 'bulk-list':
+    # one listing shard of the bucket
+    out = Path(args[args.index('-o') + 1])
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'part-0.parquet').write_bytes(b'listing')
 elif name == 'disk-tree' and args[0] == 'notify':
     sys.exit(int(os.environ.get('FAKE_NOTIFY_RC', '0')))
 elif name == 'disk-tree':
@@ -471,3 +476,32 @@ def test_a_failed_interval_store_call_still_publishes_then_fails_the_run(pipelin
     assert calls == [['dt-cloud', 'hosts'], ['dt-cloud', 'path-index'], ['dt-cloud', 'interval-store'], ['dt-cloud', 'index-sync']]
     finished = [s[:3] for s in steps(trace, 0, 2 ** 40) if s[0] == 'finish']
     assert finished == [['finish', '-x', '3']]
+
+
+def test_meta_store_scans_the_bucket_beside_each_primary_capture(pipeline) -> None:
+    run, bucket, trace = pipeline
+    for stamp, host in [('2026-10-14T06-00-01Z', 'm3'), ('2026-10-14T10-00-01Z', 'nas'), ('2026-10-14T18-00-02Z', 'm3')]:
+        result = run(stamp, host, META_STATIC_GEN='2026-10-14meta')
+        assert result.returncode == 0, result.stderr
+    calls = [[re.sub(r'^/.*/work/', '<work>/', a) for a in c[1:]] for c in map(json.loads, trace.read_text().splitlines())
+             if c[:2] in (['disk-tree', 'bulk-list'], ['dt-cloud', 'static-names']) or c[:2] == ['dt-cloud', 'index-sync'] and '-s' in c and c[c.index('-s') + 1] == 'meta']
+    sn = ['-g', '2026-10-14meta', '-L', 'meta-l2/{id}/index/{gen}/path-index.parquet', '-s', 'r2://bucket', '-o', 'r2://bucket',
+          '-w', '<work>/meta-static-names', '-p', '1', '-M', '5GB']
+    sync = lambda d, g: ['index-sync', d, '-g', g, '-b', 'r2://bucket', '-k', f'meta-l2/{d}/index/{g}', '-s', 'meta', '-d', '<work>/meta-index',  # noqa: E731
+                         '-v', 'path', '-v', 'bysize', '-m', '<work>/meta-snap/meta.json', '-M', 'r2://bucket/snapshots/meta']
+    lst = ['bulk-list', 'r2://bucket', '-E', 'https://r2.invalid', '-o', '<work>/meta-listing', '-P', '1', '-x', 'clear']
+    gens = sorted(p.parent.name for p in bucket.glob('meta-l2/*/index/*/path-index.parquet'))
+    assert len(gens) == 2
+    assert calls == [
+        lst, sync('2026-10-14T0600', gens[0]), ['static-names', 'build', *sn],
+        lst, sync('2026-10-14T1800', gens[1]), ['static-names', 'add', *sn],
+    ]
+    assert sorted(p.relative_to(bucket).as_posix() for p in bucket.glob('*meta*/**/*') if p.is_file()) == [
+        f'meta-l2/2026-10-14T0600/index/{gens[0]}/path-index.parquet',
+        f'meta-l2/2026-10-14T1800/index/{gens[1]}/path-index.parquet',
+        'meta-listing/2026-10-14T0600/part-0.parquet',
+        'meta-listing/2026-10-14T1800/part-0.parquet',
+    ]
+    assert sorted(p.relative_to(bucket).as_posix() for p in bucket.glob('snapshots/meta/*/meta.json')) == [
+        'snapshots/meta/2026-10-14T0600/meta.json', 'snapshots/meta/2026-10-14T1800/meta.json',
+    ]
