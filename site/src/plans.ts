@@ -197,10 +197,11 @@ export function useUnstage(planId: number | null) {
 }
 
 /** Dispatch the plan to the deployment's executor (admin): a dry run reports
- *  what a real run would delete; a real run deletes, recoverably. */
+ *  what a real run would delete; a real run deletes, recoverably. A real run
+ *  takes no `date`: the server runs it at its dry run's scan. */
 export function useDispatch(planId: number | null) {
   const qc = useQueryClient()
-  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date: string; buckets?: string[]; machine?: string }>({
+  return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date?: string; buckets?: string[]; machine?: string }>({
     mutationFn: ({ mode, date, buckets, machine }) => {
       if (planId == null) throw new Error('nothing staged')
       return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}) })
