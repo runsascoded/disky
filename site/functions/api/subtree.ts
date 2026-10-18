@@ -13,7 +13,8 @@
  */
 import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
 import { type Env, type Identity, requireViewer } from '../_lib/auth.js'
-import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
+import { intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
+import { withChildAges } from '../_lib/childAges.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, type ViewNode } from '../_lib/view.js'
@@ -189,7 +190,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
         ...(owner ? { owner } : {}),
         ...(query ? { q: qRaw, ...hexNote(hx.hexRuns, query.ast), matches: view.matches ?? [], matched: view.matched ?? [], ...(view.matchCount ? { matchCount: view.matchCount } : {}), ...(view.matchesCapped ? { matchesCapped: true } : {}), ...(view.rollup ? { rollup: view.rollup } : {}), ...(view.excluded ? { excluded: view.excluded } : {}), ...(view.firstPaint ? { firstPaint: true } : {}), ...(view.interiors ? { interiors: view.interiors } : {}), partial: view.partial, partialReason: view.partialReason, approximate: view.approximate, approximateReason: view.approximateReason, ...(view.dirsOnly ? { dirsOnly: true } : {}) } : {}),
         ...(keep !== true ? { budgetCut: true } : {}),
-        tree: view.tree,
+        tree: intervalsOn(ctx.env) && !lens && !owner && !classes && !query ? await withChildAges(ctx.env, date, path, view.tree) : view.tree,
       })
       return { body, keep }
     }

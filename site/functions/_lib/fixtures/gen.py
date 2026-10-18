@@ -41,6 +41,10 @@
   total (`tot`, specs/done/bysize-path-total.md), so a group's `b_max` must be
   `MAX(tot)` for a 512 KiB read to keep it (`sliceComplete.test.ts`); its
   `plans.json` is `disk-tree tiers plan -j` (with `matched`) over `SLICE_PLANS`.
+- `v2-ages/`: a laptop-shaped scan (`path-index -g`: the `age_b0…6` columns) and its age pyramid's `1d` tier
+  (`write_age_pyramid`), over objects whose created days sit on both sides of every `AGE_EDGES_DAYS` edge
+  (at intra-day hours, plus one future stamp) under four dirs of `bk`, so each child's strata from the pyramid
+  can be checked against its `age_b*` columns (`childAges.test.ts`).
 - `v2/plans.json`: `disk-tree tiers plan -j -C` over each v2 sidecar for a
   set of reads — the engine planner's group selection, which the reader's
   span queries must reproduce exactly (`pathStore.test.ts`).
@@ -54,6 +58,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from os.path import dirname, join
+from pathlib import Path
 
 import duckdb
 import pandas as pd
@@ -336,6 +341,50 @@ def write_v2_mount(here: str) -> None:
     write_v2_search(here, 'v2-mount', objects=mount_rows)
 
 
+#: The `v2-ages` scan: its id, and its objects as (name, bytes, days before the scan day, hour of that day).
+AGES_ASOF = '2026-10-18T1014'
+AGES_EDGE_DAYS = (0, 1, 6, 7, 29, 30, 90, 91, 364, 365, 1094, 1095, 4000)
+
+
+def ages_rows() -> list[tuple[str, int, int, int]]:
+    rows = [(f'mixed/d{age}', 1000 + age, age, 13) for age in AGES_EDGE_DAYS]
+    rows += [('mixed/future', 777, -3, 2)]
+    rows += [(f'old/o{k}', 5000 * (k + 1), 2000 + 400 * k, 23) for k in range(3)]
+    rows += [(f'new/n{k}', 300 * (k + 1), k, 0) for k in range(3)]
+    rows += [(f'deep/x/y/z{age}', 64 << (age % 7), age, 6) for age in AGES_EDGE_DAYS]
+    return rows
+
+
+def write_v2_ages(here: str) -> None:
+    from dt_cloud.viz import write_path_index
+    out_dir = join(here, 'v2-ages')
+    shutil.rmtree(out_dir, ignore_errors=True)
+    day0 = datetime.fromisoformat(AGES_ASOF[:10]).replace(tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as tmp:
+        listing = join(tmp, 'listing.parquet')
+        rows = ages_rows()
+        pd.DataFrame({
+            'bucket': ['bk'] * len(rows),
+            'name': [n for n, *_ in rows],
+            'size_bytes': [b for _, b, *_ in rows],
+            'created': [day0 - pd.Timedelta(days=age) + pd.Timedelta(hours=hour) for *_, age, hour in rows],
+            'storage_class_id': [1] * len(rows),
+        }).to_parquet(listing)
+        pi = join(tmp, 'pi', 'path-index.parquet')
+        write_path_index((listing,), Path(join(tmp, 'snap')), AGES_ASOF, path_index=Path(pi), age_strata=True)
+        con = duckdb.connect()
+        pyr = ix.write_age_pyramid(con, pi, join(tmp, 'pyr'), bins=('1d',))
+        print(json.dumps({'pyramid': pyr}, indent=2, default=str), file=sys.stderr)
+        shutil.os.makedirs(out_dir)
+        files = {'path': join(out_dir, 'path-index.parquet'), 'age-pyramid-1d': join(out_dir, 'age-pyramid-1d.parquet')}
+        shutil.copy(pi, files['path'])
+        shutil.copy(join(tmp, 'pyr', 'age-pyramid-1d.parquet'), files['age-pyramid-1d'])
+    d1 = d1_json(files)
+    for variant, parquet in files.items():
+        write_text(parquet.removesuffix('.parquet') + '.groups.json', groups_blob(d1[variant]['schema'], d1[variant]['rows']))
+    write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
+
+
 def write_v1(here: str) -> None:
     parquet = join(here, 'path-index-zstd.parquet')
     write_text(join(here, 'path-index-zstd.d1.json'), json.dumps(d1_json({'path': parquet}), separators=(',', ':')))
@@ -348,6 +397,7 @@ WRITERS = {
     'v2-slices': write_v2_slices,
     'v2-search': write_v2_search,
     'v2-mount': write_v2_mount,
+    'v2-ages': write_v2_ages,
 }
 
 
