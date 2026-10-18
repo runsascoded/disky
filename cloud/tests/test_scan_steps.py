@@ -150,7 +150,7 @@ def test_serving_steps_commands(tmp_path, env):
     k = "l2/2026-10-16T1200/index/G1"
     assert c.sh_impl.calls == [
         "dt-cloud static-names runs add -c 2026-10-16T1200",
-        "dt-cloud publish-r2 -a 2026-10-16T1200",
+        "dt-cloud publish-r2 -b <tmp>/data -a 2026-10-16T1200",
         f"dt-cloud index-sync -r -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
         f"dt-cloud index-sync -p -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
         "dt-cloud index-gc 2026-10-16T1200",

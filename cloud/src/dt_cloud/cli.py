@@ -3138,7 +3138,7 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
 
 @main.command("publish-r2")
 @option("-a", "--all-gens", is_flag=True, help="Copy every `index/<gen>/` under the scan, pointed or not (no D1 read); default: only the generations a D1 `index_schema` row names")
-@option("-b", "--bucket", "src_bucket", default=None, help="Source GCS scan store (default $DATA_BUCKET)")
+@option("-b", "--bucket", "src_bucket", default=None, help="Source scan store: a GCS bucket, or an absolute local dir (the local executor's data store) (default $DATA_BUCKET)")
 @option("-l", "--layer2", default=None, help="Layer-2 dir template, `{scan}` = the scan id (default $LAYER2_PREFIX; one of the two is required)")
 @option("-L", "--no-listings", is_flag=True, help="Leave the canonical per-bucket listings (`<layer-2 dir>/<bucket>.parquet`) in GCS only; copy the tiers + snapshot JSONs")
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")

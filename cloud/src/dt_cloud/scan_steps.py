@@ -733,8 +733,10 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
             return
         fill = dict(snapshots=ctx.snapshots, scan=ctx.scan, index=ctx.index_key)
         req = [a for k in ctx.opt("publish-r2", "require", []) for a in ("-R", k.format(**fill))]
-        runs = [["dt-cloud", "publish-r2", *ctx.opt("publish-r2", "args", []), "-a", *req, ctx.scan]]
-        runs += [["dt-cloud", "publish-r2", "-a", "-p", k, "-R", k, ctx.scan] for k in ctx.opt("publish-r2", "keys", [])]
+        # A local data dir is its own source; a GCS one is the env's `$DATA_BUCKET`.
+        src = [] if urlparse(ctx.profile.data).scheme else ["-b", str(ctx.data_root.resolve())]
+        runs = [["dt-cloud", "publish-r2", *src, *ctx.opt("publish-r2", "args", []), "-a", *req, ctx.scan]]
+        runs += [["dt-cloud", "publish-r2", *src, "-a", "-p", k, "-R", k, ctx.scan] for k in ctx.opt("publish-r2", "keys", [])]
         for argv in runs:
             if ctx.sh(argv, fatal=False, warn=f"publish-r2 failed for {ctx.scan} (the site keeps serving the data store)") is None and barrier:
                 raise StepFailed(1, f"publish-r2 failed for {ctx.scan}: D1 pointers were not advanced, so the previous scan "

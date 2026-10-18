@@ -29,12 +29,15 @@ R2 is reached through its S3-compatible API; creds come from the env:
 from __future__ import annotations
 
 import base64
+import hashlib
+import mimetypes
 import re
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -222,8 +225,34 @@ def r2_bucket() -> str:
     return b
 
 
+def local_root(src_bucket: str) -> Path | None:
+    """A source that is a local dir (an absolute path: the local executor's data store), else None (a GCS bucket)."""
+    return Path(src_bucket) if src_bucket.startswith("/") else None
+
+
+def file_md5(path: Path) -> str:
+    h = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def list_source(src_bucket: str, prefixes: list[str]) -> list[Obj]:
-    """Every object under the served prefixes, sorted by key."""
+    """Every object under the served prefixes, sorted by key: a GCS bucket's (its md5s), or a local dir's (keys are
+    paths relative to it, md5s computed; dot-files, a writer's temps, left out)."""
+    root = local_root(src_bucket)
+    if root is not None:
+        found: dict[str, Obj] = {}
+        for prefix in prefixes:
+            base = root / prefix if prefix.endswith("/") else (root / prefix).parent
+            if not base.is_dir():
+                continue
+            for f in base.rglob("*"):
+                key = f.relative_to(root).as_posix()
+                if f.is_file() and key.startswith(prefix) and not f.name.startswith("."):
+                    found[key] = Obj(key=key, size=f.stat().st_size, md5=file_md5(f), content_type=mimetypes.guess_type(f.name)[0])
+        return sorted(found.values(), key=lambda o: o.key)
     from google.cloud import storage
 
     client = storage.Client()
@@ -248,13 +277,17 @@ def head_dest(s3: "S3Client", bucket: str, key: str) -> Dest | None:
 
 
 def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
-    """Stream one object GCS → R2 (no local spool), stamping its md5."""
-    from google.cloud import storage
-
-    blob = storage.Client().bucket(src_bucket).blob(obj.key)
+    """One object → R2, stamping its md5: streamed from GCS (no local spool), or uploaded from a local dir."""
     extra: dict[str, Any] = {"Metadata": {MD5_META: obj.md5} if obj.md5 else {}}
     if obj.content_type:
         extra["ContentType"] = obj.content_type
+    root = local_root(src_bucket)
+    if root is not None:
+        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra)
+        return
+    from google.cloud import storage
+
+    blob = storage.Client().bucket(src_bucket).blob(obj.key)
     with blob.open("rb") as f:
         s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra)
 
@@ -292,7 +325,7 @@ def publish(
         n, b = dropped[d]
         err(f"publish-r2 {scan}: left out unpointed generation {d}/ ({n} objects, {b:,} B)")
     if not objs:
-        raise SystemExit(f"publish-r2: nothing under {', '.join(prefixes)} in gs://{src_bucket}")
+        raise SystemExit(f"publish-r2: nothing under {', '.join(prefixes)} in {src_bucket if local_root(src_bucket) else f'gs://{src_bucket}'}")
     s3, bucket = r2_client(), r2_bucket()
     report = Report()
     required_keys = set(required)

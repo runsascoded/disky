@@ -1,5 +1,8 @@
 """Specs for the R2 publish step (`dt_cloud.publish`): exact served-subset
 prefixes and the idempotency decision — the pure core the CLI drives."""
+import hashlib
+from pathlib import Path
+
 from dt_cloud import publish as P
 import pytest
 
@@ -190,3 +193,30 @@ def test_publish_repairs_required_destination_with_unknown_checksum(monkeypatch)
     dest[obj.key] = P.Dest(size=7, md5=None)
     assert P.publish("s", layer2="listing/{scan}/index/", required=(obj.key,)) == P.Report(copied=[obj.key], skipped=[], bytes=7)
     assert dest == {obj.key: P.Dest(size=7, md5=MD5_HEX)}
+
+
+def test_a_local_dir_source_lists_its_files_with_md5s_and_uploads_them(tmp_path, monkeypatch):
+    root = tmp_path / "data"
+    (root / "snapshots/laptop/S1").mkdir(parents=True)
+    (root / "listing/laptop/S1/index/G1").mkdir(parents=True)
+    (root / "snapshots/laptop/S1/meta.json").write_text("{}")
+    (root / "listing/laptop/S1/index/G1/path-index.parquet").write_bytes(b"pi")
+    (root / "listing/laptop/S1/index/G1/.path-index.parquet.tmp").write_bytes(b"partial")
+    (root / "listing/laptop/S2/index/G2").mkdir(parents=True)
+    (root / "listing/laptop/S2/index/G2/path-index.parquet").write_bytes(b"other scan")
+    objs = P.list_source(str(root), ["snapshots/laptop/S1/", "listing/laptop/S1/"])
+    assert objs == [
+        P.Obj(key="listing/laptop/S1/index/G1/path-index.parquet", size=2, md5=hashlib.md5(b"pi").hexdigest(), content_type=None),
+        P.Obj(key="snapshots/laptop/S1/meta.json", size=2, md5=hashlib.md5(b"{}").hexdigest(), content_type="application/json"),
+    ]
+
+    class S3:
+        def __init__(self):
+            self.uploads = []
+
+        def upload_file(self, path, bucket, key, ExtraArgs):
+            self.uploads.append((Path(path).read_bytes(), bucket, key, ExtraArgs))
+
+    s3 = S3()
+    P.copy_one(str(root), s3, "serve", objs[0])
+    assert s3.uploads == [(b"pi", "serve", "listing/laptop/S1/index/G1/path-index.parquet", {"Metadata": {"gcs-md5": hashlib.md5(b"pi").hexdigest()}})]
