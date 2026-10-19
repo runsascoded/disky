@@ -55,7 +55,20 @@ describe('D1', () => {
       const { db } = await sqliteD1()
       const a = await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a'), 'ann@example.org', NOW)
       const b = await mint(db, u => pageView(u, 'marin GCS'), page('/marin-a'), 'ann@example.org', NOW)
-      expect([a!.token.length, b!.token.length, a!.token === b!.token]).toEqual([10, 10, false])
+      expect([/^[a-z0-9]{12}$/.test(a!.token), /^[a-z0-9]{12}$/.test(b!.token), a!.token === b!.token]).toEqual([true, true, false])
+    })
+    it('a token works whatever case the link arrives in (Slack lowercases URLs), a 10-char mixed-case one too, and revokes so', async () => {
+      const { db } = await sqliteD1()
+      const view = (u: URL) => pageView(u, 'marin GCS')
+      const legacy = (await mint(db, view, page('/marin-a'), 'ann@example.org', NOW, 30, 'VhdAbC1234'))!
+      const fresh = (await mint(db, view, page('/marin-b'), 'ann@example.org', NOW))!
+      const tier = (path: string, t: string) => fullTier(db, 'map', { path }, t, NOW).then(r => r != null)
+      expect(await Promise.all([
+        tier('marin-a', 'VhdAbC1234'), tier('marin-a', 'vhdabc1234'), tier('marin-a', 'VHDABC1234'),
+        tier('marin-b', fresh.token), tier('marin-b', fresh.token.toUpperCase()),
+      ])).toEqual([true, true, true, true, true])
+      expect([legacy.token, (await revoke(db, 'vhdabc1234', 'admin@example.org', NOW)), await tier('marin-a', 'VhdAbC1234')])
+        .toEqual(['VhdAbC1234', 1, false])
     })
     it('pages without a card mint nothing', async () => {
       const { db } = await sqliteD1()

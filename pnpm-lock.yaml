@@ -59,7 +59,7 @@ importers:
 
   packages/react:
     dependencies:
-      '@rdub/treemap':
+      '@open-athena/treemap':
         specifier: workspace:*
         version: link:../treemap
       react:
@@ -151,11 +151,14 @@ importers:
       '@open-athena/auth':
         specifier: github:Open-Athena/auth#d87ade68aa5aa9bedb80d1833381bff4c0c0416e
         version: https://codeload.github.com/Open-Athena/auth/tar.gz/d87ade68aa5aa9bedb80d1833381bff4c0c0416e(@cloudflare/workers-types@5.20261014.1)(@tanstack/react-query@5.101.4(react@19.2.8))(react@19.2.8)
+      '@open-athena/treemap':
+        specifier: workspace:*
+        version: link:../packages/treemap
       '@rdub/file-tree':
         specifier: https://github.com/runsascoded/file-tree#9d9bd749469aa4ae76b860ea9a403c3ab18df80b
         version: https://codeload.github.com/runsascoded/file-tree/tar.gz/9d9bd749469aa4ae76b860ea9a403c3ab18df80b(@rdub/treemap@packages+treemap)(highlight.js@11.12.0)(hyparquet@1.30.0)(jq-web@0.6.2)(react-dom@19.2.8(react@19.2.8))(react-markdown@10.1.0(@types/react@19.2.18)(react@19.2.8))(react-router-dom@6.30.6(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(remark-gfm@4.0.1)(use-prms@https://codeload.github.com/runsascoded/use-prms/tar.gz/661e994157d9a595ebb0ab5276d5c579c9cc1ca9(react@19.2.8)(vue@3.5.44(typescript@5.9.3)))(wa-sqlite@1.0.0)(yaml@2.9.1)
       '@rdub/treemap':
-        specifier: workspace:*
+        specifier: workspace:@open-athena/treemap@*
         version: link:../packages/treemap
       '@resvg/resvg-wasm':
         specifier: ^2.6.2

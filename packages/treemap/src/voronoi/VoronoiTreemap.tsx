@@ -15,7 +15,7 @@ import type { VoronoiLayoutOpts } from './layout'
  * iterative. Where this wins is a *circular* clip — a glyph inside a scatter
  * marker, or an aesthetic full-panel alt view — which rectangles can't fill.
  *
- * Ships from the `@rdub/treemap/voronoi` subpath so the core package stays
+ * Ships from the `@open-athena/treemap/voronoi` subpath so the core package stays
  * dependency-free; `d3-voronoi-treemap` and `d3-hierarchy` are optional peers
  * that only consumers of this subpath need to install.
  */

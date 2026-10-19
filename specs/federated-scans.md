@@ -8,7 +8,7 @@ A scan is a **portable artifact** (`<uuid>.parquet` + `.scan.json`, as `index --
 
 1. **Scans live beside the data they describe.** Each source bucket houses its own scans — inside it under a reserved prefix (`_disk-tree/` / `usage/`) or in a dedicated **sidecar bucket** (`<bucket>-usage`). Whoever owns/scans the bucket publishes there.
 2. **The www reader unions multiple distinct scan locations — at read time.** A deploy is configured with a *list* of scan locations `{store, prefix, creds}`; the Map unions their roots (the union-of-roots concept, now over independent, separately-owned locations rather than one pre-merged index).
-3. **The viz is embeddable per project.** The same widgets (`@rdub/treemap` + `@disk-tree/react`: treemap, sizes-over-time, age, staleness) render a *single* location embedded in that project's own site. e.g. ctbk / crashes / jct each surface their own bucket's usage (sizes over time, treemap) at their own `/files` page, reading their own sidecar — while r2.rbw.sh unions all three.
+3. **The viz is embeddable per project.** The same widgets (`@open-athena/treemap` + `@disk-tree/react`: treemap, sizes-over-time, age, staleness) render a *single* location embedded in that project's own site. e.g. ctbk / crashes / jct each surface their own bucket's usage (sizes over time, treemap) at their own `/files` page, reading their own sidecar — while r2.rbw.sh unions all three.
 
 The through-line: **one scan artifact, many readers** — a project's own site (single location) and an aggregator (union of locations), both anonymous over public buckets.
 

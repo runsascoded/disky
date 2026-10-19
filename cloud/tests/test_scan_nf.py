@@ -93,6 +93,25 @@ def test_dag_order_and_resume(tmp_path):
     assert (runs / "dag.mmd").read_text().splitlines()[0] == "flowchart TB"
 
 
+def test_preview_dag_is_the_runs(tmp_path):
+    """The head's up-front DAG (`-preview`: no task runs) reduces to exactly the graph the real run's `-with-dag` does."""
+    from dt_cloud import run_dag
+    from dt_cloud.scan_head import preview_argv
+
+    marks = tmp_path / "marks"
+    r = head(tmp_path, marks)
+    assert r.returncode == 0, r.stderr
+    launch = tmp_path / "nf"
+    marks.unlink()
+    env = {**os.environ, "NXF_OFFLINE": "true", "NXF_ANSI_LOG": "false", "DT_SCAN_STEP_FAKE": str(marks)}
+    p = subprocess.run(preview_argv(REPO / "job/nf", launch), cwd=launch, env=env, capture_output=True, text=True, timeout=600)
+    assert p.returncode == 0, p.stderr
+    assert marks.exists() is False  # nothing ran
+    preview = run_dag.read("nextflow", (launch / "dag-preview.mmd").read_text())
+    real = run_dag.read("nextflow", (launch / "runs/2026-10-16T1200/dag.mmd").read_text())
+    assert preview.to_json() == real.to_json()
+
+
 def test_reproc_unfolded(tmp_path):
     """`-R` runs from `index` (no list tasks, no bucket-check); `fold: []` gives index-sync its own task."""
     marks = tmp_path / "marks"

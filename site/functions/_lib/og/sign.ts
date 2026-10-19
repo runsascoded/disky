@@ -8,7 +8,7 @@
  *   from `SESSION_SECRET`, as 10 base62 digits (~59.5 bits; the key never
  *   leaves the server, so only online guessing applies). A missing, bad or
  *   expired `sig` serves the anonymous card, never an error.
- * - **View token** (`og=`): a random 10-char base62 token (`randomToken`), no
+ * - **View token** (`og=`): a random 12-char lowercase base36 token (`randomToken`; 10-char base62 before 2026-10-19, still read), no
  *   MAC. The `og_tokens` row is the whole truth (`tokens.ts`): valid iff a row
  *   with that token exists for this exact view, unexpired and unrevoked.
  *
@@ -41,14 +41,18 @@ export function unpackDays(s: string): number | null {
   return hi < 0 || lo < 0 ? null : hi * 62 + lo
 }
 
-/** `n` uniformly random base62 chars: random bytes, rejecting those ≥ 248
- * (= 4·62) so `% 62` carries no modulo bias. `rand` is injectable for tests. */
-export function randomToken(n = 10, rand: (b: Uint8Array) => Uint8Array = b => crypto.getRandomValues(b)): string {
+/** Lowercase letters and digits: a token that survives a client lowercasing the URL (Slack does). */
+export const B36 = 'abcdefghijklmnopqrstuvwxyz0123456789'
+
+/** `n` uniformly random chars of `alphabet` (default base62): random bytes, rejecting those at or past the largest
+ * multiple of its size (248 = 4·62, 252 = 7·36) so `%` carries no modulo bias. `rand` is injectable for tests. */
+export function randomToken(n = 10, rand: (b: Uint8Array) => Uint8Array = b => crypto.getRandomValues(b), alphabet = B62): string {
+  const limit = 256 - (256 % alphabet.length)
   let out = ''
   while (out.length < n) {
     for (const x of rand(new Uint8Array(n * 2))) {
-      if (x >= 248) continue
-      out += B62[x % 62]
+      if (x >= limit) continue
+      out += alphabet[x % alphabet.length]
       if (out.length === n) break
     }
   }

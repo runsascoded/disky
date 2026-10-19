@@ -80,7 +80,7 @@ jobs:
         run: uv run mypy src/disk_tree --ignore-missing-imports
 
   treemap-widget:
-    name: "@rdub/treemap (typecheck + test)"
+    name: "@open-athena/treemap (typecheck + test)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -146,14 +146,19 @@ def gen_dir(key: str, layer2_dir: str) -> str | None:
 # The extras sidecars the site reads from a generation dir (`extras.py`; the site's `_lib/extras.ts`):
 # with the snapshot JSONs, the "small" served subset (`publish -S`).
 EXTRAS_FILES = frozenset({"attr.tsv", "attr.tsv.idx.json"})
+# The age chart's per-scan tiers (`index_footer.INDEX_VARIANTS`' `age-pyramid-<bin>`), small beside the sorts.
+AGE_PYRAMID = re.compile(r"age-pyramid-\d+[hd]\.parquet")
 
 
 def is_small(key: str, layer2_dir: str) -> bool:
     """Whether ``key`` is in the small served subset: anything outside the layer-2 dir (the snapshot
-    JSONs, `snapshots/rules.json`), and inside it only the extras sidecars — never a tier, a
-    listing or a rollup. What a deployment whose path store is served from elsewhere (an interval
-    store) still needs beside it: the page's header JSONs and the provenance its views carry."""
-    return not key.startswith(layer2_dir) or key.rsplit("/", 1)[-1] in EXTRAS_FILES
+    JSONs, `snapshots/rules.json`), and inside it only the extras sidecars and the age pyramids
+    (`age-pyramid-<bin>.parquet`: the age chart reads them per scan, specs/lean-scans.md §1.3) —
+    never a sort, a listing or a rollup. What a deployment whose path store is served from
+    elsewhere (an interval store) still needs beside it: the page's header JSONs, the age chart's
+    tiers and the provenance its views carry."""
+    name = key.rsplit("/", 1)[-1]
+    return not key.startswith(layer2_dir) or name in EXTRAS_FILES or AGE_PYRAMID.fullmatch(name) is not None
 
 
 def served(

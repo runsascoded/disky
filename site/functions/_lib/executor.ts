@@ -7,13 +7,17 @@
  * or `sweep` (gcs's). An HTTP route passes its own kind; Slack uses the var.
  *
  * `dispatchPlan` owns what both executors share: request validation, the
- * digest of the item set the run acts on (recorded on the run), and the real
- * gate — a real run needs a finished dry-run of exactly that set, with no run
- * of the plan in flight, and runs on that dry-run's scan.
+ * item set the run acts on (the rows checked on /staged, `req.items`; the whole
+ * plan when absent) and its digest (recorded on the run), and the real run's
+ * terms (`realRun`): no run of the plan in flight; no prior dry run required
+ * (specs/delete-what-you-see.md: a real run once deleted a prefix its dry run
+ * covered but the person had unchecked) — a dry run of exactly that set at that
+ * scan is reused when there is one, else the run builds its own manifest.
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type DispatchErr, type DispatchReq, type ExecEnv, type Executor, refuse } from './dispatch.js'
-import { planDigest, planRuns, realGate, type RunRow } from './plans.js'
+import { NotInPlan, planDigest, planRuns, realRun, type RunRow } from './plans.js'
+
 import { announceFinished, notifyPlan } from './stagedSlack.js'
 import { laptop } from './laptopDispatch.js'
 import { planSweep } from './planDispatch.js'
@@ -75,21 +79,25 @@ export async function dispatchPlan(
   if (req.mode === 'dry' && req.date === undefined) return refuse(400, `date required for a dry run (${ex.dateHint})`)
   const db = env.DB
 
-  const prep = await ex.prepare(env, db, req)
+  let prep: Awaited<ReturnType<Executor['prepare']>>
+  try {
+    prep = await ex.prepare(env, db, req)
+  } catch (e) {
+    if (e instanceof NotInPlan) return refuse(400, e.message)
+    throw e
+  }
   if ('ok' in prep) return prep
+  if (!prep.prefixes.length) return refuse(400, 'nothing selected')
   const digest = await planDigest(prep.prefixes)
 
   let date = req.date
   let reviewed: RunRow | undefined
   if (req.mode === 'real') {
     await refreshRuns(env, db, req.siteUrl, ex)
-    const gate = realGate(await planRuns(db, req.planId), digest, prep.prefixes.length)
-    if (!gate.ok) return refuse(409, `not deleting: ${gate.reason}`)
-    if (date !== undefined && date !== gate.dry.scan) {
-      return refuse(409, `not deleting: a real run uses its dry-run's scan (${gate.dry.scan}, ${gate.dry.run_id}), not ${date}`)
-    }
-    date = gate.dry.scan
-    reviewed = gate.dry
+    const run = realRun(await planRuns(db, req.planId), digest, prep.prefixes.length, date)
+    if (!run.ok) return refuse(409, `not deleting: ${run.reason}`)
+    reviewed = run.reviewed ?? undefined
+    date = date ?? reviewed?.scan
   }
   if (date === undefined) throw new Error('unreachable: a dry run without a date was refused above')
 

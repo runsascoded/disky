@@ -233,7 +233,7 @@ disk-tree dispatch [PLAN] # Execute a plan (id/name; default the open `Staged` p
 `site/` is the hosted/serverless app: Vite + React + TypeScript, with Pages Functions over R2 / GCS +
 D1 (disk.rbw.sh, r2.rbw.sh, the gcs/cw deployments). Its chart-lib-free DIY-SVG/canvas widgets come
 from two workspace packages:
-- **`@rdub/treemap`** (`packages/treemap/`) — the SOTA treemap core + layout/color primitives:
+- **`@open-athena/treemap`** (`packages/treemap/`) — the SOTA treemap core + layout/color primitives:
   `<Treemap>` (SVG + canvas renderers, shared-edge tiling, dust texturing, per-cell `ring`
   emphasis, hover/pin events), `<VoronoiTreemap>` (`/voronoi` subpath), `useHoverPin`, `squarify`,
   `DEFAULT_PALETTE`/`ageFade`/`parseQuery`, `styles.css`. Disk-agnostic; the intended external
@@ -250,6 +250,8 @@ same commit (`dt-cloud d1-schema dump site/schema.sql site/migrations/<slug>.sql
 `dt-cloud d1-schema check -p` verifies, and CI runs it); the recipe is applied to each of the branch's
 databases (`--file site/migrations/<slug>.sql`; `cloud`'s only one is the r2 demo's `disk-tree-demo-db`),
 then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compares a live D1, read-only.
+
+**Deleting D1 rows:** anything that can match more than a few thousand rows goes through `index_footer.d1_delete(table, where, …)` (≤ `D1_DELETE_ROWS` = 5,000 a statement, until one deletes none), never one `DELETE … WHERE`: D1 fails a statement deleting millions of rows (`7500 internal error`; gcs's `scan retire`, 2026-10-18).
 
 ### Cloud site auth routes (`site/functions/`)
 

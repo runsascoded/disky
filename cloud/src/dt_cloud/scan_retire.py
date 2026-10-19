@@ -358,8 +358,10 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
     in_static = set(listed(st, f"{STATIC_PREFIX}/{static_gen}"))
     gens = lineage(iv, iv_gen)
     scans = find_scans(src, list(layouts), list(layer2s), list(layer1s))
-    ids = list(scans)
-    kept = set(ids[len(ids) - keep:]) if keep else set()
+    # The newest `keep` of the deployment's scans (this root's and every one the interval store holds), not of this
+    # root's alone: a copy that stopped receiving per-scan files (lean scans write none to R2) would otherwise keep its
+    # own last `keep` forever.
+    kept = set(sorted(set(scans) | in_iv)[-keep:]) if keep else set()
     rows: list[dict] = []
     markers: dict[str, dict] = {}
     for sid, s in scans.items():

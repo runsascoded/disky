@@ -1,6 +1,6 @@
 /** The card SVG (specs/done/dogi.md): 1200×630, a header (site, title, subtitle), a
  * treemap of the view, and a footer (totals, and the legend). Pure and
- * DOM-free (`@rdub/treemap/squarify` only), so it runs in the Worker and is
+ * DOM-free (`@open-athena/treemap/squarify` only), so it runs in the Worker and is
  * tested by its structure.
  *
  * Tiers: an `anon` card draws shapes and colours only. No tile is labelled
@@ -8,8 +8,9 @@
  * person (a scraper can't walk the tree card by card), at any depth. A `full`
  * card labels tiles at every depth where they fit and names the legend's owners. An explicitly public map may also
  * label its paths without changing its unsigned authentication tier. */
-import { squarify } from '@rdub/treemap/squarify'
-import { parseColor } from '@rdub/treemap/parseColor'
+import { squarify } from '@open-athena/treemap/squarify'
+import { parseColor } from '@open-athena/treemap/parseColor'
+import { unitTicks } from '../../../src/series.js'
 
 export const CARD_W = 1200
 export const CARD_H = 630
@@ -44,9 +45,23 @@ export interface CardData {
   legend?: LegendItem[]
   /** Shown instead of a treemap when there's nothing to draw. */
   empty?: string
+  /** The view couldn't be read (an error, not an answer): drawn, but never cached, so the next fetch retries. */
+  failed?: boolean
   /** A heatmap instead of a treemap (`/assignments`): rows × cols, cell
    *  shade by bytes. Labels (people) only on a `full` card. */
   grid?: Grid
+  /** A time series instead of a treemap (size over time): bytes per scan. Axis values and the latest point's label
+   *  only on a labelled card. */
+  chart?: Chart
+}
+
+/** A size-over-time chart: `total`'s points `[x (ms), bytes]`, ascending x; with `bands` (the store root's buckets,
+ *  bottom to top) each band's `[x, y0, y1]` stacked up to the total, which rides their top edge as a thin line. */
+export interface Chart {
+  total: [number, number][]
+  bands?: { color: string; points: [number, number, number][] }[]
+  /** `x` (ms) → the axis label (`Oct 12`). */
+  fmtX: (x: number) => string
 }
 
 export interface Grid {
@@ -137,6 +152,61 @@ function gridSvg(g: Grid, full: boolean, x: number, y: number, w: number, h: num
   return out.join('')
 }
 
+/** The single trace's colour: the page's `--s1` (dark theme). */
+export const SERIES_COLOR = '#3987e5'
+const GRID_LINE = '#2a2d35'
+
+/** Evenly spaced x ticks over `[x0, x1]`, `n` of them (the ends included). */
+const xTicks = (x0: number, x1: number, n: number): number[] => x1 > x0 ? Array.from({ length: n }, (_, i) => x0 + (x1 - x0) * i / (n - 1)) : [x0]
+
+/** Nice byte ticks from 0 to at least `max`: the page's (`unitTicks`, IEC), one more step when the last falls short. */
+function yTicksOf(max: number): number[] {
+  const t = unitTicks(0, Math.max(max, 1), 1024)
+  const step = t.length > 1 ? t[1] - t[0] : Math.max(max, 1)
+  return t[t.length - 1] < max ? [...t, t[t.length - 1] + step] : t.length > 1 ? t : [0, step]
+}
+
+/** The chart in the box: gridlines at nice byte ticks (labelled on a labelled card), dates along the bottom, then the
+ * area (or the stacked bands and the total over them), and the latest point marked (its value labelled when
+ * labelled). Pure geometry: the anon tier draws the same shape, no numbers. */
+function chartSvg(c: Chart, labels: boolean, x: number, y: number, w: number, h: number): string {
+  const out: string[] = []
+  const pts = c.total
+  const left = labels ? 92 : 0
+  const bottom = 30
+  const [px, py, pw, ph] = [x + left, y + 6, w - left - 8, h - bottom - 6]
+  const x0 = pts[0][0], x1 = pts[pts.length - 1][0]
+  const ticks = yTicksOf(Math.max(...pts.map(p => p[1]), ...(c.bands ?? []).flatMap(b => b.points.map(p => p[2]))))
+  const yMax = ticks[ticks.length - 1] || 1
+  const X = (v: number) => x1 > x0 ? px + (v - x0) / (x1 - x0) * pw : px + pw / 2
+  const Y = (v: number) => py + ph - v / yMax * ph
+  for (const t of ticks) {
+    out.push(`<line class="grid" x1="${r1(px)}" y1="${r1(Y(t))}" x2="${r1(px + pw)}" y2="${r1(Y(t))}" stroke="${GRID_LINE}" stroke-width="1"/>`)
+    if (labels) out.push(text(px - 10, Y(t) + 5, t ? fmtB(t) : '0', 15, { fill: MUTED, anchor: 'end' }))
+  }
+  // Few points: a tick at each; else evenly spaced. A tick whose label repeats the one before it is dropped.
+  const xt = (pts.length <= 5 ? pts.map(p => p[0]) : xTicks(x0, x1, 5)).filter((t, i, a) => i === 0 || c.fmtX(t) !== c.fmtX(a[i - 1]))
+  xt.forEach((t, i) => out.push(text(X(t), py + ph + 24, c.fmtX(t), 15, { fill: MUTED, anchor: xt.length === 1 ? 'middle' : i === 0 ? 'start' : i === xt.length - 1 && X(t) > px + pw - 40 ? 'end' : 'middle' })))
+  const line = (ps: [number, number][]) => ps.map(([a, b], i) => `${i ? 'L' : 'M'}${r1(X(a))},${r1(Y(b))}`).join('')
+  if (c.bands?.length) {
+    for (const b of c.bands) {
+      if (!b.points.length) continue
+      const top = b.points.map(([a, , y1]) => [a, y1] as [number, number])
+      const base = b.points.map(([a, y0]) => [a, y0] as [number, number]).reverse()
+      out.push(`<path class="band" d="${line(top)}${base.map(([a, v]) => `L${r1(X(a))},${r1(Y(v))}`).join('')}Z" fill="${svgColor(b.color)}" fill-opacity="0.85"/>`)
+    }
+    out.push(`<path class="total" d="${line(pts)}" fill="none" stroke="${INK}" stroke-opacity="0.7" stroke-width="1.5"/>`)
+  } else {
+    out.push(`<path class="area" d="${line(pts)}L${r1(X(x1))},${r1(Y(0))}L${r1(X(x0))},${r1(Y(0))}Z" fill="${SERIES_COLOR}" fill-opacity="0.25"/>`)
+    out.push(`<path class="line" d="${line(pts)}" fill="none" stroke="${SERIES_COLOR}" stroke-width="3" stroke-linejoin="round"/>`)
+    if (pts.length <= 60) for (const [a, b] of pts) out.push(`<circle class="pt" cx="${r1(X(a))}" cy="${r1(Y(b))}" r="2.5" fill="${SERIES_COLOR}"/>`)
+  }
+  const [lx, ly] = pts[pts.length - 1]
+  out.push(`<circle class="last" cx="${r1(X(lx))}" cy="${r1(Y(ly))}" r="6" fill="${c.bands?.length ? INK : SERIES_COLOR}" stroke="${BG}" stroke-width="2"/>`)
+  if (labels) out.push(text(X(lx) - 12, Y(ly) - 14, fmtB(ly), 20, { weight: 600, anchor: 'end' }))
+  return out.join('')
+}
+
 /** A level's label size (px): 15 for the view's children, then 13, 12, 11. */
 const LABEL_PX = [15, 13, 12, 11]
 export const labelPx = (depth: number): number => LABEL_PX[Math.min(depth, LABEL_PX.length) - 1]
@@ -182,7 +252,9 @@ export function cardSvg(d: CardData): string {
   out.push(text(40, rootTitle ? 92 : 124, clip(d.subtitle, 1120, 20), 20, { fill: MUTED }))
   const [mx, my, mw, mh] = [40, rootTitle ? 112 : 144, 1120, rootTitle ? 442 : 410]
   const tiles = d.tiles.filter(t => t.b > 0)
-  if (d.grid?.cells.length) {
+  if (d.chart?.total.length) {
+    out.push(chartSvg(d.chart, full, mx, my, mw, mh))
+  } else if (d.grid?.cells.length) {
     out.push(gridSvg(d.grid, full, mx, my, mw, mh))
   } else if (!tiles.length) {
     out.push(`<rect x="${mx}" y="${my}" width="${mw}" height="${mh}" rx="6" fill="#20232a"/>`)

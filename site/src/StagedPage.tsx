@@ -46,7 +46,7 @@ import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, st
 import { batchAnchor } from './runHistory'
 import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGroups'
 import { useLocation, useNavigationType } from 'react-router-dom'
-import { useHashSpy } from './hashSpy'
+import { useSectionSpy, type SectionMode } from 'use-prms/sections'
 import { machineFor } from '../functions/_lib/sweepMachines'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
@@ -59,6 +59,10 @@ const prefixToPath = (prefix: string): string => {
 }
 
 /** Rows per batch page; the flat (filtered or ungrouped) table pages longer. */
+// The batch in view stays in the fragment (`#batch-12`): its permalinks are plain `#` links, the linked batch opens
+// from the router's `hash`, and `?s=` is the table's sort. Its link preview is the page's (no per-batch card).
+// A module constant: `useSectionSpy` re-resolves its mode whenever this object's identity changes.
+const SECTION_MODE: SectionMode = { kind: 'fragment' }
 const PAGE = 20
 const FLAT_PAGE = 50
 
@@ -300,7 +304,8 @@ export function StagedPage() {
   const removable = selected.filter(p => { const it = items.find(i => i.prefix === p); return it ? canRemove(it) : false })
 
   const [armed, setArmed] = useState(false)
-  useEffect(() => setArmed(false), [plan?.id, items.length])
+  // a changed selection disarms: the confirm names exactly what goes
+  useEffect(() => setArmed(false), [plan?.id, items.length, selected.join('\n')])
 
   // A dispatch may be cut to some of the plan's buckets (`CAPS.bucketCut`):
   // unchecked buckets stay out of the run. The cut's prefixes are what its
@@ -321,7 +326,14 @@ export function StagedPage() {
   const planBuckets = [...perBucket.keys()].sort()
   const onBuckets = planBuckets.filter(b => !bucketsOff.has(b))
   const cut = CAPS.bucketCut && onBuckets.length < planBuckets.length ? onBuckets : undefined
-  const cutItems = cut ? onBuckets.reduce((n, b) => n + perBucket.get(b)!.n, 0) : activeRows.length
+  // What a dispatch acts on: the checked rows (in the checked buckets), nothing else (specs/delete-what-you-see.md:
+  // a real run once deleted a prefix the person had unchecked). An object item goes as `=<key>`.
+  const runRows = activeRows.filter(r => sel.selected.has(r.prefix) && onBuckets.includes(prefixToPath(r.prefix).split('/')[0]))
+  const runItems = runRows.map(r => (r.kind === 'object' ? `=${r.prefix}` : r.prefix))
+  const runTotal = runRows.reduce((t, r) => t + (r.stat?.b ?? 0), 0)
+  // the newest scan: each item is held to the one it was staged at (`as_of`), so the run lists from the newest and
+  // deletes only what that staging scan saw
+  const runScan = scans[0] ?? ''
   // The executor holds a bucket's manifest in memory: a bucket with tens of
   // millions of planned objects needs the big machine (gcs only).
   const machine = CAPS.bucketCut ? machineFor(Math.max(0, ...onBuckets.map(b => perBucket.get(b)!.o))) : undefined
@@ -351,7 +363,7 @@ export function StagedPage() {
   // names the session in view in the hash. A member batch's link lands on its session.
   const sessionAnchors = useMemo(() => groups.filter(g => g.id != null && g.id > 0).map(g => batchAnchor(g.id)), [groups])
   const memberAnchors = useMemo(() => Object.fromEntries([...leadOf].filter(([id, l]) => id !== l).map(([id, l]) => [batchAnchor(id), batchAnchor(l)])), [leadOf])
-  useHashSpy({ ids: sessionAnchors, location, navType, deps: [batches.length, loadingContents, stats], legacy: memberAnchors })
+  useSectionSpy({ sections: sessionAnchors, nav: { location, navType }, deps: [batches.length, loadingContents, stats], aliases: memberAnchors, mode: SECTION_MODE })
 
   const renderGroup = (g: Group) => {
     const k = gkey(g)
@@ -524,7 +536,6 @@ export function StagedPage() {
           {admin && activeRows.length > 0 && (
             <div className="dispatch" id="dispatch">
               <h3>Dispatch</h3>
-              <label>scan <select value={date} onChange={e => setDate(e.target.value)}>{scans.map(s => <option key={s}>{s}</option>)}</select></label>
               {activeRows.length > 0 && CAPS.bucketCut && planBuckets.length > 1 && (
                 <details className="dispatch-buckets" open={!!cut}>
                   <summary className="dim">limit this run to some buckets{cut ? <> — <b>{onBuckets.length} of {planBuckets.length}</b> checked</> : ''}</summary>
@@ -541,23 +552,30 @@ export function StagedPage() {
                 </details>
               )}
               <div className="dispatch-btns">
-                <button type="button" className="dry" disabled={busy || !date || !activeRows.length || !onBuckets.length} onClick={() => dispatch.mutate({ mode: 'dry', date, buckets: cut, machine })}>dispatch dry-run</button>
+                <button type="button" className="dry" disabled={busy || !runScan || !runItems.length} onClick={() => dispatch.mutate({ mode: 'dry', date: runScan, items: runItems, buckets: cut, machine })}>
+                  dry-run {runItems.length ? <>{runItems.length} selected</> : <>(check rows)</>}
+                </button>
                 {!armed
-                  ? <button type="button" className="danger" disabled={busy || !date || !activeRows.length || !onBuckets.length} onClick={() => setArmed(true)}>real delete…</button>
+                  ? <button type="button" className="danger" disabled={busy || !runScan || !runItems.length} onClick={() => setArmed(true)}>real delete{runItems.length ? <> {runItems.length} selected…</> : <> (check rows)</>}</button>
                   : <>
-                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
-                        confirm REAL delete of {cutItems} {cutItems === 1 ? 'prefix' : 'prefixes'}{cut && <> ({onBuckets.length} of {planBuckets.length} buckets)</>}
+                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
+                        confirm REAL delete of {runItems.length} {runItems.length === 1 ? 'prefix' : 'prefixes'}{stats && <> · {fmtBytes(runTotal)}</>}
                       </button>
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
                     </>}
               </div>
+              {armed && (
+                <ul className="dispatch-confirm-list" aria-label="To be deleted">
+                  {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
+                </ul>
+              )}
               {dispatch.error && <p className="staged-err" role="alert">{dispatch.error.message}</p>}
               {pendingJob && (
                 <p className="dispatch-pending">
                   Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Its run appears below {CAPS.startHint}.
                 </p>
               )}
-              <p className="dispatch-note dim">A dry run reads the scan you pick; a real run deletes only what its dry run listed, at that scan. New objects since are left alone.{machine && <> Runs on <code>{machine}</code>.</>}</p>
+              <p className="dispatch-note dim">A run acts on the checked rows only. Each is read at the scan it was staged at: objects written since are left alone (re-stage to include them), and anything rewritten since is skipped. A real run doesn't need a dry run first.{machine && <> Runs on <code>{machine}</code>.</>}</p>
             </div>
           )}
         </>

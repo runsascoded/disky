@@ -1,4 +1,4 @@
-import { TitleSpaceToggle, Treemap } from '@rdub/treemap'
+import { TitleSpaceToggle, Treemap } from '@open-athena/treemap'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { FederatedScanPicker } from '../FederatedScanPicker'
@@ -6,7 +6,7 @@ import { federatedDeltas, parseSourceCatalog, resolveFederation, utcInstant, typ
 import { composeFederatedTrees, federatedSeries } from '../federatedViews'
 import { useUnits } from '../units'
 import type { TreeNode } from '../types'
-import '@rdub/treemap/styles.css'
+import '@open-athena/treemap/styles.css'
 
 const t = (day: number, hour: number) => `2026-10-${day}T${String(hour).padStart(2, '0')}:00:00.000Z`
 /** Deliberately fictional, completed exports. Never presented as production

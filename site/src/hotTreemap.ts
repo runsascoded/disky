@@ -1,4 +1,4 @@
-import { DEFAULT_PALETTE } from '@rdub/treemap'
+import { DEFAULT_PALETTE } from '@open-athena/treemap'
 import { exactInteger, type HotView } from './hotModel'
 
 const BUCKET_COLORS = ['#3c8cdd', '#e88c30', '#34b288', '#d7425b', ...DEFAULT_PALETTE.slice(4)]

@@ -411,6 +411,7 @@ def wandb_mine(
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, default=None, help=f"identities.yaml path or URL, needed with -a (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", "out_dir", type=Path, default=None, help="Output dir for JSON files [default: site/public/data/<asof>]")
+@option("-O", "--path-only", is_flag=True, help="With -P: only the `path` sort, no `bysize`, `-by-user` copies or `.groups.*` sidecars (the input the interval store and static name index append from; specs/lean-scans.md §1.1). Refused with -S, -u")
 @option("-r", "--row-group-rows", default=None, type=int, help="Parquet row-group size for the store's sorts (default 8192 — the reader decodes ~one group per depth of a drilled subtree, so 32768 pushed small drills past its decode cap; specs/done/path-store.md §1.6)")
 @option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/path-store-search.md); upload them with the generation dir")
 @option("-u", "--user-sort-tiers", default=None, help="Only these sorts get a `-by-user` copy, comma-separated (`bysize`: the copy a lens view reads; default every sort)")
@@ -426,6 +427,7 @@ def build_path_index(
     identities_path: str | None,
     listings: tuple[str, ...],
     out_dir: Path | None,
+    path_only: bool,
     path_index: Path | None,
     row_group_rows: int | None,
     search: bool,
@@ -442,11 +444,13 @@ def build_path_index(
 
     from .viz import write_path_index
 
+    if path_only and (search or user_sort_tiers or path_index is None):
+        raise UsageError("-O/--path-only: needs -P, and cuts the `path` sort alone (no -S search sidecars, no -u by-user copies)")
     if out_dir is None:
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
         listings, out_dir, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-        user_sorts=user_sorts, row_group_rows=row_group_rows, age_strata=age_strata, search=search, generation=generation,
+        user_sorts=user_sorts, row_group_rows=row_group_rows, age_strata=age_strata, search=search, generation=generation, path_only=path_only,
         user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
@@ -3173,7 +3177,7 @@ def fetch_listing_cmd(out: Path, src: str) -> None:
 @option("-p", "--prefix", "prefixes", multiple=True, help="Key prefix to publish (repeatable; default: the scan's served subset — snapshots/<subdir>/<scan>/ + the layer-2 dir)")
 @option("-R", "--require-key", "required", multiple=True, help="Required source key (repeatable): refuse before copying if absent, and verify its R2 size/md5 before success")
 @option("-s", "--subdir", default=None, help="Snapshots subdir of this store (default $SNAPSHOTS_SUBDIR, else none)")
-@option("-S", "--small", is_flag=True, help="Only the small files the site reads beside the path store (its `SERVED_R2`): the snapshot JSONs and each generation's extras sidecars (`attr.tsv{,.idx.json}`); no tier, listing or rollup")
+@option("-S", "--small", is_flag=True, help="Only the small files the site reads beside the path store (its `SERVED_R2`): the snapshot JSONs, each generation's extras sidecars (`attr.tsv{,.idx.json}`) and age pyramids; no sort, listing or rollup")
 @option("-w", "--workers", default=8, type=int, help="Concurrent HEADs/uploads (default 8)")
 @argument("scan")
 def publish_r2(

@@ -18,9 +18,9 @@
  * the thread (everyone) or back to the clicker ephemerally (refusals, errors).
  * Unconfigured (no signing secret or D1) it answers 503 and does nothing.
  */
-import type { D1Database } from '@cloudflare/workers-types'
 import { type Env as AuthEnv, isAdmin } from '../_lib/auth.js'
 import { dispatchPlan, type ExecEnv, executorOf, notifyDispatched } from '../_lib/executor.js'
+import { pathScans } from '../_lib/index.js'
 import { audit } from '../_lib/plans.js'
 import { slackUserEmail, verifySlackSignature } from '../_lib/slack.js'
 import { notifyPlan, planGate, slackNames, updateReplies } from '../_lib/stagedSlack.js'
@@ -41,9 +41,8 @@ async function tell(url: string | undefined, text: string): Promise<void> {
     .catch(() => undefined)
 }
 
-async function latestScan(db: D1Database): Promise<string | null> {
-  const r = await db.prepare("SELECT max(date) AS d FROM index_schema WHERE variant = 'path'").first<{ d: string | null }>()
-  return r?.d ?? null
+async function latestScan(env: Env): Promise<string | null> {
+  return (await pathScans(env, true)).results.at(-1)?.date ?? null
 }
 
 async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void> {
@@ -100,7 +99,7 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
   let date: string | undefined
   if (a.action_id === 'staged_dry') {
     mode = 'dry'
-    date = (await latestScan(db)) ?? undefined
+    date = (await latestScan(env)) ?? undefined
     if (!date) return tell(p.response_url, 'No indexed scan to run against.')
   } else {
     mode = 'real'

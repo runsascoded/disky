@@ -2,9 +2,13 @@
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
 import { mountedSegs, urlSegsOf } from '../../../src/pathCrumbs.js'
+import { SECTION_KEY } from '../../../src/homeSections.js'
 import { canonicalSel } from '../../../src/scanSlug.js'
 
-export type OgKind = 'map' | 'diff' | 'staged' | 'users' | 'user' | 'assignments'
+export type OgKind = 'map' | 'diff' | 'series' | 'staged' | 'users' | 'user' | 'assignments'
+
+/** The home sections with a card of their own (`?section=<id>`), by kind: the diff, and size over time. */
+export const KIND_SECTION: Partial<Record<OgKind, string>> = { diff: 'diff', series: 'over-time' }
 
 export interface PageView {
   kind: OgKind
@@ -26,6 +30,8 @@ const NOT_MAP = new Set([
 /** Map params a card depends on: the scan (`d`), the filter (`f`, `qs`), the
  * owner lens or pool (`o`, `by`), the colour axis (`c`) and classes (`cl`). */
 const MAP_KEYS = ['d', 'f', 'qs', 'o', 'by', 'c', 'cl'] as const
+/** A series card's: the map's less the colour axis (`c`), which no series follows. */
+const SERIES_KEYS = MAP_KEYS.filter(k => k !== 'c')
 
 const pick = (sp: URLSearchParams, keys: readonly string[]): Record<string, string> => {
   const out: Record<string, string> = {}
@@ -82,16 +88,20 @@ export function pageView(url: URL, site: string, root: readonly string[] = [], s
   return mapView(segs, sp, site, root, {})
 }
 
-/** A map page's view (`segs` below the store's path) and its diff section's; `lead` leads the params. */
+/** A map page's view (`segs` below the store's path), its diff section's and its size-over-time section's; `lead`
+ * leads the params. */
 function mapView(segs: string[], sp: URLSearchParams, site: string, root: readonly string[], lead: Record<string, string>): PageView {
   const tree = mountedSegs(root, segs)
   const path = tree.join('/')
-  const params: Record<string, string> = { ...lead, ...(path ? { path } : {}), ...pick(sp, MAP_KEYS) }
+  const section = sp.get(SECTION_KEY)
+  const params: Record<string, string> = { ...lead, ...(path ? { path } : {}), ...pick(sp, section === KIND_SECTION.series ? SERIES_KEYS : MAP_KEYS) }
   const where = urlSegsOf(root, tree).join('/') || site
   const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
-  if (sp.get('section') === 'diff') {
+  // The section in view (`?section=`: the home page's scroll-spy writes it, and share links carry it).
+  if (section === KIND_SECTION.diff) {
     const dm = sp.get('dm')
     return { kind: 'diff', params: { ...params, ...(dm === 'max' ? { dm } : {}) }, title: [where, 'changes', ...extras].join(' · ') }
   }
+  if (section === KIND_SECTION.series) return { kind: 'series', params, title: [where, 'size over time', ...extras].join(' · ') }
   return { kind: 'map', params, title: [where, ...extras].join(' · ') }
 }

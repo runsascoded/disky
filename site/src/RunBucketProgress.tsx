@@ -1,4 +1,4 @@
-import { DEFAULT_PALETTE, Treemap } from '@rdub/treemap'
+import { DEFAULT_PALETTE, Treemap } from '@open-athena/treemap'
 import { useMemo } from 'react'
 import { stringParam, useUrlState } from 'use-prms'
 import { type RunBand, useRunFiles } from './plans'

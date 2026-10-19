@@ -23,8 +23,12 @@ export type ExecEnv = NotifyEnv & BatchEnv & {
 export interface DispatchReq {
   planId: number
   mode: 'dry' | 'real'
-  /** The scan to run against. Optional for `real`: the matching dry-run's. */
+  /** The scan to list from (each item is held to its own staging scan, `plan_items.as_of`). Optional for `real` when
+   *  a dry run of exactly `items` exists: its scan. */
   date?: string
+  /** The items the run acts on (`digestLines`: a prefix, or `=<key>` for an object): the rows checked on /staged.
+   *  Absent: the whole plan (the Slack thread's buttons). Never more than named (specs/delete-what-you-see.md). */
+  items?: string[]
   actor: string
   siteUrl: string
   /** gcs only: a `-b` cut of the plan's buckets (empty/absent = all). */

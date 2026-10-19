@@ -29,7 +29,7 @@ Today there are two: the Python engine CLI `disk-tree` (on PATH via the venv) an
 
 ### 4. Code identifiers (mechanical)
 - Python package `disk_tree` → `disky` (dist name `disk-tree` → `disky`); `dt-cloud` may stay or become `disky-cloud`.
-- npm `@disk-tree/react` → `@disky/react` (dist branch `dist/react` frozen legacy already; `@rdub/treemap` is unaffected), site package name.
+- npm `@disk-tree/react` → `@disky/react` (dist branch `dist/react` frozen legacy already; `@open-athena/treemap` is unaffected), site package name.
 - Do this in one commit on `cloud` (pure rename + import rewrite), right after a round of merges so deployment branches carry few deltas; git rename detection carries the rest.
 
 ### 5. Cloud resources (last; mostly invisible)

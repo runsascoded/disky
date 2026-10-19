@@ -27,7 +27,8 @@ import { fromUrlPath, mountedSegs, pathCopy, pathDisplay, pathText } from './pat
 import { listsObjects, openHref, treeHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
-import { useHashSpy } from './hashSpy'
+import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
+import { LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
 import { useScrollSpyPref } from './prefs'
 import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
@@ -135,17 +136,15 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // paths/runs, or assigned); unowned
 // = the nobody-owns-it pool. A user narrows "owned" to that person (`OwnerMode`, `viewScope.ts`).
 
-// Home-page section anchors, top to bottom — the scroll-spy keeps `#hash`
-// tracking the one in view, and deep links scroll to it. Old ids keep working.
 // Client cache version: appended to the read endpoints' URLs so a browser's
 // HTTP copy of a pre-deploy answer (they were kept a day until 2026-09-17,
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
 const API_CV = '2'
-const SECTION_IDS = ['tree-map', 'tbl', 'over-time', 'diff', 'mtime']
-const LEGACY_ANCHORS: Record<string, string> = {
-  'size-over-time': 'over-time', 'created-date': 'mtime', changes: 'diff',
-}
+// The section in view lives in the query (`?section=diff`), where a link preview's unfurler sees it; an incoming
+// `#diff` (or a retired `#changes`) is adopted into it. A module constant: `useSectionSpy` re-resolves its mode,
+// and re-binds its scroll listener, whenever this object's identity changes.
+const SECTION_MODE: SectionMode = { kind: 'param', key: SECTION_KEY }
 
 function AppContent() {
   // Which object store to render: the subtree's <StoreProvider> (Root mounts
@@ -669,17 +668,25 @@ function AppContent() {
   }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
   const meta: Meta | null = metaQ.data ?? null
   const scanRun = useScanRunOf(store, asof)
-  // Section `#hash` both ways (deep link in, scroll-spy out) and the scroll
+  // The section param both ways (deep link in, scroll-spy out) and the scroll
   // position across navigation. A pending deep link is re-armed as the map,
   // meta and scans land (sections mount off different queries).
   const [spy] = useScrollSpyPref()
-  useHashSpy({ ids: SECTION_IDS, location, navType, deps: [mapTree, meta, scans], legacy: LEGACY_ANCHORS, offset: topbarH, spy: spy === 'on' })
+  useSectionSpy({
+    sections: SECTION_IDS,
+    nav: { location, navType },
+    deps: [mapTree, meta, scans],
+    aliases: LEGACY_ANCHORS,
+    reference: { offset: topbarH },
+    write: spy === 'on' ? 'replace' : 'off',
+    mode: SECTION_MODE,
+  })
   const [lens, setLens] = useState(false)  // treemap storage-class lens (hatch by cold fraction)
   const { fmtBytes } = useUnits()
   // The treemap's drill path now lives in the URL *path* (below the store's own
   // route prefix), so a drilled prefix is a real shareable URL —
   // `/my-bucket/some/dir`, not `/?p=my-bucket/some/dir`. View
-  // options stay query params (`?c`, `?mt`, …); the section stays in the `#hash`.
+  // options stay query params (`?c`, `?mt`, …), the section in view among them (`?section=`).
   const storeBase = store.path === '/' ? '' : store.path
   // A store home reads as `~` in the URL (`/~/c`) and a store's root (`Store.root`) is its mount, left out of its URLs;
   // the path itself is the full one (`Users/ryan/c`), each name travels encoded (`toUrlPath`), and a URL that spells
@@ -750,12 +757,12 @@ function AppContent() {
     [ageBaseQ.data],
   )
   // A drill leaves any opened object behind (`?open=` names a child of the
-  // drilled directory), and the section hash: a new path starts at the top
-  // (`useHashSpy`). Never copy the router's `hash` into a navigation — the spy
+  // drilled directory), and the section: a new path starts at the top
+  // (`useSectionSpy`). Never copy the router's section into a navigation — the spy
   // rewrites the URL's behind the router's back, so it's whatever section was
   // last *linked*, not the one in view (a crumb click warped to it).
   const drillTo = (segs: string[]) => {
-    const q = new URLSearchParams(search)
+    const q = new URLSearchParams(withoutSection(search))
     q.delete('open')
     navigate({ pathname: treeHref(store, segs), search: q.size ? `?${q}` : '' })
   }
@@ -763,7 +770,8 @@ function AppContent() {
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
   // Back closes it.
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
-  const openObject = (segs: string[]) => navigate(openHref(store, segs, search))
+  // Without the router's section: the spy names the one in view on the reader's next scroll.
+  const openObject = (segs: string[]) => navigate(openHref(store, segs, withoutSection(search)))
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
   // Where the scan's read data ends (`access.through`, spec `access-log-freshness.md`): the lens is then

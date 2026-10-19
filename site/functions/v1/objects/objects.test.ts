@@ -6,8 +6,8 @@ import { objectBuckets, onRequest } from './[[path]]'
 // status says which check it landed on without touching a bucket. A localhost
 // request is the full-scope dev identity (`identify`).
 const APP: Env = { BASE_SCOPE: 'gcs', OBJECT_BUCKETS: 'marin-a, marin-b' } as Env
-const call = async (env: Env, host: string, bucket: string) => {
-  const r = await onRequest({ request: new Request(`https://${host}/v1/objects/${bucket}/get?path=x/y.parquet`), env })
+const call = async (env: Env, host: string, bucket: string, query = '') => {
+  const r = await onRequest({ request: new Request(`https://${host}/v1/objects/${bucket}/get?path=x/y.parquet${query}`), env })
   return [r.status, (await r.text()).trim()]
 }
 
@@ -28,5 +28,11 @@ describe('/v1/objects', () => {
   })
   it('lets a member through to the proxy', async () => {
     expect(await call(APP, 'localhost', 'marin-b')).toEqual([503, 'object proxy not configured (missing store creds)'])
+  })
+  it('a secondary store serves its own OBJECT_BUCKETS, not the primary\'s (`store=`)', async () => {
+    const env = { ...APP, STORES_EXTRA: 'meta', STORES_JSON: JSON.stringify({ meta: { vars: { OBJECT_BUCKETS: 'data-bucket' } } }) } as Env
+    expect(await call(env, 'localhost', 'data-bucket', '&store=meta')).toEqual([503, 'object proxy not configured (missing store creds)'])
+    expect(await call(env, 'localhost', 'marin-a', '&store=meta')).toEqual([404, '{"error":"no such object bucket"}'])
+    expect(await call(env, 'localhost', 'data-bucket')).toEqual([404, '{"error":"no such object bucket"}'])
   })
 })

@@ -59,18 +59,20 @@ export interface SweepScript {
  * with the job's read grant, so the finished run is reflected — and its
  * result posted to the plan's Slack thread — without anyone polling. */
 export const sweepScript = ({ cfg, mode, jobId, buckets, plan, reviewed, pacing = 'guided' }: SweepScript): string => {
-  if (mode === 'real' && !reviewed) throw new Error('real dispatch requires its reviewed DR manifest')
   if (pacing !== 'guided' && pacing !== 'adaptive') throw new Error('invalid sweep pacing mode')
   const run = runDir(cfg, jobId)
   const bflags = buckets.map(b => `-b ${b}`).join(' ')
   return [
     'set -euo pipefail',
     EXIT_TRAP,
-    ...(mode === 'real' ? [
+    // A real run with a dry run of exactly its items at its scan deletes that dry run's reviewed generations (no
+    // relist); without one it lists afresh, as a dry run does, and deletes from its own manifest
+    // (specs/delete-what-you-see.md). `plan` names only the run's items, either way.
+    ...(mode === 'real' && reviewed ? [
       `dt-cloud sweep execute-reviewed -e xml -j 64 -B ${Math.max(1, Math.min(6, buckets.length))} -c ${pacing} -r 8000 ${bflags} -p "${plan}" -o "${run}" -w /work/reviewed --for-real "${reviewed}"`,
     ] : [
       `dt-cloud sweep manifest -d "$SWEEP_DATE" --plan "${plan}" ${bflags} -o "${run}"`,
-      `dt-cloud sweep execute ${bflags} "${run}"`,
+      `dt-cloud sweep execute ${bflags}${mode === 'real' ? ' --for-real' : ''} "${run}"`,
     ]),
   ].join('\n')
 }
@@ -187,7 +189,8 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   const requested = req.buckets ?? []
   // A cut names only scanned buckets (`STORE_BUCKETS`).
   if (requested.some(b => !shape.buckets.includes(b))) return refuse(400, 'bad bucket name')
-  const snapshot: PlanBucketsSnapshot | null = await snapshotPlanBuckets(db, req.planId, shape)
+  // the selected items only (`req.items`, the rows checked on /staged; all when absent)
+  const snapshot: PlanBucketsSnapshot | null = await snapshotPlanBuckets(db, req.planId, shape, req.items)
   if (!snapshot) return refuse(404, 'no such plan')
   if (!snapshot.sweep.length && !snapshot.objects?.length) return refuse(400, 'plan has no items to sweep')
   const buckets = bucketCut(snapshot.buckets, requested)
@@ -200,13 +203,13 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
 
   const launch: Prepared['launch'] = async (date, digest, reviewed) => {
     const reviewedPrefix = `gs://${cfg.dataBucket}/sweep/runs/`
-    if (req.mode === 'real' && (!reviewed?.log_dir || !reviewed.log_dir.startsWith(reviewedPrefix) || !/^gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/.test(reviewed.log_dir.slice(reviewedPrefix.length)))) {
-      return refuse(409, 'not deleting: matching dry-run has no reusable manifest directory')
-    }
+    // a matching dry run's manifest is reused only from its own run dir; one without a reusable dir means a fresh listing
+    const reuse = req.mode === 'real' && reviewed?.log_dir && reviewed.log_dir.startsWith(reviewedPrefix)
+      && /^gcs-sweep-dry-[0-9]{8}-[0-9]{6}z$/.test(reviewed.log_dir.slice(reviewedPrefix.length)) ? reviewed.log_dir : undefined
     const region = batchRegionFor(cfg, buckets)
     const jobId = `gcs-sweep-${req.mode}-${jobStampOf(new Date())}z`
     const plan = runDir(cfg, jobId)
-    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), reviewed: reviewed?.log_dir ?? undefined, pacing })
+    const script = sweepScript({ cfg, mode: req.mode, jobId, buckets, plan: planJsonPath(cfg, jobId), reviewed: reuse, pacing })
     const spec = sweepJobSpec({
       cfg, jobSa, region, script, actor: req.actor, siteUrl: req.siteUrl, machine: req.machine,
       env: {

@@ -1,10 +1,10 @@
-import { Treemap } from '@rdub/treemap'
+import { Treemap } from '@open-athena/treemap'
 import { useEffect, useMemo, useState } from 'react'
 import { exactInteger, type HotResult } from './hotModel'
 import { hotMap, type HotMapNode, type HotMapSnapshot } from './hotTreemap'
 import { useUnits } from './units'
 import { fmtBytesPrecise } from './types'
-import '@rdub/treemap/styles.css'
+import '@open-athena/treemap/styles.css'
 
 export function HotSnapshotMap({ snapshot, noun = 'bucket' }: { snapshot: HotMapSnapshot; noun?: string }) {
   const { units, suffixB } = useUnits()

@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { TreemapProps } from '@rdub/treemap'
+import type { TreemapProps } from '@open-athena/treemap'
 import { HotMaps } from './HotMaps'
 import { HotTotals } from './HotSearch'
 import type { HotMapNode } from './hotTreemap'
@@ -9,7 +9,7 @@ import type { HotView } from './hotModel'
 
 const { maps } = vi.hoisted(() => ({ maps: [] as TreemapProps<HotMapNode>[] }))
 vi.mock('./SiteKbd', () => ({ SiteKbd: () => null }))
-vi.mock('@rdub/treemap', async importOriginal => ({ ...await importOriginal<typeof import('@rdub/treemap')>(),
+vi.mock('@open-athena/treemap', async importOriginal => ({ ...await importOriginal<typeof import('@open-athena/treemap')>(),
   Treemap: (props: TreemapProps<HotMapNode>) => { maps.push(props); return createElement('div', { className: 'fixture-map' }) },
 }))
 

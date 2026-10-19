@@ -1,6 +1,6 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { DEFAULT_PALETTE } from '@rdub/treemap'
+import { DEFAULT_PALETTE } from '@open-athena/treemap'
 import { pow10 } from './stats'
 
 /**

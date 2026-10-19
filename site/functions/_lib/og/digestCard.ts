@@ -2,10 +2,10 @@
  * line against its quota, over the diff map of the headline interval. Drawn
  * here, not by the job, so the map is the site's own: the same diff tree
  * (`diffRoot`), cell colours (`diffCellStyle`) and treemap layout + paint
- * (`@rdub/treemap/svg`) as the in-app diff, in the site's dark theme and
+ * (`@open-athena/treemap/svg`) as the in-app diff, in the site's dark theme and
  * Inter. Pure and DOM-free; `api/digest-image.ts` reads the diff and
  * rasterizes it. */
-import { staticLayout, treemapSvg } from '@rdub/treemap/svg'
+import { staticLayout, treemapSvg } from '@open-athena/treemap/svg'
 import { diffBorderWidth, diffCellStyle } from '../../../src/diffStyle.js'
 import type { DiffNode } from '../../../src/diffModel.js'
 import { esc, fmtB, fmtSI } from './card.js'

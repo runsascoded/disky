@@ -326,6 +326,57 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
     assert runs_written[0] == ("2026-10-16T1300", "meta", "running", None)
 
 
+def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
+    """The run's DAG is stored from a `-preview` right after `start`, before Nextflow runs a task, so the site draws the
+    pipeline while the run is going; a preview that fails leaves the run unaffected."""
+    from dt_cloud import index_footer, scan_runs
+
+    for k in ("D1_DB_ID", "SCAN_RUNS_PROFILE", "DT_RECORD", "BATCH_JOB_UID", "DT_RUN_ID", "SNAP_ID", "GEN", "DT_JOB_START",
+              "REPROC", "DISKY_LABELS", "DT_TRIGGER"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SNAP_ID", "2026-10-16T1200")
+    monkeypatch.setenv("GEN", "G1")
+    monkeypatch.setenv("DT_JOB_START", "100")
+    monkeypatch.setenv("DT_RUN_ID", "run-1")
+    runs = tmp_path / "scan-runs.json"
+    runs.write_text('{"store": "primary", "run_id_env": ["DT_RUN_ID", "BATCH_JOB_UID"]}')
+    prof = tmp_path / "p.yml"
+    prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\n"
+                    "skip: [static-names, digest, interval-store, warm-cache, probe]\noptions: {list: {import: true}}\n"
+                    f"env: {{SCAN_RUNS_PROFILE: {runs}, D1_DB_ID: db}}\n")
+    monkeypatch.setattr(index_footer, "D1_DB_ID", "")
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(scan_runs, "lookup_job", lambda *a, **kw: None)
+    events: list[str] = []
+    monkeypatch.setattr(index_footer, "_d1_query",
+                        lambda sql, acct, tok, db: events.extend(s.split(" (")[0] for s in ([sql] if isinstance(sql, str) else sql)) or [])
+    launch, nf_dir = tmp_path / "launch", tmp_path / "nf-dir"
+    previews: list[list[str]] = []
+
+    def preview(argv, **kw):
+        previews.append(argv)
+        (launch / H.PREVIEW_DAG).write_text('flowchart TB\n    v2(["list_source"])\n    v6(["index"])\n    v2 --> v6\n')
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(H.subprocess, "run", preview)
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: events.append("nextflow run") or SimpleNamespace(pid=0, wait=lambda: 0))
+    assert H.head(prof, nf_dir, launch) == 0
+    assert previews == [H.preview_argv(nf_dir, launch)]
+    assert previews[0][-3:] == ["-preview", "-with-dag", str(launch / "dag-preview.mmd")]
+    dag_at = events.index("INSERT INTO scan_run_dags")
+    assert (events.index("INSERT INTO scan_runs") < dag_at < events.index("nextflow run")) is True
+
+    def broken(argv, **kw):
+        raise OSError("no nextflow")
+
+    monkeypatch.setattr(H.subprocess, "run", broken)
+    monkeypatch.setenv("DT_RUN_ID", "run-2")
+    events.clear()
+    assert H.head(prof, nf_dir, launch) == 0
+    assert ("INSERT INTO scan_run_dags" in events, "nextflow run" in events) == (False, True)
+
+
 def test_publish_reports(tmp_path):
     """The reports that exist go to `<work>/runs/<scan>/`; a missing one is skipped."""
     launch, work = tmp_path / "launch", tmp_path / "work"
