@@ -75,7 +75,7 @@ def verify_index(
     """The scan's index against its listings (`bucket, size_bytes, created`), raising `Mismatch` on the first
     disagreement:
     - every listed bucket is one of `buckets`, and each one's bytes / objects equal its depth-1 row of the `path` sort
-      (`size`, `n_files`; an empty bucket has no row);
+      (`size`, `n_files`; an empty bucket's is its 0-byte root, or no row from a listing without a marker);
     - the snapshot's `meta.json` totals (`total_bytes`, `total_objects`) equal the listings';
     - its `age.json` histogram sums to the dated listing population (`created IS NOT NULL`);
     - the age pyramids beside the sort, when written (`check_age_pyramid`);
@@ -94,7 +94,7 @@ def verify_index(
             expected[b] = {"bytes": int(size), "objects": int(n)}
         tops = con.execute("SELECT path, size, n_files FROM read_parquet(?) WHERE depth = 1 ORDER BY path", [str(path_sort)]).fetchall()
         indexed = {p: {"bytes": int(size), "objects": int(n)} for p, size, n in tops}
-        listed = {b: v for b, v in expected.items() if v["objects"]}
+        listed = {b: v for b, v in expected.items() if v["objects"] or b in indexed}
         if indexed != listed:
             raise Mismatch(f"per-bucket path totals {indexed} ≠ the listings' {listed}")
         totals = {"bytes": sum(v["bytes"] for v in expected.values()), "objects": sum(v["objects"] for v in expected.values())}

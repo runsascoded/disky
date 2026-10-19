@@ -46,11 +46,19 @@ def size_col(version: int) -> str:
 
 
 class Scan:
-    """One scan's per-scan `path` sort, queried in place (local copy) with DuckDB."""
+    """One scan's per-scan `path` sort, queried with DuckDB: in place (a local parquet), or with `table` loaded once into
+    that native table of `con`'s database (`verify_task`'s). A query over the parquet pays for its footer and per-group
+    statistics every time — gcs's sorts hold ~400M rows in ~50K groups, ~4 s a query whatever it reads, so the diffs'
+    one-sided lookups (two queries each, hundreds a diff) ran for hours — while the table's zonemaps over the same
+    `(depth, path)` order answer a point query in milliseconds, and a full scan several times faster."""
 
-    def __init__(self, con, file: str, version: int, key: str = ""):
-        self.con, self.file, self.v, self.key = con, file, version, key
+    def __init__(self, con, file: str, version: int, key: str = "", *, table: str | None = None):
+        self.con, self.file, self.v, self.key, self.table = con, file, version, key, table
         self.src = f"read_parquet({q(file)})"
+        if table is not None:
+            # Rows in the file's order (DuckDB preserves insertion order), so the zonemaps prune by `(depth, path)`.
+            con.execute(f"CREATE OR REPLACE TABLE {table} AS SELECT * FROM {self.src}")
+            self.src = table
         have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}
         # Columns the scan lacks read as NULL, as the builder reads them (`static_names.V2_OPTIONAL`): no owner
         # axis names no owner, and an absent storage-class pivot holds no bytes (cw's sorts carry only class 1).
@@ -59,6 +67,15 @@ class Scan:
             missing += [f"NULL::BIGINT AS {c}" for c in V2_OPTIONAL.values() if c not in have and c != "usr"]
         if missing:
             self.src = f"(SELECT *, {', '.join(missing)} FROM {self.src})"
+
+    def drop(self) -> None:
+        """Free the loaded table (a nop in place)."""
+        if self.table is not None:
+            self.con.execute(f"DROP TABLE IF EXISTS {self.table}")
+
+    def _want(self, paths: list[tuple[int, str]]) -> None:
+        self.con.execute("CREATE OR REPLACE TEMP TABLE want (depth INTEGER, path VARCHAR)")
+        self.con.executemany("INSERT INTO want VALUES (?, ?)", paths)
 
     def _aggs(self, where: str, having: str = "") -> list[dict]:
         cur = self.con.execute(f"SELECT depth, path, {agg_sql(self.v)} FROM {self.src} WHERE {where} GROUP BY depth, path {having}")
@@ -70,8 +87,7 @@ class Scan:
         same name): what the pre-aggregation filter dropped from those paths' totals."""
         if not paths:
             return {}
-        self.con.execute("CREATE OR REPLACE TEMP TABLE want (depth INTEGER, path VARCHAR)")
-        self.con.executemany("INSERT INTO want VALUES (?, ?)", paths)
+        self._want(paths)
         return {p: (b, o, wts, wb, m, c2, c3, c4) for p, b, o, wts, wb, m, c2, c3, c4 in self.con.execute(
             f"""SELECT s.path, sum(size)::BIGINT, sum(n_files)::BIGINT, sum(CASE WHEN mtime_mean IS NOT NULL THEN mtime_mean * size ELSE 0 END),
                 sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT, max(mtime)::BIGINT, sum(coalesce(sum_storage_class_id_2, 0))::BIGINT,
@@ -82,8 +98,7 @@ class Scan:
     def _users(self, paths: list[tuple[int, str]]) -> dict[str, dict[str, int]]:
         if not paths:
             return {}
-        self.con.execute("CREATE OR REPLACE TEMP TABLE want (depth INTEGER, path VARCHAR)")
-        self.con.executemany("INSERT INTO want VALUES (?, ?)", paths)
+        self._want(paths)
         out: dict[str, dict[str, int]] = {}
         for p, u, b in self.con.execute(f"""SELECT s.path, s.usr, sum(s.{size_col(self.v)})::BIGINT FROM {self.src} s JOIN want w ON s.depth = w.depth AND s.path = w.path
                 WHERE s.usr IS NOT NULL AND s.usr <> '' GROUP BY s.path, s.usr""").fetchall():
@@ -104,6 +119,19 @@ class Scan:
     def lookup(self, path: str) -> ir.Agg | None:
         rs = self._aggs(f"depth = {ir.depth_of(path)} AND path = {q(path)}")
         return self.to_agg(rs[0], self._users([(rs[0]["depth"], path)]).get(path, {})) if rs else None
+
+    def lookup_many(self, paths) -> dict[str, ir.Agg]:
+        """`lookup` of every path in `paths`, in one query (a path absent from the scan is absent)."""
+        want = [(ir.depth_of(p), p) for p in sorted(set(paths))]
+        if not want:
+            return {}
+        self._want(want)
+        cur = self.con.execute(f"""SELECT s.depth, s.path, {agg_sql(self.v)} FROM {self.src} s JOIN want w ON s.depth = w.depth AND s.path = w.path
+            GROUP BY s.depth, s.path""")
+        cols = [d[0] for d in cur.description]
+        rs = [dict(zip(cols, r)) for r in cur.fetchall()]
+        users = self._users([(r["depth"], r["path"]) for r in rs])
+        return {r["path"]: self.to_agg(r, users.get(r["path"], {})) for r in rs}
 
     def view(self, path: str, w: int = W, h: int = H, *, max_depth: int | None = None, threshold: float | None = None,
              min_area: float = ir.MIN_AREA, atten: float = ir.ATTEN) -> dict:
@@ -310,9 +338,12 @@ def cases_for(scan: Scan, date: str) -> list[dict]:
     return cases
 
 
-def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, str, int] | None, out, src) -> dict:
+def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, str, int] | None, out, src, *,
+             changes: bool = False) -> dict:
     """Every sampled case of one scan (and its diffs against `prev`), one JSON line each; `src` (a `blobstore.Store`)
-    holds the per-scan footers."""
+    holds the per-scan footers. Each diff's one-sided paths are looked up in one read per side (`lookup_many`), not one
+    per path. `changes`: also count each diff's changed versions (`Store.changes`, a cost statistic, never compared): it
+    reads every group with an open or close in the span, the whole root's in a churning one (130–200M rows a gcs root diff)."""
     summary = {"date": date, "views": 0, "view_eq": 0, "diffs": 0, "diff_eq": 0}
     footers = _footers(src, scan.key, scan.v)
     cases = cases_for(scan, date)
@@ -353,28 +384,36 @@ def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, 
                 continue
             # `buildDiff`: one floor for both sides, from the larger root.
             thr = max(ra, rb) * ir.MIN_AREA / (W * H)
+            t0 = monotonic()
             wa, wb = pscan.view(path, threshold=thr), scan.view(path, threshold=thr)
             # Across the v1 → v2 cutover the objects fold (`ir.diff`'s `fold`): the per-scan side knows each scan's
             # format from its source, the store from its rows (`Store.view`'s `objects`, what `buildDiff` tests).
             fold = pscan.v != scan.v
-            want = ir.diff(wa, wb, pscan.lookup, scan.lookup, fold=fold)
+            need_a, need_b = ir.one_sided(wa, wb, fold=fold)
+            want = ir.diff(wa, wb, pscan.lookup_many(need_a).get, scan.lookup_many(need_b).get, fold=fold)
+            t_ref = monotonic() - t0
+            t0 = monotonic()
             ga, gb = store.view(pts, path, W, H, threshold=thr), store.view(ts, path, W, H, threshold=thr)
             cost = ir.Cost()
             got_fold = ga["objects"] != gb["objects"]
-            got = ir.diff(ga, gb, lambda p: store.lookup(pts, p, cost), lambda p: store.lookup(ts, p, cost), fold=got_fold)
-            ch_cost = ir.Cost()
-            n_changed = store.changes(pts, ts, path, ch_cost)
+            got_a, got_b = ir.one_sided(ga, gb, fold=got_fold)
+            got = ir.diff(ga, gb, store.lookup_many(pts, got_a, cost).get, store.lookup_many(ts, got_b, cost).get, fold=got_fold)
+            t_iv = monotonic() - t0
             eq = got == want and got_fold == fold
             rec = {"kind": "diff", "from": pdate, "to": date, "path": path, "eq": eq, "rows": len(want), "fold": [got_fold, fold],
-                   "changed": sum(1 for r in want if r[2] != "unchanged"),
+                   "changed": sum(1 for r in want if r[2] != "unchanged"), "one_sided": [len(need_a), len(need_b)],
                    "mismatch": [list(x) for x in sorted(set(got) ^ set(want))][:20],
                    "iv_cost": {"views": [ga["cost"], gb["cost"]], "lookups": cost.total()},
-                   "changes": {"versions": n_changed, "cost": ch_cost.total()}}
+                   "t_ref": round(t_ref, 2), "t_iv": round(t_iv, 2)}
+            if changes:
+                ch_cost = ir.Cost()
+                rec["changes"] = {"versions": store.changes(pts, ts, path, ch_cost), "cost": ch_cost.total()}
             out.write(json.dumps(rec) + "\n")
             out.flush()
             summary["diffs"] += 1
             summary["diff_eq"] += eq
-            err(f"  diff {pdate}→{date} {path!r}: eq={eq} rows={len(want)} changed={rec['changed']}")
+            err(f"  diff {pdate}→{date} {path!r}: eq={eq} rows={len(want)} changed={rec['changed']} one-sided={rec['one_sided']} "
+                f"ref {t_ref:.1f}s iv {t_iv:.1f}s")
     return summary
 
 
@@ -408,12 +447,13 @@ def _footers(src, key: str, version: int) -> dict[str, Footer]:
 
 
 def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
-                runs: list[str] = (), on_summary=None) -> list[dict]:
+                runs: list[str] = (), on_summary=None, *, changes: bool = False) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
     each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
-    a URL, a dir, or a bare GCS bucket name). `runs`: the newest manifest's runs' served dirs, read beside the base.
-    `on_summary(summary)` runs as each scan completes (its marker written then: a later scan killed mid-task loses only
-    itself)."""
+    a URL, a dir, or a bare GCS bucket name), then loaded into a table of a DuckDB database under `tmp` (`Scan`'s `table`;
+    two scans' at a time at most: the diffs' `from` and the scan). `runs`: the newest manifest's runs' served dirs, read
+    beside the base. `on_summary(summary)` runs as each scan completes (its marker written then: a later scan killed
+    mid-task loses only itself). `changes`: `run_date`'s."""
     import duckdb
 
     from .blobstore import Store, store_url
@@ -423,7 +463,11 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     mine = sampled[max(0, task * per - 1):(task + 1) * per]  # the one before this task's share: its diffs' `from`
     first_own = sampled[task * per] if task * per < len(sampled) else None
     store = ir.Store(served, runs)
-    con = duckdb.connect()
+    tmp.mkdir(parents=True, exist_ok=True)
+    db = tmp / "verify.duckdb"
+    for f in (db, db.with_name(db.name + ".wal")):
+        f.unlink(missing_ok=True)
+    con = duckdb.connect(str(db))
     con.execute(f"SET threads=16; SET memory_limit='80GB'; SET temp_directory={q(str(tmp / 'spill'))}")
     src = Store(store_url(scans["bucket"]))
     prev = None
@@ -440,17 +484,20 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
             else:
                 src.get(s["src"], local)
             err(f"{date}: per-scan path sort copied ({local.stat().st_size:,} B, {monotonic() - t0:.0f}s)")
-            scan = Scan(con, str(local), s["version"], s["src"])
+            t0 = monotonic()
+            scan = Scan(con, str(local), s["version"], s["src"], table=f"scan_{mine.index(date)}")
+            err(f"{date}: per-scan path sort loaded ({monotonic() - t0:.0f}s)")
             if date == first_own or (first_own and sampled.index(date) > sampled.index(first_own)):
-                summary = run_date(store, scan, date, s["ts"], prev, out, src)
+                summary = run_date(store, scan, date, s["ts"], prev, out, src, changes=changes)
                 if (g := generation_parity(con, str(local), served, list(runs), s["ts"])) is not None:
                     summary["generation"] = g
                     err(f"  {date} generation: {g['equal']:,} of {g['objects']:,} objects equal")
                 summaries.append(summary)
                 if on_summary is not None:
                     on_summary(summary)
+            os.unlink(local)
             if prev:
-                os.unlink(prev[0].file)
+                prev[0].drop()
             prev = (scan, date, s["ts"])
     return summaries
 
@@ -475,7 +522,7 @@ def marker(summary: dict, gen: str) -> dict:
             **({"generation": g} if g is not None else {})}
 
 
-def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path) -> dict[str, dict]:
+def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, changes: bool = False) -> dict[str, dict]:
     """Parity of `scans` (`{id, src, ts, version}`, oldest first; `src` under `root`, a dir or URL) against generation
     `gen` of `store` (a `blobstore.Store`: base + the newest manifest's runs, as the reader serves them), each scan's
     marker written to `verify/<id>.json` in the generation; returns the markers by scan id."""
@@ -492,5 +539,5 @@ def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path) -> di
         store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
         out[s["date"]] = m
 
-    verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write)
+    verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes)
     return out

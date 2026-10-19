@@ -216,6 +216,15 @@ class Store:
         else:
             shutil.copyfile(Path(self.root) / key, dst)
 
+    def copy(self, src: str, dst: str) -> None:
+        """`src` copied to `dst` within the store: server side on a bucket (a GCS rewrite, an S3/R2 `CopyObject`)."""
+        if self.url:
+            _retrying(lambda: self.fs.copy(self._p(src), self._p(dst)))
+        else:
+            out = Path(self.root) / dst
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(self.root) / src, out)
+
     def put(self, src: Path, key: str) -> None:
         if self.url:
             _retrying(lambda: self.fs.put(str(src), self._p(key)))

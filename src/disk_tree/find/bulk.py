@@ -339,6 +339,20 @@ def _write_shard(out_dir: str, name: str, frame: pd.DataFrame) -> None:
     )
 
 
+def write_empty_shard(out_dir: str, name: str) -> None:
+    """An empty bucket's one shard: no rows, in the schema `entries_to_frame`'s frames write (an empty frame has nothing
+    to infer `name`'s type or `created`'s unit from)."""
+    import fsspec
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pa.schema([("bucket", pa.large_string()), ("name", pa.large_string()), ("size_bytes", pa.int64()),
+                        ("created", pa.timestamp("us", tz="UTC")), ("storage_class_id", pa.int64()), ("generation", pa.int64())])
+    out_fs, out_root = fsspec.core.url_to_fs(out_dir)
+    out_fs.makedirs(out_root, exist_ok=True)
+    pq.write_table(schema.empty_table(), f"{out_root}/{name}.parquet", filesystem=out_fs)
+
+
 def resolve_existing(out_fs, out_root: str, exists: str) -> Optional[dict]:
     """Apply the exists-policy to a target dir; returns the completed run's
     ``_SUCCESS`` payload when it should be reused, else None (proceed to list).

@@ -466,6 +466,13 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
     assert json.loads((prefix / "served" / "stats.json").read_text())["slices"] is False
     base = {key: v for key, v in _parquets(gen).items() if not key.startswith(("deltas/", "manifests/"))}
     assert _parquets(prefix) == base
+    # A cut into a new generation (`-O`) gives it its own ranges and base, not just the served sorts: self-contained.
+    common = [*common[:4], "-o", str(tmp_path / "out2"), *common[6:]]
+    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(len(ist.SORTS))]]:
+        res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
+        assert res.exit_code == 0, (args, res.output)
+    g2 = store / ist.PREFIX / "g2"
+    assert (_parquets(g2), (g2 / "ranges.json").read_text()) == (base, (prefix / "ranges.json").read_text())
 
 
 def test_verify_reads_a_non_gcs_store(world, local, tmp_path):
@@ -522,3 +529,103 @@ def test_verify_samples_the_appended_scans(world, local, tmp_path):
     markers = {d: json.loads((local["gen"] / "verify" / f"{d}.json").read_text()) for d in DATES}
     assert markers == {s["date"]: {"scan": s["date"], "gen": "g", "pass": True, **{k: s[k] for k in ("views", "view_eq", "diffs", "diff_eq")}}
                        for s in summaries}
+
+
+def test_lookup_many_reads_each_group_once_for_what_lookup_answers(world, local, monkeypatch):
+    """`Store.lookup_many` (verify's diff lookups, base + the newest manifest's runs): at every scan, every path's answer
+    is `lookup`'s (a path with no live version, or never listed, is absent), from exactly the groups the per-path
+    lookups read, each decoded once."""
+    from dt_cloud import interval_read as ir
+
+    gen = local["gen"]
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    st = ir.Store(gen / "served", [gen / r["key"] / "served" for r in newest["runs"]])
+    reads: list[tuple[str, int]] = []
+    real = ir.Sort.read
+
+    def spy(self, gs, columns, cost):
+        reads.extend((self.path, g["rg"]) for g in gs)
+        return real(self, gs, columns, cost)
+    monkeypatch.setattr(ir.Sort, "read", spy)
+    paths = [*world["paths"], "b1/nope", "b3"]
+    for s in world["scans"]:
+        reads.clear()
+        one = {p: st.lookup(s["ts"], p, ir.Cost()) for p in paths}
+        per_path = set(reads)
+        reads.clear()
+        many = st.lookup_many(s["ts"], paths, ir.Cost())
+        assert (many, sorted(reads)) == ({p: a for p, a in one.items() if a is not None}, sorted(per_path)), s["id"]
+    assert st.lookup_many(world["scans"][0]["ts"], [], ir.Cost()) == {}
+
+
+def test_one_sided_is_what_diff_looks_up():
+    from dt_cloud import interval_read as ir
+
+    a = {"kept": {"x": (5, 1, "dir"), "x/f": (3, 1, "file"), "y": (2, 1, "dir")}}
+    b = {"kept": {"x": (6, 1, "dir"), "z": (4, 2, "dir"), "z/g": (4, 1, "file")}}
+    assert (ir.one_sided(a, b), ir.one_sided(a, b, fold=True)) == ((["z", "z/g"], ["x/f", "y"]), (["z"], ["y"]))
+    asked: list[tuple[str, str]] = []
+    look = lambda side: lambda p: asked.append((side, p))  # noqa: E731
+    for fold in (False, True):
+        asked.clear()
+        ir.diff(a, b, look("a"), look("b"), fold=fold)
+        need_a, need_b = ir.one_sided(a, b, fold=fold)
+        assert sorted(asked) == sorted([*(("a", p) for p in need_a), *(("b", p) for p in need_b)])
+
+
+@pytest.mark.parametrize("j", [0, BASE, len(DATES) - 1])
+def test_scan_table_reads_as_the_parquet(world, tmp_path, j):
+    """`Scan(…, table=)` (verify's per-scan reference, loaded once): every view, lookup and pick is the in-place parquet
+    read's, `lookup_many` is `lookup` per path, and `drop` frees the table."""
+    from dt_cloud.interval_verify import Scan, cases_for, compare
+
+    s = world["scans"][j]
+    f = str(world["root"] / s["src"])
+    con = duckdb.connect(str(tmp_path / "v.duckdb"))
+    pq_scan, tbl = Scan(duckdb.connect(), f, s["version"]), Scan(con, f, s["version"], table="scan_0")
+    dirs = ["", *sorted({p for p in world["paths"] if "." not in p.rsplit("/", 1)[-1]})]
+    for path in dirs:
+        for md in (None, 1):
+            # Tied siblings come in either order (as SQL returns them): the trees compare as the check does, the rest exactly.
+            got, want = tbl.view(path, 8, 6, max_depth=md), pq_scan.view(path, 8, 6, max_depth=md)
+            rest = lambda v: {k: x for k, x in v.items() if k != "tree"}  # noqa: E731
+            assert (compare(got["tree"], want["tree"], with_f=True), rest(got)) == ([], rest(want)), (path, md)
+    paths = [*world["paths"], "b1/nope"]
+    want = {p: a for p in paths if (a := pq_scan.lookup(p)) is not None}
+    assert (tbl.lookup_many(paths), pq_scan.lookup_many(paths), {p: tbl.lookup(p) for p in want}) == (want, want, want)
+    assert cases_for(tbl, s["id"]) == cases_for(pq_scan, s["id"])
+    tables = lambda: [r[0] for r in con.execute("SELECT table_name FROM duckdb_tables() WHERE NOT temporary").fetchall()]  # noqa: E731
+    assert tables() == ["scan_0"]
+    tbl.drop()
+    assert tables() == []
+
+
+def _verify_recs(local, out: Path, *extra: str) -> list[dict]:
+    res = CliRunner().invoke(ist.cli, ["verify", "-b", str(local["store"]), "-g", "g", "-s", ",".join(DATES), "-o", str(out / "out"),
+                                       "-T", str(out / "tmp"), "-i", "0", *extra], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return [json.loads(ln) for ln in (out / "out" / "verify" / f"t00-{DATES[0]}.jsonl").read_text().splitlines()]
+
+
+def test_verify_diffs_count_changes_only_when_asked(world, local, tmp_path):
+    """A diff's record: its one-sided paths (looked up in one read a side) and timings; `Store.changes` — a cost statistic
+    that reads every group with an open or close in the span — only with `-c`, where it is `changes`' count. Either way
+    every diff is equal, the one-sided lookups are exercised, and each per-scan sort is gone (its copy deleted, its table
+    dropped) once the task moves past it."""
+    from dt_cloud import interval_read as ir
+
+    keys = ["changed", "eq", "fold", "from", "iv_cost", "kind", "mismatch", "one_sided", "path", "rows", "t_iv", "t_ref", "to"]
+    for extra, with_changes in (((), False), (("-c",), True)):
+        out = tmp_path / str(with_changes)
+        recs = [r for r in _verify_recs(local, out, *extra) if r["kind"] == "diff"]
+        assert sorted({tuple(sorted(r)) for r in recs}) == [tuple(sorted(keys + ["changes"] * with_changes))]
+        assert ({r["eq"] for r in recs}, sum(sum(r["one_sided"]) for r in recs) > 0) == ({True}, True)
+        con = duckdb.connect(str(out / "tmp" / "verify.duckdb"), read_only=True)
+        assert ([r[0] for r in con.execute("SHOW TABLES").fetchall()], sorted((out / "tmp").glob("*.parquet"))) == (
+            [f"scan_{len(DATES) - 1}"], [])
+        con.close()
+    gen = local["gen"]
+    newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
+    st = ir.Store(gen / "served", [gen / r["key"] / "served" for r in newest["runs"]])
+    ts = {s["id"]: s["ts"] for s in world["scans"]}
+    assert [r["changes"]["versions"] for r in recs] == [st.changes(ts[r["from"]], ts[r["to"]], r["path"], ir.Cost()) for r in recs]

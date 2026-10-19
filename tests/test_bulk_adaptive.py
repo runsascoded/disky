@@ -246,3 +246,16 @@ def test_duplicate_keys_assert_passes_clean(tmp_path: Path):
     pd.DataFrame({'name': ['a/1', 'b/1'], 'size_bytes': [1, 2]}).to_parquet(
         tmp_path / 'shard-00-0000.parquet', index=False)
     _assert_no_duplicate_keys(str(tmp_path))  # no raise
+
+
+def test_empty_bucket(tmp_path: Path):
+    """A bucket with no objects is a complete, empty listing: one empty shard in the listing schema (what `import` globs)
+    and `_SUCCESS.json` with 0 objects, not a failure (cw's marin-us-east-08a, emptied 2026-10-19)."""
+    import pyarrow.parquet as pq
+
+    total, df, success = _run((), tmp_path)
+    assert (total, len(df), success['objects']) == (0, 0, 0)
+    assert sorted(p.name for p in (tmp_path / 'listing').iterdir()) == ['_SUCCESS.json', 'shard-00-0000.parquet']
+    _run(_PLACEHOLDERS, tmp_path, out='full')
+    full = sorted((tmp_path / 'full').glob('shard-*.parquet'))[0]
+    assert pq.read_schema(tmp_path / 'listing/shard-00-0000.parquet').remove_metadata() == pq.read_schema(full).remove_metadata()

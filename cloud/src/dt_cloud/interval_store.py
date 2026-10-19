@@ -651,11 +651,13 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
                 raise ValueError(f"{out.name}: a closed version's vf/vt isn't one of the scans' stamps")
             t = pa.Table.from_batches([b]).drop_columns(["__seg"])
             t = t.cast(schema) if t.schema != schema else t
-            # The batch's runs of one segment (it's sorted by segment first).
-            vals = segs.to_pylist()
-            cuts = [0] + [x for x in range(1, len(vals)) if vals[x] != vals[x - 1]] + [len(vals)]
+            # The batch's runs of one segment (it's sorted by segment first), found in Arrow: a per-row Python loop holds
+            # the GIL, which serialized concurrent cuts (`cut_gen` `jobs`).
+            m = len(segs)
+            change = pc.indices_nonzero(pc.not_equal(segs.slice(1), segs.slice(0, m - 1))).to_pylist() if m > 1 else []
+            cuts = [0, *(x + 1 for x in change), m]
             for a, z in zip(cuts, cuts[1:]):
-                s = vals[a]
+                s = segs[a].as_py()
                 if s != cur:
                     flush(True)
                     cur = s
@@ -695,22 +697,30 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
     return {"sort": sort, "rows": start, "groups": len(rows), "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
-def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG) -> tuple[dict, dict]:
+def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1) -> tuple[dict, dict]:
     """A generation's served sorts from its range files under `gen_dir` (every `served_sorts(scans["slices"])` entry,
     dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
     (`served/stats.json`). What a base build (`interval_local.build_gen`) and a compaction (`interval_compact`) cut.
-    Returns `({sort: {rows, groups, bytes}}, stats)`."""
+    `jobs` sorts at a time (`static_names.each`, the largest sources first): each is a parallel DuckDB sort, then a
+    serial pyarrow writer, which the other sorts overlap. Returns `({sort: {rows, groups, bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
-    served, sorts = gen_dir / "served", {}
+    served = gen_dir / "served"
     gen = has_generation(scans)
-    for sort in served_sorts(scans["slices"]):
+    todo = served_sorts(scans["slices"])
+    size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
+
+    def one(cur, sort: str) -> dict:
         sub, _, _ = SORTS[sort]
         t1 = monotonic()
-        sd = write_served(con, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen),
+        sd = write_served(cur, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen),
                           rg_rows=rg_rows, stamps=stamps)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
-        sorts[sort] = {"rows": sd["rows"], "groups": sd["groups"], "bytes": sd["bytes"]}
+        return sd
+
+    order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
+    got = dict(zip(order, sn.each(con, one, order, jobs)))
+    sorts = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
     stats = {**churn_stats(con, str(gen_dir), scans), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
     return sorts, stats
@@ -894,6 +904,8 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         (out_dir / "stats.json").write_text(json.dumps(doc, indent=1) + "\n")
         if not no_upload:
             _refuse_overwrite(store, [f"{dst_prefix}/served/stats.json"])
+            if to_gen and to_gen != gen:
+                copy_base(store, prefix, dst_prefix)
             store.put_tree(out_dir, f"{dst_prefix}/served")
             record_slices(store, dst_prefix, scans, has_slices, has_gen)
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
@@ -920,6 +932,22 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
     if not no_upload:
         # The generation's scans and owner axis (the reader's `scans.json`; under `-O`, the new generation's).
         record_slices(store, dst_prefix, scans, has_slices, has_gen)
+
+
+def copy_base(store: Store, src: str, dst: str, *, workers: int = 16) -> int:
+    """Generation `src`'s key ranges (`ranges.json`) and base range files (`SUB_SCHEMA`'s dirs) copied into `dst` (server
+    side on a bucket), each unless `dst` has it at its size: a generation cut from another's ranges (`cut -O`) holds its
+    own base, as every reader (append, compaction, backfill, retire's lineage) assumes. Returns how many it copied."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    have = store.listing(dst)
+    todo = [k for k, n in store.listing(src).items()
+            if (k[len(src) + 1:] == "ranges.json" or k[len(src) + 1:].split("/")[0] in SUB_SCHEMA)
+            and have.get(f"{dst}/{k[len(src) + 1:]}") != n]
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(lambda k: store.copy(k, f"{dst}/{k[len(src) + 1:]}"), todo))
+    err(f"cut: {len(todo)} base files ({src}'s ranges.json and range files) copied into {dst}")
+    return len(todo)
 
 
 def download_served(store: Store, prefix: str, dst: Path, *, workers: int = 16) -> None:
@@ -974,6 +1002,7 @@ def verify_runs(store: Store, prefix: str, dst: Path, scans: dict) -> list[str]:
 
 @cli.command("verify")
 @option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
+@option("-c", "--changes", is_flag=True, help="Also count each diff's changed versions (`Store.changes`: a cost statistic, never compared; reads every group with an open or close in the span)")
 @option("-g", "--gen", required=True, help="Generation")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", help="Local mount of the data bucket (per-scan sorts are copied from it)")
@@ -982,7 +1011,7 @@ def verify_runs(store: Store, prefix: str, dst: Path, scans: dict) -> list[str]:
 @option("-s", "--scans", "scan_ids", help="Comma-separated scan ids to sample (default: the profile's `verify_scans`)")
 @option("-T", "--tmp", default="/stage/tmp", help="Local scratch (served store, per-scan copies, spill)")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
-def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) -> None:
+def verify_cmd(bucket, changes, profile, gen, index, mount, tasks, out, scan_ids, tmp) -> None:
     """Parity against the per-scan path store over the profile's `verify_scans`: every
     view's tiles and every diff's rows, with both sides' read cost; `verify/t##.jsonl` + `.json`, and each sampled
     scan's parity marker `verify/<id>.json` (`interval_verify.marker`: `pass` when every view and diff is equal)."""
@@ -1009,7 +1038,8 @@ def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) ->
         store.write_text(f"{prefix}/verify/{tag}.json", json.dumps(done, indent=1) + "\n")
         store.put(outp / f"{tag}.jsonl", f"{prefix}/verify/{tag}.jsonl")
 
-    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs, on_summary=publish)
+    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs, on_summary=publish,
+                                 changes=changes)
     (outp / f"{tag}.json").write_text(json.dumps(summaries, indent=1) + "\n")
     print(json.dumps(summaries), flush=True)
 

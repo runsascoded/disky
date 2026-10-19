@@ -70,8 +70,9 @@ def import_listing(
         f"SELECT name, size_bytes, floor(epoch(created))::BIGINT AS created{extra_sel} FROM {src} WHERE bucket = ? ORDER BY name",
         [bucket],
     ).df()
-    if df.empty:
+    if df.empty and listing_rows(con, src):
         raise ValueError(f"no rows for bucket {bucket!r} in listings {listings}")
+    # an empty listing is an empty bucket: the scan is its root alone (the dir rows below are just `''`)
     from disk_tree.backends.url import canonical
     scan_root = canonical(f'{scheme}://{bucket}')  # `file` roots → the bare path
     # Collapse `//` empty-component keys here so the parent-walking downstream
@@ -128,6 +129,11 @@ def import_listing(
         error_count=0,
         error_paths=[],
     )
+
+
+def listing_rows(con: "duckdb.DuckDBPyConnection", src: str) -> int:
+    """How many rows the prepared listing `src` holds, every bucket's: 0 is an empty bucket's listing."""
+    return con.execute(f"SELECT count(*) FROM {src}").fetchone()[0]
 
 
 def list_buckets(listings: tuple[str, ...], con: "duckdb.DuckDBPyConnection | None" = None) -> list[str]:
