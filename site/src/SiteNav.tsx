@@ -20,6 +20,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 import { DEFAULT_STORE, STORES, storeForPath } from './stores'
 import { useStore } from './store'
+import { scansHref } from './scanRunsUi'
 import { FaGithub } from 'react-icons/fa'
 import { MdMenu } from 'react-icons/md'
 import { Link, useLocation } from 'react-router-dom'
@@ -229,7 +230,7 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
             <div className="menu-pop" ref={m.refs.setFloating} style={m.floatingStyles} {...m.getFloatingProps()}>
               {link(store.path, 'Map')}
               {store.staging && link('/staged', 'Staged')}
-              {link('/scans', 'Scan runs')}
+              {link(scansHref(store), 'Scan runs')}
               {link('/health', 'Health')}
               {DEFAULT_STORE.metaTree && <a role="menuitem" className="mi" href={DEFAULT_STORE.metaTree} target="_blank" rel="noreferrer" onClick={() => m.setOpen(false)}>Meta <span className="dim">(the data bucket)</span> ↗</a>}
               {isAdmin && link('/admin', 'Admin')}

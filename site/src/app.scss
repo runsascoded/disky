@@ -2978,9 +2978,9 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   td { padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
   td.created, td.read, td.owners, td.nb { white-space: nowrap; }
   .when .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
-  td.staged-by { display: table-cell; font-size: 12.5px; .user-chip { margin-right: 4px; } }
+  td.staged-by { font-size: 12.5px; .user-chip { margin-right: 4px; } }
   code { font-size: 12.5px; }
-  .nb, .user-chip { white-space: nowrap; display: inline-block; }
+  .nb:not(td), .user-chip { white-space: nowrap; display: inline-block; }
   // Selection: the leading checkbox column is the mouse/touch handle; the
   // prefix may break anywhere, but never below a readable width — past that
   // the table scrolls in its box instead of crushing it.

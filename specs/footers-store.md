@@ -515,7 +515,7 @@ Ryan's question was whether every store should move onto one blessed FS. **Mostl
 [`site package.json`]: ../site/package.json
 [`path-store.md`]: done/path-store.md
 [`interval-store.md`]: interval-store.md
-[`index-landscape.md`]: index-landscape.md
+[`index-landscape.md`]: done/index-landscape.md
 [`static-name-search.md`]: architecture/static-name-search.md
 [`awair 0003`]: ../../awair/cfw/cascade/migrations/0003_shard_stats.sql
 [`awair 0004`]: ../../awair/cfw/cascade/migrations/0004_footer_cache.sql

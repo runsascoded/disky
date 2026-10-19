@@ -29,8 +29,17 @@ Ships:
 
 `reclaimTitleSpace` defaults to `false`: parents reserve a full-width title bar. Enabling it lets complete columns to the right of the measured label reclaim that strip, while all sibling rectangles retain one shared area multiplier. It works with DOM, canvas, hit-testing and export. `branchOutline="…"` adds quiet, one-pixel parent frames above descendants without changing layout; those frames also appear in exported images.
 
-Published to a SHA-pinnable **dist branch** (via [`npm-dist`][npm-dist]) — no
-npm publish (yet). Pin by SHA so upgrades are explicit:
+```bash
+pnpm add @rdub/treemap
+```
+
+```ts
+import '@rdub/treemap/styles.css'
+```
+
+The npm package is compiled (ESM + types per subpath: `@rdub/treemap`, `/squarify`, `/parseColor`, `/divergingColor`,
+`/svg`, `/voronoi`), so it needs no JSX/TSX handling in your bundler. It's also on a SHA-pinnable **dist branch** (via
+[`npm-dist`][npm-dist]), the same build:
 
 ```bash
 pnpm add github:runsascoded/disk-tree#<dist-sha>

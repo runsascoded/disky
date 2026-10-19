@@ -117,6 +117,6 @@ A treemap needs every matching contribution, not a first page of results, so the
 [static-name]: static-name-search.md
 [static-hex-runs]: ../done/static-hex-runs.md
 [search-extensions]: ../search-extensions.md
-[index-landscape]: ../index-landscape.md
+[index-landscape]: ../done/index-landscape.md
 [alternatives]: alternatives.md
 [postmortem]: ../done/ch-postmortem.md

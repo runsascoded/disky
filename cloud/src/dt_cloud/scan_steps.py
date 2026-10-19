@@ -987,7 +987,8 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
     with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
         for i, root in enumerate(roots):
-            d1 = [] if i == 0 and ctx.has(*CF) else ["-R"]
+            # a copy after the D1 pass: its rows are that pass's (`-D`: no "-R leaves D1 rows" warning in a dry run)
+            d1 = [] if i == 0 and ctx.has(*CF) else ["-R", *(["-D"] if ctx.has(*CF) else [])]
             backup = ["-b", o["backup"]] if i == 0 and o.get("backup") else []
             ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False, fails_phase=True,
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")

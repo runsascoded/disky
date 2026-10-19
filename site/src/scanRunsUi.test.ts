@@ -10,12 +10,12 @@ describe('per-store scan runs', () => {
       'cw', 'meta', 'cw', 'cw', 'meta',
     ])
   })
-  it('page links and API URLs carry `store=` for a secondary store only', () => {
+  it('page links live under the store\'s path (`/meta/scans`); API URLs carry `store=` for a secondary store only', () => {
     expect([
       scansHref(cw, undefined, cw), scansHref(cw, 'uid/1', cw), scansHref(meta, undefined, cw), scansHref(meta, 'uid/1', cw),
       scanRunsApi(cw, undefined, cw), scanRunsApi(meta, undefined, cw), scanRunsApi(meta, 'uid/1', cw),
     ]).toEqual([
-      '/scans', '/scans/uid%2F1', '/scans?store=meta', '/scans/uid%2F1?store=meta',
+      '/scans', '/scans/uid%2F1', '/meta/scans', '/meta/scans/uid%2F1',
       '/api/scan-runs', '/api/scan-runs?store=meta', '/api/scan-runs/uid%2F1?store=meta',
     ])
   })

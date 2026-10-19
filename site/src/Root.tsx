@@ -10,7 +10,7 @@ import { PrivacyPage } from './PrivacyPage'
 import { FilesRedirect } from './FilesRedirect'
 import { StagedPage } from './StagedPage'
 import { RunPage } from './RunPage'
-import { ScanRunPage, ScansPage } from './ScansPage'
+import { ScanRunPage, ScansPage, ScansRoute } from './ScansPage'
 import { HealthPage } from './HealthPage'
 import { NamePage } from './NamePage'
 import { OgPage } from './OgPage'
@@ -81,8 +81,8 @@ export default function Root() {
       <Route path="/staged" element={<AuthGate><StagedPage /></AuthGate>} />
       <Route path="/runs/*" element={<AuthGate><RunPage /></AuthGate>} />
       {/* What each scan job did (specs/done/scan-runs-ui.md). */}
-      <Route path="/scans" element={<AuthGate><ScansPage /></AuthGate>} />
-      <Route path="/scans/*" element={<AuthGate><ScanRunPage /></AuthGate>} />
+      <Route path="/scans" element={<AuthGate><ScansRoute /></AuthGate>} />
+      <Route path="/scans/*" element={<AuthGate><ScansRoute run /></AuthGate>} />
       {/* The append-only stores' state (specs/done/health-page.md). */}
       <Route path="/health" element={<AuthGate><HealthPage /></AuthGate>} />
       <Route path="/names" element={<AuthGate><NamePage /></AuthGate>} />
@@ -100,6 +100,9 @@ export default function Root() {
         const base = s.path.replace(/\/$/, '')
         return [
           <Route key={`${s.key}:files`} path={`${base}/files/*`} element={<AuthGate><StoreProvider store={s}><FilesRedirect /></StoreProvider></AuthGate>} />,
+          // its scan runs: the primary's pages over its own records (`store=` on their API calls)
+          <Route key={`${s.key}:scans`} path={`${base}/scans`} element={<AuthGate><StoreProvider store={s}><ScansPage /></StoreProvider></AuthGate>} />,
+          <Route key={`${s.key}:scan`} path={`${base}/scans/*`} element={<AuthGate><StoreProvider store={s}><ScanRunPage /></StoreProvider></AuthGate>} />,
           <Route key={s.key} path={`${base}/*`} element={<AuthGate><StoreProvider store={s}><App /></StoreProvider></AuthGate>} />,
         ]
       })}

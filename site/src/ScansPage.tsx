@@ -5,7 +5,7 @@
 // phase timeline per run.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
@@ -15,7 +15,8 @@ import { axisTicks, inSpan, type RunSpan, runSpanParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
 import { useUnits } from './units'
 import { useStores } from './auth'
-import { type Store } from './stores'
+import { DEFAULT_STORE, type Store } from './stores'
+import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
@@ -36,11 +37,20 @@ const useScanRun = (id: string, store: Store) => useQuery<DetailResponse, Error>
   refetchInterval: q => (q.state.data?.run.status === 'running' || q.state.data?.phase_issues?.some(i => !i.recovery) ? 30_000 : false), staleTime: 15_000,
 })
 
-/** The store this page shows (`?store=<key>`; the primary without one) and its run links. */
+/** The store this page shows (the route's: `/scans` the primary's, `<store path>/scans` a secondary's) and its run links. */
 function useScansStore(): { store: Store; scanHref: (id?: string) => string } {
-  const { search } = useLocation()
-  const store = useMemo(() => scansStore(search), [search])
+  const store = useStore()
   return { store, scanHref: (id?: string) => scansHref(store, id) }
+}
+
+/** The primary's `/scans` routes: a link from before secondary stores had their own (`/scans?store=meta`) lands on
+ *  that store's page (`/meta/scans`); else the page. */
+export function ScansRoute({ run }: { run?: boolean }) {
+  const { search } = useLocation()
+  const id = useParams()['*']
+  const legacy = new URLSearchParams(search).has('store') ? scansStore(search) : null
+  if (legacy && legacy !== DEFAULT_STORE) return <Navigate to={scansHref(legacy, run ? id : undefined)} replace />
+  return run ? <ScanRunPage /> : <ScansPage />
 }
 
 function useBytes() {
@@ -277,11 +287,6 @@ export function ScansPage() {
     <main className="staged-page scans-page">
       <SiteNav />
       <h1>Scan runs</h1>
-      {stores.length > 1 && <div className="run-filters">
-        {stores.length <= 3
-          ? <span className="gran" role="radiogroup" aria-label="Store">{stores.map(s => <button key={s.key} type="button" role="radio" aria-checked={s === store} className={s === store ? 'on' : ''} onClick={() => nav(scansHref(s))}>{s.label}</button>)}</span>
-          : <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(stores.find(s => s.key === e.target.value) ?? stores[0]))}>{stores.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>}
-      </div>}
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
         <p className="dim">Scan runs aren't recorded on this deployment yet (its D1 has no <code>scan_runs</code> table: migration <code>scan_runs</code>, then <code>dt-cloud scan-run backfill</code>).</p>

@@ -5,8 +5,8 @@ name: Build @rdub/treemap dist branch
 # can `pnpm add github:runsascoded/disk-tree#<dist-sha>` without pulling the
 # whole monorepo. Uses runsascoded/npm-dist in `package_dir` mode, which packs
 # the one package and flattens it to the dist branch ROOT — so the git dep
-# resolves to `@rdub/treemap` directly. Source-first (no compile — the package
-# ships .ts; `pnpm pack` respects its `files`).
+# resolves to `@rdub/treemap` directly: the compiled npm build (`tsup` → `dist/`;
+# `pnpm pack` respects its `files` and `publishConfig`).
 #
 # Branch-name convention: multi-target repos namespace their dist branches
 # under `dist/<pkg>` (here `dist/treemap`). Slashed dist branches are fine
@@ -28,7 +28,7 @@ name: Build @rdub/treemap dist branch
 
 on:
   push:
-    branches: [main]
+    branches: [main, cloud]
     paths:
       - "packages/treemap/**"
       - ".github/workflows/build-dist.yml"
@@ -46,13 +46,13 @@ jobs:
     uses: runsascoded/npm-dist/.github/workflows/build-dist.yml@v1
     with:
       # Package at the dist branch ROOT → `github:runsascoded/disk-tree#<dist-sha>`
-      # resolves to `@rdub/treemap`. (`pnpm pack` carries `src/` + README per the
-      # package's `files`, so no `preserve_dirs`/`extra_files` needed here.)
+      # resolves to `@rdub/treemap`. (`pnpm pack` carries `dist/` + README per the
+      # package's `files`, and applies its `publishConfig` entry points: the npm build.)
       package_dir: packages/treemap
       dist_branch: dist/treemap
       source_ref: ${{ inputs.source_ref }}
-      # The package's `build` script just typechecks (source-first, no emit);
-      # npm-dist runs it to smoke-test the source before publishing. Only this
+      # The package's `build` is `tsup` (compiled ESM + types into `dist/`, the npm
+      # package's contents); the workspace itself still imports `src/`. Only this
       # package: the root `build` is `pnpm -r build`, which also dry-run-deploys
       # the workspace's Workers (wrangler needs Node ≥ 22).
       build_command: pnpm -C packages/treemap run build
