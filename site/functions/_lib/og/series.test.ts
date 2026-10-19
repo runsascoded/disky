@@ -1,5 +1,5 @@
 /** The size-over-time card: its series query, its data from a fixture series, its SVG, and a real PNG through resvg
- * (`tmp/og-series-{full,anon,roots}.png` for a look). */
+ * (`tmp/og-series-{full,anon,roots,long,many}.png` for a look). */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cardSvg, type CardData } from './card'
 import { ensureWasm, svgToPng } from './render'
@@ -129,6 +129,25 @@ describe('cardSvg: the chart', () => {
     expect([full.split('class="band"').length - 1, full.split('class="total"').length - 1, textNodes(full).slice(-2), textNodes(anon).slice(-1)])
       .toEqual([2, 1, ['a 150 TiB', 'b 45.0 TiB'], ['195 TiB · 6,000 objects']])
   })
+  it('every drawn band is named: long bucket names shrink to fit beside the footer, and what still can\'t is counted', () => {
+    const T = 2 ** 40
+    const legend = (names: [string, number][]) => names.map(([label, b], i) => ({ label, color: slotColor(i), b: b * T }))
+    const chart = { total: [[0, 1], [1, 2]] as [number, number][], fmtX: String }
+    const card = (names: [string, number][]) => {
+      const svg = cardSvg({ tier: 'full', site: 'cw', title: 'cw', subtitle: '', total: '964 TiB · 400,000,000 objects', tiles: [], chart, legend: legend(names) })
+      return textNodes(svg).filter(t => !/^(\d|Jan|0$|1$)/.test(t)).slice(2)
+    }
+    const cw: [string, number][] = [['marin-us-east-02a', 811], ['marin-us-east-06a', 77.4], ['hero-checkpoints', 75]]
+    expect([
+      card(cw),
+      card([...cw, ['marin-us-east-04a', 0.5], ['marin-us-east-05a', 0.1]]),
+      card([...Array(20)].map((_, i) => [`marin-bucket-${i}`, 20 - i] as [string, number])),
+    ]).toEqual([
+      ['marin-us-east-02a 811 TiB', 'marin-us-east-06a 77.4 TiB', 'hero-checkpoints 75.0 TiB'],
+      ['marin-us-east-02a 811 TiB', 'marin-us-east-06a 77.4 TiB', 'hero-checkpoints 75.0 TiB', 'marin-us-east-04a 512 GiB', 'marin-us-east-05a 102 GiB'],
+      ['marin-bucket-0 20.0 TiB', 'marin-bucket-1 19.0 TiB', 'marin-bucket-2 18.0 TiB', 'marin-bucket-3 17.0 TiB', 'marin-bucket-4 16.0 TiB', 'marin-bucket-5 15.0 TiB', 'marin-bucket-6 14.0 TiB', '+13 more'],
+    ])
+  })
 })
 
 describe('seriesCard: the page\'s series, read in-process', () => {
@@ -182,6 +201,10 @@ describe('the series card as a PNG (resvg, the site\'s fonts)', () => {
       ['full', seriesCardData(SITE, 'marin-us-central2/checkpoints · size over time', 'full', pathBody, {}, SCANS[5])],
       ['anon', seriesCardData(SITE, 'marin-us-central2/checkpoints · size over time', 'anon', pathBody, {}, SCANS[5])],
       ['roots', seriesCardData(SITE, 'marin GCS · size over time', 'full', rootsBody, {}, SCANS[5])],
+      ...([['long', 5], ['many', 20]] as [string, number][]).map(([name, k]): [string, CardData] => {
+        const d = seriesCardData(SITE, 'marin GCS · size over time', 'full', rootsBody, {}, SCANS[5])
+        return [name, { ...d, total: '964 TiB · 400,000,000 objects', legend: [...Array(k)].map((_, i) => ({ label: `marin-us-east-0${i}a`, color: slotColor(i), b: (k - i) * 2 ** 40 })) }]
+      }),
     ]
     const dims: [number, number][] = []
     for (const [name, d] of cards) {
@@ -190,6 +213,6 @@ describe('the series card as a PNG (resvg, the site\'s fonts)', () => {
       dims.push([v.getUint32(16), v.getUint32(20)])
       await writeFile(`tmp/og-series-${name}.png`, png)
     }
-    expect(dims).toEqual([[1200, 630], [1200, 630], [1200, 630]])
+    expect(dims).toEqual([[1200, 630], [1200, 630], [1200, 630], [1200, 630], [1200, 630]])
   })
 })
