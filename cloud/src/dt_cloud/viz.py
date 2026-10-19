@@ -16,12 +16,16 @@ import sys
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import duckdb
 
-from .index import AGE_COLS, STORE_L2, age_bucket_sql, duckdb_codec, store_columns
+from .index import AGE_COLS, ROW_GROUP_SIZE, STORE_L2, age_bucket_sql, duckdb_codec, store_columns
 from .scan_started import listing_markers, listing_started
 from .resource_monitor import monitor_resources, resource_stage
+
+if TYPE_CHECKING:
+    from .index_parts import Part
 
 err = partial(print, file=sys.stderr)
 
@@ -120,6 +124,39 @@ CLASS_IDS = (2, 3, 4, 5, 6)
 DIR_STATS_COLS = ("bucket", "dir", "fp", "b", "o", "wts", "wb", *(f"c{c}" for c in CLASS_IDS), "mtime_max", "created_max")
 
 
+def dir_exprs(age_cols: tuple[str, ...] = ()) -> dict[str, str]:
+    """A store dir row's columns over the rolled-up slice `p` (`ptu`: `b`, `o`, `wts`, `wb`, classes, `a`, `mtime`,
+    `created`, the `age_cols` strata), its structure `d` (`own_o`, `n_subdirs`) and `n` (`n_desc`): `_write_store`'s,
+    and the sharded merge's for a split bucket's root (`index_parts.root_rows`)."""
+    from .index import GENERATION
+
+    return {
+        "path": "p.path", "usr": "p.usr", "size": "p.b::BIGINT", "depth": "p.depth::INTEGER", "kind": "'dir'",
+        "n_files": "p.o::BIGINT", "n_children": "(d.own_o + d.n_subdirs)::BIGINT", "n_desc": "n.n_desc::BIGINT",
+        "mtime": "coalesce(p.mtime, 0)::BIGINT",
+        "mtime_mean": "(CASE WHEN p.wb > 0 THEN p.wts / p.wb END)::DOUBLE",
+        "created": "p.created::BIGINT", "last_read": "p.a::INTEGER",
+        "sum_storage_class_id_2": "coalesce(p.c2, 0)::BIGINT",
+        "sum_storage_class_id_3": "coalesce(p.c3, 0)::BIGINT",
+        "sum_storage_class_id_4": "coalesce(p.c4, 0)::BIGINT",
+        **{c: f"coalesce(p.{c}, 0)::BIGINT" for c in age_cols},
+        GENERATION: "NULL::BIGINT",
+    }
+
+
+def store_columns_for(generation: bool, age_cols: tuple[str, ...] = ()) -> list[str]:
+    """The store's columns (`STORE_L2_SHAPE`'s, the `age_cols` strata, + `generation` last with `-G`)."""
+    from .index import GENERATION
+
+    return [*store_columns([([*STORE_L2_SHAPE[0], *age_cols], STORE_L2_SHAPE[1])]), *([GENERATION] if generation else [])]
+
+
+def store_select(generation: bool, age_cols: tuple[str, ...] = ()) -> str:
+    """The SELECT list of a store dir row (`dir_exprs`) in the store's column order."""
+    exprs = dir_exprs(age_cols)
+    return ", ".join(f"{exprs[c]} AS {c}" for c in store_columns_for(generation, age_cols))
+
+
 def _write_store(
     con: "duckdb.DuckDBPyConnection",
     src: str,
@@ -136,6 +173,8 @@ def _write_store(
     search: bool = False,
     generation: bool = False,
     path_only: bool = False,
+    groups: bool = True,
+    roots: tuple[Path, str] | None = None,
 ) -> dict[str, dict]:
     """The store's sorts beside ``path_index`` (specs/done/path-store.md §4.3) from
     the rolled-up dir slices (``ptu``, ``dir_stats``, ``dir_attr`` when
@@ -148,7 +187,10 @@ def _write_store(
     Structural counts are per path, from the dir set itself (cheap: dirs, not
     objects × depth): `n_children` = the dir's own objects + its direct
     subdirs; `n_desc` = own objects + Σ over subdirs of (`n_desc` + 1), folded
-    bottom-up one depth at a time."""
+    bottom-up one depth at a time.
+
+    ``groups=False``: no `.groups.*` sidecars (a part's sorts: the merge writes them from the merged file). ``roots``
+    `(file, part id)`: also the bucket roots' rolled-up slices and structural partials (`index_parts.ROOTS`)."""
     from .index import GENERATION, write_sorts
 
     if path_index.name != "path-index.parquet":
@@ -182,19 +224,7 @@ def _write_store(
             """
         )
     _rss("dstruct")
-    columns = [*store_columns([([*STORE_L2_SHAPE[0], *age_cols], STORE_L2_SHAPE[1])]), *([GENERATION] if generation else [])]
-    dir_exprs = {
-        "path": "p.path", "usr": "p.usr", "size": "p.b::BIGINT", "depth": "p.depth::INTEGER", "kind": "'dir'",
-        "n_files": "p.o::BIGINT", "n_children": "(d.own_o + d.n_subdirs)::BIGINT", "n_desc": "n.n_desc::BIGINT",
-        "mtime": "coalesce(p.mtime, 0)::BIGINT",
-        "mtime_mean": "(CASE WHEN p.wb > 0 THEN p.wts / p.wb END)::DOUBLE",
-        "created": "p.created::BIGINT", "last_read": "p.a::INTEGER",
-        "sum_storage_class_id_2": "coalesce(p.c2, 0)::BIGINT",
-        "sum_storage_class_id_3": "coalesce(p.c3, 0)::BIGINT",
-        "sum_storage_class_id_4": "coalesce(p.c4, 0)::BIGINT",
-        **{c: f"coalesce(p.{c}, 0)::BIGINT" for c in age_cols},
-        GENERATION: "NULL::BIGINT",
-    }
+    columns = store_columns_for(generation, age_cols)
     # An object is attributed to its dir's owner (the same deepest-prefix join
     # `dir_attr` resolved per dir; a leaf needs no explosion). The access log is
     # per dir, so `last_read` is NULL on object rows.
@@ -216,12 +246,23 @@ def _write_store(
     con.execute(
         f"""
         COPY (
-          SELECT {sel(dir_exprs)} FROM ptu p JOIN dstruct d USING (path) JOIN nd n USING (path)
+          SELECT {sel(dir_exprs(age_cols))} FROM ptu p JOIN dstruct d USING (path) JOIN nd n USING (path)
           UNION ALL
           SELECT {sel(obj_exprs)} FROM {src} x {attr_join}
         ) TO '{store}' (FORMAT parquet, {duckdb_codec()}, ROW_GROUP_SIZE 65536)
         """
     )
+    if roots is not None:
+        file, part_id = roots
+        con.execute(
+            f"""
+            COPY (
+              SELECT '{part_id.replace("'", "''")}' AS part, p.path, p.usr, p.b, p.o, p.wts, p.wb, p.c2, p.c3, p.c4, p.a,
+                p.mtime, p.created, d.own_o, d.n_subdirs, n.n_desc
+              FROM ptu p JOIN dstruct d USING (path) JOIN nd n USING (path) WHERE p.depth = 1 ORDER BY p.path, p.usr
+            ) TO '{file}' (FORMAT parquet)
+            """
+        )
     for t in ("nd", "dstruct", "dirs"):
         con.execute(f"DROP TABLE {t}")
     _rss("store-l2")
@@ -229,7 +270,8 @@ def _write_store(
         kw = {"row_group_rows": row_group_rows} if row_group_rows else {}
         if path_only:
             return write_sorts(con, str(store), path_index.parent, tiers=("path",), groups=False, **kw)
-        return write_sorts(con, str(store), path_index.parent, sort_variants=((("usr",),) if attr and user_sorts else ()), variant_tiers=user_sort_tiers, search=search, **kw)
+        return write_sorts(con, str(store), path_index.parent, sort_variants=((("usr",),) if attr and user_sorts else ()),
+                           variant_tiers=user_sort_tiers, search=search, groups=groups, **kw)
     finally:
         store.unlink()
 
@@ -265,9 +307,16 @@ def write_path_index(
     search: bool = False,
     generation: bool = False,
     path_only: bool = False,
+    part: "Part | None" = None,
 ) -> dict:
     """Write age.json / meta.json under ``out_dir`` (+ the path store's sorts
     beside ``path_index``); returns meta.
+
+    ``part`` (`path-index -p`, `index_parts.Part`): one shard of the scan — its bucket's objects, or those whose
+    first key segment is in its range — written as the merge reads it, beside ``path_index``: the sorts without
+    `.groups.*` sidecars, `part.json` (the snapshot's partials; returned), `roots.parquet`, `age.parquet` and, when
+    attributing, `pfx.parquet` instead of `attr.tsv`; nothing under ``out_dir``. `merge_path_index` over a scan's
+    parts writes exactly this function's outputs over all of them.
 
     ``user_sorts=False`` skips the ``-by-user`` copies; ``user_sort_tiers``
     keeps the copy for some sorts only. A lens view reads a user-first sort
@@ -341,6 +390,10 @@ def write_path_index(
         FROM (SELECT * REPLACE (ltrim(bucket, '/') AS bucket) FROM {prepare_listing(con, listings)})
         WHERE bucket <> '' OR strpos(name, '/') > 0
     )"""
+    if part is not None:
+        if path_index is None or search:
+            raise ValueError("a part (-p) writes its sorts beside -P, and no search sidecars (the merge writes them)")
+        src = f"(SELECT * FROM {src} WHERE {part.where()})"
 
     resource_stage("dir-rollups")
     # --- layer-2 dir rollups (attribution-independent; cached when dir_cache) ---
@@ -356,6 +409,9 @@ def write_path_index(
     # Bytes by age (`age_strata`, specs/done/row-age-strata.md): off by default,
     # so a store that hasn't opted in keeps its schema, cache and cost.
     age_cols = AGE_COLS if age_strata else ()
+    if age_cols and part is not None:
+        # `path-index-merge` (index_parts) merges the store's columns without the strata: refused, not dropped.
+        raise ValueError("path-index: age strata (-a) on a sharded part (-p) aren't supported")
     age_sums = "".join(
         f"sum(CASE WHEN created IS NOT NULL AND {age_bucket_sql('created', str(asof_day))} = {i} THEN size_bytes END)::BIGINT AS {c}, "
         for i, c in enumerate(age_cols)
@@ -393,7 +449,8 @@ def write_path_index(
         )
         # An empty bucket (its listing one empty shard beside a 0-object marker, as `bulk-list` writes it) is its root
         # alone at 0 bytes, as `import` writes it: on the Map at 0, not gone from the scan
-        empty = sorted({m["bucket"] for m in listing_markers(listings) if m.get("objects") == 0 and m.get("bucket")})
+        empty = sorted({m["bucket"] for m in listing_markers(listings) if m.get("objects") == 0 and m.get("bucket")
+                        and (part is None or m["bucket"] == part.bucket)})
         if empty:
             con.execute(
                 """INSERT INTO dir_stats (bucket, dir, fp, b, o)
@@ -496,7 +553,7 @@ def write_path_index(
               COALESCE(SUM(n_ops), 0) AS ro,
               COALESCE(SUM(bytes_out), 0) AS rb
             FROM {acc}
-            WHERE op IN ('GET', 'HEAD') AND {day} < DATE '{asof}'
+            WHERE op IN ('GET', 'HEAD') AND {day} < DATE '{asof}'{f" AND bucket = '{part.bucket_sql}'" if part else ""}
             GROUP BY 1, 2
             """
         )
@@ -582,11 +639,21 @@ def write_path_index(
     _rss("ptu")
     sorts: dict[str, dict] = {}
     if path_index is not None:
-        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows, user_sort_tiers=user_sort_tiers, asof_day=asof_day, age_cols=age_cols, search=search, generation=generation, path_only=path_only)
+        from .index_parts import AGE, PART_JSON, PART_VERSION, PFX, ROOTS
+
+        pdir = path_index.parent
+        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows,
+                             user_sort_tiers=user_sort_tiers, asof_day=asof_day, age_cols=age_cols, search=search, generation=generation, path_only=path_only,
+                             groups=part is None, roots=(pdir / ROOTS, part.id) if part else None)
         _rss("store")
-        # Provenance sidecar: the attributing prefixes' user/source/evidence.
-        from .extras import write_extras
-        write_extras(pfx_df if attr else None, path_index.parent)
+        if part is not None:
+            # the merge picks each key from the part holding its bucket and first segment, then writes `attr.tsv`
+            if attr:
+                pfx_df.to_parquet(pdir / PFX, index=False)
+        else:
+            # Provenance sidecar: the attributing prefixes' user/source/evidence.
+            from .extras import write_extras
+            write_extras(pfx_df if attr else None, pdir)
         _rss("extras")
     con.execute("DROP TABLE ptu")
 
@@ -599,8 +666,7 @@ def write_path_index(
         # (day, d1, user, a) strata: the cached per-(day, dir) rollup
         # joined to the same dir attribution. Day keys are epoch days; the site
         # aggregates to day/week/month.
-        age = con.execute(
-            """
+        age_sql = """
             SELECT d.day,
               CASE WHEN d.dir = '' THEN '(files)' ELSE regexp_extract(d.dir, '^([^/]+)', 1) END AS d1,
               t."user" AS user, x.aday AS a,
@@ -610,15 +676,8 @@ def write_path_index(
             LEFT JOIN access_agg x ON x.bucket = d.bucket AND x.dir = d.dir
             GROUP BY ALL ORDER BY ALL  -- fully deterministic output order (byte-identical reruns)
             """
-        ).fetchall()
-        age_rows = [
-            {"d": day, "d1": d1, **({"u": u} if u else {}), **({"a": a} if a is not None else {}), "b": b, "o": o}
-            for day, d1, u, a, b, o in age
-        ]
-        _rss("age")
     else:
-        age = con.execute(
-            """
+        age_sql = """
             SELECT d.day,
               CASE WHEN d.dir = '' THEN NULL ELSE regexp_extract(d.dir, '^([^/]+)', 1) END AS d1,
               x.aday AS a,
@@ -626,47 +685,89 @@ def write_path_index(
             FROM age_days d LEFT JOIN access_agg x ON x.bucket = d.bucket AND x.dir = d.dir
             GROUP BY ALL ORDER BY ALL
             """
-        ).fetchall()
-        age_rows = [
-            {"d": day, "d1": d1 or "(files)", **({"a": a} if a is not None else {}), "b": b, "o": o}
-            for day, d1, a, b, o in age
-        ]
+    age = None
+    if part is not None:
+        # a part's strata, summed per key by the merge (each part's are grouped by the same key)
+        con.execute(f"COPY ({age_sql}) TO '{path_index.parent / AGE}' (FORMAT parquet)")
+    else:
+        age = con.execute(age_sql).fetchall()
+    _rss("age")
 
     # Storage-class mix from the dir rollups (class 1/STANDARD = total minus
     # the explicitly-tracked classes — same derivation the per-user mix uses).
     s_b, *s_cs = con.execute(
         f"SELECT coalesce(sum(b), 0)::BIGINT, {', '.join(f'coalesce(sum(c{c}), 0)::BIGINT' for c in CLASS_IDS)} FROM dir_stats"
     ).fetchone()
-    classes = [(cid, cb) for cid, cb in ((1, int(s_b) - sum(map(int, s_cs))), *zip(CLASS_IDS, map(int, s_cs))) if cb]
-
-    meta = {
+    partial = {
         "asof": asof,
+        "attr": attr,
+        # When the scan started: the earliest bucket listing's `started` — a
+        # date-only scan id's real time on a day with other scans (`scan_started`).
+        "started": listing_started(listings),
+        "total_bytes": total_b,
+        "total_objects": total_o,
+        "class_sums": [int(s_b), *map(int, s_cs)],
+        "access": {"from": access_window[0], "to": access_window[1], "through": access_through, "buckets": access_buckets}
+        if access_window else None,
+        "users": dict(user_bytes) if attr else None,
+        "user_class": {u: {str(c): b for c, b in cs.items()} for u, cs in user_class.items()} if attr else None,
+    }
+    if part is not None:
+        doc = {
+            "version": PART_VERSION, "part": part.asdict(), "partial": partial,
+            "sorts": {v: Path(s["file"]).name for v, s in sorts.items()}, "rows": {v: s["rows"] for v, s in sorts.items()},
+            "row_group_rows": row_group_rows or ROW_GROUP_SIZE, "path_only": path_only,
+        }
+        (path_index.parent / PART_JSON).write_text(json.dumps(doc, indent=2) + "\n")
+        return partial
+    meta = snapshot_meta(partial, sorts)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "age.json").write_text(json.dumps(age_rows(age, attr), separators=(",", ":")) + "\n")
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return meta
+
+
+def age_rows(age: list[tuple], attr: bool) -> list[dict]:
+    """`age.json`'s rows from the strata query's `(day, d1, [user,] a, bytes, objects)`."""
+    if attr:
+        return [
+            {"d": day, "d1": d1, **({"u": u} if u else {}), **({"a": a} if a is not None else {}), "b": b, "o": o}
+            for day, d1, u, a, b, o in age
+        ]
+    return [
+        {"d": day, "d1": d1 or "(files)", **({"a": a} if a is not None else {}), "b": b, "o": o}
+        for day, d1, a, b, o in age
+    ]
+
+
+def snapshot_meta(partial: dict, sorts: dict[str, dict]) -> dict:
+    """`meta.json` from a scan's partials (`write_path_index`'s, or the parts' combined: `index_parts.combine_partials`)
+    and its sorts (`{variant: {rows, groups}}`, in write order)."""
+    s_b, *s_cs = partial["class_sums"]
+    classes = [(cid, cb) for cid, cb in ((1, s_b - sum(s_cs)), *zip(CLASS_IDS, s_cs)) if cb]
+    meta = {
+        "asof": partial["asof"],
         "generated": dt.date.today().isoformat(),
         # When this scan was published, as data (the site used to splice the
         # store object's mtime in, which stops being the publish time once the
         # served copy lives in R2 — specs/done/r2-serving-migration.md step 6).
         "published": dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-        # When the scan started: the earliest bucket listing's `started` — a
-        # date-only scan id's real time on a day with other scans (`scan_started`).
-        **({"started": started} if (started := listing_started(listings)) else {}),
-        "total_bytes": total_b,
-        "total_objects": total_o,
+        **({"started": partial["started"]} if partial["started"] else {}),
+        "total_bytes": partial["total_bytes"],
+        "total_objects": partial["total_objects"],
         "class_bytes": {int(c): int(b) for c, b in classes},
     }
     if sorts:
         meta["index"] = {"rows": sorts["path"]["rows"], "sorts": {v: {"rows": s["rows"], "groups": s["groups"]} for v, s in sorts.items()}}
-    if access_window:
+    if partial["access"]:
         # Epoch days the access logs cover — the UI's "no reads since <from>"
         # is only meaningful relative to when logging began. `through`: the newest
         # log hour the read data includes (`YYYY-MM-DDTHH:00Z`; the hour of the
         # newest `last_ts`), so the UI can say how far the reads are complete —
         # GCS delivers a log hour ~12 h late (specs/access-log-freshness.md §B).
-        meta["access"] = {"from": access_window[0], "to": access_window[1], "through": access_through, "buckets": access_buckets}
-    if attr:
-        meta["users"] = [{"u": u, "b": b} for u, b in sorted(user_bytes.items(), key=lambda kv: -kv[1])]
-        meta["user_class_bytes"] = {u: dict(sorted(c.items())) for u, c in sorted(user_class.items())}
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "age.json").write_text(json.dumps(age_rows, separators=(",", ":")) + "\n")
-    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        meta["access"] = partial["access"]
+    if partial["attr"]:
+        # bytes descending, a tie by name (a part-merged scan sums the same users in another order)
+        meta["users"] = [{"u": u, "b": b} for u, b in sorted(partial["users"].items(), key=lambda kv: (-kv[1], kv[0]))]
+        meta["user_class_bytes"] = {u: dict(sorted((int(c), b) for c, b in cs.items())) for u, cs in sorted(partial["user_class"].items())}
     return meta

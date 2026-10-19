@@ -251,6 +251,10 @@ export const STORES: Store[] = (([first, ...rest]) => [withPageConfig(first, (gl
 /** The primary store: `/`, and every request as it was before stores existed. */
 export const DEFAULT_STORE = STORES[0]
 
+/** The duplicate-candidate report's page (`/dups`): the deployment's `DUPS = "1"` (wrangler `[vars]`, read at build
+ *  time), as the Functions' `/api/dups` reads it. */
+export const DUPS: boolean = import.meta.env.VITE_DUPS === '1'
+
 /** Display thresholds can hide real small buckets; they do not invalidate routes. */
 export function knownBucket(name: string, store: Store, visible: { n: string }[]): boolean {
   return store.buckets.includes(name) || visible.some(row => row.n === name)

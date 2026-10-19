@@ -87,9 +87,9 @@ def test_newly_heavy_roots_are_inserted_in_bounded_batches(monkeypatch):
 
 def test_newly_heavy_rollups_match_monolithic_combine(monkeypatch):
     con = duckdb.connect()
-    con.execute(f"CREATE TABLE dr ({sr.ROOT_COLS}); CREATE TABLE newq (q VARCHAR); CREATE TABLE newh (q VARCHAR, dir VARCHAR, k INTEGER)")
+    con.execute(f"CREATE TABLE dr ({sr.ROOT_COLS}); CREATE TABLE newq (q VARCHAR); CREATE TABLE newh (q VARCHAR, dir VARCHAR, k INTEGER, rows BIGINT)")
     dirs = [("member", "b/d", 2), ("member", "b/d/sub", 3), ("new", "b/new", 2)]
-    sd.insert_rows(con, "newh", dirs)
+    sd.insert_rows(con, "newh", [(*d, 3) for d in dirs])
     sd.insert_rows(con, "newq", [("new",)])
     sd.insert_rows(con, "dr", [
         ("member", 3, "b/d/a", None, 1, 3, 10, 1),
@@ -105,9 +105,17 @@ def test_newly_heavy_rollups_match_monolithic_combine(monkeypatch):
     ]
 
     class Reads:
+        def __init__(self):
+            self.ranges = []
+
         def tables(self, c, lo, hi):
             assert c == "member"
+            self.ranges.append((c, lo, hi))
             yield roots([r for r in history if lo <= r["path"] < hi])
+
+        def hold(self, queries):
+            if queries:
+                yield 0, len(queries)
 
         def io(self):
             return {}
@@ -140,9 +148,29 @@ def test_newly_heavy_rollups_match_monolithic_combine(monkeypatch):
         full(con, table, keep, into)
 
     monkeypatch.setattr(sd, "full_rollups", checked)
-    assert sd.newly_heavy_rollups(con, Reads(), "long", 1, log=lambda _: None) == 4
-    assert sizes == [1, 1, 1]
-    assert con.execute("SELECT * FROM rup ORDER BY ALL").fetchall() == expected
+    # one chunk: `b/d/sub` is cut from `b/d`'s range, read once; a chunk each: each read on its own
+    for chunk_rows, read, chunks, ranges in ((9, 3, [3], [("member", "b/d/", "b/d0")]),
+                                             (3, 4, [1, 1, 1], [("member", "b/d/", "b/d0"), ("member", "b/d/sub/", "b/d/sub0")])):
+        con.execute("DROP TABLE IF EXISTS rup")
+        sizes.clear()
+        reads = Reads()
+        assert sd.newly_heavy_rollups(con, reads, "long", 1, log=lambda _: None, chunk_rows=chunk_rows) == read
+        assert (sizes, reads.ranges) == (chunks, ranges)
+        assert con.execute("SELECT * FROM rup ORDER BY ALL").fetchall() == expected
+
+
+@pytest.mark.parametrize("rows,chunk_rows,expected", [
+    ([], 10, []),
+    ([3, 3, 3], 9, [(0, 3)]),
+    ([3, 3, 3], 8, [(0, 2), (2, 3)]),
+    ([20, 1, 1, 20], 10, [(0, 1), (1, 3), (3, 4)]),
+])
+def test_newly_heavy_chunks(rows, chunk_rows, expected):
+    assert sd.newly_heavy_chunks(rows, chunk_rows) == expected
+
+
+def test_chunk_tops():
+    assert sd.chunk_tops([("a", "b"), ("a", "b-x"), ("a", "b/c"), ("a", "b/c/d"), ("a", "bc"), ("z", "b/c"), ("z", "b/cd")]) == [0, 1, 4, 5, 6]
 
 
 def test_newly_heavy_combine_survives_budget_that_rejects_global_group(tmp_path):
@@ -150,7 +178,7 @@ def test_newly_heavy_combine_survives_budget_that_rejects_global_group(tmp_path)
 
     con = connect(2, "64MB", tmp_path / "spill")
     # Nested directories amplify the global join; each bounded combine sees the same 4,000 roots only once.
-    con.execute("CREATE TABLE newh AS SELECT 'member' AS q, 'b/' || repeat('d/',i) || 'd' AS dir, (i+2)::INTEGER AS k FROM range(40) t(i)")
+    con.execute("CREATE TABLE newh AS SELECT 'member' AS q, 'b/' || repeat('d/',i) || 'd' AS dir, (i+2)::INTEGER AS k, 4000::BIGINT AS rows FROM range(40) t(i)")
     con.execute("CREATE TABLE newq AS SELECT DISTINCT q FROM newh")
     con.execute(f"""CREATE TABLE dr AS SELECT 'member' AS q, 43::UTINYINT AS depth, 'b/' || repeat('d/',40) || 'x/' || repeat('p',160) || i::VARCHAR AS path,
         NULL::VARCHAR AS usr, 1::BIGINT AS vf, {sr.OPEN}::BIGINT AS vt, 1::BIGINT AS size, 1::BIGINT AS n_files
@@ -164,7 +192,12 @@ def test_newly_heavy_combine_survives_budget_that_rejects_global_group(tmp_path)
         def tables(self, *args):
             raise AssertionError("New members already carry complete history in dr")
 
-    assert sd.newly_heavy_rollups(con, Reads(), "long", 1, log=lambda _: None) == 0
+        def hold(self, queries):
+            assert queries == []
+            yield from ()
+
+    # chunks of 4 nested directories (16,000 rows exploded) fit the budget the 40 at once (160,000) don't
+    assert sd.newly_heavy_rollups(con, Reads(), "long", 1, log=lambda _: None, chunk_rows=16_000) == 0
     assert con.execute("SELECT * FROM rup ORDER BY ALL").fetchall() == sorted([
         row for i in range(40) for row in [
             ("member", "b/" + "d/" * i + "d", 0, "", 1, 4000, 1),

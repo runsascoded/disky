@@ -49,6 +49,8 @@
  "pre": [],
  "pre_label": "small",
  "interval_label": "big",
+ "index_parts": [],
+ "index_part_label": "big",
  "post": [
   "index-gc",
   "warm-cache",

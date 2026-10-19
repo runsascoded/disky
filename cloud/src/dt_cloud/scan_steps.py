@@ -55,6 +55,7 @@ from urllib.parse import urlparse
 
 from disk_tree.env import name as env_name
 
+from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
 
 
@@ -568,24 +569,61 @@ def _index_check(p: ScanProfile) -> list[str]:
             problems.append("options.list.import: path-index reads the listings themselves (no per-source layer-2)")
         if urlparse(p.data).scheme not in ("gs", "gcs", ""):
             problems.append("data: a gs:// bucket or a local dir with options.index.mode path-index (its inputs are staged from GCS or read in place)")
+        if "parts" in o:
+            buckets = {s.bucket for s in p.sources}
+            for b, bounds in o["parts"].items():
+                if b not in buckets:
+                    problems.append(f"options.index.parts.{b}: not one of the sources' buckets")
+                elif bounds is not None and not (isinstance(bounds, list) and all(isinstance(x, str) for x in bounds)):
+                    problems.append(f"options.index.parts.{b}: a list of split bounds (first key segments)")
+                else:
+                    try:
+                        split_parts(b, bounds or [])
+                    except ValueError as e:
+                        problems.append(f"options.index.parts.{b}: {e}")
         return problems
     return [f"options.index.{k}: only with mode path-index" + (" (index-write writes the age pyramids itself)" if k == "age_pyramids" else "")
-            for k in ("attribution", "access", "rules", "age_pyramids", "verify", "annotate") if k in o]
+            for k in ("attribution", "access", "rules", "age_pyramids", "verify", "annotate", "parts") if k in o]
+
+
+def index_parts(profile: ScanProfile) -> list[tuple[str, Part]]:
+    """The sharded index's parts (`options.index.parts`, path-index mode), `(id, part)` in source order: every source's
+    bucket one part, or, where `parts` lists split bounds for it, one per key range (`index_parts.split_parts`; ids
+    `<bucket>~<i>`). None when `parts` is unset: the one-pass index."""
+    o = profile.opts("index")
+    if o.get("mode") != "path-index" or "parts" not in o:
+        return []
+    out: list[tuple[str, Part]] = []
+    for s in profile.sources:
+        ps = split_parts(s.bucket, (o["parts"] or {}).get(s.bucket) or [])
+        out += zip(part_ids(s.bucket, len(ps)), ps)
+    return out
 
 
 @step("index", skippable=False, stage="index", requires=_index_check,
       options={"mode": str, "webdata": list, "lifecycle": bool, "mem": str, "threads": int, "args": list,
-               "attribution": list, "access": str, "rules": bool, "age_pyramids": bool, "verify": bool, "annotate": list})
+               "attribution": list, "access": str, "rules": bool, "age_pyramids": bool, "verify": bool, "annotate": list,
+               "parts": dict})
 def index(ctx: Ctx, arg: str | None) -> None:
     """Every source's layer-2 (imported here from the listings unless `list` did), the snapshot JSONs
     (`options.index.webdata`: the deployment's command, `{web}` its out dir, `{sources}` the `<bucket>=<layer-2>` args),
     published to `snapshots/<subdir>/<scan>/` (+ `lifecycle.json`), and the index tiers (`dt-cloud index-write`) under
     `<layer2>/index/<gen>/`, `path-index.parquet` copied last: the skip-if-done mark. `options.index.mode: path-index`
     builds both from the listings in one pass instead (`path_index`; with `age_pyramids` and `verify`).
-    `options.index.mem`: DuckDB's memory limit (index-write's; under path-index, the age pyramids' and the check's)."""
+    `options.index.mem`: DuckDB's memory limit (index-write's; under path-index, the age pyramids' and the check's).
+
+    `options.index.parts` (path-index mode; `{bucket: [split bounds]}`, `{}` for one part per bucket): the index
+    sharded (`index_parts`). `scan step index <part id>` (scan.nf's `index_part` fan-out, one task per part) writes
+    one part to `<layer2>/index-parts/<gen>/<id>/`; `scan step index` then merges them into exactly the one pass's
+    outputs and carries on as it does."""
     if ctx.opt("index", "mode", "layer2") == "path-index":
-        path_index(ctx)
+        if arg:
+            path_index_part(ctx, arg)
+        else:
+            path_index(ctx)
         return
+    if arg:
+        raise StepFailed(2, f"index {arg}: a part, but options.index has no parts (path-index mode)")
     imports = bool(ctx.opt("list", "import", False))
     srcs: list[str] = []
     with ctx.phase("layer-2"):
@@ -675,46 +713,43 @@ def path_index(ctx: Ctx) -> None:
     built from (per-bucket and total bytes / objects, the snapshot totals and age histogram, the age pyramids and the
     `bysize` sort, where written) and writes `verification.json` beside the tiers; a mismatch fails the step.
     `options.index.annotate`: a command run on the snapshot after the aggregation, before the checks and the publish
-    (`{snap}`: its dir; `{listing}`: the first source's listing dir)."""
+    (`{snap}`: its dir; `{listing}`: the first source's listing dir).
+
+    Sharded (`options.index.parts`): the parts' dirs (`path_index_part`) staged and merged (`dt-cloud
+    path-index-merge`: the one pass's outputs, byte for byte) in place of the aggregation; the rest as above, then
+    the parts deleted."""
     key_dir = ctx.data_root / ctx.index_key
-    # A reprocessed scan whose listing is gone but whose layer-2 is kept (a meta store's scans from before it kept
-    # listings) is re-cut from a listing rebuilt from that layer-2 (`dt-cloud l2-listing`: exact but for `generation`)
-    rebuilt = {s.bucket for s in ctx.profile.sources
-               if ctx.reproc and not (ctx.listing_dir(s.bucket) / "_SUCCESS.json").exists() and ctx.l2_path(s.bucket).exists()}
-    for s in ctx.profile.sources:
-        if s.bucket not in rebuilt:
-            ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
+    parts = index_parts(ctx.profile)
+    buckets = [s.bucket for s in ctx.profile.sources]
+    if not parts:
+        rebuilt = _need_listings(ctx, buckets)
     if ctx.done(key_dir / "path-index.parquet", "index tiers") and ctx.done(ctx.data_root / ctx.snapshots / ctx.scan / "meta.json", "snapshot"):
         return
-    # A local data dir (the local executor's: one machine, no FUSE) is read in place; a GCS one is staged first.
-    on_disk = not urlparse(ctx.profile.data).scheme
-    store = ctx.data_uri.split("://", 1)[-1]  # `<bucket>[/<prefix>]`, or the dir
-    src = (lambda key: str(ctx.data_root / key)) if on_disk else (lambda key: f"/gcs/{store}/{key}")  # `dt-cloud stage`'s glob form
-    lglobs = [str(ctx.work / "l2-listing" / s.bucket / "*.parquet") if s.bucket in rebuilt else src(f"{ctx.listing_key(s.bucket)}/*.parquet")
-              for s in ctx.profile.sources]
-    attr = [src(a) for a in ctx.opt("index", "attribution", [])]
-    access = ctx.opt("index", "access")
-    xglobs = [src(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
-    if access and not xglobs:
-        err(f"no access shards at {access}: the index runs without read recency")
-    stage = ctx.work / "stage"
-    local = (lambda g: g) if on_disk else (lambda g: str(stage / g.removeprefix("/gcs/")) if g.startswith("/gcs/") else g)
     pi = ctx.work / "path-index"
     snap = ctx.work / "snap"
     pi.mkdir(parents=True, exist_ok=True)
-    with ctx.phase("path-index"):
-        for b in sorted(rebuilt):
-            err(f"REPROC: {b} has no listing: rebuilding one from its layer-2 (`generation` not kept)")
-            ctx.sh(["dt-cloud", "l2-listing", "-b", b, ctx.l2_path(b), ctx.work / "l2-listing" / b / "shard-00000.parquet"])
-        staged = [g for g in lglobs if g.startswith("/gcs/")]
-        if not on_disk and (staged or attr or xglobs):
-            ctx.sh(["dt-cloud", "stage", "-o", stage, *staged, *[g.replace("*.parquet", "_SUCCESS.json") for g in staged], *attr, *xglobs])
-        tmp = stage / ".duckdb-tmp"
-        tmp.mkdir(parents=True, exist_ok=True)
-        ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *[a for g in lglobs for a in ("-l", local(g))],
-                *[a for g in attr for a in ("-a", local(g))], *[a for g in xglobs for a in ("-x", local(g))],
-                "-o", snap, "-c", ctx.data_root / ctx.listing_key("dir-cache"), "-P", pi / "path-index.parquet",
-                *ctx.opt("index", "args", [])], env={"DUCKDB_TMP": str(tmp)})
+    if parts:
+        part_dirs = [ctx.need(ctx.data_root / _parts_key(ctx) / pid / PART_JSON, f"index {pid}").parent for pid, _ in parts]
+        # verify reads the listings themselves: staged only for it
+        rebuilt = _need_listings(ctx, buckets) if ctx.opt("index", "verify", False) else set()
+        inp = _IndexInputs(ctx, buckets, rebuilt, listings=bool(ctx.opt("index", "verify", False)), extras=False)
+        with ctx.phase("path-index merge"):
+            inp.prepare()
+            if inp.on_disk:
+                dirs = part_dirs
+            else:
+                ctx.sh(["dt-cloud", "stage", "-o", inp.stage, inp.src(f"{_parts_key(ctx)}/*")])
+                dirs = [Path(inp.local(inp.src(f"{_parts_key(ctx)}/{pid}"))) for pid, _ in parts]
+            search = any(a in ("-S", "--search") for a in ctx.opt("index", "args", []))
+            ctx.sh(["dt-cloud", "path-index-merge", "-o", snap, "-P", pi / "path-index.parquet", *(["-S"] if search else []), *dirs])
+    else:
+        inp = _IndexInputs(ctx, buckets, rebuilt)
+        with ctx.phase("path-index"):
+            inp.prepare()
+            ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *inp.args(),
+                    "-o", snap, "-c", ctx.data_root / ctx.listing_key("dir-cache"), "-P", pi / "path-index.parquet",
+                    *ctx.opt("index", "args", [])], env={"DUCKDB_TMP": str(inp.tmp)})
+    on_disk, lglobs, local = inp.on_disk, inp.lglobs, inp.local
     annotate = ctx.opt("index", "annotate")
     if annotate:
         # the deployment's own stamp on the snapshot before it's checked and published (m3: `disk-tree capture-meta`,
@@ -740,6 +775,124 @@ def path_index(ctx: Ctx) -> None:
         else:
             upload(files, f"{ctx.data_uri}/{ctx.index_key}")
     _publish(ctx, snap)
+    if parts:
+        # the merged generation is uploaded: the parts are spent (a rerun skips on its `path-index.parquet`)
+        drop_prefix(ctx, _parts_key(ctx))
+
+
+def _parts_key(ctx: Ctx) -> str:
+    """The sharded index's parts under the data store: `<layer2>index-parts/<gen>/<part id>/`, beside (never in) the
+    generation dir `publish-r2` and `index-gc` walk."""
+    return f"{ctx.layer2}index-parts/{ctx.gen}"
+
+
+def drop_prefix(ctx: Ctx, key: str) -> None:
+    """Delete the data store's `key/` (a local dir, or every object under the GCS prefix); never fatal."""
+    try:
+        if not urlparse(ctx.profile.data).scheme:
+            shutil.rmtree(ctx.data_root / key, ignore_errors=True)
+            return
+        from google.cloud import storage
+
+        u = urlparse(f"{ctx.data_uri}/{key}/")
+        client = storage.Client()
+        blobs = list(client.bucket(u.netloc).list_blobs(prefix=u.path.lstrip("/")))
+        for i in range(0, len(blobs), 100):
+            with client.batch():
+                for b in blobs[i:i + 100]:
+                    b.delete()
+        err(f"deleted {len(blobs)} objects under {ctx.data_uri}/{key}/")
+    except Exception as e:  # noqa: BLE001 — leftover parts cost storage, not correctness
+        err(f"WARN: couldn't delete {ctx.data_uri}/{key}/: {type(e).__name__}: {e}")
+
+
+def _need_listings(ctx: Ctx, buckets: Sequence[str]) -> set[str]:
+    """Check `buckets`' listings exist; returns those to rebuild: a reprocessed scan whose listing is gone but whose
+    layer-2 is kept (a meta store's scans from before it kept listings) is re-cut from a listing rebuilt from that
+    layer-2 (`dt-cloud l2-listing`: exact but for `generation`)."""
+    rebuilt = {b for b in buckets
+               if ctx.reproc and not (ctx.listing_dir(b) / "_SUCCESS.json").exists() and ctx.l2_path(b).exists()}
+    for b in buckets:
+        if b not in rebuilt:
+            ctx.need(ctx.listing_dir(b) / "_SUCCESS.json", "list")
+    return rebuilt
+
+
+class _IndexInputs:
+    """`path-index`'s inputs for `buckets`: their listings (`layout.listing`, or a REPROC's rebuilt ones), the
+    attribution parquets (`options.index.attribution`) and the access-log shards (`options.index.access`; left out
+    while none exist). A local data dir (the local executor's: one machine, no FUSE) is read in place; a GCS one is
+    staged to the task's disk first (`dt-cloud stage`; gcsfuse reads ~20-50 MB/s and the aggregation makes several
+    passes). `listings` / `extras` False: neither staged nor passed (the merge needs neither)."""
+
+    def __init__(self, ctx: Ctx, buckets: Sequence[str], rebuilt: set[str], listings: bool = True, extras: bool = True):
+        self.ctx, self.rebuilt = ctx, rebuilt
+        self.on_disk = not urlparse(ctx.profile.data).scheme
+        store = ctx.data_uri.split("://", 1)[-1]  # `<bucket>[/<prefix>]`, or the dir
+        # `dt-cloud stage`'s glob form
+        self.src = (lambda key: str(ctx.data_root / key)) if self.on_disk else (lambda key: f"/gcs/{store}/{key}")
+        self.lglobs = [str(ctx.work / "l2-listing" / b / "*.parquet") if b in rebuilt else self.src(f"{ctx.listing_key(b)}/*.parquet")
+                       for b in buckets] if listings else []
+        self.attr = [self.src(a) for a in ctx.opt("index", "attribution", [])] if extras else []
+        access = ctx.opt("index", "access") if extras else None
+        self.xglobs = [self.src(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
+        if access and not self.xglobs:
+            err(f"no access shards at {access}: the index runs without read recency")
+        self.stage = ctx.work / "stage"
+        self.tmp = self.stage / ".duckdb-tmp"
+
+    def local(self, g: str) -> str:
+        return g if self.on_disk or not g.startswith("/gcs/") else str(self.stage / g.removeprefix("/gcs/"))
+
+    def prepare(self) -> None:
+        """Rebuild the REPROC listings, stage the GCS inputs, make the DuckDB spill dir."""
+        ctx = self.ctx
+        for b in sorted(self.rebuilt):
+            err(f"REPROC: {b} has no listing: rebuilding one from its layer-2 (`generation` not kept)")
+            ctx.sh(["dt-cloud", "l2-listing", "-b", b, ctx.l2_path(b), ctx.work / "l2-listing" / b / "shard-00000.parquet"])
+        staged = [g for g in self.lglobs if g.startswith("/gcs/")]
+        if not self.on_disk and (staged or self.attr or self.xglobs):
+            ctx.sh(["dt-cloud", "stage", "-o", self.stage, *staged, *[g.replace("*.parquet", "_SUCCESS.json") for g in staged],
+                    *self.attr, *self.xglobs])
+        self.tmp.mkdir(parents=True, exist_ok=True)
+
+    def args(self) -> list[str]:
+        """`path-index`'s `-l` / `-a` / `-x`."""
+        return [*[a for g in self.lglobs for a in ("-l", self.local(g))], *[a for g in self.attr for a in ("-a", self.local(g))],
+                *[a for g in self.xglobs for a in ("-x", self.local(g))]]
+
+
+def path_index_part(ctx: Ctx, pid: str) -> None:
+    """One part of the sharded index (`options.index.parts`; `scan step index <id>`): its bucket's listing (+ the
+    attribution and access inputs), aggregated to its range (`dt-cloud path-index -p <bucket> [-K lo:hi]`, the
+    index's `args` but `-S`, which the merge applies), its dir uploaded to `<layer2>/index-parts/<gen>/<id>/`
+    (`part.json` last, the skip-if-done mark). Its rollup cache is `<listing>/dir-cache/<id>`."""
+    parts = dict(index_parts(ctx.profile))
+    if pid not in parts:
+        raise StepFailed(2, f"index {pid}: not one of options.index.parts' parts ({', '.join(parts) or 'none'})")
+    part = parts[pid]
+    key = f"{_parts_key(ctx)}/{pid}"
+    if ctx.done(ctx.data_root / ctx.index_key / "path-index.parquet", "index tiers") or ctx.done(ctx.data_root / key / PART_JSON, f"part {pid}"):
+        return
+    rebuilt = _need_listings(ctx, [part.bucket])
+    inp = _IndexInputs(ctx, [part.bucket], rebuilt)
+    out = ctx.work / "parts" / pid
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+    args = [a for a in ctx.opt("index", "args", []) if a not in ("-S", "--search")]
+    with ctx.phase(f"path-index {pid}"):
+        inp.prepare()
+        ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *inp.args(), "-p", part.bucket,
+                *(["-K", f"{part.lo or ''}:{part.hi or ''}"] if part.split else []),
+                "-c", ctx.data_root / ctx.listing_key("dir-cache") / pid, "-P", out / "path-index.parquet", *args],
+               env={"DUCKDB_TMP": str(inp.tmp)})
+    with ctx.phase(f"path-index {pid} upload"):
+        files = sorted((f for f in out.iterdir() if f.is_file() and not f.name.startswith(".")), key=lambda f: (f.name == PART_JSON, f.name))
+        if inp.on_disk:
+            for f in files:
+                copy_atomic(f, ctx.data_root / key / f.name)
+        else:
+            upload(files, f"{ctx.data_uri}/{key}")
 
 
 def _static_check(p: ScanProfile) -> list[str]:
@@ -953,6 +1106,31 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
         dry = ["-n"] if ctx.opt("index-gc", "dry", False) else []
         ctx.sh(["dt-cloud", "index-gc", *store_args(ctx), "-R", *dry, "-m", ctx.opt("index-gc", "grace", "2d"), *targets], fatal=False,
                warn="index-gc -F failed (superseded generations stay until the next run)")
+
+
+@step("dups", core=False, soft=True, options={"floor": int, "check": int, "check_objects": int, "suspect_copies": int,
+                                               "mem": str, "threads": int})
+def dups(ctx: Ctx, arg: str | None) -> None:
+    """The scan's duplicate-candidate groups (`dt-cloud dups`, specs/dups.md §1) beside its index:
+    `<layer2>index/<gen>/dups.{parquet,json}` (`dups.json` last, the skip-if-done mark), read from the scan's `bysize`
+    sort (its `tot` prunes the read to the paths over the floor), else its `path` sort. Options: `floor` (bytes),
+    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`. Off
+    unless the profile lists it in `steps`; never fatal."""
+    key_dir = ctx.data_root / ctx.index_key
+    if ctx.done(key_dir / "dups.json", "dups"):
+        return
+    bysize = key_dir / "path-index-bysize.parquet"
+    src = bysize if bysize.exists() else ctx.need(key_dir / "path-index.parquet", "index")
+    out = ctx.work / "dups"
+    flags = {"floor": "-f", "check": "-g", "check_objects": "-n", "suspect_copies": "-s", "mem": "-m", "threads": "-t"}
+    args = [a for k, f in flags.items() if ctx.opt("dups", k) is not None for a in (f, ctx.opt("dups", k))]
+    with ctx.phase("dups"):
+        r = ctx.sh(["dt-cloud", "dups", "-d", ctx.scan, *args, "-T", ctx.work / "dups-tmp", "-o", out, src], fatal=False,
+                   fails_phase=True, warn="dups failed (the scan's other outputs stand)")
+        if r is None:
+            return
+        copy_atomic(out / "dups.parquet", key_dir / "dups.parquet")
+        copy_atomic(out / "dups.json", key_dir / "dups.json")
 
 
 def _retire_check(p: ScanProfile) -> list[str]:

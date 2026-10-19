@@ -31,6 +31,18 @@ export function notesInView(notes: readonly ChartAnnotation[], xOf: (at: string)
     .sort((a, b) => a.x - b.x || a.note.id - b.note.id)
 }
 
+/** The notes for the chart at `prefix` (`bucket/a/b`, `''` the store's root): the store-wide ones (no `path`) and
+ *  those whose `path` is `prefix` or above it (a note on `marin-us-east-02a` shows there and under it, not at the
+ *  root), less any of a `hidden` kind. */
+export function notesHere(notes: readonly ChartAnnotation[], prefix: string, hidden: ReadonlySet<string>): ChartAnnotation[] {
+  const p = prefix.replace(/^\/+|\/+$/g, '')
+  return notes.filter(n => (n.path === null || p === n.path || p.startsWith(`${n.path}/`)) && !(n.kind !== null && hidden.has(n.kind)))
+}
+
+/** The kinds among the notes the chart at `prefix` could show, sorted: one toggle each. */
+export const noteKinds = (notes: readonly ChartAnnotation[], prefix: string): string[] =>
+  [...new Set(notesHere(notes, prefix, new Set()).flatMap(n => (n.kind === null ? [] : [n.kind])))].sort()
+
 /** The date a new note's form starts at: the diff window's end when one is set, else the latest plotted scan. */
 export const defaultNoteAt = (window: [string, string] | undefined, latest: string | undefined): string =>
   window?.[1] ?? latest ?? ''

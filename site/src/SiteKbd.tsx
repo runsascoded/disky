@@ -4,9 +4,9 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } from 'use-kbd'
 import { SpeedDialTip } from './Tooltip'
 import { hostPair, otherHostUrl, peerUrl, type Peer } from './hosts'
-import { useHelpPref } from './prefs'
+import { useHelpPref, useScrollSpyPref } from './prefs'
 import { useStore } from './store'
-import { STORES } from './stores'
+import { DEFAULT_STORE, DUPS, STORES } from './stores'
 import { useTheme } from './theme'
 import { useUnits } from './units'
 import { AUTH_MODE, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut, useStores } from './auth'
@@ -42,6 +42,7 @@ export function SiteKbd({ extra = [], placeholder }: {
   const { units, suffixB, toggleUnits, toggleSuffixB } = useUnits()
   const [help, setHelp] = useHelpPref()
   const toggleHelp = () => setHelp(help === 'on' ? 'off' : 'on')
+  const [spy, setSpy] = useScrollSpyPref()
   // Site-wide pages, in nav order — the omnibar's "Pages" group on every
   // route. The map is the subtree's store's (`/meta` on a secondary store);
   // the other configured stores follow as switches (a single-store build has
@@ -58,6 +59,7 @@ export function SiteKbd({ extra = [], placeholder }: {
   const PAGES: [string, string][] = [
     [store.path, 'Map (home)'],
     ...(store.staging ? [['/staged', 'Staged deletions']] as [string, string][] : []),
+    ...(DUPS && store === DEFAULT_STORE ? [['/dups', 'Duplicates — copies across buckets']] as [string, string][] : []),
     ['/scans', 'Scans — job runs'],
     ['/health', 'Health — the stores\' state'],
     ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs']] as [string, string][] : []),
@@ -85,6 +87,13 @@ export function SiteKbd({ extra = [], placeholder }: {
       group: 'View',
       defaultBindings: ['h'],
       handler: toggleHelp,
+    },
+    'spy:toggle': {
+      label: `Section spy (?section= in the URL while scrolling): ${spy} (toggle)`,
+      description: 'Names the section in view (tree-map, tbl, over-time, diff, mtime) in the URL as you scroll, so a copied link opens there and unfurls with that section\'s card.',
+      group: 'View',
+      keywords: ['section', 'spy', 'scroll', 'url', 'param'],
+      handler: () => setSpy(spy === 'on' ? 'off' : 'on'),
     },
     ...Object.fromEntries(
       PAGES.map(([to, label]) => [

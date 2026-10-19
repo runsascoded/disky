@@ -48,7 +48,7 @@ export const useTitleSpace = titleSpace.use
 const help = pref<'on' | 'off'>('help', ['on', 'off'], 'on')
 export const useHelpPref = help.use
 export const setHelpPref = help.set
-// The scroll-spy (`useSectionSpy`): the section in view named in the URL's hash as the reader scrolls; on until turned off.
+// The scroll-spy (`useSectionSpy`): the section in view named in the URL (`?section=`) as the reader scrolls; on until turned off.
 const scrollSpy = pref<'on' | 'off'>('scroll-spy', ['on', 'off'], 'on')
 export const useScrollSpyPref = scrollSpy.use
 export const useTiling = tiling.use

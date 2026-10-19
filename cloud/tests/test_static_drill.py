@@ -681,6 +681,31 @@ def test_settling_in_chunks_writes_the_same_bytes(world, run_rg, tmp_path, monke
 
 
 @pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_newly_heavy_in_chunks_writes_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
+    """A run's drill is the same files, byte for byte, with the newly heavy directories built one per chunk (each its own
+    prior-tier range read) as all in one chunk (a range under another of the same member cut from it, read once)."""
+    rebuild = world["rebuilds"][i]
+    chunks: list[tuple[int, int]] = []
+    split = sd.newly_heavy_chunks
+
+    def counted(rows, chunk_rows):
+        out = split(rows, chunk_rows)
+        chunks.append((len(rows), len(out)))
+        return out
+
+    monkeypatch.setattr(sd, "newly_heavy_chunks", counted)
+    rebuild(tmp_path / "whole")
+    assert [c for _, c in chunks] == [1] * len(chunks)
+    whole = [n for n, _ in chunks]
+    chunks.clear()
+    monkeypatch.setattr(sd, "NEWLY_HEAVY_CHUNK_ROWS", 1)
+    rebuild(tmp_path / "chunked")
+    assert _tree(tmp_path / "chunked", drop={"s", "reads"}) == _tree(tmp_path / "whole", drop={"s", "reads"})
+    assert chunks == [(n, n) for n in whole]
+    assert sum(whole) > 1
+
+
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
 def test_explode_parts_write_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
     """A run's drill is the same files, byte for byte, with the aggregations over `dr`'s ancestors (`tdir`, `tch`) run in
     several `hash(q)` parts as in one pass."""
@@ -763,11 +788,12 @@ def _tables(con) -> set[str]:
 
 
 @pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
-def test_an_interrupted_build_resumes_to_the_same_bytes(world, run_rg, tmp_path, i):
+def test_an_interrupted_build_resumes_to_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
     """A checkpointed build (every loop item's part saved) writes the files of an uncheckpointed one, byte for byte;
     interrupted right after each of its saves (its connection's new tables and its output dir lost, as a reclaimed task's
     are), a rerun with the same checkpoint saves exactly the steps after that one and writes the same files again; then
-    the checkpoint clears to nothing."""
+    the checkpoint clears to nothing. The newly heavy directories go one per chunk (one part each)."""
+    monkeypatch.setattr(sd, "NEWLY_HEAVY_CHUNK_ROWS", 1)
     rebuild, con = world["rebuilds"][i], world["con"]
     rebuild(tmp_path / "plain")
     want = _tree(tmp_path / "plain", drop={"s", "reads"})

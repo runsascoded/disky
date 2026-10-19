@@ -67,6 +67,9 @@ export interface Env {
    *  (`POST /api/plans/stage`, `stage_batches` in this D1); mirrors the
    *  client's `Store.staging`. Unset = admins curate plans directly. */
   STAGING?: string
+  /** `1`: the scan's duplicate-candidate report (`/api/dups`, the `/dups` page; specs/dups.md), read from the
+   *  `dups.{json,parquet}` the `dups` scan step writes beside each scan's index. Unset = 404. */
+  DUPS?: string
   /** The path filter's default syntax (`q=` without `qs=`; `querySyntax.ts`
    *  ids). Mirrors the client's `Store.querySyntax`. Unset = `simple`. */
   QUERY_SYNTAX?: string

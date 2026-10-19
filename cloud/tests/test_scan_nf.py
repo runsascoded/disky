@@ -37,10 +37,10 @@ OPTIONS = "{list: {import: true}, static-names: {profile: sn.json}, digest: {tem
 
 
 def head(tmp_path: Path, marks: Path, *args: str, extra: str = "", sources: str = SOURCES, options: str = OPTIONS,
-         path: tuple[Path, ...] = (), **env) -> subprocess.CompletedProcess:
+         path: tuple[Path, ...] = (), layout: str = "{layer2: 'l2/{scan}/', snapshots: ''}", **env) -> subprocess.CompletedProcess:
     prof = tmp_path / "fixture.yml"
     prof.write_text(f"deployment: fixture\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
-                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\n"
+                    f"layout: {layout}\n"
                     f"sources: {sources}\n"
                     "machines: {list: {type: m2, disk: 100}, big: {cpus: 1}}\n"
                     f"options: {options}\n" + extra)
@@ -124,6 +124,24 @@ def test_reproc_unfolded(tmp_path):
     assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
     assert [x for x in ran[at["index-sync"]:] if x != "over-time"] == ["index-sync", "index-gc", "warm-cache", "probe", "digest"]
     assert at["index-sync"] < at["over-time"]
+
+
+def test_sharded_index_fans_out_parts(tmp_path):
+    """`options.index.parts`: one `index_part` task per part (a bucket, or a key range of one: `<bucket>~<i>`), after
+    every list, the merging `index` after them all."""
+    marks = tmp_path / "marks"
+    r = head(tmp_path, marks, options="{index: {mode: path-index, parts: {c: [m, t]}}, static-names: {profile: sn.json}, "
+                                      "digest: {template: t, config: c.yml}}",
+             layout="{layer2: 'l2/{scan}/', snapshots: '', listing: 'listing/{scan}/'}")
+    assert r.returncode == 0, r.stderr
+    ran = marks.read_text().splitlines()
+    parts = [f"index {p}" for p in ("a", "b", "c~0", "c~1", "c~2")]
+    assert sorted(x for x in ran if x.startswith("index ")) == parts
+    at = {s: ran.index(s) for s in ran}
+    assert max(at[f"list s3://{b}"] for b in "abc") < min(at[p] for p in parts)
+    assert max(at[p] for p in parts) < at["index"]
+    nodes = {_nf_node(p) for p in (tmp_path / "nf/work").rglob(".command.sh")}
+    assert sorted(n for n in nodes if n[0] == "index_part") == [("index_part", p.removeprefix("index ")) for p in parts]
 
 
 def test_per_call_secrets(tmp_path):

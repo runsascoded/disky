@@ -1,8 +1,8 @@
 /** Hand-written notes pinned to dates on the "Size over time" chart (spec `chart-annotations.md`).
  *
  *   GET    /api/annotations[?store=K]                   → { annotations: ChartAnnotation[], applied }  viewer of the store
- *   POST   /api/annotations[?store=K]  {at, text}       → 201 { annotation }                           admin
- *   PATCH  /api/annotations[?store=K]  {id, at?, text?} → { annotation }                               admin
+ *   POST   /api/annotations[?store=K]  {at, text, path?, url?, kind?}  → 201 { annotation }           admin
+ *   PATCH  /api/annotations[?store=K]  {id, …any of those}             → { annotation }               admin
  *   DELETE /api/annotations?id=N[&store=K]              → { deleted }                                  admin
  *
  * Notes are per store: `store=` as every data request carries it (none = the primary, `primary`), a secondary
@@ -12,10 +12,11 @@
  * D1 read, and an admin's write must show at once. */
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
 import { PRIMARY_STORE, requestedStore, StoreConfigError, unionViews, withStore } from '../_lib/stores.js'
-import { addNote, deleteNote, editNote, listNotes, missingTable } from '../_lib/annotations.js'
-import { type AnnotationsBody, parseNote } from '../_lib/annotationShape.js'
+import { addNote, deleteNote, editNote, listNotes, missingScope, missingTable } from '../_lib/annotations.js'
+import { type AnnotationsBody, type NoteFields, parseNote } from '../_lib/annotationShape.js'
 
 export const NOT_APPLIED = 'chart annotations are not enabled here: apply D1 migration chart-annotations'
+export const SCOPE_NOT_APPLIED = 'chart notes can’t be written here until D1 migration chart-annotation-scope is applied (path, url, kind)'
 const NO_STORE = { 'cache-control': 'private, no-store' }
 
 /** The request's store key, and the context its viewers are gated on (a secondary store's overlay env). */
@@ -65,7 +66,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       }
       const note = parseNote(body, request.method === 'PATCH')
       if ('error' in note) return json(note, 400)
-      if (request.method === 'POST') return json({ annotation: await addNote(db, st.key, note as { at: string; text: string }, who, now()) }, 201)
+      if (request.method === 'POST') return json({ annotation: await addNote(db, st.key, note as NoteFields & { at: string; text: string }, who, now()) }, 201)
       const nid = (body as { id?: unknown }).id
       if (typeof nid !== 'number' || !Number.isInteger(nid)) return json({ error: 'id: want an integer' }, 400)
       const row = await editNote(db, st.key, nid, note, who, now())
@@ -79,6 +80,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
     }
   } catch (e) {
     if (missingTable(e)) return json({ error: NOT_APPLIED }, 503)
+    if (missingScope(e)) return json({ error: SCOPE_NOT_APPLIED }, 503)
     throw e
   }
   return json({ error: 'method not allowed' }, 405)

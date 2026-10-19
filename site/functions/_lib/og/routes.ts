@@ -24,7 +24,7 @@ export interface PageView {
  * app page read as a folder drew an empty map of a path named `scans`, `meta`, …. */
 const NOT_MAP = new Set([
   'api', 'auth', 'data', 'v1', 'og', 'slack', 'assets', '_fonts', 'files', 'admin', 'about', 'help', 'privacy', 'token', 'login',
-  'signin', 'dev', 'meta', 'runs', 'scans', 'health', 'names', 'sweep', 'hot', 'marks', 'mark',
+  'signin', 'dev', 'meta', 'runs', 'scans', 'health', 'names', 'dups', 'sweep', 'hot', 'marks', 'mark',
 ])
 
 /** Map params a card depends on: the scan (`d`), the filter (`f`, `qs`), the
