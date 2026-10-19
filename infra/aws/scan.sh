@@ -68,7 +68,14 @@ else
   echo "[scan] capture marker time unreadable: one capture+queue span"
   export DT_PRE_PHASES="[{\"name\": \"queue\", \"began\": $captured, \"ended\": $job_t0}]"
 fi
-echo "[scan] capture=$key scan=$date gen=$gen host=$host store=$store profile=${profile##*/}"
+# What started it (`/scans`' trigger): a hand submit's `DT_TRIGGER` (`aws/submit`: `manual`), else the capture marker's
+# `trigger` (disky's: `schedule` for a slot, `manual` for Scan now), else none recorded.
+if [[ -z ${DT_TRIGGER:-} ]]; then
+  t=$(aws s3 cp "s3://$bucket/$key/_SUCCESS.json" - --endpoint-url "$R2_ENDPOINT_URL" 2>/dev/null \
+    | python3 -c 'import json, sys; t = json.load(sys.stdin).get("trigger"); print(t if t in ("schedule", "manual") else "")' 2>/dev/null) || t=
+  [[ -n $t ]] && export DT_TRIGGER=$t
+fi
+echo "[scan] capture=$key scan=$date gen=$gen host=$host store=$store profile=${profile##*/} trigger=${DT_TRIGGER:-unset}"
 cd "$app/cloud"
 dt-cloud scan head -N "$nf" "$profile"
 

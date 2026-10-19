@@ -16,10 +16,12 @@ import json, os, sys
 from pathlib import Path
 name, args = Path(sys.argv[0]).name, sys.argv[1:]
 KEYS = ('DT_CAPTURE', 'SNAP_ID', 'GEN', 'DT_RUN_ID', 'DT_RUN_KIND', 'DT_RUN_MACHINE', 'DT_RUN_SPOT', 'DT_RUN_REGION', 'DT_RUN_AT',
-        'DT_RUN_TASKS', 'DT_PRE_PHASES', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'DISKY_R2_ENDPOINT_URL', 'AWS_DEFAULT_REGION')
+        'DT_RUN_TASKS', 'DT_PRE_PHASES', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'DISKY_R2_ENDPOINT_URL', 'AWS_DEFAULT_REGION', 'DT_TRIGGER')
 with open(os.environ['FAKE_TRACE'], 'a') as f:
     f.write(json.dumps([name, *args, {k: os.environ[k] for k in KEYS if k in os.environ}]) + '\n')
-if name == 'aws':
+if name == 'aws' and args[:2] == ['s3', 'cp']:
+    print(os.environ.get('FAKE_MARKER', '{}'))
+elif name == 'aws':
     print('2026-10-18T10:20:45+00:00')
 elif args[:2] == ['hosts', 'resolve']:
     stores = {'m3': 'primary', 'nas': 'nas'}
@@ -44,9 +46,9 @@ def scan(tmp_path):
     (tmp_path / 'app/cloud').mkdir(parents=True)
     trace = tmp_path / 'trace.jsonl'
 
-    def run(host: str) -> tuple[subprocess.CompletedProcess, list]:
+    def run(host: str, **extra: str) -> tuple[subprocess.CompletedProcess, list]:
         trace.write_text('')
-        env = {**os.environ, 'PATH': f'{bins}:{os.environ["PATH"]}', 'FAKE_TRACE': str(trace), 'INGEST_APP_ROOT': str(tmp_path / 'app'),
+        env = {**{k: v for k, v in os.environ.items() if k != 'DT_TRIGGER'}, **extra, 'PATH': f'{bins}:{os.environ["PATH"]}', 'FAKE_TRACE': str(trace), 'INGEST_APP_ROOT': str(tmp_path / 'app'),
                'SCAN_PROFILES': str(REPO / 'job/profiles'), 'SCAN_NF_DIR': '/nf', 'WORK': str(tmp_path / 'work'),
                'R2_ENDPOINT_URL': 'https://r2.example', 'AWS_ACCESS_KEY_ID': 'kid', 'AWS_SECRET_ACCESS_KEY': 'sec',
                'AWS_BATCH_JOB_ID': 'job-1', 'AWS_REGION': 'us-east-1', 'INGEST_MACHINE': 'fargate-arm64-2vcpu-16gib', 'INGEST_SPOT': '1'}
@@ -80,7 +82,7 @@ def test_a_primary_capture_runs_the_laptop_profile_then_the_meta_store(scan):
     assert env1 == {**base, 'DT_CAPTURE': CAPTURE.format(host='m3'), 'DT_RUN_ID': 'job-1', 'DT_RUN_KIND': 'ingest', 'DT_RUN_AT': str(t)}
     assert {**env2, 'DT_RUN_AT': '<now>'} == {**base, 'DT_RUN_ID': 'job-1-meta', 'DT_RUN_KIND': 'meta', 'DT_RUN_AT': '<now>'}
     assert [line for line in r.stdout.splitlines() if line.startswith('[scan]')] == [
-        '[scan] capture=captures/m3/root/2026-10-18T10-14-45Z scan=2026-10-18T1014 gen=202610181014 host=m3 store=primary profile=m3.yml']
+        '[scan] capture=captures/m3/root/2026-10-18T10-14-45Z scan=2026-10-18T1014 gen=202610181014 host=m3 store=primary profile=m3.yml trigger=unset']
     assert 'sec' not in r.stdout + r.stderr
 
 
@@ -106,3 +108,18 @@ def test_the_profiles_name_the_sites_static_generations():
     meta = json.loads(re.search(r"^STORES_JSON = '(.*)'$", toml, re.M)[1])['meta']['vars']['STATIC_GEN']
     gens = [yaml.safe_load((REPO / f'job/profiles/{p}.yml').read_text())['options']['static-names']['gen'] for p in ('m3', 'm3-meta')]
     assert gens == [site, meta]
+
+
+@pytest.mark.parametrize('marker,extra,trigger', [
+    ('{"files": 3, "trigger": "schedule"}', {}, 'schedule'),
+    ('{"files": 3, "trigger": "manual"}', {}, 'manual'),
+    ('{"files": 3, "trigger": "manual"}', {'DT_TRIGGER': 'manual'}, 'manual'),
+    ('{"files": 3, "trigger": "schedule"}', {'DT_TRIGGER': 'manual'}, 'manual'),
+    ('{"files": 3}', {}, None),
+    ('{"files": 3, "trigger": "cron; rm -rf /"}', {}, None),
+])
+def test_the_trigger_comes_from_a_hand_submit_else_the_capture_marker(scan, marker, extra, trigger):
+    """`DT_TRIGGER`: a hand submit's wins; else the marker's `trigger` (`schedule` / `manual` only); else none, in both heads."""
+    r, calls = scan('m3', FAKE_MARKER=marker, **extra)
+    assert r.returncode == 0, r.stderr
+    assert [env.get('DT_TRIGGER') for _, env in heads(calls)] == [trigger, trigger]
