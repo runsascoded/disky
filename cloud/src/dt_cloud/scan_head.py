@@ -34,7 +34,7 @@ from urllib.parse import urlparse
 
 from .cost_labels import check_label
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
-from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS, profile_env_value
+from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS, index_parts, profile_env_value
 
 
 def err(*a: object) -> None:
@@ -120,6 +120,9 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
         "pre_label": "pre" if "pre" in profile.machines else "small",
         "interval_label": "interval" if "interval" in profile.machines else "big",
+        # the sharded index's parts (`options.index.parts`): one `index_part` task each, before the merging `index`
+        "index_parts": [pid for pid, _ in index_parts(profile)],
+        "index_part_label": "index_part" if "index_part" in profile.machines else "big",
         "post": [n for n in enabled if STEPS[n].stage == "post" and n != "over-time"],
         "over_time": "over-time" in enabled,
         "over_time_label": "over_time" if "over_time" in profile.machines else "post",

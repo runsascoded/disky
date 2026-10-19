@@ -71,6 +71,13 @@ CACHE_NS = ""                    # response-cache keys as prod's (no host tag; `
 # bucket the daily ingestion writes the tiers into (the existing demo bucket).
 STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
+# The "data behind this site" store (`_lib/stores.ts`, the frontend's `src/stores/meta.ts`), mounted at `/meta`: the
+# demo's own bucket, disk-tree-demo, scanned by the daily ingest after the primary (`meta-l2/` tiers,
+# `snapshots/meta/`), with its own static name index (its `STATIC_GEN`, built by the ingest when it doesn't exist yet).
+# Public as the primary is (no `scope`; `OG_ANONYMOUS` and the filter policy inherited); read with the primary's RO
+# keypair (the same Pages secrets). No `all` union view: the home page stays the three public buckets.
+STORES_EXTRA = "meta"
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_GEN":"2026-10-19meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Set as Pages env vars/secrets at deploy — NOT committed (disk-tree is a public
 # repo; the account id in the R2 endpoint stays out of git):

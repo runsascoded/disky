@@ -412,6 +412,8 @@ def wandb_mine(
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", "out_dir", type=Path, default=None, help="Output dir for JSON files [default: site/public/data/<asof>]")
 @option("-O", "--path-only", is_flag=True, help="With -P: only the `path` sort, no `bysize`, `-by-user` copies or `.groups.*` sidecars (the input the interval store and static name index append from; specs/lean-scans.md §1.1). Refused with -S, -u")
+@option("-p", "--part", "part_bucket", default=None, help="One part of a sharded index (`index_parts`): only this bucket's objects (`-K`: only those in a key range), written beside -P for `path-index-merge` (sorts without sidecars, `part.json`, `roots.parquet`, `age.parquet`, `pfx.parquet`); nothing under -o. Refused with -S (the merge writes the search sidecars)")
+@option("-K", "--key-range", default=None, help="With -p: only the objects whose first key segment is in LO:HI (`[LO, HI)`; an empty side is open): one of a big bucket's parts")
 @option("-r", "--row-group-rows", default=None, type=int, help="Parquet row-group size for the store's sorts (default 8192 — the reader decodes ~one group per depth of a drilled subtree, so 32768 pushed small drills past its decode cap; specs/done/path-store.md §1.6)")
 @option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/path-store-search.md); upload them with the generation dir")
 @option("-u", "--user-sort-tiers", default=None, help="Only these sorts get a `-by-user` copy, comma-separated (`bysize`: the copy a lens view reads; default every sort)")
@@ -428,6 +430,8 @@ def build_path_index(
     listings: tuple[str, ...],
     out_dir: Path | None,
     path_only: bool,
+    part_bucket: str | None,
+    key_range: str | None,
     path_index: Path | None,
     row_group_rows: int | None,
     search: bool,
@@ -442,10 +446,27 @@ def build_path_index(
     """
     import json
 
+    from .index_parts import Part, parse_range
     from .viz import write_path_index
 
     if path_only and (search or user_sort_tiers or path_index is None):
         raise UsageError("-O/--path-only: needs -P, and cuts the `path` sort alone (no -S search sidecars, no -u by-user copies)")
+    if key_range and not part_bucket:
+        raise UsageError("-K/--key-range: only with -p")
+    if part_bucket:
+        if search or path_index is None or out_dir is not None:
+            raise UsageError("-p/--part: writes beside -P (needed), no -o snapshot, no -S search sidecars (`path-index-merge -S` writes them)")
+        try:
+            part = Part(part_bucket, *(parse_range(key_range) if key_range else (None, None)))
+        except ValueError as e:
+            raise UsageError(str(e))
+        partial = write_path_index(
+            listings, path_index.parent, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
+            user_sorts=user_sorts, row_group_rows=row_group_rows, generation=generation, path_only=path_only, part=part,
+            user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
+        )
+        err(f"wrote part {part.id} beside {path_index} ({partial['total_bytes']/1e12:.1f} TB, {partial['total_objects']:,} objects)")
+        return
     if out_dir is None:
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
@@ -459,6 +480,22 @@ def build_path_index(
     if dates:
         (data_root / "scans.json").write_text(json.dumps(dates) + "\n")
         err(f"scans.json: {dates}")
+
+
+@main.command("path-index-merge")
+@option("-j", "--procs", type=int, default=None, help="Sorts merged at once, one process each (default: every sort)")
+@option("-o", "--out", "out_dir", type=Path, required=True, help="Output dir for the snapshot JSONs (age.json, meta.json)")
+@option("-P", "--path-index", "path_index", type=Path, required=True, help="The merged store's `path` sort (`<dir>/path-index.parquet`); the other sorts, their `.groups.*` sidecars and `attr.tsv` land beside it")
+@option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the merged `path` sort (as `path-index -S`)")
+@argument("parts", nargs=-1, required=True, type=Path)
+def path_index_merge(procs: int | None, out_dir: Path, path_index: Path, search: bool, parts: tuple[Path, ...]) -> None:
+    """Merge a sharded scan's parts (PARTS: the dirs `path-index -p` wrote) into exactly what one `path-index` pass over
+    all their listings writes: each sort k-way merged by its own key into the same row groups and bytes, a key-range
+    split bucket's root recomputed from its parts', the sidecars, `attr.tsv` and the snapshot JSONs (`index_parts`)."""
+    from .index_parts import merge_path_index
+
+    meta = merge_path_index(parts, out_dir, path_index, search=search, procs=procs)
+    err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects) from {len(parts)} parts")
 
 
 @main.command()
@@ -3303,6 +3340,10 @@ main.add_command(_d1_schema)
 from .non_live import non_live_cmd as _non_live  # noqa: E402
 
 main.add_command(_non_live)
+
+from .dups import dups_cmd as _dups  # noqa: E402
+
+main.add_command(_dups)
 
 from .l2_listing import l2_listing_cmd as _l2_listing  # noqa: E402
 

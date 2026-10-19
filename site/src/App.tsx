@@ -681,6 +681,19 @@ function AppContent() {
     write: spy === 'on' ? 'replace' : 'off',
     mode: SECTION_MODE,
   })
+  // Turned off: drop the section it last wrote, so a copied link doesn't open (or unfurl) at a section no longer in
+  // view. After the spy has stopped writing: stripped in the same tick, the still-writing spy put it back.
+  const spyWas = useRef(spy)
+  useEffect(() => {
+    // The address bar's query, not the router's: the spy writes it with `history.replaceState`, which the router
+    // never sees. Minus that one param; the others keep use-prms' encoding (a re-serialization would escape them).
+    const all = window.location.search.replace(/^\?/, '').split('&').filter(Boolean)
+    const rest = all.filter(kv => kv.split('=')[0] !== SECTION_KEY)
+    if (spyWas.current === 'on' && spy === 'off' && rest.length !== all.length) {
+      navigate({ pathname: location.pathname, search: rest.length ? `?${rest.join('&')}` : '', hash: location.hash }, { replace: true })
+    }
+    spyWas.current = spy
+  }, [spy]) // eslint-disable-line react-hooks/exhaustive-deps
   const [lens, setLens] = useState(false)  // treemap storage-class lens (hatch by cold fraction)
   const { fmtBytes } = useUnits()
   // The treemap's drill path now lives in the URL *path* (below the store's own

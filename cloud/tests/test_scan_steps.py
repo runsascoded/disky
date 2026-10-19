@@ -49,6 +49,11 @@ class Runner:
             out = Path(argv[argv.index("-o") + 1])
             out.mkdir(parents=True, exist_ok=True)
             (out / "meta.json").write_text("{}")
+        if argv[:2] == ["dt-cloud", "dups"] and key not in self.fail:
+            out = Path(argv[argv.index("-o") + 1])
+            out.mkdir(parents=True, exist_ok=True)
+            for n in ("dups.parquet", "dups.json"):
+                (out / n).write_text(n)
         if argv[:2] == ["python", "web.py"]:
             Path(argv[2]).mkdir(parents=True, exist_ok=True)
             (Path(argv[2]) / "meta.json").write_text("{}")
@@ -776,6 +781,35 @@ def test_non_live_passes_each_source_its_providers_classes(tmp_path, env):
         f"dt-cloud non-live -c soft-deleted -j {snap} -o {out}/data.parquet gcs://data",
         f"dt-cloud non-live -c delete-marker -E https://s3.example.org -j {snap} -o {out}/v.parquet s3://v",
     ]
+
+
+def test_dups_reads_the_size_sort_and_writes_beside_the_index(tmp_path, env):
+    """`dups` (listed in `steps`): `dt-cloud dups` over the scan's `bysize` sort (else its `path` sort) with the
+    profile's options, both files copied beside the index (`dups.json` the skip mark); a second run skips."""
+    key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
+    key.mkdir(parents=True)
+    (key / "path-index.parquet").write_text("p")
+    (key / "path-index-bysize.parquet").write_text("b")
+    c = ctx(tmp_path, env, steps=["dups"], options={**NL_OPTS, "dups": {"floor": 1024, "check": 50, "mem": "8GB"}})
+    S.dups(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    assert c.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -f 1024 -g 50 -m 8GB -T {w}/dups-tmp -o {w}/dups "
+                               "<tmp>/data/l2/2026-10-16T1200/index/G1/path-index-bysize.parquet"]
+    assert sorted(f.name for f in key.iterdir()) == ["dups.json", "dups.parquet", "path-index-bysize.parquet", "path-index.parquet"]
+    again = ctx(tmp_path, env, steps=["dups"], options=NL_OPTS)
+    S.dups(again, None)
+    assert again.sh_impl.calls == []
+
+
+def test_dups_falls_back_to_the_path_sort_and_never_fails_the_run(tmp_path, env):
+    key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
+    key.mkdir(parents=True)
+    (key / "path-index.parquet").write_text("p")
+    c = ctx(tmp_path, env, Runner(tmp_path, fail=("dt-cloud dups -d",)), steps=["dups"], options=NL_OPTS)
+    S.dups(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    assert c.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -T {w}/dups-tmp -o {w}/dups <tmp>/data/l2/2026-10-16T1200/index/G1/path-index.parquet"]
+    assert sorted(f.name for f in key.iterdir()) == ["path-index.parquet"]
 
 
 def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):

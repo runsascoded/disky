@@ -43,6 +43,9 @@ GROUP_CACHE = 2048
 SPAN_CACHE = 512
 #: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
 EXPLODE_PART_ROWS = 1 << 23
+#: Newly heavy directories' estimated root rows (summed over a chunk's directories, so nested ones count each time) built
+#: at once (`newly_heavy_rollups`): their prior roots read under one prefetch plan, combined and rolled up in one statement each.
+NEWLY_HEAVY_CHUNK_ROWS = 1 << 23
 #: Settling's input rows (affected directories' touched and kept children, as Python rows) loaded at once.
 SETTLE_CHUNK_ROWS = 1 << 22
 #: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
@@ -458,6 +461,7 @@ class TierReads:
         self.threads = threads
         self.fetch_io: Counter = Counter()
         self.raw = ByteCache(cache_bytes or min(MAX_CACHE_BYTES, int(ram_bytes() * CACHE_RAM_FRACTION))) if threads > 1 else None
+        self.held = False
         for _, gf in self.items:
             if gf is not None:
                 gf.raw = self.raw
@@ -498,7 +502,9 @@ class TierReads:
         return False
 
     def tables(self, c: str, lo: str, hi: str):
-        """Raw tier slices for bulk insertion; the consumer must combine duplicate roots by minimum vt."""
+        """Raw tier slices for bulk insertion; the consumer must combine duplicate roots by minimum vt. Each group is read
+        once (not cached), its prefetch windowed here; under `held` (`hold`: the caller prefetched a plan of several ranges,
+        which may share groups) decoded groups are cached and their bytes kept, until the caller releases them."""
         self.stats["rows"] += 1
         if self.raw is not None:
             self.prefetch_index([(c, lo, hi)])
@@ -507,9 +513,9 @@ class TierReads:
                 ci = t.canon(c, self.kind)
                 # Each group is an item: even one huge directory is prefetched in bounded windows.
                 groups, _ = gf.select((ci, lo), (ci, hi))
-                for a, b in self.windows([[(gf, g)] for g in groups]):
+                for a, b in [(0, len(groups))] if self.held else self.windows([[(gf, g)] for g in groups]):
                     for g in groups[a:b]:
-                        tab, runs = gf.group_rows(g, keep=False)
+                        tab, runs = gf.group_rows(g, keep=self.held)
                         run = runs.get(ci)
                         if run is not None:
                             s, e, _ = run
@@ -529,6 +535,20 @@ class TierReads:
                 "index_groups": sum(len(gf._entries) + len(gf._peeked) for _, gf in self.items if gf is not None),
                 "index_spans": sum(len(gf._spans) for _, gf in self.items if gf is not None),
                 "raw_bytes": self.raw.size if self.raw is not None else 0}
+
+    def hold(self, queries: list[tuple]):
+        """Prefetch `(c, lo, hi)` `rows` plans in windows (`plan` / `windows`), yielding `(a, b)`, with `tables` under `held`;
+        then drop what they held: the plans' prefetched bytes and the decoded groups."""
+        plans = self.plan(queries, "rows")
+        self.held = True
+        try:
+            yield from self.windows(plans)
+        finally:
+            self.held = False
+            if self.raw is not None:
+                for gf, g in (x for p in plans for x in p):
+                    self.raw.pop((gf, g["file"], g["offset"]))
+            self.drop_decoded()
 
     def drop_decoded(self) -> None:
         """Drop the decoded groups (each group file's LRU; the index and raw bytes stay): between loops that read different
@@ -1098,8 +1118,8 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         if ck:
             ck.save(con, "counts", ("bx",))
     doc["base_counted"] = len(unknown)
-    con.execute(f"""CREATE OR REPLACE TABLE newh AS SELECT nh.q, nh.dir, nh.k FROM nh LEFT JOIN bx USING (q, dir)
-        WHERE coalesce(nh.base, bx.rows) + nh.runs + nh.today > {R}""")
+    con.execute(f"""CREATE OR REPLACE TABLE newh AS SELECT nh.q, nh.dir, nh.k, coalesce(nh.base, bx.rows) + nh.runs + nh.today AS rows
+        FROM nh LEFT JOIN bx USING (q, dir) WHERE coalesce(nh.base, bx.rows) + nh.runs + nh.today > {R}""")
     doc["heavy_new"] = con.execute("SELECT count(*) FROM newh").fetchone()[0]
     t2 = step(f"drill/rollups/{kind}", t0, heavy_touched=doc["heavy_touched"], affected=doc["affected"], restated=doc["restated"])
     count = 0
@@ -1148,6 +1168,27 @@ def _base_counts(con, unknown: list[tuple], reads: TierReads, kind: str, log=err
     log(f"drill {kind}: {len(unknown):,} base counts below the measurement's floor in {monotonic() - t1:.0f}s")
 
 
+def newly_heavy_chunks(rows: list[int], chunk_rows: int) -> list[tuple[int, int]]:
+    """Consecutive `[a, b)` spans of the newly heavy directories whose estimated rows (`newh.rows`) sum to at most
+    `chunk_rows`; a directory over it alone."""
+    out, a, n = [], 0, 0
+    for i, r in enumerate(rows):
+        if i > a and n + r > chunk_rows:
+            out.append((a, i))
+            a, n = i, 0
+        n += r
+    if a < len(rows):
+        out.append((a, len(rows)))
+    return out
+
+
+def chunk_tops(dirs: list[tuple[str, str]]) -> list[int]:
+    """The indexes of `dirs` (`(q, dir)`) not under another of the same `q`: the ranges read once for the chunk."""
+    have = set(dirs)
+    return [i for i, (c, d) in enumerate(dirs)
+            if not any((c, d[:j]) in have for j in range(len(d)) if d[j] == "/")]
+
+
 def newly_heavy_rollups(
     con,
     reads: TierReads,
@@ -1155,17 +1196,22 @@ def newly_heavy_rollups(
     K: int,
     log=err,
     ck: Checkpoint | None = None,
+    chunk_rows: int | None = None,
 ) -> int:
-    """Combine history and write full rollups one (q, dir) at a time, never a global expanded GROUP BY.
+    """The newly heavy directories' full rollups (table `newh (q, dir, k, rows)`, `rows` the stored root rows estimated
+    under the directory) into `rup`, in chunks of consecutive `(q, dir)` of at most `chunk_rows` estimated rows (a
+    directory over it alone; default `NEWLY_HEAVY_CHUNK_ROWS`), never a global expanded GROUP BY.
 
-    Sort the relevant delta roots once so each directory's equality/prefix predicates can prune row groups.
-    New members already carry their whole history in dr; other members read the same prior roots as before.
-    The combine identity and min(vt) rule are unchanged. A single directory can still require substantial memory.
-    `ck`: the rollup rows so far are saved as parts (`checkpoint.Parts`; each directory's rows depend on it alone), and a
-    rerun appends the saved ones and continues at the first directory they don't cover. Returns the prior roots this
-    call inserted (a resumed loop's: those of the directories it built).
-    """
-    directories = con.execute("SELECT q, dir, k, q IN (SELECT q FROM newq) AS is_new FROM newh ORDER BY q, dir").fetchall()
+    Per chunk: the prior tiers' roots of each top range (a directory not under another of the chunk's, same member) are
+    read once, the chunk's groups prefetched together (`TierReads.hold`, concurrent, not one directory's
+    round trips at a time), today's rows (`dr`; a new member's whole history) taken per top range, and each directory's
+    roots cut from them by range; combined (rows equal on `(q, dir, path, usr, vf)` are one root, the smallest `vt`) and
+    rolled up (`full_rollups`) in one statement each for the chunk. Each directory's rows depend on it alone, so the rows
+    equal a directory-at-a-time loop's at any `chunk_rows`.
+    `ck`: the rollup rows so far are saved as parts (`checkpoint.Parts`, per chunk), and a rerun appends the saved ones and
+    continues at the first directory they don't cover. Returns the prior roots this call read (a resumed loop's: those of
+    the chunks it built)."""
+    directories = con.execute("""SELECT q, dir, k, q IN (SELECT q FROM newq) AS is_new, rows FROM newh ORDER BY q, dir""").fetchall()
     parts = Parts(ck, "heavy", ROLLUP_ARROW)
     con.execute(f"CREATE TABLE IF NOT EXISTS rup ({ROLLUP_COLS})")
     if parts.loaded is not None:
@@ -1178,30 +1224,40 @@ def newly_heavy_rollups(
     total = 0
     t0 = monotonic()
     con.execute(f"CREATE OR REPLACE TABLE nhr ({ROLLUP_COLS})")
-    for i, (c, d, k, is_new) in enumerate(directories):
-        if i < parts.start:
-            continue
-        started = monotonic()
-        progress = dict(directory=i + 1, directories=len(directories), member=c, prefix=d)
+    todo = directories[parts.start:]
+    chunks = [(a + parts.start, b + parts.start) for a, b in newly_heavy_chunks([r[4] for r in todo], chunk_rows or NEWLY_HEAVY_CHUNK_ROWS)]
+    for n, (a, b) in enumerate(chunks):
+        chunk = directories[a:b]
+        progress = dict(directory=b, directories=len(directories), chunk=n + 1, chunks=len(chunks), chunk_directories=b - a)
+        con.execute("CREATE OR REPLACE TABLE nhc (q VARCHAR, dir VARCHAR, k INTEGER, lo VARCHAR, hi VARCHAR)")
+        insert_rows(con, "nhc", [(c, d, k, d + "/", d + "0") for c, d, k, _, _ in chunk])
+        tops = [chunk[i] for i in chunk_tops([(c, d) for c, d, *_ in chunk])]
         con.execute("CREATE OR REPLACE TABLE rtr (q VARCHAR, dir VARCHAR, k INTEGER, path VARCHAR, usr VARCHAR, vf BIGINT, vt BIGINT, size BIGINT, n_files BIGINT)")
         resource_stage(f"{kind}: newly-heavy history", **progress)
-        count = 0 if is_new else insert_prior_roots(con, reads, [(c, d, k)], stage=f"{kind}: newly-heavy history")
+        old = [(c, d, k) for c, d, k, is_new, _ in tops if not is_new]
+        count = 0
+        for x, y in reads.hold([(c, d + "/", d + "0") for c, d, _ in old]):
+            count += insert_prior_roots(con, reads, old[x:y], stage=f"{kind}: newly-heavy history")
         total += count
         resource_stage(f"{kind}: newly-heavy combine", **progress, inserted_rows=count)
-        con.execute(f"""CREATE OR REPLACE TABLE rtn AS SELECT q, dir, any_value(k) AS k, path, usr, vf, min(vt) AS vt,
-                any_value(size) AS size, any_value(n_files) AS n_files FROM (
-                SELECT * FROM rtr UNION ALL
-                SELECT q, {q(d)} AS dir, {int(k)} AS k, path, usr, vf, vt, size, n_files FROM newh_today
-                    WHERE q = {q(c)} AND path >= {q(d + '/')} AND path < {q(d + '0')})
-            GROUP BY q, dir, path, usr, vf""")
+        con.execute(f"CREATE OR REPLACE TABLE tday ({sr.ROOT_COLS})")
+        for c, d, *_ in tops:
+            con.execute(f"INSERT INTO tday SELECT * FROM newh_today WHERE q = {q(c)} AND path >= {q(d + '/')} AND path < {q(d + '0')}")
+        con.execute("""CREATE OR REPLACE TABLE rtn AS SELECT h.q, h.dir, any_value(h.k) AS k, r.path, r.usr, r.vf, min(r.vt) AS vt,
+                any_value(r.size) AS size, any_value(r.n_files) AS n_files FROM (
+                SELECT q, path, usr, vf, vt, size, n_files FROM rtr UNION ALL
+                SELECT q, path, usr, vf, vt, size, n_files FROM tday) AS r
+            JOIN nhc AS h ON r.q = h.q AND r.path >= h.lo AND r.path < h.hi
+            GROUP BY h.q, h.dir, r.path, r.usr, r.vf""")
+        con.execute("DROP TABLE rtr; DROP TABLE tday")
         resource_stage(f"{kind}: newly-heavy rollups", **progress, inserted_rows=count)
         full_rollups(con, "rtn", K, "nhr")
-        con.execute("DROP TABLE rtr; DROP TABLE rtn")
+        con.execute("DROP TABLE rtn; DROP TABLE nhc")
         if ck:
-            parts.add(con.execute("SELECT * FROM nhr").to_arrow_table(), i + 1)
+            parts.add(con.execute("SELECT * FROM nhr").to_arrow_table(), b)
         con.execute("INSERT INTO rup SELECT * FROM nhr; DELETE FROM nhr")
-        if (i + 1) % 25 == 0 or i + 1 == len(directories) or monotonic() - started >= 5:
-            log(f"drill {kind}: newly-heavy directory {i + 1}/{len(directories)}, {total:,} prior roots, {monotonic() - t0:.0f}s")
+        log(f"drill {kind}: newly-heavy directories {b}/{len(directories)} (chunk {n + 1}/{len(chunks)}: {b - a} directories, "
+            f"{len(old)} ranges read), {total:,} prior roots, {monotonic() - t0:.0f}s")
     parts.flush(len(directories))
     con.execute("DROP TABLE newh_today; DROP TABLE nhr")
     return total

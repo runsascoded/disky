@@ -12,15 +12,22 @@
 # by `interval-store build` and compacted into a new one by `add` every 2^5 scans,
 # the pointer the site follows moved with it) → publish footers to the D1 the Map
 # reads, which lists the scan: last, so a listed scan is already searchable (gcs's
-# order). Idempotent per date: a date already scanned is
+# order). Then the "data behind this site" store (`STORES_JSON` `meta`, the site's
+# `/meta`): the demo's own bucket, disk-tree-demo, listed after the primary's
+# outputs landed → its path store under `meta-l2/` + snapshot under
+# `snapshots/meta/` → its own static name index (the generation is meta's
+# `STATIC_GEN` in `STORES_JSON`, built once when it doesn't exist yet; no
+# interval store: a secondary store is served per scan) → D1 under store `meta`.
+# Idempotent per date: a date already scanned is
 # not scanned again (the scan id is the date; the indexes append by it), and a
-# date the indexes already hold is not re-appended. Run it by
+# date the indexes already hold is not re-appended; each store separately. Run it by
 # hand anytime via "Run workflow" (workflow_dispatch).
 #
 # Creds (repo secrets/vars): R2_HCCS_RO_* + R2_HCCS_ENDPOINT_URL (ctbk/crashes,
 # HCCS account); R2_DEMO_SRC_RO_* (token "disky demo bkts RO": read, RAC
 # source buckets — jc-taxes) and R2_DEMO_RW_* (token "disky demo RW":
-# read/write, disk-tree-demo only), both RAC via vars.R2_ENDPOINT_URL;
+# read/write, disk-tree-demo only — also the meta store's lister: meta is that
+# bucket alone), both RAC via vars.R2_ENDPOINT_URL;
 # CLOUDFLARE_API_TOKEN (D1). The demo's own tokens (the root worktree's `.envrc`
 # holds the same ones as R2_RAC_RO_* / R2_RW_*); no other deployment or laptop
 # key is shared. The site reads with "disky demo RO" (a Pages secret).
@@ -71,6 +78,10 @@ jobs:
           if aws s3 ls "s3://$BUCKET/listing/$date/index/" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
             echo "scanned=true" >> "$GITHUB_OUTPUT"
             echo "$date is already scanned: listing, upload and D1 publish skipped"
+          fi
+          if aws s3 ls "s3://$BUCKET/meta-l2/$date/index/" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
+            echo "meta_scanned=true" >> "$GITHUB_OUTPUT"
+            echo "$date is already scanned for the meta store: its listing, upload and D1 publish skipped"
           fi
       - name: List the three buckets → canonical shards
         if: steps.d.outputs.scanned != 'true'
@@ -192,10 +203,76 @@ jobs:
             -g "${{ steps.d.outputs.gen }}" -b "r2://$BUCKET" \
             -k "listing/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
             -d "$GITHUB_WORKSPACE/work/index" -v path -v bysize
-      - name: Fail on an index append that failed
-        if: ${{ !cancelled() && (steps.names.outcome == 'failure' || steps.intervals.outcome == 'failure') }}
+      # The meta store (`STORES_JSON` `meta` in site/wrangler.r2.toml, the site's `/meta`): the demo's own storage,
+      # disk-tree-demo, scanned after the primary's outputs landed, as r2.oa.dev's `r2-meta.yml` profile does (there
+      # over its data + serving buckets; the demo has no data bucket, its GHA work dir is ephemeral). Same date, its
+      # own prefixes (`meta-l2/`, `snapshots/meta/`), its own static-names generation, its own D1 store; no interval
+      # store (a secondary store is served per scan). Never blocks the primary: each step continues on error, and the
+      # last step fails the run.
+      - name: Meta store — list disk-tree-demo → path store + snapshot → upload
+        id: meta
+        if: steps.d.outputs.meta_scanned != 'true'
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p work/meta/listing work/meta/index work/meta/snap
+          uv run disk-tree bulk-list "r2://$BUCKET" -E "$RAC_ENDPOINT" -o "work/meta/listing/$BUCKET" -P 4
+          (cd cloud && uv run dt-cloud path-index -d "${{ steps.d.outputs.date }}" \
+            -l "$GITHUB_WORKSPACE/work/meta/listing/*/*.parquet" \
+            -P "$GITHUB_WORKSPACE/work/meta/index/path-index.parquet" \
+            -o "$GITHUB_WORKSPACE/work/meta/snap")
+          aws s3 cp work/meta/index/ "s3://$BUCKET/meta-l2/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}/" \
+            --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
+          aws s3 cp work/meta/snap/  "s3://$BUCKET/snapshots/meta/${{ steps.d.outputs.date }}/" \
+            --recursive --endpoint-url "$RAC_ENDPOINT" --only-show-errors
+      - name: Meta store — static name index, append the scan (or build the generation)
+        id: meta_names
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+          DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          # One source of truth: the generation the site reads, meta's `STATIC_GEN` in `STORES_JSON` (site/wrangler.r2.toml).
+          gen=$(uv run python -c 'import json, tomllib; v = tomllib.load(open("site/wrangler.r2.toml", "rb"))["vars"]; print(json.loads(v.get("STORES_JSON", "{}")).get("meta", {}).get("vars", {}).get("STATIC_GEN", ""))')
+          if [ -z "$gen" ]; then echo "no meta STATIC_GEN in site/wrangler.r2.toml: no meta static name index"; exit 0; fi
+          L='meta-l2/{id}/index/{gen}/path-index.parquet'
+          cmd=add
+          if ! aws s3 ls "s3://$BUCKET/static-names/$gen/scans.json" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
+            cmd=build  # the first run: the base generation over every meta scan so far
+          fi
+          echo "static-names $cmd -g $gen (meta)"
+          # Build with r2.oa.dev's meta rule (`-x 16,8`: the store's keys carry hex runs — generation stamps, shard ids).
+          cd cloud && uv run dt-cloud static-names "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
+            -w "$RUNNER_TEMP/static-names-meta" -p 4 -M 10GB $([ "$cmd" = build ] && echo "-x 16,8")
+      - name: Meta store — publish footers → D1
+        id: meta_sync
+        if: ${{ !cancelled() && steps.meta.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DB_ID: 261d0c80-8f73-442e-979a-4e25725b2271
+          D1_DB_NAME: disk-tree-demo-db
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+          DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+        run: |
+          cd cloud && uv run dt-cloud index-sync "${{ steps.d.outputs.date }}" -s meta \
+            -g "${{ steps.d.outputs.gen }}" -b "r2://$BUCKET" \
+            -k "meta-l2/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
+            -d "$GITHUB_WORKSPACE/work/meta/index" -v path -v bysize
+      - name: Fail on an index append or a meta step that failed
+        if: ${{ !cancelled() && (steps.names.outcome == 'failure' || steps.intervals.outcome == 'failure' || steps.meta.outcome == 'failure' || steps.meta_names.outcome == 'failure' || steps.meta_sync.outcome == 'failure') }}
         run: |
           echo "static names: ${{ steps.names.outcome }}, interval store: ${{ steps.intervals.outcome }}"
+          echo "meta: scan ${{ steps.meta.outcome }}, static names ${{ steps.meta_names.outcome }}, D1 ${{ steps.meta_sync.outcome }}"
           exit 1
       - name: Smoke — the new generation serves
         run: |
@@ -204,4 +281,12 @@ jobs:
           code=$(curl -fsS -o /dev/null -w '%{http_code}' \
             "https://r2.rbw.sh/api/subtree?date=${{ steps.d.outputs.date }}&w=1280&h=800")
           echo "GET /api/subtree?date=${{ steps.d.outputs.date }} → $code"
+          test "$code" = "200"
+      - name: Smoke — the meta store serves the scan
+        if: steps.meta_sync.outcome == 'success'
+        run: |
+          set -euo pipefail
+          code=$(curl -fsS -o /dev/null -w '%{http_code}' \
+            "https://r2.rbw.sh/api/subtree?date=${{ steps.d.outputs.date }}&store=meta&w=1280&h=800")
+          echo "GET /api/subtree?date=${{ steps.d.outputs.date }}&store=meta → $code"
           test "$code" = "200"

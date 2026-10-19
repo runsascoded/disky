@@ -84,7 +84,7 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   d: {
     label: 'Scan',
-    description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back.',
+    description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report).',
     examples: ['261009', '26100912', '2610091200', '-7d', '2609040002-7d', '-2609010002', '2609040002-2609010002'],
   },
   date: {
@@ -191,6 +191,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['rate', 'objects', 'bytes', 'byteRate'],
     pages: ['/staged', '/runs'],
   },
+  min: {
+    label: 'Duplicates: least reclaimable',
+    description: 'On `/dups`, keeps the groups whose reclaimable bytes (size × (copies − 1)) reach this many bytes. The menu offers 10 GB, 100 GB, 1 TB and 10 TB. Defaults to 0 (every group).',
+    examples: ['1000000000000'],
+    pages: ['/dups'],
+  },
   mm: {
     label: 'Manual scans',
     description: 'How the size-over-time chart sets scans a hand submit started apart from scheduled ones: `h` draws their dots hollow, `0` draws them like the rest. When absent, a tick under the x-axis marks each (named in the legend). The tooltip names them in every style.',
@@ -218,10 +224,21 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['datakit', '.json'],
     pages: ['/names'],
   },
+  nested: {
+    label: 'Duplicates: nested groups',
+    description: 'On `/dups`, `true` also lists the groups whose every copy sits under another group\'s copy (their bytes are counted there). Defaults to off.',
+    examples: ['true'],
+    pages: ['/dups'],
+  },
   next: {
     label: 'Return path',
     description: 'Where to return after signing in. Only same-origin paths are accepted; anything else returns to `/`.',
     pages: ['/signin'],
+  },
+  nh: {
+    label: 'Hidden note kinds',
+    description: 'Comma-separated note kinds (for example `cleanup ask`) the size-over-time chart hides; the chart\'s options toggle each kind its notes use. When absent, every kind shows.',
+    examples: ['cleanup ask'],
   },
   o: {
     label: 'Owner',
@@ -254,6 +271,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'On a person\'s page, the folder their map is drilled into, so a deep view can be shared and Back walks out. When absent, the map shows their whole estate.',
     pages: ['/user'],
   },
+  pair: {
+    label: 'Duplicates: bucket pair',
+    description: 'On `/dups`, keeps the groups with a copy in each of two comma-separated buckets (the same bucket twice: two copies in it), or in one bucket. Clicking a cell of the bucket-pair matrix sets it. When absent, every bucket.',
+    examples: ['marin-us-central1,marin-us-east5'],
+    pages: ['/dups'],
+  },
   path: {
     hidden: true,
     label: 'Path (legacy)',
@@ -271,9 +294,9 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   q: {
     label: 'Staged filter',
-    description: 'Filters staged prefixes by substring. Terms can target a field (`owner:<who>`, `staged-by:<who>`), and `|` separates alternatives. Setting it also shows one flat table. When absent, all staged prefixes are listed.',
+    description: 'Filters staged prefixes by substring. Terms can target a field (`owner:<who>`, `staged-by:<who>`), and `|` separates alternatives. Setting it also shows one flat table. When absent, all staged prefixes are listed. On `/dups`, keeps the groups with a copy whose path contains it (case-insensitive).',
     examples: ['hedy|grace', 'staged-by:barbara'],
-    pages: ['/staged'],
+    pages: ['/staged', '/dups'],
   },
   qs: {
     label: 'Query syntax',
@@ -346,9 +369,9 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   sort: {
     label: 'Runs sort',
-    description: 'The column the runs table sorts by: `started`, `by`, `mode`, `state`, `planned`, `deleted`, `bytes`, `rate`, `elapsed`, `gone`, `overwritten`, `drift`, `undo` or `buckets`. Defaults to `started`.',
+    description: 'The column the runs table sorts by: `started`, `by`, `mode`, `state`, `planned`, `deleted`, `bytes`, `rate`, `elapsed`, `gone`, `overwritten`, `drift`, `undo` or `buckets`. Defaults to `started`. On `/dups`, the groups\' order: `reclaim` (reclaimable bytes, the default), `size` or `idle` (longest since a copy was read or written).',
     examples: ['started', 'deleted', 'rate'],
-    pages: ['/staged'],
+    pages: ['/staged', '/dups'],
   },
   spy: {
     label: 'Render spy',
@@ -360,11 +383,23 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Which configured store\'s scan runs to show, by its key. When absent, or for an unknown key, the primary store\'s runs are shown.',
     pages: ['/scans'],
   },
+  suspect: {
+    label: 'Duplicates: suspect groups',
+    description: 'On `/dups`, `true` also lists the groups of many copies (the report\'s threshold, 7 by default), mostly same-size collisions such as shards named alike. Defaults to off.',
+    examples: ['true'],
+    pages: ['/dups'],
+  },
   t: {
     hidden: true,
     label: 'Group pin (legacy)',
     description: 'Retired group pin. On load, `unattributed` and `communal` become bare `o` (the unowned pool), and any other value is dropped.',
     examples: ['unattributed', 'communal'],
+  },
+  tier: {
+    label: 'Duplicates: tier',
+    description: 'On `/dups`, keeps one tier\'s groups: `tree` (the same relative path in several buckets) or `moved` (the same basename and size under different paths). When absent, both.',
+    examples: ['tree', 'moved'],
+    pages: ['/dups'],
   },
   tm: {
     label: 'Table mode',

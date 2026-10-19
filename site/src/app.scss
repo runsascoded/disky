@@ -2533,6 +2533,7 @@ a.staged-chip {
     input.bad { border-color: var(--danger); }
     textarea { flex: 1 1 260px; min-width: 0; resize: vertical; }
     .note-form-actions { display: flex; align-items: center; gap: 6px; }
+    .note-form-fields { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px 12px; input { min-width: 0; } }
     button { font: inherit; padding: 2px 9px; border-radius: 4px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
     button[type='submit'] { border-color: var(--dt-ts-marker); }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -2543,7 +2544,9 @@ a.staged-chip {
 .note-tip {
   max-width: 340px;
   .note-text { white-space: pre-wrap; color: var(--ink); }
-  .note-meta { margin-top: 4px; color: var(--ink-3); font-size: 11px; }
+  .note-kind { display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 3px; font-size: 10.5px; vertical-align: 1px;
+    color: var(--ink-2); background: color-mix(in srgb, var(--ink) 9%, transparent); }
+  .note-meta { margin-top: 4px; color: var(--ink-3); font-size: 11px; code { font-size: 10.5px; } a { color: inherit; text-decoration: underline; } }
   .note-actions { display: flex; gap: 6px; margin-top: 6px; }
   .note-actions button {
     font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 4px; cursor: pointer;

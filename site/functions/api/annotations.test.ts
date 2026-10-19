@@ -2,7 +2,7 @@
 // audited in `admin_edits`), a secondary store's notes are its own and need its scope, and a D1 without the table
 // reads as an honest empty list — over the D1 schema and the real gate (Bearer grants minted in the same D1).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { NOT_APPLIED, onRequest } from './annotations'
+import { NOT_APPLIED, SCOPE_NOT_APPLIED, onRequest } from './annotations'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { parseNote } from '../_lib/annotationShape'
@@ -37,7 +37,7 @@ async function setup() {
   return { raw, call, viewer, admin, edits }
 }
 
-const NOTE = { id: 1, at: '2026-10-13', text: 'Scope change: oa-gcs-usage-dvx left the meta store', author: 'ops@example.test', created: T, updated: T }
+const NOTE = { id: 1, at: '2026-10-13', text: 'Scope change: oa-gcs-usage-dvx left the meta store', author: 'ops@example.test', created: T, updated: T, path: null, url: null, kind: null }
 
 describe('/api/annotations', () => {
   it('a viewer reads an empty list; an admin adds a note (audited); the viewer then reads it', async () => {
@@ -128,6 +128,31 @@ describe('/api/annotations', () => {
     ])
   })
 
+  it('a note scoped to a path, linked and kinded; a patch changes or clears just those', async () => {
+    const { call, admin, viewer } = await setup()
+    const url = 'https://openathena.slack.com/archives/C0AHF5KV11Q/p1790109588734129'
+    const ask = { ...NOTE, at: '2026-09-22', text: 'Asked recent adders to clean up', path: 'marin-us-east-02a', url, kind: 'cleanup ask' }
+    expect(await call('POST', '', { token: admin, body: { at: ask.at, text: ask.text, path: '/marin-us-east-02a/', url, kind: ' cleanup ask ' } })).toEqual([201, { annotation: ask }])
+    const moved = { ...ask, path: 'marin-us-east-02a/marin', kind: null }
+    expect(await call('PATCH', '', { token: admin, body: { id: 1, path: 'marin-us-east-02a/marin', kind: '' } })).toEqual([200, { annotation: moved }])
+    expect(await call('GET', '', { token: viewer })).toEqual([200, { annotations: [moved], applied: true }])
+  })
+
+  it('a D1 before migration chart-annotation-scope: notes read as every chart’s; a write is a 503 naming it', async () => {
+    const { raw, call, viewer, admin } = await setup()
+    for (const c of ['path', 'url', 'kind']) raw.exec(`ALTER TABLE chart_annotations DROP COLUMN ${c}`)
+    raw.prepare("INSERT INTO chart_annotations (store, at, text, author, created, updated) VALUES ('primary', '2026-10-13', 'old', 'ops@example.test', 1, 1)").run()
+    expect([
+      await call('GET', '', { token: viewer }),
+      await call('POST', '', { token: admin, body: { at: '2026-10-14', text: 'x' } }),
+      await call('PATCH', '', { token: admin, body: { id: 1, text: 'y' } }),
+    ]).toEqual([
+      [200, { annotations: [{ id: 1, at: '2026-10-13', text: 'old', author: 'ops@example.test', created: 1, updated: 1, path: null, url: null, kind: null }], applied: true }],
+      [503, { error: SCOPE_NOT_APPLIED }],
+      [503, { error: SCOPE_NOT_APPLIED }],
+    ])
+  })
+
   it('bad writes are 400s', async () => {
     const { call, admin } = await setup()
     expect([
@@ -159,11 +184,31 @@ describe('parseNote', () => {
       { at: '2026-10-13T0700', text: 'a' },
       { text: 'b' },
       { at: '2026-10-13' },
-      { error: 'nothing to change (at, text)' },
+      { error: 'nothing to change (at, text, path, url, kind)' },
       { error: 'at: want YYYY-MM-DD or YYYY-MM-DDTHHMM' },
       { error: 'text: over 2000 characters' },
       { error: 'text: want a string' },
       { error: 'want a JSON object' },
+    ])
+  })
+
+  it('path, url and kind: normalized, cleared by null or empty, and each refusal', () => {
+    expect([
+      parseNote({ path: 'a//b/', url: ' https://x.test/p ', kind: ' ask ' }, true),
+      parseNote({ path: '/', url: '', kind: null }, true),
+      parseNote({ path: 'a/../b' }, true),
+      parseNote({ path: 3 }, true),
+      parseNote({ url: 'javascript:alert(1)' }, true),
+      parseNote({ url: 'not a url' }, true),
+      parseNote({ kind: 'k'.repeat(33) }, true),
+    ]).toEqual([
+      { path: 'a/b', url: 'https://x.test/p', kind: 'ask' },
+      { path: null, url: null, kind: null },
+      { error: 'path: no . or .. segments' },
+      { error: 'path: want a string or null' },
+      { error: 'url: want http(s)' },
+      { error: 'url: not a URL' },
+      { error: 'kind: over 32 characters' },
     ])
   })
 })

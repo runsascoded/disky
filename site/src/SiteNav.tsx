@@ -18,7 +18,7 @@ import {
 } from '@floating-ui/react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
-import { DEFAULT_STORE, STORES, storeForPath } from './stores'
+import { DEFAULT_STORE, DUPS, STORES, storeForPath } from './stores'
 import { useStore } from './store'
 import { scansHref } from './scanRunsUi'
 import { FaGithub } from 'react-icons/fa'
@@ -233,6 +233,7 @@ function NavMenuInner({ extra }: { extra?: MenuEntry[] }) {
               {canAssign && store.owners && link('/users', 'Users')}
               {canAssign && store.owners && link('/assignments', 'Assignments')}
               {store.staging && link('/staged', 'Staged')}
+              {DUPS && store === DEFAULT_STORE && link('/dups', 'Duplicates')}
               {link(scansHref(store), 'Scan runs')}
               {link('/health', 'Health')}
               {DEFAULT_STORE.metaTree && <a role="menuitem" className="mi" href={DEFAULT_STORE.metaTree} target="_blank" rel="noreferrer" onClick={() => m.setOpen(false)}>Meta <span className="dim">(the data bucket)</span> ↗</a>}

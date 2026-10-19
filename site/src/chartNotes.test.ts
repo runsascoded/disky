@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { authorName, defaultNoteAt, notesInView, shortLabel, type ChartAnnotation } from './chartNotes'
+import { authorName, defaultNoteAt, noteKinds, notesHere, notesInView, shortLabel, type ChartAnnotation } from './chartNotes'
 
-const note = (id: number, at: string, text = `note ${id}`): ChartAnnotation => ({ id, at, text, author: 'ops@example.test', created: 0, updated: 0 })
+const note = (id: number, at: string, text = `note ${id}`, path: string | null = null, kind: string | null = null): ChartAnnotation =>
+  ({ id, at, text, author: 'ops@example.test', created: 0, updated: 0, path, url: null, kind })
 const midnight = (d: string) => Date.parse(`${d.slice(0, 10)}T00:00:00Z`)
 const DAY = 86_400_000
 
@@ -35,6 +36,29 @@ describe('notesInView', () => {
 
   it('a note whose x is unknown (NaN) is dropped', () => {
     expect(notesInView([note(1, '2026-10-13')], () => NaN, -Infinity, Infinity)).toEqual([])
+  })
+})
+
+describe('notesHere / noteKinds', () => {
+  const notes = [
+    note(1, '2026-10-01', 'store-wide'),
+    note(2, '2026-10-02', 'ask', 'marin-us-east-02a', 'cleanup ask'),
+    note(3, '2026-10-03', 'grug ask', 'marin-us-east-02a/marin/grug', 'cleanup ask'),
+    note(4, '2026-10-04', 'scope', 'marin-us-east-02a', 'scope change'),
+    note(5, '2026-10-05', 'sibling', 'marin-us-east-02ab'),
+  ]
+  const ids = (prefix: string, hidden: string[] = []) => notesHere(notes, prefix, new Set(hidden)).map(n => n.id)
+
+  it('a note shows at its path and below; store-wide ones everywhere; a sibling sharing a name prefix doesn’t match', () => {
+    expect([ids(''), ids('marin-us-east-02a'), ids('/marin-us-east-02a/'), ids('marin-us-east-02a/marin'), ids('marin-us-east-02a/marin/grug/x'), ids('marin-us-east-02ab')]).toEqual([
+      [1], [1, 2, 4], [1, 2, 4], [1, 2, 4], [1, 2, 3, 4], [1, 5],
+    ])
+  })
+
+  it('a hidden kind drops its notes; the kinds offered are those the chart could show here', () => {
+    expect([ids('marin-us-east-02a/marin/grug', ['cleanup ask']), noteKinds(notes, ''), noteKinds(notes, 'marin-us-east-02a')]).toEqual([
+      [1, 4], [], ['cleanup ask', 'scope change'],
+    ])
   })
 })
 

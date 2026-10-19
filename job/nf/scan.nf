@@ -5,9 +5,12 @@
 // record, and resumes a failed scan's session.
 //
 //   bucket-check, pre ─┐
-//   list ×source ──────┴→ index ─┬→ static-names ─────────────────┐
+//   list ×source ──────┴→ [index ×part →] index ─┬→ static-names ─────────────────┐
 //                                ├→ publish-r2 → interval-store ──┼→ index-sync → post (over-time, index-gc, …)
 //                                └→ index-rows ───────────────────┘
+//
+// `params.index_parts` (`options.index.parts`): the index sharded, one `index_part` task per part (`scan step index
+// <part>`: a bucket, or a key range of one), then `index` merges them into the one pass's outputs (`index_parts`).
 //
 // `post` runs the enabled post steps in registry order (`scan_steps.STEPS`), e.g. `retire` (opt-in via the profile's
 // `steps`): after both stores and the pointers, so a scan is retired only once the stores serve it.
@@ -26,6 +29,8 @@ params.steps = []          // every enabled step (core minus `skip`, plus the pr
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
 params.pre_label = 'small'
 params.interval_label = 'big'
+params.index_parts = []    // the sharded index's part ids (`options.index.parts`), each its own task before `index`
+params.index_part_label = 'big'
 params.over_time = false
 params.over_time_label = 'post'
 params.post = []           // the post task's steps, in order
@@ -108,6 +113,14 @@ process list_source {
     stepScript(task, (first && folded('bucket-check') ? ['bucket-check'] : []) + [['list', src.uri]])
 }
 
+process index_part {
+    tag "${part}"
+    label params.index_part_label  // `index_part` when the profile sizes it (`machines.index_part`), else `big`
+    input: val part; val deps
+    output: path 'done'
+    script: stepScript(task, [['index', part]])
+}
+
 process index {
     label 'big'
     input: val deps
@@ -175,7 +188,8 @@ workflow {
     if (on('bucket-check') && !folded('bucket-check') && !params.skip_list) ready = ready.mix(bucket_check())
     if (params.pre) ready = ready.mix(pre())
     if (!params.skip_list) ready = ready.mix(list_source(Channel.fromList(params.sources)))
-    def indexed = index(gathered(ready))
+    def listed = gathered(ready)
+    def indexed = index(params.index_parts ? gathered(index_part(Channel.fromList(params.index_parts), listed)) : listed)
     def none = Channel.value('skipped')
     def pub = on('publish-r2') ? publish_r2(indexed) : indexed
     // On a local data dir the static index reads earlier scans from the serving store, so it waits for this one's publish

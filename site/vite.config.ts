@@ -118,6 +118,9 @@ const REPO_URL = process.env.VITE_REPO_URL ?? VARS.REPO_URL ?? ''
 // `public/icons/` by `scripts/marks/build.mjs`. Unset → a favicon of ROOT_LABEL's
 // first letters.
 const MARK = process.env.VITE_MARK ?? VARS.MARK ?? ''
+// The duplicate-candidate report (`DUPS = "1"` under [vars]): the `/dups` page, its ☰ / omnibar links; the Functions'
+// `/api/dups` reads the same var. Unset = no page.
+const DUPS = process.env.VITE_DUPS ?? VARS.DUPS ?? ''
 
 // The favicon + apple-touch icon: the deployment's mark, else its label.
 const markIcons: Plugin = {
@@ -155,6 +158,7 @@ export default defineConfig({
     'import.meta.env.VITE_DEV_HOST': JSON.stringify(DEV_HOST),
     'import.meta.env.VITE_REPO_URL': JSON.stringify(REPO_URL),
     'import.meta.env.VITE_MARK': JSON.stringify(MARK),
+    'import.meta.env.VITE_DUPS': JSON.stringify(DUPS),
     'import.meta.env.VITE_BUILD_SHA': JSON.stringify(BUILD_ID.sha),
     'import.meta.env.VITE_BUILD_TIME': JSON.stringify(BUILD_ID.time),
   },

@@ -1,0 +1,148 @@
+{
+ "v": 1,
+ "scan": "2026-10-18T0701",
+ "floor": 1073741824,
+ "suspect_copies": 7,
+ "classes": [
+  "sum_storage_class_id_3"
+ ],
+ "checked_groups": 6,
+ "groups": 6,
+ "rows": 19,
+ "by_tier": [
+  {
+   "tier": "moved",
+   "kind": "file",
+   "groups": 1,
+   "copies": 7,
+   "bytes": 15032385536,
+   "reclaimable": 12884901888
+  },
+  {
+   "tier": "tree",
+   "kind": "dir",
+   "groups": 2,
+   "copies": 5,
+   "bytes": 19327352832,
+   "reclaimable": 11811160064
+  },
+  {
+   "tier": "moved",
+   "kind": "dir",
+   "groups": 2,
+   "copies": 5,
+   "bytes": 17179869184,
+   "reclaimable": 9663676416
+  },
+  {
+   "tier": "tree",
+   "kind": "file",
+   "groups": 1,
+   "copies": 2,
+   "bytes": 3221225472,
+   "reclaimable": 1610612736
+  }
+ ],
+ "net_by_tier": [
+  {
+   "tier": "tree",
+   "groups": 3,
+   "copies": 7,
+   "bytes": 22548578304,
+   "reclaimable": 13421772800
+  },
+  {
+   "tier": "moved",
+   "groups": 2,
+   "copies": 3,
+   "bytes": 12884901888,
+   "reclaimable": 6800364885
+  }
+ ],
+ "suspect": [
+  {
+   "tier": "moved",
+   "groups": 1,
+   "copies": 7,
+   "bytes": 15032385536,
+   "reclaimable": 12884901888
+  }
+ ],
+ "by_pair": [
+  {
+   "tier": "tree",
+   "b1": "east",
+   "b2": "west",
+   "groups": 3,
+   "bytes": 9126805504
+  },
+  {
+   "tier": "moved",
+   "b1": "east",
+   "b2": "east",
+   "groups": 1,
+   "bytes": 5368709120
+  },
+  {
+   "tier": "tree",
+   "b1": "east",
+   "b2": "eu",
+   "groups": 1,
+   "bytes": 4294967296
+  },
+  {
+   "tier": "tree",
+   "b1": "eu",
+   "b2": "west",
+   "groups": 1,
+   "bytes": 4294967296
+  }
+ ],
+ "copies_hist": [
+  {
+   "tier": "moved",
+   "copies": 2,
+   "groups": 1
+  },
+  {
+   "tier": "moved",
+   "copies": 3,
+   "groups": 1
+  },
+  {
+   "tier": "moved",
+   "copies": 7,
+   "groups": 1
+  },
+  {
+   "tier": "tree",
+   "copies": 2,
+   "groups": 2
+  },
+  {
+   "tier": "tree",
+   "copies": 3,
+   "groups": 1
+  }
+ ],
+ "checks": [
+  {
+   "tier": "moved",
+   "check": "differs",
+   "groups": 1,
+   "copies": 1
+  },
+  {
+   "tier": "moved",
+   "check": "equal",
+   "groups": 3,
+   "copies": 8
+  },
+  {
+   "tier": "tree",
+   "check": "equal",
+   "groups": 3,
+   "copies": 4
+  }
+ ]
+}

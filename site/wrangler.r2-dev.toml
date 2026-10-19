@@ -37,6 +37,9 @@ SNAPSHOTS_SUBDIR = "r2"
 FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
 STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
+# The `/meta` store, as wrangler.r2.toml's (the same bucket, prefixes, static generation and read secrets).
+STORES_EXTRA = "meta"
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata (dev)","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_GEN":"2026-10-19meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Store-read secrets (STORE_ENDPOINT, STORE_ACCESS_KEY_ID, STORE_SECRET_ACCESS_KEY)
 # are set on the dev project's production env (it serves the `dev` branch), the

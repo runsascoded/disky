@@ -14,10 +14,11 @@ import { RunPage } from './RunPage'
 import { ScanRunPage, ScansPage, ScansRoute } from './ScansPage'
 import { HealthPage } from './HealthPage'
 import { NamePage } from './NamePage'
+import { DupsPage } from './DupsPage'
 import { OgPage } from './OgPage'
 import { UserOgPage, UserPage, UsersOgPage, UsersPage } from './UserPage'
 import { StoreProvider } from './store'
-import { DEFAULT_STORE, STORES, storeForPath } from './stores'
+import { DEFAULT_STORE, DUPS, STORES, storeForPath } from './stores'
 import { useStoreMark } from './marks'
 import { useLoadIdentities } from './identities'
 import { PerfOverlay } from './dev/PerfOverlay'
@@ -97,6 +98,8 @@ export default function Root() {
       {/* The append-only stores' state (specs/done/health-page.md). */}
       <Route path="/health" element={<AuthGate><HealthPage /></AuthGate>} />
       <Route path="/names" element={<AuthGate><NamePage /></AuthGate>} />
+      {/* The scan's duplicate-candidate report (specs/dups.md), where the deployment has it (`DUPS`). */}
+      {DUPS && <Route path="/dups" element={<AuthGate><DupsPage /></AuthGate>} />}
       {/* Retired pages: the mark & sweep console became /staged; the review
           lenses became the home page's owner axis; the name-search preview
           became /names. Old links land somewhere sane. */}

@@ -93,7 +93,7 @@ describe('every page route of the app has its own card or none, never a folder c
     const kinds = Object.fromEntries(routes.map(r => [r, pv(r.replace(/:\w+/g, 'x').replace(/\*$/, 'x'))?.kind ?? null]))
     expect(Object.entries(kinds).filter(([, k]) => k === 'map')).toEqual([])
     expect(kinds['/staged']).toBe('staged')
-    expect([kinds['/scans'], kinds['/scans/*'], kinds['/meta/*'], kinds['/names']]).toEqual([null, null, null, null])
+    expect([kinds['/scans'], kinds['/scans/*'], kinds['/meta/*'], kinds['/names'], kinds['/dups']]).toEqual([null, null, null, null, null])
   })
 })
 

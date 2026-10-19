@@ -21,7 +21,7 @@ import { ApiError, apiError } from './filterCaps'
 import { LoadFailure } from './LoadFailure'
 import { SeriesEmpty } from './SeriesEmpty'
 import { SeriesMissingNote } from './UnionNotes'
-import { defaultNoteAt, notesInView, type ChartAnnotation, type NoteMarker } from './chartNotes'
+import { defaultNoteAt, noteKinds, notesHere, notesInView, type ChartAnnotation, type NoteMarker } from './chartNotes'
 import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
 import { manualScans } from './scanRunsModel'
 import { useScanRuns } from './scanRunsUi'
@@ -402,9 +402,20 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const isAdmin = admin
   const noteWrite = useNoteWrite()
   const [noteForm, setNoteForm] = useState<{ at: string; note?: ChartAnnotation } | null>(null)
+  // A note scoped to a path shows on its chart and those below it (`notesHere`); the options toggle each kind
+  // (`?nh=<kind>,…` hides those).
+  const [nhP, setNhP] = useUrlState('nh', stringParam())
+  const hiddenKinds = useMemo(() => new Set((nhP ?? '').split(',').filter(Boolean)), [nhP])
+  const setKindShown = (kind: string, on: boolean) => {
+    const next = new Set(hiddenKinds)
+    if (on) next.delete(kind)
+    else next.add(kind)
+    setNhP(next.size ? [...next].sort().join(',') : undefined)
+  }
+  const kinds = useMemo(() => noteKinds(notes, prefix), [notes, prefix])
   const markers = useMemo(
-    () => (total.length ? notesInView(notes, at => xOfScan(at, times), total[0].x, total[total.length - 1].x) : []),
-    [notes, total, times],
+    () => (total.length ? notesInView(notesHere(notes, prefix, hiddenKinds), at => xOfScan(at, times), total[0].x, total[total.length - 1].x) : []),
+    [notes, prefix, hiddenKinds, total, times],
   )
   const latestId = total.length ? idOfX(total[total.length - 1].x) : undefined
   // Alt held on the press that becomes a pick: an admin's alt-click opens the form at that point's scan.
@@ -417,7 +428,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const renderMarker = (m: { key: string }, node: ReactNode) => {
     const { note } = m as NoteMarker
     return (
-      <Tooltip pinnable={isAdmin} content={
+      <Tooltip pinnable={isAdmin || note.url !== null} content={
         <NoteTip
           note={note}
           fmt={fmt}
@@ -502,9 +513,15 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             <b style={{ minWidth: 30, textAlign: 'right' }}>{floorPct}%</b>
           </label>
           {manual.size > 0 && <ManualMarkToggle v={manualMark} set={setManualMark} />}
+          {kinds.map(k => (
+            <label key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!hiddenKinds.has(k)} onChange={e => setKindShown(k, e.target.checked)} />
+              {k} notes
+            </label>
+          ))}
         </div>
       )}
-      {noteForm && <NoteForm key={noteForm.note?.id ?? 'new'} at={noteForm.at} note={noteForm.note} onClose={() => setNoteForm(null)} />}
+      {noteForm && <NoteForm key={noteForm.note?.id ?? 'new'} at={noteForm.at} path={prefix} note={noteForm.note} onClose={() => setNoteForm(null)} />}
       {noteWrite.isError && <p className="err sub">note: {(noteWrite.error as Error).message}</p>}
       {/* A refetch's failure over a chart still drawn; with no chart, the slot below states it. */}
       {seriesQ.isError && !tooMany && (allZero || series.length > 0) && <LoadFailure err={seriesQ.error} what="series" className="sub" onRetry={() => void seriesQ.refetch()} />}
