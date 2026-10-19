@@ -1,6 +1,6 @@
 {
   "name": "@open-athena/treemap",
-  "version": "0.1.0-dist.e947ae0",
+  "version": "0.1.1-dist.422f684",
   "description": "SOTA React treemap: SVG + canvas renderers, shared-edge (gapless) tiling, dust-texturing for the long tail, rich per-cell coloring + emphasis rings, hover/pin events, Voronoi variant. Accessor-based, chart-lib-free.",
   "type": "module",
   "main": "./dist/index.js",
