@@ -1,7 +1,16 @@
 {
-  "name": "@rdub/treemap",
-  "version": "0.1.0",
+  "name": "@open-athena/treemap",
+  "version": "0.1.1",
   "description": "SOTA React treemap: SVG + canvas renderers, shared-edge (gapless) tiling, dust-texturing for the long tail, rich per-cell coloring + emphasis rings, hover/pin events, Voronoi variant. Accessor-based, chart-lib-free.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/runsascoded/disky.git",
+    "directory": "packages/treemap"
+  },
+  "homepage": "https://github.com/runsascoded/disky/tree/cloud/packages/treemap#readme",
+  "bugs": {
+    "url": "https://github.com/runsascoded/disky/issues"
+  },
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",

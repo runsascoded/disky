@@ -1,4 +1,4 @@
-import { divergingColor } from '@rdub/treemap/divergingColor'
+import { divergingColor } from '@open-athena/treemap/divergingColor'
 import type { Env } from '../auth.js'
 import { pathScans, type Lens } from '../index.js'
 import { canonId, loadRegistry } from '../identity.js'

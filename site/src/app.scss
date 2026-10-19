@@ -2554,7 +2554,7 @@ a.staged-chip {
 
 // An anchored section parks a little below the sticky bar — not under it, not
 // flush against it (the bar's height is published as --topbar-h; it wraps to
-// more rows on narrow viewports). `useHashSpy` reads the computed margin back
+// more rows on narrow viewports). `useSectionSpy` reads the computed margin back
 // to decide when a deep link has landed.
 :root { --anchor-gap: 16px; }
 #tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }

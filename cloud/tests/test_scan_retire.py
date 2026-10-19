@@ -134,6 +134,17 @@ def _deleted(fx, d: str) -> dict[str, list[int]]:
 KEPT = {"age": [2, 10], "extras": [1, 5], "snapshot": [1, 2]}
 
 
+def test_the_keep_window_counts_the_deployments_scans_not_one_copys(fx, d1):
+    """A copy missing the newest scans (a lean scan writes no per-scan files to R2) still keeps only the deployment's
+    newest `-k`: its own last ones retire like any other."""
+    for d in ("2026-08-05", "2026-08-07"):
+        shutil.rmtree(fx["root"] / "idx" / d)
+    assert _statuses(_run(fx))[-2:] == [
+        ("2026-08-04", "retire", None, "pass"),
+        ("2026-08-04T1236", "retire", None, "pass"),
+    ]
+
+
 def test_dry_run_reports_and_deletes_nothing(fx, d1):
     before, db_before = _files(fx["root"]), d1.state()
     store_before = _files(fx["store"])

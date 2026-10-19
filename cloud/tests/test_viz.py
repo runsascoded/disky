@@ -506,6 +506,25 @@ def test_write_path_index_plain(tmp_path: Path, listing: str):
     ]
 
 
+def test_write_path_index_path_only(tmp_path: Path, listing: str, attribution: str):
+    """`path_only` (`path-index -O`, specs/lean-scans.md §1.1): the `path` sort alone, no `bysize`, no by-user copy, no
+    `.groups.*` sidecars, and that sort row for row the one a full cut writes (owner slices included)."""
+    identities_path = tmp_path / "identities.yaml"
+    identities_path.write_text(IDENTITIES_YAML)
+
+    def cut(name: str, **kw) -> tuple[dict, Path]:
+        pidx = tmp_path / name / "path-index.parquet"
+        meta = write_path_index((listing,), tmp_path / f"{name}-out", "2026-07-20", (attribution,), identities_path, path_index=pidx, **kw)
+        return meta, pidx
+
+    full_meta, full = cut("full")
+    meta, lean = cut("lean", path_only=True)
+    assert meta["index"]["sorts"] == {"path": full_meta["index"]["sorts"]["path"]}
+    assert sorted(p.name for p in lean.parent.glob("path-index*")) == ["path-index.parquet"]
+    assert pd.read_parquet(lean).equals(pd.read_parquet(full))
+    assert pq.read_metadata(lean).metadata == pq.read_metadata(full).metadata
+
+
 def test_class_bytes_carry_every_listed_class(tmp_path: Path):
     """`meta.json` `class_bytes` splits by each object's `storage_class_id`, not just GCS's 2–4: hf's public 1, private
     5 and unbilled git 6 each keep their own bytes (they used to fold into 1)."""

@@ -1,9 +1,9 @@
 # `@disk-tree/react`
 
 disk-tree's **bytes-over-time** React widgets, built on the
-[`@rdub/treemap`](../treemap) core — which this package **re-exports**, so
+[`@open-athena/treemap`](../treemap) core — which this package **re-exports**, so
 `import { Treemap, … } from '@disk-tree/react'` keeps working. New / non-disk
-consumers should depend on `@rdub/treemap` directly; reach for this package when
+consumers should depend on `@open-athena/treemap` directly; reach for this package when
 you want the disk-flavored views below.
 
 **Chart-lib-free** (DIY SVG), accessor-based.
@@ -12,10 +12,10 @@ you want the disk-flavored views below.
 |---|---|
 | [`<TimeSeries>`](#timeseries) / [`<BytesOverTime>`](#timeseries) | Multi-series line/area chart with hover-follow crosshair. Zero deps. |
 
-Everything from `@rdub/treemap` (`<Treemap>`, `useHoverPin`, `squarify`,
+Everything from `@open-athena/treemap` (`<Treemap>`, `useHoverPin`, `squarify`,
 `DEFAULT_PALETTE`, `ageFade`, `parseQuery`, …) is also re-exported here. For the
 treemap itself — including its `styles.css` and `/voronoi` subpath — see the
-[`@rdub/treemap` README](../treemap/README.md).
+[`@open-athena/treemap` README](../treemap/README.md).
 
 ## Install
 
@@ -25,7 +25,7 @@ Same SHA-pinnable **dist branch** mechanism as the core (via [`npm-dist`][npm-di
 pnpm add github:runsascoded/disk-tree#<dist-sha>
 ```
 
-`react` and `react-dom` ≥ 18 are peer deps; `@rdub/treemap` comes along as a
+`react` and `react-dom` ≥ 18 are peer deps; `@open-athena/treemap` comes along as a
 dependency.
 
 ## `<TimeSeries>`
@@ -66,7 +66,7 @@ import { BytesOverTime } from '@disk-tree/react'
 ## Theming
 
 `.dt-timeseries` (grid, axis, tooltip, crosshair) themes the same CSS-var way as
-the treemap; see the [`@rdub/treemap` theming section](../treemap/README.md#theming).
+the treemap; see the [`@open-athena/treemap` theming section](../treemap/README.md#theming).
 
 ## Contributing
 

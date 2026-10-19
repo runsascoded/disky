@@ -9,10 +9,14 @@ import type { D1Database } from '@cloudflare/workers-types'
 import { canRedeem, hashToken } from '@open-athena/auth'
 import { d1GrantStore } from '@open-athena/auth/d1'
 import type { PageView } from './routes.js'
-import { B62, canonical, expDay, expired, randomToken } from './sign.js'
+import { B36, B62, canonical, expDay, expired, randomToken } from './sign.js'
 import { shareSection } from '../../../src/shareSection.js'
 
-export const TOKEN_CHARS = 10
+/** A minted token: 12 lowercase base36 chars (~62 bits), so a client that lowercases the URL (Slack) keeps it whole.
+ * Tokens minted before 2026-10-19 are 10 base62 chars, mixed case; every lookup compares lowercased, so they still
+ * work lowercased too. */
+export const TOKEN_CHARS = 12
+const newToken = (): string => randomToken(TOKEN_CHARS, undefined, B36)
 
 export const TOKEN_DAYS_DEFAULT = 30
 /** The `exp_day` of a token that never expires (`days` 0); revocation still ends it. */
@@ -34,7 +38,7 @@ export interface Mint {
 
 /** Mint a token for `pageUrl`'s view (`view`: the deployment's `pageView`, its stores' included: `og/serve.ts`
  * `pageOf`) and record it, good for `days` (`tokenDays`; 0 = never expires). Null when the URL has no card of its own. */
-export async function mint(db: D1Database, view: (u: URL) => PageView | null, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = randomToken(TOKEN_CHARS)): Promise<Mint | null> {
+export async function mint(db: D1Database, view: (u: URL) => PageView | null, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = newToken()): Promise<Mint | null> {
   const u = shareSection(pageUrl)
   u.searchParams.delete('og')
   const pv = view(u)
@@ -46,7 +50,7 @@ export async function mint(db: D1Database, view: (u: URL) => PageView | null, pa
   return { token, url: u.href, expDay: day }
 }
 
-const TOKEN_RE = new RegExp(`^[${B62}]{${TOKEN_CHARS}}$`)
+const TOKEN_RE = new RegExp(`^(?:[${B62}]{10}|[${B62}]{${TOKEN_CHARS}})$`)
 
 /** The full tier for this page fetch: the `og=` token's row is for exactly
  * this view, unexpired and unrevoked. Its expiry day, or null. A missing
@@ -54,7 +58,7 @@ const TOKEN_RE = new RegExp(`^[${B62}]{${TOKEN_CHARS}}$`)
 export async function fullTier(db: D1Database | undefined, kind: string, params: Record<string, string>, token: string | null, now: number): Promise<{ day: number } | null> {
   if (!token || !db || !TOKEN_RE.test(token)) return null
   try {
-    const r = await db.prepare('SELECT exp_day FROM og_tokens WHERE token = ? AND kind = ? AND view = ? AND revoked_ts IS NULL ORDER BY exp_day DESC LIMIT 1')
+    const r = await db.prepare('SELECT exp_day FROM og_tokens WHERE lower(token) = lower(?) AND kind = ? AND view = ? AND revoked_ts IS NULL ORDER BY exp_day DESC LIMIT 1')
       .bind(token, kind, canonical(params)).first<{ exp_day: number }>()
     return r && !expired(r.exp_day, now) ? { day: r.exp_day } : null
   } catch {
@@ -82,8 +86,8 @@ export async function listTokens(db: D1Database, limit = 200): Promise<TokenRow[
  * only a row that minter minted (a non-admin revoking their own). */
 export async function revoke(db: D1Database, token: string, by: string, now: number, minter?: string): Promise<number> {
   const r = minter == null
-    ? await db.prepare('UPDATE og_tokens SET revoked_by = ?, revoked_ts = ? WHERE token = ? AND revoked_ts IS NULL').bind(by, now, token).run()
-    : await db.prepare('UPDATE og_tokens SET revoked_by = ?, revoked_ts = ? WHERE token = ? AND minted_by = ? AND revoked_ts IS NULL').bind(by, now, token, minter).run()
+    ? await db.prepare('UPDATE og_tokens SET revoked_by = ?, revoked_ts = ? WHERE lower(token) = lower(?) AND revoked_ts IS NULL').bind(by, now, token).run()
+    : await db.prepare('UPDATE og_tokens SET revoked_by = ?, revoked_ts = ? WHERE lower(token) = lower(?) AND minted_by = ? AND revoked_ts IS NULL').bind(by, now, token, minter).run()
   return r.meta.changes ?? 0
 }
 
@@ -137,7 +141,7 @@ export async function serverToken(db: D1Database, kind: string, params: Record<s
   const row = await db.prepare('SELECT token, exp_day FROM og_tokens WHERE kind = ? AND view = ? AND minted_by = ? AND revoked_ts IS NULL AND exp_day >= ? ORDER BY exp_day DESC LIMIT 1')
     .bind(kind, view, by, expDay(now, minDays)).first<{ token: string; exp_day: number }>()
   if (row) return { token: row.token, day: row.exp_day }
-  const token = randomToken(TOKEN_CHARS)
+  const token = newToken()
   const day = expDay(now, days)
   await db.prepare('INSERT INTO og_tokens (token, kind, view, page, minted_by, minted_ts, exp_day) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(token, kind, view, page, by, now, day).run()

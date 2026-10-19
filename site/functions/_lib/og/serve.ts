@@ -8,12 +8,13 @@ import { mapCard, type Site } from './data.js'
 import { stagedImageVersion } from '../stagedSlack.js'
 import { stagedCard } from './pages.js'
 import { ensureWasm, FONT_FILES, svgToPng } from './render.js'
-import { pageView, storeOfPath, type OgKind, type PageView } from './routes.js'
+import { KIND_SECTION, pageView, storeOfPath, type OgKind, type PageView } from './routes.js'
 import { imagePath, ogKey, resolveImage, type OgTier } from './sign.js'
 import { credLive, pageTier } from './tier.js'
 import { imageParams, splitImageParams } from './cred.js'
 import { warmUrls } from './warm.js'
 import { anonymousPolicy, cardTier, genericCard, genericImagePath, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
+import { BUILD } from '../build.js'
 
 import { canonId, loadRegistry } from '../identity.js'
 import { Memo, reqOf, withReq } from '../shared.js'
@@ -24,7 +25,9 @@ import { NoScanMatch, resolveScan } from './data.js'
 import { warmSubtree } from '../../api/subtree.js'
 import { colorModeCodec } from '../../../src/colorMode.js'
 import { diffCard, resolveDiffScans } from './diff.js'
+import { seriesCard } from './series.js'
 import { encodeScan } from '../../../src/scanSlug.js'
+import { SECTION_KEY } from '../../../src/homeSections.js'
 import type { ColorMode } from '../../../src/types.js'
 
 export type OgEnv = Env & PolicyEnv & {
@@ -69,11 +72,14 @@ export function pageOf(env: OgEnv, url: URL): { env: OgEnv; site: Site; pv: Page
   return pv && { env: senv, site, pv }
 }
 
-/** The env a card's data reads go through: the primary's as is; a secondary store's under the data Functions'
- * path-store rule for a `store=` read (`withPathStore`: the interval store is the primary's). */
+/** The env a card's data reads go through: the data Functions' path-store rule (`withPathStore`), as a request for the
+ * store would be. The primary's under `PATH_STORE=intervals` reads the interval store at its pinned or current
+ * generation (`CURRENT.json` when unpinned), as the page's own reads do: a scan the store holds without per-scan
+ * pointers (a lean scan) draws, never "view unavailable". A secondary store's as a `store=` read (the interval store
+ * is the primary's). */
 async function dataEnv(env: OgEnv, origin: string): Promise<OgEnv> {
-  if (isPrimary(env)) return env
-  return (await withPathStore({ request: new Request(`${origin}/?store=${encodeURIComponent(env.STORE_KEY!)}`), env })).env as OgEnv
+  const q = isPrimary(env) ? '' : `?store=${encodeURIComponent(env.STORE_KEY!)}`
+  return (await withPathStore({ request: new Request(`${origin}/${q}`), env })).env as OgEnv
 }
 
 /** Called before route Functions: private anonymous unfurls must not read
@@ -90,7 +96,7 @@ export async function anonymousPage(env0: OgEnv, url: URL): Promise<Response | n
 }
 
 /** The kinds this build draws; the rest keep their static card. */
-export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'diff', 'staged'])
+export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'diff', 'series', 'staged'])
 
 /** Kinds whose page Function already stamps its own title and description
  * (`functions/staged.ts`): the middleware only swaps their image. */
@@ -127,7 +133,7 @@ async function stagedVersion(env: OgEnv): Promise<string | null> {
 }
 
 /** Stamp a page's HTML with its card when it has one. */
-export async function stampPage(env0: OgEnv, url: URL, html: Response): Promise<Response> {
+export async function stampPage(env0: OgEnv, url: URL, html: Response, warm?: (p: Promise<unknown>) => void): Promise<Response> {
   const page = pageOf(env0, url)
   if (!page || !DRAWN.has(page.pv.kind)) return html
   const { pv, site } = page
@@ -145,9 +151,17 @@ export async function stampPage(env0: OgEnv, url: URL, html: Response): Promise<
   const scan = pv.kind === 'diff' ? pair?.to : pv.kind === 'staged' ? null : await resolveScan(env, pv.params.d)
   const params = { ...imageParams(pv.params, v, cred), ...(scan ? { s: scan } : {}), ...(pair?.from ? { b: pair.from } : {}), policy: anonymousPolicy(env), r: RENDER_VERSION }
   const image = url.origin + await imagePath(key, pv.kind, params, tier, day)
+  // A full card's image rendered while the unfurler reads the page: it fetches the image next, from the same colo, and a
+  // cold full render could outlast its wait (Slack showed a title and no image, 2026-10-19)
+  if (warm && tier === 'full') warm(fetch(image).then(r => r.arrayBuffer()).catch(() => undefined))
   if (pv.kind === 'diff') {
     const render = await diffCard(env, site, pv.title, { ...pv.params, ...(pair?.from ? { d: `${encodeScan(pair.to)}-${encodeScan(pair.from)}` } : {}) }, cardTier(tier, anonymousPolicy(env)), true)
     return uncachedHtml(stampMeta(html, { title: render.title, desc: `${render.subtitle} · ${render.total}`, image, imageType: 'image/png', page: url.href }))
+  }
+  if (pv.kind === 'series') {
+    // the series' span and latest size in the preview text, as the diff's comparison
+    const render = await seriesCard(env, site, pv.title, { ...pv.params, ...(scan ? { d: scan } : {}) }, cardTier(tier, anonymousPolicy(env)), url.origin)
+    return uncachedHtml(stampMeta(html, { title: render.title, desc: [render.subtitle, render.total].filter(Boolean).join(' · ') || render.empty || pv.title, image, imageType: 'image/png', page: url.href }))
   }
   if (OWN_TITLES.has(pv.kind)) return uncachedHtml(stampMeta(html, { image, imageType: 'image/png', page: url.href }))
   if (cardTier(tier, anonymousPolicy(env)) === 'full' && pv.kind === 'map') {
@@ -181,14 +195,16 @@ export function fonts(env: OgEnv, origin: string): Promise<Uint8Array[]> {
 async function cardData(env: OgEnv, kind: string, params: Record<string, string>, tier: OgTier, url: URL): Promise<CardData | null> {
   const site = siteOf(env)
   // The page's own title, recomputed from the signed view (a secondary store's below its path).
-  const page = kind === 'map' || kind === 'diff' ? `/${params.path ?? ''}` : kind === 'user' ? `/user/${params.id ?? ''}` : `/${kind}`
+  const page = kind === 'map' || Object.hasOwn(KIND_SECTION, kind) ? `/${params.path ?? ''}` : kind === 'user' ? `/user/${params.id ?? ''}` : `/${kind}`
   const pu = new URL(page, url.origin)
-  if (kind === 'diff') pu.searchParams.set('section', 'diff')
+  const section = KIND_SECTION[kind as OgKind]
+  if (section) pu.searchParams.set(SECTION_KEY, section)
   for (const [k, v] of Object.entries(params)) if (k !== 'path' && k !== 'id' && k !== 'store') pu.searchParams.set(k, v)
   const title = pageView(pu, site.name, site.root, params.store)?.title ?? site.name
   switch (kind) {
     case 'map': return mapCard(env, site, title, params, tier)
     case 'diff': return diffCard(env, site, title, params, tier)
+    case 'series': return seriesCard(env, site, title, params, tier, url.origin)
     case 'staged': return stagedCard(env, site, title, params, tier)
     default: return null
   }
@@ -224,10 +240,10 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const r0 = await resolveImage(keyP ? await keyP : null, url, t)
   if (!r0 || !DRAWN.has(r0.kind as OgKind)) return new Response('not a card', { status: 404 })
   const { view, v, scan: pinnedScan, before: pinnedBefore, cred } = splitImageParams(r0.params)
-  // A secondary store's card (`store=`, map and diff only): its label, mount, scope and data.
-  let sEnv: OgEnv = env
+  // A secondary store's card (`store=`, map, diff and series only): its label, mount, scope and data.
+  let sEnv: OgEnv = await dataEnv(env, url.origin)
   if ('store' in view) {
-    const o = r0.kind === 'map' || r0.kind === 'diff' ? storeOgEnv(env, view.store) : null
+    const o = r0.kind === 'map' || Object.hasOwn(KIND_SECTION, r0.kind) ? storeOgEnv(env, view.store) : null
     if (!o) return new Response('not a card', { status: 404 })
     sEnv = await dataEnv(o, url.origin)
   }
@@ -238,11 +254,11 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   if (r.tier === 'anon' && policy === 'generic') {
     // No ledger/scan/owner/data reads or warming, and never an old view cache key.
     // Even invalid/revoked credentials return identical content and tier headers.
-    const cacheKey = new Request(url.origin + genericImagePath)
+    const cacheKey = new Request(`${url.origin}${genericImagePath}&bld=${BUILD.sha}`)
     const cache = caches.default
     const hit = await cache.match(cacheKey)
     const response = hit ?? await renderCard(env, url, genericCard(env))
-    if (!hit) await cache.put(cacheKey, response.clone())
+    if (!hit) await cache.put(cacheKey, stored(response.clone()))
     const headers = new Headers(response.headers)
     headers.set('x-og-tier', 'anon')
     headers.set('x-og-policy', policy)
@@ -263,7 +279,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const head = 0  // m3 keeps no ownership ledger
   // An anonymous render is one per view (+ version), whatever credential the URL named.
   const keyParams = { ...(r.tier === 'full' ? r0.params : { ...view, ...(v ? { v } : {}) }), ...(scan ? { s: scan } : {}), ...(before ? { b: before } : {}), policy, r: RENDER_VERSION }
-  const cacheKey = new Request(`${url.origin}${await imagePath(null, r.kind, keyParams, 'anon')}${Object.keys(keyParams).length ? '&' : '?'}tier=${r.tier}&h=${head}`)
+  const cacheKey = new Request(`${url.origin}${await imagePath(null, r.kind, keyParams, 'anon')}${Object.keys(keyParams).length ? '&' : '?'}tier=${r.tier}&h=${head}&bld=${BUILD.sha}`)
   const cache = caches.default
   if (ctx.waitUntil) ctx.waitUntil(warmView(env, sEnv, url.origin, r.kind, renderView, p => ctx.waitUntil!(p)))
   const hit = await cache.match(cacheKey)
@@ -281,7 +297,14 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const t1 = Date.now()
   const res = await renderCard(env, url, data)
   res.headers.set('server-timing', `data;dur=${t1 - t0}${data.depth ? `;desc="depth ${data.depth}"` : ''}, render;dur=${Date.now() - t1}`)
-  const put = cache.put(cacheKey, new Response(res.clone().body, { headers: { ...Object.fromEntries(res.headers), 'cache-control': 'public, max-age=86400' } }))
+  if (data.failed) {
+    // A read error drawn as "view unavailable": no cache anywhere (the colo's, the edge's, Slack's), so the next fetch
+    // retries rather than serving it for the URL's lifetime.
+    const out = withTier(res, r.tier, r.why)
+    out.headers.set('cache-control', 'no-store')
+    return out
+  }
+  const put = cache.put(cacheKey, stored(res.clone()))
   if (ctx.waitUntil) ctx.waitUntil(put)
   else await put
   return withTier(res, r.tier, r.why, !!pinnedScan || !!v)
@@ -292,6 +315,15 @@ async function renderCard(env: OgEnv, url: URL, data: CardData): Promise<Respons
   return new Response(svgToPng(cardSvg(data), await fonts(env, url.origin)), {
     headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' },
   })
+}
+
+/** A rendered card as the colo cache holds it: a year. Its key names everything the image depends on (the view, the
+ *  scan, the render version, the ledger head, and the build, whose config — labels, colours, policy — a deploy can
+ *  change without a new `RENDER_VERSION`), so the entry never goes stale; a new scan or deploy is a new key. What a
+ *  client caches (`withTier`, the generic path) stays a day: its URL names the scan and version, not the ledger or
+ *  the build. */
+function stored(res: Response): Response {
+  return new Response(res.body, { headers: { ...Object.fromEntries(res.headers), 'cache-control': 'public, max-age=31536000' } })
 }
 
 /** The response with this fetch's tier header (and the cache policy its tier needs). */

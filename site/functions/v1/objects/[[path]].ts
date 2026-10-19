@@ -15,6 +15,7 @@
 import { createHandlers } from '@rdub/file-tree/server'
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { type Env, json, requireStager } from '../../_lib/auth.js'
+import { withStore } from '../../_lib/stores.js'
 import { storeCreds, storeReady, storeTarget } from '../../_lib/index.js'
 
 const BASE = '/v1/objects'
@@ -23,7 +24,10 @@ const BASE = '/v1/objects'
 export const objectBuckets = (env: Env): string[] =>
   (env.OBJECT_BUCKETS ?? '').split(',').map(s => s.trim()).filter(Boolean)
 
-export const onRequest = async (ctx: { request: Request; env: Env }): Promise<Response> => {
+export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<Response> => {
+  // `store=<key>`: a secondary store's env overlay (its own `OBJECT_BUCKETS`, and its `scope` on top of the gate)
+  const ctx = withStore(ctx0)
+  if (ctx instanceof Response) return ctx
   const id = await requireStager(ctx)
   if (id instanceof Response) return id
   if (id.via === 'public') return json({ error: 'unauthenticated' }, 401)

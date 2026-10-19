@@ -227,11 +227,13 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
-             mem: str = "4GB", fill: Fill | None = None) -> tuple[dict, dict, dict, dict]:
+             mem: str = "4GB", fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
-    carries `GENERATION` as the hook sets it. Returns `(scans.json, rows per table, sorts, stats)`."""
+    carries `GENERATION` as the hook sets it. Logs a line per range (`i/k`, its rows, seconds) and around the served
+    sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each range (a caller's heartbeat).
+    Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = ist.has_generation(base) or fill is not None
@@ -245,10 +247,19 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     k = json.loads((out / "ranges.json").read_text())["k"]
     con = sn.connect(threads, mem, work / "duckdb-compact")
     rows: dict[str, int] = {}
+    t_all = monotonic()
     for i in range(k):
-        for t, n in compact_range(con, str(gen_dir), [str(gen_dir / r["key"]) for r in runs], f"r{i:04d}", out, sliced, generation, fill).items():
+        t0 = monotonic()
+        got = compact_range(con, str(gen_dir), [str(gen_dir / r["key"]) for r in runs], f"r{i:04d}", out, sliced, generation, fill)
+        for t, n in got.items():
             rows[t] = rows.get(t, 0) + n
+        err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s ({monotonic() - t_all:.0f}s so far)")
+        if on_range is not None:
+            on_range(i, k)
+    t0 = monotonic()
+    err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
     sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows)
+    err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
 

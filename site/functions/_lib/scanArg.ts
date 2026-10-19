@@ -13,6 +13,7 @@
 import { decodeScan, isScanId, latestScan } from '../../src/scanSlug.js'
 import { type Env, json } from './auth.js'
 import { scanTimes } from './scanTimes.js'
+import { storeHeldScans } from './index.js'
 import { d1Variant, isPrimary, storeKey } from './stores.js'
 
 /** The latest indexed scan matching `prefix` (exact: only `prefix` itself).
@@ -28,10 +29,11 @@ export async function indexedScan(env: Env, prefix: string, exact: boolean): Pro
   const scope = isPrimary(env) ? [] : [storeKey(env), d1Variant(env, 'path')]
   if (exact) {
     const r = await env.DB.prepare(`SELECT MAX(date) AS d FROM index_schema WHERE ${where} AND date = ?`).bind(...scope, prefix).first<{ d: string | null }>()
-    return r?.d ?? null
+    return r?.d ?? ((await storeHeldScans(env)).includes(prefix) ? prefix : null)
   }
   const r = await env.DB.prepare(`SELECT DISTINCT date FROM index_schema WHERE ${where} AND date LIKE ?`).bind(...scope, `${prefix.slice(0, 10)}%`).all<{ date: string }>()
-  const day = r.results.map(x => x.date)
+  const held = (await storeHeldScans(env)).filter(d => d.startsWith(prefix.slice(0, 10)))
+  const day = [...new Set([...r.results.map(x => x.date), ...held])]
   return latestScan(prefix, day, await scanTimes(env, day))
 }
 

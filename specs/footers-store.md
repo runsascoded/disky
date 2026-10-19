@@ -448,7 +448,7 @@ pqtk footers ducklake -o catalog.sqlite r2://bucket/fs/<name>   # §3.4, later
 |---|---|---|
 | Format spec (§2), fixtures | **pqtk** (`specs/footers-format.md`, `tests/fixtures/`) | the writer and reader of one format version together |
 | Python extract/build/sync/retire + CLI | **pqtk** (`pqtk/footers/`) | Ryan's suggestion; pqtk already has fsspec and the Batch runner |
-| TS client (`openFooterStore`, planner, D1 + parquet back ends, `FsCache`, `shared.ts` memo) | **pqtk, as a JS package** (`pqtk/js/footers`, npm name e.g. `pqtk-footers`, dist-branch pinned like `@rdub/treemap`) | it is a lower layer than pyrmts (pyramids depend on it, not vice versa); keeping it beside the Python writer gives one repo and version for the contract, and cross-language fixture tests (Python writes, vitest reads) in one CI |
+| TS client (`openFooterStore`, planner, D1 + parquet back ends, `FsCache`, `shared.ts` memo) | **pqtk, as a JS package** (`pqtk/js/footers`, npm name e.g. `pqtk-footers`, dist-branch pinned like `@open-athena/treemap`) | it is a lower layer than pyrmts (pyramids depend on it, not vice versa); keeping it beside the Python writer gives one repo and version for the contract, and cross-language fixture tests (Python writes, vitest reads) in one CI |
 | Upstream-able primitives | **hyparquet fork** (PRs to upstream) | `syntheticMetadata(schema, rowGroups, kv?)`; exported `readRowGroup` / `parquetPlan`; `chunkSpan(rg, columns)`; page-index-aware spans; lazy `row_groups` ([`lazy-footer-parse.md`] option 3) |
 | Pyramid-specific use | **pyrmts** | `RowGroupIndex` / `MetadataCache` become thin adapters over an FS; `D1ShardIndex` can point at FS file ids (awair, ctbk) |
 

@@ -30,7 +30,8 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (!shape) return refuse(503, `dispatch ${NO_SHAPE}`)
   let snapshot: Awaited<ReturnType<typeof snapshotPlan>>
   try {
-    snapshot = await snapshotPlan(db, req.planId, shape)
+    // the selected items only (`req.items`, the rows checked on /staged; all when absent)
+    snapshot = await snapshotPlan(db, req.planId, shape, req.items)
   } catch (e) {
     if (e instanceof PlanSpansBuckets) return refuse(400, e.message, { buckets: e.buckets })
     throw e
@@ -38,7 +39,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   if (!snapshot) return refuse(404, 'no such plan')
   if (!snapshot.sweep.length && !snapshot.objects?.length) return refuse(400, 'plan has no items to sweep')
   const plan = snapshot
-  const prefixes = await planItemLines(db, req.planId)
+  const prefixes = await planItemLines(db, req.planId, req.items)
 
   const launch: Prepared['launch'] = async (date, digest) => {
     const jobId = `cw-sweep-${req.mode}-${jobStamp()}z`

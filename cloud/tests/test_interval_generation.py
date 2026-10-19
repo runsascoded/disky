@@ -288,7 +288,7 @@ def test_backfill_refuses_a_template_matching_files_with_and_without_generation(
     args = ["-o", str(store), "-O", "g2", "-s", str(root), "-l", LISTING, "-w", str(tmp_path / "w")]
     res = CliRunner().invoke(ib.backfill_cmd, args)
     assert (res.exit_code, res.output.strip().splitlines()[-1]) == (
-        1, f"{SCANS[GEN_FROM]}: {LISTING!r} matches 2 files, 1 without a `generation` column ({stray}): narrow it to the listing shards")
+        1, f"{SCANS[GEN_FROM]}: {LISTING!r} matches 2 files, 1 without a `generation` column ({stray.relative_to(root).as_posix()}): narrow it to the listing shards")
 
 
 def test_gen_index_reads_every_shard_of_a_bucket(tmp_path):
@@ -343,6 +343,48 @@ def test_verify_generation_checks_the_store_against_each_listing(world, backfill
         d: {"scan": d, "gen": "g2", "views_gen": "g", "pass": ok, "views": 9, "view_eq": 9, "diffs": 1, "diff_eq": 1, "generation": gen}
         for d, ok, gen in ((SCANS[2], True, g(5, 5)), (SCANS[3], False, g(5, 4)), (SCANS[5], True, g(6, 6)))
     }
+
+
+def test_gen_index_since_skips_unread_and_a_url_root_copies_only_scans_it_reads(world, tmp_path, monkeypatch):
+    """`since`: earlier scans are skipped without a listing call. Over a URL root, a scan's shards are judged by their
+    footers (ranged reads), so a scan without generations copies nothing; one with them is copied, every shard."""
+    from dt_cloud import blobstore
+
+    root = Store("memory://ivg-since")
+    for p in sorted((world / "listing").rglob("*.parquet")):
+        root.write_bytes(p.relative_to(world).as_posix(), p.read_bytes())
+    gets, listed = [], []
+    real_get, real_keys = blobstore.Store.get, blobstore.Store.keys
+    monkeypatch.setattr(blobstore.Store, "get", lambda self, k, dst: (gets.append(k), real_get(self, k, dst))[1])
+    monkeypatch.setattr(blobstore.Store, "keys", lambda self, prefix: (listed.append(prefix), real_keys(self, prefix))[1])
+    scans = [{"id": d, "ts": T0 + i} for i, d in enumerate(SCANS[:4])]
+    con = duckdb.connect()
+    work = tmp_path / "w"
+    work.mkdir()
+    out = ib.gen_index(con, root, LISTING, scans, work, since=SCANS[1])
+    assert (out["scans"], out["skipped"]) == (SCANS[GEN_FROM:4], SCANS[:GEN_FROM])
+    assert sorted({k.split("/")[1] for k in listed}) == SCANS[1:4]
+    assert sorted({k.split("/")[1] for k in gets}) == SCANS[GEN_FROM:4]
+
+
+def test_the_watchdog_exits_when_nothing_beats(monkeypatch):
+    """A stalled read (nothing calls `beat` for `stall_s`) ends the process with code 3; a beating one doesn't."""
+    import os
+    import time
+
+    exits = []
+    monkeypatch.setattr(os, "_exit", lambda code: exits.append(code))
+    with ib.Watchdog(0.2, "t") as w:
+        w.stop.wait(0)  # started
+        time.sleep(0.1)
+        w.beat()
+        time.sleep(0.1)
+        w.beat()
+        assert exits == []
+        deadline = time.monotonic() + 5
+        while not exits and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert exits[:1] == [3]
 
 
 def test_a_backfilled_generation_takes_appends_and_verifies(world, backfilled, tmp_path):
@@ -433,3 +475,23 @@ def test_sweep_manifest_cli_reads_the_store(world, on, tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     rows = [(r["name"], r["generation"]) for r in pq.read_table(tmp_path / "out" / "manifest" / f"{B}.parquet").to_pylist()]
     assert rows == [("d/keep.bin", 11), ("d/meta.bin", 61), ("d/rw2.bin", 51), ("d/sub/deep.bin", 71)]
+
+
+def test_listing_files_lists_only_the_scans_dir(tmp_path, monkeypatch):
+    """A scan's shards are found by listing that scan's dir, not the parent of every scan's (`listing/`): per scan, the
+    whole tree's walk took ~2 min on gcs's mount and ran once per scan in the store."""
+    for scan in ("2026-10-05", "2026-10-06"):
+        for key in (f"listing/{scan}/marin-a/shard-00-0000.parquet", f"listing/{scan}/marin-b/shard-00-0000.parquet",
+                    f"listing/{scan}/dir-cache/age-days.parquet"):
+            (tmp_path / key).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / key).write_bytes(b"x")
+    root = Store(str(tmp_path))
+    asked = []
+    real = root.keys
+    monkeypatch.setattr(root, "keys", lambda prefix: asked.append(prefix) or real(prefix))
+    files = ib.listing_files(root, "listing/{id}/*/shard-*.parquet", "2026-10-05", tmp_path / "w")
+    assert asked == ["listing/2026-10-05/"]
+    assert [Path(f).relative_to(tmp_path).as_posix() for f in files] == [
+        "listing/2026-10-05/marin-a/shard-00-0000.parquet",
+        "listing/2026-10-05/marin-b/shard-00-0000.parquet",
+    ]

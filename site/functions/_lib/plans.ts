@@ -477,9 +477,24 @@ export interface PlanBucketsSnapshot {
 }
 
 /** A plan's items with their kinds and `as_of` scans, key-sorted. */
-export async function planItems(db: D1Database, planId: number): Promise<(PlanItem & { as_of: string | null })[]> {
-  return (await db.prepare("SELECT prefix, kind, as_of FROM plan_items WHERE plan_id = ? ORDER BY prefix").bind(planId).all<{ prefix: string; kind: string | null; as_of: string | null }>()).results
-    .map(r => ({ key: r.prefix, kind: r.kind === 'object' ? 'object' : 'prefix', as_of: r.as_of }))
+export async function planItems(db: D1Database, planId: number, only?: readonly string[]): Promise<(PlanItem & { as_of: string | null })[]> {
+  const items = (await db.prepare("SELECT prefix, kind, as_of FROM plan_items WHERE plan_id = ? ORDER BY prefix").bind(planId).all<{ prefix: string; kind: string | null; as_of: string | null }>()).results
+    .map(r => ({ key: r.prefix, kind: (r.kind === 'object' ? 'object' : 'prefix') as PlanItem['kind'], as_of: r.as_of }))
+  return only === undefined ? items : selectItems(items, only)
+}
+
+/** A selection names an item the plan doesn't hold (unstaged since the page loaded, or a typo). */
+export class NotInPlan extends Error {}
+
+/** `items` restricted to `only` (their `digestLines`: a prefix as itself, an object as `=<key>`): what a run acts on
+ * when the person dispatching it checked some rows (specs/delete-what-you-see.md). Every selected line must be one
+ * of the plan's; an empty selection selects nothing. */
+export function selectItems<T extends PlanItem>(items: readonly T[], only: readonly string[]): T[] {
+  const want = new Set(only)
+  const have = new Set(digestLines(items))
+  const missing = [...want].filter(l => !have.has(l))
+  if (missing.length) throw new NotInPlan(`not in the plan: ${missing.slice(0, 5).join(', ')}${missing.length > 5 ? ` (+${missing.length - 5})` : ''}`)
+  return items.filter(i => want.has(i.kind === 'object' ? `=${i.key}` : i.key))
 }
 
 /** The digest's input lines for a plan's items: a prefix as itself, an object
@@ -489,14 +504,14 @@ export const digestLines = (items: readonly PlanItem[]): string[] => items.map(i
 
 /** `digestLines` of a plan's current items (every reader that gates on, or
  * versions by, the plan's item set). */
-export async function planItemLines(db: D1Database, planId: number): Promise<string[]> {
-  return digestLines(await planItems(db, planId))
+export async function planItemLines(db: D1Database, planId: number, only?: readonly string[]): Promise<string[]> {
+  return digestLines(await planItems(db, planId, only))
 }
 
-export async function snapshotPlanBuckets(db: D1Database, planId: number, shape: PrefixShape): Promise<PlanBucketsSnapshot | null> {
+export async function snapshotPlanBuckets(db: D1Database, planId: number, shape: PrefixShape, only?: readonly string[]): Promise<PlanBucketsSnapshot | null> {
   const plan = await db.prepare("SELECT id, name FROM plans WHERE id = ?").bind(planId).first<{ id: number; name: string }>()
   if (!plan) return null
-  const items = await planItems(db, planId)
+  const items = await planItems(db, planId, only)
   const sweep = items.filter(r => r.kind === 'prefix').map(r => r.key)
   const objects = items.filter(r => r.kind === 'object').map(r => r.key)
   const as_of = Object.fromEntries(items.filter(r => r.as_of).map(r => [r.key, r.as_of!]))
@@ -573,12 +588,12 @@ export const auditRunControl = (
  * (the plan's items — the whole intent; nothing carves out), with each
  * item's `as_of` scan (keyed by the relative prefix). Returns null if the plan
  * is missing. */
-export async function snapshotPlan(db: D1Database, planId: number, shape: PrefixShape): Promise<
+export async function snapshotPlan(db: D1Database, planId: number, shape: PrefixShape, only?: readonly string[]): Promise<
   { plan_id: number; name: string; bucket: string; sweep: string[]; objects?: string[]; as_of: Record<string, string> } | null
 > {
   const plan = await db.prepare("SELECT id, name FROM plans WHERE id = ?").bind(planId).first<{ id: number; name: string }>()
   if (!plan) return null
-  const items = await planItems(db, planId)
+  const items = await planItems(db, planId, only)
   const { bucket } = planBucket(items.map(r => r.key), shape.buckets)
   const rel = items.map(r => relItem(r, bucket))
   const sweep = rel.filter((_, i) => items[i].kind === 'prefix')
@@ -636,6 +651,26 @@ export function realGate(runs: readonly RunRow[], digest: string, items: number)
     return { ok: false, reason: any ? "the plan changed since the last dry-run; dry-run it again" : "no dry-run of this plan yet" }
   }
   return { ok: true, dry }
+}
+
+export type RealRun =
+  | { ok: true; reviewed: RunRow | null }
+  | { ok: false; reason: string }
+
+/** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/delete-what-you-see.md): never
+ * while a run of the plan is in flight; no prior dry run required — the run's own manifest (each item held to its
+ * staging scan, generation-pinned deletes) is the safety. `reviewed`: the newest finished dry run of exactly this set
+ * at that scan, whose manifest the run may reuse (none: the run lists afresh). `date` absent: that dry run's scan,
+ * and one is then required. */
+export function realRun(runs: readonly RunRow[], digest: string, items: number, date?: string): RealRun {
+  if (!items) return { ok: false, reason: "nothing selected" }
+  const live = runs.find(r => r.finished_ts == null)
+  if (live) return { ok: false, reason: `a ${live.mode} run is in progress (${live.run_id})` }
+  const reviewed = [...runs]
+    .filter(r => r.mode === "dry" && !!r.plan_digest && r.plan_digest === digest && (date === undefined || r.scan === date))
+    .sort((a, b) => b.started_ts - a.started_ts)[0] ?? null
+  if (date === undefined && !reviewed) return { ok: false, reason: "no scan given, and no dry run of exactly this selection to take one from" }
+  return { ok: true, reviewed }
 }
 
 /** A run an executor's reflection just closed: `ok` = with its result

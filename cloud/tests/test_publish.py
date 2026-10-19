@@ -119,7 +119,7 @@ def test_publish_dry_run_copies_only_pointed_generations(monkeypatch, capsys):
     ]
 
 
-def test_served_small_is_the_snapshot_jsons_and_extras_sidecars():
+def test_served_small_is_the_snapshot_jsons_extras_sidecars_and_age_pyramids():
     l2 = "listing/2026-10-10/index/"
     src = [
         P.Obj(key="snapshots/2026-10-10/age.json", size=1, md5=None),
@@ -129,6 +129,9 @@ def test_served_small_is_the_snapshot_jsons_and_extras_sidecars():
         P.Obj(key=f"{l2}g1/attr.tsv.idx.json", size=2, md5=None),
         P.Obj(key=f"{l2}g1/path-index.parquet", size=100, md5=None),
         P.Obj(key=f"{l2}g1/path-index.groups.parquet", size=10, md5=None),
+        P.Obj(key=f"{l2}g1/age-pyramid-1d.parquet", size=7, md5=None),
+        P.Obj(key=f"{l2}g1/age-pyramid-12h.parquet", size=8, md5=None),
+        P.Obj(key=f"{l2}g1/age-pyramid-1d.groups.json", size=3, md5=None),
         P.Obj(key=f"{l2}g2/attr.tsv", size=6, md5=None),
         P.Obj(key=f"{l2}g2/path-index-bysize.parquet", size=90, md5=None),
     ]
@@ -140,6 +143,8 @@ def test_served_small_is_the_snapshot_jsons_and_extras_sidecars():
             "snapshots/rules.json",
             f"{l2}g1/attr.tsv",
             f"{l2}g1/attr.tsv.idx.json",
+            f"{l2}g1/age-pyramid-1d.parquet",
+            f"{l2}g1/age-pyramid-12h.parquet",
         ],
         {f"{l2}g2": (1, 6)},
     )

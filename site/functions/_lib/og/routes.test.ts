@@ -13,6 +13,42 @@ describe('pageView: page URL → card kind, view params, title', () => {
       { kind: 'diff', params: { path: 'bucket', d: '26092812-26091700', dm: 'max' }, title: 'bucket · changes' },
     ])
   })
+  it('the section the scroll-spy names (`?section=`): diff and over-time get their cards, the rest the map; `?s=` is the shade axis', () => {
+    expect([
+      pv('/bucket?s=c&section=diff'),
+      pv('/bucket?section=over-time'),
+      pv('/bucket?section=tbl&d=261002'),
+      pv('/bucket?section=mtime&c=age'),
+      pv('/bucket?section=tree-map'),
+      pv('/bucket?s=diff'),
+      pv('/bucket?s=over-time'),
+    ]).toEqual([
+      { kind: 'diff', params: { path: 'bucket' }, title: 'bucket · changes' },
+      { kind: 'series', params: { path: 'bucket' }, title: 'bucket · size over time' },
+      { kind: 'map', params: { path: 'bucket', d: '261002' }, title: 'bucket' },
+      { kind: 'map', params: { path: 'bucket', c: 'age' }, title: 'bucket' },
+      { kind: 'map', params: { path: 'bucket' }, title: 'bucket' },
+      { kind: 'map', params: { path: 'bucket' }, title: 'bucket' },
+      { kind: 'map', params: { path: 'bucket' }, title: 'bucket' },
+    ])
+  })
+  it('the size-over-time view: the path and the scope the series follows (`d f qs o by cl`), not the colour axis', () => {
+    expect([
+      pv('/?section=over-time'),
+      pv('/marin-a/ckpts?section=over-time&d=261002&f=tomat&qs=g&o=alan&by=bob&cl=hot&c=age&dm=max&n=50'),
+      pv('/marin-a?section=over-time&o'),
+      pv('/marin-a?section=over-time&o=*'),
+    ]).toEqual([
+      { kind: 'series', params: {}, title: 'marin GCS · size over time' },
+      { kind: 'series', params: { path: 'marin-a/ckpts', d: '261002', f: 'tomat', qs: 'g', o: 'alan', by: 'bob', cl: 'hot' }, title: 'marin-a/ckpts · size over time · filter: tomat · owner: alan' },
+      { kind: 'series', params: { path: 'marin-a', o: '' }, title: 'marin-a · size over time · owner: unowned' },
+      { kind: 'series', params: { path: 'marin-a', o: '*' }, title: 'marin-a · size over time · owner: owned' },
+    ])
+  })
+  it('a secondary store\'s over-time section carries its `store`', () => {
+    expect(pageView(new URL('https://site.example.org/snapshots?section=over-time&d=261012'), 'CW — meta', [], 'meta'))
+      .toEqual({ kind: 'series', params: { store: 'meta', path: 'snapshots', d: '261012' }, title: 'snapshots · size over time' })
+  })
   it('map pages: the path, and only the params that change the card', () => {
     expect([
       pv('/'),

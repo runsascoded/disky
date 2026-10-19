@@ -47,7 +47,7 @@ describe('D1', () => {
     const { db } = await sqliteD1()
     const now = Date.UTC(2026, 9, 13) / 1000
     const result = await mint(db, u => pageView(u, 'Demo'), new URL('https://demo.example/bucket?d=26092812-26091700#diff'), 'demo', now, 30, 'DiffTokAAA')
-    expect(result?.url).toBe('https://demo.example/bucket?d=26092812-26091700&section=diff&og=DiffTokAAA#diff')
+    expect(result?.url).toBe('https://demo.example/bucket?d=26092812-26091700&section=diff&og=DiffTokAAA')
     const view = pageView(new URL(result!.url), 'Demo')!
     expect([view.kind, await fullTier(db, 'diff', view.params, result!.token, now), await fullTier(db, 'map', view.params, result!.token, now)])
       .toEqual(['diff', { day: result!.expDay }, null])

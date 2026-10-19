@@ -48,82 +48,165 @@ GEN_INDEX = "gen-index.parquet"
 UNREAD = ("served/", "rd/", "digest/", "sv-digest/", "verify/")
 
 
-def listing_files(root: Store, template: str, scan: str, local: Path) -> list[str]:
-    """Scan `scan`'s raw listing shards: the keys under `root` matching `template` (`{id}` the scan id, globs allowed), as
-    local paths (a URL root's copied into `local`, keys kept)."""
+#: Concurrent footer reads / shard copies per scan (a URL root's: each a ranged read or a whole-object GET).
+IO_WORKERS = 16
+#: Default stall limit (seconds) for the listing reads: no shard read, copied or folded for this long exits nonzero (a
+#: scan's fold into the index runs between beats: well under this even for gcs's 600M-object listings).
+STALL_S = 1800
+
+
+class Watchdog:
+    """Exits the process (code 3) when nothing calls `beat` for `stall_s` seconds: a read hung on a FUSE mount whose
+    object went away (gcs, 2026-10-18: 30 min at 0% CPU) fails the job instead of holding it."""
+
+    def __init__(self, stall_s: float, what: str):
+        import threading
+
+        self.stall_s, self.what, self.last, self.stop = stall_s, what, monotonic(), threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True) if stall_s > 0 else None
+
+    def beat(self) -> None:
+        self.last = monotonic()
+
+    def _run(self) -> None:
+        import os
+
+        while not self.stop.wait(min(30.0, self.stall_s)):
+            if monotonic() - self.last > self.stall_s:
+                err(f"{self.what}: no listing read for {self.stall_s:.0f}s: stalled (a shard gone under a mount?); exiting")
+                os._exit(3)
+
+    def __enter__(self) -> Watchdog:
+        if self.thread:
+            self.thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop.set()
+
+
+#: A no-op `Watchdog`.
+NO_WATCH = Watchdog(0, "")
+
+
+def shard_keys(root: Store, template: str, scan: str) -> list[str]:
+    """Scan `scan`'s raw listing shard keys under `root` matching `template` (`{id}` the scan id, globs allowed)."""
     pat = template.replace("{id}", scan)
     lead = pat.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
-    prefix = lead.rsplit("/", 1)[0] if "/" in lead else ""
-    keys = sorted(k for k in root.keys(prefix) if fnmatch.fnmatchcase(k, pat))
+    prefix = lead.rsplit("/", 1)[0] + "/" if "/" in lead else ""  # the scan's dir: `keys` lists a bare name's parent
+    return sorted(k for k in root.keys(prefix) if fnmatch.fnmatchcase(k, pat))
+
+
+def listing_files(root: Store, template: str, scan: str, local: Path, keys: list[str] | None = None, watch: Watchdog = NO_WATCH) -> list[str]:
+    """Scan `scan`'s raw listing shards (`keys`, default `shard_keys`) as local paths: a dir root's in place, a URL
+    root's copied into `local` (keys kept; in parallel; one already there at its size kept)."""
+    keys = shard_keys(root, template, scan) if keys is None else keys
     if not root.url:
         return [str(Path(root.root) / k) for k in keys]
-    out = []
-    for k in keys:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(k: str) -> str:
         dst = local / k
         if not (dst.is_file() and dst.stat().st_size == root.size(k)):
             root.get(k, dst)
-        out.append(str(dst))
-    return out
+        watch.beat()
+        return str(dst)
+    with ThreadPoolExecutor(IO_WORKERS) as ex:
+        return list(ex.map(one, keys))
 
 
-def scan_shards(root: Store, template: str, scan: str, tmp: Path, what: str) -> list[str] | None:
-    """Scan `scan`'s raw listing shards with `generation` (`listing_files`), or None (logged, `tmp` removed) when nothing
-    matches or no shard has the column. A template matching files with and without it is refused: a stray non-listing
-    parquet (gcs's `dir-cache/`) must not decide the scan's fate."""
-    files = listing_files(root, template, scan, tmp)
-    without = [f for f in files if ist.GENERATION not in pq.read_schema(f).names]
-    if without and len(without) < len(files):
-        raise SystemExit(f"{scan}: {template!r} matches {len(files)} files, {len(without)} without a `{ist.GENERATION}` column "
+def _has_generation(root: Store, key: str) -> bool:
+    """Whether shard `key`'s schema has `generation`: its footer only (a URL root's by ranged reads, nothing copied)."""
+    if not root.url:
+        return ist.GENERATION in pq.read_schema(str(Path(root.root) / key)).names
+    with root.open(key) as fh:
+        return ist.GENERATION in pq.ParquetFile(fh).schema_arrow.names
+
+
+def scan_shards(root: Store, template: str, scan: str, tmp: Path, what: str, watch: Watchdog = NO_WATCH) -> list[str] | None:
+    """Scan `scan`'s raw listing shards with `generation`, as local paths (`listing_files`), or None (logged) when
+    nothing matches or no shard has the column. Every shard's footer is read first (in parallel; a URL root's by ranged
+    reads), so a scan without generations costs no copy. A template matching files with and without it is refused: a
+    stray non-listing parquet (gcs's `dir-cache/`) must not decide the scan's fate."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    keys = shard_keys(root, template, scan)
+
+    def has(k: str) -> bool:
+        out = _has_generation(root, k)
+        watch.beat()
+        return out
+    with ThreadPoolExecutor(IO_WORKERS) as ex:
+        flags = list(ex.map(has, keys))
+    without = [k for k, f in zip(keys, flags) if not f]
+    if without and len(without) < len(keys):
+        raise SystemExit(f"{scan}: {template!r} matches {len(keys)} files, {len(without)} without a `{ist.GENERATION}` column "
                          f"({', '.join(without[:3])}): narrow it to the listing shards")
-    if without or not files:
-        err(f"{what}: {scan}: skipped, " + (f"no `{ist.GENERATION}` in its {len(files)} shards" if files else f"nothing matches {template!r}"))
-        shutil.rmtree(tmp, ignore_errors=True)
+    if without or not keys:
+        err(f"{what}: {scan}: skipped, " + (f"no `{ist.GENERATION}` in its {len(keys)} shards" if keys else f"nothing matches {template!r}"))
         return None
-    return files
+    return listing_files(root, template, scan, tmp, keys, watch)
 
 
-def gen_index(con, root: Store, template: str, scans: list[dict], work: Path) -> dict:
-    """`work/GEN_INDEX`: per `(depth, path, generation)` over every scan whose listing (`template` under `root`) has a
-    `generation` column, the first and last scan stamp it was listed at (`first_ts`, `last_ts`), sorted `(depth, path)`.
+def gen_index(con, root: Store, template: str, scans: list[dict], work: Path, *, since: str | None = None, stall_s: float = STALL_S) -> dict:
+    """`work/GEN_INDEX`: every distinct `(depth, path, generation)` listed by a scan whose listing (`template` under
+    `root`) has a `generation` column, with the first scan stamp it was listed at (`first_ts`), sorted `(depth, path)`.
+    Folded scan by scan (`scans` oldest first): a scan adds only the pairs no earlier one listed, so the table holds the
+    distinct versions (gcs: ~420M), not every scan's rows (19 × ~400M: 1.2 TiB spilled, then an OOM, 2026-10-19).
     A URL root's shards are copied in one scan at a time and removed after. Returns `{scans: ids read, skipped: ids
-    without generations, rows}`."""
+    without generations, rows}`. `since`: scans before it are skipped unread (a deployment's listings carry `generation`
+    from a known scan on). The listing reads run under a `Watchdog` (`stall_s`; 0: none)."""
     from disk_tree.listing import prepare_listing
 
-    con.execute("CREATE OR REPLACE TABLE lg (path VARCHAR, generation BIGINT, ts BIGINT)")
+    con.execute("CREATE OR REPLACE TABLE lg (path VARCHAR, generation BIGINT, first_ts BIGINT)")
     read, skipped = [], []
-    for s in scans:
-        tmp = work / "listings" / s["id"]
-        files = scan_shards(root, template, s["id"], tmp, "backfill")
-        if files is None:
-            skipped.append(s["id"])
-            continue
-        t0 = monotonic()
-        src = prepare_listing(con, (files,))  # one source: per-file sources would keep each bucket's first shard only
-        n = con.execute(f"""INSERT INTO lg SELECT DISTINCT bucket || '/' || name, {ist.GENERATION}, {int(s['ts'])}
-            FROM {src} WHERE {ist.GENERATION} IS NOT NULL""").fetchone()[0]
-        err(f"backfill: {s['id']}: {n:,} objects with a generation ({len(files)} shards, {monotonic() - t0:.1f}s)")
-        read.append(s["id"])
-        shutil.rmtree(tmp, ignore_errors=True)
+    with Watchdog(stall_s, "backfill") as watch:
+        for s in scans:
+            if since is not None and s["id"] < since:
+                skipped.append(s["id"])
+                continue
+            tmp = work / "listings" / s["id"]
+            files = scan_shards(root, template, s["id"], tmp, "backfill", watch)
+            if files is None:
+                skipped.append(s["id"])
+                continue
+            t0 = monotonic()
+            src = prepare_listing(con, (files,))  # one source: per-file sources would keep each bucket's first shard only
+            g = ist.GENERATION
+            n = con.execute(f"""INSERT INTO lg SELECT c.path, c.{g}, {int(s['ts'])} FROM (
+                    SELECT DISTINCT bucket || '/' || name AS path, {g} FROM {src} WHERE {g} IS NOT NULL) c
+                WHERE NOT EXISTS (SELECT 1 FROM lg WHERE lg.path = c.path AND lg.{g} = c.{g})""").fetchone()[0]
+            err(f"backfill: {s['id']}: {n:,} (path, generation) pairs new ({len(files)} shards, {monotonic() - t0:.1f}s)")
+            read.append(s["id"])
+            shutil.rmtree(tmp, ignore_errors=True)
+            watch.beat()
     out = work / GEN_INDEX
-    con.execute(f"""COPY (SELECT len(string_split(path, '/'))::UTINYINT AS depth, path, generation, min(ts) AS first_ts, max(ts) AS last_ts
-        FROM lg GROUP BY path, generation ORDER BY depth, path, first_ts) TO {q(str(out))} (FORMAT PARQUET, ROW_GROUP_SIZE 65536)""")
+    t0 = monotonic()
+    err(f"backfill: writing {GEN_INDEX} ({len(read)} scans folded; sorting)")
+    con.execute(f"""COPY (SELECT len(string_split(path, '/'))::UTINYINT AS depth, path, generation, first_ts
+        FROM lg ORDER BY depth, path, first_ts) TO {q(str(out))} (FORMAT PARQUET, ROW_GROUP_SIZE 65536)""")
+    err(f"backfill: {GEN_INDEX} written in {monotonic() - t0:.0f}s")
     con.execute("DROP TABLE lg")
     rows = con.execute(f"SELECT count(*) FROM read_parquet({q(str(out))})").fetchone()[0]
     return {"scans": read, "skipped": skipped, "rows": rows}
 
 
 def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
-    """The fold's hook (`interval_compact.Fill`): each object path version of the range takes the generation listed
-    first among those listed within it (`index`: `gen_index`'s file), counted in `counts`."""
+    """The fold's hook (`interval_compact.Fill`): each object path version `[vf, vt)` of the range takes the generation
+    in effect at `vf` (the newest first listed at or before it), else, for a version that began before any listing
+    had generations, the first listed within it; one first listed at or after `vt` never counts (`index`: `gen_index`'s
+    file). A `(path, generation)` never comes back once replaced, so a generation's first listing bounds it. Counted in
+    `counts`."""
     by_name = {f"r{r['i']:04d}": r for r in ranges["ranges"]}
 
     def fill(con, name: str) -> None:
         preds = " OR ".join(f"({p})" for p in sn.range_preds(by_name[name]))
         g = ist.GENERATION
         con.execute(f"""CREATE OR REPLACE TEMP TABLE __fill AS
-            SELECT p.depth, p.path, p.vf, arg_min(g.{g}, g.first_ts) AS {g}
+            SELECT p.depth, p.path, p.vf,
+                   arg_min(g.{g}, CASE WHEN g.first_ts <= p.vf THEN -g.first_ts ELSE {1 << 40} + g.first_ts END) AS {g}
             FROM pv p JOIN (SELECT * FROM read_parquet({q(index)}) WHERE {preds}) g ON g.depth = p.depth AND g.path = p.path
-            WHERE p.kind = 'file' AND g.first_ts < p.vt AND g.last_ts >= p.vf
+            WHERE p.kind = 'file' AND g.first_ts < p.vt
             GROUP BY p.depth, p.path, p.vf""")
         con.execute(f"UPDATE pv SET {g} = f.{g} FROM __fill f WHERE pv.depth = f.depth AND pv.path = f.path AND pv.vf = f.vf")
         counts[name] = con.execute("SELECT count(*) FROM __fill").fetchone()[0]
@@ -131,7 +214,8 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
     return fill
 
 
-def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: str, work: Path, *, rg_rows: int = ist.SERVED_RG,
+def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: str, work: Path, *, since: str | None = None,
+             stall_s: float = STALL_S, rg_rows: int = ist.SERVED_RG,
              threads: int = 4, mem: str = "4GB") -> dict:
     """Generation `gen` of `store` folded into `new_gen` with the objects' `generation` from the raw listings (`template`
     under `listing_root`), published to the store (data first, `scans.json` last; `CURRENT.json` untouched). Returns a
@@ -152,7 +236,7 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
     runs = lstore.read_json(newest)["runs"] if newest else []
     scans = [*base["scans"], *ic.run_scans(gen_dir, gen, runs)]
     con = sn.connect(threads, mem, work / "duckdb")
-    idx = gen_index(con, Store(listing_root), template, scans, work)
+    idx = gen_index(con, Store(listing_root), template, scans, work, since=since, stall_s=stall_s)
     if not idx["scans"]:
         raise SystemExit(f"no listing under {listing_root} matching {template!r} has a `{ist.GENERATION}` column")
     ranges = json.loads((gen_dir / "ranges.json").read_text())
@@ -183,9 +267,11 @@ def _publish_order(keys: list[str]) -> list[str]:
 @option("-O", "--to-gen", required=True, help="The new generation: `<store>/interval-store/TO_GEN/` (must not exist)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-r", "--rg-rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group")
-@option("-s", "--listings", "listing_root", required=True, help="Where the raw listings are: a dir (or a mount of the bucket) or URL, the root of -l's keys")
+@option("-s", "--listings", "listing_root", required=True, help="Where the raw listings are: a URL (`gs://…`: read through the API, a vanished shard an error) or a dir, the root of -l's keys; not a FUSE mount of a bucket being retired (a read can hang)")
+@option("-S", "--since", help="Skip, unread, the scans before this id (their listings carry no `generation`)")
+@option("-T", "--stall", "stall_s", default=STALL_S, type=IntRange(min=0), help="Exit 3 when no listing is read for this many seconds (0: never)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); the source generation is mirrored into it")
-def backfill_cmd(gen, template, mem, store_root, to_gen, threads, rg_rows, listing_root, work) -> None:
+def backfill_cmd(gen, template, mem, store_root, to_gen, threads, rg_rows, listing_root, since, stall_s, work) -> None:
     """Fold a generation into a new one whose object versions carry their GCS `generation`, read from the raw listings:
     each version takes the first one listed within it; versions that ended before any listing had one stay NULL. The
     source and `CURRENT.json` are left as they are: verify the new generation, then `interval-store current -s TO_GEN`.
@@ -200,7 +286,7 @@ def backfill_cmd(gen, template, mem, store_root, to_gen, threads, rg_rows, listi
             raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}): name one with -g")
     gen = ic.chain(store, gen)[-1]
     with workdir(work) as w:
-        print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, rg_rows=rg_rows, threads=threads, mem=mem), indent=1))
+        print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, since=since, stall_s=stall_s, rg_rows=rg_rows, threads=threads, mem=mem), indent=1))
 
 
 # ── Parity against the listings ────────────────────────────────────────────
@@ -237,6 +323,7 @@ def listing_parity(con, files: list[str], ts: int) -> dict:
 
 
 def verify_listings(store: Store, gen: str, listing_root: str, template: str, work: Path, scan_ids: list[str] = (), *,
+                    since: str | None = None, stall_s: float = STALL_S,
                     threads: int = 4, mem: str = "4GB") -> dict:
     """Each scan of generation `gen` (or `scan_ids`) whose raw listing has generations: `listing_parity` against the
     store, recorded on the scan's parity marker (`verify/<id>.json`, found in `gen` or one it was compacted from) as its
@@ -257,33 +344,35 @@ def verify_listings(store: Store, gen: str, listing_root: str, template: str, wo
     from .interval_export import scan_entry
 
     newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
-    ids = list(scan_ids) or (store.read_json(f"{prefix}/{newest}")["scans"] if newest else list(ts_of))
+    ids = [i for i in (list(scan_ids) or (store.read_json(f"{prefix}/{newest}")["scans"] if newest else list(ts_of))) if since is None or i >= since]
     gens = lineage(store, gen)
     con = sn.connect(threads, mem, work / "duckdb")
     t0 = monotonic()
     store_versions(con, served)
     err(f"verify-generation: {con.execute(f'SELECT count(*) FROM {VERSIONS}').fetchone()[0]:,} versions of {gen} in {monotonic() - t0:.1f}s")
     out = {}
-    for sid in ids:
-        tmp = work / "listings" / sid
-        files = scan_shards(Store(listing_root), template, sid, tmp, "verify-generation")
-        if files is None:
-            out[sid] = {"status": "no-generation", "generation": None}
-            continue
-        ts = ts_of[sid] if sid in ts_of else scan_entry(store, prefix, sid)[0]["ts"]
-        t0 = monotonic()
-        g = listing_parity(con, files, ts)
-        shutil.rmtree(tmp, ignore_errors=True)
-        err(f"verify-generation: {sid}: {g['equal']:,} of {g['objects']:,} listed generations equal ({g['missing']:,} without a file) "
-            f"in {monotonic() - t0:.1f}s")
-        m = find_marker(store, gens, sid)
-        if m is None:
-            out[sid] = {"status": "no-marker", "generation": g}
-            continue
-        ok = m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"] and g["objects"] > 0 and g["equal"] == g["objects"]
-        store.write_text(marker_key(prefix, sid), json.dumps({**m, "gen": gen, "views_gen": m.get("views_gen", m["gen"]), "pass": ok,
-                                                               "generation": g}) + "\n")
-        out[sid] = {"status": "pass" if ok else "fail", "generation": g}
+    with Watchdog(stall_s, "verify-generation") as watch:
+        for sid in ids:
+            tmp = work / "listings" / sid
+            files = scan_shards(Store(listing_root), template, sid, tmp, "verify-generation", watch)
+            if files is None:
+                out[sid] = {"status": "no-generation", "generation": None}
+                continue
+            ts = ts_of[sid] if sid in ts_of else scan_entry(store, prefix, sid)[0]["ts"]
+            t0 = monotonic()
+            g = listing_parity(con, files, ts)
+            shutil.rmtree(tmp, ignore_errors=True)
+            err(f"verify-generation: {sid}: {g['equal']:,} of {g['objects']:,} listed generations equal ({g['missing']:,} without a file) "
+                f"in {monotonic() - t0:.1f}s")
+            m = find_marker(store, gens, sid)
+            if m is None:
+                out[sid] = {"status": "no-marker", "generation": g}
+                continue
+            ok = m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"] and g["objects"] > 0 and g["equal"] == g["objects"]
+            store.write_text(marker_key(prefix, sid), json.dumps({**m, "gen": gen, "views_gen": m.get("views_gen", m["gen"]), "pass": ok,
+                                                                   "generation": g}) + "\n")
+            out[sid] = {"status": "pass" if ok else "fail", "generation": g}
+            watch.beat()
     return {"gen": gen, "scans": out}
 
 
@@ -293,10 +382,12 @@ def verify_listings(store: Store, gen: str, listing_root: str, template: str, wo
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
-@option("-s", "--listings", "listing_root", required=True, help="Where the raw listings are: a dir (or a mount of the bucket) or URL, the root of -l's keys")
+@option("-s", "--listings", "listing_root", required=True, help="Where the raw listings are: a URL (`gs://…`: read through the API, a vanished shard an error) or a dir, the root of -l's keys; not a FUSE mount of a bucket being retired (a read can hang)")
+@option("-S", "--since", help="Skip, unread, the scans before this id (their listings carry no `generation`)")
+@option("-T", "--stall", "stall_s", default=STALL_S, type=IntRange(min=0), help="Exit 3 when no listing is read for this many seconds (0: never)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after)")
 @argument("scan_ids", nargs=-1)
-def verify_generation_cmd(gen, template, mem, store_root, threads, listing_root, work, scan_ids) -> None:
+def verify_generation_cmd(gen, template, mem, store_root, threads, listing_root, since, stall_s, work, scan_ids) -> None:
     """Compare the objects' `generation` the store serves at each scan (SCAN_IDS, default every scan of the generation)
     with the scan's raw listing, and record it on the scan's parity marker (`pass` then needs every listed generation
     equal), so `scan retire -1` can retire the listing. Prints a JSON summary."""
@@ -309,4 +400,4 @@ def verify_generation_cmd(gen, template, mem, store_root, threads, listing_root,
             raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}): name one with -g")
     gen = ic.chain(store, gen)[-1]
     with workdir(work) as w:
-        print(json.dumps(verify_listings(store, gen, listing_root, template, w, list(scan_ids), threads=threads, mem=mem), indent=1))
+        print(json.dumps(verify_listings(store, gen, listing_root, template, w, list(scan_ids), since=since, stall_s=stall_s, threads=threads, mem=mem), indent=1))

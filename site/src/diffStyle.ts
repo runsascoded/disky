@@ -1,7 +1,7 @@
 // The diff map's cell colours and root, DOM-free: the in-app map
 // (`DiffTreemap.tsx`) and the server-drawn digest image (`functions/_lib/og/
 // digestCard.ts`) paint a change the same way.
-import { divergingColor, divergingInk } from '@rdub/treemap/divergingColor'
+import { divergingColor, divergingInk } from '@open-athena/treemap/divergingColor'
 import { buildTree, type AreaMode, type DiffData, type DiffNode } from './diffModel'
 
 const { abs, max, min, sign } = Math

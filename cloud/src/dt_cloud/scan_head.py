@@ -376,6 +376,34 @@ def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
             "-with-dag", str(launch / "dag.mmd"), "-with-timeline", str(launch / "timeline.html"), "-with-report", str(launch / "report.html")]
 
 
+#: The DAG the head stores before the run (`preview_argv`), so the site draws the pipeline while it runs; finish's real
+#: `dag.mmd` replaces it (`scan_run_dags` upserts).
+PREVIEW_DAG = "dag-preview.mmd"
+
+
+def preview_argv(nf_dir: Path, launch: Path) -> list[str]:
+    """The run's own Nextflow command with `-preview` (the workflow built, no process run: seconds) writing just its DAG,
+    `PREVIEW_DAG`: the same graph the real run's `-with-dag` reduces to."""
+    return ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
+            "-c", str(launch / "run.config"), "-params-file", str(launch / "params.json"), "-preview", "-with-dag", str(launch / PREVIEW_DAG)]
+
+
+def store_preview_dag(nf_dir: Path, launch: Path, nf_env: dict[str, str], run_id: str) -> None:
+    """Store the run's DAG up front from a `-preview` (`scan-run dag`). Never fails the run: a preview that errors, times
+    out or writes no DAG only leaves the pipeline view empty until finish stores the real one."""
+    from .scan_runs import dag_cmd
+
+    try:
+        r = subprocess.run(preview_argv(nf_dir, launch), cwd=launch, env=nf_env, capture_output=True, text=True, timeout=180)
+        dag = launch / PREVIEW_DAG
+        if r.returncode or not dag.is_file():
+            err(f"scan head: DAG preview: exit {r.returncode}{'' if dag.is_file() else ', no DAG'}; the pipeline view waits for finish")
+            return
+        _record(dag_cmd, [run_id, str(dag)])
+    except Exception as e:  # noqa: BLE001 — a view, never the run
+        err(f"scan head: DAG preview failed: {type(e).__name__}: {e}")
+
+
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
          dry_run: bool = False, env: dict[str, str] | None = None) -> int:
     from . import scan_profile
@@ -411,7 +439,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     (launch / "executor.config").write_text(executor_config(profile, image))
     (launch / "run.config").write_text(run_config(run_id, profile_json))
     trace = launch / "trace.tsv"
-    for name in REPORTS:
+    for name in (*REPORTS, PREVIEW_DAG):
         (launch / name).unlink(missing_ok=True)
     argv = nextflow_argv(nf_dir, launch, session)
     nf_env = {**env, "NXF_ANSI_LOG": "false"}
@@ -429,6 +457,8 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         for began, ended in pre_phases(env):
             _record(phase_begin_cmd, began)
             _record(phase_end_cmd, ended)
+        if run_id:
+            store_preview_dag(nf_dir, launch, nf_env, run_id)
 
     proc = subprocess.Popen(argv, cwd=launch, env=nf_env, start_new_session=True)
     stopped: list[int] = []

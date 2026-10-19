@@ -1,11 +1,11 @@
-name: Build @rdub/treemap dist branch
+name: Build @open-athena/treemap dist branch
 
 # Builds a SHA-pinnable `dist/treemap` branch for `packages/treemap/` (the
-# `@rdub/treemap` core) so external consumers (file-tree, marin's site, etc.)
+# `@open-athena/treemap` core) so external consumers (file-tree, marin's site, etc.)
 # can `pnpm add github:runsascoded/disk-tree#<dist-sha>` without pulling the
 # whole monorepo. Uses runsascoded/npm-dist in `package_dir` mode, which packs
 # the one package and flattens it to the dist branch ROOT — so the git dep
-# resolves to `@rdub/treemap` directly: the compiled npm build (`tsup` → `dist/`;
+# resolves to `@open-athena/treemap` directly: the compiled npm build (`tsup` → `dist/`;
 # `pnpm pack` respects its `files` and `publishConfig`).
 #
 # Branch-name convention: multi-target repos namespace their dist branches
@@ -16,9 +16,9 @@ name: Build @rdub/treemap dist branch
 # repo's legacy `dist` branch (the pre-split `@disk-tree/react` build) is
 # renamed to `dist/react` for that reason; its old SHA pins keep resolving.
 #
-# `@rdub/treemap` has no workspace dependencies (only peers), so its packed
+# `@open-athena/treemap` has no workspace dependencies (only peers), so its packed
 # artifact is self-contained. `@disk-tree/react` (packages/react) is NOT
-# dist-built: it depends on `@rdub/treemap` via `workspace:*`, which can't
+# dist-built: it depends on `@open-athena/treemap` via `workspace:*`, which can't
 # resolve outside the monorepo; nothing external consumes its disk widgets. If
 # that changes, add a job packing it to `dist/react` that rewrites the
 # workspace dep to a `dist/treemap` SHA via npm-dist's `pkg_kvs`.
@@ -46,7 +46,7 @@ jobs:
     uses: runsascoded/npm-dist/.github/workflows/build-dist.yml@v1
     with:
       # Package at the dist branch ROOT → `github:runsascoded/disk-tree#<dist-sha>`
-      # resolves to `@rdub/treemap`. (`pnpm pack` carries `dist/` + README per the
+      # resolves to `@open-athena/treemap`. (`pnpm pack` carries `dist/` + README per the
       # package's `files`, and applies its `publishConfig` entry points: the npm build.)
       package_dir: packages/treemap
       dist_branch: dist/treemap

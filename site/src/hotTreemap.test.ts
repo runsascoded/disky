@@ -1,4 +1,4 @@
-import { squarify } from '@rdub/treemap'
+import { squarify } from '@open-athena/treemap'
 import { describe, expect, it } from 'vitest'
 import type { HotView } from './hotModel'
 import { hotMap } from './hotTreemap'

@@ -13,7 +13,7 @@ import { SUB_DAILY_SCANS, dailyNameFixture, datedNameRegistry, fiveBucketFixture
 
 vi.mock('./SiteKbd', () => ({ SiteKbd: () => null }))
 const { roots } = vi.hoisted(() => ({ roots: [] as { b: number }[] }))
-vi.mock('@rdub/treemap', async original => ({ ...await original<typeof import('@rdub/treemap')>(), Treemap: ({ root }: { root: { b: number } }) => { roots.push(root); return createElement('div') } }))
+vi.mock('@open-athena/treemap', async original => ({ ...await original<typeof import('@open-athena/treemap')>(), Treemap: ({ root }: { root: { b: number } }) => { roots.push(root); return createElement('div') } }))
 /** The store's scan list (`useScans`, newest first): by default the registry's own scans — a name index
  *  that has caught up with the store. */
 const SCANS_KEY = ['scans', DEFAULT_STORE.key]

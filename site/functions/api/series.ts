@@ -14,7 +14,7 @@
  * got (or lost) its tiers, rather than showing a gap.
  */
 import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
-import { type Ctx, json, requireScope, requireViewer } from '../_lib/auth.js'
+import { type Ctx, type Identity, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { classKey, ownerKey, ownerOk, type OwnerScope, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
@@ -153,13 +153,20 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = await withPathStore(ctx1)
+  return seriesRead(await withPathStore(ctx1), requireViewer)
+}
+
+/** The series for `ctx` as `seriesOf` overlays it (its store's env, `withPathStore`'s path store). `gate` answers
+ * the caller: an identity (its path restriction, its `user:me`), or a refusal. The size-over-time card
+ * (`og/series.ts`) passes none (`null`): its own credential (an `og=` token, a share grant) or the deployment's
+ * anonymous policy admitted it, and without an identity nothing is restricted and `user:me` doesn't resolve. */
+export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promise<Identity | null | Response>): Promise<Response> {
   const { env, request } = ctx
   if (!env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)
   const st = serverTiming()
   traceJoins(ctx.env, st.trace)
-  const gated = await st.time('auth', requireViewer(ctx))
+  const gated = await st.time('auth', gate(ctx))
   if (gated instanceof Response) return gated
   const url = new URL(request.url)
   const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')

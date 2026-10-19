@@ -13,15 +13,21 @@ describe('withoutOg: the address bar sheds the preview token, nothing else', () 
 })
 
 describe('shareUrl: the page link, with exactly the token asked for', () => {
-  it('bakes the diff section into a server-visible parameter without losing navigation', () => {
+  it('promotes a section fragment into the server-visible `?section=` (as the page itself would); other fragments stay', () => {
     expect([
+      shareUrl('https://site.example.org/bucket?d=26092812-26091700&section=diff', { og: 'preview123' }),
       shareUrl('https://site.example.org/bucket?d=26092812-26091700#diff', { og: 'preview123' }),
       shareUrl('https://site.example.org/bucket?d=26092812-26091700#changes'),
       shareUrl('https://site.example.org/bucket?section=diff#tree-map'),
+      shareUrl('https://site.example.org/bucket?section=diff#age'),
+      shareUrl('https://site.example.org/staged#batch-12'),
     ]).toEqual([
-      'https://site.example.org/bucket?d=26092812-26091700&section=diff&og=preview123#diff',
-      'https://site.example.org/bucket?d=26092812-26091700&section=diff#changes',
-      'https://site.example.org/bucket#tree-map',
+      'https://site.example.org/bucket?d=26092812-26091700&section=diff&og=preview123',
+      'https://site.example.org/bucket?d=26092812-26091700&section=diff&og=preview123',
+      'https://site.example.org/bucket?d=26092812-26091700&section=diff',
+      'https://site.example.org/bucket?section=tree-map',
+      'https://site.example.org/bucket?section=diff#age',
+      'https://site.example.org/staged#batch-12',
     ])
   })
   it('replaces any carried og= / key=', () => {
