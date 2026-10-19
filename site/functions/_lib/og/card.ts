@@ -239,6 +239,39 @@ function cellSvg(out: string[], t: CardTile, x: number, y: number, w: number, h:
   if (headed) out.push(text(x + 6, y + size + 2, label, size, { fill: inkOn(t.color), weight: 600 }))
 }
 
+/** The chart card's legend: every band is drawn, so every band is named, largest first. One right-aligned row of
+ * 16px beside the footer (its width measured) when they all fit; else 13px in two rows, the upper across the card's
+ * width, the lower beside the footer, with whatever still doesn't fit (the smallest buckets) counted in a closing
+ * "+N more". */
+function seriesLegend(out: string[], legend: LegendItem[], footer: string): void {
+  const room = CARD_W - 40 - (40 + footer.length * 14 + 32)
+  const items = legend.map((l, i) => ({ color: l.color, label: `${l.label} ${fmtB(l.b)}`, i }))
+  const widthOf = (label: string, cw: number) => 20 + label.length * cw + 18
+  const row = (its: { color: string; label: string }[], y: number, size: number, cw: number, more = '') => {
+    let x = CARD_W - 40 - its.reduce((a, l) => a + widthOf(l.label, cw), 0) - (more ? more.length * cw + 4 : 0) + 18
+    for (const l of its) {
+      out.push(`<rect x="${r1(x)}" y="${y + 2 - size}" width="${size - 2}" height="${size - 2}" rx="3" fill="${svgColor(l.color)}"/>`, text(x + size + 4, y, l.label, size, { fill: MUTED }))
+      x += widthOf(l.label, cw)
+    }
+    if (more) out.push(text(x - 18, y, more, size, { fill: MUTED }))
+  }
+  if (items.reduce((a, l) => a + widthOf(l.label, 9), 0) <= room) return row(items, 596, 16, 9)
+  const cw = 7.4
+  const upper: typeof items = []
+  let w = 0
+  for (const l of items) {
+    if (w + widthOf(l.label, cw) > CARD_W - 80) break
+    upper.push(l)
+    w += widthOf(l.label, cw)
+  }
+  const rest = items.slice(upper.length)
+  let n = rest.length
+  const more = (k: number) => k < rest.length ? `+${rest.length - k} more` : ''
+  while (n > 0 && rest.slice(0, n).reduce((a, l) => a + widthOf(l.label, cw), 0) + (more(n) ? more(n).length * cw + 4 : 0) > room) n--
+  row(upper, rest.length ? 573 : 596, 13, cw)
+  if (rest.length) row(rest.slice(0, n), 596, 13, cw, more(n))
+}
+
 /** The card. Tiles are laid out by bytes, each with its children nested inside (`cellSvg`). Labels only
  * on a `full` card, and only where they fit. */
 export function cardSvg(d: CardData): string {
@@ -263,7 +296,8 @@ export function cardSvg(d: CardData): string {
     for (const r of squarify(tiles, mx, my, mw, mh, t => t.b)) cellSvg(out, r.it, r.x, r.y, r.w, r.h, 1, full)
   }
   out.push(text(40, 598, d.total, 24, { weight: 600 }))
-  if (full && d.legend?.length) {
+  if (full && d.legend?.length && d.chart) seriesLegend(out, d.legend, d.total)
+  else if (full && d.legend?.length) {
     // Owners, largest first, left to right, right-aligned: as many as fit.
     const fit: { l: LegendItem; label: string; w: number }[] = []
     let width = 0
