@@ -196,7 +196,7 @@ Not recommended:
 - Whether `PATH_STORE=intervals` is deployed on gcs prod (the branch config says so, `gcs` `1db67e1a`; `index-landscape.md` didn't check the deploy either).
 
 [`index-landscape.md`]: index-landscape.md
-[`interval-store.md`]: interval-store.md
-[`static-append.md`]: done/static-append.md
-[`latency-observability.md`]: latency-observability.md
-[`done/r2-serving-migration.md`]: done/r2-serving-migration.md
+[`interval-store.md`]: ../interval-store.md
+[`static-append.md`]: static-append.md
+[`latency-observability.md`]: ../latency-observability.md
+[`done/r2-serving-migration.md`]: r2-serving-migration.md

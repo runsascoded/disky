@@ -343,7 +343,7 @@ def _totals(entries: Iterable[dict[str, list[int]]]) -> dict[str, list[int]]:
 def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str, iv_gen: str | None = None,
            static_root: str | None = None, layer2s: list[str] = (), layer1s: list[str] = (), keep: int = 2, only: list[str] = (),
            execute: bool = False, markers_only: bool = False, backup_root: str | None = None, d1: bool = True,
-           d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None) -> dict:
+           d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None, d1_elsewhere: bool = False) -> dict:
     """Plan (and with `execute`, carry out) the retirement; returns the report (`scans`, `totals`, `d1`, …)."""
     scans_root, iv_root = store_url(scans_root), store_url(iv_root)  # a bare bucket name is a GCS bucket (a profile's)
     src = Store(scans_root)
@@ -424,7 +424,7 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             "d1_rows": d1_totals(plan) if plan is not None else None,
             # `-R` (another copy of the files): the pointer rows the retiring scans still have, which this pass won't
             # delete; a scan only this copy holds needs a pass with D1, or its rows outlive its files
-            "d1_left": d1_plan(retiring, d1_store, drop_path) if not d1 and _has_d1() else None,
+            "d1_left": d1_plan(retiring, d1_store, drop_path) if not d1 and not d1_elsewhere and _has_d1() else None,
         }
         if report["d1_left"]:
             left = sorted({d["date"] for d in report["d1_left"]})
@@ -482,6 +482,7 @@ def render(report: dict) -> list[str]:
 @command("retire")
 @option("-1", "--layer1", "layer1s", multiple=True, help="Key template of a scan's raw listing shards under -s (`{id}`, `*` within a segment), e.g. `listing/{id}/*/shard-*.parquet`; repeat")
 @option("-b", "--backup", "backup_root", help="Copy every object to be deleted here first (a dir or URL; same keys; server side within one store), sizes checked")
+@option("-D", "--d1-by-another-pass", "d1_elsewhere", is_flag=True, help="With -R: another pass over the same scans deletes their D1 rows (the scan step's first root), so `d1_left` isn't reported")
 @option("-g", "--gen", help="The interval store's generation (default: its current, `interval-store/CURRENT.json`), followed to its newest successor")
 @option("-G", "--static-gen", required=True, help="The static name index's generation (`static-names/GEN/` under -S)")
 @option("-j", "--json", "as_json", is_flag=True, help="Print the report as JSON")
@@ -499,7 +500,7 @@ def render(report: dict) -> list[str]:
 @option("-w", "--work", help="Local work dir (verify's copies, backups' staging; default: a temporary one)")
 @option("-x", "--execute", is_flag=True, help="Back up (-b), delete the D1 rows, then the files")
 @argument("ids", nargs=-1)
-def retire_cmd(layer1s, backup_root, gen, static_gen, as_json, keep, layer2s, layouts, markers_only, dry_run, iv_root, drop_path_pointer, no_d1,
+def retire_cmd(layer1s, backup_root, d1_elsewhere, gen, static_gen, as_json, keep, layer2s, layouts, markers_only, dry_run, iv_root, drop_path_pointer, no_d1,
                scans_root, static_root, d1_store, work, execute, ids) -> None:
     """Retire the per-scan sorts, footers, search sidecars and layer-2 and raw listings of the scans the interval store and the
     static name index both hold and a parity marker vouches for (all but the newest -k; IDS: only these). A dry run by
@@ -509,7 +510,7 @@ def retire_cmd(layer1s, backup_root, gen, static_gen, as_json, keep, layer2s, la
         raise UsageError("-n and -x: pick one (a dry run is the default)")
     report = retire(scans_root, list(layouts), iv_root=iv_root, static_gen=static_gen, iv_gen=gen, static_root=static_root,
                     layer2s=list(layer2s), layer1s=list(layer1s), keep=keep, only=list(ids), execute=execute, markers_only=markers_only,
-                    backup_root=backup_root, d1=not no_d1, d1_store=d1_store, drop_path=drop_path_pointer,
+                    backup_root=backup_root, d1=not no_d1, d1_elsewhere=d1_elsewhere, d1_store=d1_store, drop_path=drop_path_pointer,
                     work=Path(work) if work else None)
     if as_json:
         print(json.dumps(report))

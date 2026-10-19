@@ -177,6 +177,8 @@ def test_no_d1_reports_the_rows_its_scans_still_have(fx, d1):
     plan = _run(fx, "-m")["d1"]
     rep = _run(fx, "-m", "-R")
     assert (rep["d1"], rep["d1_left"], sorted({d["date"] for d in plan})) == (None, plan, ["2026-07-30", "2026-08-04", "2026-08-04T1236"])
+    # `-D` (the scan step's copies after its D1 pass): that pass covers the rows, so nothing is reported left
+    assert _run(fx, "-m", "-R", "-D")["d1_left"] is None
 
 
 @pytest.mark.parametrize("rows", [F.D1_DELETE_ROWS, 1])

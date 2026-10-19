@@ -27,7 +27,7 @@ For one week a ClickHouse VM behind a tunnel served name search and history expe
 [serverless]: serverless.md
 [static-name]: static-name-search.md
 [alternatives]: alternatives.md
-[index-landscape]: ../index-landscape.md
+[index-landscape]: ../done/index-landscape.md
 [interval-store]: ../interval-store.md
 [path-store]: ../done/path-store.md
 [search-extensions]: ../search-extensions.md

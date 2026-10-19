@@ -1,4 +1,4 @@
-"""One append runner for the run stores (specs/index-landscape.md §5, recommendation 1): the static name index's runs
+"""One append runner for the run stores (specs/done/index-landscape.md §5, recommendation 1): the static name index's runs
 (`static_runner`, `static_merge`) and the interval store's (`interval_append`) share everything here; each store plugs
 in its stage list (`Runner.one`), its merged-run build (`Carry.build`) and its reader files (`Carry.missing`).
 

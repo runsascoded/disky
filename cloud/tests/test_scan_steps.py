@@ -703,7 +703,7 @@ def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
     common = f"-G s1 -k 3 -L l2/{{id}}/index/{{gen}}/path-index.parquet -l l2/{{id}}/*.parquet -o r2://idx -S r2://idx -w {w}"
     assert c.sh_impl.calls == [
         f"dt-cloud scan retire -b gs://bak {common} -s gs://d",
-        f"dt-cloud scan retire {common} -R -s r2://idx",
+        f"dt-cloud scan retire {common} -R -D -s r2://idx",
     ]
     x = ctx(tmp_path, env, data="gs://d", steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
     S.retire(x, None)

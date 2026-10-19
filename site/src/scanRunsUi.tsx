@@ -28,10 +28,11 @@ export function scansStore(search: string, stores: Store[] = STORES): Store {
   return stores.find(s => s.key === key) ?? stores[0]
 }
 
-/** A `/scans` page link (the list, or run `id`) for `store`: the primary's carries no `store=`. */
+/** A scan-runs page link (the list, or run `id`) for `store`: under its page path, as its map is (`/scans` for the
+ *  primary, `/meta/scans` for the meta store). */
 export function scansHref(store: Store, id?: string, primary: Store = DEFAULT_STORE): string {
-  const q = storeQuery(store, primary)
-  return `/scans${id ? `/${encodeURIComponent(id)}` : ''}${q ? `?${q}` : ''}`
+  const base = store === primary ? '' : store.path.replace(/\/$/, '')
+  return `${base}/scans${id ? `/${encodeURIComponent(id)}` : ''}`
 }
 
 /** `/api/scan-runs[/<id>]` as `store` fetches it (`storeUrl`). */
@@ -43,13 +44,10 @@ export const useScanRuns = (store: Store = DEFAULT_STORE) => useQuery<ListRespon
   queryKey: ['scan-runs', store.key], queryFn: () => getJson(scanRunsApi(store)), refetchInterval: 60_000, staleTime: 15_000,
 })
 
-/** A link to the run that produced `scan` (its /scans page), for a tip about the scan: nothing until the store's runs
- *  load, or when none recorded it (a scan from before run records, or a viewer without access). */
-export function ScanRunLink({ store, scan }: { store: Store; scan: string }) {
+/** The run that produced `scan` in `store`, once the store's runs load (null: not loaded, or none recorded it). */
+export function useScanRunOf(store: Store, scan: string | null | undefined): ScanRun | null {
   const { data } = useScanRuns(store)
-  const r = data && scanRunOf(data.runs, scan)
-  if (!r) return null
-  return <div><Link to={scansHref(store, r.run_id)}>scan run</Link>{r.status !== 'succeeded' && <> ({r.status})</>}{r.trigger && <> · {r.trigger}</>}</div>
+  return (data && scan && scanRunOf(data.runs, scan)) || null
 }
 
 /** `fmtDur`, with seconds under a minute (a 3 s publish isn't `0m`). */

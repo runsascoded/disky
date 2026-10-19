@@ -50,9 +50,9 @@ export function storeOfPath(pathname: string, stores: readonly StorePath[]): { k
   return s ? { key: s.key, rest: pathname.slice(s.path.length) || '/' } : null
 }
 
-/** First segments under a secondary store's path that are not its map: the object opener and the OG render page
- * (`src/Root.tsx`'s `<path>/files/*`, `<path>/og`). */
-const NOT_STORE_MAP = new Set(['files', 'og'])
+/** First segments under a secondary store's path that are not its map: the object opener, its scan runs and the OG
+ * render page (`src/Root.tsx`'s `<path>/files/*`, `<path>/scans/*`, `<path>/og`). */
+const NOT_STORE_MAP = new Set(['files', 'scans', 'og'])
 
 /** The page's view, or null for pages with no card of their own (API routes,
  * `/files`, `/admin`, unknown asset-looking paths). `site` names the root; `root` is the store's mount

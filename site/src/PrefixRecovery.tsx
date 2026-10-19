@@ -5,7 +5,7 @@ import { runHref } from './runHistory'
 import { type PrefixExecution } from './prefixExecution'
 
 export function PrefixRecovery({ execution: e, fmtBytes }: { execution: PrefixExecution; fmtBytes: (bytes: number) => string }) {
-  if (!e) return <span className="dim">not recorded</span>
+  if (!e) return <span className="dim">—</span>
   return <Tooltip content={<>
     <div>{e.kind === 'recorded' ? `${fmtN(e.objects)} acknowledged deletions · ${fmtBytes(e.bytes)}` : e.kind === 'live-prefix' ? `${fmtN(e.objects)} acknowledged deletions so far · ${fmtBytes(e.bytes)}` : 'Bucket-level progress only; this does not establish completion of this prefix.'}</div>
     <div>{e.kind === 'recorded' ? 'Open recovery details. Prefix-filtered restore is available through the CLI; the web undo button restores the whole run.' : 'Stop and drain the run before restoring, so it cannot delete restored objects again.'}</div>

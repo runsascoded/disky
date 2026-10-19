@@ -121,11 +121,13 @@ describe('pageView: a secondary store\'s page (below its path)', () => {
       { kind: 'diff', params: { store: 'meta', path: 'snapshots', d: '261018-261017' }, title: 'snapshots · changes' },
     ])
   })
-  it('its paths are its own: the primary\'s reserved and file-looking names are folders here; `files` and `og` have no card', () => {
-    expect([pvs('/staged'), pvs('/users'), pvs('/scans.json'), pvs('/files/x'), pvs('/og')]).toEqual([
+  it('its paths are its own: the primary\'s reserved and file-looking names are folders here; `files`, `scans` and `og` have no card', () => {
+    expect([pvs('/staged'), pvs('/users'), pvs('/scans.json'), pvs('/files/x'), pvs('/scans'), pvs('/scans/uid'), pvs('/og')]).toEqual([
       { kind: 'map', params: { store: 'meta', path: 'staged' }, title: 'staged' },
       { kind: 'map', params: { store: 'meta', path: 'users' }, title: 'users' },
       { kind: 'map', params: { store: 'meta', path: 'scans.json' }, title: 'scans.json' },
+      null,
+      null,
       null,
       null,
     ])

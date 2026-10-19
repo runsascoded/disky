@@ -34,7 +34,7 @@ import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { LaptopIndicator } from './laptop'
-import { ScanRunLink } from './scanRunsUi'
+import { scansHref, useScanRunOf } from './scanRunsUi'
 import { ReadThroughBanner } from './ReadThroughLi'
 import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
 import { useReadTint } from './readTint'
@@ -668,6 +668,7 @@ function AppContent() {
     return d && { partialReason: d.partialReason, approximateReason: d.approximateReason, bucketsOnly: r?.bucketsOnly ? (r.scopedBelow ? 'scoped' as const : true) : false, dirsOnly: !!(d as { dirsOnly?: true }).dirsOnly, hexRuns: d.hexRuns }
   }, [fq, subStamp]) // eslint-disable-line react-hooks/exhaustive-deps
   const meta: Meta | null = metaQ.data ?? null
+  const scanRun = useScanRunOf(store, asof)
   // Section `#hash` both ways (deep link in, scroll-spy out) and the scroll
   // position across navigation. A pending deep link is re-armed as the map,
   // meta and scans land (sections mount off different queries).
@@ -1145,7 +1146,8 @@ function AppContent() {
         <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
-      {asof && <ScanRunLink store={store} scan={asof} />}
+      {/* the run itself is the chip's link; the tip says how it went and what started it */}
+      {scanRun && <div>{scanRun.status !== 'succeeded' ? `run ${scanRun.status}` : 'run succeeded'}{scanRun.trigger && <> · {scanRun.trigger}</>}</div>}
       {estCost && (
         <div>
           est. <b>${Math.round(estCost.list).toLocaleString()}/mo</b> at list price
@@ -1252,7 +1254,10 @@ function AppContent() {
             its date); the tip carries the exact publish time + totals. */}
         {recordedAt && (
           <Tooltip content={scanTip} pinnable>
-            <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</span>
+            {/* the run that produced the scan, one click away (the tip names it too), once the store's runs load */}
+            {scanRun
+              ? <Link className="tb-scan-ago" to={scansHref(store, scanRun.run_id)}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</Link>
+              : <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</span>}
           </Tooltip>
         )}
         <LaptopIndicator />

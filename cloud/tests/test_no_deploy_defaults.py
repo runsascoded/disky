@@ -1,4 +1,4 @@
-"""Generic code carries no deployment's values (specs/deployment-divergence.md §4): the layer-2 template, an index
+"""Generic code carries no deployment's values (specs/done/deployment-divergence.md §4): the layer-2 template, an index
 generation's key, the digest template and the static-names generation are each the deployment's to name, and a missing
 one is an error naming the flag or variable. The variant set is read off the generation's files, not configured."""
 from __future__ import annotations
