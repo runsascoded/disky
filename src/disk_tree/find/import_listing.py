@@ -133,7 +133,8 @@ def import_listing(
 
 def listing_rows(con: "duckdb.DuckDBPyConnection", src: str) -> int:
     """How many rows the prepared listing `src` holds, every bucket's: 0 is an empty bucket's listing."""
-    return con.execute(f"SELECT count(*) FROM {src}").fetchone()[0]
+    (n,) = con.execute(f"SELECT count(*) FROM {src}").fetchone() or (0,)
+    return n
 
 
 def list_buckets(listings: tuple[str, ...], con: "duckdb.DuckDBPyConnection | None" = None) -> list[str]:

@@ -204,7 +204,12 @@ def import_bucket(
     if engine != 'pandas':
         from disk_tree.find.import_listing import listing_rows
         from disk_tree.listing import prepare_listing
-        if not listing_rows(con, prepare_listing(con, listings)):
+        import duckdb
+        probe = con if con is not None else duckdb.connect()
+        empty = not listing_rows(probe, prepare_listing(probe, listings))
+        if probe is not con:
+            probe.close()
+        if empty:
             # an empty bucket: its root alone, the same on every engine (the out-of-core ones need rows)
             err(f"  {bucket}: empty listing; a root-only scan (engine pandas)")
             engine = 'pandas'
