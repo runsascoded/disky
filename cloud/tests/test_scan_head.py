@@ -339,6 +339,26 @@ def test_publish_reports(tmp_path):
     assert (work / "runs/2026-10-16T1200/dag.mmd").read_text() == "flowchart TB\n"
 
 
+def test_echo_task_logs(tmp_path):
+    """Each traced task's log under its header, in trace order; a task whose work dir has no log says so."""
+    work = tmp_path / "work"
+    for d, text in (("ab/cdef0123", "listed 3 shards\n"), ("12/345678ff", "retire: 22 scans\nkept 7\n")):
+        (work / d).mkdir(parents=True)
+        (work / d / ".command.log").write_text(text)
+    (work / "9f/00000000").mkdir(parents=True)
+    trace = tmp_path / "trace.tsv"
+    trace.write_text("task_id\thash\tname\tstatus\n1\tab/cdef01\tlist_source (r2://b)\tCOMPLETED\n"
+                     "2\t12/345678\tpost\tCOMPLETED\n3\t9f/000000\tdigest\tFAILED\n")
+    lines: list[str] = []
+    assert H.echo_task_logs(trace, work, lines.append) == 2
+    assert lines == [
+        "--- task list_source (r2://b) [ab/cdef01] COMPLETED", "listed 3 shards",
+        "--- task post [12/345678] COMPLETED", "retire: 22 scans\nkept 7",
+        "--- task digest [9f/000000] FAILED (no log)",
+    ]
+    assert H.echo_task_logs(tmp_path / "missing.tsv", work, lines.append) == 0
+
+
 def test_finish_args(tmp_path):
     """The DAG goes to `finish -D` only when Nextflow wrote it."""
     dag = tmp_path / "dag.mmd"

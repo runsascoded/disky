@@ -250,6 +250,27 @@ def first_failed(trace: Path) -> str | None:
     return None
 
 
+def echo_task_logs(trace: Path, work: Path, out=err) -> int:
+    """Each traced task's `.command.log` (its stdout + stderr) under a `--- task <name> [<hash>] <status>` line, in trace
+    order: the local executor's tasks log only into their work dirs, which a container's exit takes with it (a cloud
+    executor's tasks are jobs of their own, logged by their platform). Returns the tasks echoed."""
+    try:
+        with trace.open() as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+    except OSError:
+        return 0
+    n = 0
+    for row in rows:
+        h = row.get("hash") or ""
+        dirs = sorted(work.glob(f"{h}*")) if "/" in h else []
+        log = dirs[0] / ".command.log" if len(dirs) == 1 else None
+        out(f"--- task {row.get('name')} [{h}] {row.get('status')}" + ("" if log and log.is_file() else " (no log)"))
+        if log and log.is_file():
+            out(log.read_text(errors="replace").rstrip("\n"))
+            n += 1
+    return n
+
+
 def _record(cmd, args: list[str]) -> None:
     """A `scan-run` subcommand, in-process (they never fail the job)."""
     try:
@@ -440,6 +461,8 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     else:
         f = first_failed(trace) if rc else None
         error = f"nextflow exit {rc}" + (f": {f} failed" if f else "") + f" (session {session})" if rc else None
+    if not cloud:
+        echo_task_logs(trace, Path(profile.work.rstrip("/")) / "work")
     publish_reports(profile, scan, launch)
     if recording:
         _record(finish_cmd, finish_args(rc, error, cost, launch / "dag.mmd", run_id))
