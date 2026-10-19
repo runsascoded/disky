@@ -32,6 +32,7 @@ import re
 import shutil
 from collections.abc import Iterable, Callable
 from pathlib import Path
+from threading import Lock
 from time import monotonic
 
 import pyarrow.parquet as pq
@@ -175,16 +176,17 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
     """Key range `name` of the generation folded from the base under `base` and the runs `runs` (dirs, oldest first) into
     `out`'s range files, as `build` writes them: `pvl/`, `pv/` and `rd/` (the islands of `pvl`'s pieces), and with the
     owner axis `sv/` and `svt/`. `generation`: the path versions carry `GENERATION` — read from the inputs, or, with
-    `fill`, set by it on the path versions and taken by their pieces. Returns their row counts."""
+    `fill`, set by it on the path versions and taken by their pieces. Its tables are `con`'s temp tables, so ranges
+    run concurrently on cursors of one database (`fold_gen` `jobs`). Returns their row counts."""
     rf = lambda sub: out / sub / f"{name}.parquet"
     gen_in = generation and fill is None
     gcol = [ist.GENERATION] if gen_in else []
-    con.execute(f"CREATE OR REPLACE TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in)}")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in)}")
     # A path version is the run of its pieces with equal change columns (`dr` as `build` derives it); `wts` (and
     # `GENERATION`) is carried from the version's first scan, which every piece shares (`fold`).
     change = [c for c in ist.CHANGE_COLS if c != "dr"]
     pv_src = f"SELECT *, {ia.DR} AS dr FROM pvl"
-    con.execute(f"CREATE OR REPLACE TABLE pv AS {_islands_sql(pv_src, ist.CHANGE_COLS, [*change, 'wts', *gcol])}")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE pv AS {_islands_sql(pv_src, ist.CHANGE_COLS, [*change, 'wts', *gcol])}")
     if fill is not None:
         for t in ("pv", "pvl"):
             con.execute(f"ALTER TABLE {t} ADD COLUMN {ist.GENERATION} BIGINT")
@@ -196,17 +198,17 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
                                   pvl_schema, ist.RANGE_RG, dictionary=["kind", "us"])}
     doc["pv"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pv_schema.names)} FROM pv ORDER BY depth, path, vf"), rf("pv"), pv_schema,
                                 ist.RANGE_RG, dictionary=["kind", "us"])
-    con.execute(f"CREATE OR REPLACE TABLE rd AS {_islands_sql('SELECT * FROM pvl', ['last_read'], ['last_read'], 'last_read >= 0')}")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE rd AS {_islands_sql('SELECT * FROM pvl', ['last_read'], ['last_read'], 'last_read >= 0')}")
     doc["rd"] = sn.write_sorted(sn._batches(con, "SELECT depth, path, vf, vt, last_read FROM rd ORDER BY depth, path, vf"), rf("rd"),
                                 ist.RD_SCHEMA, ist.RANGE_RG)
     con.execute("DROP TABLE pvl; DROP TABLE pv; DROP TABLE rd")
     if sliced:
         # `build -S`'s and `fold -S`'s statements, over the same relations (`sv` with `usr` '', `svt` with it NULL).
-        con.execute(f"CREATE OR REPLACE TABLE sv AS {_versions_sql(base, runs, 'sv', name)}")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE sv AS {_versions_sql(base, runs, 'sv', name)}")
         sel = ", ".join("nullif(usr, '') AS usr" if c == "usr" else c for c in ist.SV_SCHEMA.names)
         doc["sv"] = sn.write_sorted(sn._batches(con, f"SELECT {sel} FROM sv ORDER BY depth, path, usr, vf"), rf("sv"), ist.SV_SCHEMA, ist.RANGE_RG,
                                     dictionary=["kind", "usr"])
-        con.execute(f"CREATE OR REPLACE TABLE svt AS SELECT * REPLACE (nullif(usr, '') AS usr) FROM ({_versions_sql(base, runs, 'svt', name)})")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE svt AS SELECT * REPLACE (nullif(usr, '') AS usr) FROM ({_versions_sql(base, runs, 'svt', name)})")
         doc["svt"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(ist.SVT_SCHEMA.names)} FROM svt ORDER BY depth, path, usr NULLS FIRST, vf"),
                                      rf("svt"), ist.SVT_SCHEMA, ist.RANGE_RG, dictionary=["kind", "usr"])
         con.execute("DROP TABLE sv; DROP TABLE svt")
@@ -227,13 +229,17 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
-             mem: str = "4GB", fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None) -> tuple[dict, dict, dict, dict]:
+             mem: str = "4GB", jobs: int = 1, fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None,
+             ) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
-    carries `GENERATION` as the hook sets it. Logs a line per range (`i/k`, its rows, seconds) and around the served
-    sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each range (a caller's heartbeat).
-    Returns `(scans.json, rows per table, sorts, stats)`."""
+    carries `GENERATION` as the hook sets it. `jobs` ranges, then `jobs` sorts, at a time (`static_names.each`: cursors
+    of one DuckDB database, `threads` and `mem` shared): each ends in a serial pyarrow writer, the bulk of a range's
+    time; the output's bytes don't depend on it. Logs a line per range as it ends (`i/k`, its rows, seconds, how many
+    are done) and around the served sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each
+    range (a caller's heartbeat; in completion order, one call at a time). Returns `(scans.json, rows per table, sorts,
+    stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = ist.has_generation(base) or fill is not None
@@ -246,36 +252,48 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     shutil.copyfile(gen_dir / "ranges.json", out / "ranges.json")
     k = json.loads((out / "ranges.json").read_text())["k"]
     con = sn.connect(threads, mem, work / "duckdb-compact")
-    rows: dict[str, int] = {}
+    run_dirs = [str(gen_dir / r["key"]) for r in runs]
+    lock, done = Lock(), [0]
     t_all = monotonic()
-    for i in range(k):
+
+    def one(cur, i: int) -> dict:
         t0 = monotonic()
-        got = compact_range(con, str(gen_dir), [str(gen_dir / r["key"]) for r in runs], f"r{i:04d}", out, sliced, generation, fill)
+        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill)
+        with lock:
+            done[0] += 1
+            err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s "
+                f"({done[0]}/{k} done, {monotonic() - t_all:.0f}s so far)")
+            if on_range is not None:
+                on_range(i, k)
+        return got
+
+    rows: dict[str, int] = {}
+    for got in sn.each(con, one, list(range(k)), jobs):
         for t, n in got.items():
             rows[t] = rows.get(t, 0) + n
-        err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s ({monotonic() - t_all:.0f}s so far)")
-        if on_range is not None:
-            on_range(i, k)
     t0 = monotonic()
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
-    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows)
+    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
 
 
 def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, level: int | None, rg_rows: int = ist.SERVED_RG,
-                threads: int = 4, mem: str = "4GB") -> dict:
+                threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
     """The generation `gen` (its base and the newest manifest's runs, in `gen_dir`) folded into the new generation
     `new_gen` in `out` (`fold_gen`), and `compaction.json`. Returns a summary."""
     t0 = monotonic()
+    if not (gen_dir / "ranges.json").is_file():
+        raise SystemExit(f"{gen}: no ranges.json: a staged build's generation borrowing its ranges and base from another "
+                         f"(its `ranges_gen`) can't be compacted in place; backfill-generation -R makes a self-contained one")
     store = LocalRunStore(gen_dir, work / "lease", gen)
     base = store.read_json("scans.json")
     newest = latest_key(store.keys("manifests/"))
     if newest is None:
         raise SystemExit(f"{gen}: no runs to compact")
     runs = store.read_json(newest)["runs"]
-    doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem)
+    doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
     comp = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "base_scans": len(base["scans"]), "scans": len(doc["scans"]),
             "level": level}
     (out / COMPACTION).write_text(json.dumps(comp, indent=1) + "\n")

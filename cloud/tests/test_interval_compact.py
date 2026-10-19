@@ -240,6 +240,41 @@ def test_an_interrupted_compaction_is_redone(run, tmp_path):
     assert (torn / "junk.txt").exists() is False
 
 
+def _timeless(gen: Path) -> dict[str, bytes]:
+    """A generation's files, each served sort's record (`served/<sort>.json`) without its seconds (`s`)."""
+    out = files(gen)
+    for k in [k for k in out if k.startswith("served/") and k.endswith(".json") and k != "served/stats.json"]:
+        out[k] = json.dumps({**json.loads(out[k]), "s": None}, sort_keys=True).encode()
+    return out
+
+
+def test_a_parallel_compaction_writes_the_serial_ones_bytes(run, tmp_path):
+    """`add -j 3`: the key ranges (all 3 at once), then the served sorts, folded three at a time on cursors of one DuckDB
+    database: every file of the serial compaction's generation, byte for byte (the sorts' records but their seconds)."""
+    gens = {}
+    for jobs in ("1", "3"):
+        store = tmp_path / f"store-{jobs}"
+        shutil.copytree(run["tmp"] / "before-c001", store)
+        out = add(run["world"], store, tmp_path / f"work-{jobs}", "-t", DATES[5], "-j", jobs)
+        assert (out["gen"], out["compact"]["gen"], out["compact"]["rows"]) == ("g", "g.c001", run["outs"][3]["compact"]["rows"])
+        gens[jobs] = _timeless(store / ist.PREFIX / "g.c001")
+    assert sorted(gens["3"]) == sorted(gens["1"])
+    assert gens["3"] == gens["1"]
+
+
+def test_each_keeps_the_items_order_and_raises_the_first_failure():
+    con = sn.connect(2, "1GB", None)
+    assert sn.each(con, lambda cur, i: cur.execute(f"SELECT {i} * 2").fetchone()[0], list(range(7)), 3) == [0, 2, 4, 6, 8, 10, 12]
+
+    def fail(cur, i):
+        if i == 2:
+            raise ValueError(f"item {i}")
+        return i
+    for jobs in (1, 3):
+        with pytest.raises(ValueError, match="^item 2$"):
+            sn.each(con, fail, list(range(5)), jobs)
+
+
 def test_an_unbounded_level_never_compacts(run, tmp_path):
     """`-C none`: the binary counter carries at every level and nothing compacts."""
     store = tmp_path / "store"

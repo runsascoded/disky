@@ -298,6 +298,33 @@ def connect(threads: int, mem: str, tmp: str | Path | None):
     return con
 
 
+def each(con, fn, items: list, jobs: int = 1) -> list:
+    """`fn(cursor, item)` for every item, `jobs` at a time, each on its own cursor of `con` (a connection to the same
+    database: one `threads` pool and one `memory_limit` across them, its own temp tables), in threads: the pyarrow
+    writers the work ends in are serial per file, and they and DuckDB release the GIL. Results in `items`' order. The
+    first failure cancels the items not started, and is raised once the running ones end."""
+    from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
+
+    def one(item):
+        cur = con.cursor()
+        cur.execute("SET parquet_metadata_cache=true")  # a connection's own setting, not the database's
+        try:
+            return fn(cur, item)
+        finally:
+            cur.close()
+
+    if jobs <= 1:
+        return [one(item) for item in items]
+    with ThreadPoolExecutor(jobs) as ex:
+        futures = [ex.submit(one, item) for item in items]
+        done, _ = wait(futures, return_when=FIRST_EXCEPTION)
+        if failed := next((f for f in futures if f in done and f.exception() is not None), None):
+            for f in futures:
+                f.cancel()
+            raise failed.exception()
+        return [f.result() for f in futures]
+
+
 def write_sorted(batches: Iterable[pa.RecordBatch], out: Path, schema: pa.Schema, rg_rows: int,
                  on_group=None, dictionary: list[str] | bool = False) -> int:
     """Write already-ordered batches as exact `rg_rows`-row groups (the last may be short), so the file's

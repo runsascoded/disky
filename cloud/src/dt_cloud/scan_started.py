@@ -51,14 +51,19 @@ def read_markers(pattern: str) -> list[dict]:
     return [json.loads(fs.cat_file(p)) for p in sorted(fs.glob(path))]
 
 
-def listing_started(listings: tuple[str, ...] | list[str]) -> str | None:
-    """A scan's start from its listing globs (``path-index -l``): the earliest ``started`` among the
-    ``_SUCCESS.json`` markers beside them (each glob's directory part). None when there are none (an inventory
-    listing, or a listing written before the markers carried ``started``)."""
+def listing_markers(listings: tuple[str, ...] | list[str]) -> list[dict]:
+    """The ``_SUCCESS.json`` markers beside listing globs (``path-index -l``; each glob's directory part)."""
     markers = []
     for g in dict.fromkeys(f"{posixpath.dirname(g)}/{SUCCESS_MARKER}" for g in listings):
         markers.extend(read_markers(g))
-    return earliest_started(markers)
+    return markers
+
+
+def listing_started(listings: tuple[str, ...] | list[str]) -> str | None:
+    """A scan's start from its listing globs (``path-index -l``): the earliest ``started`` among the
+    ``_SUCCESS.json`` markers beside them. None when there are none (an inventory listing, or a listing written
+    before the markers carried ``started``)."""
+    return earliest_started(listing_markers(listings))
 
 
 @command("stamp-started")

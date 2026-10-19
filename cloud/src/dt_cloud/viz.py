@@ -20,7 +20,7 @@ from pathlib import Path
 import duckdb
 
 from .index import AGE_COLS, STORE_L2, age_bucket_sql, duckdb_codec, store_columns
-from .scan_started import listing_started
+from .scan_started import listing_markers, listing_started
 from .resource_monitor import monitor_resources, resource_stage
 
 err = partial(print, file=sys.stderr)
@@ -391,6 +391,16 @@ def write_path_index(
             FROM obj GROUP BY bucket, dir, fp
             """
         )
+        # An empty bucket (its listing one empty shard beside a 0-object marker, as `bulk-list` writes it) is its root
+        # alone at 0 bytes, as `import` writes it: on the Map at 0, not gone from the scan
+        empty = sorted({m["bucket"] for m in listing_markers(listings) if m.get("objects") == 0 and m.get("bucket")})
+        if empty:
+            con.execute(
+                """INSERT INTO dir_stats (bucket, dir, fp, b, o)
+                SELECT bucket, '', bucket, 0, 0 FROM unnest(?::VARCHAR[]) t(bucket)
+                WHERE bucket NOT IN (SELECT bucket FROM dir_stats)""",
+                [empty],
+            )
         if stats_pq is not None:
             stats_pq.parent.mkdir(parents=True, exist_ok=True)
             con.execute(f"COPY dir_stats TO '{stats_pq}' (FORMAT parquet)")

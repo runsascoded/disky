@@ -72,6 +72,23 @@ def test_import_listing_missing_bucket_raises(tmp_path: Path):
         import_listing((listing,), bucket='nope', scheme='gcs')
 
 
+def _empty_listing(path: Path) -> str:
+    """A listing with no rows, in the layer-1 schema: what an empty bucket's `bulk-list` writes."""
+    pd.DataFrame({
+        'bucket': pd.Series([], dtype='string'), 'name': pd.Series([], dtype='string'),
+        'size_bytes': pd.Series([], dtype='int64'), 'created': pd.Series([], dtype='datetime64[ns, UTC]'),
+        'storage_class_id': pd.Series([], dtype='Int8'),
+    }).to_parquet(path)
+    return str(path)
+
+
+def test_import_listing_empty_bucket(tmp_path: Path):
+    """An empty listing (an empty bucket) is a root-only scan; rows for other buckets but none for this one still raise."""
+    df = import_listing((_empty_listing(tmp_path / "l.parquet"),), bucket='b1', scheme='gcs').df
+    assert df[['path', 'size', 'n_desc', 'n_children', 'kind']].to_dict('records') == [
+        {'path': '.', 'size': 0, 'n_desc': 1, 'n_children': 0, 'kind': 'dir'}]
+
+
 def test_list_buckets_distinct(tmp_path: Path):
     listing = write_listing(tmp_path / "l.parquet", [
         {'bucket': 'b1', 'name': 'x', 'size_bytes': 1, 'created': TS_A, 'storage_class_id': 1},
@@ -139,3 +156,24 @@ def test_import_cli_creates_scan(tmp_path: Path):
     conn.close()
     # size=300 (100 + 200), n_children=2 (a.txt + sub dir), n_desc=4 (self + a.txt + sub + b.txt)
     assert rows == [('gcs://b1', 300, 2, 4)]
+
+
+@pytest.mark.parametrize('engine', ['pandas', 'duckdb', 'stream'])
+def test_import_cli_empty_bucket(tmp_path: Path, engine: str):
+    """`import -b <bucket>` over an empty bucket's listing writes a root-only layer-2 and a zero-size scan, on every
+    engine (cw's scan failed on marin-us-east-08a's empty listing, 2026-10-19T0602)."""
+    listing = _empty_listing(tmp_path / 'listing.parquet')
+    root = tmp_path / 'dt-root'
+    env = {**os.environ, 'DISKY_ROOT': str(root)}
+    r = subprocess.run(
+        [sys.executable, '-m', 'disk_tree.cli.main', 'import', '-e', engine, '-m', '-p', 'storage_class_id',
+         '-l', listing, '-b', 'b1', '-t', TS_A.isoformat()],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert r.returncode == 0, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    conn = sqlite3.connect(root / 'disk-tree.db')
+    rows = conn.execute("SELECT path, size, n_children, n_desc FROM scan").fetchall()
+    conn.close()
+    assert rows == [('gcs://b1', 0, 0, 1)]
+    (blob,) = (root / 'scans').glob('*.parquet')
+    assert pd.read_parquet(blob, columns=['path', 'size', 'depth']).to_dict('records') == [{'path': '.', 'size': 0, 'depth': 0}]

@@ -78,7 +78,7 @@ def publish_order(keys: list[str]) -> list[str]:
 
 
 def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k: int = RANGES, rg_rows: int = ist.SERVED_RG,
-              threads: int = 4, mem: str = "4GB") -> dict:
+              threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
     """A base generation over `scans` (`find_scans`' doc; their files under `mount`) in `gen_dir`, every stage in turn
     (with `"generation": true` in its `scans.json` when some scan's sort carries the objects' `generation`):
     ranges → path and read versions (`build_range`, checked against every scan) → folded (`fold_range`) → owner slices
@@ -120,7 +120,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
         t = done("slices", t)
     if bad:
         raise RuntimeError(f"build {gen}: the versions don't reconstruct every scan: (range, scan) {bad}")
-    sorts, stats = ist.cut_gen(con, gen_dir, doc, rg_rows=rg_rows)
+    sorts, stats = ist.cut_gen(con, gen_dir, doc, rg_rows=rg_rows, jobs=jobs)
     done("cut", t)
     (gen_dir / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     disk.close()
@@ -210,6 +210,7 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
 
 @command("build")
 @option("-g", "--gen", required=True, help="The generation to write: `<store>/interval-store/GEN/` (never over an existing one)")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="Served sorts cut this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-k", "--ranges", "k", default=RANGES, type=IntRange(min=1), help="Key ranges (each one DuckDB pass over every scan)")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s (`{id}` the scan id, `{gen}` the store generation); repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
@@ -219,7 +220,7 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after)")
-def build_cmd(gen, k, layouts, mem, store_root, threads, rg_rows, scans_root, through, work) -> None:
+def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_root, through, work) -> None:
     """Build a base generation of the interval store on this machine, every stage in-process: the staged (Batch) path's
     stages over a local work dir, then the generation copied into the store (data first, `scans.json` last). Prints a
     JSON summary."""
@@ -235,7 +236,7 @@ def build_cmd(gen, k, layouts, mem, store_root, threads, rg_rows, scans_root, th
         gen_dir = w / "store" / prefix
         if gen_dir.exists():
             shutil.rmtree(gen_dir)
-        summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, k=k, rg_rows=rg_rows, threads=threads, mem=mem)
+        summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, k=k, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
         summary["files"] = len(upload_new(store, gen_dir, prefix, {}, publish_order))
     if ic.current(store) is None:
         ic.set_current(store, gen)  # the store's first generation: what unpinned readers and `add` follow
@@ -248,6 +249,7 @@ def build_cmd(gen, k, layouts, mem, store_root, threads, rg_rows, scans_root, th
         help=f"Compaction level L: carries stop below it, and once two runs reach L − 1 (every 2^L scans) the base and every run fold into a new generation; `none`: unbounded carries, never compacted (default {ar.COMPACT_LEVEL})")
 @option("-g", "--gen", help="The base generation (`<store>/interval-store/GEN/`); default the store's current (`interval-store/CURRENT.json`, else its only generation, adopted). One compacted into a newer one is followed to it")
 @option("-G", "--grace-s", default=ar.GRACE_S, type=IntRange(min=ar.MIN_GRACE_S), help=f"Keep a superseded manifest's runs, and a compacted generation, this many seconds (default {ar.GRACE_S}, at least {ar.MIN_GRACE_S})")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="A due compaction's key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs and compacted generations the prune would delete from the store; delete nothing")
@@ -258,7 +260,7 @@ def build_cmd(gen, k, layouts, mem, store_root, threads, rg_rows, scans_root, th
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root, through,
+def add_cmd(compact_level, gen, grace_s, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root, through,
             work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's published files are never rewritten; new ones go
@@ -311,13 +313,14 @@ def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, 
         # Compaction runs whatever was pending: an interrupted one is redone by the next `add`.
         compacted = None
         if not no_merge and ic.due(gen_dir, compact_level):
-            compacted = compact(store, gen, gen_dir, w, level=compact_level, rg_rows=rg_rows, threads=threads, mem=mem)
+            compacted = compact(store, gen, gen_dir, w, level=compact_level, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
         preds = ic.prune_predecessors(store, gen, now=sl.now(), grace_s=grace_s, dry_run=prune_dry_run)
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
                       "prune": {k_: v for k_, v in prune.items() if k_ != "keys"}, "compact": compacted, "predecessors": preds}, indent=1))
 
 
-def compact(store: Store, gen: str, gen_dir: Path, work: Path, *, level: int | None, rg_rows: int, threads: int, mem: str) -> dict:
+def compact(store: Store, gen: str, gen_dir: Path, work: Path, *, level: int | None, rg_rows: int, threads: int, mem: str,
+            jobs: int = 1) -> dict:
     """Generation `gen` (published, mirrored in `gen_dir`) folded into the next one (`interval_compact.compact_gen`) and
     published: its files (an earlier, unpublished attempt's keys replaced; data first, `scans.json` last), then
     `successor.json` in `gen`, then `CURRENT.json` when it named `gen` (or nothing)."""
@@ -329,7 +332,7 @@ def compact(store: Store, gen: str, gen_dir: Path, work: Path, *, level: int | N
         store.delete(sorted(stale))
     out = work / "store" / new_prefix
     t0, disk = monotonic(), DiskPeak(work)
-    summary = ic.compact_gen(gen_dir, out, work, gen=gen, new_gen=new, level=level, rg_rows=rg_rows, threads=threads, mem=mem)
+    summary = ic.compact_gen(gen_dir, out, work, gen=gen, new_gen=new, level=level, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
     summary["files"] = len(upload_new(store, out, new_prefix, {}, publish_order))
     summary["s"] = round(monotonic() - t0, 1)
     summary["peak"] = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}

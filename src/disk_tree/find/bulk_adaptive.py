@@ -56,6 +56,7 @@ from disk_tree.find.bulk import (
     utc_now,
     BlobRow,
     entries_to_frame,
+    write_empty_shard,
     _write_shard,
     resolve_existing,
 )
@@ -480,6 +481,10 @@ def list_bucket_adaptive(
             w.join()
     ranges.sort(key=lambda r: (r[0] or ''))
 
+    if not total:
+        # An empty bucket is a complete, empty listing: one empty shard in the listing schema, so `import`'s shard
+        # glob (and the duplicate check below) find it
+        write_empty_shard(out_dir, "shard-00-0000")
     _assert_no_duplicate_keys(out_dir)
 
     out_fs.pipe(

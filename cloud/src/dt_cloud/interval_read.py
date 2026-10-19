@@ -288,9 +288,13 @@ class Store:
         version another tier holds as live."""
         return g["vf_min"] <= D if run else live(g, D)
 
-    def read_tiers(self, plans: list[tuple[Sort, list[dict]]], cols: list[str], cost: Cost, D: int) -> pa.Table:
-        """The planned groups of every tier, combined (one row per version, the smallest `vt`), live at D."""
+    def read_tiers(self, plans: list[tuple[Sort, list[dict]]], cols: list[str], cost: Cost, D: int, keep=None) -> pa.Table:
+        """The planned groups of every tier, combined (one row per version, the smallest `vt`), live at D. `keep(t)`: a mask
+        over a tier's rows, applied before the combine — a version's rows share its `(depth, path)`, so a mask on those
+        keeps or drops all of them, and the combine only sorts what the read wants."""
         ts = [s.read(sorted(gs, key=lambda g: g["rg"]), cols, cost) for s, gs in plans]
+        if keep is not None:
+            ts = [t.filter(keep(t)) for t in ts]
         ts = [t for t in ts if t.num_rows] or ts[:1]
         return live_rows(combine(pa.concat_tables(ts) if len(ts) > 1 else ts[0]), D)
 
@@ -298,8 +302,8 @@ class Store:
     def point(self, D: int, depth: int, lo: str, hi: str, cost: Cost, sort: Sort | None = None, cols=VIEW_COLS) -> pa.Table:
         """Rows at one depth with `lo ≤ path ≤ hi`, live at D."""
         tiers = [(sort, False)] if sort is not None else self.tiers("path")
-        t = self.read_tiers([(s, [g for g in s.at_depth(depth, lo, hi) if self.may_hold(g, D, run)]) for s, run in tiers], cols, cost, D)
-        return t.filter(pc.and_(pc.equal(t["depth"], depth), pc.and_(pc.greater_equal(t["path"], lo), pc.less_equal(t["path"], hi))))
+        keep = lambda t: pc.and_(pc.equal(t["depth"], depth), pc.and_(pc.greater_equal(t["path"], lo), pc.less_equal(t["path"], hi)))  # noqa: E731
+        return self.read_tiers([(s, [g for g in s.at_depth(depth, lo, hi) if self.may_hold(g, D, run)]) for s, run in tiers], cols, cost, D, keep)
 
     def plan_path(self, D: int, d_lo: int, d_hi: int, lo: str, hi: str, thr_at) -> list[tuple[Sort, list[dict]]]:
         """`planRects` on `path`, per tier: groups meeting the depth rect (and the path range when the group is one
@@ -403,6 +407,32 @@ class Store:
         rs = self.point(D, depth_of(path), path, path, cost).to_pylist()
         return agg_of(rs[0]) if rs else None
 
+    def lookup_many(self, D: int, paths, cost: Cost) -> dict[str, Agg]:
+        """`lookup` of every path in `paths` at D, in one read: each tier's groups that `lookup` would read for any of them
+        (each group once), the rows at those `(depth, path)`s kept before the combine. A path with no live version is
+        absent."""
+        by_depth: dict[int, list[str]] = {}
+        for p in sorted(set(paths)):
+            by_depth.setdefault(depth_of(p), []).append(p)
+        if not by_depth:
+            return {}
+        plans = []
+        for s, run in self.tiers("path"):
+            gs = {g["rg"]: g for d, ps in by_depth.items() for p in ps for g in s.at_depth(d, p, p) if self.may_hold(g, D, run)}
+            plans.append((s, list(gs.values())))
+
+        def keep(t: pa.Table):
+            m = None
+            for d, ps in by_depth.items():
+                x = pc.and_(pc.equal(t["depth"], d), pc.is_in(t["path"], value_set=pa.array(ps, pa.string())))
+                m = x if m is None else pc.or_(m, x)
+            return m
+
+        out: dict[str, Agg] = {}
+        for r in self.read_tiers(plans, VIEW_COLS, cost, D, keep).to_pylist():
+            out.setdefault(r["path"], agg_of(r))  # the first live row, as `lookup` takes
+        return out
+
     def changes(self, D1: int, D2: int, path: str, cost: Cost, *, chunk: int = CHANGES_CHUNK) -> int:
         """Versions under P that opened or closed in `(D1, D2]` — the diff's changed paths — from `path`
         groups whose open or close stamps can fall in the span: the read a change-only diff would make. Counted
@@ -421,6 +451,14 @@ class Store:
 
 
 # ── Diff (both sides' kept tiles at one threshold, one-sided paths looked up) ──
+
+
+def one_sided(side_a: dict, side_b: dict, *, fold: bool = False) -> tuple[list[str], list[str]]:
+    """The paths `diff` looks up: on side a, those tiled on b only; on side b, those tiled on a only."""
+    ka, kb = side_a["kept"], side_b["kept"]
+    if fold:
+        ka, kb = ({p for p, v in k.items() if v[2] != "file"} for k in (ka, kb))
+    return sorted(set(kb) - set(ka)), sorted(set(ka) - set(kb))
 
 
 def diff(side_a: dict, side_b: dict, lookup_a, lookup_b, *, fold: bool = False) -> list[tuple]:
