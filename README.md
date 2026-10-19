@@ -1,4 +1,4 @@
-# `@rdub/treemap`
+# `@open-athena/treemap`
 
 A SOTA React **treemap** — and the layout/color primitives behind it.
 **Chart-lib-free** (no Plotly, no recharts; d3 only for the optional Voronoi
@@ -10,7 +10,7 @@ Ships:
 | Export | What |
 |---|---|
 | [`<Treemap>`](#treemap) | Squarified layout with **two renderers** (SVG/DOM default + whole-map `<canvas>`), drill-on-click, pin-on-leaf tooltip, keyboard nav, fold-small "…" dust tiles, shared-edge (gapless) tiling, per-cell coloring + [emphasis `ring`](#brushing), fullscreen, slot-based coloring/tooltip/legend/rollup, lazy subtrees. |
-| [`<VoronoiTreemap>`](#voronoitreemap) | Circle- (or polygon-) clipped Voronoi tessellation, areas ∝ value. Separate `@rdub/treemap/voronoi` subpath — the only part with dependencies. |
+| [`<VoronoiTreemap>`](#voronoitreemap) | Circle- (or polygon-) clipped Voronoi tessellation, areas ∝ value. Separate `@open-athena/treemap/voronoi` subpath — the only part with dependencies. |
 | [`useHoverPin`](#usehoverpin) | Headless hover+pin state (single pin, touch-safe, outside-click / Esc clear). |
 | `<TitleSpaceToggle>` | Controlled checkbox for `reclaimTitleSpace`; share its `checked` value with `<Treemap reclaimTitleSpace={checked}>`. |
 | `squarify` / `foldSmall` / `foldThin` / `squarifyRemainder` | Pure layout primitives if you want to render the cells yourself. |
@@ -30,14 +30,14 @@ Ships:
 `reclaimTitleSpace` defaults to `false`: parents reserve a full-width title bar. Enabling it lets complete columns to the right of the measured label reclaim that strip, while all sibling rectangles retain one shared area multiplier. It works with DOM, canvas, hit-testing and export. `branchOutline="…"` adds quiet, one-pixel parent frames above descendants without changing layout; those frames also appear in exported images.
 
 ```bash
-pnpm add @rdub/treemap
+pnpm add @open-athena/treemap
 ```
 
 ```ts
-import '@rdub/treemap/styles.css'
+import '@open-athena/treemap/styles.css'
 ```
 
-The npm package is compiled (ESM + types per subpath: `@rdub/treemap`, `/squarify`, `/parseColor`, `/divergingColor`,
+The npm package is compiled (ESM + types per subpath: `@open-athena/treemap`, `/squarify`, `/parseColor`, `/divergingColor`,
 `/svg`, `/voronoi`), so it needs no JSX/TSX handling in your bundler. It's also on a SHA-pinnable **dist branch** (via
 [`npm-dist`][npm-dist]), the same build:
 
@@ -52,7 +52,7 @@ pds init packages/treemap
 pds gh treemap   # switch to the latest GH dist SHA
 ```
 
-You'll also need to `import '@rdub/treemap/styles.css'` once somewhere in your
+You'll also need to `import '@open-athena/treemap/styles.css'` once somewhere in your
 app for the default cell/tooltip styling.
 
 `react` and `react-dom` ≥ 18 are peer deps.
@@ -60,8 +60,8 @@ app for the default cell/tooltip styling.
 ## `<Treemap>`
 
 ```tsx
-import { Treemap } from '@rdub/treemap'
-import '@rdub/treemap/styles.css'
+import { Treemap } from '@open-athena/treemap'
+import '@open-athena/treemap/styles.css'
 
 interface Node { name: string; size: number; children?: Node[] }
 
@@ -156,7 +156,7 @@ pnpm add d3-voronoi-treemap d3-hierarchy   # optional peers
 ```
 
 ```tsx
-import { VoronoiTreemap } from '@rdub/treemap/voronoi'
+import { VoronoiTreemap } from '@open-athena/treemap/voronoi'
 
 <VoronoiTreemap<Row>
   items={children}
@@ -195,7 +195,7 @@ and the `mulberry32` / `hashSeed` PRNG.
 Headless single-pin state — pairs with any hover UI:
 
 ```tsx
-import { useHoverPin } from '@rdub/treemap'
+import { useHoverPin } from '@open-athena/treemap'
 
 function Legend({ items }: { items: string[] }) {
   const pin = useHoverPin<string>({ excludeRefs: [] })
@@ -246,7 +246,7 @@ pnpm test:watch
 ```
 
 The DT app under `ui/` and `@disk-tree/react` both consume this package via
-`"@rdub/treemap": "workspace:*"` — changes flow through instantly during
+`"@open-athena/treemap": "workspace:*"` — changes flow through instantly during
 `pnpm dev`.
 
 ## License
