@@ -2,6 +2,14 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## R2 pass (2026-10-18): the `disk-tree` bucket's per-scan copies, 47.9 → ~27.6 GiB
+
+- Not the laptop disk: the bucket the site and pipeline write (`tmp/m3-r2-footprint.txt` before). Prod has served the interval store since 10/18 (`PATH_STORE = "intervals"`), so the per-scan `path`/`bysize` sorts had become mostly redundant with it (10.8 GiB vs its 0.78 GiB).
+- Deleted:
+  - `static-names/2026-10-14` (superseded by `2026-10-15`, referenced nowhere): 98 objects, **10.41 GiB**.
+  - `retire` (manual "Scan now" run `45f7c098`, `keep: 7`, `execute: true`): the 22 scans 9/29 → 10/15T2210 passed their interval-store parity check, then lost their `path`/`bysize` sorts, footers and 9/29–30 coarse/by-user tiers, plus D1 rows (`bysize` 29 → 7, coarse 6 → 0; `path` pointers kept for the scan list). Dry run's plan 10.56 GB; per-scan index files now 3.69 GiB over 28 scans (age pyramids 1.84 GiB kept: the age bars read them). **≈9.8 GiB.** Retire took 51 min (the verify); from now on each scheduled scan retires the one falling out of the newest 7.
+- Kept: `scans/` (3.2 GiB, the pre-capture `disk-tree index` blobs; the only copy of 9/06 and 9/27–28); captures (7.3 GiB, the 30-day raw window of specs/lean-scans.md §3, not yet expired by anything).
+
 ## Pass (2026-10-18): 19 G → 52 G free, no user data touched
 
 - Start: `/` 19 G free (96%), from the 10/18 06:14 scan's map + diff (`c/disky/.claude/worktrees` +27 G, `wt/app` +13 G, `.cache/uv` 44 G since 10/03).
