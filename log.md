@@ -2,6 +2,15 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Pass (2026-10-21): stale scratch, 4.5 GiB
+
+- Start: `df` swung 17 → 45 G free within minutes (swap: the `VM` volume held 19.8 GiB, 13.9 GiB used). Since 10/18's 52 G: `~` is 408 GiB (scan `2026-10-21T1023`), `wt/app/apps/tauri/target` rebuilt to 5.85 GiB exclusive.
+- Deleted (each `df` delta measured):
+  - `wt/gcs/.tmp` (DuckDB spill files from 9/14, no open handles): **1.02 GiB**.
+  - `~/c/disky/tmp/{iv-drill-bench,worktree-cleanup-20261012,worktree-cleanup-20261018}` after review: the bench's results are in `specs/interval-store.md` §6; the kept agent tmp drafts are in git (except a retired serving-box bench table whose conclusion is in `specs/done/ch-postmortem.md`); the rest was parquet fixtures, a 2.48 GB local copy of the gcs D1, local miniflare state and a local-only `.dev.vars`: **3.52 GiB**.
+- End: 51 G free (swap-dependent).
+- Proposed, not yet run: `npm cache clean --force` (4.56 GiB), old Codex releases (~3.0 GiB), `brew cleanup --prune=all` (2.3 GB), Cypress 15.x (1.85 GiB). Owned elsewhere: `wt/gcs/site/.wrangler/state` (2.6 GiB), `wt/app` target (5.85 GiB), stale agent / side worktrees (~4–4.5 GiB), `hccs/ctbk/wt` (2.4 GiB). Superhuman's extension cache in Chrome's NBDx profile is 12.6 GiB.
+
 ## R2 pass (2026-10-18): the `disk-tree` bucket's per-scan copies, 47.9 → ~27.6 GiB
 
 - Not the laptop disk: the bucket the site and pipeline write (`tmp/m3-r2-footprint.txt` before). Prod has served the interval store since 10/18 (`PATH_STORE = "intervals"`), so the per-scan `path`/`bysize` sorts had become mostly redundant with it (10.8 GiB vs its 0.78 GiB).
