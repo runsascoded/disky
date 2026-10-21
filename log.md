@@ -2,14 +2,18 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
-## Pass (2026-10-21): stale scratch, 4.5 GiB
+## Pass (2026-10-21): stale scratch and tool caches, ≈17 GiB
 
 - Start: `df` swung 17 → 45 G free within minutes (swap: the `VM` volume held 19.8 GiB, 13.9 GiB used). Since 10/18's 52 G: `~` is 408 GiB (scan `2026-10-21T1023`), `wt/app/apps/tauri/target` rebuilt to 5.85 GiB exclusive.
 - Deleted (each `df` delta measured):
   - `wt/gcs/.tmp` (DuckDB spill files from 9/14, no open handles): **1.02 GiB**.
   - `~/c/disky/tmp/{iv-drill-bench,worktree-cleanup-20261012,worktree-cleanup-20261018}` after review: the bench's results are in `specs/interval-store.md` §6; the kept agent tmp drafts are in git (except a retired serving-box bench table whose conclusion is in `specs/done/ch-postmortem.md`); the rest was parquet fixtures, a 2.48 GB local copy of the gcs D1, local miniflare state and a local-only `.dev.vars`: **3.52 GiB**.
-- End: 51 G free (swap-dependent).
-- Proposed, not yet run: `npm cache clean --force` (4.56 GiB), old Codex releases (~3.0 GiB), `brew cleanup --prune=all` (2.3 GB), Cypress 15.x (1.85 GiB). Owned elsewhere: `wt/gcs/site/.wrangler/state` (2.6 GiB), `wt/app` target (5.85 GiB), stale agent / side worktrees (~4–4.5 GiB), `hccs/ctbk/wt` (2.4 GiB). Superhuman's extension cache in Chrome's NBDx profile is 12.6 GiB.
+  - Old Codex releases (every one not `current` and not running; standalone 0.162.1 kept, still running): **2.64 GiB**. Refill: none.
+  - Cypress 15.18.1 / 15.20.1 / 15.21.1 (slidev pins 16.1.0): **1.89 GiB**. Refill: only a repo on 15.x.
+  - `brew cleanup --prune=all` (reported 2.3 GB): **3.67 GiB** `df` delta, some of it swap noise.
+  - `npm cache clean --force` + `~/.npm/_npx`: **4.54 GiB**. Refill: partial, as `npm`/`npx` run.
+- End: **62 G free (87%)**, swap-dependent; ≈17 GiB by `df` deltas this pass.
+- Owned elsewhere, not touched: `wt/gcs/site/.wrangler/state` (2.6 GiB), `wt/app` target (5.85 GiB), stale agent / side worktrees (~4–4.5 GiB), `hccs/ctbk/wt` (2.4 GiB). Superhuman's extension cache in Chrome's NBDx profile is 12.6 GiB.
 
 ## R2 pass (2026-10-18): the `disk-tree` bucket's per-scan copies, 47.9 → ~27.6 GiB
 
