@@ -16,6 +16,10 @@ function isFolded(n) {
 function edgeEmphFactor(depth, emphasis) {
   return 1 + emphasis * Math.max(0, 2 - depth);
 }
+function cellStroke(cfg, depth, w, h, dust, parentBw) {
+  const bw = Math.min(cfg.borderWidth(depth, { w, h }) * edgeEmphFactor(depth, cfg.edgeEmphasis), dust ? 1 : Infinity);
+  return cfg.borderStep ? Math.max(1, Math.min(Math.round(bw), parentBw - 1)) : bw;
+}
 function reclaimTitleColumns(rects, titleRight, bodyHeight, lift) {
   if (bodyHeight <= 0 || lift <= 0 || ![titleRight, bodyHeight, lift].every(Number.isFinite)) return rects;
   const epsilon = 1e-6;
@@ -64,8 +68,8 @@ function layoutChildren(node, path, chainLabels, raw, dims, cfg) {
   }
   return { rects, mode, titleWidth };
 }
-function place(node0, path0, r, depth, mode, cfg) {
-  const { getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis } = cfg;
+function place(node0, path0, r, depth, mode, cfg, parentBw) {
+  const { getLabel, childrenOf, showLabels, collapseChains } = cfg;
   const folded = isFolded(node0);
   let node = node0;
   let path = path0;
@@ -90,7 +94,7 @@ function place(node0, path0, r, depth, mode, cfg) {
   const dust = Math.min(r.w, r.h) < 14;
   const shared = mode === "shared";
   const showLbl = showLabels && r.w > 36 && r.h > 13;
-  const bw = shared ? Math.min(borderWidth(depth, { w: r.w, h: r.h }) * edgeEmphFactor(depth, edgeEmphasis), dust ? 1 : Infinity) : 0;
+  const bw = shared ? cellStroke(cfg, depth, r.w, r.h, dust, parentBw) : 0;
   const edge = bw / 2;
   const boxW = shared ? r.w : r.w - (dust ? 1 : 2);
   const boxH = shared ? r.h : r.h - (dust ? 1 : 2);
@@ -112,7 +116,8 @@ function place(node0, path0, r, depth, mode, cfg) {
       { x: r.x + innerLeft + s.x, y: r.y + innerTop + s.y, w: s.w, h: s.h },
       depth + 1,
       kidsMode,
-      cfg
+      cfg,
+      shared ? bw : Infinity
     )
   );
   return {
@@ -144,7 +149,8 @@ function layoutCells(topRects, basePath, rootMode, cfg) {
       r,
       0,
       rootMode,
-      cfg
+      cfg,
+      Infinity
     )
   );
 }
@@ -211,6 +217,6 @@ function foldedOf(cell) {
   return cell.folded ? cell.node : null;
 }
 
-export { NAME_MIN_PX, candidates, categoricalStyle, edgeEmphFactor, fitCandidate, flattenPlaced, foldedOf, hitTest, inlineRoom, isFolded, layoutCells, layoutChildren, resolveCellStyle, resolveRing };
-//# sourceMappingURL=chunk-2FTUTDQU.js.map
-//# sourceMappingURL=chunk-2FTUTDQU.js.map
+export { NAME_MIN_PX, candidates, categoricalStyle, cellStroke, fitCandidate, flattenPlaced, foldedOf, hitTest, inlineRoom, isFolded, layoutCells, layoutChildren, resolveCellStyle, resolveRing };
+//# sourceMappingURL=chunk-ZNR7R7MN.js.map
+//# sourceMappingURL=chunk-ZNR7R7MN.js.map

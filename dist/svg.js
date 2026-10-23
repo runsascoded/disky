@@ -1,4 +1,4 @@
-import { layoutCells, isFolded, flattenPlaced, resolveCellStyle, candidates, fitCandidate, inlineRoom, resolveRing } from './chunk-2FTUTDQU.js';
+import { layoutCells, isFolded, flattenPlaced, resolveCellStyle, candidates, fitCandidate, inlineRoom, resolveRing } from './chunk-ZNR7R7MN.js';
 import { foldThin, squarify, foldSmall } from './chunk-TWK3KLKY.js';
 import { slotColor, DEFAULT_PALETTE, CONTAINER_BG } from './chunk-FUKGMHLM.js';
 import { parseColor } from './chunk-JJOWQXW4.js';
@@ -41,6 +41,7 @@ function staticLayout(root, o) {
     collapseChains: o.collapseChains ?? false,
     borderWidth: o.borderWidth ?? defaultBorderWidth,
     edgeEmphasis: o.edgeEmphasis ?? 0,
+    borderStep: o.borderStep ?? false,
     fold,
     layTiles,
     tilingFor: () => tiling

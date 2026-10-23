@@ -1,4 +1,4 @@
-import { T as Tiling, C as CellText, S as StyleOpts, P as PlacedCell } from './cellStyle-DkAN5dVj.js';
+import { T as Tiling, C as CellText, S as StyleOpts, P as PlacedCell } from './cellStyle-DVNsfe4P.js';
 import './squarify.js';
 
 interface StaticLayoutOpts<T> {
@@ -18,6 +18,7 @@ interface StaticLayoutOpts<T> {
         h: number;
     }) => number;
     edgeEmphasis?: number;
+    borderStep?: boolean;
 }
 /** The placed-cell tree for `root`'s children at `width`×`height`, as `<Treemap>` lays it. */
 declare function staticLayout<T>(root: T, o: StaticLayoutOpts<T>): PlacedCell<T>[];

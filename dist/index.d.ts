@@ -1,7 +1,7 @@
 import * as react from 'react';
 import { ReactNode, CSSProperties, RefObject } from 'react';
-import { P as PlacedCell, C as CellText, a as CellStyle, T as Tiling, S as StyleOpts } from './cellStyle-DkAN5dVj.js';
-export { F as FoldedNode, L as LayoutConfig, N as NAME_MIN_PX, R as ResolvedStyle, c as candidates, f as fitCandidate, b as flattenPlaced, d as foldedOf, h as hitTest, i as inlineRoom, e as isFolded, l as layoutCells, r as resolveCellStyle } from './cellStyle-DkAN5dVj.js';
+import { P as PlacedCell, C as CellText, a as CellStyle, T as Tiling, S as StyleOpts } from './cellStyle-DVNsfe4P.js';
+export { F as FoldedNode, L as LayoutConfig, N as NAME_MIN_PX, R as ResolvedStyle, c as candidates, b as cellStroke, f as fitCandidate, d as flattenPlaced, e as foldedOf, h as hitTest, i as inlineRoom, g as isFolded, l as layoutCells, r as resolveCellStyle } from './cellStyle-DVNsfe4P.js';
 export { Rect, foldSmall, foldThin, squarify, squarifyRemainder } from './squarify.js';
 export { divergingColor, divergingInk } from './divergingColor.js';
 export { parseColor } from './parseColor.js';
@@ -435,6 +435,15 @@ interface TreemapProps<T> {
      */
     edgeEmphasis?: number;
     /**
+     * Shared tiling only: round every stroke to whole pixels and keep each one
+     * ≥1px narrower than its parent's, so a parent's seam always reads wider
+     * than the seams between its children (down to the 1px floor). Fractional
+     * widths from `borderWidth` (e.g. a size cap) otherwise quantize to no
+     * visible difference. Pair with a `borderWidth` that steps by level.
+     * Default: false.
+     */
+    borderStep?: boolean;
+    /**
      * In shared tiling, default each cell's half-stroke to a luminance-contrast
      * color derived from its own face (dark stroke on light cells, light on
      * dark) instead of the neutral `--dt-treemap-edge` gutter — so borders read
@@ -554,10 +563,16 @@ interface CellCtx extends CellDims {
      * `renderCellExtra` only. */
     chain?: number;
 }
-declare function Treemap<T>({ root, initialPath, path: pathProp, getSize, getChildren, hasChildren, loadChildren, onChildrenLoaded, renderLoading, renderLoadError, getLabel, getId, formatSize, formatCell, collapseChains, reclaimTitleSpace, branchOutline, colorForCell, lens, renderCellExtra, renderTooltip, tipMode, renderTipDefault, renderRollup, renderLegend, renderCrumbSuffix, renderFooter, renderCellSubtitle, onCellClick, cellHref, onPathChange, onCellHover, minCellArea, minCellSide, mergeSmall, fullscreen, exportable, onExport, renderTip, chrome, showLabels, sizeAlign, inlineSizeMinWidth, className, mapStyle, depthFade, rootFade, fadeFloor, tiling, borderWidth, edgeEmphasis, edgeContrast, dustTexture, nestedHues, foldControl, remainderTail, renderer, a11yLinks, a11yMaxCells, a11yMinSide, outlineGroups, }: TreemapProps<T>): react.JSX.Element;
+declare function Treemap<T>({ root, initialPath, path: pathProp, getSize, getChildren, hasChildren, loadChildren, onChildrenLoaded, renderLoading, renderLoadError, getLabel, getId, formatSize, formatCell, collapseChains, reclaimTitleSpace, branchOutline, colorForCell, lens, renderCellExtra, renderTooltip, tipMode, renderTipDefault, renderRollup, renderLegend, renderCrumbSuffix, renderFooter, renderCellSubtitle, onCellClick, cellHref, onPathChange, onCellHover, minCellArea, minCellSide, mergeSmall, fullscreen, exportable, onExport, renderTip, chrome, showLabels, sizeAlign, inlineSizeMinWidth, className, mapStyle, depthFade, rootFade, fadeFloor, tiling, borderWidth, edgeEmphasis, borderStep, edgeContrast, dustTexture, nestedHues, foldControl, remainderTail, renderer, a11yLinks, a11yMaxCells, a11yMinSide, outlineGroups, }: TreemapProps<T>): react.JSX.Element;
 
 /** Controlled layout switch; use the same value for `<Treemap reclaimTitleSpace>`. */
 declare function TitleSpaceToggle({ checked, onChange }: {
+    checked: boolean;
+    onChange: (checked: boolean) => void;
+}): react.JSX.Element;
+
+/** Controlled stroke switch; use the same value for `<Treemap borderStep>`. */
+declare function BorderStepToggle({ checked, onChange }: {
     checked: boolean;
     onChange: (checked: boolean) => void;
 }): react.JSX.Element;
@@ -1142,4 +1157,4 @@ declare const statusColors: {
     };
 };
 
-export { type AgeFadeOpts, CONTAINER_BG, type CanvasHit, type CellCtx, type CellDims, CellStyle, CellText, type ComposeOptions, DEFAULT_PALETTE, type DiffAreaMode, type DiffFlatRow, type DiffIndexInfo, type DiffInput, type DiffKind, type DiffMetric, type DiffNode, type DiffNodeStatus, type DiffRecRow, type DiffRowValues, type DiffStatus, type DiffSubtree, DiffTable, type DiffTableProps, type DiffTableRow, DiffTreemap, type DiffTreemapProps, type DimOpts, DustHatch, type DustHatchProps, type ExportContext, type ExportKind, type ExportOptions, GREW_GREEN, type HoverPin, type HoverPinOpts, MIN_CELL_PX, NEUTRAL, type OutlineGroups, OutlineOverlay, type OutlineOverlayProps, type OutlinePath, type OutlineSeg, PlacedCell, type QueryOpts, SHRANK_RED, StyleOpts, TOUCHED_HATCH, Tiling, type TilingCtx, TitleSpaceToggle, Treemap, TreemapCanvas, type TreemapCanvasProps, type TreemapProps, UNCHANGED_GREY, UNCHANGED_SWATCH, age01, ageDomain, ageFade, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, contrastEdge, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustLineCount, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, mapMinFrac, parseQuery, slotColor, statusColors, unionOutline, useHoverPin };
+export { type AgeFadeOpts, BorderStepToggle, CONTAINER_BG, type CanvasHit, type CellCtx, type CellDims, CellStyle, CellText, type ComposeOptions, DEFAULT_PALETTE, type DiffAreaMode, type DiffFlatRow, type DiffIndexInfo, type DiffInput, type DiffKind, type DiffMetric, type DiffNode, type DiffNodeStatus, type DiffRecRow, type DiffRowValues, type DiffStatus, type DiffSubtree, DiffTable, type DiffTableProps, type DiffTableRow, DiffTreemap, type DiffTreemapProps, type DimOpts, DustHatch, type DustHatchProps, type ExportContext, type ExportKind, type ExportOptions, GREW_GREEN, type HoverPin, type HoverPinOpts, MIN_CELL_PX, NEUTRAL, type OutlineGroups, OutlineOverlay, type OutlineOverlayProps, type OutlinePath, type OutlineSeg, PlacedCell, type QueryOpts, SHRANK_RED, StyleOpts, TOUCHED_HATCH, Tiling, type TilingCtx, TitleSpaceToggle, Treemap, TreemapCanvas, type TreemapCanvasProps, type TreemapProps, UNCHANGED_GREY, UNCHANGED_SWATCH, age01, ageDomain, ageFade, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, contrastEdge, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustLineCount, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, mapMinFrac, parseQuery, slotColor, statusColors, unionOutline, useHoverPin };

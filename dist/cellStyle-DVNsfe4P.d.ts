@@ -117,6 +117,14 @@ interface PlacedCell<T> {
     children: PlacedCell<T>[];
 }
 type Node<T> = T | FoldedNode<T>;
+/**
+ * A shared-mode cell's stroke width: the consumer's `borderWidth` times the
+ * shallow-edge emphasis, a hairline at most for dust. With `borderStep` it is a
+ * whole number of pixels, at least 1 and at most `parentBw − 1`, so a parent's
+ * seam is always ≥1px wider than its children's (until the parent is itself a
+ * hairline). `parentBw` is `Infinity` for top-level cells and under gaps parents.
+ */
+declare function cellStroke(cfg: Pick<LayoutConfig<unknown>, 'borderWidth' | 'edgeEmphasis' | 'borderStep'>, depth: number, w: number, h: number, dust: boolean, parentBw: number): number;
 /** Everything `layoutCells` needs from the host component, threaded as one bundle. */
 interface LayoutConfig<T> {
     getSize: (n: T) => number;
@@ -131,6 +139,8 @@ interface LayoutConfig<T> {
     }) => number;
     /** Shallow-edge emphasis (see {@link edgeEmphFactor}); 0 = uniform. */
     edgeEmphasis: number;
+    /** Whole-pixel strokes, each ≥1px narrower than its parent's (see {@link cellStroke}). */
+    borderStep?: boolean;
     /** Measured title content width. Absent keeps a full-width title strip. */
     getTitleWidth?: (n: T, chainLabels: string[] | null, w: number, boxW: number) => number;
     /** Fold small/thin items before layout (the component's `fold`). */
@@ -191,4 +201,4 @@ declare function resolveCellStyle<T>(cell: PlacedCell<T>, o: StyleOpts<T>): Reso
 /** The `FoldedNode` behind a folded placed cell (its `.count`/`.children`). */
 declare function foldedOf<T>(cell: PlacedCell<T>): FoldedNode<T> | null;
 
-export { type CellText as C, type FoldedNode as F, type LayoutConfig as L, NAME_MIN_PX as N, type PlacedCell as P, type ResolvedStyle as R, type StyleOpts as S, type Tiling as T, type CellStyle as a, flattenPlaced as b, candidates as c, foldedOf as d, isFolded as e, fitCandidate as f, hitTest as h, inlineRoom as i, layoutCells as l, resolveCellStyle as r };
+export { type CellText as C, type FoldedNode as F, type LayoutConfig as L, NAME_MIN_PX as N, type PlacedCell as P, type ResolvedStyle as R, type StyleOpts as S, type Tiling as T, type CellStyle as a, cellStroke as b, candidates as c, flattenPlaced as d, foldedOf as e, fitCandidate as f, isFolded as g, hitTest as h, inlineRoom as i, layoutCells as l, resolveCellStyle as r };

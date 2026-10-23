@@ -1,5 +1,5 @@
-import { flattenPlaced, hitTest, fitCandidate, candidates, inlineRoom, isFolded, layoutCells, edgeEmphFactor, layoutChildren, categoricalStyle, resolveRing, resolveCellStyle } from './chunk-2FTUTDQU.js';
-export { NAME_MIN_PX, candidates, fitCandidate, flattenPlaced, foldedOf, hitTest, inlineRoom, isFolded, layoutCells, resolveCellStyle } from './chunk-2FTUTDQU.js';
+import { flattenPlaced, hitTest, fitCandidate, candidates, inlineRoom, isFolded, layoutCells, cellStroke, layoutChildren, categoricalStyle, resolveRing, resolveCellStyle } from './chunk-ZNR7R7MN.js';
+export { NAME_MIN_PX, candidates, cellStroke, fitCandidate, flattenPlaced, foldedOf, hitTest, inlineRoom, isFolded, layoutCells, resolveCellStyle } from './chunk-ZNR7R7MN.js';
 import { foldSmall, squarifyRemainder, squarify, foldThin } from './chunk-TWK3KLKY.js';
 export { foldSmall, foldThin, squarify, squarifyRemainder } from './chunk-TWK3KLKY.js';
 import { useHoverPin } from './chunk-HMG5G7YN.js';
@@ -804,6 +804,7 @@ function Treemap({
   tiling = "gaps",
   borderWidth = defaultBorderWidth,
   edgeEmphasis = 0,
+  borderStep = false,
   edgeContrast = true,
   dustTexture = true,
   nestedHues = false,
@@ -1044,6 +1045,7 @@ function Treemap({
       collapseChains,
       borderWidth,
       edgeEmphasis,
+      borderStep,
       fold,
       layTiles,
       tilingFor,
@@ -1064,6 +1066,7 @@ function Treemap({
     collapseChains,
     borderWidth,
     edgeEmphasis,
+    borderStep,
     fold,
     layTiles,
     tilingFor,
@@ -1115,7 +1118,7 @@ function Treemap({
       go(path2);
     } else activatePin(node2, path2, key, x, y);
   };
-  const cell = (kid0, kidPath0, r, depth, mode) => {
+  const cell = (kid0, kidPath0, r, depth, mode, parentBw) => {
     const folded = isFolded(kid0);
     const chained = collapseChains && !folded ? (() => {
       let cur = kid0;
@@ -1144,7 +1147,7 @@ function Treemap({
     const showLbl = showLabels && r.w > 36 && r.h > 13;
     const dust = Math.min(r.w, r.h) < 14;
     const shared = mode === "shared";
-    const bw = shared ? Math.min(borderWidth(depth, { w: r.w, h: r.h }) * edgeEmphFactor(depth, edgeEmphasis), dust ? 1 : Infinity) : 0;
+    const bw = shared ? cellStroke({ borderWidth, edgeEmphasis, borderStep }, depth, r.w, r.h, dust, parentBw) : 0;
     const edge = bw / 2;
     let builtinEdge = null;
     const boxW = shared ? r.w : r.w - (dust ? 1 : 2);
@@ -1163,6 +1166,7 @@ function Treemap({
         collapseChains,
         borderWidth,
         edgeEmphasis,
+        borderStep,
         fold,
         layTiles,
         tilingFor,
@@ -1380,7 +1384,7 @@ function Treemap({
                 position: "absolute",
                 inset: kidsMode === "shared" ? `${showLbl ? 20 : edge}px ${edge}px ${edge}px ${edge}px` : `${showLbl ? 20 : 3}px 3px 3px 3px`
               },
-              children: kids.filter((s) => s.w >= 3 && s.h >= 3).map((s) => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it], s, depth + 1, kidsMode))
+              children: kids.filter((s) => s.w >= 3 && s.h >= 3).map((s) => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it], s, depth + 1, kidsMode, shared ? bw : Infinity))
             }
           )
         ]
@@ -1410,6 +1414,7 @@ function Treemap({
           collapseChains,
           borderWidth,
           edgeEmphasis,
+          borderStep,
           fold,
           layTiles,
           tilingFor,
@@ -1486,6 +1491,7 @@ function Treemap({
       collapseChains,
       borderWidth,
       edgeEmphasis,
+      borderStep,
       fold,
       layTiles,
       tilingFor,
@@ -1695,7 +1701,7 @@ function Treemap({
                     }, 180);
                   }
                 }
-              ) : rects.filter((r) => r.w >= 3 && r.h >= 3).map((r) => cell(r.it, isFolded(r.it) ? path : [...path, r.it], r, 0, rootMode)),
+              ) : rects.filter((r) => r.w >= 3 && r.h >= 3).map((r) => cell(r.it, isFolded(r.it) ? path : [...path, r.it], r, 0, rootMode, Infinity)),
               outlineGroups && size.w > 0 && size.h > 0 && /* @__PURE__ */ jsx(OutlineOverlay, { cells: placedCells, width: size.w, height: size.h, groups: outlineGroups }),
               branchOutline && /* @__PURE__ */ jsx("svg", { className: "dt-treemap-branch-frames", width: size.w, height: size.h, "aria-hidden": true, style: { position: "absolute", inset: 0, pointerEvents: "none", zIndex: 1 }, children: flattenPlaced(placedCells).filter((c) => c.hasKids).map((c, i) => /* @__PURE__ */ jsx("rect", { x: c.x + 0.5, y: c.y + 0.5, width: Math.max(0, c.boxW - 1), height: Math.max(0, c.boxH - 1), fill: "none", stroke: branchOutline, strokeWidth: 1 }, i)) }),
               failed?.key === viewKey ? /* @__PURE__ */ jsx("div", { className: "dt-treemap-status error", style: STATUS_STYLE, children: renderLoadError ? renderLoadError(node, path, failed.error, retry) : /* @__PURE__ */ jsxs(Fragment, { children: [
@@ -1824,6 +1830,12 @@ function TitleSpaceToggle({ checked, onChange }) {
   return /* @__PURE__ */ jsxs("label", { className: "dt-treemap-title-space-toggle", children: [
     /* @__PURE__ */ jsx("input", { type: "checkbox", checked, onChange: (e) => onChange(e.target.checked) }),
     " reclaim title bar space"
+  ] });
+}
+function BorderStepToggle({ checked, onChange }) {
+  return /* @__PURE__ */ jsxs("label", { className: "dt-treemap-border-step-toggle", children: [
+    /* @__PURE__ */ jsx("input", { type: "checkbox", checked, onChange: (e) => onChange(e.target.checked) }),
+    " parent borders \u22651px wider"
   ] });
 }
 
@@ -2647,6 +2659,6 @@ function DiffTable({
   ] });
 }
 
-export { DiffTable, DiffTreemap, DustHatch, GREW_GREEN, MIN_CELL_PX, NEUTRAL, OutlineOverlay, SHRANK_RED, TOUCHED_HATCH, TitleSpaceToggle, Treemap, TreemapCanvas, UNCHANGED_GREY, UNCHANGED_SWATCH, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustLineCount, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, mapMinFrac, parseQuery, statusColors, unionOutline };
+export { BorderStepToggle, DiffTable, DiffTreemap, DustHatch, GREW_GREEN, MIN_CELL_PX, NEUTRAL, OutlineOverlay, SHRANK_RED, TOUCHED_HATCH, TitleSpaceToggle, Treemap, TreemapCanvas, UNCHANGED_GREY, UNCHANGED_SWATCH, buildDiffTree, canvasToPngBlob, churn, colorResolver, composeExport, copyPng, cssColor, defaultExportFilename, deltaColor, deltaTextColor, dimUnmatched, downloadPng, drawDust, dustLineCount, dustOffsets, fetchable, filterNodes, groupOutlines, groupRects, mapMinFrac, parseQuery, statusColors, unionOutline };
 //# sourceMappingURL=index.js.map
 //# sourceMappingURL=index.js.map

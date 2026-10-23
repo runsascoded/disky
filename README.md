@@ -13,6 +13,7 @@ Ships:
 | [`<VoronoiTreemap>`](#voronoitreemap) | Circle- (or polygon-) clipped Voronoi tessellation, areas ∝ value. Separate `@open-athena/treemap/voronoi` subpath — the only part with dependencies. |
 | [`useHoverPin`](#usehoverpin) | Headless hover+pin state (single pin, touch-safe, outside-click / Esc clear). |
 | `<TitleSpaceToggle>` | Controlled checkbox for `reclaimTitleSpace`; share its `checked` value with `<Treemap reclaimTitleSpace={checked}>`. |
+| `<BorderStepToggle>` | Controlled checkbox for `borderStep`; share its `checked` value with `<Treemap borderStep={checked}>`. |
 | `squarify` / `foldSmall` / `foldThin` / `squarifyRemainder` | Pure layout primitives if you want to render the cells yourself. |
 | `layoutCells` / `flattenPlaced` / `hitTest` / `isFolded` | Placed-cell layout + hit-testing, shared by both renderers. |
 | `resolveCellStyle` / `foldedOf` | Cell-style resolution (the `colorForCell` → `lens` → contrast-edge fall-through). |
@@ -28,6 +29,8 @@ Ships:
 ## Install
 
 `reclaimTitleSpace` defaults to `false`: parents reserve a full-width title bar. Enabling it lets complete columns to the right of the measured label reclaim that strip, while all sibling rectangles retain one shared area multiplier. It works with DOM, canvas, hit-testing and export. `branchOutline="…"` adds quiet, one-pixel parent frames above descendants without changing layout; those frames also appear in exported images.
+
+`borderStep` (shared tiling, default `false`) rounds every stroke to whole pixels and keeps each one at least 1px narrower than its parent's, so a parent's outer seam always reads wider than the seams between its children; the 1px floor is the only place two levels can tie. Give it a `borderWidth` that steps by level (e.g. levels-below + 1).
 
 ```bash
 pnpm add @open-athena/treemap
