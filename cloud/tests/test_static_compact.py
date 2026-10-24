@@ -149,6 +149,31 @@ def test_incremental_measure_is_the_rebuilds(world, tmp_path, store, gen):
     assert got == want
 
 
+def test_compactions_measure_and_roll_up_incrementally(world):
+    """specs/static-incremental-compaction.md step 4: every fixture run counts only new roots (`dcount: fresh`), so each
+    compaction above (whose bytes `test_compacted_generation_is_the_rebuild` checks) took its measurement and rollups from
+    base ⊕ runs, each range's roots only sorted."""
+    assert [world[k]["drill"]["measure"] for k in ("b", "c", "d", "e", "f", "h", "i")] == ["incremental"] * 7
+    assert [o["compact"]["drill"]["measure"] for o in world["a"][1:]] == ["incremental"] * 2
+
+
+def test_a_run_counting_closes_measures_every_root_to_the_same_bytes(world, tmp_path):
+    """C's fold with its runs' `dcount: fresh` marks removed (drills built before it): the fold measures and rolls up
+    every root instead, and writes the incremental fold's files."""
+    gen_dir = tmp_path / "g"
+    shutil.copytree(world["c_store"] / "g", gen_dir)
+    _, runs = ar.newest_runs(gen_dir)
+    for r in runs:
+        f = gen_dir / r["key"] / "drill" / "meta.json"
+        f.write_text(json.dumps({k: v for k, v in json.loads(f.read_text()).items() if k != "dcount"}))
+    with _small_groups():
+        doc = sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3)
+    assert doc["drill"]["measure"] == "roots"
+    got, want = _md5s(tmp_path / "out"), _md5s(world["c_store"] / "g.c001")
+    assert sorted(got) == sorted(want)
+    assert got == want
+
+
 def test_incremental_measure_refuses_runs_counting_closes(world, tmp_path):
     """A run whose drill predates `dcount: fresh` (its `dcount` counts closes too) is refused, not summed."""
     root = world["b_store"]

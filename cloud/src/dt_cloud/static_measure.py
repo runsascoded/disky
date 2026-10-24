@@ -135,3 +135,97 @@ def incremental_measure(con, tiers: list[sd.Tier], meas: Path, members: str, out
         log(f"measure {kind}: {doc[kind]['rows']:,} directories ({doc[kind]['headers']:,} by run headers, {doc[kind]['dcount']:,} run counts, "
             f"{doc[kind]['base_counted']:,} counted below the base's floor)")
     return doc
+
+
+def blocker(tiers: list[sd.Tier], meas: Path, *, floor: int, R: int) -> str | None:
+    """Why a compaction over `tiers` (the base's drill, then the runs') can't measure and roll up from base ⊕ runs
+    (`incremental_measure`, `incremental_rollups`), or `None`: a run whose `dcount` counts closes too, a base without its
+    measurement `meas`, or a floor above `R + 1` (the measurement would miss heavy directories)."""
+    if stale := [t.name for t in tiers[1:] if t.meta.get("dcount") != sd.DCOUNT_FRESH]:
+        return f"runs without `dcount: {sd.DCOUNT_FRESH}`: {', '.join(stale)}"
+    if not (meas / SUBS["long"]).is_dir():
+        return f"no base measurement at {meas}"
+    if floor > R + 1:
+        return f"floor {floor:,} > R + 1 ({R + 1:,})"
+    return None
+
+
+def incremental_rollups(con, tiers: list[sd.Tier], kind: str, meas: Path, into: str, *, R: int, aliases=None, log=err) -> dict:
+    """A compaction's rollup rows for one kind (`ROLLUP_COLS`, inserted into table `into`) from `tiers` (the base's drill,
+    then the runs', oldest first) and the compaction's measurement `meas` (its `roots-measure/`, `incremental_measure`'s):
+    what `static_local.measure_rollups` rolls up from every root, without reading a root (specs/static-incremental-compaction.md,
+    step 4).
+
+    Per `(c, dir)` (`c`: a canonical of `aliases` `(q, canonical)`, the compaction's classes, re-keyed per tier as
+    `incremental_measure` does; short: the literal), `static_drill.merge_tiers`' rule over base ⊕ runs: the cells of the
+    newest tier with a full header and every later one (the base's header is full), collapsed into the rebuild's form: one
+    full header (`kind` 0; `vf` the kept children and `o` the children, the newest header's; `b` the measured root rows),
+    the kept children's and the remainder's cells. Heavy is the measurement's: a directory with more than `R` root rows (the
+    measurement holds every one: its floor is at most `R + 1`); a header whose directory isn't is dropped, a heavy
+    directory with no header in any tier is an error. Returns counts."""
+    long = kind == "long"
+    if long:
+        con.register("ir_al_in", aliases)
+        con.execute("CREATE OR REPLACE TEMP TABLE ir_c AS SELECT DISTINCT canonical AS c FROM ir_al_in")
+        con.unregister("ir_al_in")
+        con.execute("CREATE OR REPLACE TEMP TABLE ir_m (c VARCHAR, tier INTEGER, ci VARCHAR)")
+        for i, t in enumerate(tiers):
+            con.register("ir_a_in", t.alias_table())
+            con.execute(f"INSERT INTO ir_m SELECT c.c, {i}, coalesce(a.canonical, c.c) FROM ir_c AS c LEFT JOIN ir_a_in AS a ON a.q = c.c")
+            con.unregister("ir_a_in")
+
+    def keyed(i: int, files: list[str]) -> str:
+        """Tier `i`'s rollup rows (`files`), `q` the compaction's canonical (long) or the literal (short)."""
+        if long:
+            return f"""SELECT {i} AS tier, m.c AS q, r.dir, r.kind, r.child, r.vf, r.b, r.o FROM read_parquet({_files(files)}) AS r
+                JOIN ir_m AS m ON m.tier = {i} AND m.ci = r.q"""
+        return f"SELECT {i} AS tier, q, dir, kind, child, vf, b, o FROM read_parquet({_files(files)})"
+
+    empty = ("SELECT 0 AS tier, NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::TINYINT AS kind, NULL::VARCHAR AS child, NULL::BIGINT AS vf, "
+             "NULL::BIGINT AS b, NULL::BIGINT AS o")
+    runs = [keyed(i, fs) for i, t in list(enumerate(tiers))[1:] if (fs := t.files(kind, "rollups"))]
+    con.execute(f"CREATE OR REPLACE TEMP TABLE ir_r AS {_union(runs, empty)}")
+    # per directory a run touched: the newest full header's tier (else the base's), the newest header
+    hdr = f"FILTER (WHERE kind IN ({sd.KIND_FULL}, {sd.KIND_DELTA}))"
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE ir_f AS SELECT q, dir, coalesce(max(tier) FILTER (WHERE kind = {sd.KIND_FULL}), 0) AS ft,
+            arg_max(vf, tier) {hdr} AS vf, arg_max(o, tier) {hdr} AS o, arg_max(b, tier) {hdr} AS b
+        FROM ir_r GROUP BY q, dir""")
+    headless = con.execute("SELECT count(*) FROM ir_f WHERE vf IS NULL").fetchone()[0]
+    if headless:
+        raise RuntimeError(f"{kind}: {headless} directories with run cells but no run header")
+    base = tiers[0].files(kind, "rollups")
+    con.execute(f"CREATE OR REPLACE TEMP VIEW ir_b AS {keyed(0, base) if base else f'SELECT * FROM ({empty}) WHERE false'}")
+    files = sorted(str(p) for p in (meas / SUBS[kind]).glob("*.parquet"))
+    heavy = (f"SELECT q, dir, rows FROM read_parquet({_files(files)}) WHERE rows > {R}" + (" AND q IN (SELECT c FROM ir_c)" if long else "")
+             if files else "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows WHERE false")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE ir_h AS {heavy}")
+    con.execute(f"""CREATE OR REPLACE TEMP TABLE ir_hd AS SELECT h.q, h.dir, h.rows, coalesce(f.ft, 0) AS ft, coalesce(f.vf, b.vf) AS vf,
+            coalesce(f.o, b.o) AS o, coalesce(f.b, b.b) AS hb, f.q IS NOT NULL AS touched
+        FROM ir_h AS h LEFT JOIN ir_f AS f USING (q, dir) LEFT JOIN (SELECT q, dir, vf, b, o FROM ir_b WHERE kind = {sd.KIND_FULL}) AS b USING (q, dir)""")
+    missing = con.execute("SELECT count(*) FROM ir_hd WHERE vf IS NULL").fetchone()[0]
+    if missing:
+        ex = con.execute("SELECT q, dir, rows FROM ir_hd WHERE vf IS NULL ORDER BY q, dir LIMIT 3").fetchall()
+        raise RuntimeError(f"{kind}: {missing} heavy directories (> {R} root rows) without a header in any tier, e.g. {ex}")
+    n0 = con.execute(f"SELECT count(*) FROM {into}").fetchone()[0]
+    con.execute(f"""INSERT INTO {into}
+        SELECT q, dir, {sd.KIND_FULL}::TINYINT, '', vf, rows, o FROM ir_hd
+        UNION ALL SELECT b.q, b.dir, b.kind, b.child, b.vf, b.b, b.o FROM ir_b AS b SEMI JOIN (SELECT q, dir FROM ir_hd WHERE ft = 0) AS h USING (q, dir)
+            WHERE b.kind IN ({sd.KIND_KEPT}, {sd.KIND_REST})
+        UNION ALL SELECT r.q, r.dir, r.kind, r.child, r.vf, r.b, r.o FROM ir_r AS r JOIN ir_hd AS h USING (q, dir)
+            WHERE r.tier >= h.ft AND r.kind IN ({sd.KIND_KEPT}, {sd.KIND_REST})""")
+    one = lambda sql: con.execute(sql).fetchone()[0]  # noqa: E731
+    doc = {
+        "headers": one("SELECT count(*) FROM ir_hd"),
+        "touched": one("SELECT count(*) FROM ir_hd WHERE touched"),
+        "restated": one("SELECT count(*) FROM ir_hd WHERE ft > 0"),
+        "dropped": one(f"SELECT count(*) FROM (SELECT q, dir FROM ir_f UNION SELECT q, dir FROM ir_b WHERE kind = {sd.KIND_FULL}) ANTI JOIN ir_h USING (q, dir)"),
+        "b_differs": one("SELECT count(*) FROM ir_hd WHERE hb <> rows"),
+        "rows": one(f"SELECT count(*) FROM {into}") - n0,
+    }
+    con.execute("DROP VIEW ir_b")
+    for t in ("ir_r", "ir_f", "ir_h", "ir_hd", "ir_m", "ir_c"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+    log(f"rollups {kind}: {doc['rows']:,} rows, {doc['headers']:,} heavy directories ({doc['touched']:,} touched by the runs, "
+        f"{doc['restated']:,} restated in full there), {doc['dropped']:,} headers dropped (≤ {R:,} root rows), "
+        f"{doc['b_differs']:,} headers whose rows differ from the measurement's")
+    return doc
