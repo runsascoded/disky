@@ -127,7 +127,7 @@ Tests (`test_static_compact.py`, world C: chunks of 3 roots, so a class's tuples
 5. **Phase 2 (not now):** fold + measure of short ranges in the same task; overlapping the measurement with wave 2.
 6. **Separate Batch jobs per wave**, no in-task barrier.
 
-7. **Heavy chunks: no memory-class routing in the deal.** A single-VM fold at `-M 200GB -p 48` OOM'd combining c001's heavy tail (chunk 4875/4881, the `ct` combine at 186 GiB of 186 GiB; it passed at `-M 270GB`, RSS peak 322 GiB). The answer is the root session's `hash(path) % P` split of a heavy chunk's combine (P from the plan's per-chunk estimate; groups disjoint across parts, the same bytes), landing in `_long_roots` as its own `[cloud]` commit; the fan-out's units adopt it once it is on `cloud` (rebase pending). The deal stays purely contiguous by estimated rows.
+7. **Heavy chunks: no memory-class routing in the deal.** A single-VM fold at `-M 200GB -p 48` OOM'd combining c001's heavy tail (chunk 4875/4881, the `ct` combine at 186 GiB of 186 GiB; it passed at `-M 270GB`, RSS peak 322 GiB). The answer is the root session's `hash(path) % P` split of a heavy chunk's combine (P from the plan's per-chunk estimate; groups disjoint across parts, the same bytes), on `cloud` as 2261056c (`COMBINE_PART_ROWS` 64M). It lives in `_combine`, so the fan-out's units (`fold_units`) split exactly as `_long_roots` does (their part files under the task's `split/`, removed after each unit; `test_heavy_chunks_combine_in_parts_over_the_fold_fan_out`). The deal stays purely contiguous by estimated rows.
 
 ## Open questions
 
