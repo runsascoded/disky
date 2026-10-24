@@ -976,7 +976,7 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
 
     def here(units: list[tuple[str, int]]) -> None:
         done = fold_units(con, ck, units, work, work, jobs=jobs, log=log, keep=True, loaded=True)
-        log(f"fold fan-out: {done['units']:,} units here, {done['rows']:,} rows in {done['s']}s")
+        ff.log(f"fold fan-out: {done['units']:,} units here, {done['rows']:,} rows in {done['s']}s")
 
     def classes() -> int:
         """`al`, `canon`, `ctid`, `dgq` and the long ranges `lqg` from `tdig` (`_classes`); the range count."""
@@ -995,7 +995,7 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
             t = step("drill/fold/wave-1", t, units=len(w1))
             gather_digests(con, ff, chunks_, work / "dig")
             shutil.rmtree(work / "dig", ignore_errors=True)
-            log(f"fold fan-out: wave 2 combines all {len(chunks_):,} chunks again from their inputs ({sum(cw.values()):,} estimated rows; "
+            ff.log(f"fold fan-out: wave 2 combines all {len(chunks_):,} chunks again from their inputs ({sum(cw.values()):,} estimated rows; "
                 "no combined roots kept between the waves)")
         cdoc = {"long_groups": classes(), "classes": "digests" if derived else "roots", "fixed": 0, "respill": False}
         t = step("drill/fold/aliases", t, members=sl.count(con, "al"), canonical=sl.count(con, "canon"))
@@ -1018,7 +1018,7 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
         cdoc = {**cdoc, "long_groups": classes(), "fixed": fixed}
         after = [con.execute(f"SELECT * FROM {tb} ORDER BY ALL").to_arrow_table() for tb in ("al", "ctid", "lqg")]
         respill = any(not x.equals(y) for x, y in zip(before, after))
-        log(f"fold fan-out: {fixed:,} members' digests fixed from their roots; " + (
+        ff.log(f"fold fan-out: {fixed:,} members' digests fixed from their roots; " + (
             "their classes or long ranges changed: every chunk spilled again" if respill else "their classes and long ranges unchanged"))
         cdoc["respill"] = respill
         ck.save(con, "classes", CLASS_TABLES, cdoc)
