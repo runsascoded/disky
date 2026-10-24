@@ -287,7 +287,8 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     (gcs's 10-23 compaction ran its 4,881 chunks one after another at ~9 of 48 cores). It never changes the bytes.
 
     `ck`: saved after the long roots (`long-roots`: the tuples' digests and the chunks' roots) and after every root is spilled (`spilled`:
-    the classes and the spills), so a resubmitted job resumes past the last one saved.
+    the classes and the spills), so a resubmitted job resumes past the last one saved. Resumed past `spilled` with a
+    measurement `fanout`, only its tables are restored: the fan-out fetches this VM's share of the spills.
 
     `staged()`: the tiers' roots copied onto the work disk (`stage_roots`; `fold_gen` starts the copy early, this waits
     on it), read instead of the tier's files; each kind's copies deleted once its last read is done. None: read in place."""
@@ -295,7 +296,13 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     if ck is not None and ck.done("spilled"):
-        groups = _restore(con, ck, "spilled", work)
+        if fanout is not None:
+            # the measurement's fan-out fetches only this VM's share of the spills (`Fanout.start`), not all of them (c001's
+            # 730 GB, read back whole before)
+            ck.load(con, "spilled-tables")
+            groups = ck.store.read_json(ck.key("spilled/done.json"))["doc"]
+        else:
+            groups = _restore(con, ck, "spilled", work)
     else:
         st = staged()
         if st is not None:

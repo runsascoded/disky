@@ -689,7 +689,8 @@ def test_a_race_seeded_from_a_fanned_out_fold_measures_nothing_again(world, tmp_
     seeded = sk.seed_checkpoint(str(tmp_path / "scratch"), str(tmp_path / "race"), "g", "g.c001", runs, "fold/spilled", log=lambda m: None)
     again, lines = [], []
     _fanned_fold(world, tmp_path, _helpers(tmp_path, again), root="race", out="out-race", log=lines.append)
-    plans = [m.groups() for m in map(re.compile(r"measure fan-out: (\d+) ranges here \(\d+ B\), (\d+) on 2 helper tasks \((\d+) to measure\)").fullmatch, lines) if m]
+    plans = [m.groups() for m in map(re.compile(r"measure fan-out: (\d+) ranges here \([\d,]+ B; \d+ spill files, [\d,]+ B to fetch\), (\d+) on 2 helper tasks "
+                                                r"\((\d+) to measure\)").fullmatch, lines) if m]
     assert (again, seeded["steps"][-1], len(plans), plans[0][0], plans[0][2]) == ([], "fold/spilled", 1, "0", "0")
     assert _md5s(tmp_path / "out-race") == _md5s(world["c_store"] / "g.c001")
 
@@ -709,6 +710,38 @@ def test_ranges_never_measured_fail_the_fold_by_name(world, tmp_path):
     with pytest.raises(RuntimeError, match=r"^measure fan-out: (long|short) ranges \[[0-9, ]+\] unmeasured after 2 helper jobs$"):
         _fanned_fold(world, tmp_path, _helpers(tmp_path, calls, skip=lambda attempt, i: True), retries=1)
     assert [p for p, _ in calls] == ["measured/plan-1.json", "measured/plan-2.json"]
+
+
+def test_a_fanned_out_measurement_resumed_after_the_spills_fetches_only_its_share(world, tmp_path, monkeypatch):
+    """C's fold stopped once its spills are saved, an orphan spill file beside them (an aborted attempt's: under
+    `spilled/files/`, not in the marker's list); resumed with its measurement over 3 tasks: the `spilled` step's tables
+    restored, not its files (`_restore` never called for it), this VM fetching only its share's spill files, the
+    helpers theirs, the orphan read by none: the single-VM fold's bytes."""
+    from dt_cloud import static_merge as sm
+    from dt_cloud.checkpoint import Checkpoint
+
+    _, runs, root = _stopped_fold(world, tmp_path)
+    prefix = sk.checkpoint_prefix("g", "g.c001", runs)
+    probe = Checkpoint(root, f"{prefix}/fold", work=tmp_path / "ck-probe")
+    sizes, by = sm._spilled(probe)
+    probe.close()
+    files = tmp_path / "scratch" / prefix / "fold" / "spilled" / "files"
+    first = sorted(sizes)[0]
+    kind, _, rest = first.partition("/")
+    orphan = files / kind / "orphan" / rest.split("/")[1] / "x.parquet"
+    orphan.parent.mkdir(parents=True)
+    shutil.copyfile(files / first, orphan)
+    share0 = sm.deal({u: sum(sizes[r] for r in rels) for u, rels in by.items()}, 3)[0]
+    restored: list[str] = []
+    real = sk._restore
+    monkeypatch.setattr(sk, "_restore", lambda con, ck, step, work: restored.append(step) or real(con, ck, step, work))
+    lines: list[str] = []
+    calls: list = []
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, calls), log=lines.append)
+    fetch = re.compile(r"measure fan-out: \d+ ranges here \([\d,]+ B; (\d+) spill files, [\d,]+ B to fetch\), .*")
+    fetched = [int(m[1]) for m in map(fetch.fullmatch, lines) if m]
+    assert (restored, calls, fetched) == ([], [("measured/plan-1.json", 2)], [sum(len(by[u]) for u in share0)])
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
 
 
 def _anchors_fanned_fold(world, tmp_path, submit, retries: int = 2):

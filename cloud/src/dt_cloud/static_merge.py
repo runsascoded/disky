@@ -835,11 +835,17 @@ def _fetch_ranges(ck, spills: Path, heaviest: int | None, sample: str | None, wo
 
 def _spilled(ck) -> tuple[dict[str, int], dict[tuple[str, int], list[str]]]:
     """A fold checkpoint's saved spills: each file's bytes (by its path under `spilled/files/`) and the files of each
-    `(kind, range)`."""
+    `(kind, range)`. The files are the `spilled` marker's list (`spilled/done.json`), not whatever is under the prefix:
+    an aborted attempt's orphans (a fold fan-out unit written twice) are never read; the sizes are one listing's. A
+    listed file missing raises."""
     import re
 
     base = ck.key("spilled/files/")
-    sizes = {k[len(base):]: v for k, v in ck.store.listing(ck.key("spilled/files")).items() if k.startswith(base)}
+    listed = ck.store.listing(ck.key("spilled/files"))
+    rels = ck.store.read_json(ck.key("spilled/done.json"))["files"]
+    if missing := [r for r in rels if base + r not in listed]:
+        raise RuntimeError(f"{ck.key('spilled')}: {len(missing)} files its marker lists are missing (e.g. {missing[0]})")
+    sizes = {r: listed[base + r] for r in rels}
     by: dict[tuple[str, int], list[str]] = {}
     for rel in sizes:
         if m := re.match(r"(long|short)/[^/]+/grp=(\d+)/", rel):

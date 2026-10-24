@@ -55,12 +55,8 @@ def anchor_input_key(kind: str, i: int) -> str:
     return f"{ANCHORS_IN}/{'sx' if kind == 'end' else 'names'}/s{i:05d}.parquet"
 
 
-def spill_sizes(work: Path, kind: str, n: int) -> dict[int, int]:
-    """Each of `kind`'s spilled `q` ranges' bytes (`work/<kind>/*/grp=<g>/`, `static_local.spill_files`: one walk), ranges
-    without roots left out."""
-    from .static_local import spill_files
-
-    return {g: size for g, fs in spill_files(work, kind).items() if g < n and (size := sum(f.stat().st_size for f in fs))}
+#: Under the fold's checkpoint: the spills' files (`spilled/done.json` lists them; a measurement helper fetches its ranges').
+SPILLED_FILES = "spilled/files"
 
 
 class Helpers:
@@ -196,19 +192,26 @@ class Fanout(Helpers):
         return range_key(kind, g)
 
     def start(self, work: Path, groups: dict[str, int], *, R: int, K: int, floor: int, measure: bool = True) -> None:
-        """Deal `groups` (`{kind: ranges}`) over the shares by spilled bytes, keep share 0, and submit the helpers for
-        the rest (ranges already measured by an earlier attempt's helpers aren't dealt again); the plan carries the
-        measurement's `R`, `K`, `floor`, and `measure` (false: the helpers only sort each range's roots, an incremental
-        compaction's: `static_local.finish_drill`)."""
+        """Deal `groups` (`{kind: ranges}`) over the shares by spilled bytes (the checkpoint's `spilled` marker's files
+        and their listed sizes: `static_merge._spilled`), keep share 0, fetch its spills not on the work disk into `work`
+        (a resumed fold restores only the `spilled` step's tables, not every spill), and submit the helpers for the rest
+        (ranges already measured by an earlier attempt's helpers aren't dealt again); the plan carries the measurement's
+        `R`, `K`, `floor`, and `measure` (false: the helpers only sort each range's roots, an incremental compaction's:
+        `static_local.finish_drill`)."""
         self.params = {"R": R, "K": K, "floor": floor, "measure": measure}
         from . import heartbeat as hb
+        from .static_merge import _spilled
 
         hb.set_stage("drill/measure/fan-out plan")
-        weights = {(kind, g): size for kind, n in groups.items() for g, size in spill_sizes(work, kind, n).items()}
+        sizes, by = _spilled(self.ck)
+        weights = {(kind, g): size for (kind, g), rels in by.items() if g < groups.get(kind, 0) and (size := sum(sizes[r] for r in rels))}
         mine, todo = self.deal(weights)
-        self.log(f"measure fan-out: {len(mine)} ranges here ({sum(weights[r] for r in mine):,} B), "
-                 f"{len(self.away)} on {self.tasks - 1} helper tasks ({sum(len(t) for t in todo)} to measure)")
+        need = {r: work / r for u in sorted(mine) for r in by[u] if not (work / r).is_file()}
+        self.log(f"measure fan-out: {len(mine)} ranges here ({sum(weights[r] for r in mine):,} B; {len(need)} spill files, "
+                 f"{sum(sizes[r] for r in need):,} B to fetch), {len(self.away)} on {self.tasks - 1} helper tasks ({sum(len(t) for t in todo)} to measure)")
         self._submit([t for t in todo if t])
+        self.fetch({f"{SPILLED_FILES}/{r}": dst for r, dst in need.items()}, {self.ck.key(f"{SPILLED_FILES}/{r}"): sizes[r] for r in need},
+                   "measure fan-out: this share's spills")
 
     def keep(self, kind: str) -> Callable[[int, tuple, dict], None]:
         """`measure_ranges`' `on_range` for share 0: each range measured here saved under the checkpoint as a helper's
