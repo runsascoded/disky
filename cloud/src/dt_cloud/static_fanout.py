@@ -58,11 +58,12 @@ class Fanout:
     def done(self, kind: str, g: int) -> bool:
         return self.ck.store.exists(self.ck.key(f"{range_key(kind, g)}/done.json"))
 
-    def start(self, work: Path, groups: dict[str, int], *, R: int, K: int, floor: int) -> None:
+    def start(self, work: Path, groups: dict[str, int], *, R: int, K: int, floor: int, measure: bool = True) -> None:
         """Deal `groups` (`{kind: ranges}`) over the shares by spilled bytes, keep share 0, and submit the helpers for
         the rest (ranges already measured by an earlier attempt's helpers aren't dealt again); the plan carries the
-        measurement's `R`, `K`, `floor`."""
-        self.params = {"R": R, "K": K, "floor": floor}
+        measurement's `R`, `K`, `floor`, and `measure` (false: the helpers only sort each range's roots, an incremental
+        compaction's: `static_local.finish_drill`)."""
+        self.params = {"R": R, "K": K, "floor": floor, "measure": measure}
         from .static_merge import deal
 
         weights = {(kind, g): size for kind, n in groups.items() for g, size in spill_sizes(work, kind, n).items()}

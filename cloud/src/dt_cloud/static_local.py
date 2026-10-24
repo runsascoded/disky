@@ -406,15 +406,17 @@ def measure_jobs(con, ranges: int) -> int:
     return sn.pool_jobs(con, ranges, int(os.environ.get(MEASURE_THREADS_ENV) or MEASURE_THREADS))
 
 
-def _measure_one(con, files: list[str], sorted_out: str, dirs_out: str, rup_out: str, *, floor: int, R: int, K: int) -> dict:
+def _measure_one(con, files: list[str], sorted_out: str, dirs_out: str, rup_out: str, *, floor: int, R: int, K: int, measure: bool = True) -> dict:
     """One `q` range's spill `files` measured and rolled up (`measure_rollups`) → parquet `dirs_out`, `rup_out`, and its
-    roots sorted → `sorted_out`; the spill's directories removed. Its seconds and spilled bytes."""
+    roots sorted → `sorted_out`; the spill's directories removed. Its seconds and spilled bytes. `measure` false: only
+    the sorted roots (`dirs_out`, `rup_out` written empty; a compaction's incremental measurement, `static_measure`)."""
     con.execute("CREATE OR REPLACE TABLE mr_dirs (q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT)")
     con.execute(f"CREATE OR REPLACE TABLE mr_rup ({sd.ROLLUP_COLS})")
     t0 = monotonic()
     con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots([Path(f) for f in files])}")
     temp = [temp_bytes(con)]
-    m = measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into="mr_dirs", rup_into="mr_rup")
+    m = (measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into="mr_dirs", rup_into="mr_rup") if measure
+         else {"measure_s": 0.0, "rollup_s": 0.0})
     temp.append(temp_bytes(con))
     for tb, f in (("mr_dirs", dirs_out), ("mr_rup", rup_out)):
         con.execute(f"COPY {tb} TO {q(f)} (FORMAT parquet, COMPRESSION zstd)")
@@ -449,18 +451,19 @@ def fmt_b(n: int) -> str:
 
 
 def _measure_task(files: list[str], sorted_out: str, dirs_out: str, rup_out: str, floor: int, R: int, K: int, threads: int, mem: str,
-                  tmp: str) -> dict:
+                  tmp: str, measure: bool = True) -> dict:
     """`_measure_one` in a process of `measure_ranges`' pool, on a database of its own."""
     con = sn.connect(threads, mem, tmp)
     try:
-        return _measure_one(con, files, sorted_out, dirs_out, rup_out, floor=floor, R=R, K=K)
+        return _measure_one(con, files, sorted_out, dirs_out, rup_out, floor=floor, R=R, K=K, measure=measure)
     finally:
         con.close()
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into: str, *, floor: int, R: int, K: int,
-                   jobs: int | None = None, remote=None, on_range: Callable[[int, tuple, dict], None] | None = None) -> tuple[list[Path], dict]:
+                   jobs: int | None = None, remote=None, on_range: Callable[[int, tuple, dict], None] | None = None,
+                   measure: bool = True) -> tuple[list[Path], dict]:
     """Measure and roll up each of `kind`'s spilled `q` ranges (`work/<kind>/*/grp=<g>/`) into tables `dirs_into` and
     `rup_into`, and write each range's roots sorted (`work/<kind>-sorted/g<g>.parquet`, its spill removed): the ranges
     are `q`-disjoint and in `q` order, so the files are what `static_drill.write_kind` streams (`chunks`) instead of
@@ -475,7 +478,8 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     `remote` (a `static_fanout.Fanout`): the ranges it deals to its helper tasks are not measured here; once these are,
     `remote.collect` waits for the helpers' outputs and puts them where this measurement's would be (their spills are
     then removed), so the tables and files are the same. `on_range(g, task, stats)`: called once range `g` is measured
-    (`task`: `(g, spill files, sorted, dirs, rup)`, before the per-range files are folded in): a helper uploads them."""
+    (`task`: `(g, spill files, sorted, dirs, rup)`, before the per-range files are folded in): a helper uploads them.
+    `measure` false: each range's roots are only sorted (`_measure_one`), the tables left empty."""
     from concurrent.futures import as_completed
 
     for tb, cols in ((dirs_into, "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"), (rup_into, sd.ROLLUP_COLS)):
@@ -501,20 +505,20 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     prog.tick(n - len(tasks), nbytes=0)  # the ranges without roots
     t0, done = monotonic(), {}
 
-    def measure(group: list, jobs: int, label: str) -> None:
+    def run_group(group: list, jobs: int, label: str) -> None:
         if not group:
             return
         task = {t[0]: t for t in group}
         if jobs == 1:
             for g, files, so, do, ro in group:
-                done[g] = _measure_one(con, files, so, do, ro, floor=floor, R=R, K=K)
+                done[g] = _measure_one(con, files, so, do, ro, floor=floor, R=R, K=K, measure=measure)
                 prog.tick(nbytes=done[g]["nbytes"])
                 if on_range:
                     on_range(g, task[g], done[g])
             return
         with sn.ConPool(con, jobs, label) as pool:
             futs = {pool.submit(_measure_task, files, so, do, ro, floor, R, K, pool.task_threads, pool.mem,
-                                str(work / "measure-tmp" / f"{kind}-g{g:06d}")): g for g, files, so, do, ro in group}
+                                str(work / "measure-tmp" / f"{kind}-g{g:06d}"), measure): g for g, files, so, do, ro in group}
             for f in as_completed(futs):
                 g = futs[f]
                 done[g] = f.result()
@@ -525,9 +529,9 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     if heavy:
         hj = max(1, min(fixed, len(heavy))) if fixed is not None else sn.pool_jobs(con, len(heavy), HEAVY_THREADS)
         sn.err(f"drill/measure/{kind}: {len(heavy)} heavy ranges (≥ {heavy_bytes:,} B spilled, up to {max(size.values()):,}) first, {hj} at a time")
-        measure(heavy, hj, f"drill/measure/{kind} (heavy)")
+        run_group(heavy, hj, f"drill/measure/{kind} (heavy)")
     jobs = measure_jobs(con, len(light)) if fixed is None else max(1, min(fixed, len(light) or 1))
-    measure(light, jobs, f"drill/measure/{kind}")
+    run_group(light, jobs, f"drill/measure/{kind}")
     if away:
         theirs = [t for t in tasks if t[0] in away]
         got = remote.collect(kind, {t[0]: (t[2], t[3], t[4]) for t in theirs})
@@ -550,32 +554,54 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
 
 
 def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, short_groups: int, R: int, K: int, floor: int,
-                 step=_nop_step, t: float | None = None, fanout=None) -> dict:
+                 step=_nop_step, t: float | None = None, fanout=None, incremental: tuple[list, Path] | None = None) -> dict:
     """A base drill's second half, from roots already spilled under `work/{long,short}/*/grp=<g>/` (canonical members'
     long roots; short literals' roots) by `q` range (`long_groups`, `short_groups` ranges) and the member classes (table
     `al (q, canonical)`, and `aliases` as Arrow): each range measured and rolled up, `roots-measure/{dirs,short/dirs}/`
     (an alias gets its canonical's directories), then `drill/` (`static_drill.build_drill`). What `build_base_drill`
     and a compaction's fold (`static_compact`) share. Returns the drill's `meta.json` and the groups measured.
-    `fanout` (`static_fanout.Fanout`): the ranges measured in part by helper tasks (a compaction's, its spills saved)."""
+    `fanout` (`static_fanout.Fanout`): the ranges measured in part by helper tasks (a compaction's, its spills saved).
+
+    `incremental` `(tiers, meas)` (a compaction whose runs all count only new roots: `static_measure.blocker`): the
+    ranges' roots are only sorted, and `roots-measure/` and the rollups come from base ⊕ runs instead
+    (`static_measure.incremental_measure`, `incremental_rollups`: the tiers' drills, the base's measurement `meas`,
+    `gen_dir/catalog/members.parquet`): the same bytes, with no measurement or rollup over every root."""
+    from . import static_measure as sme
+
     t = monotonic() if t is None else t
+    measure = incremental is None
     if fanout is not None:
-        fanout.start(work, {"long": long_groups, "short": short_groups}, R=R, K=K, floor=floor)
-    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K, remote=fanout)
+        fanout.start(work, {"long": long_groups, "short": short_groups}, R=R, K=K, floor=floor, measure=measure)
+    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K, remote=fanout, measure=measure)
     end = monotonic()
-    step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
-    t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
-    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K, remote=fanout)
+    if measure:
+        step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
+        t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
+    else:
+        t = step("drill/sort/long", t, groups=lm["groups"])
+    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K, remote=fanout, measure=measure)
     if fanout is not None:
         fanout.finish()
     end = monotonic()
-    step("drill/measure/short", end - m["measure_s"] - m["rollup_s"], groups=m["groups"], dirs=count(con, "sdirs"))
-    t = step("drill/rollup/short", end - m["rollup_s"], rup=count(con, "srup"))
+    if measure:
+        step("drill/measure/short", end - m["measure_s"] - m["rollup_s"], groups=m["groups"], dirs=count(con, "sdirs"))
+        t = step("drill/rollup/short", end - m["rollup_s"], rup=count(con, "srup"))
+    else:
+        t = step("drill/sort/short", t, groups=m["groups"])
     meas = gen_dir / "roots-measure"
-    # every long member's (as `roots measure` measures them): an alias's roots, so its directories, are its canonical's
-    for sub, sql in (("dirs", "SELECT al.q, d.k, d.dir, d.rows FROM ldirs d JOIN al ON al.canonical = d.q"), ("short/dirs", "SELECT * FROM sdirs")):
-        (meas / sub).mkdir(parents=True, exist_ok=True)
-        pq.write_table(con.execute(f"SELECT * FROM ({sql}) ORDER BY q, k, dir").to_arrow_table(), meas / sub / "s0000.parquet", compression=sn.CODEC)
-    t = step("drill/write/measure", t)
+    if measure:
+        # every long member's (as `roots measure` measures them): an alias's roots, so its directories, are its canonical's
+        for sub, sql in (("dirs", "SELECT al.q, d.k, d.dir, d.rows FROM ldirs d JOIN al ON al.canonical = d.q"), ("short/dirs", "SELECT * FROM sdirs")):
+            (meas / sub).mkdir(parents=True, exist_ok=True)
+            pq.write_table(con.execute(f"SELECT * FROM ({sql}) ORDER BY q, k, dir").to_arrow_table(), meas / sub / "s0000.parquet", compression=sn.CODEC)
+        t = step("drill/write/measure", t)
+    else:
+        tiers, base_meas = incremental
+        sme.incremental_measure(con, tiers, base_meas, str(gen_dir / "catalog" / "members.parquet"), meas, floor=floor)
+        t = step("drill/measure/incremental", t)
+        for kind, into in (("long", "lrup"), ("short", "srup")):
+            sme.incremental_rollups(con, tiers, kind, meas, into, R=R, aliases=aliases)
+        t = step("drill/rollup/incremental", t, rup=count(con, "lrup") + count(con, "srup"))
     meta = sd.build_drill(con, gen_dir / "drill", long_roots=None, short_roots=None, aliases=aliases, R=R, K=K, meta={"floor": floor},
                           rollups={"long": "lrup", "short": "srup"}, sorted_roots={"long": lcan, "short": sall}, step=step)
     for tb in ("dmem", "dg", "dgq", "al", "canon", "qg", "ldirs", "sdirs", "lrup", "srup", "mem"):

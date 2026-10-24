@@ -44,6 +44,7 @@ from . import static_append as sa
 from . import static_catalog as sc
 from . import static_drill as sd
 from . import static_local as sl
+from . import static_measure as sme
 from . import static_names as sn
 from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version
@@ -162,13 +163,18 @@ def overlapping(spans: list[tuple[str, str | None, str | None]], lo: str, hi: st
 
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
                jobs: int = 1, step=sl._nop_step, log: Callable[[str], None] = err, ck: Checkpoint | None = None,
-               fanout: Callable[[Checkpoint], object] | None = None) -> dict:
+               fanout: Callable[[Checkpoint], object] | None = None, meas: Path | None = None) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
     `out/catalog/members.parquet`: each member's roots through the last scan, read from the tiers through each one's
     class map (every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows
     there; a member a tier doesn't know has none there), combined; the classes by root-set digest, as the build's
     (`static_local.build_base_drill`); then `static_local.finish_drill` over the canonical members' roots and the short
     literals'.
+
+    `meas`: `G`'s `roots-measure/`. When every run counts only new roots (`static_measure.blocker` finds nothing in the
+    way), `finish_drill` only sorts each range's roots and takes the measurement and rollups from base ⊕ runs
+    (specs/static-incremental-compaction.md, step 4); else it measures and rolls up every root. `log` says which, and
+    the result's `measure` (`incremental` | `roots`).
 
     Chunked, so the working set is `chunk_rows` roots, not the corpus (gcs's first compaction ran one aggregate over all
     299 GB of roots and logged nothing for 6 h): members with equal tuples of classes (one per tier) hold equal rows, so
@@ -208,9 +214,12 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     # the measurement's helper tasks fetch the spills the checkpoint just saved (specs/static-measure-fanout.md)
     fan = fanout(ck) if fanout is not None and ck is not None else None
+    why = sme.blocker(tiers, meas, floor=floor, R=R) if meas is not None else "no base measurement given"
+    log(f"drill measurement: {'incremental (base ⊕ runs; each range only sorted)' if why is None else f'every root ({why})'}")
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
-                           step=step, t=t, fanout=fan)
-    return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"]}
+                           step=step, t=t, fanout=fan, incremental=(tiers, meas) if why is None else None)
+    return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"],
+            "measure": "roots" if why else "incremental"}
 
 
 def _files(root: Path, *subs: str) -> list[str]:
@@ -560,7 +569,8 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
         con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
-        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=ck.sub("fold") if ck is not None else None, fanout=fanout), after_saves=True)
+        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=ck.sub("fold") if ck is not None else None, fanout=fanout,
+        meas=gen_dir / "roots-measure"), after_saves=True)
     t = done("drill", t)
     anchors = None
     if (gen_dir / an.ANCHORS / "meta.json").is_file():

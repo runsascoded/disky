@@ -731,7 +731,8 @@ def deal(weights: dict, n: int) -> list[list]:
 @option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads and uploads")
 def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's drill measurement helper (`static_fanout`, specs/static-measure-fanout.md): task INDEX's share of
-    the plan's `q` ranges, each fetched from the fold's saved spills, measured (`static_local.measure_ranges`) and
+    the plan's `q` ranges, each fetched from the fold's saved spills, measured (`static_local.measure_ranges`; only
+    sorted when the plan's `measure` is false: an incremental compaction's) and
     uploaded as `measured/<kind>/g<g>/{sorted,dirs,rup}.parquet`, then its `done.json` (the range's stats). A range
     whose `done.json` is there is skipped (a retry resumes); then `measured/tasks/<plan>-<index>.json`. Refuses to run
     other code than the fold's (its bytes would differ)."""
@@ -769,7 +770,7 @@ def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers)
         gs = [g for k, g in todo if k == kind]
         if gs:
             sl.measure_ranges(con, spills, kind, max(gs) + 1, "pd", "pr", floor=doc["floor"], R=doc["R"], K=doc["K"],
-                              on_range=partial(upload, kind))
+                              on_range=partial(upload, kind), measure=doc.get("measure", True))
     name = plan.rsplit("/", 1)[-1].removesuffix(".json")
     ck.store.write_text(ck.key(f"{MEASURED}/tasks/{name}-{i}.json"), json.dumps({"ranges": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
     err(f"measure-shard {plan} #{i}: {len(todo)} ranges in {monotonic() - t0:.0f}s")
