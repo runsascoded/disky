@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,9 @@ from click.testing import CliRunner
 
 from dt_cloud import append_runner as ar
 from dt_cloud import static_compact as sk
+from dt_cloud import static_drill as sd
 from dt_cloud import static_local as sl
+from dt_cloud import static_measure as sme
 from dt_cloud import static_names as sn
 from dt_cloud import static_roots as sr
 
@@ -127,6 +130,36 @@ def test_compacted_generation_is_the_rebuild(world, store, gen, ref):
     assert g == w
     assert _meta(got) == _meta(want)
     assert len(w) > 40
+
+
+@pytest.mark.parametrize("store, gen", [("a_store", "g.c001"), ("a_store", "g.c002"), ("b_store", "g.c001"), ("i_store", "g.c001")])
+def test_incremental_measure_is_the_rebuilds(world, tmp_path, store, gen):
+    """specs/static-incremental-compaction.md step 2: a compaction's `roots-measure/` from its base's measurement and the
+    runs' counts of new roots (headers, `dcount`, the floor crossers' base counts: `static_measure.incremental_measure`)
+    is the rebuild's, md5 for md5: two level-0 runs (A, I), one over a compacted base (A's `g.c002`), one merged run (B)."""
+    root = world[store]
+    rec = json.loads((root / gen / ar.COMPACTION).read_text())
+    base = root / rec["from"]
+    tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
+    con = sn.connect(2, "1GB", tmp_path / "duckdb")
+    sme.incremental_measure(con, tiers, base / "roots-measure", str(root / gen / "catalog" / "members.parquet"), tmp_path / "rm",
+                            floor=tiers[0].meta.get("floor", sl.FLOOR), log=lambda s: None)
+    got, want = _md5s(tmp_path / "rm"), _md5s(world["tmp"] / f"ref-{gen}" / sn.PREFIX / gen / "roots-measure")
+    assert sorted(want) == ["dirs/s0000.parquet", "short/dirs/s0000.parquet"]
+    assert got == want
+
+
+def test_incremental_measure_refuses_runs_counting_closes(world, tmp_path):
+    """A run whose drill predates `dcount: fresh` (its `dcount` counts closes too) is refused, not summed."""
+    root = world["b_store"]
+    run = ar.newest_runs(root / "g")[1][0]["key"]
+    shutil.copytree(root / "g" / run / "drill", tmp_path / "drill")
+    meta = json.loads((tmp_path / "drill" / "meta.json").read_text())
+    (tmp_path / "drill" / "meta.json").write_text(json.dumps({k: v for k, v in meta.items() if k != "dcount"}))
+    tiers = [sd.Tier(root / "g" / "drill", "base"), sd.Tier(tmp_path / "drill", run)]
+    with pytest.raises(ValueError) as e:
+        sme.incremental_measure(sn.connect(1, "1GB", None), tiers, root / "g" / "roots-measure", "", tmp_path / "rm", floor=2)
+    assert str(e.value) == f"runs whose dcount counts closes too (built before `dcount: fresh`): {run}"
 
 
 @pytest.mark.parametrize("store, gen", [("a_store", "g.c001"), ("a_store", "g.c002"), ("b_store", "g.c001")])

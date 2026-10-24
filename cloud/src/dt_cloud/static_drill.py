@@ -89,6 +89,11 @@ MAX_CACHE_BYTES = 2 << 30
 #: Prefetch coalescing: needed groups of one file at most this far apart are one request, of at most `COALESCE_SPAN` bytes.
 COALESCE_GAP = 64 << 10
 COALESCE_SPAN = 8 << 20
+#: A drill tier's `meta.json` `dcount` when its `dcount` and newly-heavy sums count only the roots new to the stack (an
+#: existing member's opens, every root of a new member: `day_rollups`' `fresh`); a merged tier's only when every input's
+#: did. A tier without it (built before) counts the closes too: conservative for its readers, but not what a compaction's
+#: incremental measurement sums (`static_measure`).
+DCOUNT_FRESH = "fresh"
 DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dir", pa.string(), nullable=False),
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
@@ -1878,7 +1883,7 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
     (`drill/roots/<kind>`, `day_rollups`', `drill/write/<kind>`)."""
     t0 = monotonic()
     out.mkdir(parents=True, exist_ok=True)
-    meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor}
+    meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor, "dcount": DCOUNT_FRESH}
     for i, kind in enumerate(kinds):
         t1 = monotonic()
         ck = checkpoint.sub(kind) if checkpoint else None
@@ -2013,6 +2018,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     meta: dict = {**tier, **{k: tiers[-1].meta[k] for k in ("R", "K", "rg", "idx_rg", "dispatch_rows")}}
+    if all(t.meta.get("dcount") == DCOUNT_FRESH for t in tiers):
+        meta["dcount"] = DCOUNT_FRESH
     resource_stage("merge/aliases")
     con.register("al_last", tiers[-1].alias_table())
     con.execute("CREATE OR REPLACE TABLE cls AS SELECT q, canonical FROM al_last")
