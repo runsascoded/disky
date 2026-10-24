@@ -1,5 +1,11 @@
-"""A compaction's heavy parts fanned out over helper Batch tasks: the drill measurement (specs/static-measure-fanout.md)
-and the base anchors' rollups (specs/static-anchors-fanout.md).
+"""A compaction's heavy parts fanned out over helper Batch tasks: the drill fold (specs/static-fold-fanout.md), the drill
+measurement (specs/static-measure-fanout.md) and the base anchors' rollups (specs/static-anchors-fanout.md).
+
+`FoldFanout` (the drill fold, `static_compact._fanned_fold`): units of the fold (a long chunk's digests or canonical
+spills, a short range's spills) dealt in contiguous shares (`contiguous`) over waves, one helper job each (`static_merge
+fold-shard`); the spills land under `spilled/files/`, listed by each unit's `done.json`, and the `spilled` marker is
+their union. The tuples' digests come from the tiers' persisted ones (`PersistedClasses`: no digest wave) or, where
+those are missing, a digest wave first (`DigestClasses`).
 
 `Helpers` is what both share: the fold VM deals its units of work (`(kind, index)` pairs) by bytes over `tasks` shares
 (`static_merge.deal`), keeps share 0, lists the rest in `<root>/plan-<attempt>.json` under its checkpoint and runs a
@@ -59,6 +65,28 @@ def anchor_input_key(kind: str, i: int) -> str:
 SPILLED_FILES = "spilled/files"
 
 
+def fetch_files(ck, files: dict[str, Path], listing: dict[str, int], stage: str, *, label: str, log: Callable[[str], None] = err) -> None:
+    """Checkpoint `ck`'s files (`{key under its prefix: local target}`, sizes from `listing`, by full key) downloaded in
+    parallel (`blobstore.stage_files`: sliced ranged GETs over processes from `gs://`, threads elsewhere) into a `.fetch/`
+    dir beside the targets, then moved into place. A file still failing after its retries raises (`label` says whose)."""
+    import os
+    import shutil
+
+    from .blobstore import stage_files
+
+    if not files:
+        return
+    full = {ck.key(k): dst for k, dst in files.items()}
+    tmp = Path(os.path.commonpath([str(Path(d).parent) for d in full.values()])) / ".fetch"
+    got = stage_files(ck.store.uri(""), {k: listing[k] for k in full}, tmp, label=stage, log=log)
+    if got["failed"]:
+        raise RuntimeError(f"{label}: {len(got['failed'])} files not fetched: {got['failed'][:5]}")
+    for k, dst in full.items():
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        os.replace(tmp / k, dst)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 class Helpers:
     """The fold VM's side of a fan-out: `deal` keeps share 0 and submits the rest, `wait` waits for units (re-dealing what
     a helper job left), `finish` waits for the helper job's end. `ck`: the checkpoint the helpers read and write under
@@ -77,6 +105,8 @@ class Helpers:
         self.away: set[tuple[str, int]] = set()
         self.params: dict = {}
         self.attempt = 0
+        # the helper jobs before the current wave's (`FoldFanout`'s waves each get `retries` re-deals of their own)
+        self.base = 0
         self.thread: threading.Thread | None = None
         self.error: BaseException | None = None
 
@@ -148,33 +178,16 @@ class Helpers:
                 return
             if ended:
                 why = f" ({type(self.error).__name__}: {self.error})" if self.error else ""
-                if self.attempt > self.retries:
-                    raise RuntimeError(f"{self.label}: {what} {ids(missing)} {self.undone} after {self.attempt} helper jobs{why}")
+                if self.attempt - self.base > self.retries:
+                    raise RuntimeError(f"{self.label}: {what} {ids(missing)} {self.undone} after {self.attempt - self.base} helper jobs{why}")
                 self.log(f"{self.label}: helper job {self.attempt} ended{why}; dealing {len(missing)} {what} again")
                 pend = {u: 1 for u in self.away - self.done_in(listing, self.away)}
                 self._submit([[[k, i] for k, i in share] for share in deal(pend, self.tasks - 1) if share])
             time.sleep(self.poll_s)
 
     def fetch(self, files: dict[str, Path], listing: dict[str, int], stage: str) -> None:
-        """Checkpoint files (`{key under root/: local target}`, sizes from `listing`) downloaded in parallel
-        (`blobstore.stage_files`: sliced ranged GETs over processes from `gs://`, threads elsewhere) into a `.fetch/` dir
-        beside the targets, then moved into place. A file still failing after its retries raises."""
-        import os
-        import shutil
-
-        from .blobstore import stage_files
-
-        if not files:
-            return
-        full = {self.ck.key(k): dst for k, dst in files.items()}
-        tmp = Path(os.path.commonpath([str(Path(d).parent) for d in full.values()])) / ".fetch"
-        got = stage_files(self.ck.store.uri(""), {k: listing[k] for k in full}, tmp, label=stage, log=self.log)
-        if got["failed"]:
-            raise RuntimeError(f"{self.label}: {len(got['failed'])} files not fetched: {got['failed'][:5]}")
-        for k, dst in full.items():
-            Path(dst).parent.mkdir(parents=True, exist_ok=True)
-            os.replace(tmp / k, dst)
-        shutil.rmtree(tmp, ignore_errors=True)
+        """Checkpoint files (`{key under root/: local target}`, sizes from `listing`) downloaded (`fetch_files`)."""
+        fetch_files(self.ck, files, listing, stage, label=self.label, log=self.log)
 
     def finish(self) -> None:
         """Wait for the helper job's end (every unit is done by now; its tasks are exiting)."""
@@ -334,3 +347,126 @@ class AnchorFanout(Helpers):
         self.log(f"anchors fan-out: {len(out)} shard tasks from the helpers")
         self.finish()
         return out
+
+
+# ── The drill fold (specs/static-fold-fanout.md) ───────────────────────────
+
+#: Under the fold's checkpoint: the fold helpers' units (`folded/<kind>/<unit>/done.json`), plans and task reports.
+FOLDED = "folded"
+#: The fold fan-out's unit kinds: a long chunk's tuples' digests (the digest wave), a long chunk's canonical roots
+#: spilled by `q` range (`RELONG`: again, once the classes changed under it), a short range's roots spilled.
+DIGEST, LONG, RELONG, SHORT = "digest", "long", "relong", "short"
+
+
+def fold_unit_key(kind: str, i: int) -> str:
+    return f"{FOLDED}/{kind}/{'s' if kind == SHORT else 'c'}{i:06d}"
+
+
+def contiguous(weights: dict, n: int) -> list[list]:
+    """`weights`' keys, in order, cut into `n` contiguous shares of about equal weight: each key goes to the share its
+    weight's midpoint falls in, so a share is within one key's weight of the mean (a heavy key, e.g. a single-tuple chunk
+    of 440M roots, is most of a share rather than doubling one). Contiguity keeps a share's inputs (the base's `q`-sorted
+    roots files, the runs' consecutive spill partitions) to about 1/n of them. Weights below 1 count as 1."""
+    keys = sorted(weights)
+    w = {k: max(1, weights[k]) for k in keys}
+    total = sum(w.values())
+    shares: list[list] = [[] for _ in range(n)]
+    cum = 0
+    for k in keys:
+        shares[min(n - 1, (2 * cum + w[k]) * n // (2 * total))].append(k)
+        cum += w[k]
+    return shares
+
+
+def gather_digests(con, fan: FoldFanout, chunks: list[int], dig: Path) -> None:
+    """Table `tdig (tid, n, h1, h2)` from the digest wave's units' files (`folded/digest/c<ch>/dig.parquet`; those not in
+    `dig` already, share 0's, fetched there; a chunk without roots has none)."""
+    from .static_names import q
+
+    listing = fan.listed()
+    keys = {ch: f"{fold_unit_key(DIGEST, ch)}/dig.parquet" for ch in chunks}
+    have = [ch for ch in chunks if fan.ck.key(keys[ch]) in listing]
+    fan.fetch({keys[ch]: dig / f"c{ch:06d}.parquet" for ch in have if not (dig / f"c{ch:06d}.parquet").is_file()}, listing,
+              "fold fan-out: digests")
+    con.execute("CREATE OR REPLACE TABLE tdig (tid BIGINT, n BIGINT, h1 UBIGINT, h2 UBIGINT)")
+    if have:
+        con.execute(f"INSERT INTO tdig SELECT tid, n, h1, h2 FROM read_parquet([{', '.join(q(str(dig / f'c{ch:06d}.parquet')) for ch in have)}])")
+
+
+class DigestClasses:
+    """A class source that never derives `tdig` (`derive` is false): the fold fans out a wave of digest units first,
+    one per long chunk (`static_compact.fold_units`: the chunk's roots combined and digested; only
+    `folded/digest/c<ch>/dig.parquet` written), with the short ranges, and gathers them (`gather_digests`). Wave 2 then
+    combines each chunk again from its inputs rather than shipping the combined roots between waves (logged)."""
+
+    name = "roots"
+
+    def derive(self, con, tiers: list, log: Callable[[str], None]) -> bool:
+        return False
+
+
+class PersistedClasses(DigestClasses):
+    """The default class source: `tdig` derived before any root is read from the tiers' persisted digests
+    (`static_compact._derive_digests`: the base's `drill/digests-long.parquet` plus the runs' per-class changes,
+    specs/static-incremental-compaction.md step 3), so there is no digest wave: wave 2 carries the short ranges too, and
+    each of its chunks checks its tuples' counts against its roots (`fold_units`; a mismatch's digests corrected after
+    the wave, every chunk spilled again if that changed the classes). Where `digests_blocker` refuses (a base or run
+    built before the digests), the digest wave as `DigestClasses`."""
+
+    name = "digests"
+
+    def derive(self, con, tiers: list, log: Callable[[str], None]) -> bool:
+        from .static_compact import _derive_digests
+
+        return _derive_digests(con, tiers, log)
+
+
+class FoldFanout(Helpers):
+    """The drill fold's fan-out (specs/static-fold-fanout.md): units `(kind, index)` (`DIGEST`/`LONG` chunks, `SHORT`
+    ranges) run in waves, each wave one helper job (`static_merge fold-shard`) plus share 0 here. A unit writes its
+    outputs, then its `done.json` (`folded/<kind>/<unit>/`; a spill's files listed there, themselves under
+    `spilled/files/`), so a resumed wave deals only the units without one. `classes`: where `tdig` comes from
+    (`PersistedClasses`, the default; `DigestClasses`: always the digest wave). `ck`: the fold's checkpoint."""
+
+    root, label, undone = FOLDED, "fold fan-out", "not folded"
+
+    def __init__(self, *a, classes=None, **kw):
+        super().__init__(*a, **kw)
+        self.classes = classes if classes is not None else PersistedClasses()
+
+    def unit_key(self, kind: str, i: int) -> str:
+        return fold_unit_key(kind, i)
+
+    def wave(self, n: int, weights: dict[tuple[str, int], int], here: Callable[[list[tuple[str, int]]], None]) -> None:
+        """Wave `n`: `weights`' units (estimated rows) not done already, cut into contiguous shares (`contiguous`; each
+        share's estimated rows logged), share 0 run here (`here(units)`), the rest submitted as one helper job; then wait
+        for every unit (re-dealing what a job left, `retries` times in this wave) and for the job's end."""
+        from . import heartbeat as hb
+
+        hb.set_stage(f"drill/fold/wave {n}: plan")
+        self.base = self.attempt
+        self.params = {"wave": n}
+        done = self.done_in(self.listed(), weights)
+        pending = {u: w for u, w in weights.items() if u not in done}
+        shares = contiguous(pending, self.tasks) if pending else [[] for _ in range(self.tasks)]
+        mine = shares[0]
+        self.away = set(pending) - set(mine)
+        rows = [sum(max(1, pending[u]) for u in s) for s in shares]
+        mean = sum(rows) / len(rows)
+        self.log(f"fold fan-out: wave {n}: {len(pending):,} of {len(weights):,} units to fold ({len(done):,} done), {len(mine):,} here, "
+                 f"{len(self.away):,} on {self.tasks - 1} helper tasks; estimated rows per share {rows} "
+                 f"(mean {mean:,.0f}, max/mean {max(rows) / mean if mean else 0:.2f})")
+        self._submit([[[k, i] for k, i in s] for s in shares[1:] if s])
+        hb.set_stage(f"drill/fold/wave {n}: {len(mine):,} units here")
+        here(sorted(mine))
+        hb.set_stage(f"drill/fold/wave {n}: waiting for {len(self.away):,} helper units")
+        self.wait(sorted(self.away), "units", lambda us: [fold_unit_key(k, i).removeprefix(f"{FOLDED}/") for k, i in us])
+        self.finish()
+
+    def unit_docs(self, units: list[tuple[str, int]], workers: int = 32) -> dict[tuple[str, int], dict]:
+        """Each unit's `done.json`."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(workers) as ex:
+            docs = list(ex.map(lambda u: self.ck.store.read_json(self.ck.key(f"{fold_unit_key(*u)}/done.json")), units))
+        return dict(zip(units, docs))

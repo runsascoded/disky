@@ -442,6 +442,36 @@ def anchor_fanout(tasks: int, gen: str) -> Callable:
     return lambda ck, scan: AnchorFanout(ck, tasks, submit, code=code_version(), scan=scan)
 
 
+def fold_fanout(tasks: int, gen: str) -> Callable:
+    """The compaction's drill fold over `tasks` tasks (`static_fanout.FoldFanout`, given the fold's checkpoint): its
+    helper jobs, one per wave (`fold_helper_job`, stage `FOLD_STAGE`), run by `_helper_runner`."""
+    from .checkpoint import code_version
+    from .static_fanout import FoldFanout
+
+    runner = _helper_runner(gen)
+
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        runner.run_job(*fold_helper_job(runner, url, plan, n, code, scan))
+
+    return lambda ck, scan: FoldFanout(ck, tasks, submit, code=code_version(), scan=scan)
+
+
+#: The fold fan-out's helper stage (spot with retries when the profile is; `machines` / `ssd_gbs["fold-shard"]` size it).
+FOLD_STAGE = "fold-shard"
+
+
+def fold_helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tuple[str, dict]:
+    """The fold fan-out's helper job (`runner.job`, stage `FOLD_STAGE`, named and labelled by the compaction's newest
+    `scan`): `n` tasks of `fold-shard` over the plan `plan` of the fold's checkpoint `url`, the fold's `code` version,
+    `static_runner.fold_jobs` units at a time on the stage's machine."""
+    from .append_runner import duckdb_args
+    from .static_runner import fold_jobs
+
+    machine = runner.cfg.machine_for(FOLD_STAGE)
+    args = ["fold-shard", "-c", url, "-P", plan, "-V", code, "-j", str(fold_jobs(machine)), *duckdb_args(machine)]
+    return _helper_recorded(runner, *runner.job(FOLD_STAGE, scan, n, "static_merge", args, mount=False), scan)
+
+
 def helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tuple[str, dict]:
     """The fan-out's helper job (`runner.job`, stage `measure`, named and labelled by the compaction's newest `scan`): `n`
     tasks of `measure-shard` over the plan `plan` of the fold's checkpoint `url`, the fold's `code` version."""
@@ -509,11 +539,12 @@ def _helper_recorded(runner, name: str, spec: dict, scan: str) -> tuple[str, dic
 @option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
 @option("-A", "--anchor-tasks", default=1, type=IntRange(min=1), help="The base anchors' rollups over this many tasks: this one and helper Batch tasks (`static_fanout.AnchorFanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
 @option("-D", "--measure-tasks", default=1, type=IntRange(min=1), help="The drill measurement over this many tasks: this one and helper Batch tasks (`static_fanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
+@option("-L", "--fold-tasks", default=1, type=IntRange(min=1), help="The drill fold over this many tasks: this one and helper Batch tasks, a job per wave (`static_fanout.FoldFanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
 @option("-P", "--prebuilt", help="Publish a fold done elsewhere (`compact-probe -U URL`) instead of folding: checked against its report, then published as this compaction's")
 @option("-S", "--scratch", help="Scratch bucket: the compaction lease, held throughout (none: appends aren't held off)")
 @ar.compact_options
-def compact_cmd(anchor_tasks, bucket, chunk_rows, gen, measure_tasks, prebuilt, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2,
-                tmp) -> None:
+def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, measure_tasks, prebuilt, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads,
+                to_r2, tmp) -> None:
     """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
     last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
@@ -524,12 +555,14 @@ def compact_cmd(anchor_tasks, bucket, chunk_rows, gen, measure_tasks, prebuilt, 
     from .blobstore import Store
     from .static_compact import clear_checkpoints, compactor
 
-    if (measure_tasks > 1 or anchor_tasks > 1) and not scratch:
-        raise UsageError("-D / -A need -S: the helpers read the fold's checkpoint")
+    if (measure_tasks > 1 or anchor_tasks > 1 or fold_tasks > 1) and not scratch:
+        raise UsageError("-D / -A / -L need -S: the helpers read the fold's checkpoint")
     fanout = measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None
     afan = anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None
+    ffan = fold_fanout(fold_tasks, gen) if fold_tasks > 1 else None
     try:
-        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout, prebuilt=prebuilt, anchor_fanout=afan), gen,
+        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout, prebuilt=prebuilt, anchor_fanout=afan,
+                                                                   fold_fanout=ffan), gen,
                                 Path(mount), Path(tmp),
                                 lease=ar.gcs_compaction_lease_file(scratch, PREFIX), policy=policy, force=force, r2_bucket=bucket if to_r2 else None,
                                 grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from, rec=from_env("compact"))
@@ -603,6 +636,7 @@ def probe_cmd(
 @option("-g", "--gen", required=True, help="The generation whose base and newest manifest's runs are folded")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="The drill fold's chunks at a time")
 @option("-K", "--checkpoint", "ck_root", help="This fold's own checkpoint root (a scratch URL, never the compaction's): its steps saved there, resumed from there")
+@option("-L", "--fold-tasks", default=1, type=IntRange(min=1), help="The drill fold over this many tasks (`static_fanout.FoldFanout`; needs -K and the profile in $STATIC_NAMES_PROFILE)")
 @option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-o", "--out", required=True, help="New local output directory outside the mount: the folded generation")
@@ -613,8 +647,8 @@ def probe_cmd(
 @option("-T", "--tmp", default="/stage/tmp/compact-probe", help="Local work dir")
 @option("-u", "--report", help="Also write the JSON report to this URL (`gs://<scratch>/…/<name>.json`: the VM's disks go with it)")
 @option("-U", "--upload", help="Upload the folded generation to this URL (`<url>/gen/`, then `<url>/probe.json`, last): what `compact --prebuilt` publishes")
-def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, mount, mem, out, threads, resume_from, stage, through, tmp, report,
-                      upload) -> None:
+def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, fold_tasks, mount, mem, out, threads, resume_from, stage, through, tmp,
+                      report, upload) -> None:
     """Fold the generation into its next one locally (`static_compact.fold_gen`, the compaction's own fold), read in place
     from the mount: no upload, no successor / pointer / manifests in the bucket, no lease, no checkpoint, no pruning; only
     OUT and TMP are written. Logs the fold's stage lines; prints a JSON of the summary (per-part seconds and peaks) and
@@ -637,12 +671,13 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
             raise UsageError(f"probe output/work must be outside the source mount: {path}")
     if output.exists():
         raise UsageError(f"probe output already exists: {output}")
-    if (resume_from or measure_tasks > 1 or anchor_tasks > 1) and not ck_root:
-        raise UsageError("-R, -F and -A need -K: this fold's own checkpoint root")
+    if (resume_from or measure_tasks > 1 or anchor_tasks > 1 or fold_tasks > 1) and not ck_root:
+        raise UsageError("-R, -F, -A and -L need -K: this fold's own checkpoint root")
     manifest, runs = ar.newest_runs(gen_dir)
     new_gen = ar.next_gen(gen)
     err(f"compact-probe {gen} → {new_gen}: manifest {manifest}, {len(runs)} runs, -j {jobs} -M {mem} -p {threads} -c {chunk_rows} -s {stage}"
-        + (f" -F {measure_tasks}" if measure_tasks > 1 else "") + (f" -A {anchor_tasks}" if anchor_tasks > 1 else "") + (f", resumed from {resume_from} through {through}" if resume_from else ""))
+        + (f" -F {measure_tasks}" if measure_tasks > 1 else "") + (f" -A {anchor_tasks}" if anchor_tasks > 1 else "") + (f" -L {fold_tasks}" if fold_tasks > 1 else "")
+        + (f", resumed from {resume_from} through {through}" if resume_from else ""))
     from .static_compact import compact_checkpoint, seed_checkpoint
 
     from .maint_runs import PhaseHook, from_env, phase
@@ -662,7 +697,8 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
             summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
                                source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage, ck=ck, progress=hook,
                                fanout=measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None,
-                               anchor_fanout=anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None)
+                               anchor_fanout=anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None,
+                               fold_fanout=fold_fanout(fold_tasks, gen) if fold_tasks > 1 else None)
         except BaseException as e:
             hook.end(f"failed: {type(e).__name__}: {e}", failed=True)
             raise
@@ -934,6 +970,51 @@ def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers)
     name = plan.rsplit("/", 1)[-1].removesuffix(".json")
     ck.store.write_text(ck.key(f"{MEASURED}/tasks/{name}-{i}.json"), json.dumps({"ranges": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
     err(f"measure-shard {plan} #{i}: {len(todo)} ranges in {monotonic() - t0:.0f}s")
+
+
+@cli.command("fold-shard")
+@option("-c", "--checkpoint", required=True, help="The compaction's fold checkpoint (its `fan/plan` saved), as a URL")
+@option("-i", "--index", type=int, help="This task's share of the plan (default: $BATCH_TASK_INDEX)")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="Units folded at a time, on cursors of one DuckDB database (-p threads and -M memory shared)")
+@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-P", "--plan", required=True, help="The fan-out's plan, its key under the checkpoint (`folded/plan-<n>.json`)")
+@option("-T", "--tmp", default="/stage/tmp/fold-shard", help="Local work dir")
+@option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
+@_task_recorded("fold-shard")
+def fold_shard_cmd(checkpoint, index, jobs, mem, threads, plan, tmp, code) -> None:
+    """A compaction's drill fold helper (`static_fanout.FoldFanout`, specs/static-fold-fanout.md): task INDEX's share of
+    the plan's units (a long chunk's digests or canonical spills, a short range's spills), their roots files staged from
+    the generation's store (the plan's `source`) and the runs' spill partitions from `fan/runs`, each unit folded
+    (`static_compact.fold_units`) and uploaded (spills under `spilled/files/`), then its `done.json`. A unit whose
+    `done.json` is there is skipped (a retry resumes); then `folded/tasks/<plan>-<index>.json`. Refuses to run other code
+    than the fold's (its bytes would differ)."""
+    from .checkpoint import Checkpoint, code_version
+    from .static_compact import fold_units
+    from .static_fanout import FOLDED, fold_unit_key
+
+    if (mine := code_version()) != code:
+        raise SystemExit(f"fold-shard: this is code {mine}, the fold's is {code}: refusing to fold for it")
+    root, _, prefix = checkpoint.rstrip("/").rpartition("/")
+    i = index if index is not None else int(os.environ.get("BATCH_TASK_INDEX", "0"))
+    name = plan.rsplit("/", 1)[-1].removesuffix(".json")
+    # the task's own dir, cleared first: Batch runs a job's later tasks on the VMs its earlier ones used
+    work = Path(tmp) / f"{name}-{i}"
+    shutil.rmtree(work, ignore_errors=True)
+    ck = Checkpoint(root, prefix, work=work / "ckpt")
+    doc = ck.store.read_json(ck.key(plan))
+    share = [(k, u) for k, u in doc["tasks"][i]]
+    listing = ck.store.listing(ck.key(FOLDED))
+    todo = [(k, u) for k, u in share if ck.key(f"{fold_unit_key(k, u)}/done.json") not in listing]
+    err(f"fold-shard {plan} #{i}: wave {doc.get('wave')}, {len(share)} units, {len(todo)} to fold")
+    con = connect(threads, mem, work / "duckdb")
+    try:
+        got = fold_units(con, ck, todo, work, work / "out", jobs=jobs, log=err)
+    finally:
+        con.close()
+        ck.close()
+    ck.store.write_text(ck.key(f"{FOLDED}/tasks/{name}-{i}.json"), json.dumps(got) + "\n")
+    err(f"fold-shard {plan} #{i}: {got['units']} units, {got['rows']:,} rows in {got['s']}s")
 
 
 def _timed_shard_task(*args) -> tuple[dict, float]:

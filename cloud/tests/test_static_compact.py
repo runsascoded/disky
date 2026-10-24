@@ -744,6 +744,242 @@ def test_a_fanned_out_measurement_resumed_after_the_spills_fetches_only_its_shar
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
 
 
+def _fold_fanned(world, tmp_path, submit, *, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None, on_save=None, before=None,
+                 measure=None, anchors=None, gen_dir: Path | None = None) -> dict:
+    """C's fold (`gen_dir`: a copy of C's generation) with its drill fold over 3 tasks (`static_fanout.FoldFanout`,
+    logging to `log`), `submit` running the helper jobs (`measure`, `anchors`: those fan-outs' submitters too, 3 tasks
+    each); its checkpoint under `tmp_path / root` (`on_save` its hook, `before(ck)` run on it first), the generation at
+    `tmp_path / out`. Its summary."""
+    from dt_cloud.checkpoint import code_version
+    from dt_cloud.static_fanout import AnchorFanout, Fanout, FoldFanout
+
+    gen_dir = gen_dir or world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    ck = sk.compact_checkpoint(str(tmp_path / root), "g", "g.c001", runs, work=tmp_path / f"ck-{root}", on_save=on_save)
+    if before is not None:
+        before(ck)
+    kw = dict(code=code_version(), poll_s=0.01, retries=retries, log=log)
+    try:
+        with _small_groups():
+            return sk.fold_gen(gen_dir, tmp_path / out, tmp_path / f"w-{root}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3,
+                               ck=ck, fold_fanout=lambda c, scan: FoldFanout(c, 3, submit, scan=scan, **kw),
+                               fanout=(lambda c, scan: Fanout(c, 3, measure, scan=scan, **kw)) if measure else None,
+                               anchor_fanout=(lambda c, scan: AnchorFanout(c, 3, anchors, scan=scan, **kw)) if anchors else None)
+    finally:
+        ck.close()
+
+
+def _fold_helpers(tmp_path, calls: list, skip=lambda attempt, i: False, stale: list | None = None):
+    """A fake fold helper job: each task's `fold-shard` in turn, in-process (`skip(attempt, i)`: a task that never runs).
+    Each task's dir is seeded with a stale file first; `stale` collects those that survived the task."""
+    from dt_cloud import static_merge as sm
+
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        calls.append((plan, n))
+        for i in range(n):
+            if skip(len(calls), i):
+                continue
+            tmp = tmp_path / f"f{len(calls)}"
+            junk = tmp / f"{plan.rsplit('/', 1)[-1].removesuffix('.json')}-{i}" / "stale.txt"
+            junk.parent.mkdir(parents=True, exist_ok=True)
+            junk.write_text("an earlier task's\n")
+            sm.fold_shard_cmd.callback(checkpoint=url, index=i, jobs=2, mem="1GB", threads=2, plan=plan, tmp=str(tmp), code=code)
+            if stale is not None and junk.exists():
+                stale.append(str(junk))
+    return submit
+
+
+#: A wave's dealing line (`FoldFanout.wave`): its wave, units to fold and units in all.
+WAVE = re.compile(r"fold fan-out: wave (\d): ([\d,]+) of ([\d,]+) units to fold \(([\d,]+) done\), .*")
+
+
+def _waves(lines: list[str]) -> list[tuple[int, int, int]]:
+    return [(int(m[1]), int(m[2].replace(",", "")), int(m[3].replace(",", ""))) for m in map(WAVE.fullmatch, lines) if m]
+
+
+def _gen(world, tmp_path, classes: str) -> Path:
+    """C's generation: as built (`digests`: every tier has its persisted digests), or a copy whose runs lack their
+    `digests: delta` marks (`roots`: drills built before them, so the classes come from a digest wave)."""
+    if classes == "digests":
+        return world["c_store"] / "g"
+    gen_dir = tmp_path / "g"
+    shutil.copytree(world["c_store"] / "g", gen_dir)
+    for r in ar.newest_runs(gen_dir)[1]:
+        f = gen_dir / r["key"] / "drill" / "meta.json"
+        f.write_text(json.dumps({k: v for k, v in json.loads(f.read_text()).items() if k != "digests"}))
+    return gen_dir
+
+
+def _plan_doc(world, tmp_path) -> dict:
+    """The fanned-out fold's saved plan's doc (under `tmp_path / "scratch"`)."""
+    from dt_cloud.blobstore import Store
+
+    _, runs = ar.newest_runs(world["c_store"] / "g")
+    return Store(str(tmp_path / "scratch")).read_json(f"{sk.checkpoint_prefix('g', 'g.c001', runs)}/fold/fan/plan/done.json")["doc"]
+
+
+@pytest.mark.parametrize("classes", ["digests", "roots"])
+def test_a_fanned_out_fold_writes_the_single_vm_fold(world, tmp_path, classes):
+    """The drill fold over 3 tasks (2 helper tasks per wave, a job each; each task's dir cleared first): `g.c001`'s
+    files, md5 for md5 (C folds chunks of 3 roots: a class's tuples span chunks, a range's spills span producers). With
+    the tiers' digests, one wave: every chunk's canonical spill and every short range. Without, a digest wave first
+    (every chunk's digests, every short range), then every chunk again."""
+    calls: list = []
+    stale: list = []
+    lines: list[str] = []
+    doc = _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, calls, stale=stale), log=lines.append, gen_dir=_gen(world, tmp_path, classes))
+    plan = _plan_doc(world, tmp_path)
+    n = plan["chunks"] + plan["short"]
+    assert (calls, stale, _waves(lines), doc["drill"]["classes"], doc["drill"]["fixed"]) == {
+        "digests": ([("folded/plan-1.json", 2)], [], [(2, n, n)], "digests", 0),
+        "roots": ([("folded/plan-1.json", 2), ("folded/plan-2.json", 2)], [], [(1, n, n), (2, plan["chunks"], n)], "roots", 0)}[classes]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_every_fan_out_at_once_writes_the_single_vm_fold(world, tmp_path):
+    """The drill fold, its measurement and the base anchors each over 3 tasks: the whole compaction's bytes."""
+    folds: list = []
+    measures: list = []
+    anchors: list = []
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, folds), measure=_helpers(tmp_path, measures), anchors=_anchor_helpers(tmp_path, anchors))
+    assert ([p for p, _ in folds], [p for p, _ in measures], [p for p, _, _ in anchors]) == (
+        ["folded/plan-1.json"], ["measured/plan-1.json"], ["anchored/plan-1.json"])
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+@pytest.mark.parametrize("classes, wave", [("digests", 2), ("roots", 1), ("roots", 2)])
+def test_fold_units_a_helper_job_left_are_dealt_again(world, tmp_path, classes, wave):
+    """A wave's first helper job's second task never runs: its units go to another job of that wave, and the bytes are
+    the same."""
+    calls: list = []
+    first = {"digests": 1, "roots": wave}[classes]  # the wave's first job's attempt
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, calls, skip=lambda attempt, i: attempt == first and i == 1), gen_dir=_gen(world, tmp_path, classes))
+    assert [p for p, _ in calls] == [f"folded/plan-{k}.json" for k in range(1, {"digests": 2, "roots": 3}[classes] + 1)]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_fold_units_never_folded_fail_the_fold_by_name(world, tmp_path):
+    """Helper jobs that fold nothing: after the first and its one retry, the fold fails naming the missing units."""
+    calls: list = []
+    unit = r"'(long/c|short/s)\d{6}'"
+    with pytest.raises(RuntimeError, match=rf"^fold fan-out: units \[{unit}(, {unit})*\] not folded after 2 helper jobs$"):
+        _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, calls, skip=lambda attempt, i: True), retries=1)
+    assert [p for p, _ in calls] == ["folded/plan-1.json", "folded/plan-2.json"]
+
+
+def test_an_orphaned_spill_is_never_read(world, tmp_path):
+    """A spill file under `spilled/files/` that no unit's `done.json` lists (an attempt reclaimed before marking its unit
+    done): the `spilled` marker leaves it out, so neither the measurement here nor its helpers read it."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    def orphan(ck) -> None:
+        f = tmp_path / "orphan.parquet"
+        pq.write_table(pa.table({"q": ["zzz"], "depth": pa.array([1], pa.uint8()), "path": ["x"], "usr": ["u"], "vf": [0], "vt": [0], "size": [1],
+                                 "n_files": [1]}), f)
+        ck.store.put(f, ck.key("fold/spilled/files/long/c000000.dead/grp=0/data_0.parquet"))
+
+    calls: list = []
+    measures: list = []
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, calls), before=orphan, measure=_helpers(tmp_path, measures))
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_a_fold_stopped_after_its_classes_skips_the_digest_wave(world, tmp_path):
+    """Without the tiers' digests, stopped right after `fold/classes` is saved: the rerun restores the classes and runs
+    only wave 2 (its plan resumed: the runs' spill not redone), to the same bytes."""
+    def stop(name: str) -> None:
+        if name == "fold/classes":
+            raise _Stop(name)
+
+    gen_dir = _gen(world, tmp_path, "roots")
+    with pytest.raises(_Stop):
+        _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, []), on_save=stop, out="out0", gen_dir=gen_dir)
+    calls: list = []
+    lines: list[str] = []
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, calls), log=lines.append, gen_dir=gen_dir)
+    assert ([p for p, _ in calls], [w for w, _, _ in _waves(lines)]) == (["folded/plan-1.json"], [2])
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_a_fold_stopped_mid_wave_two_deals_only_its_missing_units(world, tmp_path):
+    """Without the tiers' digests, wave 2's helper job leaves its second task's units and the fold fails (no retries);
+    the rerun deals exactly those units (every other one is done), to the same bytes."""
+    from dt_cloud.blobstore import Store
+
+    _, runs = ar.newest_runs(world["c_store"] / "g")
+    gen_dir = _gen(world, tmp_path, "roots")
+    with pytest.raises(RuntimeError, match=r"^fold fan-out: units \[.*\] not folded after 1 helper jobs$"):
+        _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, [], skip=lambda attempt, i: attempt == 2 and i == 1), retries=0, out="out0", gen_dir=gen_dir)
+    plan = Store(str(tmp_path / "scratch")).read_json(f"{sk.checkpoint_prefix('g', 'g.c001', runs)}/fold/folded/plan-2.json")
+    left = len(plan["tasks"][1])
+    lines: list[str] = []
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, []), log=lines.append, gen_dir=gen_dir)
+    assert [(w, todo) for w, todo, _ in _waves(lines)] == [(2, left)]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_a_wrong_change_is_corrected_from_the_roots_over_the_fan_out(world, tmp_path):
+    """C's run with one class's change off by one root (as `test_a_wrong_change_is_corrected_from_the_roots`), folded over
+    3 tasks: the wave's chunks holding that class fail their count checks, the fold corrects those tuples' digests from
+    their roots (`fixed`: those members), spills every chunk again when that changed the classes (wave 3), and writes the
+    same files."""
+    gen_dir = tmp_path / "g"
+    shutil.copytree(world["c_store"] / "g", gen_dir)
+    _, runs = ar.newest_runs(gen_dir)
+    drill = gen_dir / runs[-1]["key"] / "drill"
+    delta = pq.read_table(drill / sd.DIGESTS).to_pylist()
+    bad = delta[0]["q"]
+    pq.write_table(pa.Table.from_pylist([{**r, "dn": r["dn"] + (r["q"] == bad)} for r in delta], schema=sd.DIGEST_DELTA_SCHEMA), drill / sd.DIGESTS)
+    canon = {r["q"]: r["canonical"] for r in pq.read_table(drill / "aliases.parquet").to_pylist()}
+    members = pq.read_table(world["c_store"] / "g.c001" / "catalog" / "members.parquet", columns=["q"]).column("q").to_pylist()
+    lines: list[str] = []
+    doc = _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, []), log=lines.append, gen_dir=gen_dir)
+    fixed = sum(canon.get(m) == bad for m in members)
+    [verdict] = [ln for ln in lines if ln.startswith(f"fold fan-out: {fixed:,} members' digests fixed")]
+    respill = verdict.endswith("every chunk spilled again")
+    plan = _plan_doc(world, tmp_path)
+    n = plan["chunks"] + plan["short"]
+    assert (doc["drill"]["classes"], doc["drill"]["fixed"], _waves(lines)) == ("digests", fixed, [(2, n, n), *([(3, plan["chunks"], n)] if respill else [])])
+    assert fixed > 0
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_contiguous_shares_keep_order_and_balance_around_a_heavy_unit():
+    from dt_cloud.static_fanout import contiguous
+
+    assert contiguous({0: 1, 1: 1, 2: 8, 3: 1, 4: 1}, 3) == [[0, 1], [2], [3, 4]]
+    assert contiguous({("long", 0): 0, ("long", 1): 0, ("short", 0): 0}, 2) == [[("long", 0)], [("long", 1), ("short", 0)]]
+
+
+def test_a_seed_through_the_fold_plan_carries_the_finished_fold_units_and_their_spills(tmp_path):
+    """`seed_checkpoint` through `fold/classes` (a fanned-out fold's plan copied, its spills not): the finished
+    `fold/folded/` units with the spill files their `done.json` lists (not an unfinished unit's, an orphan, plans or
+    task reports); through `catalog` (no plan to number the units by): none."""
+    from dt_cloud.blobstore import Store
+
+    runs = [{"key": "runs/2026-10-23T0702"}]
+    pre = sk.checkpoint_prefix("g", "g.c001", runs)
+    src = Store(str(tmp_path / "src"))
+    for rel in ("catalog/done.json", "fold/fan/runs/done.json", "fold/fan/runs/files/in/t001/sp=0/data_0.parquet", "fold/fan/members/done.json",
+                "fold/fan/plan/done.json", "fold/fan/plan/tup.parquet", "fold/classes/done.json", "fold/folded/plan-2.json",
+                "fold/folded/tasks/plan-2-0.json", "fold/folded/digest/c000001/dig.parquet", "fold/folded/digest/c000001/done.json",
+                "fold/folded/long/c000002/done.json", "fold/spilled/files/long/c000002.ab12/grp=0/data_0.parquet",
+                "fold/spilled/files/long/c000003.cd34/grp=1/data_0.parquet", "fold/spilled/files/long/c000004.dead/grp=1/data_0.parquet"):
+        src.write_text(f"{pre}/{rel}", "{}")
+    src.write_text(f"{pre}/fold/folded/long/c000002/done.json", json.dumps({"rows": 3, "files": ["long/c000002.ab12/grp=0/data_0.parquet"]}))
+
+    def seeded(through: str, dst: str) -> list[str]:
+        sk.seed_checkpoint(str(tmp_path / "src"), str(tmp_path / dst), "g", "g.c001", runs, through, log=lambda m: None)
+        return sorted(k[len(pre) + 1:] for k in Store(str(tmp_path / dst)).keys(f"{pre}/"))
+
+    assert seeded("fold/classes", "a") == [
+        "catalog/done.json", "code.json", "fold/classes/done.json", "fold/fan/members/done.json", "fold/fan/plan/done.json", "fold/fan/plan/tup.parquet",
+        "fold/fan/runs/done.json", "fold/fan/runs/files/in/t001/sp=0/data_0.parquet", "fold/folded/digest/c000001/dig.parquet",
+        "fold/folded/digest/c000001/done.json", "fold/folded/long/c000002/done.json", "fold/spilled/files/long/c000002.ab12/grp=0/data_0.parquet"]
+    assert seeded("catalog", "b") == ["catalog/done.json", "code.json"]
+
+
 def _anchors_fanned_fold(world, tmp_path, submit, retries: int = 2):
     """C's fold with its base anchors' rollups over 3 tasks (`static_fanout.AnchorFanout`), `submit` running the helper
     jobs."""
@@ -944,4 +1180,17 @@ def test_heavy_chunks_combine_in_parts_to_the_same_generation(world, tmp_path, m
                     log=lines.append)
     split = [int(m.group(1)) for m in map(re.compile(r".*: drill/fold/long-roots in .*, split (\d+)\)$").fullmatch, lines) if m]
     assert (len(split), split[0] > 0) == (1, True)
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+@pytest.mark.parametrize("classes", ["digests", "roots"])
+def test_heavy_chunks_combine_in_parts_over_the_fold_fan_out(world, tmp_path, monkeypatch, classes):
+    """The fold fan-out's units combine a heavy chunk in parts as the single-VM fold does (`COMBINE_PART_ROWS` 2), each
+    part file removed after its unit: `g.c001`'s files, md5 for md5, with the tiers' digests (one wave) and without (a
+    digest wave first)."""
+    monkeypatch.setattr(sk, "COMBINE_PART_ROWS", 2)
+    calls: list = []
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, calls), gen_dir=_gen(world, tmp_path, classes))
+    assert len(calls) == {"digests": 1, "roots": 2}[classes]
+    assert sorted(p.name for p in tmp_path.rglob("c*-p*.parquet")) == []
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")

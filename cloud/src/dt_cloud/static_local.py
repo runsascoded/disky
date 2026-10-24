@@ -355,10 +355,10 @@ def q_bounds(counts: list[tuple[str, int]], chunk_rows: int) -> list[str]:
     return bounds
 
 
-def spill_roots(con, table: str, out: Path) -> None:
-    """Table `table`'s roots (`ROOT_COLS`) → `out/grp=<g>/*.parquet` by `q` range (table `qg (lo, grp)`)."""
+def spill_roots(con, table: str, out: Path, bounds: str = "qg") -> None:
+    """Table `table`'s roots (`ROOT_COLS`) → `out/grp=<g>/*.parquet` by `q` range (table `bounds (lo, grp)`)."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(f"COPY ({sr.ranged(table, 'qg', 'grp')}) TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
+    con.execute(f"COPY ({sr.ranged(table, bounds, 'grp')}) TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
 
 
 def read_roots(files: list[Path]) -> str:

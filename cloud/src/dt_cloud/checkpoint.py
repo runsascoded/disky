@@ -153,12 +153,21 @@ class Checkpoint:
         self._count("save", t0)
         self._saved(step)
 
-    def load_files(self, step: str, local: Path, workers: int = 16) -> dict | None:
+    def mark_files(self, step: str, rels: list[str], doc: dict | None = None) -> None:
+        """Step `step`'s marker over files already under `step/files/` (written there by others: a fan-out's helpers),
+        as `save_files` writes it: `rels` (sorted) and `doc`."""
+        self.store.write_text(self.key(f"{step}/done.json"), json.dumps({"tables": {}, "files": sorted(rels), "doc": doc}) + "\n")
+        self.log(f"checkpoint {self.key(step)}: marked {len(rels)} files")
+        self._saved(step)
+
+    def load_files(self, step: str, local: Path, workers: int = 16, missing_only: bool = False) -> dict | None:
+        """Step `step`'s files into `local` (`missing_only`: those not there already) and its doc."""
         t0 = monotonic()
         m = self.store.read_json(self.key(f"{step}/done.json"))
+        rels = [r for r in m["files"] if not (missing_only and (local / r).is_file())]
         with ThreadPoolExecutor(workers) as ex:
-            list(ex.map(lambda r: self.store.get(self.key(f"{step}/files/{r}"), local / r), m["files"]))
-        self.log(f"checkpoint {self.key(step)}: resumed {len(m['files'])} files in {monotonic() - t0:.0f}s")
+            list(ex.map(lambda r: self.store.get(self.key(f"{step}/files/{r}"), local / r), rels))
+        self.log(f"checkpoint {self.key(step)}: resumed {len(rels)} files in {monotonic() - t0:.0f}s")
         self._count("resume", t0)
         return m["doc"]
 

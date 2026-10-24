@@ -252,7 +252,8 @@ def stage_roots(gen_dir: Path, tiers: list[str], kinds: tuple[str, ...], dst: Pa
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
                jobs: int = 1, step=sl._nop_step, log: Callable[[str], None] = err, ck: Checkpoint | None = None,
                staged: Callable[[], Staged | None] = lambda: None, fanout: Callable[[Checkpoint, str], object] | None = None,
-               meas: Path | None = None, scan: str | None = None) -> dict:
+               meas: Path | None = None, scan: str | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None,
+               gen_dir: Path | None = None, source: str | None = None) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
     `out/catalog/members.parquet`: each member's roots through the last scan, read from the tiers through each one's
     class map (every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows
@@ -291,7 +292,11 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     measurement `fanout`, only its tables are restored: the fan-out fetches this VM's share of the spills.
 
     `staged()`: the tiers' roots copied onto the work disk (`stage_roots`; `fold_gen` starts the copy early, this waits
-    on it), read instead of the tier's files; each kind's copies deleted once its last read is done. None: read in place."""
+    on it), read instead of the tier's files; each kind's copies deleted once its last read is done. None: read in place.
+
+    `fold_fanout(ck, scan)` (needs `ck`; `static_fanout.FoldFanout`): the classes and spills over helper tasks instead
+    (`_fanned_fold`; specs/static-fold-fanout.md), their inputs staged per task from `source` (the generation's store
+    URL; None: `gen_dir`, the generation's local dir), the same bytes."""
     t = monotonic()
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
@@ -303,6 +308,14 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
             groups = ck.store.read_json(ck.key("spilled/done.json"))["doc"]
         else:
             groups = _restore(con, ck, "spilled", work)
+    elif fold_fanout is not None and ck is not None:
+        if gen_dir is None:
+            raise ValueError("fold_drill: the fold fan-out needs gen_dir (its roots files' generation-relative names)")
+        t, groups = _fanned_fold(con, tiers, out, work, fold_fanout(ck, scan), gen_dir=gen_dir, source=source or str(gen_dir), chunk_rows=chunk_rows,
+                                 jobs=jobs, step=step, log=log, t=t)
+        if fanout is None:
+            # measured here: every range's spills (share 0's fold kept its own)
+            ck.load_files("spilled", work, missing_only=True)
     else:
         st = staged()
         if st is not None:
@@ -332,6 +345,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         # right after saving the spills left them)
         ck.drop("long-roots-tables")
         ck.drop("long-roots")
+        ck.drop("fan/runs")
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     # the measurement's helper tasks fetch the spills the checkpoint just saved (specs/static-measure-fanout.md)
     fan = fanout(ck, scan) if fanout is not None and ck is not None else None
@@ -433,13 +447,10 @@ NO_ROOTS = ("SELECT NULL::BIGINT AS tid, NULL::VARCHAR AS path, NULL::VARCHAR AS
             "NULL::BIGINT AS size, NULL::BIGINT AS n_files WHERE false")
 
 
-def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
-                st: Staged | None = None) -> tuple[float, dict]:
-    """`fold_drill`'s plan, runs' spill and long roots: tables `dmem`, `mtid (q, tid)`, `tdig` (each tuple's digest) and
-    `work/troots/c<chunk>.parquet` (each chunk's combined roots). `st`: the roots' local copies. The digests come from the
-    tiers' (`_tuple_digests`), each tuple's count checked against its combined roots (a tuple whose count differs takes
-    its digest from them, logged), or else from the roots. Returns the time and `{classes: digests | roots, fixed:
-    members whose digests their roots corrected}`."""
+def _plan(con, tiers: list[sd.Tier], out: Path, long_files: list[list[str]], chunk_rows: int) -> list[tuple]:
+    """`fold_drill`'s plan: tables `dmem`, `ta<i>`, `mt` (`member_classes`), `tup (tid, c0 …)` (the distinct tuples of
+    classes), `mtid (q, tid)`, `tc<i>` (each tier's rows per class, estimated), `tes (tid, est)` and `tch (tid, ch)`;
+    the chunks `(ch, first tid, last tid, min c0, max c0, estimated rows)`."""
     n = len(tiers)
     member_classes(con, tiers, str(out / "catalog" / "members.parquet"))
     # a member's tuple of classes, one per tier: members with equal tuples hold equal rows
@@ -447,23 +458,23 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         FROM (SELECT DISTINCT {', '.join(f'c{i}' for i in range(n))} FROM mt)""")
     on = " AND ".join(f"t.c{i} IS NOT DISTINCT FROM mt.c{i}" for i in range(n))
     con.execute(f"CREATE OR REPLACE TABLE mtid AS SELECT mt.q, t.tid FROM mt JOIN tup AS t ON {on}")
-    why = _tuple_digests(con, tiers)
-    derived = why is None
-    log("drill classes: " + ("from the digests (the base's ⊕ the runs' changes; each tuple's count checked against its roots)" if derived
-                             else f"every root's digest ({why})"))
-    long_files = [_roots_files(tr, "long", st) for tr in tiers]
     # each tier's rows per class, estimated from its roots index (`static_roots.index_estimates`): chunk sizes only
     for i, tr in enumerate(tiers):
         sr.index_estimates(con, [tr.local("long-roots-index.parquet")] if long_files[i] else [], f"SELECT canonical AS q FROM ta{i}", f"tc{i}")
     est = " + ".join(f"coalesce(tc{i}.n, 0)" for i in range(n))
     cjoin = " ".join(f"LEFT JOIN tc{i} ON tc{i}.q = t.c{i}" for i in range(n))
-    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, est, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
-        SELECT tid, est, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
-        FROM (SELECT t.tid, {est} AS est FROM tup AS t {cjoin}))""")
-    chunks = con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0), sum(est)::BIGINT FROM tch JOIN tup AS t USING (tid)
-        GROUP BY ch ORDER BY ch""").fetchall()
-    t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
-    runs = sr.ChunkSpill(con, work / "runs", len(chunks))
+    con.execute(f"CREATE OR REPLACE TABLE tes AS SELECT t.tid, {est} AS est FROM tup AS t {cjoin}")
+    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
+        SELECT tid, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch FROM tes)""")
+    return con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0), sum(e.est)::BIGINT FROM tch JOIN tup AS t USING (tid)
+        JOIN tes AS e USING (tid) GROUP BY ch ORDER BY ch""").fetchall()
+
+
+def _runs_spill(con, work: Path, n_chunks: int, long_files: list[list[str]], jobs: int, log: Callable[[str], None]) -> sr.ChunkSpill:
+    """Every run tier's long roots joined to their tuples and chunks (`tup`, `tch`), spilled by chunk
+    (`static_roots.ChunkSpill` under `work/runs`), `jobs` runs at a time."""
+    n = len(long_files)
+    runs = sr.ChunkSpill(con, work / "runs", n_chunks)
     spills = [i for i in range(1, n) if long_files[i]]
     k = max(1, min(jobs, len(spills)))
     # a partitioned write keeps per-thread, per-partition buffers outside `memory_limit` (gcs 10-08c: RSS past `-M` here),
@@ -477,7 +488,113 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         return 0, None
 
     _pool(con, spill, spills, k, sn.Progress("drill/fold/runs-spill", len(spills), log))
-    t = step("drill/fold/runs-spill", t, runs=n - 1, parts=runs.p)
+    return runs
+
+
+def _combine(cur, c: tuple, spans: list[tuple[str, str | None, str | None]], spilled: list[Path], split_dir: Path,
+             empty: bool = False) -> list[Path] | None:
+    """Chunk `c`'s combined roots (`_plan`'s chunk: its tuples' rows in the base's roots files of `spans` and the runs'
+    spill files `spilled`; the smallest `vt` per `(tid, path, usr, vf)`) → `ct`: a temp table (returns `[]`), or for a
+    heavy chunk (estimated past `COMBINE_PART_ROWS`: one class can hold 440M roots, c001's tail OOM'd at a 186 GiB
+    limit) a temp view over its parts combined by `hash(path)` into `split_dir/c<ch>-p<i>.parquet` (returns them: each
+    group lies in one part, so the parts hold the same rows; `_drop_ct`). None (no `ct`): the chunk has no inputs
+    (`empty`: `ct` made empty all the same, so `tdig`'s counts there are checked)."""
+    ch, a, b, lo, hi, est = c[:6]
+    parts = []
+    base = overlapping(spans, lo, hi) if lo is not None else []
+    if base:
+        parts.append(f"""SELECT t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(base)}) AS r
+            JOIN tup AS t ON t.c0 = r.q WHERE r.q BETWEEN {q(lo)} AND {q(hi)} AND t.tid BETWEEN {a} AND {b}""")
+    if spilled:
+        parts.append(f"""SELECT tid, path, usr, vf, vt, size, n_files
+            FROM read_parquet([{', '.join(q(str(f)) for f in spilled)}], hive_partitioning = false)""")
+    if not parts:
+        if not empty:
+            return None
+        parts.append(NO_ROOTS)
+    combine = f"""SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files
+        FROM ({' UNION ALL '.join(parts)}) {{}} GROUP BY tid, path, usr, vf"""
+    k = max(1, -(-int(est or 0) // COMBINE_PART_ROWS))
+    if k == 1:
+        cur.execute(f"CREATE OR REPLACE TEMP TABLE ct AS {combine.format('')}")
+        return []
+    split_dir.mkdir(parents=True, exist_ok=True)
+    files = [split_dir / f"c{ch:06d}-p{i:03d}.parquet" for i in range(k)]
+    for i, f in enumerate(files):
+        cur.execute(f"COPY ({combine.format(f'WHERE hash(path) % {k} = {i}')}) TO {q(str(f))} (FORMAT parquet, COMPRESSION zstd)")
+    cur.execute(f"CREATE OR REPLACE TEMP VIEW ct AS SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in files)}])")
+    return files
+
+
+def _drop_ct(cur, files: list[Path], keep: bool = False) -> None:
+    """`_combine`'s `ct` dropped: the table, or a heavy chunk's view and its parts' files (`keep`: those with rows
+    kept, the chunk's combined roots)."""
+    if not files:
+        cur.execute("DROP TABLE ct")
+        return
+    cur.execute("DROP VIEW ct")
+    for f in files:
+        if not keep or not pq.ParquetFile(f).metadata.num_rows:
+            f.unlink()
+
+
+def _digest(cur, where: str = "") -> pa.Table:
+    """`ct`'s tuples' digests (its rows by `tid`: count and two hash sums, as the build's); `where`: a join or filter
+    on `ct` (e.g. only some tuples')."""
+    return cur.execute(f"""SELECT tid, count(*)::BIGINT AS n, (sum({ROW_HASH}) % {U64})::UBIGINT AS h1,
+        (sum(hash({ROW_HASH}, 'x')) % {U64})::UBIGINT AS h2 FROM ct {where} GROUP BY tid ORDER BY tid""").to_arrow_table()
+
+
+def _check_counts(cur, a: int, b: int) -> tuple[list[int], pa.Table] | None:
+    """The tuples `a`..`b` (a chunk's) whose rows in `ct` aren't `tdig`'s count (persisted digests: `_tuple_digests`),
+    with their digests from those rows; None: every count holds."""
+    cur.execute(f"""CREATE OR REPLACE TEMP TABLE cbad AS SELECT tid FROM (SELECT tid, count(*)::BIGINT AS n FROM ct GROUP BY tid) AS r
+        FULL JOIN (SELECT tid, n FROM tdig WHERE tid BETWEEN {a} AND {b}) AS d USING (tid) WHERE r.n IS DISTINCT FROM d.n""")
+    bad = [x for (x,) in cur.execute("SELECT tid FROM cbad ORDER BY tid").fetchall()]
+    out = (bad, _digest(cur, "SEMI JOIN cbad USING (tid)")) if bad else None
+    cur.execute("DROP TABLE cbad")
+    return out
+
+
+def _fix_digests(con, fixes: list[tuple[list[int], pa.Table]], log: Callable[[str], None]) -> int:
+    """`tdig` corrected by the chunks' count checks (`_check_counts`: tuples whose roots aren't their persisted digests'
+    count, a run's change that wasn't exact, take their digests from the roots); the members so corrected, logged."""
+    if not fixes:
+        return 0
+    bad = [x for b, _ in fixes for x in b]
+    con.register("fix_bad", pa.table({"tid": pa.array(bad, pa.int64())}))
+    fixed = con.execute("SELECT count(*) FROM mtid SEMI JOIN fix_bad USING (tid)").fetchone()[0]
+    log(f"drill classes: {len(bad):,} tuples ({fixed:,} members) whose roots aren't their digests' count; their digests taken from their roots")
+    con.execute("DELETE FROM tdig WHERE tid IN (SELECT tid FROM fix_bad)")
+    con.unregister("fix_bad")
+    con.register("tdig_in", pa.concat_tables([d for _, d in fixes]))
+    con.execute("INSERT INTO tdig SELECT tid, n, h1, h2 FROM tdig_in")
+    con.unregister("tdig_in")
+    return fixed
+
+
+def _derive_digests(con, tiers: list[sd.Tier], log: Callable[[str], None]) -> bool:
+    """`tdig` from the tiers' persisted digests (`_tuple_digests`), when they allow; whether they did (else every chunk's
+    roots are digested), logged."""
+    why = _tuple_digests(con, tiers)
+    log("drill classes: " + ("from the digests (the base's ⊕ the runs' changes; each tuple's count checked against its roots)" if why is None
+                             else f"every root's digest ({why})"))
+    return why is None
+
+
+def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
+                st: Staged | None = None) -> tuple[float, dict]:
+    """`fold_drill`'s plan, runs' spill and long roots: tables `dmem`, `mtid (q, tid)`, `tdig` (each tuple's digest) and
+    `work/troots/c<chunk>.parquet` (each chunk's combined roots). `st`: the roots' local copies. The digests come from the
+    tiers' (`_derive_digests`), each tuple's count checked against its combined roots (a tuple whose count differs takes
+    its digest from them, logged: `_fix_digests`), or else from the roots. Returns the time and `{classes: digests |
+    roots, fixed: members whose digests their roots corrected}`."""
+    long_files = [_roots_files(tr, "long", st) for tr in tiers]
+    chunks = _plan(con, tiers, out, long_files, chunk_rows)
+    derived = _derive_digests(con, tiers, log)
+    t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
+    runs = _runs_spill(con, work, len(chunks), long_files, jobs, log)
+    t = step("drill/fold/runs-spill", t, runs=len(tiers) - 1, parts=runs.p)
     spans = q_spans(long_files[0])
     troots = work / "troots"
     troots.mkdir()
@@ -488,49 +605,17 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
     def chunk(cur, c: tuple) -> tuple[int, object]:
         """Chunk `c`'s combined roots → `troots/c<ch>.parquet`; its rows and its tuples' digests (by `tid`), or (`derived`)
         the tuples whose rows aren't `tdig`'s count, with their digests from the rows (None: every count holds)."""
-        ch, a, b, lo, hi, est = c
-        parts = []
-        base = overlapping(spans, lo, hi) if lo is not None else []
-        if base:
-            parts.append(f"""SELECT t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(base)}) AS r
-                JOIN tup AS t ON t.c0 = r.q WHERE r.q BETWEEN {q(lo)} AND {q(hi)} AND t.tid BETWEEN {a} AND {b}""")
-        if spilled[ch]:
-            parts.append(f"""SELECT tid, path, usr, vf, vt, size, n_files
-                FROM read_parquet([{', '.join(q(str(f)) for f in spilled[ch])}], hive_partitioning = false)""")
-        if not parts:
-            if not derived:
-                return 0, None
-            parts.append(NO_ROOTS)  # `tdig`'s counts here are checked all the same
-        combine = f"""SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files
-            FROM ({' UNION ALL '.join(parts)}) {{}} GROUP BY tid, path, usr, vf"""
-        # a heavy chunk (one class can hold 440M roots: c001's tail OOM'd at a 186 GiB limit) combines in parts by
-        # `hash(path)`: its groups lie in one part each, so the parts' files hold the same rows; `ct` reads them back
-        k = max(1, -(-int(est or 0) // COMBINE_PART_ROWS))
-        if k > 1:
-            split.append(k)
-        if k == 1:
-            cur.execute(f"CREATE OR REPLACE TEMP TABLE ct AS {combine.format('')}")
-        else:
-            files = [troots / f"c{ch:06d}-p{i:03d}.parquet" for i in range(k)]
-            for i, f in enumerate(files):
-                cur.execute(f"COPY ({combine.format(f'WHERE hash(path) % {k} = {i}')}) TO {q(str(f))} (FORMAT parquet, COMPRESSION zstd)")
-            cur.execute(f"CREATE OR REPLACE TEMP VIEW ct AS SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in files)}])")
-        dig_sql = f"""SELECT tid, count(*)::BIGINT AS n, (sum({ROW_HASH}) % {U64})::UBIGINT AS h1,
-            (sum(hash({ROW_HASH}, 'x')) % {U64})::UBIGINT AS h2 FROM ct {{}} GROUP BY tid ORDER BY tid"""
-        if derived:
-            cur.execute(f"""CREATE OR REPLACE TEMP TABLE cbad AS SELECT tid FROM (SELECT tid, count(*)::BIGINT AS n FROM ct GROUP BY tid) AS r
-                FULL JOIN (SELECT tid, n FROM tdig WHERE tid BETWEEN {a} AND {b}) AS d USING (tid) WHERE r.n IS DISTINCT FROM d.n""")
-            bad = [x for (x,) in cur.execute("SELECT tid FROM cbad ORDER BY tid").fetchall()]
-            dig = (bad, cur.execute(dig_sql.format("SEMI JOIN cbad USING (tid)")).to_arrow_table()) if bad else None
-            cur.execute("DROP TABLE cbad")
-        else:
-            dig = cur.execute(dig_sql.format("")).to_arrow_table()
+        ch = c[0]
+        files = _combine(cur, c, spans, spilled[ch], troots, empty=derived)
+        if files is None:
+            return 0, None
+        if files:
+            split.append(len(files))
+        dig = _check_counts(cur, c[1], c[2]) if derived else _digest(cur)
         rows = sl.count(cur, "ct")
-        if k > 1:
-            cur.execute("DROP VIEW ct")
-            for f in files:
-                if not pq.ParquetFile(f).metadata.num_rows:
-                    f.unlink()
+        if files:
+            # a heavy chunk's parts are its combined roots
+            _drop_ct(cur, files, keep=True)
             return rows, dig
         if rows:
             cur.execute(f"COPY ct TO {q(str(troots / f'c{ch:06d}.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
@@ -548,21 +633,14 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         spilled.clear()
     runs.close()
     fixed = 0
-    if not derived:
+    if derived:
+        fixed = _fix_digests(con, digs, log)
+    else:
         con.execute("CREATE OR REPLACE TABLE tdig (tid BIGINT, n BIGINT, h1 UBIGINT, h2 UBIGINT)")
-    elif digs:
-        # tuples whose roots aren't their digests' count (a run's change that wasn't exact): their digests from the roots
-        bad = [x for b, _ in digs for x in b]
-        con.register("fix_bad", pa.table({"tid": pa.array(bad, pa.int64())}))
-        fixed = con.execute("SELECT count(*) FROM mtid SEMI JOIN fix_bad USING (tid)").fetchone()[0]
-        log(f"drill classes: {len(bad):,} tuples ({fixed:,} members) whose roots aren't their digests' count; their digests taken from their roots")
-        con.execute("DELETE FROM tdig WHERE tid IN (SELECT tid FROM fix_bad)")
-        con.unregister("fix_bad")
-        digs = [d for _, d in digs]
-    if digs:
-        con.register("tdig_in", pa.concat_tables(digs))
-        con.execute("INSERT INTO tdig SELECT tid, n, h1, h2 FROM tdig_in")
-        con.unregister("tdig_in")
+        if digs:
+            con.register("tdig_in", pa.concat_tables(digs))
+            con.execute("INSERT INTO tdig SELECT tid, n, h1, h2 FROM tdig_in")
+            con.unregister("tdig_in")
     return (step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=prog.rows, chunks=len(chunks), split=len(split)),
             {"classes": "digests" if derived else "roots", "fixed": fixed})
 
@@ -605,16 +683,8 @@ def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs
     canonical members' long roots (`work/long/`) and the short literals' (`work/short/`); the ranges per kind. `st`: the
     roots' local copies. `before_drop()` runs before the chunks' roots (`work/troots/`) are removed: their save's end."""
     n, troots = len(tiers), work / "troots"
-    con.execute("CREATE OR REPLACE TABLE dgq AS SELECT m.q, d.n, d.h1, d.h2 FROM mtid AS m JOIN tdig AS d USING (tid)")
-    con.execute("CREATE OR REPLACE TABLE al AS SELECT q, min(q) OVER (PARTITION BY n, h1, h2) AS canonical FROM dgq")
-    missing = con.execute("SELECT count(*) FROM dmem ANTI JOIN al USING (q)").fetchone()[0]
-    if missing:
-        raise RuntimeError(f"{missing} members without roots in any tier: the runs' drills don't cover the folded catalog's members")
-    aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
-    con.execute("CREATE OR REPLACE TABLE canon AS SELECT DISTINCT canonical AS q FROM al")
-    con.execute("CREATE OR REPLACE TABLE ctid AS SELECT c.q, m.tid FROM canon AS c JOIN mtid AS m USING (q)")
-    t = step("drill/fold/aliases", t, members=aliases.num_rows, canonical=sl.count(con, "canon"))
-    long_groups = sl.plan_groups(con, con.execute("SELECT c.q, d.n FROM ctid AS c JOIN tdig AS d USING (tid) ORDER BY c.q").fetchall(), chunk_rows)
+    long_groups = _classes(con, chunk_rows)
+    t = step("drill/fold/aliases", t, members=sl.count(con, "al"), canonical=sl.count(con, "canon"))
     files = sorted(troots.glob("*.parquet"))
     prog = sn.Progress("drill/fold/canonical-roots", len(files), log)
 
@@ -633,43 +703,346 @@ def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs
     before_drop()
     shutil.rmtree(troots)
     # a resumed fold (`long-roots` restored) never made `mt`, `tup`, `tch` or the per-tier tables
-    for tb in ("rt", "tdig", "ctid", "mt", "mtid", "tup", "tch", *(f"t{x}{i}" for i in range(n) for x in "ac")):
-        con.execute(f"DROP TABLE IF EXISTS {tb}")
+    _drop_plan(con, n)
     t = step("drill/fold/canonical-roots", t, lcan=n_long, groups=long_groups)
     short_files = [_roots_files(tr, "short", st) for tr in tiers]
     hb.set_stage("drill/fold/short-roots: plan")
-    # the q ranges planned from the tiers' roots indexes (the literals: every group's first and last `q`), not counted
+    bounds, counts = _short_plan(con, tiers, short_files, chunk_rows)
+    short_groups = sl.plan_groups(con, counts, chunk_rows)
+    short_spans = [q_spans(fs) for fs in short_files]
+    prog = sn.Progress("drill/fold/short-roots", len(bounds), log)
+    _pool(con, lambda cur, g: (_short_one(cur, g, bounds, short_spans, work / "short" / f"fold{g:06d}"), None), list(range(len(bounds))), jobs, prog)
+    n_short = prog.rows
+    return step("drill/fold/short-roots", t, sall=n_short, groups=short_groups), {"long": long_groups, "short": short_groups}
+
+
+def _drop_plan(con, n: int) -> None:
+    """The plan's and the classes' working tables dropped (a resumed fold may never have made some of them)."""
+    for tb in ("rt", "tdig", "ctid", "mt", "mtid", "tup", "tch", "tes", "fch", "fbase", "fshort", "sqg", "lqg",
+               *(f"t{x}{i}" for i in range(n) for x in "ac")):
+        con.execute(f"DROP TABLE IF EXISTS {tb}")
+
+
+def _classes(con, chunk_rows: int) -> int:
+    """The classes from the tuples' digests (`tdig`, `mtid`): table `al (q, canonical)` (members with equal root-set
+    digests alias to the least), `canon`, `ctid (q, tid)` (each canonical member's tuple) and `qg` (the long `q` ranges,
+    `static_local.plan_groups` over the canonical members' rows); their count. Every member of `dmem` must have one."""
+    con.execute("CREATE OR REPLACE TABLE dgq AS SELECT m.q, d.n, d.h1, d.h2 FROM mtid AS m JOIN tdig AS d USING (tid)")
+    con.execute("CREATE OR REPLACE TABLE al AS SELECT q, min(q) OVER (PARTITION BY n, h1, h2) AS canonical FROM dgq")
+    missing = con.execute("SELECT count(*) FROM dmem ANTI JOIN al USING (q)").fetchone()[0]
+    if missing:
+        raise RuntimeError(f"{missing} members without roots in any tier: the runs' drills don't cover the folded catalog's members")
+    con.execute("CREATE OR REPLACE TABLE canon AS SELECT DISTINCT canonical AS q FROM al")
+    con.execute("CREATE OR REPLACE TABLE ctid AS SELECT c.q, m.tid FROM canon AS c JOIN mtid AS m USING (q)")
+    return sl.plan_groups(con, con.execute("SELECT c.q, d.n FROM ctid AS c JOIN tdig AS d USING (tid) ORDER BY c.q").fetchall(), chunk_rows)
+
+
+def _short_plan(con, tiers: list[sd.Tier], short_files: list[list[str]], chunk_rows: int) -> tuple[list[str], list[tuple[str, int]]]:
+    """The short literals' `q` ranges (each one's first literal: `static_local.q_bounds`), planned from the tiers' roots
+    indexes (the literals: every group's first and last `q`), not counted; and the estimated `(q, rows)` they're cut from."""
     idx = [tr.local("short-roots-index.parquet") for tr, fs in zip(tiers, short_files) if fs]
     keys = " UNION ".join(f"SELECT q_min AS q FROM read_parquet({q(f)}) UNION SELECT q_max FROM read_parquet({q(f)})" for f in idx)
     sr.index_estimates(con, idx, keys, "sest")
     counts = con.execute("SELECT q, n FROM sest ORDER BY q").fetchall()
     con.execute("DROP TABLE sest")
-    bounds = sl.q_bounds(counts, chunk_rows)
-    short_groups = sl.plan_groups(con, counts, chunk_rows)
-    short_spans = [q_spans(fs) for fs in short_files]
-    prog = sn.Progress("drill/fold/short-roots", len(bounds), log)
+    return sl.q_bounds(counts, chunk_rows), counts
 
-    def short(cur, g: int) -> tuple[int, None]:
-        lo = bounds[g]
-        hi = bounds[g + 1] if g + 1 < len(bounds) else None
-        where = f"q >= {q(lo)}" + (f" AND q < {q(hi)}" if hi is not None else "")
-        parts = [f"SELECT * FROM ({_roots_sql(fs)}) WHERE {where}" for sp in short_spans if (fs := overlapping(sp, lo, hi))]
-        if not parts:
-            return 0, None
-        cur.execute(f"""CREATE OR REPLACE TEMP TABLE rt AS SELECT q, {DEPTH} AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-                any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY q, path, usr, vf""")
-        rows = sl.count(cur, "rt")
-        if rows:
-            sl.spill_roots(cur, "rt", work / "short" / f"fold{g:06d}")
-        cur.execute("DROP TABLE rt")
-        return rows, None
 
-    _pool(con, short, list(range(len(bounds))), jobs, prog)
-    n_short = prog.rows
-    return step("drill/fold/short-roots", t, sall=n_short, groups=short_groups), {"long": long_groups, "short": short_groups}
+def _short_one(cur, g: int, bounds: list[str], short_spans: list[list[tuple[str, str | None, str | None]]], dst: Path, qg: str = "qg") -> int:
+    """Short range `g`'s literals' roots from every tier's short roots files (`short_spans`), combined (the smallest
+    `vt` per `(q, path, usr, vf)`), spilled to `dst/grp=<g>/` (`static_local.spill_roots` by table `qg`'s ranges); its rows."""
+    lo = bounds[g]
+    hi = bounds[g + 1] if g + 1 < len(bounds) else None
+    where = f"q >= {q(lo)}" + (f" AND q < {q(hi)}" if hi is not None else "")
+    parts = [f"SELECT * FROM ({_roots_sql(fs)}) WHERE {where}" for sp in short_spans if (fs := overlapping(sp, lo, hi))]
+    if not parts:
+        return 0
+    cur.execute(f"""CREATE OR REPLACE TEMP TABLE rt AS SELECT q, {DEPTH} AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
+            any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY q, path, usr, vf""")
+    rows = sl.count(cur, "rt")
+    if rows:
+        sl.spill_roots(cur, "rt", dst, qg)
+    cur.execute("DROP TABLE rt")
+    return rows
 
 
 ROW_HASH = "hash(path, usr, vf, vt, size, n_files)"
+
+
+# ── The drill fold fanned out (specs/static-fold-fanout.md) ─────────────────
+#
+# The fold VM plans (`_plan`, the short ranges) and spills the runs' long roots by chunk, saving both under its checkpoint
+# (`fan/runs`, `fan/members`, `fan/plan`); then units run in waves, on the fold VM (share 0) and helper Batch tasks
+# (`static_merge fold-shard`) alike (`fold_units`): wave 1 each chunk's digests (the class source's, `DigestClasses`) and
+# each short range's spill; the classes (`classes`: `al`, `ctid`, the long ranges `lqg`); wave 2 each chunk's canonical
+# roots spilled by `q` range. A unit's spills go straight to `spilled/files/`, so the `spilled` marker is the units' file
+# lists and the fold VM uploads none of them.
+
+
+def fold_units(con, ck: Checkpoint, units: list[tuple[str, int]], scratch: Path, spills: Path, *, jobs: int = 1, log: Callable[[str], None] = err,
+               keep: bool = False, loaded: bool = False) -> dict:
+    """The fold fan-out's `units` (`static_fanout.DIGEST`/`LONG` chunks, `SHORT` ranges) run here, `jobs` at a time on
+    cursors of `con`: their inputs staged into `scratch` (the base's and runs' roots files they read, from the plan's
+    `source`; the runs' spill partitions of their chunks from `fan/runs`), each unit's outputs uploaded under `ck` (a
+    chunk's digests to `folded/digest/c<ch>/dig.parquet`, also kept in `scratch/dig/`; a spill to
+    `spilled/files/<kind>/<c<ch>|s<g>>.<nonce>/grp=<g>/`, written under `spills` first and removed after unless `keep`),
+    then its `done.json` (its rows, seconds and spill files). The nonce is this call's: a unit an earlier attempt wrote
+    but never marked done leaves orphans no marker names. `loaded`: the plan's tables (and the classes', for long
+    units) are in `con` already (the fold VM's), else loaded from `ck`. Returns units, rows and seconds."""
+    import re
+    import secrets
+
+    from .static_fanout import DIGEST, LONG, RELONG, SHORT, SPILLED_FILES, fetch_files, fold_unit_key
+
+    if not units:
+        return {"units": 0, "rows": 0, "s": 0.0}
+    t0 = monotonic()
+    nonce = secrets.token_hex(4)
+    spilling = any(k in (LONG, RELONG) for k, _ in units)
+    if loaded:
+        doc = ck.store.read_json(ck.key("fan/plan/done.json"))["doc"]
+        cdoc = ck.store.read_json(ck.key("classes/done.json"))["doc"] if spilling else {}
+    else:
+        doc = ck.load(con, "fan/plan")
+        cdoc = ck.load(con, "classes") if spilling else {}
+    # the classes from the persisted digests: each first-pass chunk checks its tuples' counts against its roots
+    check = cdoc.get("classes") == "digests"
+    chunks = {r[0]: r for r in con.execute("SELECT ch, a, b, lo, hi, est FROM fch ORDER BY ch").fetchall()}
+    bounds = [r[0] for r in con.execute("SELECT lo FROM sqg ORDER BY grp").fetchall()]
+    base = con.execute("SELECT rel, size, lo, hi FROM fbase ORDER BY rel").fetchall()
+    short = con.execute("SELECT tier, rel, size, lo, hi FROM fshort ORDER BY tier, rel").fetchall()
+    longs = sorted((k, i) for k, i in units if k in (DIGEST, LONG, RELONG))
+    shorts = sorted(i for k, i in units if k == SHORT)
+    # the roots files the units read, staged (helpers have no mount; the fold VM skipped staging the whole)
+    bspans = [(rel, lo, hi) for rel, _, lo, hi in base]
+    tspans = [[(rel, lo, hi) for t, rel, _, lo, hi in short if t == i] for i in range(doc["tiers"])]
+    want = {rel for _, ch in longs if chunks[ch][3] is not None for rel in overlapping(bspans, chunks[ch][3], chunks[ch][4])}
+    for g in shorts:
+        hi = bounds[g + 1] if g + 1 < len(bounds) else None
+        want |= {rel for sp in tspans for rel in overlapping(sp, bounds[g], hi)}
+    sizes = {rel: size for rel, size, _, _ in base} | {rel: size for _, rel, size, _, _ in short}
+    staged = scratch / "in"
+    if want:
+        got = stage_files(doc["source"], {r: sizes[r] for r in sorted(want)}, staged, label="fold fan-out: roots", log=log)
+        if got["failed"]:
+            raise RuntimeError(f"fold fan-out: {len(got['failed'])} roots files not staged from {doc['source']}: {got['failed'][:5]}")
+    lspans = [(str(staged / rel), lo, hi) for rel, lo, hi in bspans if rel in want]
+    sspans = [[(str(staged / rel), lo, hi) for rel, lo, hi in sp if rel in want] for sp in tspans]
+    lock = Lock()
+    total = [0]
+
+    def upload(dst: Path) -> list[str]:
+        rels = [f.relative_to(spills).as_posix() for f in sorted(dst.rglob("*.parquet"))]
+        for r in rels:
+            ck.store.put(spills / r, ck.key(f"{SPILLED_FILES}/{r}"))
+        if not keep:
+            shutil.rmtree(dst)
+        return rels
+
+    def mark(kind: str, i: int, t: float, rows: int, **extra) -> None:
+        ck.store.write_text(ck.key(f"{fold_unit_key(kind, i)}/done.json"), json.dumps({"rows": rows, "s": round(monotonic() - t, 1), **extra}) + "\n")
+        with lock:
+            total[0] += rows
+
+    spilled: dict[int, list[Path]] = {}
+
+    def chunk(cur, u: tuple[str, int]) -> tuple[int, None]:
+        kind, ch = u
+        t = monotonic()
+        checking = check and kind == LONG
+        split = _combine(cur, chunks[ch], lspans, spilled.get(ch, []), scratch / "split", empty=checking)
+        has = split is not None
+        rows = sl.count(cur, "ct") if has else 0
+        extra: dict = {}
+        if checking and has and (fix := _check_counts(cur, chunks[ch][1], chunks[ch][2])) is not None:
+            # tuples whose roots aren't their persisted count: their digests from the roots, for the fold VM to correct
+            f = scratch / "fix" / f"c{ch:06d}.parquet"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(fix[1], f, compression=CODEC)
+            ck.store.put(f, ck.key(f"{fold_unit_key(kind, ch)}/fix.parquet"))
+            extra["bad"] = fix[0]
+        if kind == DIGEST:
+            if rows:
+                f = scratch / "dig" / f"c{ch:06d}.parquet"
+                f.parent.mkdir(parents=True, exist_ok=True)
+                pq.write_table(_digest(cur), f, compression=CODEC)
+                ck.store.put(f, ck.key(f"{fold_unit_key(kind, ch)}/dig.parquet"))
+            mark(kind, ch, t, rows, dig=bool(rows))
+        else:
+            files: list[str] = []
+            if rows:
+                # the canonical tuples' roots, keyed by their canonical member (`ctid`), by long `q` range (`lqg`)
+                cur.execute(f"""CREATE OR REPLACE TEMP TABLE rt AS SELECT c.q, {DEPTH} AS depth, r.path, r.usr, r.vf, r.vt, r.size, r.n_files
+                    FROM ctid AS c JOIN ct AS r USING (tid)""")
+                rows = sl.count(cur, "rt")
+                if rows:
+                    dst = spills / LONG / f"c{ch:06d}.{nonce}"
+                    sl.spill_roots(cur, "rt", dst, "lqg")
+                    files = upload(dst)
+                cur.execute("DROP TABLE rt")
+            mark(kind, ch, t, rows, files=files, **extra)
+        if split is not None:
+            _drop_ct(cur, split)
+        return rows, None
+
+    if longs:
+        runs_doc = ck.store.read_json(ck.key("fan/runs/done.json"))
+        runs = sr.ChunkSpill(con, scratch / "runs", doc["chunks"], parts=runs_doc["doc"]["parts"])
+        parts = sorted({runs.part(ch) for _, ch in longs})
+        listing = ck.store.listing(ck.key("fan/runs/files"))
+        need = {f"fan/runs/files/{r}": scratch / "runs" / r for r in runs_doc["files"]
+                if int(re.match(r"in/[^/]+/sp=(\d+)/", r)[1]) in parts and not (scratch / "runs" / r).is_file()}
+        fetch_files(ck, need, listing, "fold fan-out: runs' spill", label="fold fan-out", log=log)
+        prog = sn.Progress("drill/fold/chunks", len(longs), log)
+        by: dict[int, list[tuple[str, int]]] = {}
+        for u in longs:
+            by.setdefault(runs.part(u[1]), []).append(u)
+        batch: list[int] = []
+        for k, p in enumerate(parts):
+            batch.append(p)
+            if sum(len(by[x]) for x in batch) < 4 * jobs and k + 1 < len(parts):
+                continue
+            for x in batch:
+                spilled.update(runs.prepare(x))
+            _pool(con, chunk, [u for x in batch for u in by[x]], jobs, prog)
+            for x in batch:
+                runs.release(x)
+            spilled.clear()
+            batch = []
+        runs.close()
+    if shorts:
+        prog = sn.Progress("drill/fold/short", len(shorts), log)
+
+        def short_unit(cur, g: int) -> tuple[int, None]:
+            t = monotonic()
+            dst = spills / SHORT / f"s{g:06d}.{nonce}"
+            rows = _short_one(cur, g, bounds, sspans, dst, "sqg")
+            mark(SHORT, g, t, rows, files=upload(dst) if rows else [])
+            return rows, None
+
+        _pool(con, short_unit, shorts, jobs, prog)
+    shutil.rmtree(staged, ignore_errors=True)
+    return {"units": len(units), "rows": total[0], "s": round(monotonic() - t0, 1)}
+
+
+def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_dir: Path, source: str, chunk_rows: int, jobs: int, step,
+                 log: Callable[[str], None], t: float) -> tuple[float, dict]:
+    """`fold_drill`'s classes and spills over the fold fan-out `ff` (`static_fanout.FoldFanout`, on the fold's checkpoint):
+    the plan and the runs' spill here (saved: `fan/runs`, `fan/members`, `fan/plan`), then the waves (`FoldFanout.wave`,
+    `fold_units`): `ff.classes`' (`tdig`'s) with the short ranges, the classes (`_classes`: saved as `classes`), the long
+    chunks' canonical spills; then `spilled-tables` (`al`) and the `spilled` marker over every unit's files. Returns the
+    ranges per kind. Each kind's ranges hold the single-VM fold's rows (only which producer wrote which file differs:
+    the measurement sorts each range on its unique key), so the bytes don't depend on the fan-out."""
+    from .static_fanout import DIGEST, LONG, RELONG, SHORT, fold_unit_key, gather_digests
+
+    ck, n = ff.ck, len(tiers)
+    if ck.done("fan/plan"):
+        doc = ck.load(con, "fan/plan")
+        ck.load(con, "fan/members")
+        t = step("drill/fold/plan", t, chunks=doc["chunks"], resumed=1)
+    else:
+        long_files = [tr.files("long", "roots") for tr in tiers]
+        chunks = _plan(con, tiers, out, long_files, chunk_rows)
+        t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
+        if not ck.done("fan/runs"):
+            runs = _runs_spill(con, work, len(chunks), long_files, jobs, log)
+            rels = _files(work / "runs", "in")
+            nbytes = sum((work / "runs" / r).stat().st_size for r in rels)
+            # the runs' long roots by chunk, for every unit's combine (kept here too: share 0 reads them)
+            ck.save_files("fan/runs", work / "runs", rels, {"parts": runs.p, "chunks": len(chunks), "bytes": nbytes})
+            t = step("drill/fold/runs-spill", t, runs=n - 1, parts=runs.p, files=len(rels), bytes=nbytes)
+        ck.save(con, "fan/members", ("dmem", "mt", "mtid"))
+        con.execute("CREATE OR REPLACE TABLE fch (ch BIGINT, a BIGINT, b BIGINT, lo VARCHAR, hi VARCHAR, est BIGINT)")
+        sd.insert_rows(con, "fch", chunks)
+        rel = lambda f: Path(f).relative_to(gen_dir).as_posix()  # noqa: E731
+        con.execute("CREATE OR REPLACE TABLE fbase (rel VARCHAR, size BIGINT, lo VARCHAR, hi VARCHAR)")
+        sd.insert_rows(con, "fbase", [(rel(f), Path(f).stat().st_size, lo, hi) for f, lo, hi in q_spans(long_files[0])])
+        short_files = [tr.files("short", "roots") for tr in tiers]
+        bounds, counts = _short_plan(con, tiers, short_files, chunk_rows)
+        est, g = [0] * len(bounds), 0
+        for qq, c in counts:
+            while g + 1 < len(bounds) and qq >= bounds[g + 1]:
+                g += 1
+            est[g] += c
+        con.execute("CREATE OR REPLACE TABLE sqg (lo VARCHAR, grp INTEGER, est BIGINT)")
+        sd.insert_rows(con, "sqg", [(lo, k, e) for k, (lo, e) in enumerate(zip(bounds, est))])
+        con.execute("CREATE OR REPLACE TABLE fshort (tier INTEGER, rel VARCHAR, size BIGINT, lo VARCHAR, hi VARCHAR)")
+        sd.insert_rows(con, "fshort", [(i, rel(f), Path(f).stat().st_size, lo, hi) for i, fs in enumerate(short_files) for f, lo, hi in q_spans(fs)])
+        doc = {"tiers": n, "chunks": len(chunks), "short": len(bounds), "source": source, "chunk_rows": chunk_rows}
+        ck.save(con, "fan/plan", ("tup", "tch", "fch", "fbase", "fshort", "sqg"), doc)
+    cw = dict(con.execute("SELECT ch, est FROM fch ORDER BY ch").fetchall())
+    shorts = {(SHORT, g): e for g, e in con.execute("SELECT grp, est FROM sqg ORDER BY grp").fetchall()}
+    chunks_ = sorted(cw)
+
+    def here(units: list[tuple[str, int]]) -> None:
+        done = fold_units(con, ck, units, work, work, jobs=jobs, log=log, keep=True, loaded=True)
+        log(f"fold fan-out: {done['units']:,} units here, {done['rows']:,} rows in {done['s']}s")
+
+    def classes() -> int:
+        """`al`, `canon`, `ctid`, `dgq` and the long ranges `lqg` from `tdig` (`_classes`); the range count."""
+        long_groups = _classes(con, chunk_rows)
+        con.execute("CREATE OR REPLACE TABLE lqg AS SELECT lo, grp FROM qg")
+        return long_groups
+
+    if ck.done("classes"):
+        cdoc = ck.load(con, "classes")
+    else:
+        derived = ff.classes.derive(con, tiers, log)
+        if not derived:
+            # the digests from the roots: a wave of every chunk's digests (the short ranges with them: they need no classes)
+            w1 = {**{(DIGEST, ch): cw[ch] for ch in chunks_}, **shorts}
+            ff.wave(1, w1, here)
+            t = step("drill/fold/wave-1", t, units=len(w1))
+            gather_digests(con, ff, chunks_, work / "dig")
+            shutil.rmtree(work / "dig", ignore_errors=True)
+            log(f"fold fan-out: wave 2 combines all {len(chunks_):,} chunks again from their inputs ({sum(cw.values()):,} estimated rows; "
+                "no combined roots kept between the waves)")
+        cdoc = {"long_groups": classes(), "classes": "digests" if derived else "roots", "fixed": 0, "respill": False}
+        t = step("drill/fold/aliases", t, members=sl.count(con, "al"), canonical=sl.count(con, "canon"))
+        ck.save(con, "classes", CLASS_TABLES, cdoc)
+    kind = RELONG if cdoc["respill"] else LONG
+    w2 = {**{(kind, ch): cw[ch] for ch in chunks_}, **shorts}
+    ff.wave(2, w2, here)
+    t = step("drill/fold/wave-2", t, units=len(w2))
+    docs = ff.unit_docs(sorted(w2))
+    if kind == LONG and (bad := [u for u in sorted(w2) if docs[u].get("bad")]):
+        # tuples whose roots aren't their persisted digests' count (`_check_counts`): `tdig` corrected from their roots
+        # (`_fix_digests`), as the single-VM fold does before its classes; spilled again if that changed the classes
+        listing = ff.listed()
+        fix = work / "fix"
+        ff.fetch({f"{fold_unit_key(*u)}/fix.parquet": fix / f"c{u[1]:06d}.parquet" for u in bad if not (fix / f"c{u[1]:06d}.parquet").is_file()},
+                 listing, "fold fan-out: digest fixes")
+        fixed = _fix_digests(con, [(docs[u]["bad"], pq.read_table(fix / f"c{u[1]:06d}.parquet")) for u in bad], log)
+        shutil.rmtree(fix, ignore_errors=True)
+        before = [con.execute(f"SELECT * FROM {tb} ORDER BY ALL").to_arrow_table() for tb in ("al", "ctid", "lqg")]
+        cdoc = {**cdoc, "long_groups": classes(), "fixed": fixed}
+        after = [con.execute(f"SELECT * FROM {tb} ORDER BY ALL").to_arrow_table() for tb in ("al", "ctid", "lqg")]
+        respill = any(not x.equals(y) for x, y in zip(before, after))
+        log(f"fold fan-out: {fixed:,} members' digests fixed from their roots; " + (
+            "their classes or long ranges changed: every chunk spilled again" if respill else "their classes and long ranges unchanged"))
+        cdoc["respill"] = respill
+        ck.save(con, "classes", CLASS_TABLES, cdoc)
+        if respill:
+            shutil.rmtree(work / LONG, ignore_errors=True)  # this VM's share of the first spills: superseded
+            kind = RELONG
+            w2 = {**{(kind, ch): cw[ch] for ch in chunks_}, **shorts}
+            ff.wave(3, w2, here)
+            t = step("drill/fold/wave-3", t, units=len(w2))
+            docs = ff.unit_docs(sorted(w2))
+    shutil.rmtree(work / "runs", ignore_errors=True)
+    files = sorted({f for d in docs.values() for f in d["files"]})
+    groups = {"long": cdoc["long_groups"], "short": len(shorts), "classes": cdoc["classes"], "fixed": cdoc["fixed"]}
+    ck.save(con, "spilled-tables", ("al", "dgq"))
+    ck.mark_files("spilled", files, groups)
+    _drop_plan(con, n)
+    for tb in ("canon", "qg"):
+        con.execute(f"DROP TABLE IF EXISTS {tb}")
+    return step("drill/fold/spilled", t, files=len(files), rows=sum(d["rows"] for d in docs.values())), groups
+
+
+#: The fold fan-out's `classes` step: the class map, the canonical tuples, the long ranges, the tuples' digests (the
+#: wave-2 units check their counts against them) and the members' (`static_drill.write_digests` writes them).
+CLASS_TABLES = ("al", "ctid", "lqg", "tdig", "dgq")
 
 
 # ── The whole fold ─────────────────────────────────────────────────────────
@@ -690,7 +1063,8 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
              chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, log: Callable[[str], None] = err, progress: Callable[..., None] | None = None,
              ck: Checkpoint | None = None, source: str | None = None, stage: str = "auto",
-             fanout: Callable[[Checkpoint, str], object] | None = None, anchor_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
+             fanout: Callable[[Checkpoint, str], object] | None = None, anchor_fanout: Callable[[Checkpoint, str], object] | None = None,
+             fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
     """Generation `gen` (its base in `gen_dir`, the runs `runs`: the newest manifest's, oldest first) folded into `new_gen`
     in `out` (every part but `compaction.json`); its `manifests/<last>.json` lists no runs. Returns a summary (rows, and
     per part its seconds, peak work-disk GiB and peak RSS GiB). `progress(note)`: the run record's hook
@@ -709,16 +1083,19 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     the generation's store URL; None: from `gen_dir`), started beside the intervals, so the drill reads them locally.
 
     `fanout(ck, scan)`, `anchor_fanout(ck, scan)` (both need `ck`): the drill measurement's and the base anchors'
-    rollups' helper tasks (`static_fanout.Fanout`, `AnchorFanout`), named by the newest scan folded."""
+    rollups' helper tasks (`static_fanout.Fanout`, `AnchorFanout`), named by the newest scan folded. `fold_fanout(ck,
+    scan)` (needs `ck`): the drill fold's (`static_fanout.FoldFanout`): nothing staged here, each task stages its own
+    share's roots from `source` (None: `gen_dir`)."""
     with ThreadPoolExecutor(3, thread_name_prefix="compact") as bg:
         return _fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                         log=log, progress=progress, ck=ck, bg=bg, source=source, stage=stage, fanout=fanout, anchor_fanout=anchor_fanout)
+                         log=log, progress=progress, ck=ck, bg=bg, source=source, stage=stage, fanout=fanout, anchor_fanout=anchor_fanout,
+                         fold_fanout=fold_fanout)
 
 
 def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int, mem: str, chunk_rows: int, jobs: int,
               log: Callable[[str], None], progress: Callable[..., None] | None, ck: Checkpoint | None, bg: ThreadPoolExecutor, source: str | None,
               stage: str, fanout: Callable[[Checkpoint, str], object] | None = None,
-              anchor_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
+              anchor_fanout: Callable[[Checkpoint, str], object] | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
     """`fold_gen`, its background work (the catalogs' merge, the parts' saves) on `bg` (waited on as `fold_gen` returns or
     fails)."""
     t0, times, peaks = monotonic(), {}, {}
@@ -798,9 +1175,10 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     shutil.copyfile(gen_dir / "ranges.json", out / "ranges.json")
     ranges = json.loads((out / "ranges.json").read_text())
     # the drill's roots onto the work disk, beside the light parts: what the fold's remaining steps read (none once the
-    # drill or its spills were saved, only the short roots once the long roots were)
+    # drill or its spills were saved, only the short roots once the long roots were; none for a fold fan-out: each of its
+    # tasks stages its own share)
     fck = ck.sub("fold") if ck is not None else None
-    if (ck is not None and ck.done("drill")) or (fck is not None and fck.done("spilled")):
+    if (ck is not None and ck.done("drill")) or (fck is not None and (fck.done("spilled") or fold_fanout is not None)):
         kinds: tuple[str, ...] = ()
     else:
         kinds = ("short",) if fck is not None and fck.done("long-roots") else sd.KINDS
@@ -846,7 +1224,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
         con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
         log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=fck, staged=staging.result if staging is not None else lambda: None,
-        fanout=fanout, meas=gen_dir / "roots-measure", scan=days[-1]), after_saves=True)
+        fanout=fanout, meas=gen_dir / "roots-measure", scan=days[-1], fold_fanout=fold_fanout, gen_dir=gen_dir, source=source), after_saves=True)
     staged = staging.result() if staging is not None else None
     has_anchors = (gen_dir / an.ANCHORS / "meta.json").is_file()
     t = done("drill", t, "anchors" if has_anchors else None)
@@ -873,15 +1251,16 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
 def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
          chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None, checkpoint: str | None = None,
          source: str | None = None, stage: str = "auto", fanout: Callable[[Checkpoint, str], object] | None = None,
-         anchor_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
+         anchor_fanout: Callable[[Checkpoint, str], object] | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
     """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs`: key ranges, census shards and drill-fold chunks at a time).
     `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`. `source`, `stage`: the drill's roots staged
-    from the generation's store URL (`stage_roots`). `fanout`, `anchor_fanout`: the drill measurement's and the base
-    anchors' helper tasks, given the checkpoint (`static_fanout.Fanout`, `AnchorFanout`; need `checkpoint`)."""
+    from the generation's store URL (`stage_roots`). `fanout`, `anchor_fanout`, `fold_fanout`: the drill measurement's,
+    the base anchors' and the drill fold's helper tasks, given the checkpoint (`static_fanout.Fanout`, `AnchorFanout`,
+    `FoldFanout`; need `checkpoint`)."""
     ck = compact_checkpoint(checkpoint, gen, new_gen, runs, work=work / "ckpt") if checkpoint else None
     try:
         return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                        progress=progress, ck=ck, source=source, stage=stage, fanout=fanout, anchor_fanout=anchor_fanout)
+                        progress=progress, ck=ck, source=source, stage=stage, fanout=fanout, anchor_fanout=anchor_fanout, fold_fanout=fold_fanout)
     finally:
         if ck is not None:
             ck.close()
@@ -899,8 +1278,10 @@ def compact_checkpoint(root: str, gen: str, new_gen: str, runs: list[dict], **kw
     return Checkpoint(store_url(root), checkpoint_prefix(gen, new_gen, runs), code=code_version(), **kw)
 
 
-#: A fold's checkpoint steps, in the order it saves them (`fold_gen`'s parts, the drill's own within it).
-STEPS = ("intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-roots", "fold/spilled-tables", "fold/spilled", "drill", "anchors")
+#: A fold's checkpoint steps, in the order it saves them (`fold_gen`'s parts, the drill's own within it): a single-VM
+#: drill fold saves the long roots, a fanned-out one (`_fanned_fold`) its plan and the classes instead.
+STEPS = ("intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-roots", "fold/fan/runs", "fold/fan/members", "fold/fan/plan",
+         "fold/classes", "fold/spilled-tables", "fold/spilled", "drill", "anchors")
 
 
 def checkpoint_prefix(gen: str, new_gen: str, runs: list[dict]) -> str:
@@ -931,14 +1312,15 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     it): a fold resumed there on new code, the source never written (a run still holding it goes on). The copied steps
     were made by the code that saved them; that they equal this code's is what CI's byte-identity tests hold (the
     drill's measurement at any pool width, fan-out, staging). So are the fan-outs' finished units of the step after
-    `through` (`helper_units`): the drill measurement's ranges when the drill isn't copied, the anchors' shard tasks when
+    `through` (`helper_units`): the drill fold's units (each with the spill files its `done.json` lists) when its plan is
+    copied but not the spills, the drill measurement's ranges when the drill isn't copied, the anchors' shard tasks when
     the anchors aren't; the resumed fold deals only the rest. Same bucket: copied server side. Returns the steps, files
     and units copied."""
     from concurrent.futures import ThreadPoolExecutor
 
     from .blobstore import Store, store_url
     from .checkpoint import code_version
-    from .static_fanout import ANCHORED, ANCHORS_IN, MEASURED
+    from .static_fanout import ANCHORED, ANCHORS_IN, FOLDED, MEASURED, SPILLED_FILES
 
     if through not in STEPS:
         raise SystemExit(f"--through {through}: one of {', '.join(STEPS)}")
@@ -950,6 +1332,9 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     steps = [st for st in STEPS[:STEPS.index(through) + 1] if src.exists(f"{prefix}/{st}/done.json")]
     keys = [k for st in steps for k in src.keys(f"{prefix}/{st}/")]
     units = []
+    if "fold/fan/plan" in steps and "fold/spilled" not in steps:
+        # a unit's chunk numbers are its plan's: only with the plan copied
+        units += helper_units(src, f"{prefix}/fold/{FOLDED}/", lambda d: [f"{prefix}/fold/{SPILLED_FILES}/{r}" for r in d.get("files", [])])
     if "fold/spilled" in steps and "drill" not in steps:
         units += helper_units(src, f"{prefix}/fold/{MEASURED}/")
     if "drill" in steps and "anchors" not in steps:
@@ -979,15 +1364,21 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     return {"steps": steps, "files": len(keys), "units": len(units)}
 
 
-def helper_units(src, root: str) -> list[list[str]]:
+def helper_units(src, root: str, listed: Callable[[dict], list[str]] | None = None) -> list[list[str]]:
     """A fan-out's finished units under `root` (`<root><kind>/<unit>/…`, `static_fanout`): each unit dir holding a
-    `done.json`, its files (the `done.json` last). Plans and task reports aren't units."""
+    `done.json`, its files (the `done.json` last), after the keys `listed(its done.json)` names elsewhere (a fold unit's
+    spill files). Plans and task reports aren't units."""
     by: dict[str, list[str]] = {}
     for k in src.keys(root):
         rel = k[len(root):].split("/")
         if len(rel) == 3:
             by.setdefault("/".join(rel[:2]), []).append(k)
-    return [sorted(fs, key=lambda k: k.endswith("/done.json")) for fs in by.values() if any(k.endswith("/done.json") for k in fs)]
+    out = []
+    for fs in by.values():
+        done = [k for k in fs if k.endswith("/done.json")]
+        if done:
+            out.append([*(listed(src.read_json(done[0])) if listed is not None else []), *sorted(fs, key=lambda k: k.endswith("/done.json"))])
+    return out
 
 
 def clear_checkpoints(root: str, new_gen: str) -> int:
@@ -1039,15 +1430,15 @@ def prebuilt_fold(url: str) -> Callable[..., dict]:
 
 def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, stage: str = "auto",
               fanout: Callable[[Checkpoint, str], object] | None = None, prebuilt: str | None = None,
-              anchor_fanout: Callable[[Checkpoint, str], object] | None = None) -> ar.Compactor:
+              anchor_fanout: Callable[[Checkpoint, str], object] | None = None,
+              fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> ar.Compactor:
     """The static store's plug into the shared compaction (`append_runner.compact_store`): its fold and upload order; its
     predecessors are left to `store-gc -k` (readers pin `STATIC_GEN`, so a compacted generation may still be served).
     `checkpoint`: the folds' checkpoint root (`fold`). `stage`: the drill's roots staged on the work disk (`STAGE_MODES`;
-    from the store, given as the fold's `source`). `fanout`, `anchor_fanout`: its drill measurement's and base anchors'
-    helper tasks (`fold`). `prebuilt`:
-    adopt a fold done elsewhere instead (`prebuilt_fold`)."""
+    from the store, given as the fold's `source`). `fanout`, `anchor_fanout`, `fold_fanout`: its drill measurement's,
+    base anchors' and drill fold's helper tasks (`fold`). `prebuilt`: adopt a fold done elsewhere instead (`prebuilt_fold`)."""
     folder = prebuilt_fold(prebuilt) if prebuilt else (lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint, stage=stage, fanout=fanout,
-                                                                                         anchor_fanout=anchor_fanout))
+                                                                                         anchor_fanout=anchor_fanout, fold_fanout=fold_fanout))
     return ar.Compactor(prefix=PREFIX, fold=folder,
                         publish_order=sl.publish_order, last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"),
                         prune=False, md5s=True, keep=reads, publish_tier=sl.publish_tier, source=True)

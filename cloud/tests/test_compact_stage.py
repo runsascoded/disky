@@ -321,6 +321,59 @@ def test_the_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_sc
                            "-V", "c0de", *duckdb_args(r.cfg.machine_for("measure")), mount=False))
 
 
+def test_the_fold_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_scan():
+    """`fold_helper_job` through the static runner's own `job()` (no fake submitter): stage `fold-shard`, named and
+    labelled by the compaction's newest scan (never the plan's key), `n` tasks of `fold-shard` over the plan on the
+    stage's machine and local SSD (the profile's `machines` / `ssd_gbs` entries), `fold_jobs` units at a time, no
+    mount, spot with retries, recorded under the scan; the arguments parse back through `fold-shard`'s own command."""
+    import re
+
+    from dt_cloud.append_runner import duckdb_args
+    from dt_cloud.static_merge import FOLD_STAGE, fold_helper_job, fold_shard_cmd
+
+    r = _static_runner(1)
+    r.cfg = replace(r.cfg, machines={**r.cfg.machines, FOLD_STAGE: "n2-highmem-32"}, ssd_gbs={**r.cfg.ssd_gbs, FOLD_STAGE: 1500})
+    url = "gs://scr/static-names/compact-checkpoints/g.c001/abc/fold"
+    name, spec = fold_helper_job(r, url, "folded/plan-2.json", 15, "c0de", "2026-10-23T0702")
+    assert re.fullmatch(r"[a-z0-9-]+-fold-shard-2026-10-23-0702-\d{6}", name), name
+    group = spec["taskGroups"][0]
+    policy = spec["allocationPolicy"]["instances"][0]["policy"]
+    cmd = group["taskSpec"]["runnables"][0]["container"]["commands"][1]
+    assert (spec["labels"]["stage"], group["taskCount"], cmd, policy["machineType"], policy["provisioningModel"], policy["disks"][0]["newDisk"]["sizeGb"],
+            group["taskSpec"]["maxRetryCount"]) == (
+        FOLD_STAGE, 15, _py("static_merge", "fold-shard", "-c", url, "-P", "folded/plan-2.json", "-V", "c0de", "-j", "5", *duckdb_args("n2-highmem-32"),
+                            mount=False), "n2-highmem-32", "SPOT", "1500", 3)
+    v = group["taskSpec"]["environment"]["variables"]
+    assert {k: v.get(k) for k in ("DT_RECORD_SCAN", "DT_RECORD_GEN", "DT_JOB_NAME")} == {"DT_RECORD_SCAN": "2026-10-23T0702",
+                                                                                    "DT_RECORD_GEN": f"static-names/{r.cfg.gen}", "DT_JOB_NAME": name}
+    args = cmd.split("dt_cloud.static_merge fold-shard ", 1)[1].split()
+    params = fold_shard_cmd.make_context("fold-shard", args).params
+    assert params == {"checkpoint": url, "index": None, "jobs": 5, "mem": "180GB", "threads": 32, "plan": "folded/plan-2.json", "tmp": "/stage/tmp/fold-shard",
+                      "code": "c0de"}
+
+
+def test_a_fold_fanned_out_compaction_gets_its_task_count_and_the_profile():
+    """`fold_tasks` 3: the compaction runs `-L 3`, which `compact` parses as its fold tasks (no collision with its other
+    options or `compact_options`'), with the profile inline in `$STATIC_NAMES_PROFILE`, which loads back as the
+    runner's own; with every fan-out on, all three flags."""
+    from dt_cloud.static_profile import load_profile
+
+    r = _static_runner(1)
+    r.cfg = replace(r.cfg, fold_tasks=3)
+    spec = r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]
+    cmd = spec["runnables"][0]["container"]["commands"][1]
+    assert cmd == _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-L", "3", "-M", "90GB", "-p", "16")
+    params = _compact_params(cmd)
+    assert (params["fold_tasks"], params["measure_tasks"], params["anchor_tasks"], params["jobs"]) == (3, 1, 1, 2)
+    assert load_profile({"STATIC_NAMES_PROFILE": spec["environment"]["variables"]["STATIC_NAMES_PROFILE"]}) == r.cfg
+    assert load_profile({"STATIC_NAMES_PROFILE": "", "STATIC_NAMES_FOLD_TASKS": "4"}).fold_tasks == 4
+    r.cfg = replace(r.cfg, measure_tasks=2, anchor_tasks=4)
+    cmd = r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]
+    assert cmd == _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-D", "2", "-A", "4", "-L", "3", "-M", "90GB", "-p", "16")
+    params = _compact_params(cmd)
+    assert (params["fold_tasks"], params["measure_tasks"], params["anchor_tasks"]) == (3, 2, 4)
+
+
 def test_the_anchors_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_scan():
     """`anchor_helper_job` through the static runner's own `job()` (no fake submitter): stage `anchor-shard`, named and
     labelled by the compaction's newest scan (never the plan's key), `n` tasks of `anchor-shard` over the plan, on the
