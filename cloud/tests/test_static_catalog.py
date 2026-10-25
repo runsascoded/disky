@@ -234,3 +234,35 @@ def test_parent_equals_regex():
     assert [a for a, _ in got] == [b for _, b in got] == [
         "b", "b/x", "b/x", "b/", "b/x/ünï", "", "", "", "", "b", "b/é",
     ]
+
+
+@pytest.mark.parametrize("floor", [1, 2, V + 1, 50])
+def test_census_sorted_equals_census(built, floor):
+    """`census_sorted` (run lengths over a shard's own order) is `census`'s table, on every shard."""
+    *_, plan, _, out, con, _ = built
+    for s in plan["shards"]:
+        f = out / "sx" / f"s{s['i']:04d}.parquet"
+        assert sc.census_sorted(f, floor, batch_rows=7).equals(sc.census(con, f"read_parquet({sn.q(str(f))})", floor))
+
+
+@pytest.mark.parametrize("floor,floor_bytes", [(1, None), (2, None), (3, None), (2, 60)])
+def test_census_sorted_multibyte(tmp_path, floor, floor_bytes):
+    """Prefixes in characters, not bytes: suffixes that share a lead byte but differ inside a multi-byte character
+    (`é` / `ê`: `c3 a9` / `c3 aa`), a combining mark (`e` + U+0301), CJK, and suffixes shorter than a level."""
+    import duckdb
+
+    ss = sorted(["abé1", "abé2", "abê", "abéx", "abéy", "abe", "ab", "日本語a", "日本語b", "日本x", "zzz", "zzz"], key=str.encode)
+    f = tmp_path / "s.parquet"
+    pq.write_table(pa.table({"s": ss, "path": [f"p/{x}" for x in ss], "usr": ["u"] * len(ss)}), f, row_group_size=3)
+    con = duckdb.connect()
+    expected = sc.census(con, f"read_parquet({sn.q(str(f))})", floor, floor_bytes)
+    assert sc.census_sorted(f, floor, floor_bytes, batch_rows=4).equals(expected)
+    if floor == 2 and floor_bytes is None:
+        # ubytes = Σ strlen(s) + strlen(path) + strlen(usr) + 41, in bytes; `e` + U+0301 sorts before `é` (`65 cc 81` < `c3 a9`)
+        assert expected.to_pylist() == [
+            {"q": "abe", "rows": 3, "ubytes": 50 + 2 * 56},
+            {"q": "abe\u0301", "rows": 2, "ubytes": 2 * 56},
+            {"q": "abé", "rows": 2, "ubytes": 2 * 54},
+            {"q": "zzz", "rows": 2, "ubytes": 2 * 50},
+            {"q": "日本語", "rows": 2, "ubytes": 2 * 64},
+        ]

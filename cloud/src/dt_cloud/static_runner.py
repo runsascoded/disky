@@ -104,7 +104,7 @@ FOLD_VCPUS = 6
 
 
 def fold_jobs(machine: str) -> int:
-    """The compaction's `-j` on `machine` (`static_merge compact -j`): key ranges, census shards and drill-fold chunks at a time, one per `FOLD_VCPUS`."""
+    """The compaction's `-j` on `machine` (`static_merge compact -j`): key ranges and drill-fold chunks at a time, one per `FOLD_VCPUS`."""
     return max(1, int(machine.rsplit("-", 1)[-1]) // FOLD_VCPUS)
 
 

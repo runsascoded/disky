@@ -287,11 +287,8 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     t = done("shards", t)
     cat = gen_dir / "catalog"
     census = work / "census"
-    census.mkdir(parents=True, exist_ok=True)
     shard_names = [f"s{s['i']:04d}" for s in plan["shards"]]
-    for name in shard_names:
-        pq.write_table(sc.census(con, f"read_parquet({q(str(gen_dir / 'sx' / f'{name}.parquet'))})", max_rows + 1), census / f"{name}.parquet",
-                       compression=sn.CODEC)
+    sc.census_shards(gen_dir / "sx", shard_names, census, max_rows + 1, sc.census_jobs(con, len(shard_names)))
     cat.mkdir(parents=True, exist_ok=True)
     members = sc.cut_members(census, cat / "members.parquet", gen=gen, max_rows=max_rows)
     (cat / "members.json").write_text(json.dumps(members, indent=1) + "\n")

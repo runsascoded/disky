@@ -91,26 +91,25 @@ def fold_ranges(con, gen_dir: Path, days: list[str], ranges: dict, out: Path, ru
 # ── Light: the catalog ─────────────────────────────────────────────────────
 
 
-def fold_catalog(con, tiers: list[Path], out: Path, work: Path, *, new_gen: str, plan: dict, membership: dict, rule, jobs: int = 1,
+def fold_catalog(con, tiers: list[Path], out: Path, work: Path, *, new_gen: str, plan: dict, membership: dict, rule,
                  merged: Callable[[], dict] | None = None) -> dict:
     """`G`'s and the runs' catalogs merged into `out/catalog` (`merge_catalogs`: the rebuild's cells and index), the
     members cut by the build's census over `out`'s new shards (`members.parquet`, `members.json`), and `meta.json` as
-    the build's `catalog_meta` (its `s`: this fold's seconds). The census runs `jobs` shards at a time on cursors of
-    `con` (each shard's census file depends only on its rows). `merged`: the merge's doc, when it was started earlier
+    the build's `catalog_meta` (its `s`: this fold's seconds). The census is `census_shards`' (a process per shard at a
+    time, up to the cores and `con`'s memory limit: `census_jobs`). `merged`: the merge's doc, when it was started earlier
     (it reads only the tiers' catalogs: `fold_gen` runs it beside the intervals and shards); else merged here."""
     t0 = monotonic()
     cat = out / "catalog"
     census = work / "census"
     shutil.rmtree(census, ignore_errors=True)
-    census.mkdir(parents=True)
-
-    def one(cur, s: dict) -> None:
-        name = f"s{s['i']:04d}"
-        pq.write_table(sc.census(cur, f"read_parquet({q(str(out / 'sx' / f'{name}.parquet'))})", membership["max_rows"] + 1, tag=f"_{name}"),
-                       census / f"{name}.parquet", compression=CODEC)
-    sn.each(con, one, plan["shards"], jobs)
+    names = [f"s{s['i']:04d}" for s in plan["shards"]]
+    hb.set_stage(f"catalog/census: {len(names)} shards")
+    cdoc = sc.census_shards(out / "sx", names, census, membership["max_rows"] + 1, sc.census_jobs(con, len(names)))
+    err(f"fold_catalog {new_gen}: census of {cdoc['shards']} shards ({cdoc['prefixes']:,} prefixes, {cdoc['jobs']} processes) in {cdoc['s']}s")
     doc = merged() if merged is not None else sa.merge_catalogs(tiers, cat)
+    tm = monotonic()
     members = sc.cut_members(census, cat / "members.parquet", gen=new_gen, max_rows=membership["max_rows"])
+    err(f"fold_catalog {new_gen}: {members['members']:,} members cut in {monotonic() - tm:.1f}s")
     (cat / "members.json").write_text(json.dumps(members, indent=1) + "\n")
     shutil.rmtree(census)
     short, long_, top = con.execute(f"""SELECT count(*) FILTER (WHERE length(q) <= 2), count(*) FILTER (WHERE length(q) > 2), max(length(q))
@@ -1092,7 +1091,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     and was killed in its drill's write with nothing kept). Each save runs beside the next part (in part order, one at a
     time; the drill, which saves its own steps, starts once the saves before it ended).
 
-    `jobs`: key ranges (`fold_ranges`) and census shards (`fold_catalog`) at a time, on cursors of one DuckDB database
+    `jobs`: key ranges (`fold_ranges`) and drill-fold chunks at a time, on cursors of one DuckDB database
     (`threads` and `mem` shared). The catalogs' merge needs no other part and runs beside the intervals and shards. The
     shards need every range's histogram (their plan), the census the shards, the drill the members: those stay in order.
 
@@ -1238,7 +1237,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     t = done("shards", t)
     membership = json.loads((gen_dir / "catalog" / "meta.json").read_text())["membership"]
     cat = resumed("catalog", ("catalog",), lambda: fold_catalog(con, [gen_dir / "catalog", *(d / "catalog" for d in run_dirs)], out, work,
-                                                                new_gen=new_gen, plan=plan, membership=membership, rule=rule, jobs=jobs,
+                                                                new_gen=new_gen, plan=plan, membership=membership, rule=rule,
                                                                 merged=merging.result if merging is not None else None))
     t = done("catalog", t, "drill")
     dm = json.loads((gen_dir / "drill" / "meta.json").read_text())
@@ -1274,7 +1273,7 @@ def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: 
          chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None, checkpoint: str | None = None,
          source: str | None = None, stage: str = "auto", fanout: Callable[[Checkpoint, str], object] | None = None,
          anchor_fanout: Callable[[Checkpoint, str], object] | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
-    """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs`: key ranges, census shards and drill-fold chunks at a time).
+    """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs`: key ranges and drill-fold chunks at a time).
     `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`. `source`, `stage`: the drill's roots staged
     from the generation's store URL (`stage_roots`). `fanout`, `anchor_fanout`, `fold_fanout`: the drill measurement's,
     the base anchors' and the drill fold's helper tasks, given the checkpoint (`static_fanout.Fanout`, `AnchorFanout`,
@@ -1483,7 +1482,7 @@ def reads(rel: str) -> bool:
 @command("compact")
 @option("-c", "--chunk-rows", default=sl.CHUNK_ROWS, type=IntRange(min=1), help="The drill's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="The generation (`<store>/static-names/GEN/`); one compacted already is followed to its newest successor")
-@option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges, census shards and drill-fold chunks folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared); the bytes don't depend on it")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges and drill-fold chunks folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared); the bytes don't depend on it")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")

@@ -116,6 +116,173 @@ def census(con, src: str, floor_rows: int, floor_bytes: int | None = None, tag: 
     return out
 
 
+def _lcp(s: pa.Array):
+    """A sorted large-string array's per-row codepoint lengths, and each row's longest common prefix (in codepoints) with
+    the row before it (`lcp[i]`: rows `i` and `i + 1`): bytewise, counting the matched lead bytes (not `10xxxxxx`), less
+    one when the mismatch splits a multi-byte character. Per-row arrays only (nothing per byte)."""
+    import numpy as np
+    import pyarrow.compute as pc
+
+    n = len(s)
+    length = pc.utf8_length(s).to_numpy().astype(np.int64)
+    if n < 2:
+        return length, np.zeros(0, np.int64)
+    offs = np.frombuffer(s.buffers()[1], np.int64)[s.offset:s.offset + n + 1]
+    data = np.frombuffer(s.buffers()[2], np.uint8) if offs[-1] else np.zeros(1, np.uint8)
+    last = len(data) - 1
+    ln = np.diff(offs)
+    a, b, m = offs[:-2], offs[1:-1], np.minimum(ln[:-1], ln[1:])
+    blcp = np.zeros(n - 1, np.int64)
+    lcp = np.zeros(n - 1, np.int64)
+    act = np.flatnonzero(m > 0)
+    k = 0
+    while act.size:
+        x = data[np.minimum(b[act] + k, last)]
+        act = act[(m[act] > k) & (data[np.minimum(a[act] + k, last)] == x)]
+        x = data[b[act] + k]
+        blcp[act] = k + 1
+        lcp[act] += (x & 0xC0) != 0x80
+        k += 1
+    split = blcp < ln[1:]
+    i = np.flatnonzero(split)
+    lcp[i] -= (data[b[i] + blcp[i]] & 0xC0) == 0x80
+    return length, lcp
+
+
+def _distinct_runs(shard: str | Path, batch_rows: int):
+    """A suffix shard's equal-`s` runs, streamed (its rows are sorted by `s`; out of order raises): the distinct `s`
+    (large strings), and per run its rows, its `UBYTES` sum (NULLs skipped) and its non-NULL bytes count. Real shards
+    repeat a suffix across paths and versions (gcs: 0.02–16% of rows distinct), so the census works on these."""
+    import numpy as np
+    import pyarrow.compute as pc
+
+    vals, rows, ubs, valid = [], [], [], []
+    prev = None
+    for b in pq.ParquetFile(shard).iter_batches(batch_rows, columns=["s", "path", "usr"]):
+        if not b.num_rows:
+            continue
+        ub = pc.add(pc.add(pc.add(pc.binary_length(b["s"]), pc.binary_length(b["path"])), pc.binary_length(b["usr"])), 41).cast(pa.int64())
+        ree = pc.run_end_encode(b["s"].cast(pa.large_string()), run_end_type=pa.int64())
+        v = ree.values
+        ends = ree.run_ends.to_numpy()
+        starts = np.concatenate([[0], ends[:-1]])
+        cs = np.concatenate([[0], np.cumsum(ub.fill_null(0).to_numpy())])
+        cv = np.concatenate([[0], np.cumsum(ub.is_valid().to_numpy(zero_copy_only=False), dtype=np.int64)])
+        n, u, k = ends - starts, cs[ends] - cs[starts], cv[ends] - cv[starts]
+        if len(v) > 1 and not pc.all(pc.greater(v.slice(1), v.slice(0, len(v) - 1))).as_py():
+            raise ValueError(f"census_sorted {shard}: rows not sorted by s")
+        first = v[0].as_py()
+        if prev is not None:
+            if first < prev:  # codepoint order, which is UTF-8's byte order
+                raise ValueError(f"census_sorted {shard}: rows not sorted by s")
+            if first == prev:
+                rows[-1][-1] += n[0]
+                ubs[-1][-1] += u[0]
+                valid[-1][-1] += k[0]
+                v, n, u, k = v.slice(1), n[1:], u[1:], k[1:]
+        if len(v):
+            vals.append(v)
+            rows.append(n.copy())
+            ubs.append(u.copy())
+            valid.append(k.copy())
+            prev = v[len(v) - 1].as_py()
+    if not vals:
+        return None
+    return pa.concat_arrays(vals), np.concatenate(rows), np.concatenate(ubs), np.concatenate(valid)
+
+
+def census_sorted(shard: str | Path, floor_rows: int, floor_bytes: int | None = None, batch_rows: int = 1 << 20) -> pa.Table:
+    """`census` of one suffix shard file read in its own order, sorted by `s` (as every `sx` shard is): its equal-`s`
+    runs first (`_distinct_runs`, streamed), then over the distinct suffixes a prefix's rows are one contiguous span, so
+    with each one's common prefix with the one before (`_lcp`) a level is integer work over the suffixes still under a
+    kept prefix: a span breaks where they aren't adjacent or share fewer than `L` characters. Rows and bytes from running
+    sums; only kept prefixes are cut from the strings. No hash aggregate, no working tables; the same table as `census`
+    (bytes `UBYTES`'s: NULL when `usr` is, skipped by the sums; a span of only those has NULL bytes)."""
+    import numpy as np
+    import pyarrow.compute as pc
+
+    runs = _distinct_runs(shard, batch_rows)
+    if runs is None:
+        return NODE_SCHEMA.empty_table()
+    s, w, u, k = runs
+    # running sums over the distinct suffixes: a span is adjacent ones, so its rows / bytes / valid count are differences
+    cw = np.concatenate([[0], np.cumsum(w)])
+    csum = np.concatenate([[0], np.cumsum(u)])
+    cval = np.concatenate([[0], np.cumsum(k)])
+    del w, u, k
+    length, lcp = _lcp(s)
+    idx = np.arange(len(s))
+    qs, rows, nbytes = [], [], []
+    L = 3
+    while True:
+        sel = idx[length[idx] >= L]
+        if not len(sel):
+            break
+        brk = np.ones(len(sel), bool)
+        brk[1:] = (np.diff(sel) != 1) | (lcp[sel[1:] - 1] < L)
+        starts = np.flatnonzero(brk)
+        ends = np.append(starts[1:], len(sel))
+        lo, hi = sel[starts], sel[ends - 1] + 1
+        cnt = cw[hi] - cw[lo]
+        tot = csum[hi] - csum[lo]
+        has = (cval[hi] - cval[lo]) > 0
+        keep = cnt >= floor_rows
+        if floor_bytes:
+            keep |= has & (tot >= floor_bytes)
+        if not keep.any():
+            break
+        qs.append(pc.utf8_slice_codeunits(s.take(pa.array(lo[keep])), 0, L).cast(pa.string()))
+        rows.append(cnt[keep])
+        nbytes.append(pa.array(tot[keep], pa.int64(), mask=~has[keep]))
+        idx = sel[np.repeat(keep, ends - starts) & (length[sel] > L)]
+        L += 1
+    if not qs:
+        return NODE_SCHEMA.empty_table()
+    out = pa.table({"q": pa.concat_arrays(qs), "rows": pa.array(np.concatenate(rows), pa.int64()), "ubytes": pa.concat_arrays(nbytes)})
+    return out.take(pc.sort_indices(out["q"])).cast(NODE_SCHEMA)
+
+
+#: A `census_sorted` process's working set (a batch, and a shard's distinct suffixes with a few int64 arrays each), what
+#: `census_jobs` divides the memory limit by.
+CENSUS_PROC_MEM = 2 << 30
+
+
+def census_jobs(con, shards: int) -> int:
+    """`census_shards`' processes: one per core, at most one per `CENSUS_PROC_MEM` of `con`'s memory limit and per shard."""
+    import os
+
+    from .static_names import mem_bytes
+
+    limit = mem_bytes(con.execute("SELECT current_setting('memory_limit')").fetchone()[0])
+    return max(1, min(shards, os.cpu_count() or 1, limit // CENSUS_PROC_MEM))
+
+
+def census_file(src: str, dst: str, floor_rows: int) -> int:
+    """One shard's `census_sorted` → parquet `dst`; returns its prefixes."""
+    nodes = census_sorted(src, floor_rows)
+    pq.write_table(nodes, dst, compression=CODEC)
+    return nodes.num_rows
+
+
+def census_shards(sx: Path, names: list[str], out: Path, floor_rows: int, jobs: int = 1) -> dict:
+    """Each suffix shard `sx/<name>.parquet`'s census (`census_sorted`) → `out/<name>.parquet` (what `cut_members`
+    reads), `jobs` processes, the biggest shards first. Returns the seconds and prefixes."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    from .static_append import _Inline
+    from .static_names import _pool_init
+
+    t0 = monotonic()
+    out.mkdir(parents=True, exist_ok=True)
+    order = sorted(names, key=lambda n: -(sx / f"{n}.parquet").stat().st_size)
+    pool = _Inline() if jobs <= 1 else ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_pool_init)
+    with pool as ex:
+        futs = [ex.submit(census_file, str(sx / f"{n}.parquet"), str(out / f"{n}.parquet"), floor_rows) for n in order]
+        prefixes = sum(f.result() for f in futs)
+    return {"shards": len(names), "prefixes": prefixes, "jobs": jobs, "s": round(monotonic() - t0, 1)}
+
+
 # ── Answers: first-hit events per member ───────────────────────────────────
 
 
