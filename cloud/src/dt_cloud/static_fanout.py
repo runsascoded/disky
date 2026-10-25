@@ -437,9 +437,10 @@ class FoldFanout(Helpers):
     def unit_key(self, kind: str, i: int) -> str:
         return fold_unit_key(kind, i)
 
-    def wave(self, n: int, weights: dict[tuple[str, int], int], here: Callable[[list[tuple[str, int]]], None]) -> None:
-        """Wave `n`: `weights`' units (estimated rows) not done already, cut into contiguous shares (`contiguous`; each
-        share's estimated rows logged), share 0 run here (`here(units)`), the rest submitted as one helper job; then wait
+    def wave(self, n: int, weights: dict[tuple[str, int], int], here: Callable[[list[tuple[str, int]]], None],
+             basis: str = "estimated") -> None:
+        """Wave `n`: `weights`' units (their rows: `basis` says which are exact, the persisted digests' counts, and which
+        estimated) not done already, cut into contiguous shares (`contiguous`; each share's rows logged), share 0 run here (`here(units)`), the rest submitted as one helper job; then wait
         for every unit (re-dealing what a job left, `retries` times in this wave) and for the job's end."""
         from . import heartbeat as hb
 
@@ -454,7 +455,7 @@ class FoldFanout(Helpers):
         rows = [sum(max(1, pending[u]) for u in s) for s in shares]
         mean = sum(rows) / len(rows)
         self.log(f"fold fan-out: wave {n}: {len(pending):,} of {len(weights):,} units to fold ({len(done):,} done), {len(mine):,} here, "
-                 f"{len(self.away):,} on {self.tasks - 1} helper tasks; estimated rows per share {rows} "
+                 f"{len(self.away):,} on {self.tasks - 1} helper tasks; rows per share ({basis}) {rows} "
                  f"(mean {mean:,.0f}, max/mean {max(rows) / mean if mean else 0:.2f})")
         self._submit([[[k, i] for k, i in s] for s in shares[1:] if s])
         hb.set_stage(f"drill/fold/wave {n}: {len(mine):,} units here")

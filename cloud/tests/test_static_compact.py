@@ -836,6 +836,52 @@ def test_a_fanned_out_fold_writes_the_single_vm_fold(world, tmp_path, classes):
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
 
 
+#: A wave's dealing line's tail (`FoldFanout.wave`): its wave, which rows are exact, and each share's rows.
+SHARES = re.compile(r"fold fan-out: wave (\d): .*; rows per share \((.+)\) \[([\d, ]*)\] \(mean .*")
+
+
+@pytest.mark.parametrize("classes", ["digests", "roots"])
+def test_the_fold_plan_takes_its_chunks_rows_from_the_persisted_digests(world, tmp_path, classes):
+    """With the tiers' persisted digests, the plan's chunks hold their tuples' exact combined-root counts (`tdig`'s `n`;
+    the units' count checks found none off), and the deal's per-share rows are those plus the short ranges' estimates.
+    Without, the roots indexes' estimates in every wave (the digest wave's `tdig` comes after the plan). Same bytes."""
+    from dt_cloud.blobstore import Store
+    from dt_cloud.static_fanout import DIGEST, LONG, SHORT, contiguous
+
+    lines: list[str] = []
+    doc = _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, []), log=lines.append, gen_dir=_gen(world, tmp_path, classes))
+    plan = _plan_doc(world, tmp_path)
+    _, runs = ar.newest_runs(world["c_store"] / "g")
+    store, prefix = Store(str(tmp_path / "scratch")), sk.checkpoint_prefix("g", "g.c001", runs)
+
+    def table(key: str) -> list[dict]:
+        dst = tmp_path / "ck-tables" / f"{key}.parquet"
+        store.get(f"{prefix}/fold/{key}.parquet", dst)
+        return pq.read_table(dst).to_pylist()
+
+    fch = {r["ch"]: r["est"] for r in table("fan/plan/fch")}
+    sqg = {r["grp"]: r["est"] for r in table("fan/plan/sqg")}
+    n = {r["tid"]: r["n"] for r in table("classes/tdig")}
+    exact: dict[int, int] = {}
+    for r in table("fan/plan/tch"):
+        exact[r["ch"]] = exact.get(r["ch"], 0) + n.get(r["tid"], 0)
+
+    def per_share(kind: str, short: bool = True) -> list[int]:
+        w = {**{(kind, ch): e for ch, e in fch.items()}, **({(SHORT, g): e for g, e in sqg.items()} if short else {})}
+        return [sum(max(1, w[u]) for u in s) for s in contiguous(w, 3)]
+
+    logged = [(int(m[1]), m[2], [int(x) for x in m[3].split(", ")]) for m in map(SHARES.fullmatch, lines) if m]
+    assert (doc["drill"]["fixed"], len(fch), sorted(exact)) == (0, plan["chunks"], sorted(fch))
+    if classes == "digests":
+        assert (plan["rows"], fch) == ("exact", exact)
+        assert logged == [(2, "long chunks exact, short ranges estimated", per_share(LONG))]
+    else:
+        assert plan["rows"] == "estimated"
+        # wave 2 deals only the long units: the short ranges were done in wave 1
+        assert logged == [(1, "estimated", per_share(DIGEST)), (2, "estimated", per_share(LONG, short=False))]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
 def test_every_fan_out_at_once_writes_the_single_vm_fold(world, tmp_path):
     """The drill fold, its measurement and the base anchors each over 3 tasks: the whole compaction's bytes."""
     folds: list = []

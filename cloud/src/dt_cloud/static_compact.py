@@ -274,8 +274,9 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
 
     Chunked, so the working set is `chunk_rows` roots, not the corpus (gcs's first compaction ran one aggregate over all
     299 GB of roots and logged nothing for 6 h): members with equal tuples of classes (one per tier) hold equal rows, so
-    the tuples (`tid`, ordered by the base's class) are cut into chunks of about `chunk_rows` rows (each tier's rows per
-    class, summed, as its roots index estimates them: `static_roots.index_estimates`). The runs' rows are spilled once
+    the tuples (`tid`, ordered by the base's class) are cut into chunks of about `chunk_rows` rows (with the persisted
+    digests, each tuple's exact count, `tdig`'s `n`; else each tier's rows per class, summed, as its roots index
+    estimates them: `static_roots.index_estimates`). The runs' rows are spilled once
     by chunk, into at most `static_roots.SPILL_PARTS` partitions of consecutive chunks (`static_roots.ChunkSpill`); the
     base's are read per chunk by its classes' `q` span (the roots files are sorted by `q`, so a chunk reads the files,
     and row groups, that span overlaps). Each chunk's combined roots and digests are exact (a tuple's rows are all in its chunk);
@@ -447,10 +448,14 @@ NO_ROOTS = ("SELECT NULL::BIGINT AS tid, NULL::VARCHAR AS path, NULL::VARCHAR AS
             "NULL::BIGINT AS size, NULL::BIGINT AS n_files WHERE false")
 
 
-def _plan(con, tiers: list[sd.Tier], out: Path, long_files: list[list[str]], chunk_rows: int) -> list[tuple]:
+def _plan(con, tiers: list[sd.Tier], out: Path, long_files: list[list[str]], chunk_rows: int,
+          derive: Callable[[], bool]) -> tuple[list[tuple], bool]:
     """`fold_drill`'s plan: tables `dmem`, `ta<i>`, `mt` (`member_classes`), `tup (tid, c0 …)` (the distinct tuples of
-    classes), `mtid (q, tid)`, `tc<i>` (each tier's rows per class, estimated), `tes (tid, est)` and `tch (tid, ch)`;
-    the chunks `(ch, first tid, last tid, min c0, max c0, estimated rows)`."""
+    classes), `mtid (q, tid)`, `tes (tid, est)` and `tch (tid, ch)`; the chunks `(ch, first tid, last tid, min c0, max
+    c0, rows)`, and whether `derive()` (run once `mtid` is in: the class source's, making `tdig`) derived the tuples'
+    digests. If it did, each tuple's rows are `tdig`'s `n` (its combined roots, exactly; 0 for a tuple with none), else
+    the tiers' rows per class estimated from their roots indexes (`tc<i>`). Chunk sizes only: a drill's bytes never
+    depend on where the chunks end."""
     n = len(tiers)
     member_classes(con, tiers, str(out / "catalog" / "members.parquet"))
     # a member's tuple of classes, one per tier: members with equal tuples hold equal rows
@@ -458,16 +463,20 @@ def _plan(con, tiers: list[sd.Tier], out: Path, long_files: list[list[str]], chu
         FROM (SELECT DISTINCT {', '.join(f'c{i}' for i in range(n))} FROM mt)""")
     on = " AND ".join(f"t.c{i} IS NOT DISTINCT FROM mt.c{i}" for i in range(n))
     con.execute(f"CREATE OR REPLACE TABLE mtid AS SELECT mt.q, t.tid FROM mt JOIN tup AS t ON {on}")
-    # each tier's rows per class, estimated from its roots index (`static_roots.index_estimates`): chunk sizes only
-    for i, tr in enumerate(tiers):
-        sr.index_estimates(con, [tr.local("long-roots-index.parquet")] if long_files[i] else [], f"SELECT canonical AS q FROM ta{i}", f"tc{i}")
-    est = " + ".join(f"coalesce(tc{i}.n, 0)" for i in range(n))
-    cjoin = " ".join(f"LEFT JOIN tc{i} ON tc{i}.q = t.c{i}" for i in range(n))
-    con.execute(f"CREATE OR REPLACE TABLE tes AS SELECT t.tid, {est} AS est FROM tup AS t {cjoin}")
+    exact = derive()
+    if exact:
+        con.execute("CREATE OR REPLACE TABLE tes AS SELECT t.tid, coalesce(d.n, 0)::BIGINT AS est FROM tup AS t LEFT JOIN tdig AS d USING (tid)")
+    else:
+        # each tier's rows per class, estimated from its roots index (`static_roots.index_estimates`)
+        for i, tr in enumerate(tiers):
+            sr.index_estimates(con, [tr.local("long-roots-index.parquet")] if long_files[i] else [], f"SELECT canonical AS q FROM ta{i}", f"tc{i}")
+        est = " + ".join(f"coalesce(tc{i}.n, 0)" for i in range(n))
+        cjoin = " ".join(f"LEFT JOIN tc{i} ON tc{i}.q = t.c{i}" for i in range(n))
+        con.execute(f"CREATE OR REPLACE TABLE tes AS SELECT t.tid, {est} AS est FROM tup AS t {cjoin}")
     con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
         SELECT tid, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch FROM tes)""")
     return con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0), sum(e.est)::BIGINT FROM tch JOIN tup AS t USING (tid)
-        JOIN tes AS e USING (tid) GROUP BY ch ORDER BY ch""").fetchall()
+        JOIN tes AS e USING (tid) GROUP BY ch ORDER BY ch""").fetchall(), exact
 
 
 def _runs_spill(con, work: Path, n_chunks: int, long_files: list[list[str]], jobs: int, log: Callable[[str], None]) -> sr.ChunkSpill:
@@ -590,8 +599,7 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
     its digest from them, logged: `_fix_digests`), or else from the roots. Returns the time and `{classes: digests |
     roots, fixed: members whose digests their roots corrected}`."""
     long_files = [_roots_files(tr, "long", st) for tr in tiers]
-    chunks = _plan(con, tiers, out, long_files, chunk_rows)
-    derived = _derive_digests(con, tiers, log)
+    chunks, derived = _plan(con, tiers, out, long_files, chunk_rows, lambda: _derive_digests(con, tiers, log))
     t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
     runs = _runs_spill(con, work, len(chunks), long_files, jobs, log)
     t = step("drill/fold/runs-spill", t, runs=len(tiers) - 1, parts=runs.p)
@@ -936,13 +944,14 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
     from .static_fanout import DIGEST, LONG, RELONG, SHORT, fold_unit_key, gather_digests
 
     ck, n = ff.ck, len(tiers)
+    derived: bool | None = None  # whether `ff.classes` derived `tdig` here (the plan's; None: the plan was resumed)
     if ck.done("fan/plan"):
         doc = ck.load(con, "fan/plan")
         ck.load(con, "fan/members")
         t = step("drill/fold/plan", t, chunks=doc["chunks"], resumed=1)
     else:
         long_files = [tr.files("long", "roots") for tr in tiers]
-        chunks = _plan(con, tiers, out, long_files, chunk_rows)
+        chunks, derived = _plan(con, tiers, out, long_files, chunk_rows, lambda: ff.classes.derive(con, tiers, log))
         t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
         if not ck.done("fan/runs"):
             runs = _runs_spill(con, work, len(chunks), long_files, jobs, log)
@@ -968,11 +977,14 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
         sd.insert_rows(con, "sqg", [(lo, k, e) for k, (lo, e) in enumerate(zip(bounds, est))])
         con.execute("CREATE OR REPLACE TABLE fshort (tier INTEGER, rel VARCHAR, size BIGINT, lo VARCHAR, hi VARCHAR)")
         sd.insert_rows(con, "fshort", [(i, rel(f), Path(f).stat().st_size, lo, hi) for i, fs in enumerate(short_files) for f, lo, hi in q_spans(fs)])
-        doc = {"tiers": n, "chunks": len(chunks), "short": len(bounds), "source": source, "chunk_rows": chunk_rows}
+        doc = {"tiers": n, "chunks": len(chunks), "short": len(bounds), "source": source, "chunk_rows": chunk_rows,
+               "rows": "exact" if derived else "estimated"}
         ck.save(con, "fan/plan", ("tup", "tch", "fch", "fbase", "fshort", "sqg"), doc)
     cw = dict(con.execute("SELECT ch, est FROM fch ORDER BY ch").fetchall())
     shorts = {(SHORT, g): e for g, e in con.execute("SELECT grp, est FROM sqg ORDER BY grp").fetchall()}
     chunks_ = sorted(cw)
+    # the long chunks' rows: `tdig`'s exact counts where the plan had the persisted digests (`_plan`), else estimates
+    basis = "long chunks exact, short ranges estimated" if doc.get("rows") == "exact" else "estimated"
 
     def here(units: list[tuple[str, int]]) -> None:
         done = fold_units(con, ck, units, work, work, jobs=jobs, log=log, keep=True, loaded=True)
@@ -987,11 +999,12 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
     if ck.done("classes"):
         cdoc = ck.load(con, "classes")
     else:
-        derived = ff.classes.derive(con, tiers, log)
+        if derived is None:
+            derived = ff.classes.derive(con, tiers, log)
         if not derived:
             # the digests from the roots: a wave of every chunk's digests (the short ranges with them: they need no classes)
             w1 = {**{(DIGEST, ch): cw[ch] for ch in chunks_}, **shorts}
-            ff.wave(1, w1, here)
+            ff.wave(1, w1, here, "estimated")
             t = step("drill/fold/wave-1", t, units=len(w1))
             gather_digests(con, ff, chunks_, work / "dig")
             shutil.rmtree(work / "dig", ignore_errors=True)
@@ -1002,7 +1015,7 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
         ck.save(con, "classes", CLASS_TABLES, cdoc)
     kind = RELONG if cdoc["respill"] else LONG
     w2 = {**{(kind, ch): cw[ch] for ch in chunks_}, **shorts}
-    ff.wave(2, w2, here)
+    ff.wave(2, w2, here, basis)
     t = step("drill/fold/wave-2", t, units=len(w2))
     docs = ff.unit_docs(sorted(w2))
     if kind == LONG and (bad := [u for u in sorted(w2) if docs[u].get("bad")]):
@@ -1026,7 +1039,7 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
             shutil.rmtree(work / LONG, ignore_errors=True)  # this VM's share of the first spills: superseded
             kind = RELONG
             w2 = {**{(kind, ch): cw[ch] for ch in chunks_}, **shorts}
-            ff.wave(3, w2, here)
+            ff.wave(3, w2, here, basis)
             t = step("drill/fold/wave-3", t, units=len(w2))
             docs = ff.unit_docs(sorted(w2))
     shutil.rmtree(work / "runs", ignore_errors=True)
