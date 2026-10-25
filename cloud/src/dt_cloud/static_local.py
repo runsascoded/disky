@@ -398,12 +398,27 @@ MEASURE_THREADS = 4
 #: whose working set passes its share spills to its temp dir and re-reads it per statement).
 MEASURE_THREADS_ENV = "DT_MEASURE_THREADS"
 #: A `q` range whose spilled roots pass this many bytes is heavy (gcs c001's: single-`q` ranges of 100M–440M roots,
-#: 0.8–5.2 GB zstd, against a median of 64 MB / 4M roots): `measure_ranges` measures the heavy ones first, `HEAVY_THREADS`
-#: DuckDB threads each (fewer processes, each a bigger share of `memory_limit`); at a light range's 1/13 they spilled
-#: 20–37 GiB apiece and set the stage's wall clock. `$DT_MEASURE_HEAVY_BYTES` overrides it.
+#: 0.8–5.2 GB zstd, against a median of 64 MB / 4M roots): `measure_ranges` measures the heavy ones first, as many at
+#: once as `heavy_jobs` allows (fewer processes than the light ranges', each a bigger share of `memory_limit`); at a
+#: light range's 1/13 they spilled 20–37 GiB apiece and set the stage's wall clock. `$DT_MEASURE_HEAVY_BYTES` overrides it.
 HEAVY_BYTES = 1 << 30
 HEAVY_BYTES_ENV = "DT_MEASURE_HEAVY_BYTES"
-HEAVY_THREADS = 16
+#: A heavy range's DuckDB threads, at least: one doesn't scale past ~8 (gcs fold2's helpers: two at 16 threads each
+#: held 12–20 cores of 32 for ~25 min), so more of them run at once, not wider.
+HEAVY_THREADS = 8
+#: A heavy range's memory share, at least (its working set: 20–37 GiB).
+HEAVY_MEM = 40 << 30
+#: The light ranges' memory, at least, while heavy ones run beside them (`measure_ranges`).
+LIGHT_MEM = 48 << 30
+
+
+def heavy_jobs(con, ranges: int, beside: bool = False) -> int:
+    """How many heavy `q` ranges `measure_ranges` measures at a time: `HEAVY_THREADS` of `con`'s threads and
+    `HEAVY_MEM` of its memory limit each (alone, a pool of `jobs` gives each `limit / (jobs + 1)`; `beside` the light
+    ranges, `LIGHT_MEM` is kept for theirs), at least 1."""
+    mem = sn.mem_bytes(con.execute("SELECT current_setting('memory_limit')").fetchone()[0])
+    fits = (mem - LIGHT_MEM) // HEAVY_MEM if beside else mem // HEAVY_MEM - 1
+    return max(1, min(sn.pool_jobs(con, ranges, HEAVY_THREADS), fits))
 
 
 def measure_jobs(con, ranges: int) -> int:
@@ -497,8 +512,11 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     are `q`-disjoint and in `q` order, so the files are what `static_drill.write_kind` streams (`chunks`) instead of
     sorting every root again. The sorted files, in `q` order.
 
-    The heavy ranges (spilled bytes ≥ `HEAVY_BYTES`) first, heaviest first, `HEAVY_THREADS` threads each; then the rest,
-    heaviest first, `jobs` at a time (default `measure_jobs`). Each range in a process of its own (spawned; `con`'s threads
+    The heavy ranges (spilled bytes ≥ `HEAVY_BYTES`), heaviest first, `heavy_jobs` at a time (`HEAVY_MEM` each), and
+    beside them the rest, heaviest first, `measure_jobs` at a time on every thread and the remaining memory: a heavy
+    range costs the same however many run (gcs's ~108M-root ranges: ~1110s each at ≤ 7 cores), so the light ones fill
+    the cores it leaves (they ran after the heavy ones: a helper's long half at 34 min, mostly idle). `jobs` given: the
+    heavy ones first, then the rest, `jobs` at a time each. Each range in a process of its own (spawned; `con`'s threads
     and memory limit split between them, `con`'s own limit lowered to a share meanwhile); 1: in turn on `con`. Each
     range's measurement and rollups go to parquet first and into the tables in `q`-range order, so neither the order nor
     `jobs` changes what the tables hold; their consumers sort them (`write_kind`, `roots-measure/`).
@@ -556,12 +574,30 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
                 if on_range:
                     on_range(g, task[g], done[g])
 
-    if heavy:
-        hj = max(1, min(fixed, len(heavy))) if fixed is not None else sn.pool_jobs(con, len(heavy), HEAVY_THREADS)
-        sn.err(f"drill/measure/{kind}: {len(heavy)} heavy ranges (≥ {heavy_bytes:,} B spilled, up to {max(size.values()):,}) first, {hj} at a time")
-        run_group(heavy, hj, f"drill/measure/{kind} (heavy)")
     jobs = measure_jobs(con, len(light)) if fixed is None else max(1, min(fixed, len(light) or 1))
-    run_group(light, jobs, f"drill/measure/{kind}")
+    if heavy and light and fixed is None:
+        hj = heavy_jobs(con, len(heavy), beside=True)
+        limit = sn.mem_bytes(con.execute("SELECT current_setting('memory_limit')").fetchone()[0])
+        sn.err(f"drill/measure/{kind}: {len(heavy)} heavy ranges (≥ {heavy_bytes:,} B spilled, up to {max(size.values()):,}) {hj} at a time, "
+               f"beside {len(light)} light ranges {jobs} at a time")
+        task = {t[0]: t for t in by_size}
+        with sn.ConPool(con, hj, f"drill/measure/{kind} (heavy)", threads=hj * HEAVY_THREADS, mem=(hj + 1) * HEAVY_MEM, processes=True) as hp, \
+                sn.ConPool(con, jobs, f"drill/measure/{kind}", mem=max(limit - hj * HEAVY_MEM, 1 << 30), processes=True) as lp:
+            futs = {pool.submit(_measure_task, files, so, do, ro, floor, R, K, pool.task_threads, pool.mem,
+                                str(work / "measure-tmp" / f"{kind}-g{g:06d}"), measure): g
+                    for pool, group in ((hp, heavy), (lp, light)) for g, files, so, do, ro in group}
+            for f in as_completed(futs):
+                g = futs[f]
+                done[g] = f.result()
+                prog.tick(nbytes=done[g]["nbytes"])
+                if on_range:
+                    on_range(g, task[g], done[g])
+    else:
+        if heavy:
+            hj = max(1, min(fixed, len(heavy))) if fixed is not None else heavy_jobs(con, len(heavy))
+            sn.err(f"drill/measure/{kind}: {len(heavy)} heavy ranges (≥ {heavy_bytes:,} B spilled, up to {max(size.values()):,}) first, {hj} at a time")
+            run_group(heavy, hj, f"drill/measure/{kind} (heavy)")
+        run_group(light, jobs, f"drill/measure/{kind}")
     if away:
         theirs = [t for t in tasks if t[0] in away]
         got = remote.collect(kind, {t[0]: (t[2], t[3], t[4]) for t in theirs})

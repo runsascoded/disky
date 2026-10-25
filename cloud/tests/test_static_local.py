@@ -213,18 +213,35 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
     assert summary["drill"]["pieces"] > files
 
 
-@pytest.mark.parametrize("heavy_bytes", [None, "1"])
+@pytest.mark.parametrize("heavy_bytes", [None, "1", "median"])
 def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_bytes):
     """The drill's tail over process pools — each `q` range measured in a process of its own (`MEASURE_THREADS` 1 at
-    `-p 4`: 4 at a time; or every range heavy, `HEAVY_THREADS` 2: 2 at a time, heaviest first), the anchors' rollups and
+    `-p 4`: 4 at a time; or every range heavy, `HEAVY_THREADS` 2: 2 at a time, heaviest first; or the ranges above the
+    median heavy, in a pool beside the light ones' pool), the anchors' rollups and
     starts-with catalog shard by shard (`ANCHOR_THREADS` 1; `write_kind`'s file pool:
     `test_writing_sorted_chunks_writes_the_same_bytes`) — writes `drill/`, `roots-measure/`, `names/` and `anchors/`
     byte for byte as the build at `-p 2` (one range, file and kind at a time on one database)."""
     from dt_cloud import static_drill as sd
 
     if heavy_bytes:
-        monkeypatch.setenv(sl.HEAVY_BYTES_ENV, heavy_bytes)
+        monkeypatch.setenv(sl.HEAVY_BYTES_ENV, "1")
         monkeypatch.setattr(sl, "HEAVY_THREADS", 2)
+        monkeypatch.setattr(sl, "HEAVY_MEM", 1)
+        monkeypatch.setattr(sl, "LIGHT_MEM", 0)
+    split: list[tuple[int, int]] = []
+    if heavy_bytes == "median":
+        spill_files = sl.spill_files
+
+        def median_split(work, kind):
+            # the heavy bound at the median range's spilled bytes: heavy and light ranges both, measured beside each other
+            got = spill_files(work, kind)
+            sizes = sorted(sum(f.stat().st_size for f in fs) for fs in got.values())
+            if sizes:
+                bound = sizes[len(sizes) // 2]
+                monkeypatch.setenv(sl.HEAVY_BYTES_ENV, str(bound))
+                split.append((sum(x >= bound for x in sizes), sum(x < bound for x in sizes)))
+            return got
+        monkeypatch.setattr(sl, "spill_files", median_split)
     monkeypatch.setattr(sl, "MEASURE_THREADS", 1)
     monkeypatch.setattr(an, "ANCHOR_THREADS", 1)
     monkeypatch.setattr(sd, "WRITE_JOBS", 3)
@@ -236,6 +253,8 @@ def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_byt
         assert _files(par / sub) == _files(gen / sub), sub
     assert len(list((gen / "sx").glob("*.parquet"))) > 1  # the anchors' `end` rollups really ran per shard
     assert min(summary["drill"]["groups"].values()) > 1  # and the measurement per range
+    if heavy_bytes == "median":
+        assert split and all(h >= 1 and lt >= 1 for h, lt in split), split  # both pools really ran
 
 
 @pytest.mark.parametrize("target_rows", [1, 7])
@@ -700,3 +719,29 @@ def test_anchors_rerun_over_a_pinned_manifest_reproduces_a_published_run(appende
     want = {f.relative_to(published).as_posix(): hashlib.md5(f.read_bytes()).hexdigest() for f in sorted((published / an.ANCHORS).rglob("*")) if f.is_file()}
     assert (report["run"], report["manifest"], report["tiers"]) == (a, f"manifests/{a}.json", 1)
     assert report["files"] == want
+
+
+def test_heavy_jobs_bounded_by_threads_and_memory(monkeypatch):
+    """`heavy_jobs`: `HEAVY_THREADS` threads and `HEAVY_MEM` (of a pool's `limit / (jobs + 1)` shares) each, at least
+    1, at most the ranges: a 32-thread, 200 GiB helper runs 4 heavy ranges at once, a 48-thread 270 GiB fold VM 5."""
+    import duckdb
+
+    con = duckdb.connect()
+    monkeypatch.setattr(sl, "HEAVY_THREADS", 8)
+    monkeypatch.setattr(sl, "HEAVY_MEM", 40 << 30)
+
+    def jobs(threads: int, mem: str, ranges: int) -> int:
+        con.execute(f"SET threads={threads}")
+        con.execute(f"SET memory_limit='{mem}'")
+        return sl.heavy_jobs(con, ranges)
+
+    assert [jobs(32, "200GiB", 9), jobs(48, "270GiB", 9), jobs(48, "270GiB", 3), jobs(16, "64GiB", 9), jobs(4, "1GiB", 9)] == [4, 5, 3, 1, 1]
+
+    def beside(threads: int, mem: str, ranges: int) -> int:
+        con.execute(f"SET threads={threads}")
+        con.execute(f"SET memory_limit='{mem}'")
+        return sl.heavy_jobs(con, ranges, beside=True)
+
+    # beside the light ranges, `LIGHT_MEM` (48 GiB) kept for theirs: a 180 GiB helper runs 3, the 270 GiB fold VM 5
+    assert [beside(32, "180GiB", 9), beside(48, "270GiB", 9), beside(48, "270GiB", 2), beside(16, "64GiB", 9)] == [3, 5, 2, 1]
+    con.close()

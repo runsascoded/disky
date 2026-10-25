@@ -386,13 +386,16 @@ class ConPool:
     """`jobs` spawned processes, each task on a DuckDB database of its own (`connect(threads, mem, tmp)`: `con`'s threads
     and memory limit split `jobs` + 1 ways), `con`'s own limit lowered to the remaining share meanwhile (restored on
     exit; a database holding more than the share keeps its limit, logged). `jobs` 1: an inline pool, `con` untouched (the
-    tasks then run in this process on databases of their own, as in the pool)."""
+    tasks then run in this process on databases of their own, as in the pool), unless `processes`: a pool beside
+    another, whose `submit` must not block. `threads`, `mem` (bytes): the budget split instead of `con`'s (two pools at
+    once share `con`'s between them)."""
 
-    def __init__(self, con, jobs: int, label: str):
-        self.con, self.jobs, self.label = con, jobs, label
-        self.threads = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+    def __init__(self, con, jobs: int, label: str, *, threads: int | None = None, mem: int | None = None, processes: bool = False):
+        self.con, self.jobs, self.label, self.processes = con, jobs, label, processes
+        self.threads = threads or int(con.execute("SELECT current_setting('threads')").fetchone()[0])
         self.was = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
-        share = max(mem_bytes(self.was) // (jobs + 1), 1 << 30) if jobs > 1 else mem_bytes(self.was)
+        budget = mem if mem is not None else mem_bytes(self.was)
+        share = max(budget // (jobs + 1), 1 << 30) if jobs > 1 or processes else budget
         self.mem = f"{share // (1 << 20)}MiB"
         self.task_threads = max(1, self.threads // jobs)
         self.lowered = False
@@ -401,7 +404,7 @@ class ConPool:
         from concurrent.futures import ProcessPoolExecutor
         from multiprocessing import get_context
 
-        if self.jobs == 1:
+        if self.jobs == 1 and not self.processes:
             from .static_append import _Inline
 
             self.ex = _Inline()
@@ -419,7 +422,7 @@ class ConPool:
 
     def __exit__(self, *exc) -> None:
         try:
-            if self.jobs > 1:
+            if self.jobs > 1 or self.processes:
                 self.ex.shutdown(wait=True, cancel_futures=exc[0] is not None)
         finally:
             if self.lowered:
