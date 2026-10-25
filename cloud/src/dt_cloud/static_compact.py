@@ -1225,22 +1225,41 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     versions = resumed("intervals", ("cintervals", "chist"), lambda: {"versions": fold_ranges(con, gen_dir, days, ranges, out, rule, jobs)})["versions"]
     t = done("intervals", t)
 
-    def shards() -> dict:
+    # the shards and the catalog side by side, as a run's append runs them: the catalog needs only the shards' plan (cut
+    # from the intervals' histograms first), never their files; the shards' merge doesn't use `con` (gcs's c001: 967 s,
+    # then 947 s, in turn)
+    shard_subs = ("sx", "sidecar", "sidecar.parquet", "shards.json")
+    if ck is not None and ck.done("shards"):
+        shard_fut, suffix_rows = None, ck.load_files("shards", out)["suffix_rows"]
+        plan = json.loads((out / "shards.json").read_text())
+    else:
         old = json.loads((gen_dir / "shards.json").read_text())
         plan = sn.plan_shards(sorted((out / "chist").glob("*.parquet")), old["target_rows"], len(old["tasks"]))
-        sa.merge_shards([gen_dir, *run_dirs], out, plan=plan)
-        (out / "shards.json").write_text(json.dumps(plan, indent=1) + "\n")
-        side = sn.concat_sidecars([pq.read_table(f) for f in sorted((out / "sidecar").glob("*.parquet"))])
-        sn.write_sidecar(side, out / "sidecar.parquet")
-        return {"suffix_rows": int(sum(side.column("rows").to_pylist()))}
-    suffix_rows = resumed("shards", ("sx", "sidecar", "sidecar.parquet", "shards.json"), shards)["suffix_rows"]
-    plan = json.loads((out / "shards.json").read_text())
-    t = done("shards", t)
+
+        def shards() -> tuple[dict, float]:
+            ts = monotonic()
+            sa.merge_shards([gen_dir, *run_dirs], out, plan=plan)
+            (out / "shards.json").write_text(json.dumps(plan, indent=1) + "\n")
+            side = sn.concat_sidecars([pq.read_table(f) for f in sorted((out / "sidecar").glob("*.parquet"))])
+            sn.write_sidecar(side, out / "sidecar.parquet")
+            return {"suffix_rows": int(sum(side.column("rows").to_pylist()))}, monotonic() - ts
+        sharding = ThreadPoolExecutor(1)
+        shard_fut = sharding.submit(shards)
+        sharding.shutdown(wait=False)
     membership = json.loads((gen_dir / "catalog" / "meta.json").read_text())["membership"]
+    tc = monotonic()
     cat = resumed("catalog", ("catalog",), lambda: fold_catalog(con, [gen_dir / "catalog", *(d / "catalog" for d in run_dirs)], out, work,
                                                                 new_gen=new_gen, plan=plan, membership=membership, rule=rule, jobs=jobs,
                                                                 merged=merging.result if merging is not None else None))
-    t = done("catalog", t, "drill")
+    if shard_fut is not None:
+        sdoc, shard_s = shard_fut.result()
+        suffix_rows = sdoc["suffix_rows"]
+        if ck is not None:
+            saving.append(bg.submit(ck.save_files, "shards", out, _files(out, *shard_subs), sdoc))
+        done("shards", monotonic() - shard_s)
+    else:
+        done("shards", t)
+    t = done("catalog", tc, "drill")
     dm = json.loads((gen_dir / "drill" / "meta.json").read_text())
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
