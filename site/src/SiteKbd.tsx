@@ -76,7 +76,7 @@ export function SiteKbd({ extra = [], placeholder }: {
     ...(DUPS && store === DEFAULT_STORE ? [['/dups', 'Duplicates — copies across buckets']] as [string, string][] : []),
     ['/scans', 'Scans — job runs'],
     ['/health', 'Health — the stores\' state'],
-    ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs'], ['/admin/activity', 'Activity — who did what'], ['/admin/usage', 'Cloudflare usage — cost and callers']] as [string, string][] : []),
+    ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs'], ['/admin/activity', 'Activity — who did what'], ['/admin/usage', 'Cloudflare usage — cost and callers'], ['/admin/cost/gcp', 'GCP cost — storage and compute']] as [string, string][] : []),
     ['/privacy', 'Privacy policy'],
     ...(!ident && AUTH_MODE !== 'public' ? [['/signin', 'Sign in']] as [string, string][] : []),
   ]

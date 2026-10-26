@@ -36,7 +36,7 @@ export function UsagePage() {
   return (
     <div className="admin-page usage-page">
       <SiteNav />
-      <p className="crumbs"><Link to="/admin">admin</Link></p>
+      <p className="crumbs"><Link to="/admin">admin</Link> · <Link to="/admin/cost/gcp">GCP cost</Link></p>
       <h1>Cloudflare usage</h1>
       <p className="dim">
         This deployment's billed Cloudflare units per day (GraphQL Analytics) at list price, and which callers and

@@ -1392,6 +1392,49 @@ def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
     )
 
 
+def test_gcp_cost_skipped_without_anything_to_measure(tmp_path, env):
+    c = ctx(tmp_path, env)
+    S.gcp_cost(c, None)
+    assert c.sh_impl.calls == []  # no options, no $DISKY_LABELS: a deployment without GCP (the r2 demo)
+    c = ctx(tmp_path, {**env, "DISKY_LABELS": "app=disky"})
+    S.gcp_cost(c, None)
+    assert c.sh_impl.calls == []  # labels without a deployment select no jobs
+    c = ctx(tmp_path, {**env, "DISKY_LABELS": "app=disky,deployment=fix", "REPROC": "1"})
+    S.gcp_cost(c, None)
+    assert c.sh_impl.calls == []
+
+
+def test_gcp_cost_snapshot_to_the_data_store_and_r2(tmp_path, env):
+    env.update(DISKY_LABELS="app=disky,deployment=fix,team=t")
+    c = ctx(tmp_path, env)
+    S.gcp_cost(c, None)
+    assert c.sh_impl.calls == [
+        "dt-cloud cost -n fix -w 30d -H 1y,2y -J app=disky,deployment=fix -o <tmp>/data/snapshots/cost/gcp",
+    ]
+    env.update(R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
+    c = ctx(tmp_path, env, options={
+        "gcp-cost": {"buckets": ["b1", "b2"], "bucket-labels": "deployment=fix", "job-labels": "app=disky,deployment=fix|old",
+                     "locations": ["us-central1"], "project": "proj", "window": "14d", "horizons": "6m,1y", "prices": "/app/prices.yml"},
+        "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"},
+    })
+    S.gcp_cost(c, None)
+    assert c.sh_impl.calls == [
+        "dt-cloud cost -n fix -w 14d -H 6m,1y -p proj -b b1 -b b2 -l deployment=fix -J app=disky,deployment=fix|old "
+        "-L us-central1 -P /app/prices.yml -o <tmp>/data/snapshots/cost/gcp -o r2://r2b/snapshots/cost/gcp",
+    ]
+
+
+def test_gcp_cost_failure_fails_its_phase_not_the_run(tmp_path, env):
+    env.update(DISKY_LABELS="app=disky,deployment=fix")
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud cost -n",)))
+    c.run = Ends()
+    S.gcp_cost(c, None)
+    assert (c.run.calls, c.sh_impl.calls) == (
+        [("begin", "gcp-cost"), ("end", "gcp-cost", 1, True, "gcp-cost snapshot failed (the scan's outputs stand; the next run writes its day)")],
+        ["dt-cloud cost -n fix -w 30d -H 1y,2y -J app=disky,deployment=fix -o <tmp>/data/snapshots/cost/gcp"],
+    )
+
+
 @pytest.mark.parametrize("files, want", [
     ({}, "38GB"),                                          # no cgroup files: the machine's 64 GiB
     ({"memory.max": "max\n"}, "38GB"),                     # v2 without a limit

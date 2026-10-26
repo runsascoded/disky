@@ -1592,6 +1592,62 @@ def cf_usage(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")
 
 
+#: Where the daily GCP cost snapshots go, beside the usage ones: one key space per cloud, `snapshots/cost/<cloud>/`
+#: (`cost` is never a scan id).
+GCP_COST_PREFIX = "snapshots/cost/gcp"
+
+
+def deployment_selector(env: Mapping[str, str]) -> str | None:
+    """`$DISKY_LABELS`' `app` and `deployment` as a Batch job selector (every job the deployment submits carries
+    them, `cost_labels`); None when it doesn't name both."""
+    from .cost_labels import REQUIRED, env_labels
+
+    labels = env_labels(dict(env))
+    return ",".join(f"{k}={labels[k]}" for k in REQUIRED) if all(labels.get(k) for k in REQUIRED) else None
+
+
+@step("gcp-cost", core=False, soft=True,
+      options={"buckets": list, "bucket-labels": str, "job-labels": str, "locations": list, "project": str,
+               "window": str, "horizons": str, "prices": str},
+      requires=primary_only("gcp-cost", "the cost snapshots are the deployment's, written once by its primary"))
+def gcp_cost(ctx: Ctx, arg: str | None) -> None:
+    """The deployment's GCP storage and Batch compute cost, now and projected (`dt-cloud cost -o`): today's
+    `<data>/snapshots/cost/gcp/<date>.json` (+ the R2 archive's copy, which the site's `/admin/cost/gcp` reads under
+    `SERVED_R2`); a second run the same day replaces it. Storage: `options.gcp-cost.buckets` (`-b`) and / or
+    `bucket-labels` (`-l`); compute: `job-labels` (`-J`), else `$DISKY_LABELS`' `app` + `deployment`. `locations`
+    (`-L`), `project` (`-p`; default `$GCP_PROJECT`, else ADC's), `window` (30d), `horizons` (1y,2y), `prices` (a
+    YAML in the image, `-P`). Skipped with nothing to measure (no GCP: e.g. the r2 demo) or on REPROC; never fatal.
+    Not core, as `cf-usage`."""
+    if ctx.reproc:
+        err("REPROC: skipping the GCP cost snapshot")
+        return
+    buckets = ctx.opt("gcp-cost", "buckets", [])
+    bucket_labels = ctx.opt("gcp-cost", "bucket-labels", None)
+    job_labels = ctx.opt("gcp-cost", "job-labels", None) or deployment_selector(ctx.env)
+    if not (buckets or bucket_labels or job_labels):
+        err("gcp-cost: nothing to measure (options.gcp-cost.buckets / bucket-labels / job-labels, or $DISKY_LABELS): "
+            "skipping the GCP cost snapshot")
+        return
+    with ctx.phase("gcp-cost"):
+        outs = [f"{ctx.data_uri}/{GCP_COST_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{GCP_COST_PREFIX}")
+        argv = ["dt-cloud", "cost", "-n", ctx.profile.deployment,
+                "-w", ctx.opt("gcp-cost", "window", "30d"), "-H", ctx.opt("gcp-cost", "horizons", "1y,2y")]
+        if project := ctx.opt("gcp-cost", "project", None):
+            argv += ["-p", project]
+        argv += [a for b in buckets for a in ("-b", b)]
+        if bucket_labels:
+            argv += ["-l", bucket_labels]
+        if job_labels:
+            argv += ["-J", job_labels]
+        argv += [a for loc in ctx.opt("gcp-cost", "locations", []) for a in ("-L", loc)]
+        if prices := ctx.opt("gcp-cost", "prices", None):
+            argv += ["-P", prices]
+        ctx.sh([*argv, *(a for o in outs for a in ("-o", o))],
+               fatal=False, warn="gcp-cost snapshot failed (the scan's outputs stand; the next run writes its day)")
+
+
 #: Core steps a profile may `skip`.
 SKIPPABLE = tuple(n for n, s in STEPS.items() if s.core and s.skippable)
 

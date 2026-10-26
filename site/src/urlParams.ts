@@ -106,9 +106,9 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   days: {
     label: 'Usage window',
-    description: 'The Cloudflare usage page\'s window: the last `7` or `30` days of daily snapshots. Defaults to 30.',
+    description: 'The Cloudflare usage and cloud cost pages\' window: the last `7` or `30` days of daily snapshots. Defaults to 30.',
     examples: ['7'],
-    pages: ['/admin/usage'],
+    pages: ['/admin/usage', '/admin/cost/gcp'],
   },
   denied: {
     label: 'Denied address',

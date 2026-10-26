@@ -316,3 +316,76 @@ def test_long_window():
 def test_cli_needs_a_target():
     r = CliRunner().invoke(main, ["cost", "-p", "p"])
     assert (r.exit_code, r.output.splitlines()[-1]) == (2, "Error: nothing to measure: pass -b / -l (storage) and/or -J (compute)")
+
+
+def test_snapshot():
+    policies = {"bkt-a": dc.BucketPolicy(soft_delete_off=True), "bkt-b": dc.BucketPolicy(ttl_days=7.0)}
+    doc = dc.report(name="D", project="p", now=NOW, window_days=2.0, horizons={"10d": 10.0}, prices=PRICES,
+                    series=dc.parse_series(PAGES), policies=policies, jobs=JOBS, selector=dc.parse_selector("app=disky,deployment=d|d-old"))
+    snap = dc.snapshot(doc, PRICES)
+    assert {k: v for k, v in snap.items() if k != "compute"} == {
+        "version": 1,
+        "cloud": "gcp",
+        "date": "2026-10-23",
+        "name": "D",
+        "project": "p",
+        "as_of": "2026-10-23T12:00:00Z",
+        "window_days": 2,
+        "horizons": {"10d": 10},
+        "basis": "approximate US list prices; estimates, not billed cost",
+        "summary": SUMMARY,
+        "usd_per_month": {"storage": 10, "compute": round(41.8515625, 6), "total": round(51.8515625, 6)},
+        "storage": {
+            "bytes": 25 * G,
+            "bytes_by_type": {"live-object": 21 * G, "soft-deleted-object": 4 * G},
+            "live_slope_bytes_per_day": -G,
+            "usd_per_month": 10,
+            "unpriced_bytes": {"WEIRD": G},
+            "horizons": {"10d": {"bytes": 31 * G, "usd_per_month": 13}},
+            "rows": [
+                {"bucket": "bkt-a", "type": "live-object", "storage_class": "REGIONAL", "days": 3, "bytes": 12 * G, "slope_bytes_per_day": G, "usd_per_month": 6},
+                {"bucket": "bkt-a", "type": "soft-deleted-object", "storage_class": "REGIONAL", "days": 2, "bytes": 4 * G, "slope_bytes_per_day": 0, "usd_per_month": 2},
+                {"bucket": "bkt-b", "type": "live-object", "storage_class": "COLDLINE", "days": 3, "bytes": 8 * G, "slope_bytes_per_day": -2 * G, "usd_per_month": 2},
+                {"bucket": "bkt-b", "type": "live-object", "storage_class": "WEIRD", "days": 1, "bytes": G, "slope_bytes_per_day": 0, "usd_per_month": None},
+            ],
+            "buckets": [
+                # soft delete off: its soft-deleted 4 GiB drain by the horizon; live grows 1 GiB/day
+                {"bucket": "bkt-a", "bytes": 16 * G, "bytes_by_type": {"live-object": 12 * G, "soft-deleted-object": 4 * G},
+                 "bytes_by_class": {"REGIONAL": 16 * G}, "live_slope_bytes_per_day": G, "usd_per_month": 8, "unpriced_bytes": 0,
+                 "horizons": {"10d": {"bytes": 22 * G, "usd_per_month": 11}},
+                 "points": 3, "soft_delete_off": True, "ttl_days": None, "partial_ttl": False, "short": True},
+                # TTL'd: live held at 8 GiB coldline + 1 GiB unpriced, despite the -2 GiB/day slope
+                {"bucket": "bkt-b", "bytes": 9 * G, "bytes_by_type": {"live-object": 9 * G},
+                 "bytes_by_class": {"COLDLINE": 8 * G, "WEIRD": G}, "live_slope_bytes_per_day": -2 * G, "usd_per_month": 2, "unpriced_bytes": G,
+                 "horizons": {"10d": {"bytes": 9 * G, "usd_per_month": 2}},
+                 "points": 3, "soft_delete_off": False, "ttl_days": 7, "partial_ttl": False, "short": True},
+            ],
+        },
+    }
+    assert snap["compute"] == dc._num(dc.compute_report(JOBS, SEL, PRICES, 2.0))
+    assert snap["compute"]["components"] == {
+        "drill": {"jobs": 1, "vm_hours": 2, "usd": 0.5, "usd_per_month": round(7.609375, 6)},
+        "scan": {"jobs": 3, "vm_hours": 3.5, "usd": 2.25, "usd_per_month": round(34.2421875, 6)},
+    }
+
+
+def test_snapshot_without_compute():
+    doc = dc.report(name="S", project="p", now=NOW, window_days=2.0, horizons={"10d": 10.0}, prices=PRICES,
+                    series=dc.parse_series(PAGES[1:]))
+    snap = dc.snapshot(doc, PRICES)
+    assert (snap["usd_per_month"], snap["compute"], [b["bucket"] for b in snap["storage"]["buckets"]]) == (
+        {"storage": 6, "compute": 0, "total": 6}, None, ["bkt-a", "bkt-b"])
+
+
+def test_cli_writes_the_snapshot_to_each_root(fake_gcp, tmp_path):
+    _, args = fake_gcp
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    (a / "2026-10-23.json").write_text("an earlier run's")
+    r = CliRunner().invoke(main, [*args, "-o", str(a), "-o", str(b)])
+    assert r.exit_code == 0, r.output
+    assert r.stdout.split("\n") == [f"{a}/2026-10-23.json", f"{b}/2026-10-23.json", ""]
+    doc = json.loads((a / "2026-10-23.json").read_text())
+    assert (doc["version"], doc["date"], doc["summary"], [x["bucket"] for x in doc["storage"]["buckets"]], doc["usd_per_month"]) == (
+        1, "2026-10-23", SUMMARY, ["bkt-a", "bkt-b"], {"storage": 10, "compute": round(41.8515625, 6), "total": round(51.8515625, 6)})
+    assert (a / "2026-10-23.json").read_bytes() == (b / "2026-10-23.json").read_bytes()

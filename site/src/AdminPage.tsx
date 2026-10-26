@@ -484,7 +484,7 @@ export function AdminPage() {
         Revocable view links for people outside the SSO/whitelist set. The raw link is shown{' '}
         <strong>once</strong>, when it's created; revoking a link signs out everyone using it, on their next request.{' '}
         A link with an email is a person's: it also creates their account, listed under <Link to="/admin/db/allowed_emails">users</Link> (all tables:{' '}
-        <Link to="/admin/db">/admin/db</Link>). Cloudflare cost and who drives it: <Link to="/admin/usage">/admin/usage</Link>.
+        <Link to="/admin/db">/admin/db</Link>). Cloudflare cost and who drives it: <Link to="/admin/usage">/admin/usage</Link>; GCP storage and compute cost: <Link to="/admin/cost/gcp">/admin/cost/gcp</Link>.
       </p>
       <form
         className="mint"

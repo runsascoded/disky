@@ -19,11 +19,16 @@ as unpriced, never dropped.
 
 The fetchers (`fetch_series`, `fetch_jobs`, `select_buckets`, `fetch_buckets`) are the only network calls; the
 rest takes the APIs' JSON as given, so tests inject fake series and jobs.
+
+`-o ROOT` (repeatable) writes the day's snapshot instead, `<ROOT>/<date>.json` (`snapshot`, the shape
+`SNAPSHOT_VERSION` names): the job's `gcp-cost` step (`scan_steps`) writes one a day under `snapshots/cost/gcp/`,
+and the site's `/admin/cost/gcp` reads them (`site/functions/api/cost/[cloud].ts`).
 """
 from __future__ import annotations
 
 import json
 import re
+import sys
 from statistics import median
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -259,6 +264,14 @@ def job_usage(job: Mapping) -> JobUsage:
 
 # --- the report ---------------------------------------------------------------------------------------------
 
+def projected(live: bool, current: float, slope: float, pol: BucketPolicy, days: float) -> float:
+    """One series' bytes `days` out: live bytes extrapolated at `slope` (floored at 0), or held in a TTL'd bucket;
+    soft-deleted held, or 0 where soft delete is off (they drain)."""
+    if live:
+        return current if pol.ttl_days is not None else max(0.0, current + slope * days)
+    return 0.0 if pol.soft_delete_off else current
+
+
 def storage_report(
     series: Sequence[Series],
     prices: Prices,
@@ -298,10 +311,7 @@ def storage_report(
             "usd_per_month": None if price is None else current / GIB * price,
         })
         for h, days in horizons.items():
-            if live:
-                b = current if pol.ttl_days is not None else max(0.0, current + slope * days)
-            else:
-                b = 0.0 if pol.soft_delete_off else current
+            b = projected(live, current, slope, pol, days)
             at[h]["bytes"] += b
             if price is not None:
                 at[h]["usd_per_month"] += b / GIB * price
@@ -465,6 +475,98 @@ def render(doc: Mapping) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --- daily snapshots ------------------------------------------------------------------------------------------
+
+#: `snapshot`'s shape; a reader (`site/functions/api/cost/[cloud].ts`) refuses another.
+SNAPSHOT_VERSION = 1
+#: The snapshot's `cloud`, its key space beside other clouds' cost pages: `snapshots/cost/<cloud>/<date>.json`.
+CLOUD = "gcp"
+
+
+def _num(x: Any) -> Any:
+    """`x` with stable JSON numbers (an integral value as an int, else rounded to 6 places), containers recursively."""
+    if isinstance(x, bool) or not isinstance(x, (int, float, Mapping, list, tuple)):
+        return x
+    if isinstance(x, (int, float)):
+        return int(x) if float(x).is_integer() else round(x, 6)
+    if isinstance(x, Mapping):
+        return {k: _num(v) for k, v in x.items()}
+    return [_num(v) for v in x]
+
+
+def bucket_rows(storage: Mapping, prices: Prices, horizons: Mapping[str, float]) -> list[dict]:
+    """Per bucket (name order): its bytes in all, by `type` (live / soft-deleted) and by `storage_class`, its live
+    slope, $/mo now (priced classes) and unpriced bytes, its bytes and $/mo at each horizon (`projected`, per series,
+    as the totals are), and its policy and window (`storage_report`'s `buckets` entry)."""
+    out: dict[str, dict[str, Any]] = {}
+    for r in storage["rows"]:
+        meta = storage["buckets"][r["bucket"]]
+        pol = BucketPolicy(meta["soft_delete_off"], meta["ttl_days"], meta["partial_ttl"])
+        x = out.setdefault(r["bucket"], {
+            "bucket": r["bucket"], "bytes": 0.0, "bytes_by_type": {}, "bytes_by_class": {},
+            "live_slope_bytes_per_day": 0.0, "usd_per_month": 0.0, "unpriced_bytes": 0.0,
+            "horizons": {h: {"bytes": 0.0, "usd_per_month": 0.0} for h in horizons}, **meta,
+        })
+        x["bytes"] += r["bytes"]
+        x["bytes_by_type"][r["type"]] = x["bytes_by_type"].get(r["type"], 0.0) + r["bytes"]
+        x["bytes_by_class"][r["storage_class"]] = x["bytes_by_class"].get(r["storage_class"], 0.0) + r["bytes"]
+        x["live_slope_bytes_per_day"] += r["slope_bytes_per_day"]
+        price = prices.storage.get(r["storage_class"])
+        if price is None:
+            x["unpriced_bytes"] += r["bytes"]
+        else:
+            x["usd_per_month"] += r["bytes"] / GIB * price
+        for h, days in horizons.items():
+            b = projected(r["type"] == LIVE, r["bytes"], r["slope_bytes_per_day"], pol, days)
+            x["horizons"][h]["bytes"] += b
+            if price is not None:
+                x["horizons"][h]["usd_per_month"] += b / GIB * price
+    return list(out.values())
+
+
+def snapshot(doc: Mapping, prices: Prices) -> dict:
+    """One day's cost document, `snapshots/cost/gcp/<date>.json` (`date`: the report's `as_of`, UTC):
+
+    - `version`, `cloud`, `date`, and the report's `name`, `project`, `as_of`, `window_days`, `horizons` (days per
+      horizon), `basis`, `summary`;
+    - `usd_per_month`: `storage`, `compute` and their `total`, now (list-price estimates);
+    - `storage` (None: not measured): the report's totals (`bytes`, `bytes_by_type`, `live_slope_bytes_per_day`,
+      `usd_per_month`, `unpriced_bytes`, `horizons`) and `rows` (bucket × type × class), plus `buckets`: a list of
+      `bucket_rows`, each with its own projection;
+    - `compute` (None: not measured): `compute_report` as is (per `component` and machine, `unlabeled`).
+
+    Numbers are `_num`'d, so a rerun over the same measurements writes the same bytes."""
+    s, c = doc["storage"], doc["compute"]
+    storage_usd = s["usd_per_month"] if s is not None else 0.0
+    compute_usd = c["usd_per_month"] if c is not None else 0.0
+    return _num({
+        "version": SNAPSHOT_VERSION,
+        "cloud": CLOUD,
+        "date": doc["as_of"][:10],
+        **{k: doc[k] for k in ("name", "project", "as_of", "window_days", "horizons", "basis", "summary")},
+        "usd_per_month": {"storage": storage_usd, "compute": compute_usd, "total": storage_usd + compute_usd},
+        "storage": None if s is None else {
+            **{k: s[k] for k in ("bytes", "bytes_by_type", "live_slope_bytes_per_day", "usd_per_month", "unpriced_bytes", "horizons", "rows")},
+            "buckets": bucket_rows(s, prices, doc["horizons"]),
+        },
+        "compute": c,
+    })
+
+
+def write_snapshot(snap: Mapping, roots: Sequence[str]) -> list[str]:
+    """`snap` as `<root>/<date>.json` under each root (a dir or URL), replacing that day's earlier one (a later run's
+    measurement of the same day wins); their locations."""
+    from .blobstore import Store
+
+    written = []
+    for root in roots:
+        store = Store(root)
+        key = f"{snap['date']}.json"
+        store.write_text(key, json.dumps(snap, indent=1) + "\n")
+        written.append(store.uri(key))
+    return written
+
+
 # --- fetching (read-only) -----------------------------------------------------------------------------------
 
 def clock() -> float:
@@ -530,6 +632,7 @@ def fetch_jobs(project: str, locations: Sequence[str], since: float) -> list[dic
 @option("-l", "--bucket-labels", default=None, help="Bucket label selector, `k=v,k=v` (a value may be `v1|v2`): the project's buckets whose labels match (added to `-b`)")
 @option("-L", "--location", "locations", multiple=True, help="Batch location (repeatable; default every location)")
 @option("-n", "--name", default=None, help="What the summary calls the deployment (default: the selectors)")
+@option("-o", "--out", "outs", multiple=True, help="Write the day's snapshot (`snapshot`), `<OUT>/<date>.json` (a dir or URL; repeatable), and print its locations instead of the report")
 @option("-p", "--project", default=None, help="GCP project (default `$GCP_PROJECT`, else ADC's)")
 @option("-P", "--prices", "prices_path", type=Path, default=None, help="YAML overriding the built-in list prices: `storage` ($/GiB-month by class), `machines` ($/h by type), `spot_factor`")
 @option("-w", "--window", default="30d", help="Measurement window (`30d`, `2w`, …)")
@@ -541,12 +644,14 @@ def cost_cmd(
     bucket_labels: str | None,
     locations: tuple[str, ...],
     name: str | None,
+    outs: tuple[str, ...],
     project: str | None,
     prices_path: Path | None,
     window: str,
 ) -> None:
     """A deployment's storage and compute cost now and projected over `-H` horizons, from the window's GCS
-    Monitoring bytes and Batch jobs: list-price estimates. Read-only."""
+    Monitoring bytes and Batch jobs: list-price estimates. Read-only, except `-o`'s daily snapshot (the job's
+    `gcp-cost` step; the site's `/admin/cost/gcp`)."""
     from .gcp import gcp_project
 
     if not (buckets or bucket_labels or job_labels):
@@ -572,5 +677,10 @@ def cost_cmd(
         name=label, project=project, now=now, window_days=window_days, horizons=spans, prices=prices,
         series=series, policies=policies, jobs=jobs, selector=selector,
     )
+    if outs:
+        for w in write_snapshot(snapshot(doc, prices), outs):
+            print(w)
+        print(doc["summary"], file=sys.stderr)
+        return
     print(json.dumps(doc, indent=2) if as_json else render(doc), end="\n" if as_json else "")
 
