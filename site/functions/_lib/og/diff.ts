@@ -1,6 +1,7 @@
 import { divergingColor } from '@open-athena/treemap/divergingColor'
 import type { Env } from '../auth.js'
 import { pathScans, type Lens } from '../index.js'
+import { serverDefaultScan } from '../defaultScan.js'
 import { canonId, loadRegistry } from '../identity.js'
 import { indexedOnly } from '../indexedOnly.js'
 import { scanTimes } from '../scanTimes.js'
@@ -13,12 +14,13 @@ import { fmtB, type CardData, type CardTile } from './card.js'
 import { NoScanMatch, type Site } from './data.js'
 import type { OgTier } from './sign.js'
 
-export async function resolveDiffScans(env: Env, d: string | undefined): Promise<{ from: string | null; to: string } | null> {
+export async function resolveDiffScans(env: Env, d: string | undefined, filtered = false): Promise<{ from: string | null; to: string } | null> {
   const ids = (await pathScans(env, true)).results.map(r => r.date)
   const times = await scanTimes(env, ids)
   const scans = sortScans(ids, times)
   const sel = decodeSel(d)
-  const to = resolveAfter(sel, scans, times)
+  // No end pinned: the page's default scan (`src/defaultScan.ts`), as the map's.
+  const to = sel?.invalid || sel?.d ? resolveAfter(sel, scans, times) : await serverDefaultScan(env, scans, filtered)
   if (!to) {
     if (sel?.invalid || sel?.d) throw new NoScanMatch(d!)
     return null
@@ -59,7 +61,7 @@ export function diffCardData(
 }
 
 export async function diffCard(env: Env, site: Site, title: string, params: Record<string, string>, tier: OgTier, summary = false): Promise<CardData> {
-  const scans = await resolveDiffScans(env, params.d)
+  const scans = await resolveDiffScans(env, params.d, !!params.f)
   const empty = { tier, site: site.name, title, subtitle: '', total: '', tiles: [], empty: scans ? 'no earlier scan' : 'no scans yet' }
   if (!scans?.from) return empty
   if (params.o === 'me') return { ...empty, empty: 'choose a named owner before sharing' }

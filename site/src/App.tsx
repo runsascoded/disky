@@ -35,6 +35,8 @@ import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
+import { indexingScans, searchOff } from './defaultScan'
+import { SearchOffNote, SearchOffTip } from './SearchCatchUp'
 import { scansHref, useScanRunOf } from './scanRunsUi'
 import { ReadThroughBanner } from './ReadThroughLi'
 import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
@@ -50,7 +52,7 @@ import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
-import { apiError, indexedSyntax, refusalOf, useFilterCaps, useIndexedScans } from './filterCaps'
+import { apiError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } from './filterCaps'
 import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
@@ -196,12 +198,21 @@ function AppContent() {
   // Scan selection (`?d=YYMMDD`) + the polling scan list, shared with /users
   // and /user/:id via useScan (specs/done/scan-param-all-pages.md). Absent `?d` is
   // a first-class "latest", so a parked tab follows new scans.
-  // A filtered view with no `?d=` on an indexed-only deployment opens on the newest scan the static
-  // index covers (a just-published scan isn't searchable until the index appends it), and says so.
+  // The default scan (`defaultScan.ts`, the deployment's `DEFAULT_SCAN`): a view with no `?d=` that prefers the
+  // static index's covered scans (a filtered one, or any on a `searchable` deployment) opens on the newest of them
+  // (a just-published scan isn't searchable until the index appends it), and says so. Until the caps say which
+  // mode, nothing is picked (no fetch of a scan the mode may rule out).
   const { indexedOnly: indexedOnly0 } = useFilterCaps()
   const [fFloat] = useUrlState('f', stringParam())
-  const indexedScans = useIndexedScans(indexedOnly0 && !!fFloat)
-  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ } = useScan(store, indexedOnly0 && fFloat ? indexedScans : undefined)
+  const { prefer, covered } = useScanPreference(!!fFloat)
+  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ } = useScan(store, prefer)
+  // The page's scan isn't in the static name index yet (published, not yet appended): the search box is shown
+  // disabled, its tip linking the scan's indexing run and the newest searchable scan in this view.
+  const searchIsOff = searchOff(asof, covered)
+  const newestSearchable = Array.isArray(covered) ? scans.find(s => covered.includes(s)) ?? null : null
+  const newestHref = newestSearchable ? hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), newestSearchable, true, times, scans) : null
+  const indexing = useMemo(() => new Set(indexingScans(scans, covered)), [scans, covered])
+  const pickLabel = useCallback((id: string) => (indexing.has(id) ? `${fmtS(id)} · indexing` : fmtS(id)), [indexing, fmtS])
   const rulesQ = useRules()
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
@@ -523,7 +534,10 @@ function AppContent() {
   const deepRefused = !rootErr && fq && refusalOf(deepErr) ? deepErr : undefined
   const viewErr = rootErr ?? deepRefused
   // The box's error: the client's own parse, else the server's 400.
-  const fErr = fParse.error ?? fScopeRefused ?? /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1]
+  // On a scan the index doesn't cover yet, its `scan-not-indexed` refusal is the box's disabled state and the map
+  // slot's catch-up note (with its links), not an error.
+  const notIndexed = searchIsOff && refusalOf(viewErr)?.code === 'scan-not-indexed'
+  const fErr = fParse.error ?? fScopeRefused ?? (notIndexed ? undefined : /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1])
   // useQueries returns a fresh array each render; stamp the data so the graft
   // memo re-runs exactly when a response lands.
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
@@ -783,8 +797,7 @@ function AppContent() {
   // Without the router's section: the spy names the one in view on the reader's next scroll.
   const openObject = (segs: string[]) => navigate(openHref(store, segs, withoutSection(search)))
   // ⌘K: the folders and files named for the query, largest first, at this scan; a pick drills there (`folderSearch.ts`).
-  const omniIndexed = useIndexedScans(indexedOnly0)
-  useFolderSearch({ fetcher: sfetch, date: asof ?? null, indexed: omniIndexed, at: endAt, qs: syntax.id, drill: drillTo, open: openObject, filter: q => setFq(q), size: fmtBytes })
+  useFolderSearch({ fetcher: sfetch, date: asof ?? null, indexed: indexedOnly0 ? covered : null, at: endAt, qs: syntax.id, drill: drillTo, open: openObject, filter: q => setFq(q), size: fmtBytes })
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
   // Where the scan's read data ends (`access.through`, spec `access-log-freshness.md`): the lens is then
@@ -1261,8 +1274,8 @@ function AppContent() {
           <span className="tb-scan">
             {union
               ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Scan date" compact
-                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />} />
-              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />}
+                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={pickLabel} />} />
+              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={pickLabel} />}
           </span>
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
@@ -1331,17 +1344,29 @@ function AppContent() {
         )}
         {bar.pathFilter && (
           <span className={fq ? 'filterbox active' : 'filterbox'}>
-            <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
-              <input
-                value={fqDraft ?? fqRaw ?? ''}
-                onChange={e => setFqDraft(e.target.value)}
-                placeholder={boxSyntax.describe().placeholder}
-                aria-label="Filter tree by path"
-                data-log-input="filter"
-                aria-invalid={!!fErr}
-                size={30}
-              />
-            </Explain>
+            {searchIsOff && asof ? (
+              <Tooltip pinnable content={<SearchOffTip store={store} scan={asof} newest={newestSearchable} newestHref={newestHref} fmt={fmtS} />}>
+                <input
+                  value={fqDraft ?? fqRaw ?? ''}
+                  placeholder="search catches up after indexing"
+                  aria-label="Filter tree by path (not yet available for this scan)"
+                  disabled
+                  size={30}
+                />
+              </Tooltip>
+            ) : (
+              <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
+                <input
+                  value={fqDraft ?? fqRaw ?? ''}
+                  onChange={e => setFqDraft(e.target.value)}
+                  placeholder={boxSyntax.describe().placeholder}
+                  aria-label="Filter tree by path"
+                  data-log-input="filter"
+                  aria-invalid={!!fErr}
+                  size={30}
+                />
+              </Explain>
+            )}
             {indexedOnly
               ? <QueryHelpTip syntaxes={[syntax]} active={syntax} />
               : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
@@ -1359,7 +1384,7 @@ function AppContent() {
 
       {/* Ambiguous `?d`: render the newest match (a best guess beats a dead
           end) with a strip listing every candidate to pin one. */}
-      {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending)}</p>}
+      {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending, undefined, !!fq)}</p>}
       {union && <UnionMissingNote union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}
       {dMatches.length > 1 && (
         <p className="disambig">
@@ -1510,6 +1535,9 @@ function AppContent() {
           {rootErr.message.startsWith('409') ? 'no per-user index for this scan — pick a newer scan, or clear the user'
             : 'this view is too wide for the index — drill in, or narrow the scope'}
         </p>
+      ) : viewErr && notIndexed && asof ? (
+        // A scan the static name index doesn't cover yet: why, and the ways on (its indexing run, the newest searchable scan).
+        <SearchOffNote store={store} scan={asof} newest={newestSearchable} newestHref={newestHref} fmt={fmtS} />
       ) : viewErr ? (
         // The filter's refusal as its reason, inline; any other failure as its message, a 5xx with a retry.
         <LoadFailure err={viewErr} what="view" onRetry={retryMap} />

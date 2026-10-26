@@ -6,16 +6,19 @@ import type { QuerySyntax } from '../functions/_lib/queryAst'
 import { indexedHelp } from '../functions/_lib/indexedOnly'
 import { plain } from '../functions/_lib/querySyntax'
 import { useStore, useStoreFetch } from './store'
+import { type DefaultScanMode, prefersIndexed } from './defaultScan'
 
 /** `pathTerms`: an indexed-only deployment answers path terms (`a/b`; `SEARCH_PATH_TERMS`), absent: a term holding
  *  `/` is refused (`unsupported-slash`). `rootLabel`: the store root's label (`ROOT_LABEL`), the unfiltered view's
  *  root crumb; `rootTitle`: that crumb's tooltip (`ROOT_TITLE`) — each absent when the deployment sets none, or
  *  before it loads. */
-export interface FilterCaps { indexedOnly: boolean; pathTerms?: boolean; rootLabel?: string; rootTitle?: string }
+export interface FilterCaps { indexedOnly: boolean; pathTerms?: boolean; defaultScan?: 'searchable'; rootLabel?: string; rootTitle?: string }
 
 /** The deployment's filter capabilities for this subtree's store (unloaded or unreachable: none, i.e. every
- *  form, and no root label). */
-export function useFilterCaps(): FilterCaps {
+ *  form, and no root label). `defaultScan: 'searchable'` (`DEFAULT_SCAN`, `defaultScan.ts`): a view with no `?d=`
+ *  opens on the newest scan the static name index covers; absent, on the newest. `loaded`: the caps have answered
+ *  (or failed), so `defaultScan` is known. */
+export function useFilterCaps(): FilterCaps & { loaded: boolean } {
   const store = useStore()
   const sfetch = useStoreFetch()
   const q = useQuery({
@@ -28,7 +31,7 @@ export function useFilterCaps(): FilterCaps {
     staleTime: Infinity,
     retry: 1,
   })
-  return q.data ?? { indexedOnly: false }
+  return { ...(q.data ?? { indexedOnly: false }), loaded: !q.isPending }
 }
 
 const indexed = (paths: boolean): QuerySyntax => ({ id: plain.id, parse: q => plain.parse(q), describe: () => indexedHelp(paths) })
@@ -80,13 +83,16 @@ export function apiErrorMessage(status: number, text: string): string {
   return `${status}: ${text.slice(0, 120)}`
 }
 
-/** The scans the static name index covers (`/api/filter-scans`), when `enabled`: `'loading'` until known,
- *  null when there's no static filter (or the list can't be had: no preference), else the ids. */
+/** The scans the static name index covers in this subtree's store (`/api/filter-scans`), when `enabled`:
+ *  `'loading'` until known, null when there's no static filter (or the list can't be had: no preference), else
+ *  the ids. */
 export function useIndexedScans(enabled: boolean): string[] | null | 'loading' {
+  const store = useStore()
+  const sfetch = useStoreFetch()
   const q = useQuery({
-    queryKey: ['filter-scans'],
+    queryKey: ['filter-scans', store.key],
     queryFn: async (): Promise<string[] | null> => {
-      const r = await fetch('/api/filter-scans', { credentials: 'include' })
+      const r = await sfetch('/api/filter-scans', { credentials: 'include' })
       if (!r.ok) return null
       return (await r.json() as { scans: string[] | null }).scans
     },
@@ -95,4 +101,15 @@ export function useIndexedScans(enabled: boolean): string[] | null | 'loading' {
     refetchInterval: 5 * 60_000,
   })
   return !enabled ? null : q.isPending ? 'loading' : q.data ?? null
+}
+
+/** A page's default-scan preference (`defaultScan.ts`, the deployment's `DEFAULT_SCAN` from the caps), for `useScan`:
+ *  `prefer` is `'loading'` until the caps answer (nothing is picked before the mode is known), the covered scans when
+ *  the view prefers them (a `filtered` one, or any on a `searchable` deployment), else undefined (the newest scan);
+ *  `covered` the covered list itself (null: no static filter), for the search box's off state. */
+export function useScanPreference(filtered: boolean): { prefer: readonly string[] | null | 'loading' | undefined; covered: string[] | null | 'loading' } {
+  const { indexedOnly, defaultScan: cap, loaded } = useFilterCaps()
+  const mode: DefaultScanMode = cap ?? 'newest'
+  const covered = useIndexedScans(loaded && (indexedOnly || mode === 'searchable'))
+  return { prefer: !loaded ? 'loading' : prefersIndexed(mode, filtered) ? covered : undefined, covered }
 }

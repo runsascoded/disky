@@ -43,7 +43,7 @@ The site serves the scan on the map; `?f=` searches on it are refused (`scan-not
 
 ## Related
 
-`specs/search-gated-default-scan.md` (awaiting Ryan): the site's default scan = the newest searchable one. With `map_first` on, the two compose. The default stays searchable, and the newer scan is reachable and labelled "indexing". Either can ship alone; this one is the job-side half.
+`specs/done/search-gated-default-scan.md` (built): per deployment (`DEFAULT_SCAN`), the default is the newest scan with its search box disabled until the append (`newest`), or the newest searchable one (`searchable`). With `map_first` on, either composes: the newer scan is reachable and labelled "indexing". Either can ship alone; this one is the job-side half.
 
 ## Tests
 

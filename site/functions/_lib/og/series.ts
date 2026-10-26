@@ -85,7 +85,7 @@ export function seriesCardData(
  * series can't sum, a hidden path) is drawn as such; a read error as "series unavailable", never cached. */
 export async function seriesCard(env: Env, site: Site, title: string, params: Record<string, string>, tier: OgTier, origin: string): Promise<CardData> {
   const base = { tier, site: site.name, title, subtitle: '', total: '', tiles: [] }
-  const scan = await resolveScan(env, params.d)
+  const scan = await resolveScan(env, params.d, !!params.f)
   if (!scan) return { ...base, empty: 'no scans yet' }
   const reg = params.o ? await loadRegistry(env).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>) : {}
   const q = seriesQuery(params, u => canonId(u, reg))

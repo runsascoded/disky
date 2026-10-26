@@ -6,6 +6,7 @@ import { SiteKbd } from './SiteKbd'
 import { UserChip, shortName, shortUserKey } from './UserChip'
 import { Tooltip } from './Tooltip'
 import { DEFAULT_STORE } from './stores'
+import { useScanPreference } from './filterCaps'
 import { useScan } from './scan'
 import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
@@ -21,7 +22,7 @@ interface Cell { by: string; to: string; bytes: number; prefixes: string[] }
 export function AssignmentsPage() {
   useDocTitle('Assignments')
   const { fmtBytes } = useUnits()
-  const { asof, miss, scans, times, label } = useScan(DEFAULT_STORE)
+  const { asof, miss, scans, times, label } = useScan(DEFAULT_STORE, useScanPreference(false).prefer)
   const location = useLocation()
   const q = useQuery<{ scan: string; head: number; cells: Cell[] }>({
     queryKey: ['assignments', asof],

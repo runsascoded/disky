@@ -3,6 +3,7 @@ import { canDeepen, deepestView, depthPlan, dominant, legendOf, NoScanMatch, own
 import type { TreeNode } from '../../../src/types'
 import { dateColor, slotColor } from '../../../src/colors'
 import { sqliteD1 } from '../testD1'
+import { injectedStores, type StaticFilterStore } from '../staticFilter'
 
 describe('D1', () => {
   describe('scanOfSel: the after scan of a `?d=` selection', () => {
@@ -196,6 +197,30 @@ describe('D1', () => {
     })
     it.each(['26100903', '261010', 'junk'])('d=%s names no scan: NoScanMatch, never the latest', async d => {
       await expect(resolveScan(await env(), d)).rejects.toEqual(new NoScanMatch(d))
+    })
+  })
+
+  describe('resolveScan: with no end pinned, the page\'s default scan (`DEFAULT_SCAN`, `src/defaultScan.ts`)', () => {
+    // 12:36 is published, not yet appended to the static name index.
+    const env = async (vars: Record<string, string> = {}) => {
+      const { db } = await sqliteD1()
+      for (const date of ['2026-10-08', '2026-10-09T0601', '2026-10-09T1236']) await db.prepare("INSERT INTO index_schema (date, variant, version, schema_json) VALUES (?, 'path', 2, '[]')").bind(date).run()
+      const e = { DB: db, ...vars }
+      injectedStores.set(e, { source: { hits: async () => null }, scans: async () => ['2026-10-08', '2026-10-09T0601'], gen: 'fixture' } as StaticFilterStore)
+      return e as unknown as Parameters<typeof resolveScan>[0]
+    }
+    it('`newest` (unset): the newest published scan; a filtered card the newest covered one; a pinned end as named', async () => {
+      const e = await env()
+      expect([await resolveScan(e, undefined), await resolveScan(e, '-7d'), await resolveScan(e, undefined, true), await resolveScan(e, '261009', true)])
+        .toEqual(['2026-10-09T1236', '2026-10-09T1236', '2026-10-09T0601', '2026-10-09T1236'])
+    })
+    it('`searchable`: the newest covered scan, filtered or not; a pinned end as named', async () => {
+      const e = await env({ DEFAULT_SCAN: 'searchable' })
+      expect([await resolveScan(e, undefined), await resolveScan(e, '-7d'), await resolveScan(e, undefined, true), await resolveScan(e, '261009')])
+        .toEqual(['2026-10-09T0601', '2026-10-09T0601', '2026-10-09T0601', '2026-10-09T1236'])
+    })
+    it('an unknown mode is a config error, never a silent default', async () => {
+      await expect(resolveScan(await env({ DEFAULT_SCAN: 'latest' }), undefined)).rejects.toEqual(new Error('DEFAULT_SCAN=latest: want newest | searchable'))
     })
   })
 })

@@ -47,6 +47,7 @@ STORE_SCHEME = "r2://"
 PUBLIC_READ = "1"
 SNAPSHOTS_SUBDIR = "r2"
 FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
+# DEFAULT_SCAN = "searchable"    # unset (`newest`): open on the newest published scan, search disabled until the static name index appends it (`src/defaultScan.ts`)
 # Search and the Map's path store, as wrangler.r2.toml's (the static name index's generation; the interval store following
 # `interval-store/CURRENT.json`): without them dev searched nothing and read per-scan sorts (parity, 2026-10-22).
 STATIC_GEN = "2026-10-15"

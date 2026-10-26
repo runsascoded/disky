@@ -9,15 +9,18 @@
  *   → { indexedOnly: true, rootLabel: 'Marin CoreWeave', rootTitle: '…' }   (`FILTER_INDEXED_ONLY=1`: one literal
  *     substring of a name, unscoped; `rootLabel` / `rootTitle` (`ROOT_TITLE`, the root crumb's tooltip) absent when
  *     the deployment sets none; `pathTerms: true` with `SEARCH_PATH_TERMS=1`, path terms answered — absent, a term
- *     holding `/` is refused, `unsupported-slash`)
+ *     holding `/` is refused, `unsupported-slash`; `defaultScan: 'searchable'` with `DEFAULT_SCAN=searchable`: a
+ *     view with no `?d=` opens on the newest scan the static name index covers, `src/defaultScan.ts` — absent,
+ *     on the newest published scan)
  */
 import { type Ctx, type Env, json } from '../_lib/auth.js'
 import { indexedOnly, pathTerms } from '../_lib/indexedOnly.js'
 import { withStore } from '../_lib/stores.js'
+import { scanMode } from '../_lib/defaultScan.js'
 import { memberCtxs, unionFor } from '../_lib/union.js'
 
 const caps = (env: Env, strict: boolean, paths: boolean): Response =>
-  json({ indexedOnly: strict, ...(strict && paths ? { pathTerms: true } : {}), ...(env.ROOT_LABEL ? { rootLabel: env.ROOT_LABEL } : {}), ...(env.ROOT_TITLE ? { rootTitle: env.ROOT_TITLE } : {}) }, 200, { 'cache-control': 'public, max-age=300' })
+  json({ indexedOnly: strict, ...(strict && paths ? { pathTerms: true } : {}), ...(scanMode(env) === 'searchable' ? { defaultScan: 'searchable' } : {}), ...(env.ROOT_LABEL ? { rootLabel: env.ROOT_LABEL } : {}), ...(env.ROOT_TITLE ? { rootTitle: env.ROOT_TITLE } : {}) }, 200, { 'cache-control': 'public, max-age=300' })
 
 export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   const u = unionFor(ctx0.request, ctx0.env)

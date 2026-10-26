@@ -81,6 +81,9 @@ export interface Env {
    *  of a name, unscoped, on a scan the index covers (`_lib/indexedOnly.ts`); anything else is a 400 with a
    *  reason code, never a path-store scan. */
   FILTER_INDEXED_ONLY?: string
+  /** The scan a view with no `?d=` opens on (`src/defaultScan.ts`): `newest` (unset), the newest published scan, its
+   *  search box disabled until the static name index appends it; `searchable`, the newest scan that index covers. */
+  DEFAULT_SCAN?: string
   /** `1`: the search box answers path terms (`a/b`) from the static name index (`_lib/indexedOnly.ts` `pathTerms`);
    *  unset, a term holding `/` is `unsupported-slash` on an indexed-only deployment and walked elsewhere. */
   SEARCH_PATH_TERMS?: string

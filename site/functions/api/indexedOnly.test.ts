@@ -603,6 +603,16 @@ describe('D1', () => {
       const got = await Promise.all(['', '?store=meta'].map(async qs => (await caps({ request: new Request(`http://localhost/api/filter-caps${qs}`), env } as never)).json()))
       expect(got).toEqual([{ indexedOnly: true, rootLabel: 'Marin CoreWeave' }, { indexedOnly: true, rootLabel: 'Marin usage — meta', rootTitle: 'this site\'s own data' }])
     })
+    it('and the default scan (`DEFAULT_SCAN=searchable`, a secondary store inheriting it), absent for `newest`', async () => {
+      const on = { ...envOf(true), DEFAULT_SCAN: 'searchable', STORES_JSON: JSON.stringify({ meta: { vars: {} } }) } as Env
+      const newest = { ...envOf(true), DEFAULT_SCAN: 'newest' } as Env
+      const got = await Promise.all([[on, ''], [on, '?store=meta'], [newest, '']].map(async ([env, qs]) => (await caps({ request: new Request(`http://localhost/api/filter-caps${qs}`), env } as never)).json()))
+      expect(got).toEqual([
+        { indexedOnly: true, defaultScan: 'searchable', rootLabel: 'root' },
+        { indexedOnly: true, defaultScan: 'searchable' },
+        { indexedOnly: true, rootLabel: 'root' },
+      ])
+    })
   })
 
   describe('/api/filter-scans', () => {

@@ -13,7 +13,8 @@ import { scanTimes } from '../scanTimes.js'
 import { parseOwner, queryParam, QueryError } from '../scope.js'
 import { snapshotsPrefix } from '../shared.js'
 import { isPrimary } from '../stores.js'
-import { decodeSel, fmtScanUtc, resolveAfter } from '../../../src/scanSlug.js'
+import { decodeSel, fmtScanUtc, resolveAfter, sortScans } from '../../../src/scanSlug.js'
+import { serverDefaultScan } from '../defaultScan.js'
 import { ATTEN_DEFAULT, buildView, MIN_AREA_DEFAULT, NotFound, type View } from '../view.js'
 import { hexQuery } from '../staticFilter.js'
 import { dateColor, HI_CONTRAST, slotColor } from '../../../src/colors.js'
@@ -94,10 +95,12 @@ export class NoScanMatch extends Error {
 }
 
 /** The scan a card draws: the latest scan matching the selection (the
- * resolver — a day's slug is that day's latest scan); the latest scan when
- * `d` pins no end (absent, or a look-back only). Throws `NoScanMatch` when it
+ * resolver — a day's slug is that day's latest scan); when `d` pins no end
+ * (absent, or a look-back only), the page's default scan (`src/defaultScan.ts`:
+ * the newest, or the newest the static name index covers for a `filtered` view
+ * or on a `DEFAULT_SCAN=searchable` deployment). Throws `NoScanMatch` when it
  * names no scan. Null only when there are no scans at all. */
-export async function resolveScan(env: Env, d: string | undefined): Promise<string | null> {
+export async function resolveScan(env: Env, d: string | undefined, filtered = false): Promise<string | null> {
   const scans = (await pathScans(env, true)).results.map(r => r.date)
   const sel = decodeSel(d)
   const times = await scanTimes(env, scans)
@@ -106,7 +109,7 @@ export async function resolveScan(env: Env, d: string | undefined): Promise<stri
     if (!scan) throw new NoScanMatch(d!)
     return scan
   }
-  return resolveAfter(undefined, scans, times)
+  return serverDefaultScan(env, sortScans(scans, times), filtered)
 }
 
 /** The scan's color facts: attribution ranks and access-log observation window. */
@@ -214,7 +217,7 @@ export interface Site { name: string; scheme: string; root?: string[]; defaultCo
  * throw: an unfurl must always get an image. */
 export async function mapCard(env: Env, site: Site, title: string, params: Record<string, string>, tier: OgTier, opts: { deepen?: boolean } = {}): Promise<CardData> {
   const base = { tier, site: site.name, title, tiles: [] as CardTile[], ...(env.PUBLIC_READ ? { publicLabels: true } : {}) }
-  const date = await resolveScan(env, params.d)
+  const date = await resolveScan(env, params.d, !!params.f)
   if (!date) return { ...base, subtitle: '', total: '', empty: 'no scans yet' }
   const path = params.path ?? ''
   const filterNote = params.f ? ` · filter “${params.f}”` : ''

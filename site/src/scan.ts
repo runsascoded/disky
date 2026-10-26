@@ -5,6 +5,7 @@ import { encodeCutoff, parseCutoff } from './federatedScans'
 import { canonicalizeSel, decodeSel, encodeScan, encodeSel, exactSlug, latestScan, minPrefix, minSlug, legacyDateParam, legacyFromParam, mergeSel, scanCmp, scanInstant, scanMatches, scanNeighbors, scanParts, selSlug, sortScans, startKey, timesNeeded, type ScanSel, type ScanTimes } from './scanSlug'
 import { storeUrl, type Store } from './stores'
 import { pickScanSelection } from './scanSelection'
+import { floatingScan } from './defaultScan'
 
 // How often an unpinned tab re-checks for newly published scans.
 export const SCANS_POLL_MS = 5 * 60_000
@@ -210,30 +211,21 @@ export function useScans(store: Store): UseQueryResult<string[]> {
 export const noScansYet = (q: { isSuccess: boolean; data?: string[] }): boolean =>
   q.isSuccess && q.data?.length === 0
 
-/** The scan a page with no explicit `?d=` opens on: the newest scan, or — for a filtered view on an
- * indexed-only deployment (`indexed` given: the static index's covered scans) — the newest scan the
- * index covers, with `pending` the newer scans it doesn't cover yet (published, not yet appended). None
- * covered: the newest scan (whose view then says it isn't indexed). `scans` is newest first. */
-export function floatingScan(scans: readonly string[], indexed?: readonly string[] | null | 'loading'): { scan: string | null; pending: string[] } {
-  // the covered list is on its way: pick nothing yet (no fetch of a scan it may rule out)
-  if (indexed === 'loading') return { scan: null, pending: [] }
-  if (!indexed) return { scan: scans[0] ?? null, pending: [] }
-  const have = new Set(indexed)
-  const i = scans.findIndex(s => have.has(s))
-  return i < 0 ? { scan: scans[0] ?? null, pending: [] } : { scan: scans[i], pending: scans.slice(0, i) }
-}
+export { floatingScan } from './defaultScan'
 
-/** The note a floating filtered view shows when it skipped newer scans: "Searching 10/9 4:30a, the newest
- * indexed scan; 10/9 8:36a is still being indexed." (`pending` newest first.) */
-export function pendingNote(scan: string, pending: readonly string[], now = new Date()): string {
+/** The note a floating view shows when it skipped newer scans: filtered, "Searching 10/9 4:30a, the newest
+ * indexed scan; 10/9 8:36a is still being indexed."; unfiltered (a `DEFAULT_SCAN=searchable` deployment's default),
+ * "Showing 10/9 4:30a, the newest searchable scan; …". (`pending` newest first.) */
+export function pendingNote(scan: string, pending: readonly string[], now = new Date(), filtered = true): string {
   const names = [...pending].reverse().map(s => fmtScan(s, now))
   const list = names.length <= 2 ? names.join(' and ') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
-  return `Searching ${fmtScan(scan, now)}, the newest indexed scan; ${list} ${names.length === 1 ? 'is' : 'are'} still being indexed.`
+  const lead = filtered ? `Searching ${fmtScan(scan, now)}, the newest indexed scan` : `Showing ${fmtScan(scan, now)}, the newest searchable scan`
+  return `${lead}; ${list} ${names.length === 1 ? 'is' : 'are'} still being indexed.`
 }
 
 /** The scan a page shows: an explicit `?d=` resolves to the latest scan it names (a miss — none, or an
- * unparseable value — is `miss`, never another scan); absent, `floatingScan` (the newest scan, or for a
- * filtered indexed-only view the newest covered one, `pending` the newer ones skipped). */
+ * unparseable value — is `miss`, never another scan); absent, `floatingScan` (the newest scan, or with
+ * `indexed` the newest covered one, `pending` the newer ones skipped; `defaultScan.ts` says when). */
 export function selectScan(sel: ScanSel | undefined, scans: readonly string[], loaded: boolean, indexed?: readonly string[] | null | 'loading', times?: ScanTimes): { asof: string | null; miss: ScanMiss | null; pending: string[] } {
   const miss = scanMiss(sel, scans, loaded, times)
   if (miss || sel?.invalid) return { asof: null, miss, pending: [] }
@@ -267,8 +259,9 @@ export function useScanTimes(store: Store, scans: readonly string[]): ScanTimes 
   }, [q.data, scans])
 }
 
-/** The page's scan selection. `indexed`: the covered scans to prefer when `?d=` is absent (a filtered
- * view on an indexed-only deployment; see `floatingScan`). An explicit `?d=` resolves as always. */
+/** The page's scan selection. `indexed`: the covered scans to prefer when `?d=` is absent (`defaultScan.ts`
+ * `prefersIndexed`: a filtered view, or every view on a `DEFAULT_SCAN=searchable` deployment). An explicit `?d=`
+ * resolves as always. */
 export function useScan(store: Store, indexed?: readonly string[] | null | 'loading'): Scan {
   const [sel] = useScanSel()
   // One writer for the end/start selection and the cutoff instants, so a pick is one history entry.

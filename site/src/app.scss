@@ -1266,6 +1266,8 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
 .tooltip-content .bb-tip { color: var(--ink-2); }
 .tooltip-content .pin-hint { color: var(--ink-3); font-size: 10.5px; margin-top: 5px; }
 .tooltip-content.pinned { border-color: var(--ink-3); }
+.tooltip-content .search-off-tip p { margin: 0 0 4px; }
+.tooltip-content .search-off-tip p:last-child { margin-bottom: 0; }
 .tt-ref.pinnable { cursor: pointer; }
 .tooltip-content .copy-hint { display: block; color: var(--ink-3); font-size: 11px; margin-top: 3px; }
 .tooltip-content code.elide-full {
@@ -2145,6 +2147,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
     border: 1px solid var(--line);
     border-radius: 6px;
     font-size: 12.5px;
+  }
+  // A scan the static name index hasn't appended yet (`SearchCatchUp.tsx`): the box is off, its tip says why. A
+  // disabled input swallows pointer events, so the hover/pin lands on the tip's wrapper instead.
+  input:disabled {
+    opacity: 0.55;
+    cursor: help;
+    pointer-events: none;
   }
   // An applied filter scopes every section below: the box says so at a glance.
   &.active input {
