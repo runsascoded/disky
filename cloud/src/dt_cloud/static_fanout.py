@@ -265,22 +265,25 @@ class Fanout(Helpers):
                            log=self.log)
 
     def start(self, work: Path, groups: dict[str, int], *, R: int, K: int, floor: int, measure: bool = True) -> None:
-        """Deal `groups` (`{kind: ranges}`) over the shares by spilled bytes (the checkpoint's `spilled` marker's files
-        and their listed sizes: `static_merge._spilled`), keep share 0, fetch its spills not on the work disk into `work`
+        """Deal `groups` (`{kind: ranges}`) over the shares by spilled roots (the checkpoint's `spilled` marker's files
+        and their rows, `static_merge.SPILL_ROWS`; their listed bytes for a fold that predates it: `static_merge._spilled`), keep share 0, fetch its spills not on the work disk into `work`
         (a resumed fold restores only the `spilled` step's tables, not every spill), and submit the helpers for the rest
         (ranges already measured by an earlier attempt's helpers aren't dealt again); the plan carries the measurement's
         `R`, `K`, `floor`, and `measure` (false: the helpers only sort each range's roots, an incremental compaction's:
         `static_local.finish_drill`)."""
         self.params = {"R": R, "K": K, "floor": floor, "measure": measure}
         from . import heartbeat as hb
-        from .static_merge import _spilled
+        from .static_merge import _spilled, spill_rows
 
         hb.set_stage("drill/measure/fan-out plan")
         sizes, by = _spilled(self.ck)
-        weights = {(kind, g): size for (kind, g), rels in by.items() if g < groups.get(kind, 0) and (size := sum(sizes[r] for r in rels))}
+        # by roots, as the ranges' seconds go (gcs c001: r 0.78 long, 0.98 short; bytes 0.33 / 0.65, the compression varies)
+        rows = spill_rows(self.ck, list(sizes))
+        per, unit = (rows, "roots") if rows is not None else (sizes, "B")
+        weights = {(kind, g): w for (kind, g), rels in by.items() if g < groups.get(kind, 0) and (w := sum(per[r] for r in rels))}
         mine, todo = self.deal(weights)
         need = {r: work / r for u in sorted(mine) for r in by[u] if not (work / r).is_file()}
-        self.log(f"measure fan-out: {len(mine)} ranges here ({sum(weights[r] for r in mine):,} B; {len(need)} spill files, "
+        self.log(f"measure fan-out: {len(mine)} ranges here ({sum(weights[r] for r in mine):,} {unit}; {len(need)} spill files, "
                  f"{sum(sizes[r] for r in need):,} B to fetch), {len(self.away)} on {self.tasks - 1} helper tasks ({sum(len(t) for t in todo)} to measure)")
         self._submit([t for t in todo if t])
         self.fetch({f"{SPILLED_FILES}/{r}": dst for r, dst in need.items()}, {self.ck.key(f"{SPILLED_FILES}/{r}"): sizes[r] for r in need},

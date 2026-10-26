@@ -384,6 +384,8 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         groups = {**groups, **cdoc}
         if st is not None:
             st.drop("short")
+        if ck is not None:
+            _spill_rows(ck, {r: pq.ParquetFile(work / r).metadata.num_rows for r in _files(work, "long", "short")})
         _save(con, ck, "spilled", work, tables=("al", "dgq"), subs=("long", "short"), doc=groups)
     if ck is not None:
         # the spills hold every long root again: the chunks' roots are no longer needed to resume (an attempt stopped
@@ -422,6 +424,14 @@ def _save(con, ck: Checkpoint | None, step: str, work: Path, *, tables: tuple[st
     if ck is not None:
         ck.save(con, f"{step}-tables", tables)
         ck.save_files(step, work, _files(work, *subs), doc)
+
+
+def _spill_rows(ck: Checkpoint, rows: dict[str, int]) -> None:
+    """The spill files' rows (`static_merge.SPILL_ROWS`, by their paths under `spilled/files/`), before the `spilled`
+    marker: the measurement's fan-out deals its ranges by them (`static_fanout.Fanout.start`)."""
+    from .static_merge import SPILL_ROWS
+
+    ck.store.write_text(ck.key(SPILL_ROWS), json.dumps(dict(sorted(rows.items()))) + "\n")
 
 
 def _restore(con, ck: Checkpoint, step: str, work: Path) -> dict | None:
@@ -883,13 +893,14 @@ def fold_units(con, ck: Checkpoint, units: list[tuple[str, int]], scratch: Path,
     lock = Lock()
     total = [0]
 
-    def upload(dst: Path) -> list[str]:
-        rels = [f.relative_to(spills).as_posix() for f in sorted(dst.rglob("*.parquet"))]
-        for r in rels:
+    def upload(dst: Path) -> dict[str, int]:
+        """`dst`'s spill files put under the checkpoint; each one's rows (its footer: what the measurement deals by)."""
+        rows = {f.relative_to(spills).as_posix(): pq.ParquetFile(f).metadata.num_rows for f in sorted(dst.rglob("*.parquet"))}
+        for r in rows:
             ck.store.put(spills / r, ck.key(f"{SPILLED_FILES}/{r}"))
         if not keep:
             shutil.rmtree(dst)
-        return rels
+        return rows
 
     def mark(kind: str, i: int, t: float, rows: int, **extra) -> None:
         secs = round(monotonic() - t, 1)
@@ -924,7 +935,7 @@ def fold_units(con, ck: Checkpoint, units: list[tuple[str, int]], scratch: Path,
                 ck.store.put(f, ck.key(f"{fold_unit_key(kind, ch)}/dig.parquet"))
             mark(kind, ch, t, rows, dig=bool(rows))
         else:
-            files: list[str] = []
+            files: dict[str, int] = {}
             if rows:
                 # the canonical tuples' roots, keyed by their canonical member (`ctid`), by long `q` range (`lqg`)
                 cur.execute(f"""CREATE OR REPLACE TEMP TABLE rt AS SELECT c.q, {DEPTH} AS depth, r.path, r.usr, r.vf, r.vt, r.size, r.n_files
@@ -935,7 +946,7 @@ def fold_units(con, ck: Checkpoint, units: list[tuple[str, int]], scratch: Path,
                     sl.spill_roots(cur, "rt", dst, "lqg")
                     files = upload(dst)
                 cur.execute("DROP TABLE rt")
-            mark(kind, ch, t, rows, files=files, **extra)
+            mark(kind, ch, t, rows, files=list(files), file_rows=files, **extra)
         if split is not None:
             _drop_ct(cur, split)
         return rows, None
@@ -972,7 +983,8 @@ def fold_units(con, ck: Checkpoint, units: list[tuple[str, int]], scratch: Path,
             t = monotonic()
             dst = spills / SHORT / f"s{g:06d}.{nonce}"
             rows = _short_one(cur, g, bounds, sspans, dst, "sqg")
-            mark(SHORT, g, t, rows, files=upload(dst) if rows else [])
+            files = upload(dst) if rows else {}
+            mark(SHORT, g, t, rows, files=list(files), file_rows=files)
             return rows, None
 
         _pool(con, short_unit, shorts, jobs, prog)
@@ -1097,6 +1109,9 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
     files = sorted({f for d in docs.values() for f in d["files"]})
     groups = {"long": cdoc["long_groups"], "short": len(shorts), "classes": cdoc["classes"], "fixed": cdoc["fixed"]}
     ck.save(con, "spilled-tables", ("al", "dgq"))
+    if all("file_rows" in d for d in docs.values()):
+        # a unit an older helper spilled has no rows: the measurement then deals by bytes
+        _spill_rows(ck, {r: n for d in docs.values() for r, n in d["file_rows"].items()})
     ck.mark_files("spilled", files, groups)
     _drop_plan(con, n)
     for tb in ("canon", "qg"):

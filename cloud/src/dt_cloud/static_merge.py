@@ -880,6 +880,19 @@ def _fetch_ranges(ck, spills: Path, heaviest: int | None, sample: str | None, wo
     return ck.store.read_json(ck.key("spilled/done.json"))["doc"], chosen
 
 
+#: Under a fold checkpoint: each spill file's rows (`{path under spilled/files/: rows}`), written before the `spilled`
+#: marker; absent when the fold predates it, or a unit an older helper spilled had none.
+SPILL_ROWS = "spilled/rows.json"
+
+
+def spill_rows(ck, rels: list[str]) -> dict[str, int] | None:
+    """`SPILL_ROWS`' rows of `rels`, or None when it's absent or misses one of them."""
+    if not ck.store.exists(ck.key(SPILL_ROWS)):
+        return None
+    rows = ck.store.read_json(ck.key(SPILL_ROWS))
+    return rows if all(r in rows for r in rels) else None
+
+
 def _spilled(ck) -> tuple[dict[str, int], dict[tuple[str, int], list[str]]]:
     """A fold checkpoint's saved spills: each file's bytes (by its path under `spilled/files/`) and the files of each
     `(kind, range)`. The files are the `spilled` marker's list (`spilled/done.json`), not whatever is under the prefix:
