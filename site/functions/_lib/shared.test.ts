@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { inFlight, JOIN, joinBound, Memo, Req, resetJoinStats, shared, snapshotsPrefix, track } from './shared'
+import { cellsBytes, HeldAnswers, hitsBytes, inFlight, JOIN, joinBound, Memo, Req, resetJoinStats, shared, snapshotsPrefix, track } from './shared'
 
 describe('shared', () => {
   beforeEach(() => vi.useFakeTimers())
@@ -281,5 +281,27 @@ describe('snapshotsPrefix', () => {
     expect(snapshotsPrefix({ SNAPSHOTS_SUBDIR: '' })).toBe('snapshots/')
     expect(snapshotsPrefix({ SNAPSHOTS_SUBDIR: 'cw' })).toBe('snapshots/cw/')
     expect(snapshotsPrefix({ SNAPSHOTS_SUBDIR: '/cw/' })).toBe('snapshots/cw/')
+  })
+})
+
+describe('HeldAnswers', () => {
+  it('holds answers under one bound, the least recently used dropped first, one over the bound alone never', () => {
+    const h = new HeldAnswers(100)
+    const dropped: string[] = []
+    const keep = (k: string, n: number) => h.keep(k, () => n, () => dropped.push(k))
+    keep('a', 40)
+    keep('b', 40)
+    keep('a', 40) // used again: now the most recent, its bytes not re-estimated
+    keep('c', 40) // over: `b` goes, the least recently used
+    const afterC = [h.bytes, [...dropped]]
+    keep('d', 101) // over the bound alone: not held, nothing else dropped
+    const afterD = [h.bytes, [...dropped]]
+    h.forget('a')
+    keep('e', 60) // fits beside `c` once `a` is forgotten
+    expect([afterC, afterD, [h.bytes, dropped]]).toEqual([[80, ['b']], [80, ['b', 'd']], [100, ['b', 'd']]])
+  })
+
+  it('estimates hits and cells by count and name length', () => {
+    expect([hitsBytes([{ path: 'ab' }, { path: 'abcd' }]), cellsBytes([{ child: 'x' }])]).toEqual([2 * 256 + 6, 161])
   })
 })

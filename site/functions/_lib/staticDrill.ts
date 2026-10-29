@@ -35,7 +35,7 @@ import { subBlobs } from './staticRuns.js'
 import { compressors } from './zstd.js'
 import { type HexRule, occurs, ruleOf } from './hexRuns.js'
 import { isScanId } from '../../src/scanSlug.js'
-import { inFlight, Memo, type Req } from './shared.js'
+import { cellsBytes, heldAnswers, heldId, hitsBytes, inFlight, Memo, type Req } from './shared.js'
 
 export const DRILL_DIR = 'drill'
 
@@ -714,16 +714,13 @@ function hitOf(c: Record<string, unknown[]>, i: number): Hit {
   return { path, depth, usr: c.usr[i] as string, vf: Number(c.vf[i]) * 1000, vt: Number(c.vt[i]) * 1000, size: c.size[i] as bigint, n: c.n_files[i] as bigint }
 }
 
-/** Answers held per isolate, across (literal, path) views: the oldest dropped past this many hits + cells. */
-const HELD = 400_000
-
 /** The filter's heavy source over a drill: a view's match roots, or its rollup, exact on the live tiers' scans
  *  (`Found.scans`). Plain views and non-members decline (null): the caller reads as before. */
 export class DrillSource implements HitSource {
   /** Answers held per isolate (an `over` one never), their sizes; one pending in another request is joined
    *  (`shared.ts`). */
   private held = new Memo<DrillAnswer | DrillOver>('static-drill-answer')
-  private sizes = new Map<string, number>()
+  private id = heldId('static-drill-answer')
   /** `cache`: roots answers across isolates (the colo's Cache API) — decoding a member's ~80K roots from the
    *  drill's parquet is seconds of an edge isolate's CPU, each new isolate again. */
   constructor(readonly drill: Drill, readonly cache?: HitCache) {}
@@ -738,19 +735,13 @@ export class DrillSource implements HitSource {
   async answer(t: string, P: string, st: DrillState, maxRows?: number, req?: Req): Promise<DrillAnswer | DrillOver> {
     const k = DrillSource.key(t, P, st)
     const a = await this.held.get(k, () => this.drill.bounded(t, P, st, maxRows, req), req, x => x.source !== 'over')
-    if (this.held.has(k) && !this.sizes.has(k)) this.hold(k, a.source === 'roots' ? a.hits.length : 'rollup' in a ? a.rollup.cells.length : 0)
+    if (this.held.has(k)) this.hold(k, a)
     return a
   }
 
-  /** `k`'s answer is held, `n` hits + cells: the oldest dropped past `HELD`. */
-  private hold(k: string, n: number): void {
-    this.sizes.set(k, n)
-    let sum = [...this.sizes.values()].reduce((s, x) => s + x, 0)
-    for (const old of [...this.held.keys()]) {
-      if (sum <= HELD || old === k) break
-      sum -= this.sizes.get(old) ?? 0
-      this.held.delete(old); this.sizes.delete(old)
-    }
+  /** `k`'s answer held (`heldAnswers`, under the isolate's bound for the static sources' answers). */
+  private hold(k: string, a: DrillAnswer | DrillOver): void {
+    heldAnswers.keep(this.id + k, () => a.source === 'roots' ? hitsBytes(a.hits) : 'rollup' in a ? cellsBytes(a.rollup.cells) : 0, () => this.held.delete(k))
   }
 
   /** `key`'s view under `under`, exact on the live tiers' scans. A tier that fails to load is cut (`Drill.broke`)
@@ -793,8 +784,9 @@ export class DrillSource implements HitSource {
       if (hits) {
         if (opts?.maxRows != null && hits.length > opts.maxRows) { opts.over = true; return null }
         const kind: Kind = [...key].length <= 2 ? 'short' : 'long'
-        this.held.set(k, { source: 'roots', kind, c: key, upper: hits.length, hits, io: newIo() })
-        this.hold(k, hits.length)
+        const a: DrillAnswer = { source: 'roots', kind, c: key, upper: hits.length, hits, io: newIo() }
+        this.held.set(k, a)
+        this.hold(k, a)
         return { hits, io: { from: 'drill', source: 'roots', cache: 'colo', tiers: st.tiers.length, ms: Date.now() - t0 }, scans: st.scans }
       }
     }
@@ -805,7 +797,7 @@ export class DrillSource implements HitSource {
     if (fresh && a.source === 'roots' && this.cache) await this.cache.put(k, a.hits).catch(() => {})
     if (a.source === 'plain' || a.source === 'none') return null
     // An answer narrowed by the catalog's broken tier is not held: once that tier loads, the view widens again.
-    if ('scans' in a && a.scans) { this.held.delete(k); this.sizes.delete(k) }
+    if ('scans' in a && a.scans) { this.held.delete(k); heldAnswers.forget(this.id + k) }
     const io = { from: 'drill', source: a.source, kind: a.kind, c: a.c, upper: a.upper, tiers: st.tiers.length, ...a.io, ms: Date.now() - t0 }
     return a.source === 'roots' ? { hits: a.hits, io, scans: st.scans } : { rollup: a.rollup, io, scans: a.scans ?? st.scans }
   }

@@ -23,7 +23,7 @@
  *  `drill/` is live, up to the first run without one, so a heavy literal on a later scan is not covered (`covers`)
  *  and the view is refused (`scan-not-indexed`) — never the thresholded walk's "no matches". */
 import type { QueryAst } from './queryAst.js'
-import { Memo, type Req, reqOf } from './shared.js'
+import { heldAnswers, heldId, hitsBytes, Memo, type Req, reqOf } from './shared.js'
 import { StaticCatalog } from './staticCatalog.js'
 import { type CatalogLookup, Drill, DRILL_DIR, DrillSource, type Rollup, type RollupCell } from './staticDrill.js'
 import { type Blobs, cacheIndexes, type FirstHits, type Hit, type Io, r2Blobs, scanAt, staticGen, staticPrefix } from './staticNames.js'
@@ -106,9 +106,6 @@ export interface StaticFilterStore { source: HitSource; scans: (req?: Req) => Pr
  *  catalog's membership bound, so every non-member fits) plus two 8K-row groups of slack. */
 export const MAX_ROWS = 100_000 + 2 * 8192
 
-/** Hits held per isolate, across literals (each ~150 B): the oldest literal is dropped past this. */
-const HELD_HITS = 400_000
-
 const under = (p: string, root: string): boolean => root === '' || p.startsWith(root + '/')
 
 /** What `SuffixHits` reads: a literal's first hits, refused (null) above `maxRows`. `snapshot` names the index's
@@ -127,6 +124,7 @@ export interface HitReader {
 export class SuffixHits implements HitSource {
   /** Each literal's first hits, held per isolate; a read pending in another request is joined (`shared.ts`). */
   private held = new Memo<{ hits: Hit[]; io: Record<string, unknown>; scans?: string[] } | null>('static-suffix-hits')
+  private id = heldId('static-suffix-hits')
   private cut = new WeakMap<Hit[], Map<string, Hit[]>>()
   constructor(
     readonly names: HitReader,
@@ -144,7 +142,6 @@ export class SuffixHits implements HitSource {
     const version = snap?.version ?? 'base'
     // The base generation's entries keep their keys; a day's runs version theirs.
     const vkey = version === 'base' ? key : `${key}@${version}`
-    const fresh = !this.held.has(vkey)
     const got = await this.held.get(vkey, async () => {
       const cached = await this.opts.cache?.get(vkey)
       if (cached) return { hits: cached, io: { from: 'cache', version }, scans: snap?.scans }
@@ -155,18 +152,8 @@ export class SuffixHits implements HitSource {
       if (read === version) await this.opts.cache?.put(vkey, fold.hits)
       return { hits: fold.hits, io: { from: 'shards', version: read, shard: io.shard, groups: io.groups, bytes: io.bytes, rows_read: io.rows_read, tiers: io.tiers ?? 1, ms: io.ms }, scans }
     }, req, g => !g || g.io.version === version)
-    if (fresh) this.trim()
+    if (this.held.has(vkey)) heldAnswers.keep(this.id + vkey, () => hitsBytes(got?.hits ?? []), () => this.held.delete(vkey))
     return got
-  }
-
-  /** Bound what the isolate holds: the oldest literals past `HELD_HITS` hits are dropped (never the newest). */
-  private trim(): void {
-    let n = 0
-    const held = [...this.held.entries()].reverse()
-    for (const [k, got] of held) {
-      n += got?.hits.length ?? 0
-      if (n > HELD_HITS && k !== held[0][0]) this.held.delete(k)
-    }
   }
 
   get heavy(): boolean { return !!this.opts.heavy }
