@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 import duckdb
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 from test_interval_append import _rows, _views_equal, build_full, combine
@@ -157,7 +158,7 @@ def test_each_run_is_the_staged_append(world, local, staged):
     for d, run in staged["runs"].items():
         got = _parquets(local["gen"] / "deltas" / d)
         assert sorted(got) == sorted([*(f"{t}/r{i:04d}.parquet" for t in ia.tables() for i in range(k)),
-                                      *(f"served/{s}{x}" for s in ia.run_sorts() for x in (".parquet", ".groups.parquet"))]), d
+                                      *(f"served/{s}{x}" for s in [*ia.run_sorts(), ist.CHANGES] for x in (".parquet", ".groups.parquet"))]), d
         assert got == {key: v for key, v in _parquets(run).items() if not key.startswith("state/")}, d
 
 
@@ -423,7 +424,7 @@ def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
     merged = ar.run_key(ids[0], ids[-1])
     for key in [*(f"deltas/{d}" for d in ids), merged]:
         assert sorted(_parquets(gen / key)) == sorted([*(f"pvl/r{i:04d}.parquet" for i in range(k)),
-                                                       *(f"served/{x}{e}" for x in ("path", "bysize") for e in (".parquet", ".groups.parquet"))]), key
+                                                       *(f"served/{x}{e}" for x in ("path", "bysize", "changes") for e in (".parquet", ".groups.parquet"))]), key
     newest = json.loads((gen / "manifests" / f"{ids[-1]}.m001.json").read_text())
     assert [(r["key"], r["scans"]) for r in newest["runs"]] == [(merged, ids)]
 
@@ -660,3 +661,21 @@ def test_verify_diffs_count_changes_only_when_asked(world, local, tmp_path):
     st = ir.Store(gen / "served", [gen / r["key"] / "served" for r in newest["runs"]])
     ts = {s["id"]: s["ts"] for s in world["scans"]}
     assert [r["changes"]["versions"] for r in recs] == [st.changes(ts[r["from"]], ts[r["to"]], r["path"], ir.Cost()) for r in recs]
+
+
+def test_base_and_runs_transitions_are_a_full_builds(world, local, tmp_path):
+    """The base's `changes` and each run's (the newest manifest's runs, carried or not) hold, together, exactly the
+    transitions a fresh build over every scan cuts: the v1 → v2 switch's file openings dropped in both."""
+    full = tmp_path / "full"
+    res = CliRunner().invoke(il.build_cmd, ["-g", "f", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(full), "-w", str(tmp_path / "work"),
+                                            "-k", "3", "-r", str(RG), "-p", "2", "-M", "1GB", "-t", DATES[-1]], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    key = lambda r: (r["b"], r["depth"], r["path"])  # noqa: E731
+    want = sorted(pq.read_table(full / ist.PREFIX / "f" / "served" / f"{ist.CHANGES}.parquet").to_pylist(), key=key)
+    gen = local["gen"]
+    newest = sorted((gen / "manifests").glob("*.json"))[-1]
+    runs = [gen / r["key"] for r in json.loads(newest.read_text())["runs"]]
+    got = pq.read_table(gen / "served" / f"{ist.CHANGES}.parquet").to_pylist()
+    for r in runs:
+        got += pq.read_table(r / "served" / f"{ist.CHANGES}.parquet").to_pylist()
+    assert len(want) > 0 and sorted(got, key=key) == want
