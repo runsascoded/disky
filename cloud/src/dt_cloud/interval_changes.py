@@ -175,15 +175,37 @@ def changes_cmd(scans_json, mem, out, threads, tmp, rg_rows, inputs) -> None:
     print(json.dumps({"total": tot}), flush=True)
 
 
-def backfill_plan(store, prefix: str) -> list[str]:
-    """What a generation lacks of the `changes` sort: `""` for its base, else each run key (generation-relative) the
-    newest manifest lists. A file is there once its `changes.json` (uploaded last) is."""
+def backfill_keys(store, prefix: str) -> list[str]:
+    """The generation-relative dirs that serve a `changes` sort: `""` (the base), then each run the newest manifest lists."""
     from .append_runner import manifest_keys
 
-    todo = [] if store.exists(f"{prefix}/served/{SORT}.json") else [""]
     keys = manifest_keys([k.removeprefix(f"{prefix}/") for k in store.listing(f"{prefix}/manifests/")])
-    runs = store.read_json(f"{prefix}/{keys[-1]}")["runs"] if keys else []
-    return todo + [r["key"] for r in runs if not store.exists(f"{prefix}/{r['key']}/served/{SORT}.json")]
+    return ["", *(r["key"] for r in (store.read_json(f"{prefix}/{keys[-1]}")["runs"] if keys else []))]
+
+
+def served_prefix(prefix: str, key: str) -> str:
+    """Dir `key`'s (`""`: the base) `changes` files' key prefix."""
+    return f"{prefix}/{key + '/' if key else ''}served/{SORT}"
+
+
+def r2_publish_changes(store, key_prefix: str, *, check: bool = False) -> list[str]:
+    """`key_prefix`'s `changes` files on `store` (a `gs://` bucket) → R2 (`append_runner.r2_copy`, same keys),
+    `changes.json` last; with `check`, only the keys R2 lacks (or holds differently), nothing copied."""
+    from .append_runner import r2_copy, r2_missing, r2_objects
+
+    uri = store.uri("")
+    if not uri.startswith("gs://"):
+        raise SystemExit(f"backfill-changes -R: {uri} is not a gs:// bucket (R2 is copied from one)")
+    bucket = uri.removeprefix("gs://").split("/")[0]
+    objs = r2_objects(bucket, [key_prefix])
+    if check:
+        return r2_missing(objs) if objs else [f"{key_prefix}.json"]
+    body = [o for o in objs if not o.key.endswith(".json")]
+    r2_copy(bucket, body)
+    r2_copy(bucket, [o for o in objs if o.key.endswith(".json")], workers=1)
+    if bad := r2_missing(objs):
+        raise SystemExit(f"r2 {key_prefix}: {len(bad)} files not on R2 after the copy (e.g. {bad[0]})")
+    return []
 
 
 @command("backfill-changes")
@@ -191,16 +213,19 @@ def backfill_plan(store, prefix: str) -> list[str]:
 @option("-g", "--gen", required=True, help="Generation")
 @option("-m", "--mount", help="Local mount of the store's bucket (the range and delta files are read from it)")
 @option("-M", "--mem", default="80GB", help="DuckDB memory limit")
-@option("-n", "--dry-run", is_flag=True, help="Print what is missing, cut nothing")
+@option("-n", "--dry-run", is_flag=True, help="Print what is missing (on the store, and with -R on R2), cut and copy nothing")
 @option("-o", "--out", default="/stage/out", help="Local output dir (uploaded, then removed)")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-r", "--rg-rows", default=RG_ROWS, type=IntRange(min=1), help="Rows per served row group")
+@option("-R", "--r2", is_flag=True, help="Also copy each dir's `changes` files to the serving R2 bucket ($R2_* credentials, as `r2_publish`), `changes.json` last: a GCS store's deployments serve from R2")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
-def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile, rg_rows, tmp) -> None:
+def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile, rg_rows, r2, tmp) -> None:
     """Add the `changes` sort (specs/diff-from-changes.md) to a generation cut before it: its base (from `pv/`) and each run
     its newest manifest lists (from the run's `pvl` deltas), beside their other served sorts. Additive: a sort already
-    there is never rewritten, `changes.json` goes up last, so a rerun resumes. One JSON line per sort cut."""
+    there is never rewritten, `changes.json` goes up last, so a rerun resumes; `-R` copies each to R2 as well (a sort on
+    the store but not on R2 is copied, not cut again). Refuses a generation already compacted into another (its prune
+    would leave what it adds). One JSON line per dir done."""
     import shutil
 
     from .blobstore import Store
@@ -209,22 +234,32 @@ def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile
 
     store = Store(_bucket(bucket, profile))
     prefix = f"{PREFIX}/{gen}"
-    todo = backfill_plan(store, prefix)
-    err(f"backfill-changes {prefix}: {len(todo)} to cut ({'base, ' if '' in todo else ''}{sum(1 for k in todo if k)} runs)")
+    if store.exists(f"{prefix}/successor.json"):
+        raise SystemExit(f"backfill-changes {prefix}: compacted into {store.read_json(f'{prefix}/successor.json')['gen']}; backfill that")
+    keys = backfill_keys(store, prefix)
+    cut = [k for k in keys if not store.exists(f"{served_prefix(prefix, k)}.json")]
+    copy = [k for k in keys if k in cut or r2_publish_changes(store, served_prefix(prefix, k), check=True)] if r2 else []
+    err(f"backfill-changes {prefix}: {len(keys)} dirs; {len(cut)} to cut" + (f", {len(copy)} to copy to R2" if r2 else ""))
     if dry_run:
-        print(json.dumps({"gen": gen, "todo": todo}), flush=True)
+        print(json.dumps({"gen": gen, "cut": cut, **({"r2": copy} if r2 else {})}), flush=True)
         return
     root = _root(store, prefix, mount)
     scans = store.read_json(f"{prefix}/scans.json")["scans"]
-    con = connect(threads, mem, tmp)
-    for key in todo:
-        dst = Path(out) / (key or "base") / "served"
-        dst.mkdir(parents=True, exist_ok=True)
-        if key:
-            doc = cut_run_changes(con, f"{root}/{key}", dst, rg_rows=rg_rows)
-        else:
-            doc = write_changes(con, f"read_parquet('{root}/pv/r*.parquet')", dst / f"{SORT}.parquet", scans[0]["ts"], listed_from(scans), rg_rows=rg_rows)
-            (dst / f"{SORT}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
-        store.put_tree(dst, f"{prefix}/{key + '/' if key else ''}served", last=(f"{SORT}.json",))
-        shutil.rmtree(dst)
-        print(json.dumps({"key": key or "base", "rows": doc["rows"], "groups": doc["groups"], "bytes": doc["bytes"]}), flush=True)
+    con = connect(threads, mem, tmp) if cut else None
+    for key in keys:
+        doc = None
+        if key in cut:
+            dst = Path(out) / (key or "base") / "served"
+            dst.mkdir(parents=True, exist_ok=True)
+            if key:
+                doc = cut_run_changes(con, f"{root}/{key}", dst, rg_rows=rg_rows)
+            else:
+                doc = write_changes(con, f"read_parquet('{root}/pv/r*.parquet')", dst / f"{SORT}.parquet", scans[0]["ts"], listed_from(scans),
+                                    rg_rows=rg_rows)
+                (dst / f"{SORT}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
+            store.put_tree(dst, f"{prefix}/{key + '/' if key else ''}served", last=(f"{SORT}.json",))
+            shutil.rmtree(dst)
+        if key in copy:
+            r2_publish_changes(store, served_prefix(prefix, key))
+        if doc or key in copy:
+            print(json.dumps({"key": key or "base", **({k: doc[k] for k in ("rows", "groups", "bytes")} if doc else {}), "r2": key in copy}), flush=True)
