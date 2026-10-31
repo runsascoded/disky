@@ -59,15 +59,30 @@ export function summarize(reqs: Req[], o: { since: number; batches: number; capp
   return { since: o.since, requests: reqs.length, batches: o.batches, capped: o.capped, routes, users, slowest }
 }
 
-/** The summary of the batches received since `since` (epoch ms), optionally one user's or one session's. */
-export async function latency(db: D1Database, f: { since: number; email?: string; sid?: string }): Promise<LatencySummary> {
+/** Batches one statement reads (D1 caps a result's size; a week's `events` blobs in one `.all()` can pass it). */
+export const PAGE_BATCHES = 2_000
+
+/** The summary of the batches received since `since` (epoch ms), optionally one user's or one session's: newest first,
+ *  `PAGE_BATCHES` a statement (keyset on `(last_ms, sid, pid, seq)`), at most `MAX_BATCHES`. */
+export async function latency(db: D1Database, f: { since: number; email?: string; sid?: string }, page = PAGE_BATCHES): Promise<LatencySummary> {
   const where = ['b.last_ms >= ?']
   const args: unknown[] = [f.since]
   if (f.email) { where.push('l.email = ?'); args.push(f.email) }
   if (f.sid) { where.push('b.sid = ?'); args.push(f.sid) }
-  const r = await db.prepare(`SELECT b.sid, l.email, b.events FROM session_log_batches b JOIN session_log l ON l.sid = b.sid WHERE ${where.join(' AND ')} ORDER BY b.last_ms DESC LIMIT ${MAX_BATCHES + 1}`)
-    .bind(...args).all<{ sid: string; email: string | null; events: string }>()
-  const rows = r.results.slice(0, MAX_BATCHES)
+  type Row = { sid: string; pid: string; seq: number; last_ms: number; email: string | null; events: string }
+  const rows: Row[] = []
+  let after: Row | null = null
+  let capped = false
+  for (;;) {
+    const w: string[] = after ? [...where, '(b.last_ms, b.sid, b.pid, b.seq) < (?, ?, ?, ?)'] : where
+    const a: unknown[] = after ? [...args, after.last_ms, after.sid, after.pid, after.seq] : args
+    const r: { results: Row[] } = await db.prepare(`SELECT b.sid, b.pid, b.seq, b.last_ms, l.email, b.events FROM session_log_batches b JOIN session_log l ON l.sid = b.sid WHERE ${w.join(' AND ')} ORDER BY b.last_ms DESC, b.sid DESC, b.pid DESC, b.seq DESC LIMIT ${page}`)
+      .bind(...a).all<Row>()
+    rows.push(...r.results)
+    if (rows.length > MAX_BATCHES) { capped = true; rows.length = MAX_BATCHES; break }
+    if (r.results.length < page) break
+    after = r.results[r.results.length - 1]
+  }
   const reqs = rows.flatMap(x => requestsOf(x.sid, x.email, JSON.parse(x.events) as SlogEvent[]))
-  return summarize(reqs, { since: f.since, batches: rows.length, capped: r.results.length > MAX_BATCHES })
+  return summarize(reqs, { since: f.since, batches: rows.length, capped })
 }

@@ -8,6 +8,7 @@ import { onRequest, purgeState } from './session-log/[[path]]'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { listSessions, purge } from '../_lib/sessionLog'
+import { latency } from '../_lib/sessionLatency'
 import { FOREVER_MS, fmtCursor, isForever, LIMITS, parseCursor, parseUntil, type SessionRow, switchState, validateBatch } from '../_lib/sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 12, 15, 0, 0)  // 2026-10-12T15:00Z
@@ -571,7 +572,7 @@ describe('D1', () => {
 
   describe('latency (`/admin/latency`)', () => {
     it('summarizes logged requests per route and cache tier, per user, and the slowest; admins only', async () => {
-      const { call, viewer, adminT } = await setup()
+      const { db, call, viewer, adminT } = await setup()
       const api = (t: number, u: string, ms: number, f: Record<string, unknown> = {}) => ev(t, 'api', { u, s: 200, ms, ...f })
       const post = (sid: string, token: string, events: unknown[]) => call('POST', '', { token, body: batch({ sid, events }) })
       await post('sid-aaaaaa', viewer, [
@@ -606,6 +607,8 @@ describe('D1', () => {
       })
       const [, one] = await call('GET', '/latency?days=1&sid=sid-bbbbbb', { token: adminT })
       expect([one.requests, one.users.map((u: { email: string }) => u.email)]).toEqual([1, ['ops@example.test']])
+      // Paged a batch at a time: the same summary.
+      expect(await latency(db, { since: NOW - 86_400_000 }, 1)).toEqual(body)
     })
   })
 })
