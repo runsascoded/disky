@@ -483,7 +483,9 @@ def check_scan(con, scan: dict, r: dict, name: str, roots: list[str], *, bucket:
 
 def check_cut(con, root: str, served: Path, *, sliced: bool = True, generation: ist.Identity = False) -> dict:
     """Each of a run's served sorts (`served/<sort>.parquet`) against the deltas under `root` it was cut from, row for
-    row in the sort's columns: `rows` (the sort's), `missing` (delta rows it lacks), `extra` (rows the deltas lack)."""
+    row in the sort's columns: `rows` (the sort's), `missing` (delta rows it lacks), `extra` (rows the deltas lack).
+    Not `changes`: it is a join of the deltas, not a reordering, so checking it here would recompute it with the same SQL;
+    its independent check is a fresh build's (`test_base_and_runs_transitions_are_a_full_builds`)."""
     out = {}
     for sort in run_sorts(sliced, has_table(root, AT)):
         names = ist.served_schema(sort, generation).names
@@ -527,7 +529,8 @@ def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: di
 
 def run_files(sliced: bool = True, attributed: bool = False) -> tuple[str, ...]:
     """What every run a manifest lists holds (the reader's files and the run's record), checked before it is written;
-    `attributed`: the run holds the attribution table (some scan of it is covered)."""
+    `attributed`: the run holds the attribution table (some scan of it is covered). Not yet `changes`: runs cut before
+    it have none, and requiring it would refuse every manifest listing them until `backfill-changes` covers them."""
     return ("meta.json", *(f"served/{s}{x}" for s in run_sorts(sliced, attributed) for x in (".parquet", ".groups.parquet")))
 
 
