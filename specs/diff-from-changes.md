@@ -82,6 +82,67 @@ The floor is the Δ map's own: `G · minArea / (w·h)`, where G is the area the 
 - A side a parent is absent on holds none of its children (the as-of walk's reading of a one-sided parent; a scan's rows are hierarchical).
 - Tests (`intervalStore.test.ts`, "Δ diffs from changes"): over `g2`, `g5` (base + run) and `g7` (unowned), every pair of scans at every directory to depth 2 and three canvas sizes, every changed row drawn is the as-of walk's row (read just under the Δ floor, no lookup budget), every changed walk row over its depth's floor under an expanded node is drawn, and every expanded node's children and `(other)` sum to its Δ; a subtree with no change decodes no `changes` row group; a generation without the sort is refused. `g1`'s synthetic scans aren't hierarchical, so they are not a parity fixture.
 
+## Revision 2 (2026-10-31): measured on gcs, a planner over three reads
+
+**Status:** the reader above is on `cloud` behind `DIFF_FROM_CHANGES`, on for gcs dev only; **prod held everywhere** (hf included).
+
+### What gcs dev showed (cold, `tmp/dm-compare.py`, 3 pairs × 6 paths, against the as-of walk `dm=max`)
+
+| range | Δ from `changes` | as-of walk |
+|---|---|---|
+| 1 scan | 1.8–8.8 s (`common_pile`, 0 rows: 88 groups, 8.8 s) | 1.8–3.1 s |
+| ~1 day (several scans) | 8.7–21 s, 125–240 lookups | 1.3–3.2 s |
+| 1 week | 18–28 s, two 1102s | 2.0–3.5 s |
+
+Totals equal everywhere; rows equal on 1-scan and ~1-day ranges; week ranges differ by 1–79 rows where the lookup budget
+left estimates. Three causes:
+1. **The size order can't prune by path.** Inside a scan's block each size bucket's groups span the keyspace, so a
+   subtree reads every group of the range over the floor, fleet-wide (spec (a) failing: `common_pile` 0 rows, 88 groups).
+2. **Ancestors.** A change makes a transition on every ancestor, and the group filter tested a flat floor (the per-depth
+   `thrAt` only per row): every big ancestor of any change was read.
+3. **No caching.** `changes` groups are read raw from R2 and decoded per request (~40–80 ms a group in the dev runs);
+   the as-of walk's groups come decoded from the colo cache (`coloGroup`; ~12 ms a group in the same runs).
+Plus: lookups for multi-scan ranges are scattered `path` point reads (~50–70 ms each).
+
+### Measured on gcs's base (`2026-10-09b.g3`, 453M transitions, 55,294 groups a sort; groups / rows)
+
+| case (floor) | size order, flat | size order + group-level `thrAt` | `(b, path)` order | `(b, depth, path)` |
+|---|---|---|---|---|
+| `common_pile` 1 scan (any) | 6–39 / ≤132 | — | **3** | 12 |
+| `common_pile` 1 week (any) | 37–408 / ≤174 | 37–64 | **23** | 138–166 |
+| `marin-us-central1` 1 week (1 GB) | 37 / 12.8K | 34 / 2.1K | 60 | 149 |
+| root 1 scan (128 MB) | 46 / 359K | **11 / 11K** | 1,133 | 791 |
+| root 1 week (1 GB) | 51 / 340K | **28 / 9.6K** | 4,697 | 2,008 |
+
+Rejected: keying the size order on each transition's |Δ| and reading at floor/k (k scans): marginal at k=1 (root 1
+scan 1 GB: 5 / 375 vs 6 / 988), worse over a week (root 1 GB: 58 / 38.6K plus 33K endpoint lookups vs 28 / 9.6K); at
+128 MB, 201K lookups. `(b, path)` is also the smaller file (3.07 GB vs 3.54 GB).
+
+### The design
+
+- **Group-level attenuated floor** (shipped first, reader-only): a group passes when `b_max ≥ floor·atten^(d_min − dP − 1)`.
+- **A second sort, `changes-path`, `(b, path)`**: a subtree's transitions in a scan are contiguous (one or two groups).
+  Cut wherever `changes` is (`cut_gen`, `cut_run`, `backfill-changes`).
+- **Endpoints from `changes-path` by path** (the same file, contiguous per path), not `path` point reads.
+- **Colo-cached decoded groups** for both sorts, as the as-of reads' (`coloGroup` / `putColoGroup`).
+- **A planner per request**, from footers alone (held per isolate and in the colo): the as-of walk's plan (both sides'
+  groups, as views plan), the size order's (group-level floor) and `changes-path`'s, each costed as **groups × a measured
+  per-group cost for its source** (a colo-cached decoded group vs a raw R2 range read and decode; measured on dev from
+  `Server-Timing` and kept as constants beside `GROUP_READS`), plus the lookups each implies. The cheapest is read; the
+  answer says which (`tier`: `changes`, `changes-path`, or the walk's).
+- **Union members** (r2, and every deployment whose meta store is in a main union): below the root a member diff is one
+  store's, so `fromChanges` applies there; at the union root the members' diffs share a floor `T`, so `buildDiffChanges`
+  takes a fixed `threshold` (no floor-lowering). The parity tests assert `tier`, so a silent fallback fails them.
+
+### Order of work
+
+1. The group-level floor (`8f3d79c6`, `r/changes-atten`); re-run the dev comparison to see what is left.
+2. Colo-cached `changes` groups; re-run.
+3. `changes-path` (cut + backfill) and endpoints from it.
+4. The planner (with the measured per-source costs) and the union path.
+5. Dev comparison across 1 scan / 1 day / 1 week at root, buckets and quiet subtrees: every case no slower than the walk
+   (cold and warm), rows and totals equal; then prod per deployment.
+
 ## Open items
 
 1. **`changes` size on gcs.** If it approaches `path`'s (~19 GB), cut it with fewer columns or only for scans after a cutoff (older ranges refused, per (c)).
