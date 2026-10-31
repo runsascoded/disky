@@ -982,6 +982,25 @@ describe('Δ diffs from changes', () => {
     expect(err).toBe('ChangesUnavailable: the interval store\'s current generation doesn\'t hold scan 2026-10-31T0702')
   })
 
+  it('cut to `top`, both readers keep every expanded row exact: its drawn children and `(other)` sum to its Δ', async () => {
+    let cut = 0
+    for (const gen of ['g2', 'g5']) for (let i = 0; i < DATES.length; i++) for (let j = i + 1; j < DATES.length; j++) for (const path of ['', 'bk', 'bk/flat']) {
+      for (const fromChanges of [true, false]) {
+        const d = await buildDiff(at(gen, []), { from: DATES[i], to: DATES[j], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 3, ...(fromChanges ? { fromChanges } : {}) }).catch(() => null)
+        if (!d) continue
+        if (d.truncated) cut++
+        const rows = d.rows as R[]
+        for (const top of [{ p: '', a: d.total_a, b: d.total_b, oa: d.objects_a, ob: d.objects_b }, ...rows.filter(r => r.x)]) {
+          const kids = rows.filter(r => parentOf(r.p) === top.p && r.p !== top.p)
+          if (!kids.length) continue
+          const sum = (f: (r: R) => number) => kids.reduce((s, r) => s + f(r), 0)
+          expect([gen, path, fromChanges, top.p, sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([gen, path, fromChanges, top.p, top.b - top.a, top.ob - top.oa])
+        }
+      }
+    }
+    expect(cut).toBeGreaterThan(0)
+  }, 120_000)
+
   it('refuses a generation without the `changes` sort (no other answer)', async () => {
     // Another revision: the footer the tests above opened is held per isolate (a generation's files never go away).
     const e = { ...at('g2', [], k => k.includes('/changes.')), INTERVAL_STORE_REV: 'no-changes' } as Env
