@@ -212,7 +212,9 @@ gcp.storage.Bucket(
     uniform_bucket_level_access=True,
     # shared with cw-s3 (its `cw-l2/`, static names): no one deployment's
     labels={"deployment": "shared", "component": "data"},
-    soft_delete_policy=gcp.storage.BucketSoftDeletePolicyArgs(retention_duration_seconds=604800),
+    # Soft delete off (2026-10-25): `retire` deletes each old scan's sorts and listings daily, and a 7-day
+    # window billed them all twice. Everything here is rebuildable from the scans; deletes are final.
+    soft_delete_policy=gcp.storage.BucketSoftDeletePolicyArgs(retention_duration_seconds=0),
     lifecycle_rules=[
         gcp.storage.BucketLifecycleRuleArgs(
             action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
