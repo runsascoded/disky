@@ -8,6 +8,8 @@
 #   job/cw-interval-submit.sh build -t <scan>   # … through one scan (extra args go to the command)
 #   job/cw-interval-submit.sh add               # append every scan after the generation's newest
 #   job/cw-interval-submit.sh verify -s A,B,…   # parity against the per-scan path store at those scans (the base's)
+#   job/cw-interval-submit.sh backfill-changes  # add the `changes` sort to $INTERVAL_STORE_GEN (base + its runs), additive;
+#                                               # its inputs (`pv/`, each run dir) are mirrored to the stage disk as `-m`
 #   TASKS=8 job/cw-interval-submit.sh verify -s A,B,…  # … split over 8 Batch tasks (each its share of the scans)
 #   DRY=1 job/cw-interval-submit.sh build       # print the body only
 #
@@ -17,7 +19,7 @@ set -euo pipefail
 
 if [ $# -eq 0 ]; then echo "usage: $0 build|add|verify [args…]" >&2; exit 2; fi
 CMD=$1; shift
-case $CMD in build|add|verify) ;; *) echo "$0: build, add or verify, not $CMD" >&2; exit 2 ;; esac
+case $CMD in build|add|verify|backfill-changes) ;; *) echo "$0: build, add, verify or backfill-changes, not $CMD" >&2; exit 2 ;; esac
 
 PROJECT=oa-internal-450019
 REGION=us-central1
@@ -43,6 +45,14 @@ out = shlex.quote(STORE) if STORE else '"$R2_ARCHIVE"'
 if CMD == "verify":  # every case's lines + summary land in /stage/verify (and the generation's verify/ on R2); the summary is printed
     # each task its share of the sampled scans (`-i` defaults to $BATCH_TASK_INDEX); each scan's marker lands in the generation's verify/
     run = f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -n {os.environ["TASKS"]} -T /stage/tmp -o /stage {extra}\n'
+elif CMD == "backfill-changes":  # R2 isn't mountable on Batch: mirror the inputs (`pv/`, the runs) to the stage disk as `-m`
+    mirror = ("import sys; from pathlib import Path; from dt_cloud.blobstore import Store; from dt_cloud.interval_changes import backfill_keys; "
+              "s = Store(sys.argv[1]); g = 'interval-store/' + sys.argv[2]; "
+              "[s.get(k, Path('/stage/mirror') / k) for d in ['pv', *[k for k in backfill_keys(s, g) if k]] for k in s.listing(f'{g}/{d}')]")
+    run = (f'python -c {shlex.quote(mirror)} "$R2_ARCHIVE" {GEN}\n'
+           f'du -sh /stage/mirror\n'
+           f'dt-cloud interval-store backfill-changes -b "$R2_ARCHIVE" -g {GEN} -m /stage/mirror -o /stage/out -T /stage/tmp'
+           f' -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
 else:
     run = (f"dt-cloud interval-store {CMD} -g {GEN} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
            f' -s "$R2_ARCHIVE" -o {out} -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
