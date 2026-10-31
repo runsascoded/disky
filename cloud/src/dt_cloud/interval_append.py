@@ -373,7 +373,23 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
         doc["s"] = round(monotonic() - t0, 1)
         (out / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
         docs[sort] = doc
+    docs[ist.CHANGES] = cut_run_changes(con, root, out, rg_rows=rg_rows)
     return docs
+
+
+def cut_run_changes(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG) -> dict:
+    """A run's transitions (specs/diff-from-changes.md §2) from its `pvl` deltas under `root` → `out/changes.parquet` +
+    `.groups.parquet` + `.json`: its `bysize` holds a change's two sides as separate rows. A close record keeps the
+    closed version's `vf` (before the run), so only an opened row (`op` 1) is an opening."""
+    from .interval_changes import DIFF_COLS, write_changes
+
+    t0 = monotonic()
+    cols = ", ".join(ist.ident(c) for c in ["depth", "path", "vt", *DIFF_COLS])
+    src = f"(SELECT CASE WHEN op = 1 THEN vf ELSE 0 END AS vf, {cols} FROM {delta_relation(root, 'pvl', served=False)})"
+    doc = write_changes(con, src, out / f"{ist.CHANGES}.parquet", 0, rg_rows=rg_rows)
+    doc["s"] = round(monotonic() - t0, 1)
+    (out / f"{ist.CHANGES}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
+    return doc
 
 
 def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False) -> dict:
