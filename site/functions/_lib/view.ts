@@ -2327,6 +2327,9 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   /** The walk's lookup budgets, `LOOKUP_CAP` and (filtered) `FILTER_WALK_MS` by default (tests). */
   lookupCap?: number
   walkMs?: number
+  /** A Δ-mode diff from the interval store's transitions (`buildDiffChanges`, specs/diff-from-changes.md): set by the
+   *  route for an unscoped `dm=delta` request on a deployment with `DIFF_FROM_CHANGES`. */
+  fromChanges?: boolean
 }
 
 export interface DiffRow {
@@ -2413,6 +2416,10 @@ const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null
  * `(other)` is parent − Σ named on each side, so its Δ is the sub-floor
  * churn, truthfully. */
 export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
+  if (o.fromChanges) {
+    const { buildDiffChanges } = await import('./diffChanges.js')
+    return buildDiffChanges(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}) })
+  }
   const env = sliced(asOfScans(env0, [o.from, o.to]), o)
   const { from, to, path, lens, owner, query } = o
   const dP = path === '' ? 0 : path.split('/').length

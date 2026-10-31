@@ -72,6 +72,14 @@ The floor is the Δ map's own: `G · minArea / (w·h)`, where G is the area the 
 2. Reader: an events read per tier (`readChanges` beside `readSizeRects`), Δ-mode `buildDiff` on it when `dm` is Δ and the scope is unscoped or class-only; `dm=max` and lens/pool/filter diffs unchanged. The client sends `dm` (today it is client-only state, so the server can't tell which area mode it is drawing for).
 3. Each deployment: backfill `changes` into its current generation, `current -s`, then deploy. Bump the diff's response version (`bump-response-v-on-shape-change`): its rows change for the same key.
 
+## Implementation notes (reader, 2026-10-31)
+
+- `readChanges` (`_lib/index.ts`) reads each tier holding a scan in `(from, to]` (the base, the runs), footer groups and row groups pruned by scan, size and path bounds; `buildDiffChanges` (`_lib/diffChanges.ts`) is the Δ walk. `buildDiff` takes it when the route sets `fromChanges`: `dm=delta` asked explicitly (the client now sends `dm`; one that doesn't draws `max` areas from the same rows), unscoped (no lens, owner pool, class scope, filter, summary, union member), on a deployment with `DIFF_FROM_CHANGES=1` (set once its store is backfilled). The edge-cache key carries it (`&dm=c`).
+- The floor is attenuated with depth as the as-of reads' (`thrAt`: `floor · atten^(d − dP − 1)`), so the Δ map draws the rows the walk does.
+- Pass 2 (an endpoint not shown over its depth's floor) is `readAsks` on the `path` sort at that scan.
+- A side a parent is absent on holds none of its children (the as-of walk's reading of a one-sided parent; a scan's rows are hierarchical).
+- Tests (`intervalStore.test.ts`, "Δ diffs from changes"): over `g2`, `g5` (base + run) and `g7` (unowned), every pair of scans at every directory to depth 2 and three canvas sizes, every changed row drawn is the as-of walk's row (read just under the Δ floor, no lookup budget), every changed walk row over its depth's floor under an expanded node is drawn, and every expanded node's children and `(other)` sum to its Δ; a subtree with no change decodes no `changes` row group; a generation without the sort is refused. `g1`'s synthetic scans aren't hierarchical, so they are not a parity fixture.
+
 ## Open items
 
 1. **`changes` size on gcs.** If it approaches `path`'s (~19 GB), cut it with fewer columns or only for scans after a cutoff (older ranges refused, per (c)).
