@@ -2371,7 +2371,8 @@ export function capDiffRows(rows: DiffRow[], top: number): { rows: DiffRow[]; cu
     o.a += r.a; o.b += r.b; o.oa += r.oa; o.ob += r.ob
   }
   for (const o of others.values()) o.s = !o.a && !o.b ? 'unchanged' : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
-  return { rows: [...skeleton, ...kept, ...[...others.values()].filter(o => o.s !== 'unchanged')], cut: leaves.length > top }
+  const tail = [...kept, ...[...others.values()].filter(o => o.s !== 'unchanged')].sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  return { rows: [...skeleton, ...tail], cut: leaves.length > top }
 }
 
 export interface Diff {

@@ -21,10 +21,10 @@ describe('capDiffRows', () => {
     expect(cut).toBe(true)
     expect(got).toEqual([
       row('m', 1, 'changed', 1 * GB, 40.6 * GB, 5, 16, true),
+      row('m/(other)', 2, 'changed', 1 * GB, 1.1 * GB + [0, 1, 2, 3, 4, 5, 6].reduce((s, i) => s + (3.5 + i / 10) * GB, 0), 5, 13),
       row('m/s9', 2, 'added', 0, 4.4 * GB, 0, 1),
       row('m/s8', 2, 'added', 0, 4.3 * GB, 0, 1),
       row('m/s7', 2, 'added', 0, 4.2 * GB, 0, 1),
-      row('m/(other)', 2, 'changed', 1 * GB, 1.1 * GB + [0, 1, 2, 3, 4, 5, 6].reduce((s, i) => s + (3.5 + i / 10) * GB, 0), 5, 13),
       row('(other)', 1, 'added', 0, 2 * GB, 0, 1),
     ])
     // Exact under `m`: its drawn children and `(other)` sum to its Δ (bytes and objects).
