@@ -699,4 +699,39 @@ def test_backfill_changes_restores_a_generations_sorts_byte_for_byte(local, tmp_
     assert {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob(f"served/{ist.CHANGES}*.parquet"))} == {
         k: v for k, v in cut.items() if k.startswith("served/") or k.split("/served/")[0] in runs}
     again = CliRunner().invoke(ic.backfill_changes_cmd, [*args, "-n"], catch_exceptions=False)
-    assert json.loads(again.stdout) == {"gen": "g", "todo": []}
+    assert json.loads(again.stdout) == {"gen": "g", "cut": []}
+
+
+def test_backfill_changes_copies_to_r2_without_cutting_again(local, tmp_path, monkeypatch):
+    """`-R`: each dir's `changes` files go to R2 after the store has them; a dir the store has but R2 lacks is copied, not
+    cut again; `-n -R` reports both; nothing is left to do after. A compacted generation is refused."""
+    store = tmp_path / "store"
+    shutil.copytree(local["store"], store)
+    gen = store / ist.PREFIX / "g"
+    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
+    for p in gen.glob(f"served/{ist.CHANGES}*"):
+        p.unlink()
+    on_r2: set[str] = {f"{ist.PREFIX}/g/{runs[0]}/served/{ist.CHANGES}"}  # one run already on R2: neither cut nor copied
+    copied: list[str] = []
+
+    def fake(st, key_prefix, *, check=False):
+        assert Path(st.uri("")).exists() and (Path(st.uri("")) / f"{key_prefix}.json").exists()  # the store has it first
+        if check:
+            return [] if key_prefix in on_r2 else [f"{key_prefix}.json"]
+        copied.append(key_prefix)
+        on_r2.add(key_prefix)
+        return []
+
+    monkeypatch.setattr(ic, "r2_publish_changes", fake)
+    args = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG), "-R"]
+    dry = CliRunner().invoke(ic.backfill_changes_cmd, [*args, "-n"], catch_exceptions=False)
+    assert json.loads(dry.stdout) == {"gen": "g", "cut": [""], "r2": ["", *runs[1:]]}
+    res = CliRunner().invoke(ic.backfill_changes_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert [(d["key"], "rows" in d, d["r2"]) for d in map(json.loads, res.stdout.splitlines())] == [
+        ("base", True, True), *((k, False, True) for k in runs[1:])]
+    assert copied == [f"{ist.PREFIX}/g/{k + '/' if k else ''}served/{ist.CHANGES}" for k in ["", *runs[1:]]]
+    assert json.loads(CliRunner().invoke(ic.backfill_changes_cmd, [*args, "-n"], catch_exceptions=False).stdout) == {"gen": "g", "cut": [], "r2": []}
+    (gen / "successor.json").write_text(json.dumps({"gen": "g.c001"}))
+    refused = CliRunner().invoke(ic.backfill_changes_cmd, args)
+    assert (refused.exit_code, refused.output.strip().splitlines()[-1]) == (1, f"backfill-changes {ist.PREFIX}/g: compacted into g.c001; backfill that")
