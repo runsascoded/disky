@@ -16,7 +16,7 @@
  *  second read) never misses a cell. */
 import type { Env } from './auth.js'
 import { asOfScans, openIndex, readAsks, readChanges, type Trace, type Transition, TooWide } from './index.js'
-import { type Diff, type DiffRow, NotFound, readRootAgg } from './view.js'
+import { type Diff, type DiffRow, LOOKUP_CAP, NotFound, readRootAgg } from './view.js'
 
 const parentOf = (p: string): string => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
 
@@ -37,6 +37,8 @@ export interface ChangesOpts {
 /** A side's total. */
 type Side = { b: number; o: number } | null
 interface Cand { kind: 'file' | 'dir'; a: Side; b: Side; d: number }
+
+const absDelta = (c: { a: Side; b: Side }): number => Math.abs((c.b?.b ?? 0) - (c.a?.b ?? 0))
 
 /** Floors tried at most: the byte floor, then the bound from P's changed children (and, while that bound is 0, a
  *  sixteenth at a time). */
@@ -62,12 +64,21 @@ async function asOf(env: Env, date: string, paths: { path: string; depth: number
   return out
 }
 
-/** The candidates over the floor at their depth (`thrAt`) with both sides (step 2), and the lookups that took. */
-async function candidates(env: Env, o: ChangesOpts, floor: number): Promise<{ cands: Map<string, Cand>; lookups: number; groups: number } | null> {
+/** The candidates over the floor at their depth (`thrAt`) with both sides (step 2), the endpoint lookups that took, and
+ *  whether their budget (`LOOKUP_CAP`) cut them.
+ *
+ *  A candidate's `from` side is its first transition's old side when that is the first in the range: at the range's
+ *  first scan (nothing in the range precedes it), or with an old side over its floor (a transition before it would have
+ *  that as its new side, and been read). Its `to` side likewise: its last transition at the range's last scan, or with a
+ *  new side over the floor. Otherwise the side is read as of its scan (`readAsks`), unless the parent is known absent
+ *  there (its children are too). So adjacent scans (a range of one scan) need no lookups. Past the budget (largest
+ *  estimated |Δ| first) a side keeps its estimate: absent, or the transition's own side, either way off by less than the
+ *  path's floor (every unread transition's sides were under it); `(other)` takes the difference, so totals stay exact. */
+async function candidates(env: Env, o: ChangesOpts, floor: number): Promise<{ cands: Map<string, Cand>; lookups: number; capped: boolean; groups: number }> {
   const dP = o.path === '' ? 0 : o.path.split('/').length
   const thrAt = (depth: number) => floor * o.atten ** Math.max(0, depth - dP - 1)
   const got = await readChanges(env, o.from, o.to, o.path, floor, { trace: o.trace })
-  if (!got) return null
+  const [firstScan, lastScan] = [got.scans[0], got.scans[got.scans.length - 1]]
   const byPath = new Map<string, Transition[]>()
   for (const t of got.rows) {
     if (Math.max(t.size ?? 0, t.sizePrev ?? 0) < thrAt(t.depth)) continue
@@ -75,29 +86,39 @@ async function candidates(env: Env, o: ChangesOpts, floor: number): Promise<{ ca
     if (l) l.push(t)
     else byPath.set(t.path, [t])
   }
-  const cands = new Map<string, Cand>()
-  const askA: { path: string; depth: number }[] = []
-  const askB: { path: string; depth: number }[] = []
+  const cands = new Map<string, Cand & { sureA: boolean; sureB: boolean }>()
   for (const [p, ts] of byPath) {
     ts.sort((x, y) => x.b - y.b)
     const first = ts[0]
     const last = ts[ts.length - 1]
-    const a: Side = first.sizePrev == null ? null : { b: first.sizePrev, o: first.nFilesPrev ?? 0 }
-    const b: Side = last.size == null ? null : { b: last.size, o: last.nFiles ?? 0 }
-    cands.set(p, { kind: last.size != null ? last.kind : first.kind, a, b, d: first.depth })
     const f = thrAt(first.depth)
-    if (!(first.sizePrev != null && first.sizePrev >= f)) askA.push({ path: p, depth: first.depth })
-    if (!(last.size != null && last.size >= f)) askB.push({ path: p, depth: last.depth })
+    cands.set(p, {
+      kind: last.size != null ? last.kind : first.kind,
+      a: first.sizePrev == null ? null : { b: first.sizePrev, o: first.nFilesPrev ?? 0 },
+      b: last.size == null ? null : { b: last.size, o: last.nFiles ?? 0 },
+      d: first.depth,
+      sureA: first.b === firstScan || (first.sizePrev != null && first.sizePrev >= f),
+      sureB: last.b === lastScan || (last.size != null && last.size >= f),
+    })
   }
-  const [la, lb] = await Promise.all([asOf(env, o.from, askA), asOf(env, o.to, askB)])
+  // A side the parent is surely absent on: its children are absent there too, no lookup.
+  const absent = (p: string, side: 'a' | 'b'): boolean => {
+    const q = parentOf(p)
+    const c = q === o.path ? null : cands.get(q)
+    return !!c && c[side] == null && (side === 'a' ? c.sureA : c.sureB)
+  }
+  const asks = [...cands].flatMap(([p, c]) => [
+    ...(!c.sureA && !absent(p, 'a') ? [{ side: 'a' as const, path: p, depth: c.d, est: absDelta(c) }] : []),
+    ...(!c.sureB && !absent(p, 'b') ? [{ side: 'b' as const, path: p, depth: c.d, est: absDelta(c) }] : []),
+  ]).sort((x, y) => y.est - x.est || (x.path < y.path ? -1 : 1))
+  const take = asks.slice(0, LOOKUP_CAP)
+  const [la, lb] = await Promise.all([asOf(env, o.from, take.filter(q => q.side === 'a')), asOf(env, o.to, take.filter(q => q.side === 'b'))])
   for (const [p, s] of la) cands.get(p)!.a = s
   for (const [p, s] of lb) cands.get(p)!.b = s
   // A transition the lookups undo (the path is the same at both scans: it changed and changed back) is no change.
   for (const [p, c] of cands) if (c.a && c.b && c.a.b === c.b.b && c.a.o === c.b.o) cands.delete(p)
-  return { cands, lookups: askA.length + askB.length, groups: got.groups }
+  return { cands, lookups: take.length, capped: asks.length > take.length, groups: got.groups }
 }
-
-const absDelta = (c: { a: Side; b: Side }): number => Math.abs((c.b?.b ?? 0) - (c.a?.b ?? 0))
 
 export async function buildDiffChanges(env0: Env, o: ChangesOpts): Promise<Diff> {
   const env = asOfScans(env0, [o.from, o.to])
@@ -120,13 +141,12 @@ export async function buildDiffChanges(env0: Env, o: ChangesOpts): Promise<Diff>
       if (e instanceof TooWide && got) { truncated = true; break }
       throw e
     }
-    if (!next) throw new NotFound(path)
     got = next
     const bound = [...got.cands].reduce((s, [p, c]) => s + (parentOf(p) === path ? absDelta(c) : 0), 0) * k
     if (bound >= floor || floor < 1) break
     floor = bound > 0 ? bound : floor / 16
   }
-  const { cands, lookups } = got!
+  const { cands, lookups, capped } = got!
   // A changed path under an unchanged parent (Δ 0: a move between its children) is not reached: its parent is one
   // unchanged cell, as the as-of walk draws it.
   const kids = new Map<string, string[]>()
@@ -181,8 +201,8 @@ export async function buildDiffChanges(env0: Env, o: ChangesOpts): Promise<Diff>
     threshold: floor,
     tier: 'changes',
     expansions,
-    truncated: truncated || frontier.length > o.top,
+    truncated: truncated || capped || frontier.length > o.top,
     lookups,
-    lookups_capped: false,
+    lookups_capped: capped,
   }
 }

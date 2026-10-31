@@ -129,8 +129,9 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     const [head, g] = await st.time('pre', Promise.all([lens && ctx.env.DB || owner && await hasLedger(ctx.env) ? ledgerHead(ctx.env) : Promise.resolve(0), pathGens(ctx.env, [from, to])]))
     // Δ mode from the transitions (specs/diff-from-changes.md): asked for explicitly (`dm=delta`: a client that doesn't
     // say draws max(old, new) areas from these rows too), unscoped, on a deployment whose store has them.
+    // `atten ≥ 1`: a parent's floor is then at most its children's, so a changed child's parent (as big) is read too.
     const fromChanges = url.searchParams.get('dm') === 'delta' && ctx.env.DIFF_FROM_CHANGES === '1' && intervalsOn(ctx.env) &&
-      !lens && !owner && !query && !classes && !summary && !member
+      !lens && !owner && !query && !classes && !summary && !member && atten >= 1
     const cacheKey = cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
       `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
         `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
