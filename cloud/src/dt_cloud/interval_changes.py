@@ -248,6 +248,11 @@ def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile
     con = connect(threads, mem, tmp) if cut else None
     for key in keys:
         doc = None
+        # A compaction that finished since the start: its predecessor prune may already have run, so a file added now
+        # would be left behind (the check above covers only one finished before).
+        if (key in cut or key in copy) and store.exists(f"{prefix}/successor.json"):
+            raise SystemExit(f"backfill-changes {prefix}: compacted into {store.read_json(f'{prefix}/successor.json')['gen']} meanwhile; stopped before "
+                             f"{key or 'base'} (backfill that)")
         if key in cut:
             dst = Path(out) / (key or "base") / "served"
             dst.mkdir(parents=True, exist_ok=True)

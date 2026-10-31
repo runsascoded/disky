@@ -735,3 +735,26 @@ def test_backfill_changes_copies_to_r2_without_cutting_again(local, tmp_path, mo
     (gen / "successor.json").write_text(json.dumps({"gen": "g.c001"}))
     refused = CliRunner().invoke(ic.backfill_changes_cmd, args)
     assert (refused.exit_code, refused.output.strip().splitlines()[-1]) == (1, f"backfill-changes {ist.PREFIX}/g: compacted into g.c001; backfill that")
+
+
+def test_backfill_changes_stops_when_the_generation_is_compacted_meanwhile(local, tmp_path, monkeypatch):
+    """A compaction finishing mid-backfill (`successor.json` appearing after the start): the backfill stops before its
+    next dir, adding nothing more to the old generation."""
+    store = tmp_path / "store"
+    shutil.copytree(local["store"], store)
+    gen = store / ist.PREFIX / "g"
+    for p in gen.rglob(f"served/{ist.CHANGES}*"):
+        p.unlink()
+    write = ic.write_changes
+
+    def compacting(*a, **kw):  # the base's cut: a compaction lands meanwhile
+        (gen / "successor.json").write_text(json.dumps({"gen": "g.c001"}))
+        return write(*a, **kw)
+
+    monkeypatch.setattr(ic, "write_changes", compacting)
+    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
+    args = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG)]
+    res = CliRunner().invoke(ic.backfill_changes_cmd, args)
+    assert res.exit_code == 1
+    assert res.output.strip().splitlines()[-1] == f"backfill-changes {ist.PREFIX}/g: compacted into g.c001 meanwhile; stopped before {runs[0]} (backfill that)"
+    assert sorted(p.relative_to(gen).as_posix() for p in gen.rglob(f"served/{ist.CHANGES}.json")) == ["served/changes.json"]
