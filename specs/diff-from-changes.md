@@ -62,6 +62,7 @@ The floor is the Δ map's own: `G · minArea / (w·h)`, where G is the area the 
 - **Endpoints across the floor:** at a floor between 1 KB and 10 GB, a path growing 1 KB → 10 GB reads Δ = 10 GB − 1 KB, a path shrinking 10 GB → 1 KB reads −(10 GB − 1 KB), each as one transition and as two (1 KB → 2 KB → 10 GB, so the first transition is under the floor and pass 2 must find it), and a path that disappears and reappears inside the range.
 - **No-change:** a subtree with no events selects 0 groups, also one where a file moved between two child dirs (P's row unchanged, children not).
 - **Compaction:** the same diffs before and after `interval-store add` compacts, equal.
+- **Across the v1 → v2 switch:** files first listed at the switch are no transitions (`listed_from`); a diff from a v1 scan to a later one draws each dir's Δ exactly, and a file changed after the switch takes its old side from that transition's `size_prev` (never reads as appearing).
 - **Retire:** retiring the oldest scan leaves every `changes` row and every in-range diff unchanged.
 - **Refusal:** a generation without `changes`, and a scan the generation lacks, give 409, never a per-scan read.
 
