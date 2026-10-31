@@ -882,3 +882,90 @@ describe('interval store: base + runs', () => {
     expect(totals).toEqual({ cases: 450, candidates: 1839, pruned: 58, rows: 108595 })
   }, 60_000)  // 450 cases over the fixture's sorts: seconds alone, past the 5 s default under the parallel suite
 })
+
+// Δ-mode diffs from the transitions (`changes`, specs/diff-from-changes.md): over a base alone (`g2`, `g7` unowned) and a
+// base + run (`g5`), every pair of scans at every directory equals the as-of walk read at a floor under every row,
+// restricted to what a Δ map draws: the changed rows whose larger side clears the Δ floor, under changed parents. These
+// generations are built from per-scan listings (a path's descendants exist only with it); `g1`'s synthetic scans are
+// not, and the walk's reading of a one-sided parent (its children absent with it) can't be told from transitions there.
+describe('Δ diffs from changes', () => {
+  const DATES = ['2026-09-30T0007', '2026-09-30T0008', '2026-09-30T0009']
+  type R = { p: string; d: number; k: string; s: string; a: number; b: number; oa: number; ob: number; x?: true }
+  const key = (r: R) => `${r.p}|${r.s}|${r.a}|${r.b}|${r.oa}|${r.ob}|${r.k}`
+  const at = (gen: string, rs: string[], hide?: (k: string) => boolean) => ({ ...env, INTERVAL_STORE_GEN: gen, INDEX_R2: r2(rs, hide) }) as Env
+  /** Every directory down to depth 2 on any of the scans (and the root). */
+  const dirsOf = async (gen: string, depth = 2, dates = DATES): Promise<string[]> => {
+    const out = new Set([''])
+    for (const d of dates) {
+      const h = await openIndex(at(gen, []), d, 'path')
+      for (const r of await readRows(h, 1, depth, '', '\uffff')) if (r.kind === 'dir') out.add(r.path)
+    }
+    return [...out].sort()
+  }
+  const parentOf = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '')
+
+  it('equals the as-of walk under the Δ floor, and each expanded row\'s children and `(other)` sum to its Δ', async () => {
+    let compared = 0
+    for (const gen of ['g2', 'g5', 'g7']) {
+      const paths = await dirsOf(gen)
+      for (let i = 0; i < DATES.length; i++) for (let j = i + 1; j < DATES.length; j++) {
+        const [from, to] = [DATES[i], DATES[j]]
+        for (const path of paths) for (const [w, h] of [[8, 6], [30, 30], [1280, 768]]) {
+          const o = { from, to, path, w, h, minArea: 12, atten: 2, top: 1e6 }
+          const got = await buildDiff(at(gen, []), { ...o, fromChanges: true }).catch(e => (e as Error).name)
+          // The reference: the as-of walk just under the Δ floor (it keeps every row the Δ map can draw), with no lookup
+          // budget (it would fold what it can't look up).
+          const want = typeof got === 'string' ? got : await buildDiff(at(gen, []), { ...o, threshold: got.threshold * 0.999, lookupCap: 1e9 }).catch(e => (e as Error).name)
+          if (typeof got === 'string' || typeof want === 'string') {
+            expect([gen, from, to, path, got]).toEqual([gen, from, to, path, want])
+            continue
+          }
+          expect([got.total_a, got.total_b, got.objects_a, got.objects_b]).toEqual([want.total_a, want.total_b, want.objects_a, want.objects_b])
+          // Row for row at the level the Δ map draws (expanded or not: the walk at a near-zero floor expands nodes into
+          // children too small to draw): every changed row it draws is the walk's row for that path, and every changed
+          // walk row over the floor under a node it expanded (or P) is drawn.
+          const changed = (r: R) => r.s !== 'unchanged' && !r.p.endsWith('(other)')
+          const gotRows = (got.rows as R[]).filter(changed)
+          const wantBy = new Map((want.rows as R[]).filter(changed).map(r => [r.p, key(r)]))
+          const open = new Set(['', ...gotRows.filter(r => r.x).map(r => r.p)])
+          const drawn = gotRows.map(r => [r.p, key(r), wantBy.get(r.p) ?? null])
+          expect([gen, from, to, path, w, drawn.filter(([, k1, k2]) => k1 !== k2)]).toEqual([gen, from, to, path, w, []])
+          const thr = (r: R) => got.threshold * 2 ** Math.max(0, r.d - 1)
+          const missed = (want.rows as R[]).filter(r => changed(r) && Math.max(r.a, r.b) >= thr(r) && open.has(parentOf(r.p)) && !gotRows.some(g1 => g1.p === r.p)).map(key)
+          expect([gen, from, to, path, w, missed]).toEqual([gen, from, to, path, w, []])
+          // Exact by subtraction: under every expanded row (and P), the children's Δ and `(other)`'s sum to its Δ.
+          const rows = got.rows as R[]
+          for (const top of [{ p: '', a: got.total_a, b: got.total_b }, ...rows.filter(r => r.x)]) {
+            const kids = rows.filter(r => parentOf(r.p) === top.p && r.p !== top.p)
+            if (!kids.length) continue
+            expect([gen, from, to, path, top.p, kids.reduce((s, r) => s + r.b - r.a, 0)]).toEqual([gen, from, to, path, top.p, top.b - top.a])
+          }
+          compared++
+        }
+      }
+    }
+    expect(compared).toBeGreaterThan(100)
+  }, 120_000)
+
+  it('answers a subtree nothing changed under from footers alone (no `changes` row group read)', async () => {
+    let found = 0
+    const G1 = ['2026-08-03', '2026-08-04', '2026-08-05']
+    for (const [gen, dates] of [['g2', DATES], ['g7', DATES], ['g1', G1]] as const) for (const path of await dirsOf(gen, 3, [...dates])) for (let i = 0; i + 1 < dates.length; i++) {
+      const [from, to] = [dates[i], dates[i + 1]]
+      const plain = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, threshold: 0.5, lookupCap: 1e9 }).catch(() => null)
+      if (!plain || plain.rows.some(r => r.s !== 'unchanged') || plain.total_a !== plain.total_b || plain.objects_a !== plain.objects_b) continue
+      const rs: string[] = []
+      const d = await buildDiff(at(gen, rs), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, fromChanges: true })
+      found++
+      expect([gen, path, from, d.rows, rs.filter(k => k.endsWith('/changes.parquet'))]).toEqual([gen, path, from, [], []])
+    }
+    expect(found).toBeGreaterThan(0)
+  }, 120_000)
+
+  it('refuses a generation without the `changes` sort (no other answer)', async () => {
+    // Another revision: the footer the tests above opened is held per isolate (a generation's files never go away).
+    const e = { ...at('g2', [], k => k.includes('/changes.')), INTERVAL_STORE_REV: 'no-changes' } as Env
+    const err = await buildDiff(e, { from: DATES[0], to: DATES[2], path: '', w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, fromChanges: true }).then(() => null, (x: Error) => `${x.name}: ${x.message}`)
+    expect(err).toBe('ChangesUnavailable: the interval store\'s generation g2 has no `changes` sort (backfill it: `dt-cloud interval-store backfill-changes`)')
+  })
+})
