@@ -399,6 +399,7 @@ def _cut(rel_root: Path, out: Path) -> Path:
     for sort in ia.run_sorts():
         sub, _, _ = ist.SORTS[sort]
         ist.write_served(con, ia.delta_relation(str(rel_root), sub), sort, out / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=4)
+    ia.cut_run_changes(con, str(rel_root), out, rg_rows=4)
     return out
 
 
