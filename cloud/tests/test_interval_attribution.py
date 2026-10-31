@@ -193,7 +193,7 @@ def test_an_unattributed_store_has_no_table(stores):
     assert AT not in json.loads((gen / "scans.json").read_text())
     assert [m for m in (json.loads(p.read_text()) for p in sorted((gen / "manifests").glob("*.json"))) if AT in m] == []
     assert sorted(p.name for p in (gen / "served").glob("*.parquet")) == sorted(
-        f"{s}{x}" for s in ist.served_sorts(True) for x in (".parquet", ".groups.parquet"))
+        f"{s}{x}" for s in [*ist.served_sorts(True), ist.CHANGES] for x in (".parquet", ".groups.parquet"))
     assert ist.served_sorts(True) == ["path", "bysize", "reads", "slices", "slices-bytotal", "slices-bysize-user"]
     assert ia.tables() == ("pvl", "sv", "svt") and ia.run_sorts() == ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user")
 

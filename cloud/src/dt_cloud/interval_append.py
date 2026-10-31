@@ -373,7 +373,23 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
         doc["s"] = round(monotonic() - t0, 1)
         (out / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
         docs[sort] = doc
+    docs[ist.CHANGES] = cut_run_changes(con, root, out, rg_rows=rg_rows)
     return docs
+
+
+def cut_run_changes(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG) -> dict:
+    """A run's transitions (specs/diff-from-changes.md §2) from its `pvl` deltas under `root` → `out/changes.parquet` +
+    `.groups.parquet` + `.json`: its `bysize` holds a change's two sides as separate rows. A close record keeps the
+    closed version's `vf` (before the run), so only an opened row (`op` 1) is an opening."""
+    from .interval_changes import DIFF_COLS, write_changes
+
+    t0 = monotonic()
+    cols = ", ".join(ist.ident(c) for c in ["depth", "path", "vt", *DIFF_COLS])
+    src = f"(SELECT CASE WHEN op = 1 THEN vf ELSE 0 END AS vf, {cols} FROM {delta_relation(root, 'pvl', served=False)})"
+    doc = write_changes(con, src, out / f"{ist.CHANGES}.parquet", 0, rg_rows=rg_rows)
+    doc["s"] = round(monotonic() - t0, 1)
+    (out / f"{ist.CHANGES}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
+    return doc
 
 
 def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False) -> dict:
@@ -467,7 +483,9 @@ def check_scan(con, scan: dict, r: dict, name: str, roots: list[str], *, bucket:
 
 def check_cut(con, root: str, served: Path, *, sliced: bool = True, generation: ist.Identity = False) -> dict:
     """Each of a run's served sorts (`served/<sort>.parquet`) against the deltas under `root` it was cut from, row for
-    row in the sort's columns: `rows` (the sort's), `missing` (delta rows it lacks), `extra` (rows the deltas lack)."""
+    row in the sort's columns: `rows` (the sort's), `missing` (delta rows it lacks), `extra` (rows the deltas lack).
+    Not `changes`: it is a join of the deltas, not a reordering, so checking it here would recompute it with the same SQL;
+    its independent check is a fresh build's (`test_base_and_runs_transitions_are_a_full_builds`)."""
     out = {}
     for sort in run_sorts(sliced, has_table(root, AT)):
         names = ist.served_schema(sort, generation).names
@@ -511,7 +529,8 @@ def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: di
 
 def run_files(sliced: bool = True, attributed: bool = False) -> tuple[str, ...]:
     """What every run a manifest lists holds (the reader's files and the run's record), checked before it is written;
-    `attributed`: the run holds the attribution table (some scan of it is covered)."""
+    `attributed`: the run holds the attribution table (some scan of it is covered). Not yet `changes`: runs cut before
+    it have none, and requiring it would refuse every manifest listing them until `backfill-changes` covers them."""
     return ("meta.json", *(f"served/{s}{x}" for s in run_sorts(sliced, attributed) for x in (".parquet", ".groups.parquet")))
 
 
