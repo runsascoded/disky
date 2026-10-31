@@ -80,15 +80,27 @@ def split_uri(uri: str) -> tuple[str, str, str]:
     return scheme, u.netloc, f"{p}/" if p else ""
 
 
+#: GCS's answer to a soft-deleted listing of a bucket whose soft delete is off (retention 0).
+NO_SOFT_DELETE = "Soft delete policy is required"
+
+
 def gcs_soft_deleted(bucket: str, prefix: str, client=None) -> Total:
-    """GCS soft-deleted objects under `prefix`: sizes, soft-delete times, hard-delete (expiry) times."""
+    """GCS soft-deleted objects under `prefix`: sizes, soft-delete times, hard-delete (expiry) times. A bucket with
+    soft delete off holds none (its deletes are final): a row of zeros, not an error."""
+    from google.api_core.exceptions import BadRequest
     from google.cloud import storage
 
     client = client or storage.Client()
     t = Total(bucket, "soft-deleted")
-    for b in client.list_blobs(bucket, prefix=prefix or None, soft_deleted=True,
-                               fields="items(name,size,softDeleteTime,hardDeleteTime),nextPageToken"):
-        t.add(b.size, b.soft_delete_time, b.hard_delete_time)
+    try:
+        for b in client.list_blobs(bucket, prefix=prefix or None, soft_deleted=True,
+                                   fields="items(name,size,softDeleteTime,hardDeleteTime),nextPageToken"):
+            t.add(b.size, b.soft_delete_time, b.hard_delete_time)
+    except BadRequest as e:
+        if NO_SOFT_DELETE not in str(e):
+            raise
+        err(f"non-live gs://{bucket}: soft delete is off; nothing soft-deleted")
+        return Total(bucket, "soft-deleted")
     return t
 
 
