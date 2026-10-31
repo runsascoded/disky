@@ -173,3 +173,58 @@ def changes_cmd(scans_json, mem, out, threads, tmp, rg_rows, inputs) -> None:
                 tot[k] = tot.get(k, 0) + v
     err(f"changes: {len(inputs)} inputs")
     print(json.dumps({"total": tot}), flush=True)
+
+
+def backfill_plan(store, prefix: str) -> list[str]:
+    """What a generation lacks of the `changes` sort: `""` for its base, else each run key (generation-relative) the
+    newest manifest lists. A file is there once its `changes.json` (uploaded last) is."""
+    from .append_runner import manifest_keys
+
+    todo = [] if store.exists(f"{prefix}/served/{SORT}.json") else [""]
+    keys = manifest_keys([k.removeprefix(f"{prefix}/") for k in store.listing(f"{prefix}/manifests/")])
+    runs = store.read_json(f"{prefix}/{keys[-1]}")["runs"] if keys else []
+    return todo + [r["key"] for r in runs if not store.exists(f"{prefix}/{r['key']}/served/{SORT}.json")]
+
+
+@command("backfill-changes")
+@option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
+@option("-g", "--gen", required=True, help="Generation")
+@option("-m", "--mount", help="Local mount of the store's bucket (the range and delta files are read from it)")
+@option("-M", "--mem", default="80GB", help="DuckDB memory limit")
+@option("-n", "--dry-run", is_flag=True, help="Print what is missing, cut nothing")
+@option("-o", "--out", default="/stage/out", help="Local output dir (uploaded, then removed)")
+@option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
+@option("-r", "--rg-rows", default=RG_ROWS, type=IntRange(min=1), help="Rows per served row group")
+@option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
+def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile, rg_rows, tmp) -> None:
+    """Add the `changes` sort (specs/diff-from-changes.md) to a generation cut before it: its base (from `pv/`) and each run
+    its newest manifest lists (from the run's `pvl` deltas), beside their other served sorts. Additive: a sort already
+    there is never rewritten, `changes.json` goes up last, so a rerun resumes. One JSON line per sort cut."""
+    import shutil
+
+    from .blobstore import Store
+    from .interval_append import cut_run_changes
+    from .interval_store import PREFIX, _bucket, _root
+
+    store = Store(_bucket(bucket, profile))
+    prefix = f"{PREFIX}/{gen}"
+    todo = backfill_plan(store, prefix)
+    err(f"backfill-changes {prefix}: {len(todo)} to cut ({'base, ' if '' in todo else ''}{sum(1 for k in todo if k)} runs)")
+    if dry_run:
+        print(json.dumps({"gen": gen, "todo": todo}), flush=True)
+        return
+    root = _root(store, prefix, mount)
+    scans = store.read_json(f"{prefix}/scans.json")["scans"]
+    con = connect(threads, mem, tmp)
+    for key in todo:
+        dst = Path(out) / (key or "base") / "served"
+        dst.mkdir(parents=True, exist_ok=True)
+        if key:
+            doc = cut_run_changes(con, f"{root}/{key}", dst, rg_rows=rg_rows)
+        else:
+            doc = write_changes(con, f"read_parquet('{root}/pv/r*.parquet')", dst / f"{SORT}.parquet", scans[0]["ts"], listed_from(scans), rg_rows=rg_rows)
+            (dst / f"{SORT}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
+        store.put_tree(dst, f"{prefix}/{key + '/' if key else ''}served", last=(f"{SORT}.json",))
+        shutil.rmtree(dst)
+        print(json.dumps({"key": key or "base", "rows": doc["rows"], "groups": doc["groups"], "bytes": doc["bytes"]}), flush=True)

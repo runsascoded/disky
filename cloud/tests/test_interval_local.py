@@ -679,3 +679,24 @@ def test_base_and_runs_transitions_are_a_full_builds(world, local, tmp_path):
     for r in runs:
         got += pq.read_table(r / "served" / f"{ist.CHANGES}.parquet").to_pylist()
     assert len(want) > 0 and sorted(got, key=key) == want
+
+
+def test_backfill_changes_restores_a_generations_sorts_byte_for_byte(local, tmp_path):
+    """A generation cut before the `changes` sort (its base's and runs' files removed) gets them back from
+    `backfill-changes`, byte for byte what the cut wrote; a second run cuts nothing."""
+    store = tmp_path / "store"
+    shutil.copytree(local["store"], store)
+    gen = store / ist.PREFIX / "g"
+    cut = {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob(f"served/{ist.CHANGES}*.parquet"))}
+    for p in gen.rglob(f"served/{ist.CHANGES}*"):
+        p.unlink()
+    args = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG)]
+    res = CliRunner().invoke(ic.backfill_changes_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    # The base and the runs the newest manifest lists (folded runs still on disk are not the reader's).
+    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
+    assert [json.loads(line)["key"] for line in res.stdout.splitlines()] == ["base", *runs]
+    assert {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob(f"served/{ist.CHANGES}*.parquet"))} == {
+        k: v for k, v in cut.items() if k.startswith("served/") or k.split("/served/")[0] in runs}
+    again = CliRunner().invoke(ic.backfill_changes_cmd, [*args, "-n"], catch_exceptions=False)
+    assert json.loads(again.stdout) == {"gen": "g", "todo": []}
