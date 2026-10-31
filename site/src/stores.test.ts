@@ -93,6 +93,18 @@ describe('store requests', () => {
     const impl = (async () => new Response('')) as unknown as typeof fetch
     expect(storeFetch(r2, r2, impl)).toBe(impl)
   })
+  it('storeFetch without an impl calls the global fetch as it is at call time, not when built', async () => {
+    const orig = globalThis.fetch
+    const calls: string[] = []
+    try {
+      const f = storeFetch(r2, r2)
+      globalThis.fetch = (async (input: string | URL | Request) => { calls.push(String(input)); return new Response('') }) as typeof fetch
+      await f('/api/subtree?path=')
+    } finally {
+      globalThis.fetch = orig
+    }
+    expect(calls).toEqual(['/api/subtree?path='])
+  })
   it('storeFetch rewrites a secondary’s string, URL and Request inputs, passing init through', async () => {
     const calls: [string, RequestInit | undefined][] = []
     const impl = (async (input: string | URL | Request, init?: RequestInit) => {
