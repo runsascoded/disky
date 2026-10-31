@@ -1041,10 +1041,17 @@ async function openChanges(env: Env, run: string | null): Promise<PqHandle> {
 /** A `changes` group's rows (`cols`), decoded once: from the isolate's group cache, else the colo's decoded copy (gzip
  *  JSON, as the as-of reads' `coloGroup`), else read from R2 and put in both (the colo put not waited for). A sort's
  *  group never changes (generations are immutable), so neither copy goes stale. */
+const changesKey = (h: PqHandle, rg: number): string => `${storeKey(h.env)}|${h.gen}|${CHANGES}|${rg}`
+
+/** A `changes` group the isolate holds decoded (`changesGroup`), or undefined. */
+function heldChangesGroup(h: PqHandle, rg: number): Record<string, unknown>[] | undefined {
+  const held = cacheGet<Record<string, unknown>>(changesKey(h, rg))
+  if (held) h.trace?.('ccache', 1)
+  return held
+}
+
 async function changesGroup(h: PqHandle, rg: number, json: string, cols: string[]): Promise<Record<string, unknown>[]> {
-  const k = `${storeKey(h.env)}|${h.gen}|${CHANGES}|${rg}`
-  const held = cacheGet<Record<string, unknown>>(k)
-  if (held) { h.trace?.('ccache', 1); return held }
+  const k = changesKey(h, rg)
   const hit = await colo().match(groupColoKey(h, rg))
   let rows: Record<string, unknown>[]
   if (hit?.body) {
@@ -1099,12 +1106,15 @@ export async function readChanges(env: Env, from: string, to: string, path: stri
   const out: Transition[] = []
   await Promise.all(picked.map(async ({ h, groups }) => {
     if (!groups.length) return
-    const jsons = await fetchGroupJson(h, groups.map(g => g.rg))
+    // The groups the isolate holds need no metadata: only the rest fetch theirs (`rg_json`), then the colo or R2.
+    const held = new Map(groups.flatMap(g => { const rows = heldChangesGroup(h, g.rg); return rows ? [[g.rg, rows] as const] : [] }))
+    const jsons = await fetchGroupJson(h, groups.filter(g => !held.has(g.rg)).map(g => g.rg))
     const cols = ['depth', 'path', 'b', 'kind', 'size', 'n_files', 'size_prev', 'n_files_prev']
     await mapLimit(groups, GROUP_READS, async g => {
       const json = jsons.get(g.rg)
-      if (!json) return
-      for (const r of await changesGroup(h, g.rg, json, cols)) {
+      const got = held.get(g.rg) ?? (json ? await changesGroup(h, g.rg, json, cols) : null)
+      if (!got) return
+      for (const r of got) {
         const b = num(r.b)
         const depth = num(r.depth)
         const p = str(r.path)
