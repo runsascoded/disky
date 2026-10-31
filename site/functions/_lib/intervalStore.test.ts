@@ -1014,6 +1014,15 @@ describe('Δ diffs from changes', () => {
     }
   })
 
+  it('decodes a `changes` group once per isolate: a second read of the same range reads no `changes.parquet` bytes', async () => {
+    const first: string[] = []
+    const again: string[] = []
+    const a = await readChanges({ ...at('g5', first), INTERVAL_STORE_REV: 'cc' } as Env, DATES[0], DATES[2], '', 0)
+    const b = await readChanges({ ...at('g5', again), INTERVAL_STORE_REV: 'cc' } as Env, DATES[0], DATES[2], '', 0)
+    const data = (rs: string[]) => rs.filter(k => k.endsWith('/changes.parquet')).length
+    expect([data(first) > 0, data(again), b.rows]).toEqual([true, 0, a.rows])
+  })
+
   it('refuses a generation without the `changes` sort (no other answer)', async () => {
     // Another revision: the footer the tests above opened is held per isolate (a generation's files never go away).
     const e = { ...at('g2', [], k => k.includes('/changes.')), INTERVAL_STORE_REV: 'no-changes' } as Env

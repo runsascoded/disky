@@ -1038,6 +1038,27 @@ async function openChanges(env: Env, run: string | null): Promise<PqHandle> {
   return { mode: 'pq', file, env, date: '', variant: CHANGES, gen: `iv:${gen}${ivRev(env)}${run ? `/${run}` : ''}`, dir, schema, version: Number(kv.get('version')), columns: null, floor: null, footer, asOf: 0, src, dataKey: key, ...(run ? { run } : {}) } as PqHandle
 }
 
+/** A `changes` group's rows (`cols`), decoded once: from the isolate's group cache, else the colo's decoded copy (gzip
+ *  JSON, as the as-of reads' `coloGroup`), else read from R2 and put in both (the colo put not waited for). A sort's
+ *  group never changes (generations are immutable), so neither copy goes stale. */
+async function changesGroup(h: PqHandle, rg: number, json: string, cols: string[]): Promise<Record<string, unknown>[]> {
+  const k = `${storeKey(h.env)}|${h.gen}|${CHANGES}|${rg}`
+  const held = cacheGet<Record<string, unknown>>(k)
+  if (held) { h.trace?.('ccache', 1); return held }
+  const hit = await colo().match(groupColoKey(h, rg))
+  let rows: Record<string, unknown>[]
+  if (hit?.body) {
+    rows = groupRows(await new Response(hit.body.pipeThrough(new DecompressionStream('gzip'))).json<GroupDoc>())
+    h.trace?.('ccolo', 1)
+  } else {
+    rows = await readGroupRaw(h, json, cols)
+    const doc = groupDoc(rows, cols)
+    if (doc) putColoGroup(h, rg, doc)
+  }
+  cachePut(k, rows, rows.length * ROW_BYTES)
+  return rows
+}
+
 /** The transitions under `path` (at depths below it) between scans `from` < `to` — those at a scan in `(from, to]` —
  *  whose larger side is at least the floor at their depth (`floor · atten^(depth − dP − 1)`, `atten` ≥ 1): each tier holding such a scan (the base, the runs) read from its
  *  `changes` sort, groups pruned by their scan, size and path bounds. Null when the store doesn't hold both scans.
@@ -1083,7 +1104,7 @@ export async function readChanges(env: Env, from: string, to: string, path: stri
     await mapLimit(groups, GROUP_READS, async g => {
       const json = jsons.get(g.rg)
       if (!json) return
-      for (const r of await readGroupRaw(h, json, cols)) {
+      for (const r of await changesGroup(h, g.rg, json, cols)) {
         const b = num(r.b)
         const depth = num(r.depth)
         const p = str(r.path)
