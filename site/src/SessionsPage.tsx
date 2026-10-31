@@ -207,7 +207,7 @@ function SessionView({ sid }: { sid: string }) {
       <h1><Who s={s} size={28} /></h1>
       <p className="session-meta">
         {fmtTime(s.started_ms)} · {fmtDuration(s.last_ms - s.started_ms)} · {s.n_events.toLocaleString()} events ·{' '}
-        {s.n_errors ? <b className="err">{s.n_errors} errors</b> : '0 errors'} · {uaLabel(s.ua)} · build <code>{s.build ?? '—'}</code> · <code className="dim">{s.sid}</code>
+        {s.n_errors ? <b className="err">{s.n_errors} errors</b> : '0 errors'} · {uaLabel(s.ua)} · build <code>{s.build ?? '—'}</code> · <code className="dim">{s.sid}</code> · <Link to={`/admin/latency?days=30&sid=${s.sid}`}>latency</Link>
       </p>
       <Strip lines={lines} hot={hot} onHover={stripHover} onPick={jump} />
       <div className="sessions-filters" role="radiogroup" aria-label="Show">
