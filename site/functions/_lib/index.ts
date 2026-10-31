@@ -1039,10 +1039,10 @@ async function openChanges(env: Env, run: string | null): Promise<PqHandle> {
 }
 
 /** The transitions under `path` (at depths below it) between scans `from` < `to` — those at a scan in `(from, to]` —
- *  whose larger side is at least `floor` bytes: each tier holding such a scan (the base, the runs) read from its
+ *  whose larger side is at least the floor at their depth (`floor · atten^(depth − dP − 1)`, `atten` ≥ 1): each tier holding such a scan (the base, the runs) read from its
  *  `changes` sort, groups pruned by their scan, size and path bounds. Null when the store doesn't hold both scans.
  *  `TooWide` past `maxGroups` row groups; `ChangesUnavailable` when a tier it needs has no `changes` sort. */
-export async function readChanges(env: Env, from: string, to: string, path: string, floor: number, { maxGroups = CHANGES_MAX_GROUPS, trace }: { maxGroups?: number; trace?: Trace } = {}): Promise<{ rows: Transition[]; groups: number; scans: number[] }> {
+export async function readChanges(env: Env, from: string, to: string, path: string, floor: number, { maxGroups = CHANGES_MAX_GROUPS, trace, atten = 1 }: { maxGroups?: number; trace?: Trace; atten?: number } = {}): Promise<{ rows: Transition[]; groups: number; scans: number[] }> {
   const st = await ivState(env)
   const D1 = st.scans.get(from)
   const D2 = st.scans.get(to)
@@ -1059,14 +1059,17 @@ export async function readChanges(env: Env, from: string, to: string, path: stri
   const dP = path === '' ? 0 : path.split('/').length
   const pLo = path ? `${path}/` : ''
   const pHi = path ? `${path}0` : '\uffff'
+  // The floor at a depth, attenuated as the as-of reads' (`thrAt`): a group holds nothing over it unless its largest row
+  // clears the floor at its shallowest depth (`d_min`), so deep groups are pruned at their own (higher) floor.
+  const thrAt = (depth: number) => floor * atten ** Math.max(0, depth - dP - 1)
   const t0 = now()
   const picked = await Promise.all(tiers.map(async h => {
     const fgs = h.footer.groups.filter(fg => {
       const b = fg.bounds
-      return !b || ((b.vtMax == null || b.vtMax > D1) && (b.vfMin == null || b.vfMin <= D2) && b.bMax >= floor && b.pMax >= pLo && b.pMin < pHi && b.dMax > dP)
+      return !b || ((b.vtMax == null || b.vtMax > D1) && (b.vfMin == null || b.vfMin <= D2) && b.bMax >= thrAt(b.dMin) && b.pMax >= pLo && b.pMin < pHi && b.dMax > dP)
     })
     const groups = (await mapLimit(fgs, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
-      .filter(g => g.vfMax! > D1 && g.vfMin! <= D2 && g.bMax >= floor && g.pMax >= pLo && g.pMin < pHi && g.dMax > dP)
+      .filter(g => g.vfMax! > D1 && g.vfMin! <= D2 && g.bMax >= thrAt(g.dMin) && g.pMax >= pLo && g.pMin < pHi && g.dMax > dP)
     return { h, groups }
   }))
   const n = picked.reduce((k, t) => k + t.groups.length, 0)
@@ -1086,7 +1089,7 @@ export async function readChanges(env: Env, from: string, to: string, path: stri
         const p = str(r.path)
         const size = r.size == null ? null : num(r.size)
         const sizePrev = r.size_prev == null ? null : num(r.size_prev)
-        if (b <= D1 || b > D2 || depth <= dP || p < pLo || p >= pHi || Math.max(size ?? 0, sizePrev ?? 0) < floor) continue
+        if (b <= D1 || b > D2 || depth <= dP || p < pLo || p >= pHi || Math.max(size ?? 0, sizePrev ?? 0) < thrAt(depth)) continue
         out.push({ depth, path: p, b, kind: str(r.kind) === 'file' ? 'file' : 'dir', size, nFiles: r.n_files == null ? null : num(r.n_files), sizePrev, nFilesPrev: r.n_files_prev == null ? null : num(r.n_files_prev) })
       }
     })

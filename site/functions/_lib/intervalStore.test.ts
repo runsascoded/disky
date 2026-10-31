@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
-import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
+import { asOfScans, type Ask, readChanges, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { indexedScan } from './scanArg'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
@@ -1000,6 +1000,19 @@ describe('Δ diffs from changes', () => {
     }
     expect(cut).toBeGreaterThan(0)
   }, 120_000)
+
+  it('prunes `changes` groups at the floor of their shallowest depth (`atten`), reading no row the flat floor would keep', async () => {
+    const e = at('g2', [])
+    for (const path of ['', 'bk']) {
+      const flat = await readChanges(e, DATES[0], DATES[2], path, 4096, { atten: 1 })
+      const att = await readChanges(e, DATES[0], DATES[2], path, 4096, { atten: 2 })
+      const dP = path === '' ? 0 : path.split('/').length
+      const over = (t: { depth: number; size: number | null; sizePrev: number | null }) => Math.max(t.size ?? 0, t.sizePrev ?? 0) >= 4096 * 2 ** Math.max(0, t.depth - dP - 1)
+      const key = (t: { path: string; b: number }) => `${t.b} ${t.path}`
+      expect([path, att.rows.map(key).sort()]).toEqual([path, flat.rows.filter(over).map(key).sort()])
+      expect(att.groups).toBeLessThanOrEqual(flat.groups)
+    }
+  })
 
   it('refuses a generation without the `changes` sort (no other answer)', async () => {
     // Another revision: the footer the tests above opened is held per isolate (a generation's files never go away).
