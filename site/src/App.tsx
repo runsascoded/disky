@@ -375,6 +375,10 @@ function AppContent() {
   const cutQs = endAt ? `at=${endAt}` : `date=${asof}`
   const cutKey = endAt ?? asof
   const diffQs = `${startAt ? `from_at=${startAt}` : `from=${diffPrev}`}&${endAt ? `to_at=${endAt}` : `to=${asof}`}`
+  // The diff map's area mode (`DiffTreemap`'s `dm`; absent = Δ): the rows a Δ map needs are only what changed
+  // (specs/diff-from-changes.md), so the server is told which one it draws for.
+  const [dmP] = useUrlState('dm', stringParam())
+  const dmMode = dmP === 'max' ? 'max' : 'delta'
   const diffKey = `${startAt ?? diffPrev}→${endAt ?? asof}`
   // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
   // any other store never fetches the earlier scan's meta (`diskDiffScan`).
@@ -858,14 +862,14 @@ function AppContent() {
   // (`depth` only caps what's drawn), so without a search index the "first"
   // paint costs as much as the full walk (gcs 2026-10-02: 9.3 s vs 4.5 s).
   const diffQ1 = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, 'l1'],
+    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, dmMode, 'l1'],
     enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined && !fq,
     staleTime: Infinity,
     retry: false,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const pf = perf.start('dtm', viewKey(graftPath, `${diffPrev}→${asof}`, '|d1'), ['dtable'])
       const r = await pf.track(sfetch(
-        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&depth=1`,
+        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&dm=${dmMode}&depth=1`,
         { credentials: 'include', signal },
       ))
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
@@ -881,7 +885,7 @@ function AppContent() {
   const diffSlotRef = useRef<HTMLDivElement>(null)
   const diffSlotH = useRef(0)
   const diffQ = useQuery<DiffData, Error>({
-    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey],
+    queryKey: ['diff', store.key, diffKey, diffPath, canW, scopeKey, dmMode],
     enabled: !!asof && !!diffPrev && scopeReady && diffPathOf !== undefined,
     // While the full walk aligns: the bucket-level diff of the SAME pair once
     // it lands, else the last pair's diff — drawn dimmed either way, so the
@@ -894,7 +898,7 @@ function AppContent() {
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const pf = perf.start('dtm', viewKey(graftPath, `${diffPrev}→${asof}`), ['dtable'])
       const r = await pf.track(sfetch(
-        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}`,
+        `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&dm=${dmMode}`,
         { credentials: 'include', signal },
       ))
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }

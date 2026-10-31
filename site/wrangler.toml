@@ -155,6 +155,7 @@ database_id = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"
 
 [env.preview.vars]
 SESSION_MONITOR = "0"           # shared D1: preview may dry-run, never send monitor alerts
+DIFF_FROM_CHANGES = "1"   # Δ-mode diffs (`dm=delta`, unscoped) from the interval store's `changes` sort (specs/diff-from-changes.md); `2026-10-09b.g3` backfilled 2026-10-31 (`backfill-changes -R`). Dev first, then prod's [vars]
 SERVED_R2 = "1"   # snapshot JSONs (meta/age/lifecycle/rules) + extras read from INDEX_R2, not GCS (the job copies them: `publish-r2 -S`)
 PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`); the generation from INDEX_R2's `interval-store/CURRENT.json`
 STATIC_BENCH = "1"   # /api/static-bench: R2 read timings for the static name-search prototype
