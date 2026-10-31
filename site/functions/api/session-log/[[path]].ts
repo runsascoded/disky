@@ -6,6 +6,7 @@
 //   PUT  /api/session-log/switch          { enabled, until?, indefinite? } → SwitchState   admin
 //   GET  /api/session-log/sessions        SessionPage                   admin (?email= &since= &errors=1 &limit= &after= | &before=)
 //   GET  /api/session-log/sessions/:sid   { session, events }           admin
+//   GET  /api/session-log/latency         LatencySummary                admin (?days= (default 7, ≤ 31) &email= &sid=)
 //
 // Off unless an admin turns the switch on at `/admin` (`session_log_switch`,
 // D1); on, it ends by itself at its `until` (default 7 days, at most 31), or
@@ -19,6 +20,7 @@ import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireViewer } from
 import { cachedSwitch, ingest, listSessions, maybePurge, retainDays, sessionDetail, type SwitchCache, writeSwitch } from '../../_lib/sessionLog.js'
 import { defaultUntil, FOREVER_MS, isForever, isOn, lastDay, LIMITS, maxUntil, parseCursor, parseUntil, type SwitchState, switchState, validateBatch } from '../../_lib/sessionLogShape.js'
 import { feedClient, readKinds } from '../../_lib/activity.js'
+import { latency } from '../../_lib/sessionLatency.js'
 import { keptEvents } from '../../_lib/activityShape.js'
 import { noteActivity } from '../../_lib/activityHook.js'
 
@@ -158,6 +160,10 @@ async function admin(ctx: C, rest: string): Promise<Response> {
   if (!db) return json({ error: 'no D1 bound' }, 503)
   const q = new URL(ctx.request.url).searchParams
   try {
+    if (rest === 'latency') {
+      const days = Math.min(Math.max(Number(q.get('days')) || 7, 1 / 24), 31)
+      return json(await latency(db, { since: Date.now() - days * 86_400_000, email: q.get('email') || undefined, sid: q.get('sid') || undefined }), 200, NO_STORE)
+    }
     if (rest === 'sessions') {
       const since = q.get('since')
       const sinceMs = since ? Date.parse(since) : NaN
@@ -197,7 +203,7 @@ export const onRequest = async (ctx: C): Promise<Response> => {
   if (rest === 'switch') {
     return m === 'GET' || m === 'PUT' ? switchRoute(ctx) : json({ error: 'method not allowed' }, 405)
   }
-  if (rest === 'sessions' || /^sessions\/[A-Za-z0-9_-]+$/.test(rest)) {
+  if (rest === 'sessions' || rest === 'latency' || /^sessions\/[A-Za-z0-9_-]+$/.test(rest)) {
     return m === 'GET' ? admin(ctx, rest) : json({ error: 'method not allowed' }, 405)
   }
   return json({ error: 'not found' }, 404)
