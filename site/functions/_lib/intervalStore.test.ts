@@ -6,7 +6,7 @@ import { indexedScan } from './scanArg'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
 import { type D1Variant, fixture, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, type ViewNode } from './view'
+import { buildDiff, buildView, LOOKUP_CAP, type ViewNode } from './view'
 import { type HitSource, injectedStores } from './staticFilter'
 import { type Hit, scanAt } from './staticNames'
 import { parseQuery } from './scope'
@@ -961,6 +961,26 @@ describe('Δ diffs from changes', () => {
     }
     expect(found).toBeGreaterThan(0)
   }, 120_000)
+
+  it('needs no endpoint lookups between adjacent scans (a sweep-scale add: `bk/flat`\'s 8,000 new files), at most `LOOKUP_CAP` over a longer range', async () => {
+    const run = async (from: string, to: string, path: string) => {
+      const t0 = performance.now()
+      const d = await buildDiff(at('g2', []), { from, to, path, w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, fromChanges: true })
+      return { ...d, ms: performance.now() - t0 }
+    }
+    const adjacent = await run(DATES[0], DATES[1], 'bk')
+    const flat = adjacent.rows.filter(r => r.p.startsWith('flat/') && r.k === 'file')
+    console.log(`adjacent: ${flat.length} new files drawn, ${adjacent.lookups} lookups, ${adjacent.ms.toFixed(0)} ms`)
+    expect([flat.length > 100, adjacent.lookups, adjacent.lookups_capped]).toEqual([true, 0, false])
+    const range = await run(DATES[0], DATES[2], 'bk')
+    console.log(`two scans: ${range.lookups} lookups (capped ${range.lookups_capped}), ${range.ms.toFixed(0)} ms`)
+    expect(range.lookups <= LOOKUP_CAP && range.lookups_capped === range.truncated || !range.lookups_capped).toBe(true)
+  }, 120_000)
+
+  it('refuses a scan the generation doesn\'t hold (409, not a 404)', async () => {
+    const err = await buildDiff(at('g5', []), { from: DATES[0], to: '2026-10-31T0702', path: '', w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, fromChanges: true }).then(() => null, (x: Error) => `${x.name}: ${x.message}`)
+    expect(err).toBe('ChangesUnavailable: the interval store\'s current generation doesn\'t hold scan 2026-10-31T0702')
+  })
 
   it('refuses a generation without the `changes` sort (no other answer)', async () => {
     // Another revision: the footer the tests above opened is held per isolate (a generation's files never go away).

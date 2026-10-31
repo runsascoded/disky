@@ -2383,7 +2383,7 @@ export interface Diff {
   searchLate?: true
 }
 
-const LOOKUP_CAP = 240
+export const LOOKUP_CAP = 240
 /** A filtered diff's one-sided lookups run this long, at most (each level's are one batched read a side). */
 export const FILTER_WALK_MS = 800
 /** …and its two sides' phase 2 this long (each; they run at once). */

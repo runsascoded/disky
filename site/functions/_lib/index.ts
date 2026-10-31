@@ -1007,8 +1007,8 @@ export interface Transition {
 /** The current generation, or one of its runs the range needs, has no `changes` sort (cut before it): refused (409),
  *  never answered another way — the fix is the index (`interval-store backfill-changes`). */
 export class ChangesUnavailable extends Error {
-  constructor(readonly where: string) {
-    super(`the interval store's ${where} has no \`changes\` sort (backfill it: \`dt-cloud interval-store backfill-changes\`)`)
+  constructor(readonly where: string, why?: string) {
+    super(why ?? `the interval store's ${where} has no \`changes\` sort (backfill it: \`dt-cloud interval-store backfill-changes\`)`)
     this.name = 'ChangesUnavailable'
   }
 }
@@ -1042,11 +1042,13 @@ async function openChanges(env: Env, run: string | null): Promise<PqHandle> {
  *  whose larger side is at least `floor` bytes: each tier holding such a scan (the base, the runs) read from its
  *  `changes` sort, groups pruned by their scan, size and path bounds. Null when the store doesn't hold both scans.
  *  `TooWide` past `maxGroups` row groups; `ChangesUnavailable` when a tier it needs has no `changes` sort. */
-export async function readChanges(env: Env, from: string, to: string, path: string, floor: number, { maxGroups = CHANGES_MAX_GROUPS, trace }: { maxGroups?: number; trace?: Trace } = {}): Promise<{ rows: Transition[]; groups: number } | null> {
+export async function readChanges(env: Env, from: string, to: string, path: string, floor: number, { maxGroups = CHANGES_MAX_GROUPS, trace }: { maxGroups?: number; trace?: Trace } = {}): Promise<{ rows: Transition[]; groups: number; scans: number[] }> {
   const st = await ivState(env)
   const D1 = st.scans.get(from)
   const D2 = st.scans.get(to)
-  if (D1 == null || D2 == null) return null
+  const unheld = (d: string) => new ChangesUnavailable(`scan ${d}`, `the interval store's current generation doesn't hold scan ${d}`)
+  if (D1 == null) throw unheld(from)
+  if (D2 == null) throw unheld(to)
   for (const d of [from, to]) {
     const cut = ivCutOut(env, st, d)
     if (cut) throw cut
@@ -1090,7 +1092,7 @@ export async function readChanges(env: Env, from: string, to: string, path: stri
     })
   }))
   trace?.('changes', now() - t0)
-  return { rows: out, groups: n }
+  return { rows: out, groups: n, scans: [...st.scans.values()].filter(t => D1 < t && t <= D2).sort((a, b) => a - b) }
 }
 
 /** Each path's `last_read` at a scan, from the interval store's `reads` sort (absent = never read): per
