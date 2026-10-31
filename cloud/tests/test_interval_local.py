@@ -735,3 +735,54 @@ def test_backfill_changes_copies_to_r2_without_cutting_again(local, tmp_path, mo
     (gen / "successor.json").write_text(json.dumps({"gen": "g.c001"}))
     refused = CliRunner().invoke(ic.backfill_changes_cmd, args)
     assert (refused.exit_code, refused.output.strip().splitlines()[-1]) == (1, f"backfill-changes {ist.PREFIX}/g: compacted into g.c001; backfill that")
+
+
+def test_backfill_changes_stops_when_the_generation_is_compacted_meanwhile(local, tmp_path, monkeypatch):
+    """A compaction finishing mid-backfill (`successor.json` appearing after the start): the backfill stops before its
+    next dir, adding nothing more to the old generation."""
+    store = tmp_path / "store"
+    shutil.copytree(local["store"], store)
+    gen = store / ist.PREFIX / "g"
+    for p in gen.rglob(f"served/{ist.CHANGES}*"):
+        p.unlink()
+    write = ic.write_changes
+
+    def compacting(*a, **kw):  # the base's cut: a compaction lands meanwhile
+        (gen / "successor.json").write_text(json.dumps({"gen": "g.c001"}))
+        return write(*a, **kw)
+
+    monkeypatch.setattr(ic, "write_changes", compacting)
+    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
+    args = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG)]
+    res = CliRunner().invoke(ic.backfill_changes_cmd, args)
+    assert res.exit_code == 1
+    assert res.output.strip().splitlines()[-1] == f"backfill-changes {ist.PREFIX}/g: compacted into g.c001 meanwhile; stopped before {runs[0]} (backfill that)"
+    assert sorted(p.relative_to(gen).as_posix() for p in gen.rglob(f"served/{ist.CHANGES}.json")) == ["served/changes.json"]
+
+
+def test_backfill_changes_mirrors_a_url_stores_inputs(local, tmp_path):
+    """A URL store without `-m` (DuckDB reads no `r2://`; `memory://` stands in): each dir's inputs are mirrored into
+    `-w` before its cut and removed after, and the sorts come out byte for byte the cut's."""
+    import fsspec
+
+    fs = fsspec.filesystem("memory")
+    gen = local["store"] / ist.PREFIX / "g"
+    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
+    want = {}
+    for p in sorted(local["store"].rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(local["store"]).as_posix()
+        if f"/served/{ist.CHANGES}" in rel:
+            if rel.endswith(".parquet") and (f"g/served/{ist.CHANGES}" in rel or any(f"g/{k}/served/" in rel for k in runs)):
+                want[rel] = p.read_bytes()
+            continue
+        fs.pipe(f"/bf/{rel}", p.read_bytes())
+    work = tmp_path / "work"
+    args = ["-b", "memory://bf", "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG), "-w", str(work)]
+    res = CliRunner().invoke(ic.backfill_changes_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert [json.loads(line)["key"] for line in res.stdout.splitlines()] == ["base", *runs]
+    assert {k: fs.cat(f"/bf/{k}") for k in want} == want
+    assert sorted(p.name for p in work.iterdir()) == []
+    fs.rm("/bf", recursive=True)

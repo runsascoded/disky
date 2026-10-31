@@ -220,15 +220,18 @@ def r2_publish_changes(store, key_prefix: str, *, check: bool = False) -> list[s
 @option("-r", "--rg-rows", default=RG_ROWS, type=IntRange(min=1), help="Rows per served row group")
 @option("-R", "--r2", is_flag=True, help="Also copy each dir's `changes` files to the serving R2 bucket ($R2_* credentials, as `r2_publish`), `changes.json` last: a GCS store's deployments serve from R2")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
-def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile, rg_rows, r2, tmp) -> None:
+@option("-w", "--work", help="Local work dir a URL store's inputs are mirrored into without `-m` (one dir's at a time; default: a temporary one, removed after)")
+def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile, rg_rows, r2, tmp, work) -> None:
     """Add the `changes` sort (specs/diff-from-changes.md) to a generation cut before it: its base (from `pv/`) and each run
     its newest manifest lists (from the run's `pvl` deltas), beside their other served sorts. Additive: a sort already
     there is never rewritten, `changes.json` goes up last, so a rerun resumes; `-R` copies each to R2 as well (a sort on
-    the store but not on R2 is copied, not cut again). Refuses a generation already compacted into another (its prune
+    the store but not on R2 is copied, not cut again). A URL store without `-m` (`r2://`, which DuckDB can't read) has each
+    dir's inputs mirrored into `-w` before its cut, and removed after. Refuses a generation already compacted into another (its prune
     would leave what it adds). One JSON line per dir done."""
     import shutil
+    import tempfile
 
-    from .blobstore import Store
+    from .blobstore import Store, mirror, scheme
     from .interval_append import cut_run_changes
     from .interval_store import PREFIX, _bucket, _root
 
@@ -243,23 +246,40 @@ def backfill_changes_cmd(bucket, gen, mount, mem, dry_run, out, threads, profile
     if dry_run:
         print(json.dumps({"gen": gen, "cut": cut, **({"r2": copy} if r2 else {})}), flush=True)
         return
+    # A URL store without a mount: DuckDB reads each dir's inputs from a local mirror (`-w`), one dir at a time.
+    local = not mount and scheme(store.uri("")) is not None and bool(cut)
+    w = Path(work or tempfile.mkdtemp(prefix="backfill-changes-")) if local else None
     root = _root(store, prefix, mount)
     scans = store.read_json(f"{prefix}/scans.json")["scans"]
     con = connect(threads, mem, tmp) if cut else None
     for key in keys:
         doc = None
+        # A compaction that finished since the start: its predecessor prune may already have run, so a file added now
+        # would be left behind (the check above covers only one finished before).
+        if (key in cut or key in copy) and store.exists(f"{prefix}/successor.json"):
+            raise SystemExit(f"backfill-changes {prefix}: compacted into {store.read_json(f'{prefix}/successor.json')['gen']} meanwhile; stopped before "
+                             f"{key or 'base'} (backfill that)")
         if key in cut:
             dst = Path(out) / (key or "base") / "served"
             dst.mkdir(parents=True, exist_ok=True)
+            sub = "pvl" if key else "pv"
+            src = f"{root}/{key}" if key else root
+            if w:
+                src = str(w / (key.replace("/", "_") or "base"))
+                mirror(store, f"{prefix}/{key + '/' if key else ''}{sub}", Path(src) / sub, keep=lambda rel: rel.endswith(".parquet"))
             if key:
-                doc = cut_run_changes(con, f"{root}/{key}", dst, rg_rows=rg_rows)
+                doc = cut_run_changes(con, src, dst, rg_rows=rg_rows)
             else:
-                doc = write_changes(con, f"read_parquet('{root}/pv/r*.parquet')", dst / f"{SORT}.parquet", scans[0]["ts"], listed_from(scans),
+                doc = write_changes(con, f"read_parquet('{src}/pv/r*.parquet')", dst / f"{SORT}.parquet", scans[0]["ts"], listed_from(scans),
                                     rg_rows=rg_rows)
                 (dst / f"{SORT}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
+            if w:
+                shutil.rmtree(src)
             store.put_tree(dst, f"{prefix}/{key + '/' if key else ''}served", last=(f"{SORT}.json",))
             shutil.rmtree(dst)
         if key in copy:
             r2_publish_changes(store, served_prefix(prefix, key))
         if doc or key in copy:
             print(json.dumps({"key": key or "base", **({k: doc[k] for k in ("rows", "groups", "bytes")} if doc else {}), "r2": key in copy}), flush=True)
+    if w and not work:
+        shutil.rmtree(w, ignore_errors=True)

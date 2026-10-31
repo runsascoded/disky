@@ -8,6 +8,7 @@ import { onRequest, purgeState } from './session-log/[[path]]'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { listSessions, purge } from '../_lib/sessionLog'
+import { latency } from '../_lib/sessionLatency'
 import { FOREVER_MS, fmtCursor, isForever, LIMITS, parseCursor, parseUntil, type SessionRow, switchState, validateBatch } from '../_lib/sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 12, 15, 0, 0)  // 2026-10-12T15:00Z
@@ -566,6 +567,48 @@ describe('D1', () => {
           { t: NOW - 1000, k: 'nav', u: '/a', pid: 'pid-111111', seq: 0 },
         ],
       }])
+    })
+  })
+
+  describe('latency (`/admin/latency`)', () => {
+    it('summarizes logged requests per route and cache tier, per user, and the slowest; admins only', async () => {
+      const { db, call, viewer, adminT } = await setup()
+      const api = (t: number, u: string, ms: number, f: Record<string, unknown> = {}) => ev(t, 'api', { u, s: 200, ms, ...f })
+      const post = (sid: string, token: string, events: unknown[]) => call('POST', '', { token, body: batch({ sid, events }) })
+      await post('sid-aaaaaa', viewer, [
+        ev(NOW - 9000, 'start', { u: '/' }),
+        api(NOW - 8000, '/api/subtree?date=2026-10-10&path=b', 100, { c: 'MISS' }),
+        api(NOW - 7000, '/api/subtree?date=2026-10-10T0702&path=c', 300, { c: 'MISS' }),
+        api(NOW - 6000, '/api/subtree?date=2026-10-10&path=b', 20, { c: 'HIT' }),
+        api(NOW - 5000, '/data/2026-10-10T0702/lifecycle.json', 7),
+        api(NOW - 4000, '/api/diff?from=a&to=b', 900, { s: 503, err: 'phase2 timeout' }),
+      ])
+      await post('sid-bbbbbb', adminT, [api(NOW - 3000, '/api/subtree?path=', 50, { c: 'kv' })])
+      expect((await call('GET', '/latency', { token: viewer }))[0]).toBe(403)
+      const [st, body] = await call('GET', '/latency?days=1', { token: adminT })
+      expect(st).toBe(200)
+      expect({ ...body, slowest: body.slowest.map((r: { u: string; ms: number }) => [r.u, r.ms]) }).toEqual({
+        since: NOW - 86_400_000, requests: 6, batches: 2, capped: false,
+        routes: [
+          { route: '/api/subtree', cache: 'miss', n: 2, p50: 100, p90: 300, p99: 300, max: 300, errors: 0 },
+          { route: '/api/diff', cache: '-', n: 1, p50: 900, p90: 900, p99: 900, max: 900, errors: 1 },
+          { route: '/api/subtree', cache: 'hit', n: 1, p50: 20, p90: 20, p99: 20, max: 20, errors: 0 },
+          { route: '/api/subtree', cache: 'kv', n: 1, p50: 50, p90: 50, p99: 50, max: 50, errors: 0 },
+          { route: '/data/:scan/lifecycle.json', cache: '-', n: 1, p50: 7, p90: 7, p99: 7, max: 7, errors: 0 },
+        ],
+        users: [
+          { email: 'ann@example.test', n: 5, p50: 100, p90: 900, p99: 900, max: 900, errors: 1 },
+          { email: 'ops@example.test', n: 1, p50: 50, p90: 50, p99: 50, max: 50, errors: 0 },
+        ],
+        slowest: [
+          ['/api/diff?from=a&to=b', 900], ['/api/subtree?date=2026-10-10T0702&path=c', 300], ['/api/subtree?date=2026-10-10&path=b', 100],
+          ['/api/subtree?path=', 50], ['/api/subtree?date=2026-10-10&path=b', 20], ['/data/2026-10-10T0702/lifecycle.json', 7],
+        ],
+      })
+      const [, one] = await call('GET', '/latency?days=1&sid=sid-bbbbbb', { token: adminT })
+      expect([one.requests, one.users.map((u: { email: string }) => u.email)]).toEqual([1, ['ops@example.test']])
+      // Paged a batch at a time: the same summary.
+      expect(await latency(db, { since: NOW - 86_400_000 }, 1)).toEqual(body)
     })
   })
 })

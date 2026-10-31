@@ -990,6 +990,111 @@ async function openIvRun(env: Env, base: PqHandle, run: string, file: string): P
   return { ...base, file: fileSlice, gen: `${base.gen}/${run}`, dir, schema, version, columns: rowColumns(version, schema), footer, run, runs: undefined, dataKey: key }
 }
 
+/** One transition of the interval store's `changes` sort (`interval_changes`, specs/diff-from-changes.md): a path's
+ *  change at scan `b` (epoch seconds), its new side and its old side (`*Prev`); a side is null where the path appeared
+ *  (no old side) or went away (no new side). */
+export interface Transition {
+  depth: number
+  path: string
+  b: number
+  kind: 'file' | 'dir'
+  size: number | null
+  nFiles: number | null
+  sizePrev: number | null
+  nFilesPrev: number | null
+}
+
+/** The current generation, or one of its runs the range needs, has no `changes` sort (cut before it): refused (409),
+ *  never answered another way — the fix is the index (`interval-store backfill-changes`). */
+export class ChangesUnavailable extends Error {
+  constructor(readonly where: string, why?: string) {
+    super(why ?? `the interval store's ${where} has no \`changes\` sort (backfill it: \`dt-cloud interval-store backfill-changes\`)`)
+    this.name = 'ChangesUnavailable'
+  }
+}
+
+/** Row groups one `readChanges` may decode (past it: `TooWide`). */
+export const CHANGES_MAX_GROUPS = 400
+
+const CHANGES = 'changes'
+
+/** A tier's `changes` sort as a `pq` handle (its footer opened, as `openIvRun` does a run's sorts). */
+async function openChanges(env: Env, run: string | null): Promise<PqHandle> {
+  const gen = env.INTERVAL_STORE_GEN!
+  const dir = `${ivPrefix(env)}/${gen}/${run ? `${run}/` : ''}served`
+  let footer: FooterIndex
+  try {
+    footer = await (run ? ivRunFooter(env, run, CHANGES) : ivFooter(env, CHANGES))
+  } catch (e) {
+    if ((e as Error).name === 'NotFoundError' || /not found|404|NoSuchKey/i.test(String((e as Error).message))) throw new ChangesUnavailable(run ?? `generation ${gen}`)
+    throw e
+  }
+  const kv = new Map((footer.metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
+  const schema = JSON.parse(kv.get('schema')!) as SchemaElement[]
+  const src = r2Bytes(env.INDEX_R2!)
+  const key = ivKey(env, `${dir}/${CHANGES}.parquet`)
+  const file: FileSlice = { get byteLength() { return 0 }, slice: async (s0, e) => toBuffer((await src.get(key, { offset: s0, length: (e ?? s0) - s0 })).bytes) }
+  // `asOf` set: footer groups decode through the interval store's colo-cached path (`ivFooterDoc`), keyed by `gen`.
+  return { mode: 'pq', file, env, date: '', variant: CHANGES, gen: `iv:${gen}${ivRev(env)}${run ? `/${run}` : ''}`, dir, schema, version: Number(kv.get('version')), columns: null, floor: null, footer, asOf: 0, src, dataKey: key, ...(run ? { run } : {}) } as PqHandle
+}
+
+/** The transitions under `path` (at depths below it) between scans `from` < `to` — those at a scan in `(from, to]` —
+ *  whose larger side is at least `floor` bytes: each tier holding such a scan (the base, the runs) read from its
+ *  `changes` sort, groups pruned by their scan, size and path bounds. Null when the store doesn't hold both scans.
+ *  `TooWide` past `maxGroups` row groups; `ChangesUnavailable` when a tier it needs has no `changes` sort. */
+export async function readChanges(env: Env, from: string, to: string, path: string, floor: number, { maxGroups = CHANGES_MAX_GROUPS, trace }: { maxGroups?: number; trace?: Trace } = {}): Promise<{ rows: Transition[]; groups: number; scans: number[] }> {
+  const st = await ivState(env)
+  const D1 = st.scans.get(from)
+  const D2 = st.scans.get(to)
+  const unheld = (d: string) => new ChangesUnavailable(`scan ${d}`, `the interval store's current generation doesn't hold scan ${d}`)
+  if (D1 == null) throw unheld(from)
+  if (D2 == null) throw unheld(to)
+  for (const d of [from, to]) {
+    const cut = ivCutOut(env, st, d)
+    if (cut) throw cut
+  }
+  const inRange = (id: string) => { const t = st.scans.get(id); return t != null && D1 < t && t <= D2 }
+  const runs = st.runs.filter(r => r.scans.some(inRange))
+  const tiers = await Promise.all([...([...st.base].some(inRange) ? [null] : []), ...runs.map(r => r.key)].map(r => openChanges(env, r)))
+  const dP = path === '' ? 0 : path.split('/').length
+  const pLo = path ? `${path}/` : ''
+  const pHi = path ? `${path}0` : '\uffff'
+  const t0 = now()
+  const picked = await Promise.all(tiers.map(async h => {
+    const fgs = h.footer.groups.filter(fg => {
+      const b = fg.bounds
+      return !b || ((b.vtMax == null || b.vtMax > D1) && (b.vfMin == null || b.vfMin <= D2) && b.bMax >= floor && b.pMax >= pLo && b.pMin < pHi && b.dMax > dP)
+    })
+    const groups = (await mapLimit(fgs, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
+      .filter(g => g.vfMax! > D1 && g.vfMin! <= D2 && g.bMax >= floor && g.pMax >= pLo && g.pMin < pHi && g.dMax > dP)
+    return { h, groups }
+  }))
+  const n = picked.reduce((k, t) => k + t.groups.length, 0)
+  trace?.('cgroups', n)
+  if (n > maxGroups) throw new TooWide(`query too wide: >${maxGroups} change groups (drill deeper or raise minArea)`)
+  const out: Transition[] = []
+  await Promise.all(picked.map(async ({ h, groups }) => {
+    if (!groups.length) return
+    const jsons = await fetchGroupJson(h, groups.map(g => g.rg))
+    const cols = ['depth', 'path', 'b', 'kind', 'size', 'n_files', 'size_prev', 'n_files_prev']
+    await mapLimit(groups, GROUP_READS, async g => {
+      const json = jsons.get(g.rg)
+      if (!json) return
+      for (const r of await readGroupRaw(h, json, cols)) {
+        const b = num(r.b)
+        const depth = num(r.depth)
+        const p = str(r.path)
+        const size = r.size == null ? null : num(r.size)
+        const sizePrev = r.size_prev == null ? null : num(r.size_prev)
+        if (b <= D1 || b > D2 || depth <= dP || p < pLo || p >= pHi || Math.max(size ?? 0, sizePrev ?? 0) < floor) continue
+        out.push({ depth, path: p, b, kind: str(r.kind) === 'file' ? 'file' : 'dir', size, nFiles: r.n_files == null ? null : num(r.n_files), sizePrev, nFilesPrev: r.n_files_prev == null ? null : num(r.n_files_prev) })
+      }
+    })
+  }))
+  trace?.('changes', now() - t0)
+  return { rows: out, groups: n, scans: [...st.scans.values()].filter(t => D1 < t && t <= D2).sort((a, b) => a - b) }
+}
+
 /** Each path's `last_read` at a scan, from the interval store's `reads` sort (absent = never read): per
  *  depth, the groups whose path range holds one of the asked paths, read raw (the sort's rows aren't
  *  `Row`s) and tested live at the scan. A view's few thousand tiles cost the groups that hold them. */
