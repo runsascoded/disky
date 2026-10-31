@@ -2349,6 +2349,31 @@ export interface DiffRow {
   l?: 1 | 2
 }
 
+/** A diff's rows cut to `top` (both readers' tail): every expanded row (the skeleton), then the changed leaf rows by
+ *  |Δ|, at most `top` of them; each one cut is folded into its parent's `(other)` (bytes and objects, on each side), and
+ *  the `(other)` rows are always kept (one per expanded parent, not counted in `top`), so an expanded row's drawn
+ *  children and `(other)` still sum to it exactly. Unchanged leaf rows are left out, as before (the renderer infers
+ *  them as filler). `cut`: rows were cut. */
+export function capDiffRows(rows: DiffRow[], top: number): { rows: DiffRow[]; cut: boolean } {
+  const isOther = (r: DiffRow) => r.p === '(other)' || r.p.endsWith('/(other)')
+  const parentOf = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
+  const skeleton = rows.filter(r => r.x)
+  const leaves = rows.filter(r => !r.x && !isOther(r) && r.s !== 'unchanged').sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const kept = leaves.slice(0, top)
+  const others = new Map(rows.filter(isOther).map(r => [parentOf(r.p), { ...r }]))
+  for (const r of leaves.slice(top)) {
+    const q = parentOf(r.p)
+    let o = others.get(q)
+    if (!o) {
+      const d = r.d
+      others.set(q, (o = { p: q === '' ? '(other)' : `${q}/(other)`, d, k: 'dir', s: 'unchanged', a: 0, b: 0, oa: 0, ob: 0 }))
+    }
+    o.a += r.a; o.b += r.b; o.oa += r.oa; o.ob += r.ob
+  }
+  for (const o of others.values()) o.s = !o.a && !o.b ? 'unchanged' : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
+  return { rows: [...skeleton, ...kept, ...[...others.values()].filter(o => o.s !== 'unchanged')], cut: leaves.length > top }
+}
+
 export interface Diff {
   rows: DiffRow[]
   total_a: number
@@ -2750,15 +2775,12 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // the top-|Δ| changed frontier rows; unchanged frontier rows are inferred
   // as filler by the renderer.
   tr?.('walk', performance.now() - walkStart)
-  const skeleton = rows.filter(r => r.x)
-  const frontier = rows
-    .filter(r => !r.x && r.s !== 'unchanged')
-    .sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const capped0 = capDiffRows(rows, o.top)
   return {
-    rows: [...skeleton, ...frontier.slice(0, o.top)],
+    rows: capped0.rows,
     ...totals,
     expansions,
-    truncated: frontier.length > o.top,
+    truncated: capped0.cut,
     lookups,
     lookups_capped: capped,
     ...(late ? { lookups_late: true as const } : {}),
