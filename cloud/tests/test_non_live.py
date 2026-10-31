@@ -68,6 +68,28 @@ def test_gcs_soft_deleted_carries_hard_delete_as_expiry():
         "expires_min": T(22), "expires_max": T(25)}
 
 
+def _raising(exc):
+    def list_blobs(bucket, **kw):
+        raise exc
+        yield
+    return SimpleNamespace(list_blobs=list_blobs)
+
+
+def test_gcs_soft_deleted_on_a_bucket_with_soft_delete_off_is_zeros():
+    """GCS refuses a soft-deleted listing of a bucket whose retention is 0 (400); it holds none: measured, zero."""
+    from google.api_core.exceptions import BadRequest
+    client = _raising(BadRequest("GET https://storage.googleapis.com/storage/v1/b/bk/o: Soft delete policy is required to list soft-deleted versions"))
+    assert nl.gcs_soft_deleted("bk", "", client).row() == {
+        "bucket": "bk", "class": "soft-deleted", "prefix": "", "bytes": 0, "objects": 0, "oldest": None, "newest": None,
+        "expires_min": None, "expires_max": None}
+
+
+def test_gcs_soft_deleted_raises_any_other_bad_request():
+    from google.api_core.exceptions import BadRequest
+    with pytest.raises(BadRequest, match="^400 Invalid argument$"):
+        nl.gcs_soft_deleted("bk", "", _raising(BadRequest("Invalid argument")))
+
+
 @pytest.mark.parametrize("uri,classes,msg", [
     ("r2://bk", ["soft-deleted"], "r2://bk: r2 has no soft-deleted (it has mpu)"),
     ("gs://bk/p", ["noncurrent", "delete-marker"], "gs://bk/p: gs has no noncurrent, delete-marker (it has soft-deleted, mpu)"),
