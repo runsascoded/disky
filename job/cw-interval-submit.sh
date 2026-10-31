@@ -8,8 +8,7 @@
 #   job/cw-interval-submit.sh build -t <scan>   # … through one scan (extra args go to the command)
 #   job/cw-interval-submit.sh add               # append every scan after the generation's newest
 #   job/cw-interval-submit.sh verify -s A,B,…   # parity against the per-scan path store at those scans (the base's)
-#   job/cw-interval-submit.sh backfill-changes  # add the `changes` sort to $INTERVAL_STORE_GEN (base + its runs), additive;
-#                                               # its inputs (`pv/`, each run dir) are mirrored to the stage disk as `-m`
+#   job/cw-interval-submit.sh backfill-changes  # add the `changes` sort to $INTERVAL_STORE_GEN (base + its runs), additive
 #   TASKS=8 job/cw-interval-submit.sh verify -s A,B,…  # … split over 8 Batch tasks (each its share of the scans)
 #   DRY=1 job/cw-interval-submit.sh build       # print the body only
 #
@@ -45,13 +44,8 @@ out = shlex.quote(STORE) if STORE else '"$R2_ARCHIVE"'
 if CMD == "verify":  # every case's lines + summary land in /stage/verify (and the generation's verify/ on R2); the summary is printed
     # each task its share of the sampled scans (`-i` defaults to $BATCH_TASK_INDEX); each scan's marker lands in the generation's verify/
     run = f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -n {os.environ["TASKS"]} -T /stage/tmp -o /stage {extra}\n'
-elif CMD == "backfill-changes":  # R2 isn't mountable on Batch: mirror the inputs (`pv/`, the runs) to the stage disk as `-m`
-    mirror = ("import sys; from pathlib import Path; from dt_cloud.blobstore import Store; from dt_cloud.interval_changes import backfill_keys; "
-              "s = Store(sys.argv[1]); g = 'interval-store/' + sys.argv[2]; "
-              "[s.get(k, Path('/stage/mirror') / k) for d in ['pv', *[k for k in backfill_keys(s, g) if k]] for k in s.listing(f'{g}/{d}')]")
-    run = (f'python -c {shlex.quote(mirror)} "$R2_ARCHIVE" {GEN}\n'
-           f'du -sh /stage/mirror\n'
-           f'dt-cloud interval-store backfill-changes -b "$R2_ARCHIVE" -g {GEN} -m /stage/mirror -o /stage/out -T /stage/tmp'
+elif CMD == "backfill-changes":  # R2 isn't mountable on Batch: each dir's inputs are mirrored into `-w` on the stage disk
+    run = (f'dt-cloud interval-store backfill-changes -b "$R2_ARCHIVE" -g {GEN} -w /stage/iv -o /stage/out -T /stage/tmp'
            f' -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
 else:
     run = (f"dt-cloud interval-store {CMD} -g {GEN} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
