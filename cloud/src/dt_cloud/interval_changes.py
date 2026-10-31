@@ -21,16 +21,30 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from click import IntRange, command, option
 
-from .interval_store import CLS
+from . import static_names as sn
+from .interval_store import CHANGES, CLS, STORE_VERSION, write_groups
 from .static_names import OPEN, connect, err
 
 #: The columns a diff draws: what a transition carries on both sides.
 DIFF_COLS = ["kind", "size", "n_files", *CLS]
 #: Rows per row group (`SERVED_RG`'s size, the served sorts').
 RG_ROWS = 8192
+#: The served sort's name (`served/changes.parquet`).
+SORT = CHANGES
+#: A transition row: the new side's diff columns, then the old side's (`*_prev`); a missing side is NULL.
+SCHEMA = pa.schema([
+    pa.field("depth", pa.uint8(), nullable=False),
+    pa.field("path", pa.string(), nullable=False),
+    pa.field("b", pa.int64(), nullable=False),
+    pa.field("kind", pa.string(), nullable=False),
+    *(pa.field(c, pa.int64()) for c in DIFF_COLS[1:]),
+    *(pa.field(f"{c}_prev", pa.int64()) for c in DIFF_COLS[1:]),
+])
 
 
 def listed_from(scans: list[dict]) -> list[int]:
@@ -55,23 +69,80 @@ def transitions_sql(src: str, first: int, objects_from: list[int] = ()) -> str:
     """
 
 
+#: A transition's size key: the larger side (what the size floor tests, `b_min`/`b_max` in its group index).
+TOP = "greatest(coalesce(size, 0), coalesce(size_prev, 0))"
+
+
 def order_sql() -> str:
     """The `changes` sort's order: scan, then size bucket descending (size 0 last), then path."""
-    top = "greatest(coalesce(size, 0), coalesce(size_prev, 0))"
-    return f"b, CASE WHEN {top} > 0 THEN floor(log2({top}))::INT ELSE -1 END DESC, path"
+    return f"b, CASE WHEN {TOP} > 0 THEN floor(log2({TOP}))::INT ELSE -1 END DESC, path"
+
+
+def _bounds(t: pa.Table) -> dict:
+    """A group's `GROUPS_SCHEMA` bounds: its scan in the time columns (every one of `vf`/`vt` min and max: a group holds
+    one scan's transitions), its size keys in `b`, segment 0."""
+    def mm(c):
+        r = pc.min_max(c)
+        return r["min"].as_py(), r["max"].as_py()
+
+    d, p, b = mm(t.column("depth")), mm(t.column("path")), mm(t.column("b"))
+    top = pc.max_element_wise(pc.fill_null(t.column("size"), 0), pc.fill_null(t.column("size_prev"), 0))
+    s = mm(top)
+    return {"seg": 0, "d_min": d[0], "d_max": d[1], "p_min": p[0], "p_max": p[1], "b_min": s[0], "b_max": s[1],
+            "u_min": None, "u_max": None, "vf_min": b[0], "vf_max": b[1], "vt_min": b[0], "vt_max": b[1], "rows": t.num_rows}
+
+
+def write_changes(con, src: str, out: Path, first: int, objects_from: list[int] = (), *, rg_rows: int = RG_ROWS) -> dict:
+    """The `changes` sort of the versions in `src` to `out` (+ `.groups.parquet`): `rg_rows`-row groups, cut where the
+    scan changes so a group holds one scan's transitions (its time bounds are that scan)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    bounds: list[dict] = []
+    sql = f"SELECT {', '.join(SCHEMA.names)} FROM ({transitions_sql(src, first, objects_from)}) ORDER BY {order_sql()}"
+    with pq.ParquetWriter(out, SCHEMA, compression=sn.CODEC, use_dictionary=["kind"], write_statistics=["depth", "b"]) as w:
+        pending: list[pa.Table] = []
+
+        def flush(t: pa.Table, final: bool) -> pa.Table:
+            off = 0
+            while t.num_rows - off >= rg_rows or (final and off < t.num_rows):
+                g = t.slice(off, min(rg_rows, t.num_rows - off))
+                w.write_table(g, row_group_size=rg_rows)
+                bounds.append(_bounds(g))
+                off += g.num_rows
+            return t.slice(off)
+
+        cur = None
+        for batch in sn._batches(con, sql):
+            if not batch.num_rows:
+                continue
+            t = pa.Table.from_batches([batch]).cast(SCHEMA)
+            bs = t.column("b").combine_chunks()
+            m = len(bs)
+            change = pc.indices_nonzero(pc.not_equal(bs.slice(1), bs.slice(0, m - 1))).to_pylist() if m > 1 else []
+            cuts = [0, *(x + 1 for x in change), m]
+            for a, z in zip(cuts, cuts[1:]):
+                v = bs[a].as_py()
+                if v != cur and pending:
+                    rest = flush(pa.concat_tables(pending), True)
+                    pending = [rest] if rest.num_rows else []
+                cur = v
+                pending.append(t.slice(a, z - a))
+                if sum(x.num_rows for x in pending) >= rg_rows:
+                    rest = flush(pa.concat_tables(pending).combine_chunks(), False)
+                    pending = [rest] if rest.num_rows else []
+        if pending:
+            flush(pa.concat_tables(pending).combine_chunks(), True)
+        w.add_key_value_metadata({"store": "interval", "version": str(STORE_VERSION), "sort": SORT, "order": order_sql(), "open": str(OPEN)})
+    return write_groups(out, bounds, SORT, lambda rows: {"scans": {"groups": len({r["vf_min"] for r in rows}), "rows": sum(r["row_end"] - r["row_start"] for r in rows)}})
 
 
 def cut_changes(con, src: str, out: Path, first: int, objects_from: list[int] = (), *, rg_rows: int = RG_ROWS) -> dict:
-    """Write `src`'s transitions to `out` in the `changes` order (zstd, `rg_rows`-row groups); their counts."""
-    con.execute(f"CREATE OR REPLACE TEMP TABLE t AS {transitions_sql(src, first, objects_from)}")
+    """`write_changes`, and the transitions' counts by kind of change."""
+    sd = write_changes(con, src, out, first, objects_from, rg_rows=rg_rows)
     rows, opens, closes, both = con.execute(
-        "SELECT count(*), count(*) FILTER (WHERE size IS NOT NULL), count(*) FILTER (WHERE size_prev IS NOT NULL),"
-        " count(*) FILTER (WHERE size IS NOT NULL AND size_prev IS NOT NULL) FROM t").fetchone()
-    con.execute(f"COPY (SELECT * FROM t ORDER BY {order_sql()}) TO '{out}' "
-                f"(FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {rg_rows})")
-    con.execute("DROP TABLE t")
+        "SELECT count(*), count(size), count(size_prev), count(*) FILTER (WHERE size IS NOT NULL AND size_prev IS NOT NULL)"
+        f" FROM read_parquet('{out}')").fetchone()
     return {"rows": rows, "appeared": rows - closes, "went": rows - opens, "changed": both,
-            "bytes": out.stat().st_size, "groups": pq.ParquetFile(out).num_row_groups}
+            "bytes": sd["bytes"], "groups": sd["groups"], "groups_bytes": sd["groups_bytes"]}
 
 
 @command("changes")

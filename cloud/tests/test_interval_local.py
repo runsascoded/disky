@@ -22,6 +22,7 @@ from dt_cloud import blobstore as bs
 from dt_cloud import interval_append as ia
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
+from dt_cloud import interval_changes as ic
 from dt_cloud import static_names as sn
 
 #: Four scans in the base (three v1 indexes, one v2 store generation), then four appended (v2, a timed id among them).
@@ -97,6 +98,8 @@ def staged(world, local, tmp_path_factory):
     for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
         ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, base / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=RG,
                          stamps=[s["ts"] for s in scans[:BASE]])
+    ic.write_changes(con, f"read_parquet('{base}/pv/r*.parquet')", base / "served" / f"{ist.CHANGES}.parquet", scans[0]["ts"],
+                     ic.listed_from(scans[:BASE]), rg_rows=RG)
     runs, prev = {}, None
     for s in scans[BASE:]:
         out = tmp / "runs" / s["id"]
@@ -117,7 +120,7 @@ def test_build_writes_the_staged_generation(world, local, staged):
         want = {k: v for k, v in _parquets(staged["base"]).items() if k.startswith(f"{sub}/")}
         assert sorted(got) == sorted(want) and got == want, sub
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
-        [*(f"{s}{x}" for s in ist.served_sorts(True) for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+        [*(f"{s}{x}" for s in [*ist.served_sorts(True), ist.CHANGES] for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     assert json.loads((gen / "scans.json").read_text()) == {
         "bucket": str(world["root"]), "layouts": [LAYOUT],
         "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": True}
@@ -412,10 +415,10 @@ def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
         "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": False}
     assert json.loads((gen / "served" / "stats.json").read_text())["slices"] is False
     s = unowned["summary"]
-    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "path", "reads"])
+    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "changes", "path", "reads"])
     assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", "verify"]
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
-        [*(f"{x}{e}" for x in ("path", "bysize", "reads") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+        [*(f"{x}{e}" for x in ("path", "bysize", "reads", "changes") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     k = json.loads((gen / "ranges.json").read_text())["k"]
     merged = ar.run_key(ids[0], ids[-1])
     for key in [*(f"deltas/{d}" for d in ids), merged]:
@@ -484,7 +487,7 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
         ["build-ranges", *common, "-r", every, "-S"],
         ["fold", *common, "-i", "0", "-n", str(k)],
         ["fold", *common, "-i", "0", "-n", str(k), "-S"],
-        ["cut", *common, "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))],
+        ["cut", *common, "-r", str(RG), *(x for s in [*ist.SORTS, ist.CHANGES] for x in ("-s", s))],
         ["cut", *common, "-i", str(ist.CUT_TASKS.index("stats"))],
     ]
     for args in stages:
@@ -496,7 +499,7 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
     assert _parquets(prefix) == base
     # A cut into a new generation (`-O`) gives it its own ranges and base, not just the served sorts: self-contained.
     common = [*common[:4], "-o", str(tmp_path / "out2"), *common[6:]]
-    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(ist.CUT_TASKS.index("stats"))]]:
+    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in [*ist.SORTS, ist.CHANGES] for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(ist.CUT_TASKS.index("stats"))]]:
         res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
         assert res.exit_code == 0, (args, res.output)
     g2 = store / ist.PREFIX / "g2"
