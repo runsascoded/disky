@@ -49,7 +49,7 @@ export function LatencyPage() {
   const set = (k: string, v: string) => setParams(p => { const n = new URLSearchParams(p); if (v) n.set(k, v); else n.delete(k); return n }, { replace: true })
   const d = q.data
   return (
-    <div className="admin-page latency-page">
+    <div className="admin-page sessions-page latency-page">
       <SiteNav />
       <p className="crumbs"><Link to="/admin">admin</Link> · <Link to="/admin/sessions">sessions</Link></p>
       <h1>Latency</h1>
