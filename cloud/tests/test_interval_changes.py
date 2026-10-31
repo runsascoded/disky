@@ -5,7 +5,7 @@ from __future__ import annotations
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from dt_cloud.interval_changes import cut_changes
+from dt_cloud.interval_changes import cut_changes, listed_from
 from dt_cloud.interval_store import CLS
 from dt_cloud.static_names import OPEN, connect
 
@@ -52,3 +52,16 @@ def test_transitions_carry_both_sides_and_sort_by_scan_size_path(tmp_path):
         T("shrink", 300, KB, GB),
     ]
     assert {k: v for k, v in stats.items() if k != "bytes"} == {"rows": 6, "appeared": 2, "went": 2, "changed": 2, "groups": 1}
+
+
+def test_files_appearing_where_objects_are_first_listed_are_no_transitions(tmp_path):
+    """At the first scan listing objects after dirs-only scans, a file's opening is the format's, not a change; its
+    dir's change there and the file's later changes are transitions."""
+    scans = [{"ts": 100, "version": 1}, {"ts": 200, "version": 1}, {"ts": 300, "version": 2}, {"ts": 400, "version": 2}]
+    assert listed_from(scans) == [300]
+    src = tmp_path / "pv.parquet"
+    t = versions(("d/old", 300, 400, 5), ("d/kept", 300, OPEN, 8), ("d/later", 400, OPEN, 2))
+    pq.write_table(t, src)
+    out = tmp_path / "changes.parquet"
+    cut_changes(connect(1, "1GB", None), f"read_parquet('{src}')", out, 100, listed_from(scans))
+    assert pq.read_table(out).to_pylist() == [T("d/old", 400, None, 5), T("d/later", 400, 2, None)]
