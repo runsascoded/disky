@@ -611,7 +611,9 @@ SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHE
 ATTRIBUTION_SUBS = (ATTRIBUTION,)
 #: The staged `cut`'s tasks by index (`-i`): every sort, then `stats`, then the attribution sort (after `stats`, so the
 #: indices a staged build has always used hold).
-CUT_TASKS = [*(s for s in SORTS if s != ATTRIBUTION), "stats", ATTRIBUTION]
+#: The transitions sort (`interval_changes`, specs/diff-from-changes.md): cut from `pv`, not a version sort of `SORTS`.
+CHANGES = "changes"
+CUT_TASKS = [*(s for s in SORTS if s != ATTRIBUTION), "stats", ATTRIBUTION, CHANGES]
 #: The owner-slice range files (`build -S`, `fold -S`), and the sorts cut from them. A generation whose scans name no
 #: owner (`usr` NULL or '' on every row: cw-s3, r2.rbw.sh) has no owner axis and builds none of them: its slices would
 #: be its path rows again, each slice sort about the size of `path`.
@@ -807,6 +809,12 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
         err(f"  {sort}: {sum(seg_rows.values()):,} rows in {len(seg_rows)} segments (open {seg_rows.get(0, 0):,})")
         w.add_key_value_metadata({"store": "interval", "version": str(STORE_VERSION), "sort": sort, "order": order,
                                   "segments": "open,dyadic" if stamps else "open,hist", "open": str(OPEN)})
+    return write_groups(out, bounds, sort, lambda rows: _seg_summary(rows, bool(stamps)))
+
+
+def write_groups(out: Path, bounds: list[dict], sort: str, summary) -> dict:
+    """`<out stem>.groups.parquet` beside a served sort just written (`GROUPS_SCHEMA`): per row group its exact `bounds`
+    (as the writer saw them) and the compact metadata the Worker revives; `summary(rows)` = the segments' summary."""
     md = pq.read_metadata(out)
     rows, start = [], 0
     for g in range(md.num_row_groups):
@@ -824,7 +832,7 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
 
     sj = schema_json(md)
     t = pa.table({c: [r[c] for r in rows] for c in GROUPS_SCHEMA.names}, schema=GROUPS_SCHEMA)
-    segs = _seg_summary(rows, bool(stamps))
+    segs = summary(rows)
     kv = {"groups_v": "1", "version": str(STORE_VERSION), "schema": json.dumps(sj["schema"], separators=(",", ":")), "sort": sort,
           "rows": str(start), "segments": json.dumps({k: v["groups"] for k, v in segs.items()})}
     gp = out.with_name(out.name.removesuffix(".parquet") + ".groups.parquet")
@@ -860,6 +868,15 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
     got = dict(zip(order, sn.each(con, one, order, jobs)))
     sorts = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
+    # The transitions a Δ diff reads (specs/diff-from-changes.md), from the path versions (`pv`: no read-day splits).
+    from .interval_changes import listed_from, write_changes
+
+    t1 = monotonic()
+    sd = write_changes(con, f"read_parquet({q(str(gen_dir / 'pv' / 'r*.parquet'))})", served / f"{CHANGES}.parquet", stamps[0],
+                       listed_from(scans["scans"]), rg_rows=rg_rows)
+    sd["s"] = round(monotonic() - t1, 1)
+    (served / f"{CHANGES}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
+    sorts[CHANGES] = {"rows": sd["rows"], "groups": sd["groups"], "bytes": sd["bytes"]}
     stats = {**churn_stats(con, str(gen_dir), scans), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
     return sorts, stats
@@ -1019,7 +1036,7 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 @option("-O", "--to-gen", help="Write the served files (and a copy of scans.json) under this generation instead of GEN")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-r", "--rg-rows", default=SERVED_RG, type=int, help="Rows per served row group")
-@option("-s", "--sort", "sorts", multiple=True, type=Choice(list(SORTS)), help="Sort(s) to cut (default: the task's)")
+@option("-s", "--sort", "sorts", multiple=True, type=Choice([*SORTS, CHANGES]), help="Sort(s) to cut (default: the task's)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
@@ -1050,6 +1067,22 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         return
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
     for sort in todo:
+        if sort == CHANGES:
+            from .interval_changes import listed_from, write_changes
+
+            if not no_upload:
+                _refuse_overwrite(store, [f"{dst_prefix}/served/{sort}{x}" for x in (".parquet", ".groups.parquet", ".json")])
+            t0 = monotonic()
+            doc = write_changes(con, f"read_parquet({q(root + '/pv/r*.parquet')})", out_dir / f"{sort}.parquet", scans["scans"][0]["ts"],
+                                listed_from(scans["scans"]), rg_rows=rg_rows)
+            doc["s"] = round(monotonic() - t0, 1)
+            err(f"cut {sort}: {doc['rows']:,} rows, {doc['groups']:,} groups, {doc['bytes']:,} B in {doc['s']}s")
+            (out_dir / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
+            if not no_upload:
+                store.put_tree(out_dir, f"{dst_prefix}/served")
+                shutil.rmtree(out_dir)
+            print(json.dumps(doc), flush=True)
+            continue
         sub, _, _ = SORTS[sort]
         if sub in ATTRIBUTION_SUBS and not attributed(scans):
             err(f"cut {sort}: {prefix} has no attribution table")

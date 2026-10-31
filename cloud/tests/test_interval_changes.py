@@ -51,7 +51,16 @@ def test_transitions_carry_both_sides_and_sort_by_scan_size_path(tmp_path):
         T("gone", 250, None, 7),
         T("shrink", 300, KB, GB),
     ]
-    assert {k: v for k, v in stats.items() if k != "bytes"} == {"rows": 6, "appeared": 2, "went": 2, "changed": 2, "groups": 1}
+    assert {k: v for k, v in stats.items() if k not in ("bytes", "groups_bytes")} == {"rows": 6, "appeared": 2, "went": 2, "changed": 2, "groups": 4}
+    # One group per scan: its scan in the time bounds, its rows' larger side in `b_min`/`b_max`.
+    groups = pq.read_table(tmp_path / "changes.groups.parquet",
+                           columns=["rg", "vf_min", "vf_max", "vt_min", "vt_max", "b_min", "b_max", "p_min", "p_max", "row_start", "row_end"])
+    assert groups.to_pylist() == [
+        {"rg": 0, "vf_min": 150, "vf_max": 150, "vt_min": 150, "vt_max": 150, "b_min": 4, "b_max": 4, "p_min": "back", "p_max": "back", "row_start": 0, "row_end": 1},
+        {"rg": 1, "vf_min": 200, "vf_max": 200, "vt_min": 200, "vt_max": 200, "b_min": 5, "b_max": GB, "p_min": "grow", "p_max": "new", "row_start": 1, "row_end": 3},
+        {"rg": 2, "vf_min": 250, "vf_max": 250, "vt_min": 250, "vt_max": 250, "b_min": 6, "b_max": 7, "p_min": "back", "p_max": "gone", "row_start": 3, "row_end": 5},
+        {"rg": 3, "vf_min": 300, "vf_max": 300, "vt_min": 300, "vt_max": 300, "b_min": GB, "b_max": GB, "p_min": "shrink", "p_max": "shrink", "row_start": 5, "row_end": 6},
+    ]
 
 
 def test_files_appearing_where_objects_are_first_listed_are_no_transitions(tmp_path):

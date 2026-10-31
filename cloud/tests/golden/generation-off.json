@@ -121,6 +121,8 @@
   "interval-store/g/rd/r0002.parquet": "a675394f7ef5eaaa0b87fdce991b4bccb74dd61d493098ad9345bc5b3187d60b",
   "interval-store/g/served/bysize.groups.parquet": "5db366b0893844ce43bc0ddbbc5d71b210a23dcb328af68bd0f3d717be9df778",
   "interval-store/g/served/bysize.parquet": "fa62907da56730df1d2f52ee265e00a5cd471c3ac312ff5d2ed7025f07a0593c",
+  "interval-store/g/served/changes.groups.parquet": "97c106d48e457d78bf94c0923886ddb5f515b82ce1b6e8808167da30a6d627dd",
+  "interval-store/g/served/changes.parquet": "e387bf2fa503a153c4dffc93a9174ab7f6556c64132f2506c5a6b7ff19a9a461",
   "interval-store/g/served/path.groups.parquet": "0d0812d62552032d47e1609a9f292879e2fa281253d3d4c17453db1ab3fd9843",
   "interval-store/g/served/path.parquet": "2e6deae07cbb004df698db4d84215fbcc40216a1542c8c52ac09d055f6149f7a",
   "interval-store/g/served/reads.groups.parquet": "86cf2d0f3110f195f0aa75fd131f30b688ddab9bc44b386923ad5ef5a40ebc65",
