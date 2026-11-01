@@ -35,7 +35,9 @@ export const DESCENT_MAX_EXPANDABLE = 2
  *  out), the descent hands off to the walk, so its worst case is about this plus the walk. The planner can't see a deep,
  *  busy subtree from P's children (r2's `marin-na`: L1–L6 0.2 s, then one L7 round of 0.8–3.5 s, 2.6–7.4 s against
  *  the walk's 0.5–1.5 s). Over every kept gcs dev case (server-side totals 150–1,006 ms; the 1,006 ms one is slower
- *  than its walk too), hf's (149–524 ms wall) and cw's two slower ones (+0.4, +0.6 s, which it now hands off). */
+ *  than its walk too), hf's (149–524 ms wall) and cw's two slower ones (+0.4, +0.6 s, which it now hands off).
+ *  Near it, which reader answers depends on timing: both answers are exact, their drawn rows may differ, and an edge-
+ *  cached body is whichever came first. */
 export const DESCENT_BUDGET_MS = 1000
 
 /** The descent declines: `breadth`, the planner (`DESCENT_MAX_EXPANDABLE`, `detail` = P's children to expand); `budget`,
