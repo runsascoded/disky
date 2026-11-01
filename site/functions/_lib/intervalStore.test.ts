@@ -959,6 +959,23 @@ describe('Δ diffs by descent', () => {
     expect(compared).toBeGreaterThan(100)
   }, 180_000)
 
+  it('descent: a fixed floor (a union root\'s threshold) is the walk\'s at that threshold, row for row', async () => {
+    let compared = 0
+    for (const gen of ['g2', 'g5']) {
+      for (const T of [1, 4096, 1e6]) {
+        const o = { from: DATES[0], to: DATES[2], path: '', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, threshold: T }
+        const got = await buildDiff(at(gen, []), { ...o, descent: true, noHandOff: true })
+        const want = await buildDiff(at(gen, []), { ...o, lookupCap: 1e9 })
+        const ch = (r: R) => r.s !== 'unchanged' && !r.p.endsWith('(other)')
+        const wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+        expect([gen, T, got.tier, got.threshold, got.total_b - got.total_a, (got.rows as R[]).filter(ch).map(r => [r.p, key(r), wantBy.get(r.p) ?? null]).filter(([, a, b]) => a !== b)])
+          .toEqual([gen, T, 'descent', T, want.total_b - want.total_a, []])
+        compared++
+      }
+    }
+    expect(compared).toBe(6)
+  })
+
   it('descent: best first, stopped at `top`, says how many expansions it skipped, and every expanded row still sums', async () => {
     const full = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, descent: true, noHandOff: true })
     const cut = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 5, descent: true, noHandOff: true })

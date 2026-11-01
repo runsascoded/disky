@@ -138,6 +138,19 @@ describe('unionDiffRows', () => {
       { ...row('(other)', 1, 5, 5), oa: 2, ob: 2, s: 'unchanged' },
     ])
   })
+  it('with members\' totals, `(other)` is each one\'s totals less its drawn depth-1 rows: a member that drew nothing still adds up', () => {
+    const got = unionDiffRows(view, [
+      { store: 'primary', rows: [row('a', 1, 5, 9), row('a/x', 2, 5, 9), row('(other)', 1, 2, 1)], total: { a: 7, b: 10, oa: 2, ob: 2 } },
+      { store: 'meta', rows: [], total: { a: 40, b: 65, oa: 3, ob: 5 } },
+    ])
+    expect(got).toEqual([
+      { ...row('a', 1, 5, 9), src: 'primary' },
+      row('a/x', 2, 5, 9),
+      { p: '(other)', d: 1, k: 'dir', s: 'changed', a: 2 + 40, b: 1 + 65, oa: 1 + 3, ob: 1 + 5 },
+    ])
+    const d1 = got.filter(r => r.d === 1)
+    expect([d1.reduce((n, r) => n + r.b - r.a, 0), d1.reduce((n, r) => n + r.ob - r.oa, 0)]).toEqual([(10 + 65) - (7 + 40), (2 + 5) - (2 + 3)])
+  })
   it('refuses a depth-1 name two stores draw', () => {
     expect(() => unionDiffRows(view, [{ store: 'primary', rows: [row('a', 1, 1, 1)] }, { store: 'meta', rows: [row('a', 1, 1, 1)] }])).toThrow("union view 'all': root 'a' is in stores primary, meta")
   })
