@@ -14,7 +14,7 @@ A diff map that is **always** fast, by a cost bound we can state, not on average
 
 Today a Δ-mode cell's area is its **net** change |b − a|. A folder whose children were renamed (`a/x` → `a/y`, 500 TB) nets ≈ 0, draws as a sliver, and never expands: 1 PB of churn is invisible until someone drills into `a` by hand. Proposal: **area = gross churn** (bytes removed + bytes added under the cell, between the two scans), **color = net** (grew / shrank / neutral). A pure rename then draws as one large neutral cell that opens into red `x` and green `y`. Cost: a folder rewritten in place every day (scratch, checkpoints overwritten) draws large too, which is arguably what a "what changed" map should show. `?dm=max` (area = max(a, b)) is unchanged.
 
-Everything below works for either answer; §3 is what gross sizing needs.
+Everything below works for either answer. §3 adds one column, and with it the work bound holds by construction: **churn is the default area**, net is a toggle (`dm=net`), and max stays as is. Ryan, 2026-11-01: churn "is nice because it's a monoid, both up the tree and across versions"; worth offering as a toggle or making default.
 
 ## Cost model (why the current readers miss "always")
 
@@ -46,12 +46,19 @@ The fix is structural: **don't chain levels inside a request.** Let the client d
 - Time to first paint = one level request. Time to complete = depth × one level request, but every intermediate state is a correct, summing map (each unexpanded cell is drawn as a leaf at its own size).
 - The loading state is explicit per cell: a cell whose level request is in flight shows a small spinner in its corner; the map header shows "N of M folders loaded". (Ryan asked for a clearer loading state; this makes it structural.)
 
-### 3. Gross churn (if area = gross; open question 1)
+### 3. Churn: definition, storage, and why it bounds the work
 
-To size and choose cells by churn without reading their unchanged children, add per-directory churn at scan time:
-- **Churn rows.** For each scan s and each directory d whose subtree changed since the previous scan: `bytes_in`, `bytes_out` (and objects) under d. These are kept only where non-zero, so the count is O(changes × depth) per scan, consistent with "indexes grow O(changes)". They're written beside the path versions, by the same append/compaction, as a served sort keyed `(depth, path, scan)`.
-- **Range churn.** For `(D1, D2]`, a directory's churn ≤ Σ its per-scan churn over the range (a file added then deleted inside the range counts twice: an upper bound, exact for one-scan ranges). The level request reads its children's churn rows in the range (contiguous by path) and sums them.
-- **Renames.** `a/x` → `a/y` gives `a` churn = 2 × 500 TB (in and out), so `a` draws large and neutral; its level shows `x` red and `y` green.
+**Definition.** For a scan s and its predecessor s⁻, a file's churn is |size_s − size_s⁻| (its full size where it appeared or went away), and a directory's churn is the sum over the files under it. Over a range `(D1, D2]`, churn is the sum over the range's adjacent scan pairs. So a file created and deleted inside the range counts twice, while net change misses it entirely.
+
+**It's a commutative monoid in both directions,** additive up the tree (a directory's churn = Σ its children's) and across time (a range's churn = Σ its adjacent pairs'). It's actually a group (sums have inverses), so time needs no dyadic index: **prefix sums are enough.**
+- **Storage: one column, `churn_cum`, on every path version.** A path's cumulative churn up to the version's `vf`. It changes exactly when something under the path changes, which already opens a new version of the path (its size, count or mtime moves). The exception is a pure same-size swap, where the column itself forces the boundary. So it adds no rows, one int64 per version, written by the same append and compaction (an O(changes × depth) rollup of |Δfile| to its ancestors per scan).
+- **Range churn = `churn_cum`(D2) − `churn_cum`(D1).** These are the two versions the level request already reads for a changed child; an unchanged child has churn 0 and is never read.
+
+**Why it gives the bound we lacked:**
+1. **Children's areas sum to the parent's.** Churn is additive up the tree, so a churn map is a true treemap: each level partitions its parent's rectangle. The cells at or above the legible minimum area per level are therefore ≤ canvas area / minimum cell area, and the cells expanded over the whole map are ≤ depth × that. **Work is bounded by the canvas, not by the data.** Net |Δ| has no such property: children's |Δ| can sum to far more than the parent's |Δ| (a rename sums to 2× while the parent nets 0), which is why the descent drew 500–1,000 cells and needed budgets.
+2. **Churn ≥ |net| at every node** (triangle inequality per file, summed). So churn is an admissible pruning bound for the net map too: any node whose net |Δ| clears the floor has churn that clears it, and expanding by churn never misses a net cell. A net-area map can be computed exactly from the same reads. Its cost is bounded by the churn cells over the net floor, which exceeds the net map's own cells only by the churn/net ratio, i.e. exactly where moves dominate (and the churn map is the view that shows them).
+
+**Renames.** `a/x` → `a/y` (500 TB): `a`'s churn = 1 PB, net ≈ 0. It draws as one large neutral cell (color = net) and opens into `x` red (−500 TB) and `y` green (+500 TB).
 - **Later phase, move labels.** Pair a removed and an added sibling with equal size, object count and content (crc32c where listed, as `dups` does) into one "moved x → y" cell. Not needed for correctness.
 
 ### 4. What goes away
