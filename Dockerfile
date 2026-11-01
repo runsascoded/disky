@@ -54,6 +54,8 @@ COPY cloud/src ./cloud/src
 RUN uv sync --no-dev --no-editable --package dt-cloud --extra overtime
 COPY --from=site /repo/site/dist ./dist
 COPY job ./job
+# The Pages config the `cf-usage` step filters Cloudflare's analytics by (`options.cf-usage.config`)
+COPY site/wrangler.toml ./site/wrangler.toml
 # The entrypoint runs `job/$JOB` (`job/build.sh` passes `--build-arg JOB=…`):
 # the CoreWeave scan job, `cw-run.sh`, by default, under `dt-cloud scan-run
 # supervise` (specs/scan-job-wrapper.md, "The entrypoint"): a preemption, cancel
