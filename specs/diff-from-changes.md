@@ -166,6 +166,11 @@ Acceptance (`dt-cloud diff-check -t descent,bysize,path`): gcs 18/18, hf 30/30, 
 kept the descent for quiet or narrow subtrees (gcs `common_pile`/`checkpoints` 0.4–0.6 s against the walk's 1.4–3.0 s;
 hf `/`, spaces, buckets 149–524 ms) and handed broad ones to the walk at no measurable cost (`L1=0`). Kept and slower:
 2 of cw's (+0.4, +0.6 s), deep and narrow; a running-cost bail-out was judged not worth adding.
+- **Budget** (added after r2's union run): the planner can't see a deep, busy subtree from P's children (r2
+  `marin-na`: L1–L6 0.2 s, then one L7 round of 0.8–3.5 s; 2.6–7.4 s against the walk's 0.5–1.5 s). Past
+  `DESCENT_BUDGET_MS` (1,000) since it started, the descent hands off to the walk — checked before each round and raced
+  against the round in flight — so its worst case is about the budget plus the walk. Server-Timing `handoff` says which
+  bail-out declined (`breadth` / `budget`); `diff-check` prints it.
 
 `changes` has no reader: its write path (`cut_gen`, `cut_run`, the staged `cut`), `interval-store changes` /
 `backfill-changes`, the reader (`readChanges`, `buildDiffChanges`, `DIFF_FROM_CHANGES`) and its fixtures are removed.
