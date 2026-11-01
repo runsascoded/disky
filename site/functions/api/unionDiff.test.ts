@@ -82,6 +82,27 @@ describe('D1', () => {
     expect([first, scansRead()]).toEqual([2, 2])
   })
 
+  it('another isolate in the colo reads the observations from the colo\'s copy, not D1', async () => {
+    const g = globalThis as unknown as { caches: unknown }
+    const before = g.caches
+    const store = new Map<string, Response>()
+    g.caches = { default: { match: async (r: Request) => store.get(r.url)?.clone(), put: async (r: Request, res: Response) => { store.set(r.url, res) } } }
+    try {
+      const env = deployment()
+      const sql: string[] = []
+      // Each env is its own D1 binding object (a fresh isolate's view of the same database).
+      const counted = () => ({ ...env, DB: new Proxy(env.DB as object, { get: (t, k) => k === 'prepare' ? (q: string) => { sql.push(q); return (t as { prepare: (q: string) => unknown }).prepare(q) } : (t as Record<string | symbol, unknown>)[k] }) }) as unknown as Env
+      const scansRead = () => sql.filter(q => q.includes('SELECT DISTINCT date FROM index_schema')).length
+      const ask = async (e: Env) => expect((await diff({ request: new Request(`http://localhost/api/diff?w=1280&h=768&from=${A}&to=${C}&path=`), env: e })).status).toBe(200)
+      await ask(counted())
+      const first = scansRead()
+      await ask(counted())
+      expect([first, scansRead()]).toEqual([2, 2])
+    } finally {
+      g.caches = before
+    }
+  })
+
   it('both stores rescanned: each diffs its own scans; rows tagged, totals summed, one threshold', async () => {
     const [u, p, m] = await Promise.all([body(`from=${A}&to=${C}&path=`), body(`from=${A}&to=${C}&path=&store=primary`), body(`from=${A}&to=${B}&path=&store=meta`)])
     expect([u.prev, u.curr, u.union, roots(u), pick(u), u.threshold]).toEqual([
