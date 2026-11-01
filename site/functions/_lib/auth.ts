@@ -303,7 +303,23 @@ function authIdentity(auth: Auth): Identity {
 const allScopes = (env: Env): string[] =>
   [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env), baseAssignScope(env)])]
 
-export async function identify(ctx: Ctx): Promise<Identity | null> {
+/** Per request and env: its identity lookup (a D1 read for a session or a grant), so the middleware's gate
+ *  (`restrictGate`) and the route, handed the same Request and env, share one. The env is part of the key: the identity
+ *  depends on its database, secret and scope policy, and a union member's env (`withStore`) is its own. */
+const identified = new WeakMap<Request, WeakMap<object, Promise<Identity | null>>>()
+
+export function identify(ctx: Ctx): Promise<Identity | null> {
+  let byEnv = identified.get(ctx.request)
+  if (!byEnv) identified.set(ctx.request, byEnv = new WeakMap())
+  const env = ctx.env as unknown as object
+  const hit = byEnv.get(env)
+  if (hit) return hit
+  const id = identifyOnce(ctx)
+  byEnv.set(env, id)
+  return id
+}
+
+async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
   // Local dev has no minted session, so `wrangler pages
   // dev` requests would 401 — leaving the client `DEV_IDENTITY` stub (which
   // only fakes the *client's* whoami) disagreeing with the server. Treat any

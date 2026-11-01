@@ -20,6 +20,25 @@ import { instrumentBindings, Meter, metered, usagePoint, type UsageEnv, writeUsa
 
 const isHtml = (res: Response): boolean => (res.headers.get('content-type') ?? '').startsWith('text/html')
 
+// This isolate's requests so far: Server-Timing `isolate` says `cold` on its first (a TTFB floor outside every clock
+// here, isolate start-up and bundle evaluation included, shows up as a difference between cold and warm).
+let served = 0
+
+/** `res` with the middleware's own phases first in its Server-Timing (a copy when its headers are immutable). */
+function withMiddlewareTiming(res: Response, phases: [string, number][], nth: number): Response {
+  const own = [...phases.map(([k, ms]) => `${k};dur=${Math.round(ms)}`), `isolate;dur=0;desc="${nth === 1 ? 'cold' : `warm ${nth}`}"`].join(', ')
+  const st = res.headers.get('server-timing')
+  const v = st ? `${own}, ${st}` : own
+  try {
+    res.headers.set('server-timing', v)
+    return res
+  } catch {
+    const copy = new Response(res.body, res)
+    copy.headers.set('server-timing', v)
+    return copy
+  }
+}
+
 // A hashed bundle URL that names no file in this deployment. Static Pages
 // answers it through the SPA fallback (`_redirects`' `/* /index.html 200`; a
 // `404` rule there is silently ignored, and any redirect rule shadows the real
@@ -55,21 +74,30 @@ export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => {
 }
 
 async function serve(ctx: MiddlewareCtx): Promise<Response> {
+  const nth = ++served
+  const t0 = Date.now()
+  const phases: [string, number][] = []
+  const mark = (k: string, from: number) => { phases.push([k, Date.now() - from]); return Date.now() }
   // a renamed deployment's old hosts: before the gate, so a signed-out visitor follows a posted link to the new host
   const moved = hostRedirect(ctx.request, ctx.env as never)
   if (moved) return moved
   const blocked = await restrictGate(ctx.request, ctx.env as never)
-  if (blocked) return blocked
+  let t = mark('mw-gate', t0)
+  if (blocked) return withMiddlewareTiming(blocked, [...phases, ['mw', Date.now() - t0]], nth)
   const url = new URL(ctx.request.url)
   if (ctx.request.method === 'GET') {
     const anonymous = await anonymousPage(ctx.env, url)
-    if (anonymous) return anonymous
+    t = mark('mw-anon', t)
+    if (anonymous) return withMiddlewareTiming(anonymous, [...phases, ['mw', Date.now() - t0]], nth)
   }
   // A write that may be an activity event (specs/done/activity-feed.md): its body is read from a clone before the route
   // consumes it, and it is recorded once the route answers 2xx.
   const activityKind = serverKind(ctx.request.method, url.pathname)
   const body = activityKind ? readBody(ctx.request) : null
-  const res = await ctx.next()
+  const res0 = await ctx.next()
+  mark('mw-next', t)
+  // Server-Timing on API answers only (pages and assets keep their headers as Pages sent them).
+  const res = url.pathname.startsWith('/api/') ? withMiddlewareTiming(res0, [...phases, ['mw', Date.now() - t0]], nth) : res0
   if (activityKind && res.ok && ctx.waitUntil) {
     const wait = ctx.waitUntil.bind(ctx)
     wait(captureWrite(ctx as unknown as Ctx, activityKind, body, wait, Date.now(), sizeAssignments))
