@@ -106,7 +106,9 @@ const iso = (ms: number): string => new Date(ms).toISOString()
  *  union's cutoffs (and `latest`) can lag a newly landed scan by up to this long in an isolate that already holds them. */
 export const OBSERVATIONS_TTL = 60_000
 
-/** Per isolate, per D1 binding (a deployment) and store: the observations, in flight or settled, and when asked. */
+/** Per isolate, per D1 binding (a deployment) and store: the observations, in flight or settled, and when asked; behind
+ *  it the colo's copy (the Cache API, `max-age` `OBSERVATIONS_TTL`, keyed by deployment host and store), so a request on
+ *  another isolate in the colo reads it there instead of D1. A lag of up to twice the TTL (colo, then isolate). */
 const observed = new WeakMap<object, Map<string, { at: number; obs: Promise<Observation[]> }>>()
 
 /** A member's indexed scans as observations: each id observed through its
@@ -121,9 +123,16 @@ function observations(env: Env): Promise<Observation[]> {
   const hit = byStore.get(key)
   if (hit && Date.now() - hit.at < OBSERVATIONS_TTL) return hit.obs
   const obs = (async () => {
+    // Then the colo's copy, so any isolate there reuses it (r2: one client's requests land on different isolates).
+    const colo = typeof caches === 'undefined' ? null : (caches as unknown as { default: Cache }).default
+    const ck = new Request(`https://union-observations.cache/${encodeURIComponent(env.PROD_HOST ?? '-')}/${encodeURIComponent(key)}`)
+    const hit = await colo?.match(ck)
+    if (hit) return await hit.json<Observation[]>()
     const dates = (await pathScans(env, true)).results.map(r => r.date)
     const times = await scanTimes(env, dates)
-    return dates.map(id => { const t = iso(scanInstant(id, times)); return { id, revision: '', observed_through: t, published_at: t } })
+    const got = dates.map(id => { const t = iso(scanInstant(id, times)); return { id, revision: '', observed_through: t, published_at: t } })
+    await colo?.put(ck, new Response(JSON.stringify(got), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${OBSERVATIONS_TTL / 1000}` } }))
+    return got
   })()
   byStore.set(key, { at: Date.now(), obs })
   obs.catch(() => { if (byStore!.get(key)?.obs === obs) byStore!.delete(key) })

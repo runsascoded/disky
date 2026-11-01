@@ -14,7 +14,7 @@
  *  children). The floor is the Δ map's, `G · minArea / (w·h)`: read P's children at `|Δ P| · k` (a lower
  *  bound: `G ≥ |Δ P|`), then use `Σ |Δ child| · k` below (`G ≥` that too). */
 import type { Env } from './auth.js'
-import { asOfScans, DiffUnavailable, type IndexHandle, openIndex, planRects, readRects, type Rect, type Row, type Span, type Trace } from './index.js'
+import { asOfScans, DiffUnavailable, type IndexHandle, openIndex, readRects, type Rect, type Row, type Trace } from './index.js'
 import { capDiffRows, type Diff, type DiffRow, NotFound, readRootAgg } from './view.js'
 
 type Side = { b: number; o: number; kind: 'file' | 'dir'; vf?: number; vt?: number } | null
@@ -23,8 +23,9 @@ type Side = { b: number; o: number; kind: 'file' | 'dir'; vf?: number; vt?: numb
  *  it answers, or to which reader answers (a handoff's walk body differs from a descent's), so a deploy never serves an
  *  earlier descent's cached body (a global `CACHE_V` bump would make every view and diff cold everywhere). 2: best
  *  first, stopped at `top`, `expansions_skipped`. 3: the planner's handoff. 4: the time and work budgets' handoffs
- *  (r2's first rerun served pre-budget descent bodies from KV at its earlier canvases). */
-export const DESCENT_V = 4
+ *  (r2's first rerun served pre-budget descent bodies from KV at its earlier canvases). 5: the pre-read work check
+ *  withdrawn (it handed off nearly every descent). */
+export const DESCENT_V = 5
 
 /** The planner (specs/diff-from-changes.md revision 3): the descent continues past P's children only when at most this
  *  many of them need expanding (changed, |Δ| over their children's floor) — the change is concentrated, and the descent
@@ -43,12 +44,14 @@ export const DESCENT_MAX_EXPANDABLE = 2
 export const DESCENT_BUDGET_MS = 500
 
 /** The work bail-out: rows the descent's reads have returned (both sides, unfloored re-reads included), checked after
- *  each read; and before each read, those plus the rows its planned groups hold (from the footers, nothing fetched:
- *  Server-Timing `descent-planned`), so a read that would pass it isn't issued. A Worker's clock advances only across
- *  I/O, so `DESCENT_BUDGET_MS` never sees the descent's CPU — decoding and folding these rows (r2's `marin-na`: 1.44 s
- *  of Server-Timing against 3.7 s wall). Calibration (`descent-rows`): hf's kept cases read at most 4,682 (10-15→10-31
- *  `/buckets`, growing about a scan a day; ~1.7× headroom); r2's `marin-na` ≥ 9,261 (its L4 alone, in children); gcs's
- *  `checkpoints` over a week 35,708 (2.8 s against its walk's 0.5 s). Both of those trip; 10,000 would put r2 at the edge. */
+ *  each read. A Worker's clock advances only across I/O, so `DESCENT_BUDGET_MS` never sees the descent's CPU — decoding
+ *  and folding these rows (r2's `marin-na`: 1.44 s of Server-Timing against 3.7 s wall). Not checked before a read:
+ *  the footers' row counts are whole groups (8K rows) of which a path range uses a sliver, so they overestimate the rows
+ *  under P many times over (hf: 33–47K planned against 1.2–4.7K read; it handed every descent off). Calibration
+ *  (`descent-rows`): hf's kept cases read at most 4,682 (10-15→10-31 `/buckets`, growing about a scan a day; ~1.7×
+ *  headroom); r2's `marin-na` ≥ 9,261 (its L4 alone, in children); gcs's `checkpoints` over a week 35,708 (2.8 s
+ *  against its walk's 0.5 s). Both of those trip, each after the one read that crosses it; 10,000 would put r2 at the
+ *  edge. */
 export const DESCENT_BUDGET_ROWS = 8000
 
 /** The descent declines: `breadth`, the planner (`DESCENT_MAX_EXPANDABLE`, `detail` = P's children to expand); `budget`,
@@ -115,18 +118,6 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     o.trace?.('handoff', performance.now() - tStart, `work: ${rowsRead} rows read (max ${budgetRows})`)
     throw new HandOff('work', rowsRead)
   }
-  // Before a read: the rows its planned groups hold (from the footers, nothing fetched yet), which bound what it decodes.
-  // Over the budget with them, the descent hands off before paying for the read (Server-Timing `descent-planned`).
-  let rowsPlanned = 0
-  const afford = (spans: Span[]) => {
-    const n = spans.reduce((x, s) => x + s.rowEnd - s.rowStart, 0)
-    rowsPlanned += n
-    if (o.noHandOff || rowsRead + n <= budgetRows) return
-    o.trace?.('descent-rows', rowsRead, `${rowsRead} rows read`)
-    o.trace?.('descent-planned', rowsPlanned, `${rowsPlanned} rows planned`)
-    o.trace?.('handoff', performance.now() - tStart, `work: ${rowsRead} rows read + ${n} planned (max ${budgetRows})`)
-    throw new HandOff('work', rowsRead + n)
-  }
   const env = asOfScans(env0, [o.from, o.to])
   const { path } = o
   const dP = path === '' ? 0 : path.split('/').length
@@ -149,9 +140,7 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     const depthOf = new Map(parents.map(x => [x.p, x.d + 1]))
     const rects = parents.map(x => childRect(x.p, x.d + 1))
     const over = (r: Row) => r.size >= thrAt(r.depth)
-    const [planA, planB] = await Promise.all([planRects(hA, rects, thrAt), planRects(hB, rects, thrAt)])
-    afford([...planA, ...planB])
-    const [rowsA, rowsB] = await Promise.all([readRects(hA, rects, thrAt, undefined, planA), readRects(hB, rects, thrAt, undefined, planB)])
+    const [rowsA, rowsB] = await Promise.all([readRects(hA, rects, thrAt), readRects(hB, rects, thrAt)])
     spend(rowsA.length + rowsB.length)
     const A = bySide(rowsA.filter(over))
     const B = bySide(rowsB.filter(over))
@@ -159,13 +148,9 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     const redoA = new Set<string>(), redoB = new Set<string>()
     for (const [p, s] of B) if (!A.has(p)) { if (s!.vf! <= D1) A.set(p, s); else redoA.add(parentOf(p)) }
     for (const [p, s] of A) if (!B.has(p)) { if (s!.vt! > D2) B.set(p, s); else redoB.add(parentOf(p)) }
-    const redoRects = (s: Set<string>) => [...s].map(q => childRect(q, depthOf.get(q)!))
-    const [moreRA, moreRB] = [redoRects(redoA), redoRects(redoB)]
-    const [morePA, morePB] = await Promise.all([moreRA.length ? planRects(hA, moreRA) : [], moreRB.length ? planRects(hB, moreRB) : []])
-    afford([...morePA, ...morePB])
     const [moreA, moreB] = await Promise.all([
-      moreRA.length ? readRects(hA, moreRA, undefined, undefined, morePA) : Promise.resolve([] as Row[]),
-      moreRB.length ? readRects(hB, moreRB, undefined, undefined, morePB) : Promise.resolve([] as Row[]),
+      redoA.size ? readRects(hA, [...redoA].map(q => childRect(q, depthOf.get(q)!))) : Promise.resolve([] as Row[]),
+      redoB.size ? readRects(hB, [...redoB].map(q => childRect(q, depthOf.get(q)!))) : Promise.resolve([] as Row[]),
     ])
     spend(moreA.length + moreB.length)
     const fullA = bySide(moreA), fullB = bySide(moreB)
@@ -270,7 +255,6 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
   const skipped = frontier.filter(expandable).length
   for (const it of frontier) if (it.p !== path) emit(rel(it.p), it.d - dP, it.k, it.a, it.b, false)
   o.trace?.('descent-rows', rowsRead, `${rowsRead} rows read`)
-  o.trace?.('descent-planned', rowsPlanned, `${rowsPlanned} rows planned`)
   const cut = capDiffRows(rows, o.top, { a: Math.round(ra?.b ?? 0), b: Math.round(rb?.b ?? 0), oa: Math.round(ra?.o ?? 0), ob: Math.round(rb?.o ?? 0) })
   return {
     rows: cut.rows,
