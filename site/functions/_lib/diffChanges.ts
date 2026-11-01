@@ -190,7 +190,7 @@ export async function buildDiffChanges(env0: Env, o: ChangesOpts): Promise<Diff>
     }
     level = next
   }
-  const cut = capDiffRows(rows, o.top)
+  const cut = capDiffRows(rows, o.top, { a: Math.round(ra?.b ?? 0), b: Math.round(rb?.b ?? 0), oa: Math.round(ra?.o ?? 0), ob: Math.round(rb?.o ?? 0) })
   return {
     rows: cut.rows,
     total_a: Math.round(ra?.b ?? 0),
