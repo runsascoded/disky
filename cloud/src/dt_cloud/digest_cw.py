@@ -404,9 +404,10 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig, p
     back = [r for r in seen if r.date <= start.isoformat()]
     b30 = back[-1] if back else seen[0]
     b30_url = _diff_url(last.scan, scan_ts(b30.scan) if b30 is not last else None, site_url, slug=last.slug)
+    # (none when it starts where month-to-date does: a store whose first scan is this month's)
+    look = f"**{_tb(last.tb - b30.tb)} {u.name}** [{window_label(start, b30.scan)}]({b30_url}) · " if b30 is not base else ""
     lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} {u.name}** [month-to-date]({mtd_url}) · "
-        f"**{_tb(last.tb - b30.tb)} {u.name}** [{window_label(start, b30.scan)}]({b30_url}) · {primary}{last.tb:,.0f} {u.name}{_quotas(last.tb, last.classes, qs, u)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
+        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} {u.name}** [month-to-date]({mtd_url}) · {look}{primary}{last.tb:,.0f} {u.name}{_quotas(last.tb, last.classes, qs, u)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
         # the OP is re-edited every scan, so it is the thread's live view; say which scan it reflects
         f"_as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_",
         "",

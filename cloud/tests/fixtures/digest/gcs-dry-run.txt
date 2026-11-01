@@ -1,4 +1,4 @@
-:arrow_deg40: **+149.0 TiB** month-to-date · **+149.0 TiB** [since 7/31](https://site.example.org/?d=260811-11d#over-time) · [dashboard](https://site.example.org/)
+:arrow_deg40: **+149.0 TiB** month-to-date · [dashboard](https://site.example.org/)
 
 *Weekly summaries*
 :arrow_deg0: [wk of 7/27](https://site.example.org/?d=260802-2d#over-time) — **3,010 TiB** (+10.0, 0.3%) · $19,272/mo (+$103)

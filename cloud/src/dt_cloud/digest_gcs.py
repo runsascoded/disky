@@ -129,9 +129,10 @@ def op_body(data: Month, month: dt.date, plot_url: str | None, cfg: DigestConfig
         b30_tb, b30_at = seen[0].tb - (seen[0].dtb or 0), seen[0].prev or seen[0].date
     last = rows[-1]
     b30_url = f"{site_url}/?d={_dlink(last.date, last.slug)}-{_span(scan_ts(b30_at), scan_ts(last.date))}#over-time"
+    # (none when it starts where month-to-date does: a store whose first scan is this month's)
+    look = f"**{_tb(last.tb - b30_tb)} TiB** [{window_label(start, b30_at)}]({b30_url}) · " if b30_at != (rows[0].prev or rows[0].date) else ""
     lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** month-to-date · **{_tb(last.tb - b30_tb)} TiB** "
-        f"[{window_label(start, b30_at)}]({b30_url}) · [dashboard]({site_url}/)",
+        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** month-to-date · {look}[dashboard]({site_url}/)",
         "",
         "*Weekly summaries*",
     ]

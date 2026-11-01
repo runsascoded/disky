@@ -131,7 +131,7 @@ def test_units_tb():
     assert [r.tb for r in rows] == [15.0, 15.5, 15.4]
     month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
     assert D.op_body(month, oct1, None, cfg).split("\n") == [
-        f":arrow_deg50: **+0.4 TB** [month-to-date]({SITE}/?d=261002-2d#over-time) · **+0.4 TB** [since 9/30]({SITE}/?d=261002-2d#over-time) · 15 TB · 6.1% of 253 TB public · [dashboard]({SITE}/)",
+        f":arrow_deg50: **+0.4 TB** [month-to-date]({SITE}/?d=261002-2d#over-time) · 15 TB · 6.1% of 253 TB public · [dashboard]({SITE}/)",
         "_as of 10/2 08:00Z_",
         "",
         "*Weekly summaries*",
@@ -180,7 +180,7 @@ def test_class_scoped_quotas():
     assert [(r.tb, r.classes) for r in rows] == [(15.0, {1: 15.0, 5: 0.02, 6: 0.005}), (16.0, {1: 15.5, 5: 0.5, 6: 0.005})]
     month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
     assert D.op_body(month, oct1, None, cfg).split("\n") == [
-        f":arrow_deg70: **+1.0 TB** [month-to-date]({SITE}/?d=261001-1d#over-time) · **+1.0 TB** [since 9/30]({SITE}/?d=261001-1d#over-time) · 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private · [dashboard]({SITE}/)",
+        f":arrow_deg70: **+1.0 TB** [month-to-date]({SITE}/?d=261001-1d#over-time) · 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private · [dashboard]({SITE}/)",
         "_as of 10/1 08:00Z_",
         "",
         "*Weekly summaries*",
@@ -262,7 +262,7 @@ def test_rows_from_meta_buckets_switch():
     # bucket, the primary's total included, linked (as in the replies) over the
     # same month-to-date span
     assert D.op_body(month, SEP, None, CFG).split("\n")[0] == (
-        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-1d#over-time) · **+2.0 TiB** [since 9/1]({SITE}/?d=260902-1d#over-time) · [main]({SITE}/main-data?d=260902-1d#over-time) 712 TiB · 78.2% of 1 PB · "
+        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-1d#over-time) · [main]({SITE}/main-data?d=260902-1d#over-time) 712 TiB · 78.2% of 1 PB · "
         f"[hot]({SITE}/hot-data?d=260902-1d#over-time) 91 TiB · [dashboard]({SITE}/)"
     )
 

@@ -80,8 +80,8 @@ def test_reply_discord_link_text():
 
 def test_op_body():
     assert D.op_body(D.Month(ROWS), date(2026, 8, 1), "https://x/p.png", CFG).split("\n") == [
-        # a store younger than the window: its look-back figure runs from its first scan's baseline (8/2)
-        ":arrow_deg20: **+10.0 TiB** month-to-date · **+10.0 TiB** [since 8/2](https://site.example.org/?d=260804-2d#over-time) · [dashboard](https://site.example.org/)",
+        # a store younger than the window, whose look-back figure would start where month-to-date does: none
+        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
         "",
         "*Weekly summaries*",
         ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
@@ -217,8 +217,8 @@ def test_render_plot_without_site_token(monkeypatch, tmp_path):
 def test_op_body_without_plot():
     # `plot_url=None` (Discord attaches the PNG) drops the trailing image lines only
     assert D.op_body(D.Month(ROWS), date(2026, 8, 1), None, CFG).split("\n") == [
-        # a store younger than the window: its look-back figure runs from its first scan's baseline (8/2)
-        ":arrow_deg20: **+10.0 TiB** month-to-date · **+10.0 TiB** [since 8/2](https://site.example.org/?d=260804-2d#over-time) · [dashboard](https://site.example.org/)",
+        # a store younger than the window, whose look-back figure would start where month-to-date does: none
+        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
         "",
         "*Weekly summaries*",
         ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
@@ -292,13 +292,13 @@ class _FakeBot:
 # One scan in (8/3: +30 on 3000, 1 day → 7%/wk-equivalent → deg50; the week's
 # bullet is +1.0% → deg20), then both scans (+10 net → deg20; week +0.3% → deg0).
 OP_ONE_SCAN = "\n".join([
-    "<:arrow_deg50:5> **+30.0 TiB** month-to-date · **+30.0 TiB** [since 8/2](https://site.example.org/?d=260803-1d#over-time) · [dashboard](https://site.example.org/)",
+    "<:arrow_deg50:5> **+30.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
     "",
     "*Weekly summaries*",
     "<:arrow_deg20:2> [wk of 8/3](https://site.example.org/?d=260803-1d#over-time) _(partial)_ — **3,030 TiB** (+30.0, 1.0%) · $19,784/mo (+$615)",
 ])
 OP_TWO_SCANS = "\n".join([
-    "<:arrow_deg20:2> **+10.0 TiB** month-to-date · **+10.0 TiB** [since 8/2](https://site.example.org/?d=260804-2d#over-time) · [dashboard](https://site.example.org/)",
+    "<:arrow_deg20:2> **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
     "",
     "*Weekly summaries*",
     "<:arrow_deg0:1> [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
