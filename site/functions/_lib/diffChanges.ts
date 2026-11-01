@@ -16,7 +16,7 @@
  *  second read) never misses a cell. */
 import type { Env } from './auth.js'
 import { asOfScans, openIndex, readAsks, readChanges, type Trace, type Transition, TooWide } from './index.js'
-import { type Diff, type DiffRow, LOOKUP_CAP, NotFound, readRootAgg } from './view.js'
+import { capDiffRows, type Diff, type DiffRow, LOOKUP_CAP, NotFound, readRootAgg } from './view.js'
 
 const parentOf = (p: string): string => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
 
@@ -77,7 +77,7 @@ async function asOf(env: Env, date: string, paths: { path: string; depth: number
 async function candidates(env: Env, o: ChangesOpts, floor: number): Promise<{ cands: Map<string, Cand>; lookups: number; capped: boolean; groups: number }> {
   const dP = o.path === '' ? 0 : o.path.split('/').length
   const thrAt = (depth: number) => floor * o.atten ** Math.max(0, depth - dP - 1)
-  const got = await readChanges(env, o.from, o.to, o.path, floor, { trace: o.trace })
+  const got = await readChanges(env, o.from, o.to, o.path, floor, { trace: o.trace, atten: o.atten })
   const [firstScan, lastScan] = [got.scans[0], got.scans[got.scans.length - 1]]
   const byPath = new Map<string, Transition[]>()
   for (const t of got.rows) {
@@ -190,10 +190,9 @@ export async function buildDiffChanges(env0: Env, o: ChangesOpts): Promise<Diff>
     }
     level = next
   }
-  const skeleton = rows.filter(r => r.x)
-  const frontier = rows.filter(r => !r.x && r.s !== 'unchanged').sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const cut = capDiffRows(rows, o.top)
   return {
-    rows: [...skeleton, ...frontier.slice(0, o.top)],
+    rows: cut.rows,
     total_a: Math.round(ra?.b ?? 0),
     total_b: Math.round(rb?.b ?? 0),
     objects_a: Math.round(ra?.o ?? 0),
@@ -201,7 +200,7 @@ export async function buildDiffChanges(env0: Env, o: ChangesOpts): Promise<Diff>
     threshold: floor,
     tier: 'changes',
     expansions,
-    truncated: truncated || capped || frontier.length > o.top,
+    truncated: truncated || capped || cut.cut,
     lookups,
     lookups_capped: capped,
   }
