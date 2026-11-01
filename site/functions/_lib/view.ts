@@ -2422,6 +2422,8 @@ export interface Diff {
   threshold: number
   tier: string
   lookups: number
+  /** Directories a budgeted reader (the descent, at `top`) left unexpanded, each drawn as a leaf: cut, not complete. */
+  expansions_skipped?: number
   /** The lookup budget ran out: names one side drew that the other side's lookup didn't answer are folded into
    *  their parent's `(other)` on both sides (never drawn one-sided at 0). */
   lookups_capped: boolean
