@@ -71,20 +71,21 @@ def check(a: dict, b: dict, tier: str | None, atten: float = 2.0) -> dict:
     return out
 
 
-def fetch(host: str, q: dict, token: str, retries: int = 6) -> tuple[int, dict | str, float, str]:
-    """`/api/diff` on `host` (a 202 / 503 retried): status, body, seconds, `Server-Timing`."""
+def fetch(host: str, q: dict, token: str, retries: int = 6) -> tuple[int, dict | str, float, str, str]:
+    """`/api/diff` on `host` (a 202 / 503 retried): status, body, seconds, `Server-Timing`, `x-cache` (`hit` / `kv`: an
+    edge copy, not a compute; `miss`)."""
     url = f"{host.rstrip('/') if '://' in host else 'https://' + host}/api/diff?{urllib.parse.urlencode(q)}"
     for i in range(retries):
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "dt-cloud-diff-check/1"})
         t = time.time()
         try:
             with urllib.request.urlopen(req, timeout=180) as r:
-                return r.status, json.loads(r.read()), time.time() - t, r.headers.get("server-timing") or ""
+                return r.status, json.loads(r.read()), time.time() - t, r.headers.get("server-timing") or "", r.headers.get("x-cache") or "-"
         except urllib.error.HTTPError as e:
             if e.code in (202, 503) and i + 1 < retries:
                 time.sleep(5)
                 continue
-            return e.code, e.read().decode()[:200], time.time() - t, ""
+            return e.code, e.read().decode()[:200], time.time() - t, "", "-"
     raise AssertionError("unreachable")
 
 
@@ -114,8 +115,8 @@ def diff_check_cmd(host_a, host_b, height, top, tier, width, cases) -> None:
     bad = 0
     for c in cs:
         q = {"from": c["from"], "to": c["to"], "path": c.get("path", ""), "w": width, "h": height, **({"top": top} if top else {})}
-        sa, a, ta, _ = fetch(host_a, {**q, "dm": "max"}, token)
-        sb, b, tb, st = fetch(host_b, {**q, "dm": "delta"}, token)
+        sa, a, ta, _, ca = fetch(host_a, {**q, "dm": "max"}, token)
+        sb, b, tb, st, cb = fetch(host_b, {**q, "dm": "delta"}, token)
         name = f"{c['from']}→{c['to']} /{q['path']}"
         if sa != 200 or sb != 200:
             print(f"ERR  {name}: A {sa} {a if sa != 200 else ''} | B {sb} {b if sb != 200 else ''}", flush=True)
@@ -124,8 +125,8 @@ def diff_check_cmd(host_a, host_b, height, top, tier, width, cases) -> None:
         f = check(a, b, tier)
         bad += not f["ok"]
         print(f"{'OK  ' if f['ok'] else 'FAIL'} {name}: totals {'=' if f['totals'] else '≠'}, differ {len(f['differ'])}, missed {len(f['missed'])}, "
-              f"B-only {f['only_b']}, sums A {f['sums_a'][:2] or 'ok'} B {f['sums_b'][:2] or 'ok'} | A {ta:.1f}s {a.get('tier')} "
-              f"| B {tb:.1f}s {f['tier']}{'' if f['tier_ok'] else ' (want ' + tier + ')'} lookups={b.get('lookups')} trunc={b.get('truncated')} | {timing(st)}", flush=True)
+              f"B-only {f['only_b']}, sums A {f['sums_a'][:2] or 'ok'} B {f['sums_b'][:2] or 'ok'} | A {ta:.1f}s {ca} {a.get('tier')} "
+              f"| B {tb:.1f}s {cb} {f['tier']}{'' if f['tier_ok'] else ' (want ' + tier + ')'} lookups={b.get('lookups')} trunc={b.get('truncated')} | {timing(st)}", flush=True)
         for k in ("differ", "missed"):
             if f[k]:
                 print(f"   {k}: {f[k][:3]}", flush=True)
