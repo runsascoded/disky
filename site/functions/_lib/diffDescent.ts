@@ -189,7 +189,7 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     const res = o.noHandOff || budget === Infinity ? await round : await Promise.race([
       round,
       new Promise<typeof BUDGET>(r => { timer = setTimeout(() => r(BUDGET), Math.max(0, budget - (t0 - tStart))) }),
-    ]).finally(() => clearTimeout(timer))
+    ]).finally(() => { if (timer !== undefined) clearTimeout(timer) })
     if (res === BUDGET) {
       // The round goes on unawaited; its reads are dropped (a rejection too).
       round.catch(() => {})
