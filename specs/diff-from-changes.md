@@ -168,7 +168,8 @@ hf `/`, spaces, buckets 149–524 ms) and handed broad ones to the walk at no me
 2 of cw's (+0.4, +0.6 s), deep and narrow; a running-cost bail-out was judged not worth adding.
 - **Budget** (added after r2's union run): the planner can't see a deep, busy subtree from P's children (r2
   `marin-na`: L1–L6 0.2 s, then one L7 round of 0.8–3.5 s; 2.6–7.4 s against the walk's 0.5–1.5 s). Past
-  `DESCENT_BUDGET_MS` (1,000) since it started, the descent hands off to the walk — checked before each round and raced
+  `DESCENT_BUDGET_MS` (500; 1,000 at first, until cw's `marin-us-east-08a` ran 13 cheap rounds to ~960 ms on
+  this clock, 2.5 s wall against the walk's 1.3 s) since it started, the descent hands off to the walk — checked before each round and raced
   against the round in flight — so its worst case is about the budget plus the walk. Server-Timing `handoff` says which
   bail-out declined (`breadth` / `budget`); `diff-check` prints it. Near the budget the reader that answers depends on
   timing: one request can come back from the descent once and from the walk another time. Both are exact and every

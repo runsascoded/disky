@@ -33,14 +33,14 @@ export const DESCENT_V = 4
  *  1.4–3.0 s; at ≥ 4, 0.3–19 s against 1.8–3.5 s), not per deployment. */
 export const DESCENT_MAX_EXPANDABLE = 2
 
-/** The running-cost bail-out: past this many ms since it started (a round in flight is raced against it, not waited
- *  out), the descent hands off to the walk, so its worst case is about this plus the walk. The planner can't see a deep,
- *  busy subtree from P's children (r2's `marin-na`: L1–L6 0.2 s, then one L7 round of 0.8–3.5 s, 2.6–7.4 s against
- *  the walk's 0.5–1.5 s). Over every kept gcs dev case (server-side totals 150–1,006 ms; the 1,006 ms one is slower
- *  than its walk too), hf's (149–524 ms wall) and cw's two slower ones (+0.4, +0.6 s, which it now hands off).
- *  Near it, which reader answers depends on timing: both answers are exact, their drawn rows may differ, and an edge-
- *  cached body is whichever came first. */
-export const DESCENT_BUDGET_MS = 1000
+/** The running-cost bail-out: past this many ms since it started (checked before each round, and a round in flight is
+ *  raced against it), the descent hands off to the walk, so its worst case is about this plus the walk. It sees I/O
+ *  only (a Worker's clock doesn't advance during CPU: `DESCENT_BUDGET_ROWS` covers that), so it catches many cheap
+ *  rounds: cw's `marin-us-east-08a`, 13 rounds of 9–287 ms, ~960 ms on this clock at the end (2.5 s wall against the
+ *  walk's 1.3 s), never reached 1,000. Every kept case faster than its walk ends well under 500: cw ≤ 322 ms server
+ *  total, gcs ≤ 324, hf ≤ 524 wall. Near it, which reader answers depends on timing: both answers are exact, their
+ *  drawn rows may differ, and an edge-cached body is whichever came first. */
+export const DESCENT_BUDGET_MS = 500
 
 /** The work bail-out: rows the descent's reads have returned (both sides, unfloored re-reads included), checked after
  *  each read; and before each read, those plus the rows its planned groups hold (from the footers, nothing fetched:
