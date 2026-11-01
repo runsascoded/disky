@@ -55,7 +55,12 @@ def check(a: dict, b: dict, tier: str | None, atten: float = 2.0) -> dict:
     only_b = [p for p in ib if p not in ia]
     opened = {""} | {r["p"] for r in b["rows"] if r.get("x")}
     floor = b.get("threshold", 0)
-    missed = [p for p, r in ia.items() if p not in ib and parent_of(p) in opened and max(r["a"], r["b"]) >= floor * atten ** max(0, r["d"] - 1)]
+    # A row B cut to `top` is in its parent's `(other)` there: excused when B is truncated and that `(other)` covers it
+    # (both sides at least the row's).
+    others = {parent_of(r["p"]): r for r in b["rows"] if is_other(r["p"])}
+    folded = lambda r: b.get("truncated") and (o := others.get(parent_of(r["p"]))) is not None and o["a"] >= r["a"] and o["b"] >= r["b"]  # noqa: E731
+    missed = [p for p, r in ia.items() if p not in ib and parent_of(p) in opened and max(r["a"], r["b"]) >= floor * atten ** max(0, r["d"] - 1)
+              and not folded(r)]
     out = {
         "totals": all(a.get(k) == b.get(k) for k in TOTALS),
         "differ": differ, "missed": missed, "only_b": len(only_b),
@@ -98,16 +103,17 @@ def timing(st: str, keep: tuple[str, ...] = ("total", "cgroups", "changes", "vie
 @option("-a", "--host-a", required=True, help="The reference host (asked for `dm=max`: the as-of walk)")
 @option("-b", "--host-b", required=True, help="The host under test (asked for `dm=delta`); may be A")
 @option("-H", "--height", default=307, type=IntRange(min=1), help="Canvas height")
+@option("-n", "--top", type=IntRange(min=1), help="Frontier rows each diff keeps (`top`; default: the API's)")
 @option("-t", "--tier", help="The `tier` B must answer with (`descent`, `changes`): a fallback fails the case")
 @option("-w", "--width", default=512, type=IntRange(min=1), help="Canvas width (an uncached one measures cold)")
 @argument("cases")
-def diff_check_cmd(host_a, host_b, height, tier, width, cases) -> None:
+def diff_check_cmd(host_a, host_b, height, top, tier, width, cases) -> None:
     """Check CASES (a JSON list of `{from, to, path}`, inline or a file) on both hosts; `$SITE_TOKEN` authenticates."""
     token = os.environ["SITE_TOKEN"].strip()
     cs = json.loads(Path(cases).read_text() if Path(cases).is_file() else cases)
     bad = 0
     for c in cs:
-        q = {"from": c["from"], "to": c["to"], "path": c.get("path", ""), "w": width, "h": height}
+        q = {"from": c["from"], "to": c["to"], "path": c.get("path", ""), "w": width, "h": height, **({"top": top} if top else {})}
         sa, a, ta, _ = fetch(host_a, {**q, "dm": "max"}, token)
         sb, b, tb, st = fetch(host_b, {**q, "dm": "delta"}, token)
         name = f"{c['from']}→{c['to']} /{q['path']}"

@@ -47,8 +47,10 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // object counts exact from the manifest's per-user objects (`uo`). 5 (2026-10-14): a
 // node's `d` is its newest write, not the byte-weighted mean. 6 (2026-10-16): an mtime of 0
 // (a listing's unknown) gives no `d` (it read as 1970-01-01). 7 (2026-10-21): a node with a `d` carries `t`, that
-// newest write's instant (epoch seconds).
-export const CACHE_V = '7'
+// newest write's instant (epoch seconds). 8 (2026-11-01): a diff cut to `top` keeps every expanded row's (and the root's)
+// `(other)` (`capDiffRows`: its totals less its drawn children); entries cached before it dropped cut leaves (hf: a cut
+// root child missing from `open-athena/models`'s answer, served from KV after the fix deployed).
+export const CACHE_V = '8'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
