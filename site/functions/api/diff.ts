@@ -28,7 +28,7 @@ import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
 import { traceJoins } from '../_lib/shared.js'
-import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
+import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, type Union, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
 
@@ -204,12 +204,20 @@ export type MemberChange = 'changed' | 'unchanged' | 'unknown'
  * member (at `to`, else at `from`) answers — an unchanged one its one scan against itself (every total equal, no
  * rows); an unknown one is a 409.
  */
-/** A union response with the union's own time before its members' reads first in its Server-Timing (`union`: gates,
- *  observations, cutoffs, the drilled member's lookup), which the member's entries don't cover. */
-function withUnionTiming(r: Response, ms: number): Response {
+/** A union's own time before its members' reads (`union`), then its parts: the members' contexts (`union-ctxs`),
+ *  gates (`union-gate`) and observations (`union-obs`; these two concurrently), the cutoffs (`union-cutoff`), and the
+ *  drilled member's lookup (`union-member`) or the root's totals (`union-roots`). */
+type UnionMarks = { un?: Union; cutoff?: number; member?: number; roots?: number }
+const unionTiming = (pre: number, m: UnionMarks): string => [
+  ['union', pre], ...(m.un ? [['union-ctxs', m.un.timing.ctxs], ['union-gate', m.un.timing.gate], ['union-obs', m.un.timing.obs]] : []),
+  ...(['cutoff', 'member', 'roots'] as const).flatMap(k => m[k] === undefined ? [] : [[`union-${k}`, m[k]!]]),
+].map(([k, ms]) => `${k};dur=${Math.round(ms as number)}`).join(', ')
+
+/** A union response with its own timing (`unionTiming`) first in its Server-Timing, before the member's entries. */
+function withUnionTiming(r: Response, own: string): Response {
   const out = new Response(r.body, r)
   const st = r.headers.get('server-timing')
-  out.headers.set('server-timing', `union;dur=${Math.round(ms)}${st ? `, ${st}` : ''}`)
+  out.headers.set('server-timing', `${own}${st ? `, ${st}` : ''}`)
   return out
 }
 
@@ -222,10 +230,13 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
   try {
     const un = await openUnion(ctx0, view, true)
     if (un instanceof Response) return un
+    const marks: UnionMarks = { un }
+    const tc = performance.now()
     const cf = await cutoffOf(un, sp, 'from')
     if (cf instanceof Response) return cf
     const ct = await cutoffOf(un, sp, 'to')
     if (ct instanceof Response) return ct
+    marks.cutoff = performance.now() - tc
     if (cf.at >= ct.at) return new Response('from must precede to', { status: 400 })
     const [rf, rt] = [membersAt(un, cf), membersAt(un, ct)]
     const pairs = view.members.map((store, i) => {
@@ -237,12 +248,14 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
     const ask = (p: typeof pairs[number], m: MemberDiff) =>
       diffOf({ ...ctx0, request: memberRequest(ctx0.request, p.store, { from: p.from!, to: p.to! }) }, { ...m, same: p.change === 'unchanged' })
     if (path !== '') {
+      const tm = performance.now()
       const m = await memberOf(rt, path) ?? await memberOf(rf, path)
+      marks.member = performance.now() - tm
       if (!m) return new Response('path not found in either scan', { status: 404 })
       const p = pairs[view.members.indexOf(m.store)]
       if (p.change === 'unknown') return json({ error: `store '${p.store}' has no scan by ${p.from ? ct.date : cf.date}: its change is unknown`, union: { view: view.key, sources } }, 409)
       const pre = performance.now() - t0
-      return withUnionTiming(await ask(p, { id: un.id }), pre)
+      return withUnionTiming(await ask(p, { id: un.id }), unionTiming(pre, marks))
     }
     const scoped = (['lens', 'o', 'cl'] as const).filter(k => sp.get(k))
     if (scoped.length) return new Response(`a union view's root is unscoped (${scoped.join(', ')}: drill into one store)`, { status: 400 })
@@ -258,11 +271,13 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       const { reads, refused, ...body } = answer
       return new Response(JSON.stringify({ prev: cf.date, curr: ct.date, path, q, ...body, union: { view: view.key, sources: sources.map(s => refusedOf(s, refused)) } }), { headers: {
         'content-type': 'application/json; charset=utf-8',
-        'server-timing': `union;dur=${Math.round(pre)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
+        'server-timing': `${unionTiming(pre, marks)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
         'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
       } })
     }
+    const tr = performance.now()
     const roots = await Promise.all(comparable.map(p => Promise.all([p.from!, p.to!].map(date => ivRetry(() => readRootAgg(p.env, { date, path: '' }))))))
+    marks.roots = performance.now() - tr
     const side = (k: 0 | 1) => roots.reduce((n, r) => n + (r[k]?.b ?? 0), 0)
     const threshold = (Math.max(side(0), side(1)) * minArea) / (w * h)
     // A changed member's diff is read; an unchanged one's is its root total on both sides (no rows: nothing moved).
@@ -290,7 +305,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       union: { view: view.key, sources },
     }), { headers: {
       'content-type': 'application/json; charset=utf-8',
-      'server-timing': `union;dur=${Math.round(pre)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
+      'server-timing': `${unionTiming(pre, marks)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
       'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
     } })
   } catch (e) {
