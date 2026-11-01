@@ -49,6 +49,7 @@ from . import append_runner as ar
 from . import heartbeat as hb
 from . import interval_append as ia
 from . import interval_compact as ic
+from . import interval_churn as ich
 from . import interval_store as ist
 from . import static_names as sn
 from .append_runner import LocalRunStore, latest_key, run_key, scans_of
@@ -108,7 +109,8 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
               threads: int = 4, mem: str = "4GB", jobs: int = 1, attribution: bool = False) -> dict:
     """A base generation over `scans` (`find_scans`' doc; their files under `mount`) in `gen_dir`, every stage in turn
     (with `"generation": true` in its `scans.json` when some scan's sort carries the objects' `generation`):
-    ranges → path and read versions (`build_range`, checked against every scan) → folded (`fold_range`) → owner slices
+    ranges → path and read versions (`build_range`, checked against every scan) → folded (`fold_range`) → their churn
+    (`interval_churn.churn_gen`; `"churn": true` in `scans.json`) → owner slices
     (`build_slices_range`, checked) → slices with their path's total (`slice_totals_range`) → with `attribution`, the
     attribution table over the covered scans (`build_attribution_range`, checked; `"attribution": true`) → the served
     sorts (`cut`, dyadic segments over the scans' stamps) and their churn (`stats.json`). Returns a summary (rows, and per
@@ -139,6 +141,10 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
         bad += [(r["i"], s["id"]) for s in d["scans"] if not (s["eq"] and s["reads_eq"])]
         ist.fold_range(str(gen_dir), r["i"], gen_dir, con)
     t = done("versions", t)
+    # Churn on the folded path versions: a rollup across the ranges (a directory's files sit in others).
+    doc = ich.record_churn(doc)
+    ich.churn_gen(con, gen_dir, ranges["k"], ich.churn_from(doc["scans"])["ts"], work, jobs=jobs)
+    t = done("churn", t)
     # The owner axis, from the versions: a generation whose scans name no owner builds no slices.
     doc["slices"] = ist.owners_of(digests)
     if doc["slices"]:
@@ -166,16 +172,17 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
 # ── add: scans appended as runs ────────────────────────────────────────────
 
 
-def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, generation: bool = False, attributed: bool = False) -> dict[str, str]:
+def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, generation: bool = False, attributed: bool = False,
+                   churn: bool = False) -> dict[str, str]:
     """Key range `name`'s open versions after the newest of `runs` (run dirs, the manifest's order), refolded: the base's
     (`interval_append.base_state_sql` over the range files under `root`) and every run's delta rows (opened versions and
     close records, `pvf` carried), one row per version (`IDENT`) with the smallest `vt`, those still open. What the staged
     path reads from `state/<prev>/`, as `STATE_SCHEMA` relations (`interval_append.tables(sliced, attributed)`; the
     attribution table's from the base and runs holding it)."""
-    base = ia.base_state_sql(root, name, sliced, generation, attributed)
+    base = ia.base_state_sql(root, name, sliced, generation, attributed, churn)
     out = {}
     for t in ia.tables(sliced, attributed):
-        cols = ist.qcols(ia.state_schema(t, generation).names)
+        cols = ist.qcols(ia.state_schema(t, generation, churn).names)
         files = [f"{r}/{t}/{name}.parquet" for r in runs]
         if t in ist.ATTRIBUTION_SUBS:
             files = [f for f in files if Path(f).exists()]
@@ -202,6 +209,7 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     base = store.read_json("scans.json")
     sliced = ist.sliced(base)
     gen_col = ist.has_generation(base)
+    churn = ich.has_churn(base)
     prev = latest_key(store.keys("manifests/"), before=d)
     runs = store.read_json(prev)["runs"] if prev else []
     have = scans_of(base, runs)
@@ -218,19 +226,24 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     (run / "scans.json").write_text(json.dumps(pinned, indent=1) + "\n")
     ranges = store.read_json("ranges.json")
     roots = [str(gen_dir / r["key"]) for r in runs]
+    count = ich.counts_at(ia.scan_entry(store.read_json, base, have[-1]), scan)
     for r in ranges["ranges"]:
         name = f"r{r['i']:04d}"
-        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed), scan, r, name, run, bucket=base["bucket"],
-                              mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots], attributed=attributed)
+        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed, churn), scan, r, name, run,
+                              bucket=base["bucket"], mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots],
+                              attributed=attributed, churn=churn, count=count)
         doc["prev"] = have[-1]
         doc["check"]["runs"] = [x["key"] for x in runs]
         (run / "ranges").mkdir(exist_ok=True)
         (run / "ranges" / f"{name}.json").write_text(json.dumps(doc) + "\n")
+    if churn:
+        st = run / "state"
+        ich.apply_run(con, run, st, ranges, int(scan["ts"]), run, open_rows=lambda name: f"SELECT * FROM read_parquet({q(str(st / 'pvl' / f'{name}.parquet'))})")
     shutil.rmtree(run / "state")
     t1 = monotonic()
-    docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced, generation=gen_col)
+    docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced, generation=gen_col, churn=churn)
     cut_s = round(monotonic() - t1, 1)
-    cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col)
+    cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col, churn=churn)
     new = {"key": rk, "first": d, "last": d, "level": 0, "scans": [d]}
     meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs, ia.run_attribution(pinned)), "cut_s": cut_s, "check": cut,
             "check_s": round(monotonic() - t1 - cut_s, 1)}
@@ -253,7 +266,8 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
     dir), each published as a revision of it."""
     store = LocalRunStore(gen_dir, work / "lease", gen)
     base = store.read_json("scans.json")
-    carry = ia.carry(gen, k, threads=threads, mem=mem, rg_rows=rg_rows, sliced=ist.sliced(base), generation=ist.has_generation(base))
+    carry = ia.carry(gen, k, threads=threads, mem=mem, rg_rows=rg_rows, sliced=ist.sliced(base), generation=ist.has_generation(base),
+                     churn=ich.has_churn(base))
     return ar.merge_pending(store, carry, gen_dir, tmp=work / "merge", max_level=compact_level, heartbeat_s=None)
 
 
