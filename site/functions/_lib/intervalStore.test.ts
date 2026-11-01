@@ -1027,7 +1027,8 @@ describe('Δ diffs by descent', () => {
       } }).catch(e => (e as Error).message)
       if (typeof d === 'string' || why[0] !== 'work') continue
       handed++
-      expect([path, why, rows.length, rows[0] > 1, d]).toEqual([path, ['work'], 1, true, await buildDiff(at('g2', []), o)])
+      // Handed off before the first read: its planned groups alone pass 1 row, so nothing was decoded.
+      expect([path, why, rows, d]).toEqual([path, ['work'], [0], await buildDiff(at('g2', []), o)])
     }
     expect(handed).toBeGreaterThan(0)
   }, 120_000)
