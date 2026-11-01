@@ -1,7 +1,7 @@
 /** A Δ-mode diff by lazy descent over the interval store (specs/diff-from-changes.md, revision 3): P's children at both
  *  scans, then the children of the children whose net Δ can hold a cell, level by level. Reads only the `path` sort,
  *  so it needs no index beyond the store's; its cost follows the cells drawn (each expanded directory's children),
- *  not P's size nor the churn elsewhere. Unscoped diffs only, as `buildDiffChanges`.
+ *  not P's size nor the churn elsewhere. Unscoped diffs only (no lens, owner pool, class scope or filter: `buildDiff`).
  *
  *  A level reads, for every directory it expands, its children at both scans as `path` ranges (`readRects`), groups
  *  pruned by the floor at that depth. A child read on one side only is either absent on the other or under the floor
