@@ -89,13 +89,17 @@ def fetch(host: str, q: dict, token: str, retries: int = 6) -> tuple[int, dict |
     raise AssertionError("unreachable")
 
 
-def timing(st: str, keep: tuple[str, ...] = ("total", "cgroups", "changes", "views", "walk")) -> str:
-    """The `Server-Timing` phases worth a line: `keep`, and the descent's levels (`L1`, `L2`, …)."""
+def timing(st: str, keep: tuple[str, ...] = ("total", "views", "walk", "plan", "descent-rows")) -> str:
+    """The `Server-Timing` phases worth a line: `keep` (`descent-rows` is the descent's rows read, a count), the descent's levels
+    (`L1`, `L2`, …) and its `handoff` (which bail-out declined: `breadth`, `budget` or `work`)."""
     out = []
     for part in st.split(","):
         name, *kv = [x.strip() for x in part.split(";")]
         dur = next((x[4:] for x in kv if x.startswith("dur=")), "")
-        if name in keep or (name[:1] == "L" and name[1:].isdigit()):
+        if name == "handoff":
+            desc = next((x[5:].strip('"') for x in kv if x.startswith("desc=")), "")
+            out.append(f"handoff[{desc.split(':')[0]}]={dur}")
+        elif name in keep or (name[:1] == "L" and name[1:].isdigit()):
             out.append(f"{name}={dur}")
     return " ".join(out)
 

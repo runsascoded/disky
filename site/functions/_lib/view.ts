@@ -2332,6 +2332,9 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   descent?: boolean
   /** With `descent`: never hand off (tests of the descent itself). */
   noHandOff?: boolean
+  /** With `descent`: its running-cost budgets (`DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS` by default; tests). */
+  descentBudgetMs?: number
+  descentBudgetRows?: number
 }
 
 export interface DiffRow {
@@ -2483,9 +2486,10 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   if (o.descent) {
     const { buildDiffDescent, HandOff } = await import('./diffDescent.js')
     try {
-      return await buildDiffDescent(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}), ...(o.noHandOff ? { noHandOff: true } : {}), ...(o.threshold !== undefined ? { threshold: o.threshold } : {}) })
+      return await buildDiffDescent(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}), ...(o.noHandOff ? { noHandOff: true } : {}), ...(o.threshold !== undefined ? { threshold: o.threshold } : {}), ...(o.descentBudgetMs !== undefined ? { budgetMs: o.descentBudgetMs } : {}), ...(o.descentBudgetRows !== undefined ? { budgetRows: o.descentBudgetRows } : {}) })
     } catch (e) {
-      // The planner declined (a busy, broad P): the as-of walk, as it is (`tier` says which answered).
+      // The planner (a busy, broad P) or the budget (a deep, busy one) declined: the as-of walk, as it is (`tier` says
+      // which answered, Server-Timing `handoff` which declined).
       if (!(e instanceof HandOff)) throw e
     }
   }

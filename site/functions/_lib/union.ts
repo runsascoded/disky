@@ -134,15 +134,15 @@ export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promi
     if (!c.env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
     if (!storeReady(c.env)) return json({ error: 'index reader not configured (missing index store creds)' }, 503)
   }
-  let id: Identity | null = null
-  if (gate) {
-    for (const c of ctxs) {
-      const g = await requireViewer(c as never)
-      if (g instanceof Response) return g
-      id ??= g
-    }
-  }
-  return { view, ctxs, obs: await Promise.all(ctxs.map(c => observations(c.env))), id }
+  // Each member's gate and its observations, all at once (in turn they were most of a union request's time before its
+  // member's diff, cache hits included: r2, 0.4–0.8 s).
+  const [gates, obs] = await Promise.all([
+    gate ? Promise.all(ctxs.map(c => requireViewer(c as never))) : Promise.resolve([]),
+    Promise.all(ctxs.map(c => observations(c.env))),
+  ])
+  const refused = gates.find(g => g instanceof Response)
+  if (refused) return refused as Response
+  return { view, ctxs, obs, id: (gates[0] as Identity | undefined) ?? null }
 }
 
 /** The `at`-form param beside a scan-id param: `date` → `at`, `from` → `from_at`, `to` → `to_at`. */
