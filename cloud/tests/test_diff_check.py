@@ -37,8 +37,8 @@ def test_timing_keeps_the_totals_and_levels():
 
 
 def test_timing_names_the_handoff():
-    st = 'L1;dur=20, plan;dur=21;desc="1 to expand (max 2)", L2;dur=900, handoff;dur=1000;desc="budget: L3 over 1000 ms", walk;dur=700, total;dur=1750'
-    assert timing(st) == "L1=20 plan=21 L2=900 handoff[budget]=1000 walk=700 total=1750"
+    st = 'L1;dur=20, plan;dur=21;desc="1 to expand (max 2)", descent-rows;dur=6120;desc="6120 rows read", handoff;dur=310;desc="work: 6120 rows read (max 5000)", walk;dur=700, total;dur=1050'
+    assert timing(st) == "L1=20 plan=21 descent-rows=6120 handoff[work]=310 walk=700 total=1050"
 
 
 def test_a_row_b_cut_into_its_parents_other_is_excused_when_b_is_truncated():

@@ -174,6 +174,13 @@ hf `/`, spaces, buckets 149–524 ms) and handed broad ones to the walk at no me
   timing: one request can come back from the descent once and from the walk another time. Both are exact and every
   expanded row sums, but the drawn rows can differ (the descent's finer floor), so which one an edge-cached body holds
   is whichever answered first. Accepted: it is a choice between two correct answers, not between right and wrong.
+- **Work budget** (r2, after the time budget): a Worker's clock advances only across I/O, so the time budget never sees
+  the descent's CPU, and a timer can't fire during it (r2 `marin-na`: 1.44 s of Server-Timing against 3.7 s wall).
+  `DESCENT_BUDGET_ROWS` (5,000) counts the rows the descent's reads return, both sides and unfloored re-reads, checked
+  after each read; past it, `HandOff('work')`. Server-Timing `descent-rows` carries the count (its dur). Set against gcs dev
+  (its one kept case with work, `checkpoints` over a week: 3,706 children, ≈ 7.5K rows, 2.8 s against the walk's
+  0.5 s, trips) and r2 `marin-na` (L4 alone 9,261 children); hf's and cw's kept cases are to confirm from their
+  `descent-rows`. The time budget stays as a guard for I/O stalls.
 
 `changes` has no reader: its write path (`cut_gen`, `cut_run`, the staged `cut`), `interval-store changes` /
 `backfill-changes`, the reader (`readChanges`, `buildDiffChanges`, `DIFF_FROM_CHANGES`) and its fixtures are removed.
