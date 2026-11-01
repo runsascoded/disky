@@ -132,3 +132,26 @@ describe('every response names the build serving it (`x-disky-build: <sha> <time
     expect(got.map(r => [r.status, r.headers.get('x-disky-build')])).toEqual([[400, buildId()], [404, buildId()], [302, buildId()]])
   })
 })
+
+describe('middleware timing', () => {
+  const names = (r: Response) => (r.headers.get('server-timing') ?? '').split(', ').map(x => x.split(';')[0])
+  it('an /api/ answer leads its Server-Timing with the middleware\'s phases and the isolate, before the route\'s own', async () => {
+    const res = await onRequest({ request: new Request('https://gcs.example.test/api/x'), env: {} as never, next: async () => new Response('{}', { headers: { 'content-type': 'application/json', 'server-timing': 'total;dur=5' } }) })
+    expect(names(res)).toEqual(['mw-gate', 'mw-anon', 'mw-next', 'mw', 'isolate', 'total'])
+    expect(res.headers.get('server-timing')).toMatch(/isolate;dur=0;desc="(cold|warm \d+)"/)
+  })
+  it('a page or an asset keeps its headers as Pages sent them', async () => {
+    const res = await onRequest({ request: new Request('https://gcs.example.test/robots.txt'), env: {} as never, next: async () => new Response('ok', { headers: { 'content-type': 'text/plain' } }) })
+    expect(res.headers.get('server-timing')).toBe(null)
+  })
+})
+
+describe('identify', () => {
+  it('is one lookup per request and env: the gate\'s and the route\'s calls share it; another env (a union member) has its own', async () => {
+    const { identify } = await import('./_lib/auth')
+    const request = new Request('http://localhost/api/x')
+    const [e1, e2] = [{} as never, {} as never]
+    const [a, b, c] = [identify({ request, env: e1 } as never), identify({ request, env: e1 } as never), identify({ request, env: e2 } as never)]
+    expect([a === b, a === c, (await a)?.via]).toEqual([true, false, 'session'])
+  })
+})
