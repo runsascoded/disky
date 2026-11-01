@@ -31,13 +31,23 @@ export const DESCENT_V = 3
  *  1.4–3.0 s; at ≥ 4, 0.3–19 s against 1.8–3.5 s), not per deployment. */
 export const DESCENT_MAX_EXPANDABLE = 2
 
-/** The descent's planner declines (`DESCENT_MAX_EXPANDABLE`): `buildDiff` answers with the as-of walk. */
+/** The running-cost bail-out: past this many ms since it started (a round in flight is raced against it, not waited
+ *  out), the descent hands off to the walk, so its worst case is about this plus the walk. The planner can't see a deep,
+ *  busy subtree from P's children (r2's `marin-na`: L1–L6 0.2 s, then one L7 round of 0.8–3.5 s, 2.6–7.4 s against
+ *  the walk's 0.5–1.5 s). Over every kept gcs dev case (server-side totals 150–1,006 ms; the 1,006 ms one is slower
+ *  than its walk too), hf's (149–524 ms wall) and cw's two slower ones (+0.4, +0.6 s, which it now hands off). */
+export const DESCENT_BUDGET_MS = 1000
+
+/** The descent declines: `breadth`, the planner (`DESCENT_MAX_EXPANDABLE`, `detail` = P's children to expand); `budget`,
+ *  its running cost (`DESCENT_BUDGET_MS`, `detail` = ms spent). `buildDiff` answers with the as-of walk. */
 export class HandOff extends Error {
-  constructor(readonly expandable: number) {
-    super(`descent hands off: ${expandable} of P's children to expand`)
+  constructor(readonly why: 'breadth' | 'budget', readonly detail: number) {
+    super(why === 'breadth' ? `descent hands off: ${detail} of P's children to expand` : `descent hands off: over its budget after ${Math.round(detail)} ms`)
     this.name = 'HandOff'
   }
 }
+
+const BUDGET = Symbol('budget')
 
 /** Directories one round expands at most (largest |Δ| first). */
 const ROUND_PARENTS = 64
@@ -72,6 +82,8 @@ export interface DescentOpts {
   noHandOff?: boolean
   /** A fixed floor for P's children instead of `|Δ P| · minArea / (w·h)`: a union root's common threshold. */
   threshold?: number
+  /** The running-cost budget (`DESCENT_BUDGET_MS` by default; tests of the planner alone pass `Infinity`). */
+  budgetMs?: number
 }
 
 export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff> {
@@ -141,7 +153,25 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     const take = frontier.filter(expandable).slice(0, ROUND_PARENTS)
     if (!take.length) break
     const t0 = performance.now()
-    const { out, reads } = await level(take)
+    const budget = o.budgetMs ?? DESCENT_BUDGET_MS
+    if (!o.noHandOff && t0 - tStart >= budget) {
+      o.trace?.('handoff', t0 - tStart, `budget: before L${levels + 1}, ${budget} ms`)
+      throw new HandOff('budget', t0 - tStart)
+    }
+    const round = level(take)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const res = o.noHandOff || budget === Infinity ? await round : await Promise.race([
+      round,
+      new Promise<typeof BUDGET>(r => { timer = setTimeout(() => r(BUDGET), Math.max(0, budget - (t0 - tStart))) }),
+    ]).finally(() => clearTimeout(timer))
+    if (res === BUDGET) {
+      // The round goes on unawaited; its reads are dropped (a rejection too).
+      round.catch(() => {})
+      const spent = performance.now() - tStart
+      o.trace?.('handoff', spent, `budget: L${levels + 1} over ${budget} ms`)
+      throw new HandOff('budget', spent)
+    }
+    const { out, reads } = res
     levels++
     o.trace?.(`L${levels}`, performance.now() - t0, `${take.length} parents, ${out.size} children, ${reads} reads`)
     if (levels === 1) {
@@ -154,7 +184,10 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
       }).length
       // Server-Timing `plan`: the descent's time up to the decision (what a handoff spent), the count in its desc.
       o.trace?.('plan', performance.now() - tStart, `${expandable} to expand (max ${DESCENT_MAX_EXPANDABLE})`)
-      if (expandable > DESCENT_MAX_EXPANDABLE && !o.noHandOff) throw new HandOff(expandable)
+      if (expandable > DESCENT_MAX_EXPANDABLE && !o.noHandOff) {
+        o.trace?.('handoff', performance.now() - tStart, `breadth: ${expandable} to expand`)
+        throw new HandOff('breadth', expandable)
+      }
     }
     const kids = new Map<string, string[]>()
     for (const p of [...out.keys()].sort()) {
