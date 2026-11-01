@@ -15,7 +15,7 @@
 import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
 import { type Env, type Identity, json, requireViewer } from '../_lib/auth.js'
 import { DESCENT_V } from '../_lib/diffDescent.js'
-import { ChangesUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
+import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg } from '../_lib/view.js'
@@ -133,12 +133,11 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     // `atten ≥ 1`: a parent's floor is then at most its children's, so a changed child's parent (as big) is read too.
     const deltaOk = url.searchParams.get('dm') === 'delta' && intervalsOn(ctx.env) && !lens && !owner && !query && !classes && !summary && !member && atten >= 1
     const descent = deltaOk && ctx.env.DIFF_DESCENT === '1'
-    const fromChanges = deltaOk && !descent && ctx.env.DIFF_FROM_CHANGES === '1'
     const cacheKey = cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
       `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
         `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
         // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).
-        (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent ? `&dm=d${DESCENT_V}` : fromChanges ? '&dm=c' : ''),
+        (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent ? `&dm=d${DESCENT_V}` : ''),
       storeKey(ctx.env),
     )
     // …and both scans covered by the static index for this literal (else `scan-not-indexed`).
@@ -149,7 +148,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
     const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; walkMs?: number; trace?: typeof st.trace } = {}) => {
-      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}), ...(fromChanges ? { fromChanges } : {}), ...(descent ? { descent } : {}) }))
+      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}), ...(descent ? { descent } : {}) }))
       // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
       const keep = keepFor(diff)
       const body = JSON.stringify({
@@ -183,7 +182,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     if (e instanceof NotFound) return new Response('path not found in either scan', { status: 404 })
     if (e instanceof FilterRejected) return new Response(rejectBody(e.reject), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof LensUnavailable) return new Response('lens index not available for a scan', { status: 409 })
-    if (e instanceof ChangesUnavailable) return new Response(e.message, { status: 409 })
+    if (e instanceof DiffUnavailable) return new Response(e.message, { status: 409 })
     const msg = String((e as Error).message ?? e)
     if (msg.startsWith('query too wide')) return new Response(msg, { status: 413 })
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })

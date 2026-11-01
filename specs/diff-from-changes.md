@@ -1,6 +1,6 @@
 # Δ-mode diffs from the interval store's changes, not from two as-of views
 
-**Status:** proposal, 2026-10-31. Shared (`[cloud]`: `site/functions/_lib/view.ts`, `_lib/index.ts`, `cloud/src/dt_cloud/interval_store.py` / `interval_compact.py`). Nothing is implemented.
+**Status:** revision 3 (2026-11-01) supersedes the `changes` design below; kept for the record. Originally a proposal, 2026-10-31. Shared (`[cloud]`: `site/functions/_lib/view.ts`, `_lib/index.ts`, `cloud/src/dt_cloud/interval_store.py` / `interval_compact.py`). Nothing is implemented.
 
 ## Problem
 
@@ -142,6 +142,35 @@ scan 1 GB: 5 / 375 vs 6 / 988), worse over a week (root 1 GB: 58 / 38.6K plus 33
 4. The planner (with the measured per-source costs) and the union path.
 5. Dev comparison across 1 scan / 1 day / 1 week at root, buckets and quiet subtrees: every case no slower than the walk
    (cold and warm), rows and totals equal; then prod per deployment.
+
+## Revision 3 (2026-11-01): lazy descent over the interval store, with a planner; `changes` retired
+
+The `changes` sorts answered exactly (every gcs dev case equal to the walk) but no ordering of them was cheap across
+deployments: the size order can't prune by path, a path order can't prune broad ranges by size, and every change makes
+a transition on each ancestor. Revision 2's planner over three readers would have tuned a gcs-specific cost model.
+
+What replaces them reads only the interval store's `path` sort (`_lib/diffDescent.ts`, `DIFF_DESCENT`):
+- **Descent.** A round reads, for the directories it expands, their children at both scans as `path` ranges at each
+  depth's floor; a child read on one side takes the other from its own version when that version spans both scans,
+  else its parent is read again unfloored on that side (a range, never a point lookup). A directory expands when it
+  changed and its net |Δ| clears its children's floor (moves inside an unchanged directory aren't opened). Best first:
+  one queue by |Δ| across depths, 64 parents a round, until `top` changed rows are drawn (`expansions_skipped`).
+- **Planner.** After P's children (the first round), the descent continues only when at most `DESCENT_MAX_EXPANDABLE`
+  (2) of them need expanding; otherwise `HandOff`, and `buildDiff` runs the as-of walk unchanged. `tier` names the
+  reader; Server-Timing `plan` is the time to the decision.
+- **`(other)` from the invariant** for every reader (`capDiffRows`): an expanded row's totals less its drawn children,
+  objects-only ones kept; the walk's own `(other)` emits zero-byte objects too.
+- **Cache versions.** `CACHE_V` 8 for the `(other)` changes; the descent's answers carry `DESCENT_V` in their key.
+
+Acceptance (`dt-cloud diff-check -t descent,bysize,path`): gcs 18/18, hf 30/30, cw 17/17, cold and warm. The planner
+kept the descent for quiet or narrow subtrees (gcs `common_pile`/`checkpoints` 0.4–0.6 s against the walk's 1.4–3.0 s;
+hf `/`, spaces, buckets 149–524 ms) and handed broad ones to the walk at no measurable cost (`L1=0`). Kept and slower:
+2 of cw's (+0.4, +0.6 s), deep and narrow; a running-cost bail-out was judged not worth adding.
+
+`changes` has no reader: its write path (`cut_gen`, `cut_run`, the staged `cut`), `interval-store changes` /
+`backfill-changes`, the reader (`readChanges`, `buildDiffChanges`, `DIFF_FROM_CHANGES`) and its fixtures are removed.
+The files already backfilled on each deployment (gcs: 3.6 GiB on GCS and on R2) are left until Ryan's go to delete
+them. Prod `DIFF_DESCENT`: per deployment, on Ryan's go.
 
 ## Open items
 

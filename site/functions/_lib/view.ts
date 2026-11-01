@@ -2327,9 +2327,6 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   /** The walk's lookup budgets, `LOOKUP_CAP` and (filtered) `FILTER_WALK_MS` by default (tests). */
   lookupCap?: number
   walkMs?: number
-  /** A Δ-mode diff from the interval store's transitions (`buildDiffChanges`, specs/diff-from-changes.md): set by the
-   *  route for an unscoped `dm=delta` request on a deployment with `DIFF_FROM_CHANGES`. */
-  fromChanges?: boolean
   /** …by lazy descent over the interval store instead (`buildDiffDescent`): the route sets it with `DIFF_DESCENT`. Its
    *  planner hands a busy, broad P to the as-of walk (`HandOff`). */
   descent?: boolean
@@ -2491,10 +2488,6 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       // The planner declined (a busy, broad P): the as-of walk, as it is (`tier` says which answered).
       if (!(e instanceof HandOff)) throw e
     }
-  }
-  if (o.fromChanges) {
-    const { buildDiffChanges } = await import('./diffChanges.js')
-    return buildDiffChanges(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}) })
   }
   const env = sliced(asOfScans(env0, [o.from, o.to]), o)
   const { from, to, path, lens, owner, query } = o

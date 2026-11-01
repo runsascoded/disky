@@ -23,7 +23,6 @@ from dt_cloud import blobstore as bs
 from dt_cloud import interval_append as ia
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
-from dt_cloud import interval_changes as ic
 from dt_cloud import static_names as sn
 
 #: Four scans in the base (three v1 indexes, one v2 store generation), then four appended (v2, a timed id among them).
@@ -99,8 +98,6 @@ def staged(world, local, tmp_path_factory):
     for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
         ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, base / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=RG,
                          stamps=[s["ts"] for s in scans[:BASE]])
-    ic.write_changes(con, f"read_parquet('{base}/pv/r*.parquet')", base / "served" / f"{ist.CHANGES}.parquet", scans[0]["ts"],
-                     ic.listed_from(scans[:BASE]), rg_rows=RG)
     runs, prev = {}, None
     for s in scans[BASE:]:
         out = tmp / "runs" / s["id"]
@@ -121,7 +118,7 @@ def test_build_writes_the_staged_generation(world, local, staged):
         want = {k: v for k, v in _parquets(staged["base"]).items() if k.startswith(f"{sub}/")}
         assert sorted(got) == sorted(want) and got == want, sub
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
-        [*(f"{s}{x}" for s in [*ist.served_sorts(True), ist.CHANGES] for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+        [*(f"{s}{x}" for s in ist.served_sorts(True) for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     assert json.loads((gen / "scans.json").read_text()) == {
         "bucket": str(world["root"]), "layouts": [LAYOUT],
         "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": True}
@@ -158,7 +155,7 @@ def test_each_run_is_the_staged_append(world, local, staged):
     for d, run in staged["runs"].items():
         got = _parquets(local["gen"] / "deltas" / d)
         assert sorted(got) == sorted([*(f"{t}/r{i:04d}.parquet" for t in ia.tables() for i in range(k)),
-                                      *(f"served/{s}{x}" for s in [*ia.run_sorts(), ist.CHANGES] for x in (".parquet", ".groups.parquet"))]), d
+                                      *(f"served/{s}{x}" for s in ia.run_sorts() for x in (".parquet", ".groups.parquet"))]), d
         assert got == {key: v for key, v in _parquets(run).items() if not key.startswith("state/")}, d
 
 
@@ -416,15 +413,15 @@ def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
         "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": False}
     assert json.loads((gen / "served" / "stats.json").read_text())["slices"] is False
     s = unowned["summary"]
-    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "changes", "path", "reads"])
+    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "path", "reads"])
     assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", "verify"]
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
-        [*(f"{x}{e}" for x in ("path", "bysize", "reads", "changes") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+        [*(f"{x}{e}" for x in ("path", "bysize", "reads") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     k = json.loads((gen / "ranges.json").read_text())["k"]
     merged = ar.run_key(ids[0], ids[-1])
     for key in [*(f"deltas/{d}" for d in ids), merged]:
         assert sorted(_parquets(gen / key)) == sorted([*(f"pvl/r{i:04d}.parquet" for i in range(k)),
-                                                       *(f"served/{x}{e}" for x in ("path", "bysize", "changes") for e in (".parquet", ".groups.parquet"))]), key
+                                                       *(f"served/{x}{e}" for x in ("path", "bysize") for e in (".parquet", ".groups.parquet"))]), key
     newest = json.loads((gen / "manifests" / f"{ids[-1]}.m001.json").read_text())
     assert [(r["key"], r["scans"]) for r in newest["runs"]] == [(merged, ids)]
 
@@ -488,7 +485,7 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
         ["build-ranges", *common, "-r", every, "-S"],
         ["fold", *common, "-i", "0", "-n", str(k)],
         ["fold", *common, "-i", "0", "-n", str(k), "-S"],
-        ["cut", *common, "-r", str(RG), *(x for s in [*ist.SORTS, ist.CHANGES] for x in ("-s", s))],
+        ["cut", *common, "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))],
         ["cut", *common, "-i", str(ist.CUT_TASKS.index("stats"))],
     ]
     for args in stages:
@@ -500,7 +497,7 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
     assert _parquets(prefix) == base
     # A cut into a new generation (`-O`) gives it its own ranges and base, not just the served sorts: self-contained.
     common = [*common[:4], "-o", str(tmp_path / "out2"), *common[6:]]
-    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in [*ist.SORTS, ist.CHANGES] for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(ist.CUT_TASKS.index("stats"))]]:
+    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(ist.CUT_TASKS.index("stats"))]]:
         res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
         assert res.exit_code == 0, (args, res.output)
     g2 = store / ist.PREFIX / "g2"
@@ -662,127 +659,3 @@ def test_verify_diffs_count_changes_only_when_asked(world, local, tmp_path):
     ts = {s["id"]: s["ts"] for s in world["scans"]}
     assert [r["changes"]["versions"] for r in recs] == [st.changes(ts[r["from"]], ts[r["to"]], r["path"], ir.Cost()) for r in recs]
 
-
-def test_base_and_runs_transitions_are_a_full_builds(world, local, tmp_path):
-    """The base's `changes` and each run's (the newest manifest's runs, carried or not) hold, together, exactly the
-    transitions a fresh build over every scan cuts: the v1 → v2 switch's file openings dropped in both."""
-    full = tmp_path / "full"
-    res = CliRunner().invoke(il.build_cmd, ["-g", "f", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(full), "-w", str(tmp_path / "work"),
-                                            "-k", "3", "-r", str(RG), "-p", "2", "-M", "1GB", "-t", DATES[-1]], catch_exceptions=False)
-    assert res.exit_code == 0, res.output
-    key = lambda r: (r["b"], r["depth"], r["path"])  # noqa: E731
-    want = sorted(pq.read_table(full / ist.PREFIX / "f" / "served" / f"{ist.CHANGES}.parquet").to_pylist(), key=key)
-    gen = local["gen"]
-    newest = sorted((gen / "manifests").glob("*.json"))[-1]
-    runs = [gen / r["key"] for r in json.loads(newest.read_text())["runs"]]
-    got = pq.read_table(gen / "served" / f"{ist.CHANGES}.parquet").to_pylist()
-    for r in runs:
-        got += pq.read_table(r / "served" / f"{ist.CHANGES}.parquet").to_pylist()
-    assert len(want) > 0 and sorted(got, key=key) == want
-
-
-def test_backfill_changes_restores_a_generations_sorts_byte_for_byte(local, tmp_path):
-    """A generation cut before the `changes` sort (its base's and runs' files removed) gets them back from
-    `backfill-changes`, byte for byte what the cut wrote; a second run cuts nothing."""
-    store = tmp_path / "store"
-    shutil.copytree(local["store"], store)
-    gen = store / ist.PREFIX / "g"
-    cut = {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob(f"served/{ist.CHANGES}*.parquet"))}
-    for p in gen.rglob(f"served/{ist.CHANGES}*"):
-        p.unlink()
-    args = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG)]
-    res = CliRunner().invoke(ic.backfill_changes_cmd, args, catch_exceptions=False)
-    assert res.exit_code == 0, res.output
-    # The base and the runs the newest manifest lists (folded runs still on disk are not the reader's).
-    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
-    assert [json.loads(line)["key"] for line in res.stdout.splitlines()] == ["base", *runs]
-    assert {p.relative_to(gen).as_posix(): p.read_bytes() for p in sorted(gen.rglob(f"served/{ist.CHANGES}*.parquet"))} == {
-        k: v for k, v in cut.items() if k.startswith("served/") or k.split("/served/")[0] in runs}
-    again = CliRunner().invoke(ic.backfill_changes_cmd, [*args, "-n"], catch_exceptions=False)
-    assert json.loads(again.stdout) == {"gen": "g", "cut": []}
-
-
-def test_backfill_changes_copies_to_r2_without_cutting_again(local, tmp_path, monkeypatch):
-    """`-R`: each dir's `changes` files go to R2 after the store has them; a dir the store has but R2 lacks is copied, not
-    cut again; `-n -R` reports both; nothing is left to do after. A compacted generation is refused."""
-    store = tmp_path / "store"
-    shutil.copytree(local["store"], store)
-    gen = store / ist.PREFIX / "g"
-    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
-    for p in gen.glob(f"served/{ist.CHANGES}*"):
-        p.unlink()
-    on_r2: set[str] = {f"{ist.PREFIX}/g/{runs[0]}/served/{ist.CHANGES}"}  # one run already on R2: neither cut nor copied
-    copied: list[str] = []
-
-    def fake(st, key_prefix, *, check=False):
-        assert Path(st.uri("")).exists() and (Path(st.uri("")) / f"{key_prefix}.json").exists()  # the store has it first
-        if check:
-            return [] if key_prefix in on_r2 else [f"{key_prefix}.json"]
-        copied.append(key_prefix)
-        on_r2.add(key_prefix)
-        return []
-
-    monkeypatch.setattr(ic, "r2_publish_changes", fake)
-    args = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG), "-R"]
-    dry = CliRunner().invoke(ic.backfill_changes_cmd, [*args, "-n"], catch_exceptions=False)
-    assert json.loads(dry.stdout) == {"gen": "g", "cut": [""], "r2": ["", *runs[1:]]}
-    res = CliRunner().invoke(ic.backfill_changes_cmd, args, catch_exceptions=False)
-    assert res.exit_code == 0, res.output
-    assert [(d["key"], "rows" in d, d["r2"]) for d in map(json.loads, res.stdout.splitlines())] == [
-        ("base", True, True), *((k, False, True) for k in runs[1:])]
-    assert copied == [f"{ist.PREFIX}/g/{k + '/' if k else ''}served/{ist.CHANGES}" for k in ["", *runs[1:]]]
-    assert json.loads(CliRunner().invoke(ic.backfill_changes_cmd, [*args, "-n"], catch_exceptions=False).stdout) == {"gen": "g", "cut": [], "r2": []}
-    (gen / "successor.json").write_text(json.dumps({"gen": "g.c001"}))
-    refused = CliRunner().invoke(ic.backfill_changes_cmd, args)
-    assert (refused.exit_code, refused.output.strip().splitlines()[-1]) == (1, f"backfill-changes {ist.PREFIX}/g: compacted into g.c001; backfill that")
-
-
-def test_backfill_changes_stops_when_the_generation_is_compacted_meanwhile(local, tmp_path, monkeypatch):
-    """A compaction finishing mid-backfill (`successor.json` appearing after the start): the backfill stops before its
-    next dir, adding nothing more to the old generation."""
-    store = tmp_path / "store"
-    shutil.copytree(local["store"], store)
-    gen = store / ist.PREFIX / "g"
-    for p in gen.rglob(f"served/{ist.CHANGES}*"):
-        p.unlink()
-    write = ic.write_changes
-
-    def compacting(*a, **kw):  # the base's cut: a compaction lands meanwhile
-        (gen / "successor.json").write_text(json.dumps({"gen": "g.c001"}))
-        return write(*a, **kw)
-
-    monkeypatch.setattr(ic, "write_changes", compacting)
-    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
-    args = ["-b", str(store), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG)]
-    res = CliRunner().invoke(ic.backfill_changes_cmd, args)
-    assert res.exit_code == 1
-    assert res.output.strip().splitlines()[-1] == f"backfill-changes {ist.PREFIX}/g: compacted into g.c001 meanwhile; stopped before {runs[0]} (backfill that)"
-    assert sorted(p.relative_to(gen).as_posix() for p in gen.rglob(f"served/{ist.CHANGES}.json")) == ["served/changes.json"]
-
-
-def test_backfill_changes_mirrors_a_url_stores_inputs(local, tmp_path):
-    """A URL store without `-m` (DuckDB reads no `r2://`; `memory://` stands in): each dir's inputs are mirrored into
-    `-w` before its cut and removed after, and the sorts come out byte for byte the cut's."""
-    import fsspec
-
-    fs = fsspec.filesystem("memory")
-    gen = local["store"] / ist.PREFIX / "g"
-    runs = [r["key"] for r in json.loads(sorted((gen / "manifests").glob("*.json"))[-1].read_text())["runs"]]
-    want = {}
-    for p in sorted(local["store"].rglob("*")):
-        if not p.is_file():
-            continue
-        rel = p.relative_to(local["store"]).as_posix()
-        if f"/served/{ist.CHANGES}" in rel:
-            if rel.endswith(".parquet") and (f"g/served/{ist.CHANGES}" in rel or any(f"g/{k}/served/" in rel for k in runs)):
-                want[rel] = p.read_bytes()
-            continue
-        fs.pipe(f"/bf/{rel}", p.read_bytes())
-    work = tmp_path / "work"
-    args = ["-b", "memory://bf", "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "spill"), "-M", "1GB", "-p", "2", "-r", str(RG), "-w", str(work)]
-    res = CliRunner().invoke(ic.backfill_changes_cmd, args, catch_exceptions=False)
-    assert res.exit_code == 0, res.output
-    assert [json.loads(line)["key"] for line in res.stdout.splitlines()] == ["base", *runs]
-    assert {k: fs.cat(f"/bf/{k}") for k in want} == want
-    assert sorted(p.name for p in work.iterdir()) == []
-    fs.rm("/bf", recursive=True)
