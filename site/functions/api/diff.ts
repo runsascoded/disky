@@ -204,7 +204,17 @@ export type MemberChange = 'changed' | 'unchanged' | 'unknown'
  * member (at `to`, else at `from`) answers — an unchanged one its one scan against itself (every total equal, no
  * rows); an unknown one is a 409.
  */
+/** A union response with the union's own time before its members' reads first in its Server-Timing (`union`: gates,
+ *  observations, cutoffs, the drilled member's lookup), which the member's entries don't cover. */
+function withUnionTiming(r: Response, ms: number): Response {
+  const out = new Response(r.body, r)
+  const st = r.headers.get('server-timing')
+  out.headers.set('server-timing', `union;dur=${Math.round(ms)}${st ? `, ${st}` : ''}`)
+  return out
+}
+
 async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
+  const t0 = performance.now()
   const url = new URL(ctx0.request.url)
   const sp = url.searchParams
   const path = (sp.get('path') ?? '').replace(/\/+$/, '')
@@ -231,7 +241,8 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       if (!m) return new Response('path not found in either scan', { status: 404 })
       const p = pairs[view.members.indexOf(m.store)]
       if (p.change === 'unknown') return json({ error: `store '${p.store}' has no scan by ${p.from ? ct.date : cf.date}: its change is unknown`, union: { view: view.key, sources } }, 409)
-      return ask(p, { id: un.id })
+      const pre = performance.now() - t0
+      return withUnionTiming(await ask(p, { id: un.id }), pre)
     }
     const scoped = (['lens', 'o', 'cl'] as const).filter(k => sp.get(k))
     if (scoped.length) return new Response(`a union view's root is unscoped (${scoped.join(', ')}: drill into one store)`, { status: 400 })
@@ -241,11 +252,13 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
     const comparable = pairs.filter(p => p.change !== 'unknown')
     const q = sp.get('q') ?? ''
     if (q.trim()) {
+      const pre = performance.now() - t0
       const answer = await unionFilteredDiff(view, comparable, (p, threshold) => ask(p, { id: un.id, ...(threshold === undefined ? {} : { threshold }) }), { w, h, minArea })
       if (answer instanceof Response) return answer
       const { reads, refused, ...body } = answer
       return new Response(JSON.stringify({ prev: cf.date, curr: ct.date, path, q, ...body, union: { view: view.key, sources: sources.map(s => refusedOf(s, refused)) } }), { headers: {
         'content-type': 'application/json; charset=utf-8',
+        'server-timing': `union;dur=${Math.round(pre)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
         'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
       } })
     }
@@ -254,6 +267,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
     const threshold = (Math.max(side(0), side(1)) * minArea) / (w * h)
     // A changed member's diff is read; an unchanged one's is its root total on both sides (no rows: nothing moved).
     const changed = comparable.filter(p => p.change === 'changed')
+    const pre = performance.now() - t0
     const reads = await Promise.all(changed.map(p => ask(p, { id: un.id, threshold })))
     const bad = reads.find(r => !r.ok)
     if (bad) return bad
@@ -276,6 +290,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       union: { view: view.key, sources },
     }), { headers: {
       'content-type': 'application/json; charset=utf-8',
+      'server-timing': `union;dur=${Math.round(pre)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
       'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
     } })
   } catch (e) {
