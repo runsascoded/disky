@@ -3440,6 +3440,8 @@ from .static_compact import compact_cmd as _static_compact  # noqa: E402
 _static_names.add_command(_static_compact)
 main.add_command(_static_names)
 
+from .diff_check import diff_check_cmd as _diff_check  # noqa: E402
+main.add_command(_diff_check)
 from .interval_store import cli as _interval_store  # noqa: E402
 from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
 from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
