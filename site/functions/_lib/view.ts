@@ -2330,8 +2330,11 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   /** A Δ-mode diff from the interval store's transitions (`buildDiffChanges`, specs/diff-from-changes.md): set by the
    *  route for an unscoped `dm=delta` request on a deployment with `DIFF_FROM_CHANGES`. */
   fromChanges?: boolean
-  /** …by lazy descent over the interval store instead (`buildDiffDescent`): the route sets it with `DIFF_DESCENT`. */
+  /** …by lazy descent over the interval store instead (`buildDiffDescent`): the route sets it with `DIFF_DESCENT`. Its
+   *  planner hands a busy, broad P to the as-of walk (`HandOff`). */
   descent?: boolean
+  /** With `descent`: never hand off (tests of the descent itself). */
+  noHandOff?: boolean
 }
 
 export interface DiffRow {
@@ -2481,8 +2484,13 @@ const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null
  * churn, truthfully. */
 export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   if (o.descent) {
-    const { buildDiffDescent } = await import('./diffDescent.js')
-    return buildDiffDescent(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}) })
+    const { buildDiffDescent, HandOff } = await import('./diffDescent.js')
+    try {
+      return await buildDiffDescent(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}), ...(o.noHandOff ? { noHandOff: true } : {}) })
+    } catch (e) {
+      // The planner declined (a busy, broad P): the as-of walk, as it is (`tier` says which answered).
+      if (!(e instanceof HandOff)) throw e
+    }
   }
   if (o.fromChanges) {
     const { buildDiffChanges } = await import('./diffChanges.js')

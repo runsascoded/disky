@@ -32,6 +32,8 @@ export interface ChangesOpts {
   top: number
   depth?: number
   trace?: Trace
+  /** The descent only: never hand off to the walk (tests of the descent itself). */
+  noHandOff?: boolean
 }
 
 /** A side's total. */
