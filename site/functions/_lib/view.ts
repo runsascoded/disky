@@ -2400,8 +2400,10 @@ export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: 
     const o = additive && !par.own
       ? { a: Math.max(0, par.a - t.a), b: Math.max(0, par.b - t.b), oa: Math.max(0, par.oa - t.oa), ob: Math.max(0, par.ob - t.ob) }
       : f
-    if (!o.a && !o.b) continue
-    const s: DiffRow['s'] = !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
+    // Zero-byte objects count too: an `(other)` of objects alone (no bytes either side) is kept when they differ.
+    const s: DiffRow['s'] = !o.a && !o.b
+      ? (o.oa === o.ob ? 'unchanged' : !o.oa ? 'added' : !o.ob ? 'removed' : 'changed')
+      : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
     if (s === 'unchanged') continue
     others.push({ p: par.p === '' ? '(other)' : `${par.p}/(other)`, d: par.d + 1, k: 'dir', s, ...o })
   }
@@ -2802,9 +2804,11 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       const restB = newAgg()
       restB.b = Math.max(0, (b?.b ?? 0) - sum.b.b)
       restB.o = Math.max(0, (b?.o ?? 0) - sum.b.o)
-      if (restA.b > 0 || restB.b > 0) {
+      // Zero-byte objects count too (an `(other)` of objects alone), as the tail's invariant (`capDiffRows`).
+      const has = (r: Agg) => r.b > 0 || r.o > 0
+      if (has(restA) || has(restB)) {
         const key = p === path ? '(other)' : `${rel(p)}/(other)`
-        emit(key, d - dP + 1, restA.b > 0 ? restA : null, restB.b > 0 ? restB : null, false)
+        emit(key, d - dP + 1, has(restA) ? restA : null, has(restB) ? restB : null, false)
       }
     }
     level = next

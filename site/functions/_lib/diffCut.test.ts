@@ -60,3 +60,11 @@ describe('capDiffRows at the root', () => {
     expect([sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([root.b - root.a, root.ob - root.oa])
   })
 })
+
+describe('capDiffRows: zero-byte objects', () => {
+  it('keeps an objects-only `(other)` (gcs: icd-warmstart-tpu-001, 19 zero-byte files beside `cells`)', () => {
+    const rows = [row('k', 1, 'changed', 2353104154, 3765485860, 24, 165, true), row('k/cells', 2, 'changed', 2353104154, 3765485860, 24, 146)]
+    const { rows: got } = capDiffRows(rows, 1e6, { a: 2353104154, b: 3765485860, oa: 24, ob: 165 })
+    expect(got.filter(r => r.p.startsWith('k/'))).toEqual([row('k/cells', 2, 'changed', 2353104154, 3765485860, 24, 146), row('k/(other)', 2, 'added', 0, 0, 0, 19)])
+  })
+})
