@@ -993,7 +993,7 @@ describe('Δ diffs by descent', () => {
     for (const path of await dirsOf('g2')) for (let i = 0; i + 1 < DATES.length; i++) {
       const o = { from: DATES[i], to: DATES[i + 1], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6 }
       const plan: number[] = []
-      const d = await buildDiff(at('g2', []), { ...o, descent: true, descentBudgetMs: Infinity, trace: (n, _ms, desc) => { if (n === 'plan') plan.push(Number(String(desc).split(' ')[0])) } }).catch(e => (e as Error).message)
+      const d = await buildDiff(at('g2', []), { ...o, descent: true, descentBudgetMs: Infinity, descentBudgetRows: Infinity, trace: (n, _ms, desc) => { if (n === 'plan') plan.push(Number(String(desc).split(' ')[0])) } }).catch(e => (e as Error).message)
       if (typeof d === 'string') continue
       if (d.tier === 'descent') { kept++; expect([path, plan.every(x => x <= DESCENT_MAX_EXPANDABLE)]).toEqual([path, true]); continue }
       handed++
@@ -1012,6 +1012,22 @@ describe('Δ diffs by descent', () => {
       if (typeof d === 'string' || !why.length) continue
       handed++
       expect([path, why, d]).toEqual([path, ['budget'], await buildDiff(at('g2', []), o)])
+    }
+    expect(handed).toBeGreaterThan(0)
+  }, 120_000)
+
+  it('descent: past its work budget (rows read), it hands off to the walk, unchanged, and says so (`handoff` work)', async () => {
+    let handed = 0
+    for (const path of await dirsOf('g2')) {
+      const o = { from: DATES[0], to: DATES[1], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6 }
+      const why: string[] = [], rows: number[] = []
+      const d = await buildDiff(at('g2', []), { ...o, descent: true, descentBudgetMs: Infinity, descentBudgetRows: 1, trace: (n, ms, desc) => {
+        if (n === 'handoff') why.push(String(desc).split(':')[0])
+        if (n === 'descent-rows') rows.push(ms)
+      } }).catch(e => (e as Error).message)
+      if (typeof d === 'string' || why[0] !== 'work') continue
+      handed++
+      expect([path, why, rows.length, rows[0] > 1, d]).toEqual([path, ['work'], 1, true, await buildDiff(at('g2', []), o)])
     }
     expect(handed).toBeGreaterThan(0)
   }, 120_000)

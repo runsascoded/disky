@@ -40,11 +40,21 @@ export const DESCENT_MAX_EXPANDABLE = 2
  *  cached body is whichever came first. */
 export const DESCENT_BUDGET_MS = 1000
 
+/** The work bail-out: rows the descent's reads have returned (both sides, unfloored re-reads included), checked after
+ *  each read. A Worker's clock advances only across I/O, so `DESCENT_BUDGET_MS` never sees the descent's CPU — decoding
+ *  and folding those rows, which this counts (r2's `marin-na`: 1.44 s of Server-Timing against 3.7 s wall, L4 9,261
+ *  children; the walk on it ~0.45 s). gcs dev's one kept case with work, `checkpoints` over a week, read 3,706 children
+ *  (≈ 7.5K rows) in 2.8 s against its walk's 0.5 s: it trips too. hf's and cw's kept cases set it from their counts
+ *  (Server-Timing `descent-rows`). */
+export const DESCENT_BUDGET_ROWS = 5000
+
 /** The descent declines: `breadth`, the planner (`DESCENT_MAX_EXPANDABLE`, `detail` = P's children to expand); `budget`,
- *  its running cost (`DESCENT_BUDGET_MS`, `detail` = ms spent). `buildDiff` answers with the as-of walk. */
+ *  its elapsed time (`DESCENT_BUDGET_MS`, `detail` = ms); `work`, the rows it read (`DESCENT_BUDGET_ROWS`, `detail` =
+ *  rows). `buildDiff` answers with the as-of walk. */
 export class HandOff extends Error {
-  constructor(readonly why: 'breadth' | 'budget', readonly detail: number) {
-    super(why === 'breadth' ? `descent hands off: ${detail} of P's children to expand` : `descent hands off: over its budget after ${Math.round(detail)} ms`)
+  constructor(readonly why: 'breadth' | 'budget' | 'work', readonly detail: number) {
+    super(why === 'breadth' ? `descent hands off: ${detail} of P's children to expand`
+      : why === 'work' ? `descent hands off: ${detail} rows read` : `descent hands off: over its budget after ${Math.round(detail)} ms`)
     this.name = 'HandOff'
   }
 }
@@ -86,10 +96,22 @@ export interface DescentOpts {
   threshold?: number
   /** The running-cost budget (`DESCENT_BUDGET_MS` by default; tests of the planner alone pass `Infinity`). */
   budgetMs?: number
+  /** The work budget (`DESCENT_BUDGET_ROWS` by default; tests of the planner alone pass `Infinity`). */
+  budgetRows?: number
 }
 
 export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff> {
   const tStart = performance.now()
+  // Rows the reads returned (`DESCENT_BUDGET_ROWS`), reported as Server-Timing `descent-rows` (its dur is the count).
+  let rowsRead = 0
+  const budgetRows = o.budgetRows ?? DESCENT_BUDGET_ROWS
+  const spend = (n: number) => {
+    rowsRead += n
+    if (o.noHandOff || rowsRead <= budgetRows) return
+    o.trace?.('descent-rows', rowsRead, `${rowsRead} rows read`)
+    o.trace?.('handoff', performance.now() - tStart, `work: ${rowsRead} rows read (max ${budgetRows})`)
+    throw new HandOff('work', rowsRead)
+  }
   const env = asOfScans(env0, [o.from, o.to])
   const { path } = o
   const dP = path === '' ? 0 : path.split('/').length
@@ -113,6 +135,7 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     const rects = parents.map(x => childRect(x.p, x.d + 1))
     const over = (r: Row) => r.size >= thrAt(r.depth)
     const [rowsA, rowsB] = await Promise.all([readRects(hA, rects, thrAt), readRects(hB, rects, thrAt)])
+    spend(rowsA.length + rowsB.length)
     const A = bySide(rowsA.filter(over))
     const B = bySide(rowsB.filter(over))
     // A side a child wasn't read on: the same row when its version spans both scans, else read that parent unfloored.
@@ -123,6 +146,7 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
       redoA.size ? readRects(hA, [...redoA].map(q => childRect(q, depthOf.get(q)!))) : Promise.resolve([] as Row[]),
       redoB.size ? readRects(hB, [...redoB].map(q => childRect(q, depthOf.get(q)!))) : Promise.resolve([] as Row[]),
     ])
+    spend(moreA.length + moreB.length)
     const fullA = bySide(moreA), fullB = bySide(moreB)
     const names = new Set([...A.keys(), ...B.keys()])
     const out = new Map<string, { a: Side; b: Side }>()
@@ -224,6 +248,7 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
   // the answer is cut, not complete.
   const skipped = frontier.filter(expandable).length
   for (const it of frontier) if (it.p !== path) emit(rel(it.p), it.d - dP, it.k, it.a, it.b, false)
+  o.trace?.('descent-rows', rowsRead, `${rowsRead} rows read`)
   const cut = capDiffRows(rows, o.top, { a: Math.round(ra?.b ?? 0), b: Math.round(rb?.b ?? 0), oa: Math.round(ra?.o ?? 0), ob: Math.round(rb?.o ?? 0) })
   return {
     rows: cut.rows,
