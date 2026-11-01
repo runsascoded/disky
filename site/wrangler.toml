@@ -100,7 +100,6 @@ SLACK_ADMIN_CHANNEL = "C0C579HNRFB"
 # Static name search (2026-10-09): the map's filter and /names read the static
 # name index on R2 (INDEX_R2, below), built daily by `job/static-daily.sh`.
 # FILTER_STATIC_HEAVY stays dev-only for now (heavy literals on per-scan runs need each run's `drill/`).
-DIFF_DESCENT = "1"   # Δ-mode diffs by lazy descent over the interval store (`_lib/diffDescent.ts`; busy, broad paths handed to the as-of walk). On prod since 2026-11-01 after `dt-cloud diff-check -t descent,bysize,path` on dev
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 # Only what the static index answers fast and exactly: one plain path-segment
@@ -156,7 +155,7 @@ database_id = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"
 
 [env.preview.vars]
 SESSION_MONITOR = "0"           # shared D1: preview may dry-run, never send monitor alerts
-DIFF_DESCENT = "1"   # Δ-mode diffs by lazy descent over the interval store (`_lib/diffDescent.ts`; busy, broad paths handed to the as-of walk). as production
+DIFF_DESCENT = "1"   # Δ-mode diffs by lazy descent over the interval store (`_lib/diffDescent.ts`; busy, broad paths handed to the as-of walk); dev only, prod off (Ryan, 2026-11-01: wait for a progressive, one-level-per-request design)
 SERVED_R2 = "1"   # snapshot JSONs (meta/age/lifecycle/rules) + extras read from INDEX_R2, not GCS (the job copies them: `publish-r2 -S`)
 PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`); the generation from INDEX_R2's `interval-store/CURRENT.json`
 STATIC_BENCH = "1"   # /api/static-bench: R2 read timings for the static name-search prototype
