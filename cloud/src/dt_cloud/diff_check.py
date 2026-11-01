@@ -89,7 +89,7 @@ def fetch(host: str, q: dict, token: str, retries: int = 6) -> tuple[int, dict |
     raise AssertionError("unreachable")
 
 
-def timing(st: str, keep: tuple[str, ...] = ("total", "views", "walk", "plan", "descent-rows")) -> str:
+def timing(st: str, keep: tuple[str, ...] = ("total", "views", "walk", "plan", "descent-rows", "descent-planned")) -> str:
     """The `Server-Timing` phases worth a line: `keep` (`descent-rows` is the descent's rows read, a count), the descent's levels
     (`L1`, `L2`, …) and its `handoff` (which bail-out declined: `breadth`, `budget` or `work`)."""
     out = []

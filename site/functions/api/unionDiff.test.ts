@@ -69,6 +69,19 @@ describe('D1', () => {
     expect([drill[0], drill.length > 1]).toEqual(['union', true])
   })
 
+  it('a member\'s observations are read once per isolate within `OBSERVATIONS_TTL`, not on every request', async () => {
+    const env = deployment()
+    const sql: string[] = []
+    const db = new Proxy(env.DB as object, { get: (t, k) => k === 'prepare' ? (q: string) => { sql.push(q); return (t as { prepare: (q: string) => unknown }).prepare(q) } : (t as Record<string | symbol, unknown>)[k] })
+    const counted = { ...env, DB: db } as unknown as Env
+    const scansRead = () => sql.filter(q => q.includes('SELECT DISTINCT date FROM index_schema')).length
+    const ask = async () => expect((await diff({ request: new Request(`http://localhost/api/diff?w=1280&h=768&from=${A}&to=${C}&path=`), env: counted })).status).toBe(200)
+    await ask()
+    const first = scansRead()
+    await ask()
+    expect([first, scansRead()]).toEqual([2, 2])
+  })
+
   it('both stores rescanned: each diffs its own scans; rows tagged, totals summed, one threshold', async () => {
     const [u, p, m] = await Promise.all([body(`from=${A}&to=${C}&path=`), body(`from=${A}&to=${C}&path=&store=primary`), body(`from=${A}&to=${B}&path=&store=meta`)])
     expect([u.prev, u.curr, u.union, roots(u), pick(u), u.threshold]).toEqual([
