@@ -27,7 +27,7 @@ import { type Env, json, type Identity, requireViewer } from './auth.js'
 import { ivRetry, pathScans, storeReady, withPathStore } from './index.js'
 import { indexedScan, noScan } from './scanArg.js'
 import { scanTimes } from './scanTimes.js'
-import { PRIMARY_STORE, StoreConfigError, type UnionView, unionViews, withStore } from './stores.js'
+import { PRIMARY_STORE, StoreConfigError, storeKey, type UnionView, unionViews, withStore } from './stores.js'
 import { readRootRows, type ViewNode } from './view.js'
 
 type Ctx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -101,13 +101,32 @@ export async function memberCtxs(ctx: Ctx, view: UnionView): Promise<Ctx[] | Res
 
 const iso = (ms: number): string => new Date(ms).toISOString()
 
+/** How long an isolate reuses a member's observations: its scan list changes only when a scan lands, and a union's
+ *  warm cache hits re-read it every request otherwise (r2: most of a warm union subtree's 60–215 ms prelude). */
+export const OBSERVATIONS_TTL = 60_000
+
+/** Per isolate, per D1 binding (a deployment) and store: the observations, in flight or settled, and when asked. */
+const observed = new WeakMap<object, Map<string, { at: number; obs: Promise<Observation[]> }>>()
+
 /** A member's indexed scans as observations: each id observed through its
  * own instant (`scanInstant`: a timed id's minute, a date-only id's recorded
- * start, else its midnight). One D1 query for the ids, one for the starts. */
-async function observations(env: Env): Promise<Observation[]> {
-  const dates = (await pathScans(env, true)).results.map(r => r.date)
-  const times = await scanTimes(env, dates)
-  return dates.map(id => { const t = iso(scanInstant(id, times)); return { id, revision: '', observed_through: t, published_at: t } })
+ * start, else its midnight). One D1 query for the ids, one for the starts;
+ * reused for `OBSERVATIONS_TTL` (a failed read isn't). */
+function observations(env: Env): Promise<Observation[]> {
+  const db = env.DB as unknown as object
+  let byStore = observed.get(db)
+  if (!byStore) observed.set(db, byStore = new Map())
+  const key = storeKey(env)
+  const hit = byStore.get(key)
+  if (hit && Date.now() - hit.at < OBSERVATIONS_TTL) return hit.obs
+  const obs = (async () => {
+    const dates = (await pathScans(env, true)).results.map(r => r.date)
+    const times = await scanTimes(env, dates)
+    return dates.map(id => { const t = iso(scanInstant(id, times)); return { id, revision: '', observed_through: t, published_at: t } })
+  })()
+  byStore.set(key, { at: Date.now(), obs })
+  obs.catch(() => { if (byStore!.get(key)?.obs === obs) byStore!.delete(key) })
+  return obs
 }
 
 /** A union opened for a request: its members' contexts (gated) and indexed scans, and the caller's identity. */
