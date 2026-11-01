@@ -14,9 +14,8 @@
  *  children). The floor is the Δ map's, `G · minArea / (w·h)`: read P's children at `|Δ P| · k` (a lower
  *  bound: `G ≥ |Δ P|`), then use `Σ |Δ child| · k` below (`G ≥` that too). */
 import type { Env } from './auth.js'
-import { asOfScans, ChangesUnavailable, type IndexHandle, openIndex, readRects, type Rect, type Row } from './index.js'
+import { asOfScans, DiffUnavailable, type IndexHandle, openIndex, readRects, type Rect, type Row, type Trace } from './index.js'
 import { capDiffRows, type Diff, type DiffRow, NotFound, readRootAgg } from './view.js'
-import type { ChangesOpts } from './diffChanges.js'
 
 type Side = { b: number; o: number; kind: 'file' | 'dir'; vf?: number; vt?: number } | null
 
@@ -57,7 +56,24 @@ function bySide(rows: Row[]): Map<string, Side> {
   return m
 }
 
-export async function buildDiffDescent(env0: Env, o: ChangesOpts): Promise<Diff> {
+export interface DescentOpts {
+  from: string
+  to: string
+  path: string
+  w: number
+  h: number
+  minArea: number
+  /** The floor's growth per level below P's children (`thrAt`, as the as-of reads attenuate it). */
+  atten: number
+  top: number
+  depth?: number
+  trace?: Trace
+  /** Never hand off to the walk (tests of the descent itself). */
+  noHandOff?: boolean
+}
+
+export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff> {
+  const tStart = performance.now()
   const env = asOfScans(env0, [o.from, o.to])
   const { path } = o
   const dP = path === '' ? 0 : path.split('/').length
@@ -67,7 +83,7 @@ export async function buildDiffDescent(env0: Env, o: ChangesOpts): Promise<Diff>
   const rb: Side = rb0?.b ? { ...rb0, kind: 'dir' } : null
   const [hA, hB] = await Promise.all([openIndex(env, o.from, 'path'), openIndex(env, o.to, 'path')])
   const [D1, D2] = [hA.asOf, hB.asOf]
-  if (D1 == null || D2 == null) throw new ChangesUnavailable('a per-scan store', 'a descent diff reads the interval store; one scan is per-scan')
+  if (D1 == null || D2 == null) throw new DiffUnavailable('a per-scan store', 'a descent diff reads the interval store; one scan is per-scan')
   const k = o.minArea / (o.w * o.h)
   const dlt = (a: Side, b: Side) => Math.abs((b?.b ?? 0) - (a?.b ?? 0))
   let floor = dlt(ra, rb) * k
@@ -134,7 +150,8 @@ export async function buildDiffDescent(env0: Env, o: ChangesOpts): Promise<Diff>
         const kind = c.b?.kind ?? c.a?.kind ?? 'dir'
         return kind === 'dir' && !same(c.a, c.b) && dlt(c.a, c.b) >= thrAt(dP + 2)
       }).length
-      o.trace?.('plan', expandable, `${expandable} to expand (max ${DESCENT_MAX_EXPANDABLE})`)
+      // Server-Timing `plan`: the descent's time up to the decision (what a handoff spent), the count in its desc.
+      o.trace?.('plan', performance.now() - tStart, `${expandable} to expand (max ${DESCENT_MAX_EXPANDABLE})`)
       if (expandable > DESCENT_MAX_EXPANDABLE && !o.noHandOff) throw new HandOff(expandable)
     }
     const kids = new Map<string, string[]>()
