@@ -14,6 +14,7 @@
  */
 import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
 import { type Env, type Identity, json, requireViewer } from '../_lib/auth.js'
+import { DESCENT_V } from '../_lib/diffDescent.js'
 import { ChangesUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
@@ -137,7 +138,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
       `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
         `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
         // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).
-        (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent ? '&dm=d' : fromChanges ? '&dm=c' : ''),
+        (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent ? `&dm=d${DESCENT_V}` : fromChanges ? '&dm=c' : ''),
       storeKey(ctx.env),
     )
     // …and both scans covered by the static index for this literal (else `scan-not-indexed`).
