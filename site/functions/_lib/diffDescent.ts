@@ -20,6 +20,11 @@ import type { ChangesOpts } from './diffChanges.js'
 
 type Side = { b: number; o: number; kind: 'file' | 'dir'; vf?: number; vt?: number } | null
 
+/** The descent's answer version, in its edge-cache key (`&dm=d<v>`, `api/diff.ts`): bumped with every change to what
+ *  it answers while it iterates, so a deploy never serves an earlier descent's cached body (a global `CACHE_V` bump
+ *  would make every view and diff cold everywhere). 2: best first, stopped at `top`, `expansions_skipped`. */
+export const DESCENT_V = 2
+
 /** Directories one round expands at most (largest |Δ| first). */
 const ROUND_PARENTS = 64
 
