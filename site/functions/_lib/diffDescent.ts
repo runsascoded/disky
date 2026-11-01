@@ -23,7 +23,22 @@ type Side = { b: number; o: number; kind: 'file' | 'dir'; vf?: number; vt?: numb
 /** The descent's answer version, in its edge-cache key (`&dm=d<v>`, `api/diff.ts`): bumped with every change to what
  *  it answers while it iterates, so a deploy never serves an earlier descent's cached body (a global `CACHE_V` bump
  *  would make every view and diff cold everywhere). 2: best first, stopped at `top`, `expansions_skipped`. */
-export const DESCENT_V = 2
+export const DESCENT_V = 3
+
+/** The planner (specs/diff-from-changes.md revision 3): the descent continues past P's children only when at most this
+ *  many of them need expanding (changed, |Δ| over their children's floor) — the change is concentrated, and the descent
+ *  reads a few ranges where the as-of walk reads P's whole subtree. More, and it hands off to the walk (`HandOff`),
+ *  which reuses nothing of it. Set from gcs dev (18 cases: at ≤ 1 the descent took 0.2–0.8 s against the walk's
+ *  1.4–3.0 s; at ≥ 4, 0.3–19 s against 1.8–3.5 s), not per deployment. */
+export const DESCENT_MAX_EXPANDABLE = 2
+
+/** The descent's planner declines (`DESCENT_MAX_EXPANDABLE`): `buildDiff` answers with the as-of walk. */
+export class HandOff extends Error {
+  constructor(readonly expandable: number) {
+    super(`descent hands off: ${expandable} of P's children to expand`)
+    this.name = 'HandOff'
+  }
+}
 
 /** Directories one round expands at most (largest |Δ| first). */
 const ROUND_PARENTS = 64
@@ -114,6 +129,13 @@ export async function buildDiffDescent(env0: Env, o: ChangesOpts): Promise<Diff>
     if (levels === 1) {
       // The floor from P's children: `G ≥ Σ |Δ child|`.
       floor = Math.max(floor, [...out.values()].reduce((s, c) => s + dlt(c.a, c.b), 0) * k)
+      // The planner: how many of P's children would expand (as below), against `DESCENT_MAX_EXPANDABLE`.
+      const expandable = [...out.values()].filter(c => {
+        const kind = c.b?.kind ?? c.a?.kind ?? 'dir'
+        return kind === 'dir' && !same(c.a, c.b) && dlt(c.a, c.b) >= thrAt(dP + 2)
+      }).length
+      o.trace?.('plan', expandable, `${expandable} to expand (max ${DESCENT_MAX_EXPANDABLE})`)
+      if (expandable > DESCENT_MAX_EXPANDABLE && !o.noHandOff) throw new HandOff(expandable)
     }
     const kids = new Map<string, string[]>()
     for (const p of [...out.keys()].sort()) {

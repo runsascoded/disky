@@ -65,7 +65,7 @@ def check(a: dict, b: dict, tier: str | None, atten: float = 2.0) -> dict:
         "totals": all(a.get(k) == b.get(k) for k in TOTALS),
         "differ": differ, "missed": missed, "only_b": len(only_b),
         "sums_a": bad_sums(a), "sums_b": bad_sums(b),
-        "tier": b.get("tier"), "tier_ok": tier is None or b.get("tier") == tier,
+        "tier": b.get("tier"), "tier_ok": tier is None or b.get("tier") in tier.split(","),
     }
     out["ok"] = out["totals"] and not differ and not missed and not out["sums_a"] and not out["sums_b"] and out["tier_ok"]
     return out
@@ -104,7 +104,7 @@ def timing(st: str, keep: tuple[str, ...] = ("total", "cgroups", "changes", "vie
 @option("-b", "--host-b", required=True, help="The host under test (asked for `dm=delta`); may be A")
 @option("-H", "--height", default=307, type=IntRange(min=1), help="Canvas height")
 @option("-n", "--top", type=IntRange(min=1), help="Frontier rows each diff keeps (`top`; default: the API's)")
-@option("-t", "--tier", help="The `tier` B must answer with (`descent`, `changes`): a fallback fails the case")
+@option("-t", "--tier", help="The `tier`(s) B may answer with, comma-separated (`descent,bysize,path`: the descent or its planner's handoff to the walk); any other fails the case")
 @option("-w", "--width", default=512, type=IntRange(min=1), help="Canvas width (an uncached one measures cold)")
 @argument("cases")
 def diff_check_cmd(host_a, host_b, height, top, tier, width, cases) -> None:

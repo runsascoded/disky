@@ -7,6 +7,7 @@ import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
 import { type D1Variant, fixture, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, LOOKUP_CAP, type ViewNode } from './view'
+import { DESCENT_MAX_EXPANDABLE } from './diffDescent'
 import { type HitSource, injectedStores } from './staticFilter'
 import { type Hit, scanAt } from './staticNames'
 import { parseQuery } from './scope'
@@ -1028,7 +1029,7 @@ describe('Δ diffs from changes', () => {
       const paths = await dirsOf(gen)
       for (let i = 0; i < DATES.length; i++) for (let j = i + 1; j < DATES.length; j++) for (const path of paths) for (const [w, h, top] of [[8, 6, 1e6], [1280, 768, 1e6], [1280, 768, 3]]) {
         const o = { from: DATES[i], to: DATES[j], path, w, h, minArea: 12, atten: 2, top }
-        const got = await buildDiff(at(gen, []), { ...o, descent: true }).catch(e => (e as Error).message)
+        const got = await buildDiff(at(gen, []), { ...o, descent: true, noHandOff: true }).catch(e => (e as Error).message)
         if (typeof got === 'string') {
           expect([gen, path, got]).toEqual([gen, path, await buildDiff(at(gen, []), o).then(() => 'answered', e => (e as Error).message)])
           continue
@@ -1060,8 +1061,8 @@ describe('Δ diffs from changes', () => {
   }, 180_000)
 
   it('descent: best first, stopped at `top`, says how many expansions it skipped, and every expanded row still sums', async () => {
-    const full = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, descent: true })
-    const cut = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 5, descent: true })
+    const full = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, descent: true, noHandOff: true })
+    const cut = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 5, descent: true, noHandOff: true })
     expect([full.expansions_skipped, full.truncated, cut.truncated, (cut.expansions_skipped ?? 0) > 0 || cut.expansions < full.expansions]).toEqual([undefined, false, true, true])
     const rows = cut.rows as R[]
     for (const t of [{ p: '', a: cut.total_a, b: cut.total_b, oa: cut.objects_a, ob: cut.objects_b }, ...rows.filter(r => r.x)]) {
@@ -1071,6 +1072,21 @@ describe('Δ diffs from changes', () => {
     }
   })
 
+  it('descent: the planner hands a P with more than `DESCENT_MAX_EXPANDABLE` children to expand to the walk, unchanged', async () => {
+    let handed = 0, kept = 0
+    for (const path of await dirsOf('g2')) for (let i = 0; i + 1 < DATES.length; i++) {
+      const o = { from: DATES[i], to: DATES[i + 1], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6 }
+      const plan: number[] = []
+      const d = await buildDiff(at('g2', []), { ...o, descent: true, trace: (n, ms) => { if (n === 'plan') plan.push(ms) } }).catch(e => (e as Error).message)
+      if (typeof d === 'string') continue
+      if (d.tier === 'descent') { kept++; expect([path, plan.every(x => x <= DESCENT_MAX_EXPANDABLE)]).toEqual([path, true]); continue }
+      handed++
+      expect([path, plan, d]).toEqual([path, [plan[0]], await buildDiff(at('g2', []), o)])
+      expect(plan[0]).toBeGreaterThan(DESCENT_MAX_EXPANDABLE)
+    }
+    expect([handed > 0, kept > 0]).toEqual([true, true])
+  }, 120_000)
+
   it('descent: a subtree nothing changed under reads no level and draws nothing', async () => {
     let found = 0
     const G1 = ['2026-08-03', '2026-08-04', '2026-08-05']
@@ -1079,7 +1095,7 @@ describe('Δ diffs from changes', () => {
       const plain = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, threshold: 0.5, lookupCap: 1e9 }).catch(() => null)
       if (!plain || plain.rows.some(r => r.s !== 'unchanged') || plain.total_a !== plain.total_b || plain.objects_a !== plain.objects_b) continue
       const levels: string[] = []
-      const d = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, descent: true, trace: n => { if (/^L\d+$/.test(n)) levels.push(n) } })
+      const d = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, descent: true, noHandOff: true, trace: n => { if (/^L\d+$/.test(n)) levels.push(n) } })
       found++
       expect([gen, path, d.rows.filter(r => r.s !== 'unchanged'), levels]).toEqual([gen, path, [], []])
     }
