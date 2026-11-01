@@ -17,7 +17,7 @@ describe('capDiffRows', () => {
       row('n', 1, 'added', 0, 2 * GB, 0, 1),
       row('u', 1, 'unchanged', 3 * GB, 3 * GB, 1, 1),
     ]
-    const { rows: got, cut } = capDiffRows(rows, 3)
+    const { rows: got, cut } = capDiffRows(rows, 3, { a: 4 * GB, b: 45.6 * GB, oa: 6, ob: 18 })
     expect(cut).toBe(true)
     expect(got).toEqual([
       row('m', 1, 'changed', 1 * GB, 40.6 * GB, 5, 16, true),
@@ -34,6 +34,17 @@ describe('capDiffRows', () => {
 
   it('cuts nothing under `top`', () => {
     const rows = [row('a', 1, 'added', 0, 5, 0, 1), row('(other)', 1, 'changed', 3, 4, 1, 1)]
-    expect(capDiffRows(rows, 10)).toEqual({ rows, cut: false })
+    expect(capDiffRows(rows, 10, { a: 3, b: 9, oa: 1, ob: 2 })).toEqual({ rows, cut: false })
+  })
+})
+
+describe('capDiffRows from the invariant', () => {
+  it('derives `(other)` from the parent less its drawn children, whatever left children out (a lookup budget)', () => {
+    // Snowball's shape: +268.3 GB, 26 children read (+91.2 GB), the rest never read (no row, so nothing to fold).
+    const kids = Array.from({ length: 26 }, (_, i) => row(`s/c${String(i).padStart(2, '0')}`, 2, 'added', 0, 91.2 * GB / 26, 0, 1))
+    const { rows } = capDiffRows([row('s', 1, 'changed', 10 * GB, 278.3 * GB, 5, 100, true), ...kids], 1e6, { a: 10 * GB, b: 278.3 * GB, oa: 5, ob: 100 })
+    const under = rows.filter(r => r.p.startsWith('s/'))
+    expect(rows.find(r => r.p === 's/(other)')).toEqual(row('s/(other)', 2, 'changed', 10 * GB, 278.3 * GB - 91.2 * GB, 5, 74))
+    expect(under.reduce((x, r) => x + r.b - r.a, 0)).toBeCloseTo(268.3 * GB, -3)
   })
 })
