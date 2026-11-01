@@ -210,6 +210,8 @@ VIEWER_DOMAINS = "coreweave.com"
 # The opt-in trash model (specs/staged-delete.md): any full viewer stages
 # deletions into the shared open plan (`stage_batches`, `site/schema.sql`).
 STAGING = "1"
+# Δ diffs by lazy descent over the interval store (`_lib/diffDescent.ts`), on dev only while `dt-cloud diff-check -t descent` compares it with prod's as-of walk
+DIFF_DESCENT = "1"
 # Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged plan
 # in #cw-s3-admin; `EXECUTOR` = the Store's executor, which says the Slack
 # buttons may dispatch (plan-sweep). Secrets: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
