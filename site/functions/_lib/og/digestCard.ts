@@ -106,8 +106,9 @@ function monthShade(d: { from: number; month?: number }, f: Frame, y0: number, h
     `<line x1="${r1(x)}" x2="${r1(x)}" y1="${r1(y0)}" y2="${r1(y0 + h)}" stroke="${INK3}" stroke-opacity="0.8" stroke-width="1.5"/>`,
   ]
   if (label) {
-    out.push(text(x - 6, y0 + 14, `← ${prev}`, 11, { fill: INK3, anchor: 'end' }))
-    out.push(text(x + 6, y0 + 14, `${cur} →`, 11, { fill: INK2, weight: 600 }))
+    // above the panel (under the header), clear of the quota label and the latest call-out inside it
+    out.push(text(x - 6, y0 - 4, `← ${prev}`, 11, { fill: INK3, anchor: 'end' }))
+    out.push(text(x + 6, y0 - 4, `${cur} →`, 11, { fill: INK2, weight: 600 }))
   }
   return out
 }
