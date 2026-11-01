@@ -170,7 +170,10 @@ hf `/`, spaces, buckets 149–524 ms) and handed broad ones to the walk at no me
   `marin-na`: L1–L6 0.2 s, then one L7 round of 0.8–3.5 s; 2.6–7.4 s against the walk's 0.5–1.5 s). Past
   `DESCENT_BUDGET_MS` (1,000) since it started, the descent hands off to the walk — checked before each round and raced
   against the round in flight — so its worst case is about the budget plus the walk. Server-Timing `handoff` says which
-  bail-out declined (`breadth` / `budget`); `diff-check` prints it.
+  bail-out declined (`breadth` / `budget`); `diff-check` prints it. Near the budget the reader that answers depends on
+  timing: one request can come back from the descent once and from the walk another time. Both are exact and every
+  expanded row sums, but the drawn rows can differ (the descent's finer floor), so which one an edge-cached body holds
+  is whichever answered first. Accepted: it is a choice between two correct answers, not between right and wrong.
 
 `changes` has no reader: its write path (`cut_gen`, `cut_run`, the staged `cut`), `interval-store changes` /
 `backfill-changes`, the reader (`readChanges`, `buildDiffChanges`, `DIFF_FROM_CHANGES`) and its fixtures are removed.
