@@ -1059,6 +1059,18 @@ describe('Δ diffs from changes', () => {
     expect(compared).toBeGreaterThan(100)
   }, 180_000)
 
+  it('descent: best first, stopped at `top`, says how many expansions it skipped, and every expanded row still sums', async () => {
+    const full = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, descent: true })
+    const cut = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 5, descent: true })
+    expect([full.expansions_skipped, full.truncated, cut.truncated, (cut.expansions_skipped ?? 0) > 0 || cut.expansions < full.expansions]).toEqual([undefined, false, true, true])
+    const rows = cut.rows as R[]
+    for (const t of [{ p: '', a: cut.total_a, b: cut.total_b, oa: cut.objects_a, ob: cut.objects_b }, ...rows.filter(r => r.x)]) {
+      const kids = rows.filter(r => parentOf(r.p) === t.p && r.p !== t.p)
+      if (!kids.length) continue
+      expect([t.p, kids.reduce((x, r) => x + r.b - r.a, 0), kids.reduce((x, r) => x + r.ob - r.oa, 0)]).toEqual([t.p, t.b - t.a, t.ob - t.oa])
+    }
+  })
+
   it('descent: a subtree nothing changed under reads no level and draws nothing', async () => {
     let found = 0
     const G1 = ['2026-08-03', '2026-08-04', '2026-08-05']

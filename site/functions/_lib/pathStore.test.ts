@@ -569,6 +569,8 @@ describe('buildDiff', () => {
         row('bk/small', 2, 'dir', 'added', 0, 6000, 0, 3),
         row('bk/b', 2, 'dir', 'removed', 400, 0, 1, 0),
         row('bk/a', 2, 'dir', 'removed', 300, 0, 2, 0),
+        // `bk`'s one object no drawn child holds (a zero-byte one): its children and `(other)` sum to it.
+        row('bk/(other)', 2, 'dir', 'added', 0, 0, 0, 1),
       ],
       total_a: 700, total_b: 37229948, objects_a: 3, objects_b: 8009, threshold: 1, tier: 'path',
       expansions: 4, truncated: false, lookups: 7, lookups_capped: false,

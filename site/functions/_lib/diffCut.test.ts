@@ -48,3 +48,23 @@ describe('capDiffRows from the invariant', () => {
     expect(under.reduce((x, r) => x + r.b - r.a, 0)).toBeCloseTo(268.3 * GB, -3)
   })
 })
+
+describe('capDiffRows at the root', () => {
+  it('folds a cut child of the root into a root `(other)` (hf: open-athena/models, one tiny child cut)', () => {
+    const kids = [row('a', 1, 'changed', 100, 200, 3, 4), row('b', 1, 'changed', 50, 60, 2, 2), row('t', 1, 'changed', 1000, 1001, 4, 4)]
+    const root = { a: 1150, b: 1261, oa: 9, ob: 10 }
+    const { rows, cut } = capDiffRows(kids, 2, root)
+    expect(cut).toBe(true)
+    expect(rows).toEqual([row('a', 1, 'changed', 100, 200, 3, 4), row('b', 1, 'changed', 50, 60, 2, 2), row('(other)', 1, 'changed', 1000, 1001, 4, 4)])
+    const sum = (f: (r: DiffRow) => number) => rows.reduce((s, r) => s + f(r), 0)
+    expect([sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([root.b - root.a, root.ob - root.oa])
+  })
+})
+
+describe('capDiffRows: zero-byte objects', () => {
+  it('keeps an objects-only `(other)` (gcs: icd-warmstart-tpu-001, 19 zero-byte files beside `cells`)', () => {
+    const rows = [row('k', 1, 'changed', 2353104154, 3765485860, 24, 165, true), row('k/cells', 2, 'changed', 2353104154, 3765485860, 24, 146)]
+    const { rows: got } = capDiffRows(rows, 1e6, { a: 2353104154, b: 3765485860, oa: 24, ob: 165 })
+    expect(got.filter(r => r.p.startsWith('k/'))).toEqual([row('k/cells', 2, 'changed', 2353104154, 3765485860, 24, 146), row('k/(other)', 2, 'added', 0, 0, 0, 19)])
+  })
+})

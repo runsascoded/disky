@@ -2357,9 +2357,9 @@ export interface DiffRow {
  *  those as filler), per side, clamped at 0. So an expanded row's children and `(other)` sum to it whatever left a
  *  child out — the cut, a floor, a lookup budget, a skipped read. `(other)` rows are always kept (one per expanded row,
  *  not counted in `top`); an unchanged one is left out (filler, as before). `cut`: leaves were cut.
- *  Per side, the larger of that and the walk's own `(other)` plus the cut leaves (equal on consistent data; the walk's
- *  where a scan's rows aren't). `additive` false (a filtered diff: a parent's totals are its matched bytes): the latter
- *  alone. */
+ *  A scan's rows are hierarchical, so this is the walk's own `(other)` plus the cut leaves wherever the walk read them
+ *  all. `additive` false (a filtered diff: a parent's totals are its matched bytes, not its children's sum): the walk's
+ *  own `(other)` plus the cut leaves instead. */
 export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: number; oa: number; ob: number }, additive = true): { rows: DiffRow[]; cut: boolean } {
   const isOther = (r: DiffRow) => r.p === '(other)' || r.p.endsWith('/(other)')
   const parentOf = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
@@ -2398,10 +2398,12 @@ export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: 
     const f = fold.get(par.p) ?? zero()
     const t = drawn.get(par.p) ?? zero()
     const o = additive && !par.own
-      ? { a: Math.max(f.a, par.a - t.a, 0), b: Math.max(f.b, par.b - t.b, 0), oa: Math.max(f.oa, par.oa - t.oa, 0), ob: Math.max(f.ob, par.ob - t.ob, 0) }
+      ? { a: Math.max(0, par.a - t.a), b: Math.max(0, par.b - t.b), oa: Math.max(0, par.oa - t.oa), ob: Math.max(0, par.ob - t.ob) }
       : f
-    if (!o.a && !o.b) continue
-    const s: DiffRow['s'] = !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
+    // Zero-byte objects count too: an `(other)` of objects alone (no bytes either side) is kept when they differ.
+    const s: DiffRow['s'] = !o.a && !o.b
+      ? (o.oa === o.ob ? 'unchanged' : !o.oa ? 'added' : !o.ob ? 'removed' : 'changed')
+      : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
     if (s === 'unchanged') continue
     others.push({ p: par.p === '' ? '(other)' : `${par.p}/(other)`, d: par.d + 1, k: 'dir', s, ...o })
   }
@@ -2420,6 +2422,8 @@ export interface Diff {
   threshold: number
   tier: string
   lookups: number
+  /** Directories a budgeted reader (the descent, at `top`) left unexpanded, each drawn as a leaf: cut, not complete. */
+  expansions_skipped?: number
   /** The lookup budget ran out: names one side drew that the other side's lookup didn't answer are folded into
    *  their parent's `(other)` on both sides (never drawn one-sided at 0). */
   lookups_capped: boolean
@@ -2802,9 +2806,11 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       const restB = newAgg()
       restB.b = Math.max(0, (b?.b ?? 0) - sum.b.b)
       restB.o = Math.max(0, (b?.o ?? 0) - sum.b.o)
-      if (restA.b > 0 || restB.b > 0) {
+      // Zero-byte objects count too (an `(other)` of objects alone), as the tail's invariant (`capDiffRows`).
+      const has = (r: Agg) => r.b > 0 || r.o > 0
+      if (has(restA) || has(restB)) {
         const key = p === path ? '(other)' : `${rel(p)}/(other)`
-        emit(key, d - dP + 1, restA.b > 0 ? restA : null, restB.b > 0 ? restB : null, false)
+        emit(key, d - dP + 1, has(restA) ? restA : null, has(restB) ? restB : null, false)
       }
     }
     level = next
