@@ -2483,7 +2483,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   if (o.descent) {
     const { buildDiffDescent, HandOff } = await import('./diffDescent.js')
     try {
-      return await buildDiffDescent(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}), ...(o.noHandOff ? { noHandOff: true } : {}) })
+      return await buildDiffDescent(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}), ...(o.noHandOff ? { noHandOff: true } : {}), ...(o.threshold !== undefined ? { threshold: o.threshold } : {}) })
     } catch (e) {
       // The planner declined (a busy, broad P): the as-of walk, as it is (`tier` says which answered).
       if (!(e instanceof HandOff)) throw e

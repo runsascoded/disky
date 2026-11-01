@@ -50,7 +50,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // newest write's instant (epoch seconds). 8 (2026-11-01): a diff cut to `top` keeps every expanded row's (and the root's)
 // `(other)` (`capDiffRows`: its totals less its drawn children); entries cached before it dropped cut leaves (hf: a cut
 // root child missing from `open-athena/models`'s answer, served from KV after the fix deployed).
-export const CACHE_V = '8'
+// 9 (2026-11-01): a union root's `(other)` is each changed member's totals less its drawn depth-1 rows (r2: a member
+// that drew nothing at the union's threshold was missing from the root, its Δ in no row).
+export const CACHE_V = '9'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
