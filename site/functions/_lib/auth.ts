@@ -111,11 +111,8 @@ export interface Env {
    *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
    *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */
   PATH_STORE?: string
-  /** `1`: Δ-mode diffs (`dm=delta`, unscoped) read the interval store's `changes` sort (specs/diff-from-changes.md),
-   *  once this deployment's store is backfilled (`interval-store backfill-changes`). */
-  DIFF_FROM_CHANGES?: string
-  /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; over
-   *  `DIFF_FROM_CHANGES` when both are set). Needs no index beyond the store's. */
+  /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its
+   *  planner hands busy, broad paths to the as-of walk). Needs no index beyond the store's. */
   DIFF_DESCENT?: string
   /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
    *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
