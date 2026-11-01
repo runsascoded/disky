@@ -67,8 +67,8 @@ describe('digestSvg', () => {
     const svg = digestSvg({ ...input(false), from: sep(14) - 16 * 3600_000, month: day(1), points: [{ t: sep(14), bytes: 800 * T }, ...input(false).points] })
     expect(texts(svg)).toEqual([
       'Usage — October 2026', 'example.org · bucket · TiB',
-      '800', '850', '900', '950', '1,000',
       '← Sep', 'Oct →',
+      '800', '850', '900', '950', '1,000',
       '9/14', '9/21', '9/28', '10/5', '10/12', '10/19', '10/26',
       '1 PiB quota', '830 TiB · 83%',
     ])
