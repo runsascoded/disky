@@ -102,7 +102,8 @@ export async function memberCtxs(ctx: Ctx, view: UnionView): Promise<Ctx[] | Res
 const iso = (ms: number): string => new Date(ms).toISOString()
 
 /** How long an isolate reuses a member's observations: its scan list changes only when a scan lands, and a union's
- *  warm cache hits re-read it every request otherwise (r2: most of a warm union subtree's 60–215 ms prelude). */
+ *  warm cache hits re-read it every request otherwise (r2: most of a warm union subtree's 60–215 ms prelude). So a
+ *  union's cutoffs (and `latest`) can lag a newly landed scan by up to this long in an isolate that already holds them. */
 export const OBSERVATIONS_TTL = 60_000
 
 /** Per isolate, per D1 binding (a deployment) and store: the observations, in flight or settled, and when asked. */
