@@ -49,12 +49,12 @@ describe('kinds', () => {
     expect(cases.map(([req]) => { const [m, p] = req.split(' '); return [req, serverKind(m, p) ?? '-'] })).toEqual(cases)
   })
 
-  it('maps session-log events to kinds; a failed request is an error', () => {
+  it('maps session-log events to kinds; a failed request is an error, one the page cancelled is not', () => {
     const evs = [
       { k: 'start' }, { k: 'nav' }, { k: 'click' }, { k: 'console' }, { k: 'api', s: 200 }, { k: 'api', s: 502 },
-      { k: 'api', s: 0 }, { k: 'dropped' },
+      { k: 'api', s: 0 }, { k: 'api', s: 0, err: 'abort' }, { k: 'dropped' },
     ] as const
-    expect(evs.map(e => clientKind(e as never))).toEqual(['view', 'nav', 'click', 'error', 'api', 'error', 'error', null])
+    expect(evs.map(e => clientKind(e as never))).toEqual(['view', 'nav', 'click', 'error', 'api', 'error', 'error', 'api', null])
   })
 
   it('says what the auth package\'s writes did', () => {
@@ -106,11 +106,12 @@ describe('bursts (pure)', () => {
     expect(keptEvents(events, conf).map(e => e.k)).toEqual(['start', 'nav', 'nav', 'click', 'dropped'])
   })
 
-  it('tallies errors with the page they happened on; a benign ResizeObserver report is not one', () => {
+  it('tallies errors with the page they happened on; a benign ResizeObserver report and a cancelled request are not', () => {
     const events = [
       { t: 1000, k: 'start', u: '/scans' }, { t: 2500, k: 'api', u: '/api/scan-runs', s: 0, ms: 3214, err: 'TypeError: Failed to fetch' },
       { t: 3000, k: 'nav', u: '/users?o=bob' }, { t: 4000, k: 'reject', msg: 'boom' }, { t: 5000, k: 'api', u: '/api/x', s: 404, ms: 9 },
       { t: 6000, k: 'error', msg: 'ResizeObserver loop completed with undelivered notifications.', src: '/users:0:0' },
+      { t: 7000, k: 'api', u: '/api/diff?from=a&to=b', s: 0, ms: 553, err: 'abort' },
     ] as SlogEvent[]
     expect(tallyClient(events, mergeKinds([])).counts.error).toBe(2)
     expect(tallyClient(events, mergeKinds([])).errors).toEqual([
