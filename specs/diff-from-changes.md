@@ -178,8 +178,9 @@ hf `/`, spaces, buckets 149–524 ms) and handed broad ones to the walk at no me
 - **Work budget** (r2, after the time budget): a Worker's clock advances only across I/O, so the time budget never sees
   the descent's CPU, and a timer can't fire during it (r2 `marin-na`: 1.44 s of Server-Timing against 3.7 s wall).
   `DESCENT_BUDGET_ROWS` (8,000) counts the rows the descent's reads return, both sides and unfloored re-reads, checked
-  after each read, and before each read with the rows its planned groups hold (footers only; `descent-planned`), so a
-  read that would pass it isn't issued; past it, `HandOff('work')`. Server-Timing `descent-rows` carries the count
+  after each read; past it, `HandOff('work')`. A pre-read check against the planned groups' rows was tried and
+  withdrawn: a group's count is the whole group (8K rows) where a path range uses a sliver, so it overestimated many
+  times over (hf: 33–47K planned against 1.2–4.7K read) and handed nearly every descent off. Server-Timing `descent-rows` carries the count
   (its dur). Calibration (`descent-rows`): hf's kept cases read at most 4,682 (~1.7× headroom, growing about a scan a
   day); r2 `marin-na` ≥ 9,261; gcs `checkpoints` over a week 35,708 (2.8 s against the walk's 0.5 s). The time budget
   stays as a guard for I/O stalls.
