@@ -130,13 +130,14 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     // Δ mode from the transitions (specs/diff-from-changes.md): asked for explicitly (`dm=delta`: a client that doesn't
     // say draws max(old, new) areas from these rows too), unscoped, on a deployment whose store has them.
     // `atten ≥ 1`: a parent's floor is then at most its children's, so a changed child's parent (as big) is read too.
-    const fromChanges = url.searchParams.get('dm') === 'delta' && ctx.env.DIFF_FROM_CHANGES === '1' && intervalsOn(ctx.env) &&
-      !lens && !owner && !query && !classes && !summary && !member && atten >= 1
+    const deltaOk = url.searchParams.get('dm') === 'delta' && intervalsOn(ctx.env) && !lens && !owner && !query && !classes && !summary && !member && atten >= 1
+    const descent = deltaOk && ctx.env.DIFF_DESCENT === '1'
+    const fromChanges = deltaOk && !descent && ctx.env.DIFF_FROM_CHANGES === '1'
     const cacheKey = cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
       `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
         `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
         // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).
-        (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (fromChanges ? '&dm=c' : ''),
+        (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent ? '&dm=d' : fromChanges ? '&dm=c' : ''),
       storeKey(ctx.env),
     )
     // …and both scans covered by the static index for this literal (else `scan-not-indexed`).
@@ -147,7 +148,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
     const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; walkMs?: number; trace?: typeof st.trace } = {}) => {
-      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}), ...(fromChanges ? { fromChanges } : {}) }))
+      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}), ...(fromChanges ? { fromChanges } : {}), ...(descent ? { descent } : {}) }))
       // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
       const keep = keepFor(diff)
       const body = JSON.stringify({

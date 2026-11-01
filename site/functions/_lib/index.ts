@@ -1038,11 +1038,39 @@ async function openChanges(env: Env, run: string | null): Promise<PqHandle> {
   return { mode: 'pq', file, env, date: '', variant: CHANGES, gen: `iv:${gen}${ivRev(env)}${run ? `/${run}` : ''}`, dir, schema, version: Number(kv.get('version')), columns: null, floor: null, footer, asOf: 0, src, dataKey: key, ...(run ? { run } : {}) } as PqHandle
 }
 
+/** A `changes` group's rows (`cols`), decoded once: from the isolate's group cache, else the colo's decoded copy (gzip
+ *  JSON, as the as-of reads' `coloGroup`), else read from R2 and put in both (the colo put not waited for). A sort's
+ *  group never changes (generations are immutable), so neither copy goes stale. */
+const changesKey = (h: PqHandle, rg: number): string => `${storeKey(h.env)}|${h.gen}|${CHANGES}|${rg}`
+
+/** A `changes` group the isolate holds decoded (`changesGroup`), or undefined. */
+function heldChangesGroup(h: PqHandle, rg: number): Record<string, unknown>[] | undefined {
+  const held = cacheGet<Record<string, unknown>>(changesKey(h, rg))
+  if (held) h.trace?.('ccache', 1)
+  return held
+}
+
+async function changesGroup(h: PqHandle, rg: number, json: string, cols: string[]): Promise<Record<string, unknown>[]> {
+  const k = changesKey(h, rg)
+  const hit = await colo().match(groupColoKey(h, rg))
+  let rows: Record<string, unknown>[]
+  if (hit?.body) {
+    rows = groupRows(await new Response(hit.body.pipeThrough(new DecompressionStream('gzip'))).json<GroupDoc>())
+    h.trace?.('ccolo', 1)
+  } else {
+    rows = await readGroupRaw(h, json, cols)
+    const doc = groupDoc(rows, cols)
+    if (doc) putColoGroup(h, rg, doc)
+  }
+  cachePut(k, rows, rows.length * ROW_BYTES)
+  return rows
+}
+
 /** The transitions under `path` (at depths below it) between scans `from` < `to` — those at a scan in `(from, to]` —
- *  whose larger side is at least `floor` bytes: each tier holding such a scan (the base, the runs) read from its
+ *  whose larger side is at least the floor at their depth (`floor · atten^(depth − dP − 1)`, `atten` ≥ 1): each tier holding such a scan (the base, the runs) read from its
  *  `changes` sort, groups pruned by their scan, size and path bounds. Null when the store doesn't hold both scans.
  *  `TooWide` past `maxGroups` row groups; `ChangesUnavailable` when a tier it needs has no `changes` sort. */
-export async function readChanges(env: Env, from: string, to: string, path: string, floor: number, { maxGroups = CHANGES_MAX_GROUPS, trace }: { maxGroups?: number; trace?: Trace } = {}): Promise<{ rows: Transition[]; groups: number; scans: number[] }> {
+export async function readChanges(env: Env, from: string, to: string, path: string, floor: number, { maxGroups = CHANGES_MAX_GROUPS, trace, atten = 1 }: { maxGroups?: number; trace?: Trace; atten?: number } = {}): Promise<{ rows: Transition[]; groups: number; scans: number[] }> {
   const st = await ivState(env)
   const D1 = st.scans.get(from)
   const D2 = st.scans.get(to)
@@ -1059,14 +1087,17 @@ export async function readChanges(env: Env, from: string, to: string, path: stri
   const dP = path === '' ? 0 : path.split('/').length
   const pLo = path ? `${path}/` : ''
   const pHi = path ? `${path}0` : '\uffff'
+  // The floor at a depth, attenuated as the as-of reads' (`thrAt`): a group holds nothing over it unless its largest row
+  // clears the floor at its shallowest depth (`d_min`), so deep groups are pruned at their own (higher) floor.
+  const thrAt = (depth: number) => floor * atten ** Math.max(0, depth - dP - 1)
   const t0 = now()
   const picked = await Promise.all(tiers.map(async h => {
     const fgs = h.footer.groups.filter(fg => {
       const b = fg.bounds
-      return !b || ((b.vtMax == null || b.vtMax > D1) && (b.vfMin == null || b.vfMin <= D2) && b.bMax >= floor && b.pMax >= pLo && b.pMin < pHi && b.dMax > dP)
+      return !b || ((b.vtMax == null || b.vtMax > D1) && (b.vfMin == null || b.vfMin <= D2) && b.bMax >= thrAt(b.dMin) && b.pMax >= pLo && b.pMin < pHi && b.dMax > dP)
     })
     const groups = (await mapLimit(fgs, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
-      .filter(g => g.vfMax! > D1 && g.vfMin! <= D2 && g.bMax >= floor && g.pMax >= pLo && g.pMin < pHi && g.dMax > dP)
+      .filter(g => g.vfMax! > D1 && g.vfMin! <= D2 && g.bMax >= thrAt(g.dMin) && g.pMax >= pLo && g.pMin < pHi && g.dMax > dP)
     return { h, groups }
   }))
   const n = picked.reduce((k, t) => k + t.groups.length, 0)
@@ -1075,18 +1106,21 @@ export async function readChanges(env: Env, from: string, to: string, path: stri
   const out: Transition[] = []
   await Promise.all(picked.map(async ({ h, groups }) => {
     if (!groups.length) return
-    const jsons = await fetchGroupJson(h, groups.map(g => g.rg))
+    // The groups the isolate holds need no metadata: only the rest fetch theirs (`rg_json`), then the colo or R2.
+    const held = new Map(groups.flatMap(g => { const rows = heldChangesGroup(h, g.rg); return rows ? [[g.rg, rows] as const] : [] }))
+    const jsons = await fetchGroupJson(h, groups.filter(g => !held.has(g.rg)).map(g => g.rg))
     const cols = ['depth', 'path', 'b', 'kind', 'size', 'n_files', 'size_prev', 'n_files_prev']
     await mapLimit(groups, GROUP_READS, async g => {
       const json = jsons.get(g.rg)
-      if (!json) return
-      for (const r of await readGroupRaw(h, json, cols)) {
+      const got = held.get(g.rg) ?? (json ? await changesGroup(h, g.rg, json, cols) : null)
+      if (!got) return
+      for (const r of got) {
         const b = num(r.b)
         const depth = num(r.depth)
         const p = str(r.path)
         const size = r.size == null ? null : num(r.size)
         const sizePrev = r.size_prev == null ? null : num(r.size_prev)
-        if (b <= D1 || b > D2 || depth <= dP || p < pLo || p >= pHi || Math.max(size ?? 0, sizePrev ?? 0) < floor) continue
+        if (b <= D1 || b > D2 || depth <= dP || p < pLo || p >= pHi || Math.max(size ?? 0, sizePrev ?? 0) < thrAt(depth)) continue
         out.push({ depth, path: p, b, kind: str(r.kind) === 'file' ? 'file' : 'dir', size, nFiles: r.n_files == null ? null : num(r.n_files), sizePrev, nFilesPrev: r.n_files_prev == null ? null : num(r.n_files_prev) })
       }
     })

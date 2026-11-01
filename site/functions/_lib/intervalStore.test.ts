@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
-import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
+import { asOfScans, type Ask, readChanges, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { indexedScan } from './scanArg'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
@@ -981,6 +981,99 @@ describe('Δ diffs from changes', () => {
     const err = await buildDiff(at('g5', []), { from: DATES[0], to: '2026-10-31T0702', path: '', w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, fromChanges: true }).then(() => null, (x: Error) => `${x.name}: ${x.message}`)
     expect(err).toBe('ChangesUnavailable: the interval store\'s current generation doesn\'t hold scan 2026-10-31T0702')
   })
+
+  it('cut to `top`, both readers keep every expanded row exact: its drawn children and `(other)` sum to its Δ', async () => {
+    let cut = 0
+    for (const gen of ['g2', 'g5']) for (let i = 0; i < DATES.length; i++) for (let j = i + 1; j < DATES.length; j++) for (const path of ['', 'bk', 'bk/flat']) {
+      for (const fromChanges of [true, false]) {
+        const d = await buildDiff(at(gen, []), { from: DATES[i], to: DATES[j], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 3, ...(fromChanges ? { fromChanges } : {}) }).catch(() => null)
+        if (!d) continue
+        if (d.truncated) cut++
+        const rows = d.rows as R[]
+        for (const top of [{ p: '', a: d.total_a, b: d.total_b, oa: d.objects_a, ob: d.objects_b }, ...rows.filter(r => r.x)]) {
+          const kids = rows.filter(r => parentOf(r.p) === top.p && r.p !== top.p)
+          if (!kids.length) continue
+          const sum = (f: (r: R) => number) => kids.reduce((s, r) => s + f(r), 0)
+          expect([gen, path, fromChanges, top.p, sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([gen, path, fromChanges, top.p, top.b - top.a, top.ob - top.oa])
+        }
+      }
+    }
+    expect(cut).toBeGreaterThan(0)
+  }, 120_000)
+
+  it('prunes `changes` groups at the floor of their shallowest depth (`atten`), reading no row the flat floor would keep', async () => {
+    const e = at('g2', [])
+    for (const path of ['', 'bk']) {
+      const flat = await readChanges(e, DATES[0], DATES[2], path, 4096, { atten: 1 })
+      const att = await readChanges(e, DATES[0], DATES[2], path, 4096, { atten: 2 })
+      const dP = path === '' ? 0 : path.split('/').length
+      const over = (t: { depth: number; size: number | null; sizePrev: number | null }) => Math.max(t.size ?? 0, t.sizePrev ?? 0) >= 4096 * 2 ** Math.max(0, t.depth - dP - 1)
+      const key = (t: { path: string; b: number }) => `${t.b} ${t.path}`
+      expect([path, att.rows.map(key).sort()]).toEqual([path, flat.rows.filter(over).map(key).sort()])
+      expect(att.groups).toBeLessThanOrEqual(flat.groups)
+    }
+  })
+
+  it('decodes a `changes` group once per isolate: a second read of the same range reads no `changes.parquet` bytes', async () => {
+    const first: string[] = []
+    const again: string[] = []
+    const a = await readChanges({ ...at('g5', first), INTERVAL_STORE_REV: 'cc' } as Env, DATES[0], DATES[2], '', 0)
+    const b = await readChanges({ ...at('g5', again), INTERVAL_STORE_REV: 'cc' } as Env, DATES[0], DATES[2], '', 0)
+    const data = (rs: string[]) => rs.filter(k => k.endsWith('/changes.parquet')).length
+    expect([data(first) > 0, data(again), b.rows]).toEqual([true, 0, a.rows])
+  })
+  it('descent: every row it draws is the as-of walk\'s, every expanded row sums, `tier` says descent', async () => {
+    let compared = 0
+    for (const gen of ['g2', 'g5', 'g7']) {
+      const paths = await dirsOf(gen)
+      for (let i = 0; i < DATES.length; i++) for (let j = i + 1; j < DATES.length; j++) for (const path of paths) for (const [w, h, top] of [[8, 6, 1e6], [1280, 768, 1e6], [1280, 768, 3]]) {
+        const o = { from: DATES[i], to: DATES[j], path, w, h, minArea: 12, atten: 2, top }
+        const got = await buildDiff(at(gen, []), { ...o, descent: true }).catch(e => (e as Error).message)
+        if (typeof got === 'string') {
+          expect([gen, path, got]).toEqual([gen, path, await buildDiff(at(gen, []), o).then(() => 'answered', e => (e as Error).message)])
+          continue
+        }
+        expect(got.tier).toBe('descent')
+        const want = await buildDiff(at(gen, []), { ...o, top: 1e6, threshold: Math.max(0.5, got.threshold * 0.999), lookupCap: 1e9 })
+        expect([got.total_a, got.total_b, got.objects_a, got.objects_b]).toEqual([want.total_a, want.total_b, want.objects_a, want.objects_b])
+        const ch = (r: R) => r.s !== 'unchanged' && !r.p.endsWith('(other)')
+        let wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+        // A row the walk at the final floor doesn't name (the descent read P's children at a lower first-level floor):
+        // compared with the walk at a floor under every row.
+        if ((got.rows as R[]).some(r => ch(r) && !wantBy.has(r.p))) {
+          const fine = await buildDiff(at(gen, []), { ...o, top: 1e6, threshold: 0.5, lookupCap: 1e9 })
+          wantBy = new Map((fine.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+        }
+        const bad = (got.rows as R[]).filter(ch).map(r => [r.p, key(r), wantBy.get(r.p) ?? null]).filter(([, a, b]) => a !== b)
+        expect([gen, DATES[i], DATES[j], path, w, top, bad]).toEqual([gen, DATES[i], DATES[j], path, w, top, []])
+        const rows = got.rows as R[]
+        for (const t of [{ p: '', a: got.total_a, b: got.total_b, oa: got.objects_a, ob: got.objects_b }, ...rows.filter(r => r.x)]) {
+          const kids = rows.filter(r => parentOf(r.p) === t.p && r.p !== t.p)
+          if (!kids.length) continue
+          const sum = (f: (r: R) => number) => kids.reduce((x, r) => x + f(r), 0)
+          expect([gen, path, top, t.p, sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([gen, path, top, t.p, t.b - t.a, t.ob - t.oa])
+        }
+        compared++
+      }
+    }
+    expect(compared).toBeGreaterThan(100)
+  }, 180_000)
+
+  it('descent: a subtree nothing changed under reads no level and draws nothing', async () => {
+    let found = 0
+    const G1 = ['2026-08-03', '2026-08-04', '2026-08-05']
+    for (const [gen, dates] of [['g2', DATES], ['g7', DATES], ['g1', G1]] as const) for (const path of await dirsOf(gen, 3, [...dates])) for (let i = 0; i + 1 < dates.length; i++) {
+      const [from, to] = [dates[i], dates[i + 1]]
+      const plain = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, threshold: 0.5, lookupCap: 1e9 }).catch(() => null)
+      if (!plain || plain.rows.some(r => r.s !== 'unchanged') || plain.total_a !== plain.total_b || plain.objects_a !== plain.objects_b) continue
+      const levels: string[] = []
+      const d = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, descent: true, trace: n => { if (/^L\d+$/.test(n)) levels.push(n) } })
+      found++
+      expect([gen, path, d.rows.filter(r => r.s !== 'unchanged'), levels]).toEqual([gen, path, [], []])
+    }
+    expect(found).toBeGreaterThan(0)
+  }, 120_000)
+
 
   it('refuses a generation without the `changes` sort (no other answer)', async () => {
     // Another revision: the footer the tests above opened is held per isolate (a generation's files never go away).
