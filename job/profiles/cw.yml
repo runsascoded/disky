@@ -49,6 +49,8 @@ secrets:
   R2_ENDPOINT: cw-s3-r2-endpoint
   R2_ACCESS_KEY_ID: cw-s3-isolated-r2-access-key-id
   R2_SECRET_ACCESS_KEY: cw-s3-isolated-r2-secret-access-key
+  # Account Analytics: Read, for the `cf-usage` step (`snapshots/usage/<date>.json`)
+  CF_ANALYTICS_TOKEN: cw-s3-cf-analytics-token
 env:
   SCAN_RUNS_PROFILE: /app/job/scan-runs.json
   D1_DB_ID: 7f1e1326-b879-4ecd-8621-846621c24f36   # oa-cw-s3-usage-db (site/wrangler.toml)
@@ -75,8 +77,8 @@ env:
 pass: [DT_RECORD, DT_ALERTS]
 # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2), retired for real
 # since the reviewed one-off by hand (2026-10-18: 167 scans, ~874 GB over GCS + R2)
-# `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), never fatal
-steps: [retire, gcp-cost]
+# `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), `cf-usage` the Cloudflare one (`/admin/usage`); both never fatal
+steps: [retire, gcp-cost, cf-usage]
 labels: {deployment: cw}
 queue_size: 20
 options:
@@ -101,6 +103,8 @@ options:
   digest: {template: cw, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects
   gcp-cost: {buckets: [oa-cw-s3-usage-data, oa-cw-s3-usage-scratch]}
+  # the Nextflow task's cwd isn't the image's `/app`
+  cf-usage: {config: /app/site/wrangler.toml}
   # the data bucket, then the R2 copy: every scan but the newest 2, each verified against the interval store in this task
   # first (about one per run once caught up; a failed or unverifiable scan keeps its files)
   retire: {keep: 2, execute: true, verify_jobs: 3, static_gen: 2026-10-15cw.c001, layer2: true, copies: [r2]}

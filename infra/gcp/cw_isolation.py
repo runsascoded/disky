@@ -82,7 +82,23 @@ def prepare_isolation(
         role="roles/secretmanager.secretAccessor",
         member=member,
     )
-    resources.extend([repository, reader, credential, accessor])
+    # Account Analytics: Read on cw's account, for the scan's `cf-usage` step (`CF_ANALYTICS_TOKEN`)
+    analytics = gcp.secretmanager.Secret(
+        "cw-cf-analytics-token",
+        project=project,
+        secret_id="cw-s3-cf-analytics-token",
+        replication={"auto": {}},
+        labels={**labels, "component": "secret"},
+        opts=pulumi.ResourceOptions(protect=True),
+    )
+    analytics_accessor = gcp.secretmanager.SecretIamMember(
+        "cw-cf-analytics-token-job",
+        project=project,
+        secret_id=analytics.secret_id,
+        role="roles/secretmanager.secretAccessor",
+        member=member,
+    )
+    resources.extend([repository, reader, credential, accessor, analytics, analytics_accessor])
     pulumi.export("isolation_data_bucket", buckets[0].name)
     pulumi.export("isolation_scratch_bucket", buckets[1].name)
     pulumi.export("isolation_image_repository", repository.repository_id)

@@ -22,6 +22,11 @@ database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
 # ignore `remote`. Needs CLOUDFLARE_API_TOKEN (direnv) + CLOUDFLARE_ACCOUNT_ID.
 remote = true
 
+# Usage attribution (`_lib/usage.ts`, specs/usage-metrics.md): one point per Functions request.
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_cw"
+
 # Workers Logs: retain console output + uncaught exceptions from the Pages
 # Functions (a few days, in the dashboard) — without this a 500 leaves no trace
 # once the request is gone (`wrangler pages deployment tail` is live-only).
@@ -73,6 +78,7 @@ SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:la
 DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"  # the site's "Source on GitHub" link (build-time)
+CF_PAGES_SCRIPT = "pages-worker--18550629"   # the project's Functions scripts in the analytics datasets: `<this>-production` / `-preview` (`dt-cloud cf-usage`; the Pages API's `production_script_name`)
 # The in-app viewer policy (specs/done/oidc-cutover-cw.md): these domains get the
 # `cw` scope with no `allowed_emails` row.
 VIEWER_DOMAINS = "coreweave.com"
@@ -262,3 +268,8 @@ bucket_name = "oa-cw-s3-usage-index"
 [[env.preview.kv_namespaces]]
 binding = "CACHE_KV"
 id = "1dbc4c60884c4f3ba61aa1aa79f494bc"
+
+# The same dataset as production (a point's host isn't recorded; dev's load is small next to prod's).
+[[env.preview.analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_cw"
