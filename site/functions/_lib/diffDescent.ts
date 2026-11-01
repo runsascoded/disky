@@ -70,6 +70,8 @@ export interface DescentOpts {
   trace?: Trace
   /** Never hand off to the walk (tests of the descent itself). */
   noHandOff?: boolean
+  /** A fixed floor for P's children instead of `|Δ P| · minArea / (w·h)`: a union root's common threshold. */
+  threshold?: number
 }
 
 export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff> {
@@ -86,7 +88,7 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
   if (D1 == null || D2 == null) throw new DiffUnavailable('a per-scan store', 'a descent diff reads the interval store; one scan is per-scan')
   const k = o.minArea / (o.w * o.h)
   const dlt = (a: Side, b: Side) => Math.abs((b?.b ?? 0) - (a?.b ?? 0))
-  let floor = dlt(ra, rb) * k
+  let floor = o.threshold ?? dlt(ra, rb) * k
   const thrAt = (depth: number) => floor * o.atten ** Math.max(0, depth - dP - 1)
   const same = (a: Side, b: Side) => !!(a && b && Math.round(a.b) === Math.round(b.b) && Math.round(a.o) === Math.round(b.o))
 
@@ -144,7 +146,7 @@ export async function buildDiffDescent(env0: Env, o: DescentOpts): Promise<Diff>
     o.trace?.(`L${levels}`, performance.now() - t0, `${take.length} parents, ${out.size} children, ${reads} reads`)
     if (levels === 1) {
       // The floor from P's children: `G ≥ Σ |Δ child|`.
-      floor = Math.max(floor, [...out.values()].reduce((s, c) => s + dlt(c.a, c.b), 0) * k)
+      if (o.threshold === undefined) floor = Math.max(floor, [...out.values()].reduce((s, c) => s + dlt(c.a, c.b), 0) * k)
       // The planner: how many of P's children would expand (as below), against `DESCENT_MAX_EXPANDABLE`.
       const expandable = [...out.values()].filter(c => {
         const kind = c.b?.kind ?? c.a?.kind ?? 'dir'

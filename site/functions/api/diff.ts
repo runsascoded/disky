@@ -131,7 +131,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
     // Δ mode from the transitions (specs/diff-from-changes.md): asked for explicitly (`dm=delta`: a client that doesn't
     // say draws max(old, new) areas from these rows too), unscoped, on a deployment whose store has them.
     // `atten ≥ 1`: a parent's floor is then at most its children's, so a changed child's parent (as big) is read too.
-    const deltaOk = url.searchParams.get('dm') === 'delta' && intervalsOn(ctx.env) && !lens && !owner && !query && !classes && !summary && !member && atten >= 1
+    const deltaOk = url.searchParams.get('dm') === 'delta' && intervalsOn(ctx.env) && !lens && !owner && !query && !classes && !summary && atten >= 1
     const descent = deltaOk && ctx.env.DIFF_DESCENT === '1'
     const cacheKey = cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
       `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
@@ -264,7 +264,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       bodies.reduce((n, b) => n + b[k], 0) + (k === 'expansions' || k === 'lookups' ? 0 : still.reduce((n, r) => n + (k.startsWith('total') ? r.b : r.o), 0))
     return new Response(JSON.stringify({
       prev: cf.date, curr: ct.date, path,
-      rows: unionDiffRows(view, bodies.map((b, i) => ({ store: changed[i].store, rows: b.rows }))),
+      rows: unionDiffRows(view, bodies.map((b, i) => ({ store: changed[i].store, rows: b.rows, total: { a: b.total_a, b: b.total_b, oa: b.objects_a, ob: b.objects_b } }))),
       total_a: sum('total_a'), total_b: sum('total_b'), objects_a: sum('objects_a'), objects_b: sum('objects_b'),
       expansions: sum('expansions'),
       truncated: bodies.some(b => b.truncated),
@@ -352,25 +352,38 @@ async function unionFilteredDiff<P extends Comparable>(
 }
 
 /** A union root diff's rows from its members' (each a root diff): every row as its member drew it, a depth-1
- *  row tagged with its store (`src`), the members' depth-1 `(other)` folds summed into one. A depth-1 name two
- *  members draw is a misconfigured union (`UnionOverlap`). */
-export function unionDiffRows(view: UnionView, members: readonly { store: string; rows: readonly DiffRow[] }[]): (DiffRow & { src?: string })[] {
+ *  row tagged with its store (`src`), and one `(other)`. With a member's totals (`total`), its share of `(other)` is
+ *  the invariant — its totals less its drawn depth-1 rows, per side, clamped — so a member that drew nothing at the
+ *  union's threshold (its root not expanded, no `(other)` of its own) still adds up; without, its own depth-1
+ *  `(other)` (a filtered diff's fold). A depth-1 name two members draw is a misconfigured union (`UnionOverlap`). */
+export function unionDiffRows(view: UnionView, members: readonly { store: string; rows: readonly DiffRow[]; total?: { a: number; b: number; oa: number; ob: number } }[]): (DiffRow & { src?: string })[] {
   const out: (DiffRow & { src?: string })[] = []
-  let other = null as DiffRow | null
+  const other = { a: 0, b: 0, oa: 0, ob: 0 }
+  let any = false
   const seen = new Map<string, string>()
   for (const m of members) {
+    const drawn = { a: 0, b: 0, oa: 0, ob: 0 }
     for (const r of m.rows) {
       if (r.d !== 1) { out.push(r); continue }
       if (r.p === '(other)') {
-        other = other ? { ...other, a: other.a + r.a, b: other.b + r.b, oa: other.oa + r.oa, ob: other.ob + r.ob } : { ...r }
+        any = true
+        if (!m.total) { other.a += r.a; other.b += r.b; other.oa += r.oa; other.ob += r.ob }
         continue
       }
       const prev = seen.get(r.p)
       if (prev) throw new UnionOverlap(`union view '${view.key}': root '${r.p}' is in stores ${prev}, ${m.store}`)
       seen.set(r.p, m.store)
       out.push({ ...r, src: m.store })
+      drawn.a += r.a; drawn.b += r.b; drawn.oa += r.oa; drawn.ob += r.ob
+    }
+    if (m.total) {
+      const t = m.total
+      other.a += Math.max(0, t.a - drawn.a); other.b += Math.max(0, t.b - drawn.b)
+      other.oa += Math.max(0, t.oa - drawn.oa); other.ob += Math.max(0, t.ob - drawn.ob)
     }
   }
-  if (other) out.push({ ...other, s: other.a === other.b && other.oa === other.ob ? 'unchanged' : 'changed' })
+  if (any || other.a !== other.b || other.oa !== other.ob) {
+    out.push({ p: '(other)', d: 1, k: 'dir', a: other.a, b: other.b, oa: other.oa, ob: other.ob, s: other.a === other.b && other.oa === other.ob ? 'unchanged' : 'changed' } as DiffRow)
+  }
   return out
 }
