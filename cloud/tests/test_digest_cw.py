@@ -131,7 +131,7 @@ def test_units_tb():
     assert [r.tb for r in rows] == [15.0, 15.5, 15.4]
     month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
     assert D.op_body(month, oct1, None, cfg).split("\n") == [
-        f":arrow_deg50: **+0.4 TB** [month-to-date]({SITE}/?d=261002-2d#over-time) · 15 TB · 6.1% of 253 TB public · [dashboard]({SITE}/)",
+        f":arrow_deg50: **+0.4 TB** [month-to-date]({SITE}/?d=261002-2d#over-time) · **+0.4 TB** [since 9/30]({SITE}/?d=261002-2d#over-time) · 15 TB · 6.1% of 253 TB public · [dashboard]({SITE}/)",
         "_as of 10/2 08:00Z_",
         "",
         "*Weekly summaries*",
@@ -145,6 +145,7 @@ def test_units_tb():
         "title": "HF usage — October 2026",
         "note": "cw.example.org · TB",
         "month": "2026-10",
+        "from": "2026-09-02",
         "points": [{"scan": s, "bytes": b * TB // 10} for s, b in (("2026-09-30T0800", 150), ("2026-10-01T0800", 155), ("2026-10-02T0800", 154))],
         "units": "TB",
         "quota": {"bytes": 253 * TB, "name": "253 TB public"},
@@ -179,7 +180,7 @@ def test_class_scoped_quotas():
     assert [(r.tb, r.classes) for r in rows] == [(15.0, {1: 15.0, 5: 0.02, 6: 0.005}), (16.0, {1: 15.5, 5: 0.5, 6: 0.005})]
     month, oct1 = D.Month(lead=rows[:1], rows=rows[1:]), date(2026, 10, 1)
     assert D.op_body(month, oct1, None, cfg).split("\n") == [
-        f":arrow_deg70: **+1.0 TB** [month-to-date]({SITE}/?d=261001-1d#over-time) · 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private · [dashboard]({SITE}/)",
+        f":arrow_deg70: **+1.0 TB** [month-to-date]({SITE}/?d=261001-1d#over-time) · **+1.0 TB** [since 9/30]({SITE}/?d=261001-1d#over-time) · 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private · [dashboard]({SITE}/)",
         "_as of 10/1 08:00Z_",
         "",
         "*Weekly summaries*",
@@ -261,7 +262,7 @@ def test_rows_from_meta_buckets_switch():
     # bucket, the primary's total included, linked (as in the replies) over the
     # same month-to-date span
     assert D.op_body(month, SEP, None, CFG).split("\n")[0] == (
-        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-1d#over-time) · [main]({SITE}/main-data?d=260902-1d#over-time) 712 TiB · 78.2% of 1 PB · "
+        f":arrow_deg30: **+2.0 TiB** [month-to-date]({SITE}/?d=260902-1d#over-time) · **+2.0 TiB** [since 9/1]({SITE}/?d=260902-1d#over-time) · [main]({SITE}/main-data?d=260902-1d#over-time) 712 TiB · 78.2% of 1 PB · "
         f"[hot]({SITE}/hot-data?d=260902-1d#over-time) 91 TiB · [dashboard]({SITE}/)"
     )
 
@@ -469,38 +470,40 @@ def test_no_quota():
 
     cfg = replace(CFG, buckets={})
     assert D.op_body(MONTH, SEP, None, cfg).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · 715 TiB · [dashboard]({SITE}/)",
+        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31]({SITE}/?d=26090212-2d12h#over-time) · 715 TiB · [dashboard]({SITE}/)",
         "_as of 9/2 12:00Z_",
         "",
         "*Weekly summaries*",
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB",
+        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB",
     ]
     assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"713 Ti [↗︎]({SITE}/main-data?d=26090112-1d#over-time)"
 
 
 def test_op_body():
     # month-to-date +10.0 on 705 over 2 days → 1.42%·3.5 = 5.0%/wk → deg40;
-    # the (partial) week +10.0 → 1.4% → deg20, linked over 8/31 12:00 → 9/2 12:00 = 2d
+    # nothing before 8/31 (a store younger than the window): the look-back figure and the (partial) week run from
+    # its first scan, 8/31 00:00 (700): +15.0 → 2.1% → deg30, linked over 8/31 00:00 → 9/2 12:00 = 2d12h
     assert D.op_body(MONTH, SEP, "https://x/p.png", CFG).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · 715 TiB · 78.6% of 1 PB · [dashboard]({SITE}/)",
+        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31]({SITE}/?d=26090212-2d12h#over-time) · 715 TiB · 78.6% of 1 PB · [dashboard]({SITE}/)",
         "_as of 9/2 12:00Z_",
         "",
         "*Weekly summaries*",
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB · 78.6% of 1 PB",
+        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB · 78.6% of 1 PB",
         "",
         "![S3 usage — September 2026](https://x/p.png)",
     ]
-    assert D.op_body(MONTH, SEP, None, CFG).split("\n")[-1].startswith(":arrow_deg20: [wk of 8/31]")
+    assert D.op_body(MONTH, SEP, None, CFG).split("\n")[-1].startswith(":arrow_deg30: [wk of 8/31]")
 
 
 def test_op_body_two_weeks():
-    # a completed week (Sunday scanned) is not partial; the next week's bullet is Δ vs that week's end
+    # a completed week (Sunday scanned) is not partial, Δ from the store's first scan (8/31 00:00: none before the
+    # week); the next week's bullet is Δ vs that week's end
     metas = LEAD + [(f"2026-09-{d:02d}T{h}", _meta(700 + i)) for i, (d, h) in enumerate(((d, h) for d in range(1, 8) for h in ("0000", "1200")), start=1)]
     rows = D.rows_from_meta(metas, P)
     month = D.Month(lead=rows[:2], rows=rows[2:])
     bullets = D.op_body(month, SEP, None, CFG).split("\n")[4:]
     assert bullets == [
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090612-6d#over-time): **+7.0 TiB** → 712 TiB · 78.2% of 1 PB",
+        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090612-6d12h#over-time): **+12.0 TiB** → 712 TiB · 78.2% of 1 PB",
         f":arrow_deg0: [wk of 9/7]({SITE}/?d=26090712-1d#over-time) _(partial)_: **+2.0 TiB** → 714 TiB · 78.5% of 1 PB",
     ]
 
@@ -548,6 +551,72 @@ def test_state_path():
     assert E.state_path("gs://b/snapshots/cw", SEP, CFG.state.format(channel="C1", variant="sender")) == "gs://b/digest/cw/C1/sender/2026-09.json"
 
 
+# ---- the OP's window (specs/digest-rolling-window.md) ------------------------
+
+
+@pytest.mark.parametrize("month, today, start", [
+    # the 1st: 30 days back, into the previous month
+    (date(2026, 11, 1), date(2026, 11, 1), date(2026, 10, 2)),
+    (date(2026, 11, 1), date(2026, 11, 15), date(2026, 10, 16)),
+    (date(2026, 11, 1), date(2026, 11, 30), date(2026, 10, 31)),
+    # a 31-day month's last day: just the month
+    (date(2026, 10, 1), date(2026, 10, 31), date(2026, 10, 1)),
+    # across a year boundary
+    (date(2027, 1, 1), date(2027, 1, 1), date(2026, 12, 2)),
+])
+def test_window_start(month: date, today: date, start: date):
+    assert E.window_start(month, today) == start
+
+
+def _daily(root: Path, first: date, last: date, tib) -> None:
+    """One 08:00Z scan a day, ``tib(i)`` TiB on the ``i``-th day."""
+    n = (last - first).days + 1
+    _publish(root, [(f"{first + dt.timedelta(days=i)}T0800", _meta(tib(i))) for i in range(n)])
+
+
+NOV = date(2026, 11, 1)
+
+
+def test_op_body_on_the_first(tmp_path: Path):
+    # 11/1, a day into the month: the window reaches back to 10/2, its weeks from 9/28's (baselined on 9/27's scan);
+    # the four that ended in October are marked so; the headline puts the last 30 days beside the one-day
+    # month-to-date; the OP links October's thread
+    root = tmp_path / "snapshots" / "cw"
+    _daily(root, date(2026, 9, 25), NOV, lambda i: 700 + i)
+    month = D.load_month(str(root), NOV, P)
+    assert D.op_body(month, NOV, None, CFG, "https://slack.example.org/archives/C1/p1").split("\n") == [
+        f":arrow_deg20: **+1.0 TiB** [month-to-date]({SITE}/?d=26110108-1d#over-time) · **+30.0 TiB** [last 30d]({SITE}/?d=26110108-30d#over-time) · 737 TiB · 81.0% of 1 PB · [dashboard]({SITE}/)",
+        "_as of 11/1 08:00Z_",
+        "",
+        "*Weekly summaries*",
+        f":arrow_deg20: [wk of 9/28]({SITE}/?d=261004-7d#over-time) (Oct): **+7.0 TiB** → 709 TiB · 77.9% of 1 PB",
+        f":arrow_deg20: [wk of 10/5]({SITE}/?d=261011-7d#over-time) (Oct): **+7.0 TiB** → 716 TiB · 78.7% of 1 PB",
+        f":arrow_deg20: [wk of 10/12]({SITE}/?d=261018-7d#over-time) (Oct): **+7.0 TiB** → 723 TiB · 79.5% of 1 PB",
+        f":arrow_deg20: [wk of 10/19]({SITE}/?d=261025-7d#over-time) (Oct): **+7.0 TiB** → 730 TiB · 80.2% of 1 PB",
+        f":arrow_deg20: [wk of 10/26]({SITE}/?d=26110108-7d#over-time): **+7.0 TiB** → 737 TiB · 81.0% of 1 PB",
+        "",
+        "[← October](https://slack.example.org/archives/C1/p1)",
+    ]
+    # the plot: from the last scan before the window (10/1) on, the month shaded after 10/2
+    body = D.image_body(month, NOV, CFG)
+    assert (body["from"], body["points"][0]["scan"], body["points"][-1]["scan"], len(body["points"])) == ("2026-10-02", "2026-10-01T0800", "2026-11-01T0800", 32)
+
+
+def test_converge_links_the_previous_months_thread(tmp_path: Path):
+    # October's thread converged first (OP m1); November's OP links it, by the client's permalink
+    root = tmp_path / "snapshots" / "cw"
+    _daily(root, date(2026, 10, 30), NOV, lambda i: 700 + i)
+    fake = _FakeSlack()
+    post_digest(str(root), date(2026, 10, 1), "xoxb", "C1", "sender", client=fake)
+    assert fake.calls[0][0] == "post" and "[← September]" not in fake.calls[0][1]
+    fake.calls.clear()
+    post_digest(str(root), NOV, "xoxb", "C1", "sender", client=fake)
+    op = fake.calls[0]
+    assert (op[0], op[3], op[1].split("\n")[-4:-1]) == (
+        "post", "S3 usage — November 2026", ["", "[← October](https://slack.example.org/archives/C1/pm1)", ""],
+    )
+
+
 # ---- converge mechanism ----------------------------------------------------
 
 
@@ -572,6 +641,9 @@ class _FakeSlack:
         self.calls.append(("post", content, thread_id, username, icon_url, icon_emoji, *(["broadcast"] if broadcast else [])))
         return _Msg(f"m{self.n}")
 
+    def permalink(self, ts):
+        return f"https://slack.example.org/archives/C1/p{ts}"
+
     def edit(self, ts, content):
         self.calls.append(("edit", ts, content))
         return _Msg(ts)
@@ -593,10 +665,11 @@ def test_load_month(tmp_path: Path):
     root = tmp_path / "snapshots" / "cw"
     _publish(root, [("2026-08-30T1200", _meta(690))] + LEAD + SEPT)
     month = D.load_month(str(root), SEP, P)
-    # lead = every scan of the last pre-month day (not 8/30); rows = the in-month scans
+    # lead = every scan of the last pre-month day; pre = the OP window's earlier scans (8/30); rows = the in-month scans
+    assert [r.scan for r in month.pre] == ["2026-08-30T1200"]
     assert [r.scan for r in month.lead] == ["2026-08-31T0000", "2026-08-31T1200"]
     assert [r.scan for r in month.rows] == [s for s, _ in SEPT]
-    assert (month.lead[0].dtb, month.rows[0].dtb, month.rows[0].hours) == (None, 5.0, 12.0)  # deltas only within the loaded window
+    assert (month.pre[0].dtb, month.lead[0].dtb, month.rows[0].dtb, month.rows[0].hours) == (None, 10.0, 5.0, 12.0)  # deltas only within the loaded window
     assert D.load_month(str(root), date(2026, 7, 1), P) is None
     _publish(tmp_path / "fresh", SEPT)
     assert D.load_month(str(tmp_path / "fresh"), SEP, P).lead == []
@@ -914,12 +987,15 @@ def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
 
 
 def test_image_body():
-    # the site draws the OP image: every scan from the lead-in on, the primary's quota, the headline interval's diff
+    # the site draws the OP image: every scan in the window (from 8/3, 30 days before 9/2: all of these), the
+    # primary's quota, the headline interval's diff
     assert D.image_body(MONTH, SEP, CFG) == {
         "title": "S3 usage — September 2026",
         "note": "cw.example.org · TiB",
         "month": "2026-09",
+        "from": "2026-08-03",
         "points": [
+            {"scan": "2026-08-31T0000", "bytes": 700 * TIB},
             {"scan": "2026-08-31T1200", "bytes": 705 * TIB},
             {"scan": "2026-09-01T0000", "bytes": 710 * TIB},
             {"scan": "2026-09-01T1200", "bytes": 713 * TIB},
@@ -939,6 +1015,7 @@ def test_image_body_first_scan():
         "title": "S3 usage — September 2026",
         "note": "cw.example.org · TiB",
         "month": "2026-09",
+        "from": "2026-08-02",
         "points": [{"scan": "2026-09-01T0000", "bytes": 710 * TIB}],
         "units": "TiB",
         "quota": {"bytes": 910 * TIB, "name": "1 PB"},

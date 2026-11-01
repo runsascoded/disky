@@ -21,7 +21,7 @@ describe('parseDigestRequest: tiers', () => {
   it('parses the tiers (default colours, bottom → top) and the points (time-sorted) over the month frame', () => {
     expect(parseDigestRequest(tiers)).toEqual({
       kind: 'tiers', title: 'marin GCS — October 2026', note: 'gcs.oa.dev · TiB', units: 'TiB',
-      from: OCT - 16 * H, to: NOV - 8 * H,
+      from: OCT - 16 * H, to: NOV - 8 * H, month: OCT,
       tiers: [
         { name: 'Archive', color: TIER_COLORS[0] }, { name: 'Coldline', color: TIER_COLORS[1] },
         { name: 'Nearline', color: TIER_COLORS[2] }, { name: 'Standard', color: TIER_COLORS[3] },
@@ -65,7 +65,7 @@ describe('parseDigestRequest: usage', () => {
   it('is the kind when none is given (the cw job sends none); its frame widens to the lead-in scan', () => {
     expect(parseDigestRequest(usage)).toEqual({
       kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TB',
-      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H,
+      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H, month: OCT,
       points: [{ t: Date.UTC(2026, 8, 30, 8), bytes: 14e12 }, { t: Date.UTC(2026, 9, 1, 8), bytes: 15e12 }],
       quota: { bytes: 253e12, name: '253 TB public' },
       diff: { from: '2026-09-30T0800', to: '2026-10-01T0800', path: 'bucket', title: 'What changed' },
@@ -75,10 +75,19 @@ describe('parseDigestRequest: usage', () => {
   it('drops a malformed quota, and takes no diff', () => {
     expect(parseDigestRequest({ ...usage, quota: { bytes: '1' }, diff: null, units: undefined })).toEqual({
       kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TiB',
-      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H,
+      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H, month: OCT,
       points: [{ t: Date.UTC(2026, 8, 30, 8), bytes: 14e12 }, { t: Date.UTC(2026, 9, 1, 8), bytes: 15e12 }],
       quota: null, diff: null,
     })
+  })
+  it("widens the frame back to the OP window's first day (`from`), the month still its own", () => {
+    const req = parseDigestRequest({ ...usage, from: '2026-09-15', points: [{ scan: '2026-09-14T0800', bytes: 13e12 }, ...usage.points] })
+    expect(typeof req === 'string' ? req : [req.from, req.to, req.month]).toEqual([Date.UTC(2026, 8, 14, 8), NOV - 8 * H, OCT])
+    const late = parseDigestRequest({ ...usage, from: '2026-10-01' })
+    expect(typeof late === 'string' ? late : [late.from, late.month]).toEqual([Date.UTC(2026, 8, 30, 8), OCT])
+  })
+  it('refuses a malformed `from`', () => {
+    expect(['2026-9-15', 20260915, null].map(from => parseDigestRequest({ ...usage, from }))).toEqual(['from: YYYY-MM-DD', 'from: YYYY-MM-DD', 'from: YYYY-MM-DD'])
   })
   it('refuses a bad diff', () => {
     expect([

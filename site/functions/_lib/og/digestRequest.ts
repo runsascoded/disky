@@ -1,15 +1,16 @@
 /** `POST /api/digest-image`'s request, validated (pure; `api/digest-image.ts` resolves a `usage` diff and renders):
  *
- *   {kind?: 'usage', title, note, month: 'YYYY-MM', points: [{scan, bytes}],
+ *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', points: [{scan, bytes}],
  *    quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → `digestSvg`: the usage line against its quota, over the headline interval's diff map (the cw template)
- *   {kind: 'tiers', title, note, month, tiers: [name, …] (bottom → top), points: [{scan, bytes: [per tier]}],
+ *   {kind: 'tiers', title, note, month, from?, tiers: [name, …] (bottom → top), points: [{scan, bytes: [per tier]}],
  *    diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → `tiersSvg`: the total line over the stacked storage classes, over the headline interval's diff map (the gcs
  *       template)
  *
- * A body without `kind` is `usage` (the cw job's request predates the field). Either kind's `diff` is resolved by the
- * endpoint (`buildDiff`). */
+ * A body without `kind` is `usage` (the cw job's request predates the field). `from`: the OP window's first day
+ * (specs/digest-rolling-window.md), before the month on all but its last days: the axis starts there and the card
+ * shades the month. Either kind's `diff` is resolved by the endpoint (`buildDiff`). */
 import { type DigestPoint, type DigestUnits, TIER_COLORS, type TierPoint } from './digestCard.js'
 import { isScanId, scanTime } from '../../../src/scanSlug.js'
 
@@ -26,9 +27,12 @@ export interface DiffSpec {
 interface Common {
   title: string
   note: string
-  /** The x axis' span, epoch ms: the month (scans fill it in left → right), widened to a lead-in scan before it. */
+  /** The x axis' span, epoch ms: the month (scans fill it in left → right), widened back to the window's first day
+   *  (`from`) and a lead-in scan before it. */
   from: number
   to: number
+  /** The month's first instant, epoch ms (the shaded current month starts there). */
+  month: number
   units: DigestUnits
 }
 
@@ -67,9 +71,12 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
   const units = (b.units ?? 'TiB') as DigestUnits
   const raw = b.points ?? []
   if (!Array.isArray(raw)) return 'points: an array'
+  const w = b.from === undefined ? null : typeof b.from === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(b.from) : null
+  if (b.from !== undefined && !w) return 'from: YYYY-MM-DD'
   const frame = (ts: number[]) => {
     const [y, mo] = [Number(m[1]), Number(m[2]) - 1]
-    return { from: Math.min(Date.UTC(y, mo, 1) - 16 * 3600_000, ...ts), to: Date.UTC(y, mo + 1, 1) - 8 * 3600_000 }
+    const start = Math.min(Date.UTC(y, mo, 1), ...(w ? [Date.UTC(Number(w[1]), Number(w[2]) - 1, Number(w[3]))] : []))
+    return { from: Math.min(start - 16 * 3600_000, ...ts), to: Date.UTC(y, mo + 1, 1) - 8 * 3600_000, month: Date.UTC(y, mo, 1) }
   }
   const diff = parseDiff(b.diff)
   if (typeof diff === 'string') return diff

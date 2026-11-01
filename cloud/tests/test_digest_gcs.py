@@ -5,7 +5,7 @@ paths, the Discord converge).
 Exact-equality against a hand-built month (no Slack, no GCS): a lead-in scan
 (8/2) plus two in-month scans (8/3 Mon, 8/4 Tue — same ISO week, so the label is
 unambiguous). Totals chosen so every derived string is checkable by hand."""
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -79,8 +79,9 @@ def test_reply_discord_link_text():
 
 
 def test_op_body():
-    assert D.op_body(ROWS, date(2026, 8, 1), "https://x/p.png", CFG).split("\n") == [
-        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
+    assert D.op_body(D.Month(ROWS), date(2026, 8, 1), "https://x/p.png", CFG).split("\n") == [
+        # a store younger than the window: its look-back figure runs from its first scan's baseline (8/2)
+        ":arrow_deg20: **+10.0 TiB** month-to-date · **+10.0 TiB** [since 8/2](https://site.example.org/?d=260804-2d#over-time) · [dashboard](https://site.example.org/)",
         "",
         "*Weekly summaries*",
         ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
@@ -95,7 +96,7 @@ def test_op_body_full_week_not_partial():
     for i, d in enumerate(range(3, 10)):
         dm.append((f"2026-08-0{d}", _meta(3000 + i, 300 + i, 600, 1500, 600)))
     rows = D.rows_from_meta(dm, CFG.prices)[1:]
-    bullet = D.op_body(rows, date(2026, 8, 1), "https://x/p.png", CFG).split("\n")[3]
+    bullet = D.op_body(D.Month(rows), date(2026, 8, 1), "https://x/p.png", CFG).split("\n")[3]
     assert bullet.startswith(":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) — ")
 
 
@@ -130,7 +131,7 @@ SUB_TRIGGERS = {"2026-08-02": "schedule", "2026-08-03T0601": "manual", "2026-08-
 
 
 def test_daily_rows_run_sender_to_sender(sub_root):
-    rows = D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS)
+    rows = D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS).rows
     # 8/3's row is its scheduled scan, Δ vs 8/2 (the manual 06:01Z neither replies nor baselines); 8/5 not yet
     assert [(r.date, r.prev, r.tb, r.dtb, r.dcost, r.slug) for r in rows] == [
         ("2026-08-02", None, 3000.0, None, None, "260802"),
@@ -161,16 +162,18 @@ def test_a_manual_scan_replies_for_its_day_once_a_later_scan_lands(sub_root):
 
     # 9/1's scan closes August: 8/5's manual scan stands in for its day
     shutil.copytree(Path(sub_root) / "2026-08-04T0700", Path(sub_root) / "2026-09-01")
-    assert [(r.date, r.prev) for r in D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS)][-1] == ("2026-08-05T0300", "2026-08-04T0700")
+    assert [(r.date, r.prev) for r in D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS).rows][-1] == ("2026-08-05T0300", "2026-08-04T0700")
 
 
 def test_image_body():
     # `POST /api/digest-image`'s tiers card: each scan's bytes per class, bottom → top (Archive … Standard)
-    assert D.image_body(ROWS, AUG, CFG) == {
+    assert D.image_body(D.Month(ROWS), AUG, CFG) == {
         "kind": "tiers",
         "title": "GCS usage — August 2026",
         "note": "site.example.org · TiB",
         "month": "2026-08",
+        # the window: 30 days back from the latest scan (8/4)
+        "from": "2026-07-05",
         "units": "TiB",
         "tiers": ["Archive", "Coldline", "Nearline", "Standard"],
         "points": [
@@ -185,7 +188,7 @@ def test_image_body():
 def test_image_body_no_diff_without_two_scans():
     # a month's lone scan with no lead-in: nothing to diff
     lone = D.rows_from_meta([("2026-08-03", _meta(3030, 330, 600, 1500, 600))], CFG.prices)
-    assert "diff" not in D.image_body(lone, AUG, CFG)
+    assert "diff" not in D.image_body(D.Month(lone), AUG, CFG)
 
 
 def test_render_plot_posts_to_site(monkeypatch, tmp_path):
@@ -194,8 +197,8 @@ def test_render_plot_posts_to_site(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setenv("SITE_TOKEN", "tok")
     monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
-    TPL.render_plot(ROWS, AUG, tmp_path / "op.png")
-    assert calls == [("https://site.example.org", "tok", "/api/digest-image", D.image_body(ROWS, AUG, CFG))]
+    TPL.render_plot(D.Month(ROWS), AUG, tmp_path / "op.png")
+    assert calls == [("https://site.example.org", "tok", "/api/digest-image", D.image_body(D.Month(ROWS), AUG, CFG))]
     assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
 
 
@@ -203,7 +206,7 @@ def test_render_plot_without_site_token(monkeypatch, tmp_path):
     monkeypatch.delenv("SITE_TOKEN", raising=False)
     monkeypatch.delenv("GCS_USAGE_TOKEN", raising=False)
     with pytest.raises(E.PlotUnavailable) as e:
-        TPL.render_plot(ROWS, AUG, tmp_path / "op.png")
+        TPL.render_plot(D.Month(ROWS), AUG, tmp_path / "op.png")
     assert str(e.value) == "digest image: no site token ($SITE_TOKEN)"
     assert sorted(tmp_path.iterdir()) == []
 
@@ -213,8 +216,9 @@ def test_render_plot_without_site_token(monkeypatch, tmp_path):
 
 def test_op_body_without_plot():
     # `plot_url=None` (Discord attaches the PNG) drops the trailing image lines only
-    assert D.op_body(ROWS, date(2026, 8, 1), None, CFG).split("\n") == [
-        ":arrow_deg20: **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
+    assert D.op_body(D.Month(ROWS), date(2026, 8, 1), None, CFG).split("\n") == [
+        # a store younger than the window: its look-back figure runs from its first scan's baseline (8/2)
+        ":arrow_deg20: **+10.0 TiB** month-to-date · **+10.0 TiB** [since 8/2](https://site.example.org/?d=260804-2d#over-time) · [dashboard](https://site.example.org/)",
         "",
         "*Weekly summaries*",
         ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
@@ -288,13 +292,13 @@ class _FakeBot:
 # One scan in (8/3: +30 on 3000, 1 day → 7%/wk-equivalent → deg50; the week's
 # bullet is +1.0% → deg20), then both scans (+10 net → deg20; week +0.3% → deg0).
 OP_ONE_SCAN = "\n".join([
-    "<:arrow_deg50:5> **+30.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
+    "<:arrow_deg50:5> **+30.0 TiB** month-to-date · **+30.0 TiB** [since 8/2](https://site.example.org/?d=260803-1d#over-time) · [dashboard](https://site.example.org/)",
     "",
     "*Weekly summaries*",
     "<:arrow_deg20:2> [wk of 8/3](https://site.example.org/?d=260803-1d#over-time) _(partial)_ — **3,030 TiB** (+30.0, 1.0%) · $19,784/mo (+$615)",
 ])
 OP_TWO_SCANS = "\n".join([
-    "<:arrow_deg20:2> **+10.0 TiB** month-to-date · [dashboard](https://site.example.org/)",
+    "<:arrow_deg20:2> **+10.0 TiB** month-to-date · **+10.0 TiB** [since 8/2](https://site.example.org/?d=260804-2d#over-time) · [dashboard](https://site.example.org/)",
     "",
     "*Weekly summaries*",
     "<:arrow_deg0:1> [wk of 8/3](https://site.example.org/?d=260804-2d#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)",
@@ -307,7 +311,7 @@ def test_converge_discord_fresh_then_incremental():
     hook, bot, saves = _FakeHook(), _FakeBot(), []
     plot = "/x/plot.png"
     # fresh month, one scan in: OP (webhook, calendar sender, plot attached) → bot opens the thread → one reply
-    state = E.converge_discord(TPL, ROWS[:1], AUG, {}, hook=hook, bot=bot, emoji=EMOJI, plot=plot, save=lambda s: saves.append(dict(s)))
+    state = E.converge_discord(TPL, D.Month(ROWS[:1]), AUG, {}, hook=hook, bot=bot, emoji=EMOJI, plot=plot, save=lambda s: saves.append(dict(s)))
     assert hook.calls == [
         ("post", OP_ONE_SCAN, None, "GCS usage — August 2026", CAL, [plot]),
         ("post", "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)", "t1", "8/3 — 3,030 TiB (+30.0, 1.0%)", f"{AV}50.png?v=4", []),
@@ -323,7 +327,7 @@ def test_converge_discord_fresh_then_incremental():
     # next day: OP edited in place (plot re-attached), only the new scan replied, no new thread
     hook.calls.clear()
     bot.calls.clear()
-    state = E.converge_discord(TPL, ROWS, AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot=plot)
+    state = E.converge_discord(TPL, D.Month(ROWS), AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot=plot)
     assert hook.calls == [
         ("edit", "m1", OP_TWO_SCANS, [plot]),
         ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TiB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
@@ -333,7 +337,7 @@ def test_converge_discord_fresh_then_incremental():
 
     # same scans again: nothing but the OP refresh
     hook.calls.clear()
-    E.converge_discord(TPL, ROWS, AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot=plot)
+    E.converge_discord(TPL, D.Month(ROWS), AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot=plot)
     assert hook.calls == [("edit", "m1", OP_TWO_SCANS, [plot])]
 
 
@@ -341,7 +345,7 @@ def test_converge_discord_edit_replies():
     # backfill mode: every posted reply is re-edited (through the thread-bound hook) to its current body; nothing is re-posted
     hook, bot, rhook = _FakeHook(), _FakeBot(), _FakeHook()
     state = {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03": "m2", "2026-08-04": "m3"}}
-    E.converge_discord(TPL, ROWS, AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot="/x/plot.png", edit_replies=True, reply_hook=rhook)
+    E.converge_discord(TPL, D.Month(ROWS), AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot="/x/plot.png", edit_replies=True, reply_hook=rhook)
     assert hook.calls == [("edit", "m1", OP_TWO_SCANS, ["/x/plot.png"])]
     assert rhook.calls == [
         ("edit", "m2", "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)", []),
@@ -357,14 +361,14 @@ def test_redo_discord_since():
     hook.n = 4  # m1–m4 already posted
     state = {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03T0700": "m2", "2026-08-03T1500": "m3", "2026-08-04T0700": "m4"}}
     kw = dict(hook=hook, reply_hook=rhook, bot=bot, emoji=EMOJI, plot="/x/plot.png")
-    assert E.redo_discord(TPL, ROWS, AUG, state, since=date(2026, 8, 4), **kw) == {
+    assert E.redo_discord(TPL, D.Month(ROWS), AUG, state, since=date(2026, 8, 4), **kw) == {
         "old": [("2026-08-04T0700", "m4")],
         "new": [("2026-08-04", "2026-08-04", "8/4 — 3,010 TiB (−20.0, 0.7%)")],
         "rekey": [("2026-08-03", "2026-08-03T0700")],
         "left": ["2026-08-03T1500"],
     }
     assert (hook.calls, rhook.calls) == ([], [])
-    state = E.redo_discord(TPL, ROWS, AUG, state, since=date(2026, 8, 4), for_real=True, **kw)
+    state = E.redo_discord(TPL, D.Month(ROWS), AUG, state, since=date(2026, 8, 4), for_real=True, **kw)
     assert hook.calls == [
         ("edit", "m1", OP_TWO_SCANS, ["/x/plot.png"]),
         ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TiB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
@@ -398,3 +402,29 @@ def test_links_use_each_scans_canonical_slug():
     # without the start, 10/9's hours stay unknown: both by their minutes
     dm[1] = ("2026-10-09", _meta(3030, 330, 600, 1500, 600))
     assert urls(at(16))[1:] == ["https://site.example.org/?d=2610090000#diff)", "https://site.example.org/?d=2610091236#diff)"]
+
+
+def test_op_body_on_the_first(tmp_path: Path):
+    # 11/1: the window reaches back to 10/2, its weeks from 9/28's (baselined on 9/27's row), the four that ended in
+    # October marked so; the last 30 days beside the one-day month-to-date; October's thread linked
+    import json
+
+    root = tmp_path / "snapshots"
+    for i in range(38):  # 9/25 .. 11/1, +2 TiB a day of Standard
+        d, t = date(2026, 9, 25) + timedelta(days=i), 3000 + 2 * i
+        (root / f"{d}").mkdir(parents=True)
+        (root / f"{d}" / "meta.json").write_text(json.dumps(_meta(t, t - 2700, 600, 1500, 600)))
+    month = D.load_month(str(root), date(2026, 11, 1), CFG.prices, {})
+    lines = D.op_body(month, date(2026, 11, 1), None, CFG, "https://slack.example.org/archives/C1/p1").split("\n")
+    assert lines[0].split(" · ")[:2] == [":arrow_deg10: **+2.0 TiB** month-to-date", "**+60.0 TiB** [last 30d](https://site.example.org/?d=" + month.rows[-1].slug + "-30d#over-time)"]
+    assert [l.split(" — ")[0] for l in lines[3:8]] == [
+        ":arrow_deg10: [wk of 9/28](https://site.example.org/?d=261004-7d#over-time) (Oct)",
+        ":arrow_deg10: [wk of 10/5](https://site.example.org/?d=261011-7d#over-time) (Oct)",
+        ":arrow_deg10: [wk of 10/12](https://site.example.org/?d=261018-7d#over-time) (Oct)",
+        ":arrow_deg10: [wk of 10/19](https://site.example.org/?d=261025-7d#over-time) (Oct)",
+        f":arrow_deg10: [wk of 10/26](https://site.example.org/?d={month.rows[-1].slug}-7d#over-time)",
+    ]
+    assert lines[3].split(" — ")[1] == "**3,018 TiB** (+14.0, 0.5%) · $19,538/mo (+$287)"
+    assert lines[8:] == ["", "[← October](https://slack.example.org/archives/C1/p1)"]
+    # one reply a day, November's only
+    assert [r.date for r in month.rows] == ["2026-11-01"]
