@@ -86,7 +86,7 @@ def test_compaction_record_due(interval_store, tmp_path, monkeypatch):
         "read": "<n> files, <GiB> from <store> (mount) (in place)",
         "due": "every 2s: 2 scans past the base (1 runs: L1)",
         "fold": "3 ranges, <n> rows in <s>; work disk peak <GiB>, RSS peak <GiB>",
-        "sorts": "4 scans; <n> rows; <n> versions; 4 sorts; work disk peak <GiB>, RSS peak <GiB>",
+        "sorts": "4 scans; <n> rows; <n> versions; 3 sorts; work disk peak <GiB>, RSS peak <GiB>",
         "upload": "<n> files, <GiB> to <store>/interval-store/g.c001/ in <s>",
         "pointer": "g/successor.json → g.c001; CURRENT.json → g.c001",
         "prune": "g: <n> objects, <GiB> kept (0h old)",

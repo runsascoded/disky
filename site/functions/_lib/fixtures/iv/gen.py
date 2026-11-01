@@ -33,7 +33,6 @@ SIZES = [(8, 6), (30, 30)]
 
 
 def main() -> None:
-    from dt_cloud import interval_changes as ic
     from dt_cloud import interval_read as ir
     from dt_cloud import interval_store as ist
     from dt_cloud import static_names as sn
@@ -69,7 +68,6 @@ def main() -> None:
         schema = ist.SUB_SCHEMA[sub]
         ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", schema, rg_rows=4,
                          stamps=[x["ts"] for x in scans])
-    ic.write_changes(con, f"read_parquet('{work}/out/pv/r*.parquet')", out / "served" / f"{ist.CHANGES}.parquet", scans[0]["ts"], ic.listed_from(scans), rg_rows=4)
     (out / "scans.json").write_text(json.dumps({"scans": [{"id": s["id"], "ts": s["ts"]} for s in scans]}, indent=1) + "\n")
     store = ir.Store(out / "served")
     expected = []
@@ -104,7 +102,6 @@ def tiered_gens(mount: Path, work: Path, scans: list[dict], n_base: int, ranges:
     """`gens` (name → `unmerged` | `pairwise` | `deferred`) built over the scans under `mount`, intermediates in `work`."""
     from dt_cloud import append_runner as ar
     from dt_cloud import interval_append as ia
-    from dt_cloud import interval_changes as ic
     from dt_cloud import interval_store as ist
     from dt_cloud.static_append import push_run, run_key
 
@@ -132,8 +129,6 @@ def tiered_gens(mount: Path, work: Path, scans: list[dict], n_base: int, ranges:
             sub, _, _ = ist.SORTS[sort]
             ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub],
                              rg_rows=rg_rows, stamps=[x["ts"] for x in scans[:n_base]])
-        ic.write_changes(con, f"read_parquet('{base}/pv/r*.parquet')", out / "served" / f"{ist.CHANGES}.parquet", scans[0]["ts"],
-                         ic.listed_from(scans[:n_base]), rg_rows=rg_rows)
         (out / "scans.json").write_text(json.dumps({"scans": [{"id": x["id"], "ts": x["ts"]} for x in scans[:n_base]]}, indent=1) + "\n")
         if mode == "deferred":
             # The bucket as the append writes it: each scan's run (deltas, cut, `meta.json`), published, then the merge stage.
@@ -220,9 +215,6 @@ def slices_gen() -> None:
             continue
         ist.write_served(con, f"read_parquet('{work}/out/{sub}/r*.parquet')", sort, out / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub],
                          rg_rows=256, stamps=[x["ts"] for x in scans])
-    from dt_cloud import interval_changes as ic
-
-    ic.write_changes(con, f"read_parquet('{work}/out/pv/r*.parquet')", out / "served" / f"{ist.CHANGES}.parquet", scans[0]["ts"], ic.listed_from(scans), rg_rows=256)
     (out / "scans.json").write_text(json.dumps({"scans": [{"id": x["id"], "ts": x["ts"]} for x in scans]}, indent=1) + "\n")
     shutil.rmtree(work)
     print(f"{G2}: {sorted(p.name for p in (out / 'served').iterdir())}", file=sys.stderr)
