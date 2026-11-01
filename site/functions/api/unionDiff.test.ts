@@ -57,6 +57,18 @@ describe('D1', () => {
     expect((await get(`from=${A}&to=${C}&path=`, { all: { union: ['primary', 'meta'] } })).text).toBe((await get(`from=${A}&to=${C}&path=`, {})).text)
   })
 
+  it('Server-Timing leads with the union\'s own time (`union`), then its members\' (root) or the drilled member\'s', async () => {
+    const names = async (qs: string) => {
+      const r = await diff({ request: new Request(`http://localhost/api/diff?w=1280&h=768&${qs}`), env: deployment() })
+      expect(r.status).toBe(200)
+      return (r.headers.get('server-timing') ?? '').split(', ').map(x => x.split(';')[0])
+    }
+    const root = await names(`from=${A}&to=${C}&path=`)
+    expect(root).toEqual(['union', 'members'])
+    const drill = await names(`from=${A}&to=${C}&path=${(await body(`from=${A}&to=${C}&path=`)).rows.find(r => r.d === 1 && r.src === 'primary')!.p}`)
+    expect([drill[0], drill.length > 1]).toEqual(['union', true])
+  })
+
   it('both stores rescanned: each diffs its own scans; rows tagged, totals summed, one threshold', async () => {
     const [u, p, m] = await Promise.all([body(`from=${A}&to=${C}&path=`), body(`from=${A}&to=${C}&path=&store=primary`), body(`from=${A}&to=${B}&path=&store=meta`)])
     expect([u.prev, u.curr, u.union, roots(u), pick(u), u.threshold]).toEqual([
