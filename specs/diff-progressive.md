@@ -1,6 +1,6 @@
 # Progressive diffs: one directory level per request, bounded by construction
 
-**Status:** proposal, 2026-11-01, for review before anything is built. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
+**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; steps 2–3 (the level request, the client) not started. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
 
 ## Goal
 
@@ -59,6 +59,24 @@ The fix is structural: **don't chain levels inside a request.** Let the client d
 2. **Churn ≥ |net| at every node** (triangle inequality per file, summed). So churn is an admissible pruning bound for the net map too: any node whose net |Δ| clears the floor has churn that clears it, and expanding by churn never misses a net cell. A net-area map can be computed exactly from the same reads. Its cost is bounded by the churn cells over the net floor, which exceeds the net map's own cells only by the churn/net ratio, i.e. exactly where moves dominate (and the churn map is the view that shows them).
 
 **Wide directories (a sweep of 10⁶ changed children).** This is the churn analogue of a plain treemap folder with 10³+ similar-size children, which `bysize` solves because size is a stored per-row value. Range churn is a difference, not a stored value, but `churn_cum`(D2) is an **upper bound** on it (cumulative churn is non-negative and monotone). So a **`bychurn` sort** (P's children in `churn_cum` descending order, like `bysize`) supports an exact top-K with a stopping rule. Traverse the after side in that order; a row live since before D1 (`vf ≤ D1`) has range churn 0 with no lookup; otherwise look up its D1 version for `churn_cum`(D1) (Ryan's traversal). Stop once the next row's `churn_cum`(D2) is below the K-th range churn found or the floor: nothing unread can qualify. No zipped traversal of the before side is needed, because the after side's value already bounds the range churn. The bound is loose for children with a busy history and a quiet range (their cumulative churn is large, their range churn 0): they're read, but cost no lookup. Measure on gcs's sweeps and on long ranges before deciding whether it needs tightening (e.g. a per-version `churn_step`, which makes one-scan ranges exact).
+
+**As built (step 1, `interval_churn.py`).**
+- **Columns.** On the folded path versions (`pvl`) only, the pieces that already split on `last_read` without splitting the path version. `pv`, `pvf` and the owner slices are untouched.
+  - `churn_cum`: the path's cumulative churn at the piece's `vf`.
+  - `churn_end`: on a closed piece, the cumulative churn at its `vt`, that scan's churn included; NULL while open.
+  - A path not live at D has cumulative churn = its last piece's `churn_end`, and a reappearing path continues from it. ("Last `churn_cum` + its size" assumed a directory's size is the sum of its files and that its going away was counted; neither holds in the v1 era.)
+  - Served in `path` and `bysize`; the Worker projects named columns, so readers that don't use them are unaffected.
+- **Base.** Churn is counted after the last scan that first lists objects after directory-only scans (v1 → v2: gcs's 2026-09-30), else after the first scan. It follows from the scans' `version`s (`churn_from`, `counts_at`), so `scans.json` carries only `"churn": true`. An append at such a scan counts nothing. In the v1 era every `churn_cum` is 0, since there are no file rows. A D1 before the base has no churn, and the diff falls back to the as-of walk; that's a data limit, not a threshold.
+- **Build and backfill.** A rollup across the key ranges, because a directory's files sit in other ranges (`churn_gen`). First, every range's file events with their ancestors' sums (depth ≥ 1; the root's churn is the depth-1 sum, as its totals are). Then each range's pieces get the columns, splitting a piece where its path's churn moves inside it (a same-size swap). The local build runs it after `fold`; the staged build has `interval-store churn`, one task between `fold` and `cut`. `interval-store backfill-churn -O NEW` folds an existing generation's base and runs into a new one with the columns, byte for byte a fresh build's (`test_a_backfilled_generation_is_a_fresh_build`).
+- **Append.**
+  - `ranges`: `churn_cum` rides as a carried column (continuing versions keep theirs). Each range also writes its files' churn at D with the ancestors' sums (`state/<D>/churn/`), and its reappearing paths' last `churn_end` from the published roots (`state/<D>/prior/`).
+  - `publish`: first sets the run's `pvl` deltas from every range's churn (`apply_run`): opened versions get their `churn_cum`, closed ones their `churn_end`, and a path churned without an opened version splits. It uploads them before the cut, and writes the opened versions to `state/<D>/pvl-fix/`, which the next scan's `ranges` takes in place of its open state.
+  - Carries reduce `churn_end` by `max` (only the close record has one), and compaction keeps the columns as the inputs have them.
+  - Base + runs, merged or not, and compacted, equal a fresh build version for version (the interval suites, on fixtures whose directory sizes aren't sums, so same-size-swap splits are frequent).
+- **Measured on gcs** (base `2026-10-09b.g3`: 1.23 B versions, 560 M directory versions, 35 scan pairs after 09-30):
+  - file events per pair: median ~2.8 M, range 0.4 M–126 M (126 M on a bulk rewrite);
+  - (directory, scan) churn rows: 2.9 K–3.6 M per pair, 26.0 M in total, so the rollup costs per directory changed, not per file × depth;
+  - forced splits: 0 (every churned directory already opens a version there), apart from the root, which has no row.
 
 **Renames.** `a/x` → `a/y` (500 TB): `a`'s churn = 1 PB, net ≈ 0. It draws as one large neutral cell (color = net) and opens into `x` red (−500 TB) and `y` green (+500 TB).
 - **Later phase, move labels.** Pair a removed and an added sibling with equal size, object count and content (crc32c where listed, as `dups` does) into one "moved x → y" cell. Not needed for correctness.

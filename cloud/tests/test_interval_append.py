@@ -23,6 +23,7 @@ from test_interval_store import V2_FROM, _scan_rows, _slice_oracle, _universe, _
 
 from dt_cloud import append_runner as ar
 from dt_cloud import interval_append as ia
+from dt_cloud import interval_churn as ich
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
 from dt_cloud.static_append import push_run, run_key
@@ -36,15 +37,19 @@ RANGES = {"k": 3, "ranges": [{"i": 0, "lo": [0, ""], "hi": [2, "b1/gof"]}, {"i":
 NAMES = [f"r{i:04d}" for i in range(RANGES["k"])]
 
 
-def build_full(scans: list[dict], root: Path, out: Path) -> Path:
-    """`interval-store build` + `fold` + `build -S` + `fold -S` over `scans`: the range files a generation is cut from."""
+def build_full(scans: list[dict], root: Path, out: Path, churn: bool = False, ranges: dict = RANGES) -> Path:
+    """`interval-store build` + `fold` (+ `churn`) + `build -S` + `fold -S` over `scans`: the range files a generation is
+    cut from."""
     con = duckdb.connect()
     doc = {"bucket": "b", "scans": scans}
-    for i in range(RANGES["k"]):
-        assert ist.build_range(doc, RANGES, i, out, con, mount=str(root))["eq"]
+    for i in range(ranges["k"]):
+        assert ist.build_range(doc, ranges, i, out, con, mount=str(root))["eq"]
         ist.fold_range(str(out), i, out, con)
-        assert ist.build_slices_range(doc, RANGES, i, out, con, mount=str(root))["eq"]
+        assert ist.build_slices_range(doc, ranges, i, out, con, mount=str(root))["eq"]
         ist.slice_totals_range(str(out), i, out, con)
+    if churn:
+        (out / "ranges.json").write_text(json.dumps(ranges))
+        ich.churn_gen(con, out, ranges["k"], ich.churn_from(scans)["ts"], out.parent / f"{out.name}-work")
     return out
 
 
@@ -99,9 +104,11 @@ def world(tmp_path_factory):
 
 
 def _rows(d: Path, t: str) -> list[dict]:
-    """A dir's `t` rows in the served columns, `usr` '' where no owner is named (the base's NULL, a run's '')."""
-    cols = ist.SUB_SCHEMA[t].names
-    tb = pa.concat_tables([pq.read_table(p, columns=cols) for p in sorted((d / t).glob("r*.parquet"))])
+    """A dir's `t` rows in the served columns (and the churn columns where its files carry them), `usr` '' where no owner
+    is named (the base's NULL, a run's '')."""
+    files = sorted((d / t).glob("r*.parquet"))
+    cols = [*ist.SUB_SCHEMA[t].names, *(c for c in (ich.CHURN, ich.CHURN_END) if files and c in pq.read_schema(files[0]).names)]
+    tb = pa.concat_tables([pq.read_table(p, columns=cols) for p in files])
     rows = tb.to_pylist()
     for r in rows:
         if "usr" in r and r["usr"] is None:

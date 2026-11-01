@@ -64,6 +64,7 @@ import pyarrow as pa
 from click import Choice, IntRange, argument, command, group, option
 
 from . import append_runner as ar
+from . import interval_churn as ich
 from . import interval_store as ist
 from . import static_names as sn
 from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as this module has always offered them
@@ -79,6 +80,7 @@ from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as thi
 )
 from .blobstore import Store, gs_bucket, run_store, serves, store_url
 from .maint_runs import NULL, from_env
+from .interval_churn import CHURN, CHURN_END, FIX, with_churn
 from .static_names import OPEN, U64, err, q, write_sorted
 from .interval_verify import marker_key
 from .static_profile import Profile, from_mapping, level_arg, parse_compact_level
@@ -108,17 +110,17 @@ STATE_SCHEMA = {
 DELTA_SCHEMA = {k: s.append(OP) for k, s in STATE_SCHEMA.items()}
 
 
-def state_schema(t: str, generation: ist.Identity = False) -> pa.Schema:
-    """Table `t`'s open-state columns (`STATE_SCHEMA`); `pvl` with `GENERATION` after the served columns (before `pvf`)
-    when the generation carries it."""
-    if t == "pvl" and generation:
-        return ist.with_generation(ist.PVL_SCHEMA, generation).append(PVF)
+def state_schema(t: str, generation: ist.Identity = False, churn: bool = False) -> pa.Schema:
+    """Table `t`'s open-state columns (`STATE_SCHEMA`); `pvl` with `churn_cum` and then `GENERATION` after the served
+    columns (before `pvf`) when the generation carries them."""
+    if t == "pvl" and (generation or churn):
+        return ist.with_generation(with_churn(ist.PVL_SCHEMA, churn, pending=True), generation).append(PVF)
     return STATE_SCHEMA[t]
 
 
-def delta_schema(t: str, generation: ist.Identity = False) -> pa.Schema:
-    """Table `t`'s delta columns (`DELTA_SCHEMA`, with `state_schema`'s `GENERATION`)."""
-    return state_schema(t, generation).append(OP)
+def delta_schema(t: str, generation: ist.Identity = False, churn: bool = False) -> pa.Schema:
+    """Table `t`'s delta columns (`DELTA_SCHEMA`, with `state_schema`'s `churn_cum` and `GENERATION`)."""
+    return state_schema(t, generation, churn).append(OP)
 #: Each table's version identity (a version's rows across tiers share it).
 IDENT = {"pvl": ["depth", "path", "vf"], "sv": ["depth", "path", "usr", "vf"], "svt": ["depth", "path", "usr", "vf"], ist.ATTRIBUTION: ["depth", "path", "vf"]}
 TABLES = tuple(STATE_SCHEMA)
@@ -188,13 +190,21 @@ def covered_scans(base: dict, manifest: dict | None) -> set[str]:
 # ── The open versions ──────────────────────────────────────────────────────
 
 
-def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Identity = False, attributed: bool = False) -> dict[str, str]:
+def scan_entry(read_json: Callable[[str], dict], base: dict, sid: str) -> dict:
+    """Scan `sid`'s `scans.json` entry in a generation: its base's, else its run's (`deltas/<id>/scans.json`, kept on a
+    folded run: `FOLDED_RETAIN`); `read_json` reads a key under the generation."""
+    got = next((s for s in base["scans"] if s["id"] == sid), None)
+    return got if got is not None else read_json(f"{run_key(sid, sid)}/scans.json")["scans"][0]
+
+
+def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Identity = False, attributed: bool = False,
+                   churn: bool = False) -> dict[str, str]:
     """A key range's open versions from a base generation's range files under `root` (`pvl/`, `pv/`, `sv/`, `svt/`,
     `attribution/` `<name>.parquet`): `state_schema` relations (`tables(sliced, attributed)`). `pvf` is the open path
     version's `vf` (`pv/`). A base without the attribution table opens it empty."""
     rd = lambda sub: f"read_parquet({q(f'{root}/{sub}/{name}.parquet')})"  # noqa: E731
     pv = f"(SELECT depth, path, vf AS pvf FROM {rd('pv')} WHERE vt = {OPEN})"
-    pvl_cols = ", ".join(f"l.{c}" for c in ist.with_generation(ist.PVL_SCHEMA, generation).names)
+    pvl_cols = ", ".join(f"l.{c}" for c in ist.with_generation(with_churn(ist.PVL_SCHEMA, churn), generation).names)
     svt_cols = ", ".join("coalesce(s.usr, '') AS usr" if c == "usr" else f"s.{c}" for c in ist.SVT_SCHEMA.names)
     sv_cols = ", ".join("coalesce(usr, '') AS usr" if c == "usr" else c for c in ist.SV_SCHEMA.names)
     out = {
@@ -208,8 +218,14 @@ def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Id
 
 
 def run_state_sql(root: str, name: str, sliced: bool = True, attributed: bool = False) -> dict[str, str]:
-    """A key range's open versions after a scan, from its `state/<D>/` dir `root`."""
-    return {t: f"SELECT * FROM read_parquet({q(f'{root}/{t}/{name}.parquet')})" for t in tables(sliced, attributed)}
+    """A key range's open versions after a scan, from its `state/<D>/` dir `root`; `pvl`'s with the churn apply's opened
+    versions (`interval_churn.apply_run`'s `pvl-fix/`, when the generation carries churn) in place of their paths'."""
+    out = {t: f"SELECT * FROM read_parquet({q(f'{root}/{t}/{name}.parquet')})" for t in tables(sliced, attributed)}
+    fix = f"{root}/{FIX}/{name}.parquet"
+    if Path(fix).exists():
+        out["pvl"] = f"""SELECT * FROM ({out['pvl']}) ANTI JOIN read_parquet({q(fix)}) f USING (depth, path)
+            UNION ALL BY NAME SELECT * FROM read_parquet({q(fix)})"""
+    return out
 
 
 def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list[int]]:
@@ -225,7 +241,8 @@ def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list
 
 
 def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
-                 sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None, attributed: bool = False) -> dict:
+                 sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None, attributed: bool = False,
+                 churn: bool = False, count: bool = True) -> dict:
     """Append `scan` to one key range's open versions (`prev`: `state_schema` relations per table, `tables(sliced,
     attributed)`; `attributed`: the lineage carries the attribution table, `append_attribution`).
     Writes under `out` each table's delta `<t>/<name>.parquet` (`delta_schema`, sorted by identity then `op`) and next
@@ -236,7 +253,12 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
 
     `check`: the published roots the store answers the range from (the base's range-file dir, then each run its newest
     earlier manifest lists): the range's answer at the scan over them and this run's deltas is compared with the scan's
-    rows, row for row (`check_tables`), as `doc["check"]` (the scan's parity marker sums them: `append_marker`)."""
+    rows, row for row (`check_tables`), as `doc["check"]` (the scan's parity marker sums them: `append_marker`).
+
+    `churn` (the generation carries `churn_cum`): continuing versions keep theirs; those opened at the scan have none
+    until `interval_churn.apply_run` sums the scan's churn across ranges. For it, this writes the range's churn at the
+    scan (`state/churn/`: its files' |Δ|, rolled up to their ancestors) and the cumulative churn its reappearing paths
+    had (`state/prior/`, from `check`'s roots); `count` false where objects are first listed (`interval_churn.counts_at`)."""
     from pyrmts.intervals import append_intervals
 
     t0 = monotonic()
@@ -260,12 +282,14 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
     key2 = ["depth", "path"]
     key3 = ["depth", "path", "usr"]
     gcol = [ist.identity_column(generation)] if generation else []
-    pvl_new = f"SELECT {', '.join([*key2, *ist.CHANGE_COLS, 'last_read', 'wts', 'pvf', *gcol])} FROM npf"
+    ccol = [CHURN, CHURN_END] if churn else []
+    pvl_new = f"SELECT {', '.join([*key2, *ist.CHANGE_COLS, 'last_read', 'wts', 'pvf', *gcol, *(f'NULL::BIGINT AS {c}' for c in ccol)])} FROM npf"
     sv_new = f"SELECT {', '.join([*key3, *SV_STATE])} FROM ns"
     svt_new = f"""SELECT {', '.join(f's.{c}' for c in [*key3, *ist.SV_CHANGE])}, p.size AS tot, p.pvf, s.wts
         FROM ns s JOIN npf p ON p.depth = s.depth AND p.path = s.path"""
     plan = {
-        "pvl": (pvl_new, key2, [*PVL_STATE, *gcol], {"wts": "first", "pvf": "first", **({c: "first" for c in gcol} if not isinstance(generation, pa.Field) else {})}),
+        "pvl": (pvl_new, key2, [*PVL_STATE, *gcol, *ccol], {"wts": "first", "pvf": "first", **{c: "first" for c in ccol},
+                                                         **({c: "first" for c in gcol} if not isinstance(generation, pa.Field) else {})}),
         "sv": (sv_new, key3, SV_STATE, ist.CARRIED),
         "svt": (svt_new, key3, SVT_STATE, ist.CARRIED),
     }
@@ -283,7 +307,7 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
             eq = " AND ".join(f"o_svt.{c} IS NOT DISTINCT FROM c.{c}" for c in ist.SV_CHANGE)
             con.execute(f"""UPDATE o_svt SET wts = c.wts FROM (SELECT * FROM o_svt WHERE vt = {D}) c
                 WHERE o_svt.vf = {D} AND {on} AND {eq}""")
-        schema = delta_schema(t, generation)
+        schema = delta_schema(t, generation, churn and t == "pvl")
         cols = ", ".join(schema.names[:-1])
         order = ", ".join([*IDENT[t], "op"])
         dict_cols = [c for c in ("kind", "us", "usr") if c in schema.names]
@@ -291,11 +315,13 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
                 UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_{t} WHERE vt = {D} ORDER BY {order}"""),
                                out / t / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=dict_cols)
         n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}"),
-                               out / "state" / t / f"{name}.parquet", state_schema(t, generation), ist.RANGE_RG, dictionary=dict_cols)
+                               out / "state" / t / f"{name}.parquet", state_schema(t, generation, churn and t == "pvl"), ist.RANGE_RG, dictionary=dict_cols)
         got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
         if got != want:
             raise RuntimeError(f"append {name} {scan['id']} {t}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
         doc[t] = {"opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
+        if t == "pvl" and churn:
+            doc["churn"] = ich.scan_churn(con, "o_pvl", D, check or [], name, out / "state", count)
         con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
     if attributed:
         doc[AT] = append_attribution(con, prev[AT], scan, preds, name, out, D, bucket=bucket, mount=mount)
@@ -360,7 +386,8 @@ def delta_relation(root: str, t: str, served: bool = True, cols: list[str] | Non
     return f"(SELECT {', '.join('nullif(usr, ' + q('') + ') AS usr' if c == 'usr' else ist.ident(c) for c in cols)} FROM {src})"
 
 
-def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: bool = True, generation: ist.Identity = False) -> dict:
+def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: bool = True, generation: ist.Identity = False,
+            churn: bool = False) -> dict:
     """A run's served sorts (`run_sorts(sliced)`, the attribution sort when the run holds its table) from its delta files
     under `root` → `out/<sort>.parquet` + `.groups.parquet` + `<sort>.json`. Open versions then close records (`seg_sql`
     without stamps: segment 0, then 1). `GENERATION` in `interval_store.GENERATION_SORT` with `generation`."""
@@ -368,7 +395,7 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
     for sort in run_sorts(sliced, has_table(root, AT)):
         sub, _, _ = ist.SORTS[sort]
         t0 = monotonic()
-        schema = ist.served_schema(sort, generation)
+        schema = ist.served_schema(sort, generation, churn)
         doc = ist.write_served(con, delta_relation(root, sub, cols=schema.names), sort, out / f"{sort}.parquet", schema, rg_rows=rg_rows)
         doc["s"] = round(monotonic() - t0, 1)
         (out / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
@@ -376,7 +403,7 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
     return docs
 
 
-def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False) -> dict:
+def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False, churn: bool = False) -> dict:
     """One key range of runs (`inputs`: their roots, oldest first) merged per table (`tables(sliced)`, and the attribution
     table over the inputs holding it: none before the table opened, nor a run of uncovered scans): rows of one version
     are one (`IDENT`), the smallest `vt` (a close record over the row it closes), `op` 1 if any input opened it."""
@@ -387,8 +414,10 @@ def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, ge
         files = [f"{r}/{t}/{name}.parquet" for r in inputs]
         if t in ist.ATTRIBUTION_SUBS and not (files := [f for f in files if Path(f).exists()]):
             continue
-        schema = delta_schema(t, generation)
-        stream = merge_parquets(files, [*IDENT[t], "op"], identity=IDENT[t], reduce={"vt": "min", "op": "max"})
+        schema = delta_schema(t, generation, churn and t == "pvl")
+        # `churn_end`: only a close record has one (`max` skips NULLs), as `vt` takes the close record's.
+        ends = {CHURN_END: "max"} if churn and t == "pvl" else {}
+        stream = merge_parquets(files, [*IDENT[t], "op"], identity=IDENT[t], reduce={"vt": "min", "op": "max", **ends})
         doc[t] = write_sorted(stream, out / t / f"{name}.parquet", schema, ist.RANGE_RG,
                               dictionary=[c for c in ("kind", "us", "usr", "user", "source") if c in schema.names])
     return doc
@@ -465,12 +494,12 @@ def check_scan(con, scan: dict, r: dict, name: str, roots: list[str], *, bucket:
         con.execute("DROP TABLE IF EXISTS np; DROP TABLE IF EXISTS ns; DROP TABLE IF EXISTS na")
 
 
-def check_cut(con, root: str, served: Path, *, sliced: bool = True, generation: ist.Identity = False) -> dict:
+def check_cut(con, root: str, served: Path, *, sliced: bool = True, generation: ist.Identity = False, churn: bool = False) -> dict:
     """Each of a run's served sorts (`served/<sort>.parquet`) against the deltas under `root` it was cut from, row for
     row in the sort's columns: `rows` (the sort's), `missing` (delta rows it lacks), `extra` (rows the deltas lack)."""
     out = {}
     for sort in run_sorts(sliced, has_table(root, AT)):
-        names = ist.served_schema(sort, generation).names
+        names = ist.served_schema(sort, generation, churn).names
         cols = ist.qcols(names)
         got = f"(SELECT {cols} FROM read_parquet({q(str(served / f'{sort}.parquet'))}))"
         want = f"(SELECT {cols} FROM {delta_relation(root, ist.SORTS[sort][0], cols=names)})"
@@ -574,17 +603,18 @@ def publish_run(store: ar.RunStore, scan: str) -> dict:
 
 
 def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: int, tmp: Path, threads: int = 16, mem: str = "100GB",
-                     rg_rows: int = ist.SERVED_RG, log: Callable[[str], None] = err, sliced: bool = True, generation: ist.Identity = False) -> dict:
+                     rg_rows: int = ist.SERVED_RG, log: Callable[[str], None] = err, sliced: bool = True, generation: ist.Identity = False,
+                     churn: bool = False) -> dict:
     """The merged run `run` (`plan_carries`' output) of input run dirs `dirs` (oldest first) into `outp`: each key range's
     deltas merged per table (`merge_range`, the `k` ranges), its served sorts cut from them (`cut_run`, `outp/served/`),
     then `meta.json` (`run_meta`, the inputs' stamps). Returns `{rows, bytes, s}`."""
     shutil.rmtree(outp, ignore_errors=True)
     t0 = monotonic()
     for i in range(k):
-        merge_range([str(d) for d in dirs], f"r{i:04d}", outp, sliced, generation)
+        merge_range([str(d) for d in dirs], f"r{i:04d}", outp, sliced, generation, churn)
     merge_s = round(monotonic() - t0, 1)
     t1 = monotonic()
-    docs = cut_run(sn.connect(threads, mem, tmp), str(outp), outp / "served", rg_rows=rg_rows, sliced=sliced, generation=generation)
+    docs = cut_run(sn.connect(threads, mem, tmp), str(outp), outp / "served", rg_rows=rg_rows, sliced=sliced, generation=generation, churn=churn)
     cut_s = round(monotonic() - t1, 1)
     metas = [json.loads((d / "meta.json").read_text()) for d in dirs]
     stamps = {sid: ts for m in metas for sid, ts in m["stamps"].items()}
@@ -596,12 +626,12 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: in
 
 
 def carry(gen: str, k: int, *, threads: int = 16, mem: str = "100GB", rg_rows: int = ist.SERVED_RG, sliced: bool = True,
-          generation: ist.Identity = False) -> Carry:
+          generation: ist.Identity = False, churn: bool = False) -> Carry:
     """The interval store's `Carry`: merged runs by `build_merged_run`, every listed run holding `run_files(sliced)` (and
     the attribution sort, a run some scan of which the newest manifest's `"attribution"` covers), no drills."""
     def build(dirs, run, outp, *, drilled, tmp, log, rec=None):
         return build_merged_run(dirs, run, outp, gen=gen, k=k, tmp=tmp, threads=threads, mem=mem, rg_rows=rg_rows, log=log, sliced=sliced,
-                                generation=generation)
+                                generation=generation, churn=churn)
 
     def missing(store, runs):
         cur = ar.newest(store)
@@ -1052,7 +1082,9 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     ranges = store.read_json(f"{PREFIX}/{ranges_gen}/ranges.json")
     base, runs = _state(store, gen, scan)
     sl = ist.sliced(base)
+    churn = ich.has_churn(base)
     prev = scans_of(base, runs)[-1]
+    count = ich.counts_at(scan_entry(lambda k: store.read_json(f"{prefix}/{k}"), base, prev), s)
     smount = str(Path(mount).parent / scratch)
     t = sn._task(index)
     k = ranges["k"]
@@ -1078,14 +1110,14 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
             err(f"ranges {name}: done")
             continue
         state = (run_state_sql(f"{smount}/{prefix}/state/{prev}", name, sl) if runs
-                 else base_state_sql(f"{mount}/{PREFIX}/{ranges_gen}", name, sl, ist.has_generation(base)))
+                 else base_state_sql(f"{mount}/{PREFIX}/{ranges_gen}", name, sl, ist.has_generation(base), churn=churn))
         if at:
             state[AT] = (run_state_sql(f"{smount}/{prefix}/state/{prev}", name, sl, True)[AT] if prev_at
                          else base_state_sql(f"{mount}/{PREFIX}/{ranges_gen}", name, sl, ist.has_generation(base), True)[AT])
         outp = Path(out) / name
         shutil.rmtree(outp, ignore_errors=True)
         doc = append_range(con, state, s, ranges["ranges"][i], name, outp, bucket=doc_scan["bucket"], mount=mount, sliced=sl,
-                           generation=ist.has_generation(base), check=check, attributed=at)
+                           generation=ist.has_generation(base), check=check, attributed=at, churn=churn, count=count)
         doc["prev"] = prev
         doc["check"]["runs"] = [r["key"] for r in runs]
         sstore.put_tree(outp / "state", f"{prefix}/state/{scan}")
@@ -1143,10 +1175,15 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
         t0 = monotonic()
         base = Store(store_url(bucket)).read_json(f"{prefix}/scans.json")
         sl = ist.sliced(base)
+        churn = ich.has_churn(base)
         con = sn.connect(threads, mem, tmp)
-        docs = cut_run(con, f"{mount}/{prefix}/{rk}", outp, sliced=sl, generation=ist.has_generation(base))
+        root = f"{mount}/{prefix}/{rk}"
+        if churn:
+            root = str(publish_churn(con, st, Store(store_url(scratch)), prefix, rk, scan, int(s["ts"]), Path(mount) / prefix / rk,
+                                     st.read_json(f"{PREFIX}/{ranges_gen}/ranges.json"), Path(tmp), sl))
+        docs = cut_run(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn)
         cut_s = round(monotonic() - t0, 1)
-        cut = check_cut(con, f"{mount}/{prefix}/{rk}", outp, sliced=sl, generation=ist.has_generation(base))
+        cut = check_cut(con, root, outp, sliced=sl, generation=ist.has_generation(base), churn=churn)
         Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
         shutil.rmtree(outp)
         new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
@@ -1156,6 +1193,35 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
         err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")
     print(json.dumps(publish_run(store, scan), indent=1))
     write_marker(st, gen, ranges_gen, scan)
+
+
+def publish_churn(con, st: Store, sstore: Store, prefix: str, rk: str, scan: str, D: int, run: Path, ranges: dict, tmp: Path,
+                  sliced: bool) -> Path:
+    """The run's `pvl` deltas with `churn_cum` (`interval_churn.apply_run` over every range's churn at D, from the scan's
+    state in the scratch bucket), uploaded over its unpublished ones, and the opened versions to its state (`pvl-fix/`, the
+    next append's open state takes them). Returns a local root holding them beside the run's other tables (symlinks into
+    `run`, the data bucket's mount): what its cut reads."""
+    from .blobstore import mirror
+
+    state, root = tmp / "churn-state", tmp / "churn-run"
+    for d in (state, root):
+        shutil.rmtree(d, ignore_errors=True)
+    skey = f"{prefix}/state/{scan}"
+    mirror(sstore, skey, state, keep=lambda rel: rel.startswith((f"{ich.SCAN_CHURN}/", f"{ich.PRIOR}/")))
+
+    def open_rows(name: str) -> str:
+        dst = state / "pvl" / f"{name}.parquet"
+        if not dst.exists():
+            sstore.get(f"{skey}/pvl/{name}.parquet", dst)
+        return f"SELECT * FROM read_parquet({q(str(dst))})"
+
+    ich.apply_run(con, run, state, ranges, D, root, open_rows=open_rows)
+    st.put_tree(root / "pvl", f"{prefix}/{rk}/pvl")
+    sstore.put_tree(state / FIX, f"{skey}/{FIX}")
+    for t in tables(sliced, True):
+        if t != "pvl" and (run / t).is_dir():
+            (root / t).symlink_to(run / t)
+    return root
 
 
 def write_marker(st: Store, gen: str, ranges_gen: str, scan: str, *, workers: int = 16) -> dict | None:
@@ -1198,7 +1264,7 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, read_from, compact_level, mount,
     sl = ist.sliced(base)
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
     rec = NULL if dry_run else from_env("merge")
-    doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base)), Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
+    doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base), churn=ich.has_churn(base)), Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
                            max_merges=max_merges, max_level=compact_level, status=status,
                            source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
     doc["prune"] = _summary(ar.finish_merge(rec, doc, lambda: ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")))
