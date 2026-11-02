@@ -1,6 +1,6 @@
 # Progressive diffs: one directory level per request, bounded by construction
 
-**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; steps 2–3 (the level request, the client) not started. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
+**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; step 2 (`/api/diff/level`, `_lib/diffLevel.ts`) built 2026-11-02, branch `diff-level`; step 3 (the client) not started. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
 
 ## Goal
 
@@ -80,6 +80,18 @@ The fix is structural: **don't chain levels inside a request.** Let the client d
 
 **Renames.** `a/x` → `a/y` (500 TB): `a`'s churn = 1 PB, net ≈ 0. It draws as one large neutral cell (color = net) and opens into `x` red (−500 TB) and `y` green (+500 TB).
 - **Later phase, move labels.** Pair a removed and an added sibling with equal size, object count and content (crc32c where listed, as `dups` does) into one "moved x → y" cell. Not needed for correctness.
+
+**As built (step 2, `_lib/diffLevel.ts`, `api/diff/level.ts`).**
+- **Request.** `GET /api/diff/level?from=&to=&p=<dir>[&p=…]&k=&m=churn|net`: up to 64 directories per request, usually one depth's (the client sends a batch per level, asking only for the directories it doesn't already hold). Answers `{ from, to, k, m, levels }`, each level `{ path, a, b, oa, ob, churn, rows: [{p, k, s, a, b, oa, ob, churn}], other: {n, …} | null, unchanged: {a, b, oa, ob}, next? }`. `rows` are the `k` largest changed children by the measure (`churn` by default, `net` = |b − a|); `p` is the name under the directory.
+- **Cache.** Each directory's answer is its own edge-cache entry, keyed by (store generation, D1, D2, directory, K, measure, `LEVEL_V`), never the canvas. A batch matches every directory first and reads only the misses, together. K is snapped to a power of two in [4, 512] (`levelK`) so nearby canvases share entries.
+- **Reads.** One `path`-sort read per batch (`planChanged` / `readChanged` in `index.ts`): each directory's children rectangle and its own point, every tier, keeping only the groups whose version bounds allow a version opening or closing in `(D1, D2]`. Decoded groups go through the isolate's and the colo's group caches, so a sibling batch doesn't decode them again. The churn columns are projected only by this reader (`withChurn`), and its groups are cached apart from a plain read's (`ivGroupKey` / `groupColoKey` `c`), so other views don't fetch their bytes.
+- **Churn per child, from the changed versions alone.** `c2 − c1`. `c1` is the D1 version's `churn_cum`, or, for a child absent at D1, its first version in the range's `churn_cum` less its size (it appeared there, all of it new). `c2` is the D2 version's `churn_cum`, or its last version's `churn_end`. So no lookup of an older version is needed, and D1 must be at or after the churn base (`IvStateDoc.churn`, from `scans.json`'s `churn` flag and scan versions; before it the request is a 409 and the client uses `/api/diff`). A run whose scans switch v1 → v2 isn't seen by the reader (the manifest doesn't carry versions).
+- **Totals.** A changed directory's own row comes from the same read. The root (no row) and a directory one version spans read their totals as of each scan (`readRootAgg`). `unchanged` is the directory less its changed children, by subtraction.
+- **Zero-churn directories are never asked** (the client knows from the parent's row).
+- **Chains.** A directory whose only changed child is a directory is followed into it in the same request (`next`, its answer included and cached on its own), a round of reads per link.
+- **Wide directories.** A directory whose changed children span more groups than the decoder takes (250 groups / 700K rows) is a 413. A batch that doesn't fit is split first. The `bychurn` sort (§3) is the bounded answer, not built yet.
+- **Refused (409):** a union view, a store or generation without churn, D1 before the churn base. A path-restricted link: a hidden directory is a 404 (nothing under a visible directory is hidden).
+- **Tests** (`diffLevel.test.ts`, fixture `fixtures/iv-churn/`: a base over four scans, three appended runs merged by the carries, 4 rows per group): every (from, to, directory) answer from the churn base on equals one computed from the scans' files alone (60 answers, renames and same-size swaps among them); a batch equals its directories alone; a chain; K folding and both measures; the churn-base refusal; the range plan is a subset of the unpruned plan, strictly smaller on some.
 
 ### 4. What goes away
 

@@ -33,6 +33,8 @@ const ActivityPage = lazy(() => import('./ActivityPage').then(m => ({ default: m
 const activity = <AuthGate><Suspense fallback={<Loading />}><ActivityPage /></Suspense></AuthGate>
 const UsagePage = lazy(() => import('./UsagePage').then(m => ({ default: m.UsagePage })))
 const usage = <AuthGate><Suspense fallback={<Loading />}><UsagePage /></Suspense></AuthGate>
+const SlackPage = lazy(() => import('./SlackPage').then(m => ({ default: m.SlackPage })))
+const slack = <AuthGate><Suspense fallback={<Loading />}><SlackPage /></Suspense></AuthGate>
 const CostPage = lazy(() => import('./CostPage').then(m => ({ default: m.CostPage })))
 const cost = <AuthGate><Suspense fallback={<Loading />}><CostPage /></Suspense></AuthGate>
 const FederatedScansPreview = import.meta.env.DEV ? lazy(() => import('./dev/FederatedScansPreview')) : null
@@ -83,6 +85,7 @@ export default function Root() {
       <Route path="/admin/latency" element={latency} />
       <Route path="/admin/activity" element={activity} />
       <Route path="/admin/usage" element={usage} />
+      <Route path="/admin/slack" element={slack} />
       <Route path="/admin/cost/:cloud" element={cost} />
       <Route path="/admin/sessions/:sid" element={sessions} />
       <Route path="/files/*" element={<AuthGate><FilesRedirect /></AuthGate>} />

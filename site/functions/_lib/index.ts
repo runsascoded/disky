@@ -81,6 +81,10 @@ export interface Row {
   /** An interval-store row's validity `[vf, vt)` (epoch seconds of scans). */
   vf?: number
   vt?: number
+  /** An interval-store row's cumulative churn (bytes added + removed under the path, scan by scan) at its `vf`, and on
+   *  a closed version at its `vt` (`interval_churn.py`); absent on a generation without churn. */
+  churn_cum?: number | null
+  churn_end?: number | null
 }
 
 interface GroupSpan {
@@ -689,7 +693,7 @@ interface IvManifest { gen: string; date: string; scans: string[]; stamps: Recor
  *  the owner axis (its slice sorts). `atBase`: its base has the attribution table (`served/attribution.parquet`);
  *  `attribution`: the scans the table covers (the base's covered scans, and the usable runs' the manifest names); a run
  *  holds the table's sort when one of its scans is covered. */
-interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; refused: Map<string, string>; slices: boolean; atBase: boolean; attribution: Set<string> }
+interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; refused: Map<string, string>; slices: boolean; atBase: boolean; attribution: Set<string>; churn: number | null }
 /** How long a state stands before the manifests are listed again (a new scan's run shows up within it). */
 export const IV_STATE_TTL = 60_000
 /** How long a broken run stays cut out (then it is tried again: a publish caught mid-copy heals). */
@@ -810,24 +814,39 @@ async function ivManifest(env: Env): Promise<IvManifest | null> {
 
 /** The generation's `scans.json` (its scans, and `slices`: false when the generation has no owner axis; a generation
  *  from before the flag has it) and newest manifest, as one document. */
-interface IvStateDoc { scans: { id: string; ts: number }[]; slices: boolean; manifest: IvManifest | null; attribution: { base: boolean; covered: string[] } }
+/** `churn`: the stamp churn is counted after (`interval_churn.churn_from`: the last scan first listing objects after
+ *  directory-only ones, else the first), null when the generation carries no churn. */
+interface IvStateDoc { scans: { id: string; ts: number }[]; slices: boolean; manifest: IvManifest | null; attribution: { base: boolean; covered: string[] }; churn: number | null }
 
 /** `IvStateDoc` through the colo cache for `IV_STATE_TTL`: a new isolate's first read starts from it instead of
  *  three R2 operations in series (`scans.json`, the manifests' `list`, the newest's `get`). A new scan's run
  *  shows up within the colo's TTL plus the isolate's. */
 async function ivStateDoc(env: Env): Promise<IvStateDoc> {
   const gen = env.INTERVAL_STORE_GEN!
-  const ck = coloKey(env, ivKey(env, `${ivPrefix(env)}/${gen}/scans.json`), 'state=3')
+  const ck = coloKey(env, ivKey(env, `${ivPrefix(env)}/${gen}/scans.json`), 'state=4')
   const hit = await colo().match(ck)
   if (hit) return hit.json<IvStateDoc>()
   const [o, manifest] = await Promise.all([env.INDEX_R2!.get(`${ivPrefix(env)}/${gen}/scans.json`), ivManifest(env)])
   if (!o) throw new Error(`interval store ${gen}: no scans.json`)
-  const j = await o.json<{ scans: { id: string; ts: number; attribution_src?: string }[]; slices?: boolean; attribution?: boolean }>()
+  const j = await o.json<{ scans: { id: string; ts: number; version?: number; attribution_src?: string }[]; slices?: boolean; attribution?: boolean; churn?: boolean }>()
   // The attribution table's base coverage: the scans whose entry names their map (`interval_store.ATTRIBUTION_SRC`).
   const attribution = { base: j.attribution === true, covered: j.attribution === true ? j.scans.filter(s => s.attribution_src).map(s => s.id) : [] }
-  const doc: IvStateDoc = { scans: j.scans, slices: j.slices !== false, manifest, attribution }
+  const doc: IvStateDoc = { scans: j.scans.map(({ id, ts }) => ({ id, ts })), slices: j.slices !== false, manifest, attribution, churn: j.churn === true ? churnFrom(j.scans) : null }
   await colo().put(ck, new Response(JSON.stringify(doc), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
   return doc
+}
+
+/** `interval_churn.churn_from`'s stamp: the last scan that first lists objects after directory-only scans (`version`
+ *  1 → ≥ 2), else the first. A switch in a run (its scans' versions aren't in the manifest) isn't seen here. */
+export function churnFrom(scans: { ts: number; version?: number }[]): number | null {
+  let at = scans[0]?.ts ?? null
+  for (let i = 1; i < scans.length; i++) if ((scans[i - 1].version ?? 1) === 1 && (scans[i].version ?? 1) >= 2) at = scans[i].ts
+  return at
+}
+
+/** The interval store's churn base (`IvStateDoc.churn`): null when it is off or its generation carries no churn. */
+export async function ivChurnFrom(env: Env): Promise<number | null> {
+  return intervalsOn(env) ? (await ivState(env)).churn : null
 }
 
 async function loadIvState(env: Env): Promise<IvState> {
@@ -853,7 +872,7 @@ async function loadIvState(env: Env): Promise<IvState> {
     }
     for (const x of r.scans) if (!scans.has(x)) refused.set(x, cutAt)
   }
-  return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false, atBase: !!doc.attribution?.base, attribution }
+  return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false, atBase: !!doc.attribution?.base, attribution, churn: doc.churn ?? null }
 }
 
 /** The store's state, re-read once it is `IV_STATE_TTL` old (`IV_BROKEN_TTL` when cut); a failed re-read keeps
@@ -1154,6 +1173,24 @@ export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'c
  * the site, so a deployment that names its classes renames them here and there only. */
 export const IV_CLASS_COLS = { 2: 'nearline_bytes', 3: 'coldline_bytes', 4: 'archive_bytes' } as const
 export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', IV_CLASS_COLS[2], IV_CLASS_COLS[3], IV_CLASS_COLS[4], 'us', 'last_read']
+/** An interval store's churn columns (`interval_churn.py`), projected only by a read that asks for them (`withChurn`):
+ *  every other read leaves their bytes unfetched. */
+export const IV_CHURN_COLS = ['churn_cum', 'churn_end']
+
+/** `h` (and its runs) projecting the churn columns too, or null when a tier's sort has none (a generation without
+ *  churn). Its groups are held apart from a plain read's (`ivGroupKey`). */
+export function withChurn(h: IndexHandle): IndexHandle | null {
+  const add = (t: IndexHandle): IndexHandle | null => {
+    const have = new Set(t.schema.map(l => l.name))
+    if (!t.columns || !IV_CHURN_COLS.every(c => have.has(c))) return null
+    return { ...t, columns: [...t.columns, ...IV_CHURN_COLS] }
+  }
+  const base = add(h)
+  if (!base) return null
+  const runs = h.runs?.map(add)
+  if (runs?.some(r => !r)) return null
+  return runs ? { ...base, runs: runs as IndexHandle[] } : base
+}
 export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_2', 'sum_storage_class_id_3', 'sum_storage_class_id_4']
 
 /** What a shaped read projects: a v1 index reads every column (its columns
@@ -1621,6 +1658,7 @@ const toRowV3 = (r: Record<string, unknown>): Row => {
     us: r.us == null ? null : usMap(str(r.us), size),
     vf: num(r.vf),
     vt: num(r.vt),
+    ...('churn_cum' in r ? { churn_cum: r.churn_cum == null ? null : num(r.churn_cum), churn_end: r.churn_end == null ? null : num(r.churn_end) } : {}),
   }
 }
 
@@ -1772,7 +1810,7 @@ async function readGroupVersions(h: IndexHandle, rgJson: string, columns?: strin
 /** A decoded group as the colo holds it: its columns, each an array over its rows. */
 type GroupDoc = { cols: string[]; v: unknown[][] }
 
-const groupColoKey = (h: IndexHandle, rg: number): Request => coloKey(h.env, h.dataKey!, `rg=${rg}`)
+const groupColoKey = (h: IndexHandle, rg: number): Request => coloKey(h.env, h.dataKey!, `rg=${rg}${h.columns?.includes(IV_CHURN_COLS[0]) ? '&c=1' : ''}`)
 
 /** `raw` (a group's decoded columns) as a `GroupDoc`, or null when a value wouldn't survive JSON exactly (an
  *  integer past 2^53, a non-finite float, a byte array): such a group is decoded from parquet every time. */
@@ -1856,6 +1894,8 @@ async function coloGroup(h: IndexHandle, rg: number): Promise<IvGroup | null> {
   const t0 = now()
   const d = await new Response(hit.body.pipeThrough(new DecompressionStream('gzip'))).json<GroupDoc>()
   h.trace?.('gjson', now() - t0, h.variant)
+  // A copy put by a reader that projected fewer columns (one from before a column was read): a miss.
+  if (h.columns?.some(c => !d.cols.includes(c))) return null
   return new IvGroup(h, d)
 }
 
@@ -1973,7 +2013,7 @@ const groupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|${h.date}|$
  *  (every version; `cachedGroup` keeps a read's scan's) and its fetch in flight, which a concurrent
  *  read of the same group waits for instead of fetching and decoding it again. One entry for both
  *  sides is what lets a root diff's ~20 groups fit the LRU (gcs `2026-10-09b`). */
-const ivGroupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|${ivPrefix(h.env)}|iv|${h.variant}|${h.gen}|${rg}`
+const ivGroupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|${ivPrefix(h.env)}|iv|${h.variant}|${h.gen}|${rg}${h.columns?.includes(IV_CHURN_COLS[0]) ? '|c' : ''}`
 const groupsInFlight = new Map<string, Promise<IvGroup | null>>()
 
 /** An interval store's group held by the isolate (every version), or undefined. */
@@ -2313,7 +2353,8 @@ export function readFits(spans: Span[]): boolean {
  * decode millions of rows and blow the Worker CPU. Error cleanly instead. */
 /** `pre`: a cheap superset of `keep` on a row's raw `depth`, `path` and `size` (`Pre`): an interval store's groups
  *  shape only the rows it passes. */
-async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boolean, stop?: () => boolean, pre?: Pre): Promise<Row[]> {
+/** `versions`: an interval store's rows are returned every version (tiers combined), not only those live at its scan. */
+async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boolean, stop?: () => boolean, pre?: Pre, versions = false): Promise<Row[]> {
   if (!readFits(kept)) throw new Error('query too wide: drill deeper or raise minArea')
   let t0 = now()
   if (h.runs?.length) {
@@ -2326,15 +2367,45 @@ async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boole
       return (await readGroupsCached(t, mine.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, true, pre)).flat()
     })))
     h.trace?.('groups', now() - t0, h.variant)
-    return combineLive(h, got.flat())
+    return versions ? combineVersions(got.flat()) : combineLive(h, got.flat())
   }
   const jsons = await fetchGroupJson(h, kept.map(s => s.rg))
   h.trace?.('rgjson', now() - t0)
   h.trace?.('ngroups', kept.length)
   t0 = now()
-  const perGroup = await readGroupsCached(h, kept.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, false, pre)
+  const perGroup = await readGroupsCached(h, kept.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, versions, pre)
   h.trace?.('groups', now() - t0, h.variant)
   return perGroup.flat()
+}
+
+/** A version that opens or closes in `(d1, d2]`. */
+const changesIn = (vf: number, vt: number, d1: number, d2: number): boolean => (vf > d1 && vf <= d2) || (vt > d1 && vt <= d2)
+
+/** What a range read decodes (`readChanged`), before any is: its row groups, and their rows. */
+export interface ChangedPlan { spans: Span[]; rows: number }
+
+/** The row groups of `rects` that can hold a version opening or closing in `(d1, d2]` (on an interval store's handle,
+ *  every tier): by the footers' version bounds, so a group whose versions all span the range (unchanged paths), or
+ *  all ended before it, is never read. */
+export async function planChanged(h: IndexHandle, rects: Rect[], d1: number, d2: number): Promise<ChangedPlan> {
+  const ranged = (t: IndexHandle): IndexHandle => ({ ...t, historyRange: [d1, d2] })
+  const hr = { ...ranged(h), ...(h.runs ? { runs: h.runs.map(ranged) } : {}) }
+  type Timed = Span & { vfMin?: number; vfMax?: number; vtMin?: number; vtMax?: number }
+  const spans = (await planRects(hr, rects)).filter((g: Timed) =>
+    g.vfMin == null || (g.vfMax! > d1 && g.vfMin <= d2) || (g.vtMax! > d1 && g.vtMin! <= d2))
+  return { spans, rows: spans.reduce((n, s) => n + (s.rowEnd - s.rowStart), 0) }
+}
+
+/** Every version in `rects` that opens or closes in `(d1, d2]`, one row per version (tiers combined: a close record's
+ *  `vt` over the row it ends), from the groups `planChanged` keeps (`plan`, else planned here). The versions of a path
+ *  that changed in the range are all here: the one live at `d1` (it closes in the range), the one live at `d2` (it
+ *  opens in it) and any between. */
+export async function readChanged(h: IndexHandle, rects: Rect[], d1: number, d2: number, { plan, pre, stop }: { plan?: ChangedPlan; pre?: Pre; stop?: () => boolean } = {}): Promise<Row[]> {
+  if (!rects.length) return []
+  const { spans } = plan ?? await planChanged(h, rects, d1, d2)
+  const at = (depth: number, path: string) => rects.some(q => depth >= q.dLo && depth <= q.dHi && path >= q.pLo && path <= q.pHi)
+  const rows = await decodeSpans(h, spans, r => at(r.depth, r.path), stop, (d, p, b) => at(d, p) && (!pre || pre(d, p, b)), true)
+  return rows.filter(r => changesIn(r.vf!, r.vt!, d1, d2))
 }
 
 /** At most `n` of the calls it wraps running at once (the rest queue). */

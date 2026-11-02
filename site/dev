@@ -75,7 +75,7 @@ if [ "$LOCALDB" = 1 ]; then
   CFG_BAK=tmp/wrangler.toml.remote
   CFG_STRIPPED=tmp/wrangler.toml.stripped
   cp wrangler.toml "$CFG_BAK"
-  grep -v '^remote = true$' "$CFG_BAK" > "$CFG_STRIPPED"
+  grep -vE '^remote = true( *#.*)?$' "$CFG_BAK" > "$CFG_STRIPPED"
   cp "$CFG_STRIPPED" wrangler.toml
   echo "→ local-db mode: wrangler bound to the LOCAL D1 (prod untouched)" >&2
 fi

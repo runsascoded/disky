@@ -104,6 +104,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Legacy spelling of the scan selection: an ISO or compact scan id for the shown scan. It is folded into `d` and rewritten on load.',
     examples: ['2026-10-06'],
   },
+  dc: {
+    label: 'Digest candidates',
+    description: 'The Slack digest page\'s candidate columns, `;`-separated, each the OP\'s params as `digest/codec` writes them: `w<days>` window, `t<p0>-<p1>` today\'s position, `d<w|m>` diff span, `h<m|w…>` headline figures, `k<w|m>` weeks; `.` is the defaults. Absent: one default candidate.',
+    examples: ['.', 'w14,dm', '.;w45,hw'],
+    pages: ['/admin/slack'],
+  },
   days: {
     label: 'Usage window',
     description: 'The Cloudflare usage and cloud cost pages\' window: the last `7` or `30` days of daily snapshots. Defaults to 30.',
@@ -113,6 +119,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   denied: {
     label: 'Denied address',
     description: 'Set when a verified address isn\'t on the access list. The login wall then opens the request-access form, pre-filled with that address.',
+  },
+  dk: {
+    label: 'Digest thread',
+    description: 'The Slack digest page\'s preview bundle: its key, `digest/preview/<channel>/<variant>/<YYYY-MM>.json`. Absent: the newest month\'s first.',
+    examples: ['digest/preview/C0C9G547AP7/sender/2026-11.json'],
+    pages: ['/admin/slack'],
   },
   dm: {
     label: 'Diff area mode',
