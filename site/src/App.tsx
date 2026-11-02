@@ -1,6 +1,7 @@
 import { Explain } from './Help'
 import { keepPreviousData, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useNavigationType } from 'react-router-dom'
 import { MdLayers } from 'react-icons/md'
 import { useActions } from 'use-kbd'
@@ -404,6 +405,30 @@ function AppContent() {
     setRange(toScan, spanTo(toScan, fromScan), fromScan)
   }
   const diffWindow: [string, string] | undefined = diffPrev && asof ? [diffPrev, asof] : undefined
+  /** One diff edge's neighbouring scan (`scans` runs newest first): `older` steps back in time; null past the
+   *  history or onto/over the other edge. Brushed like a drag on the chart, so the window ends up pinned. */
+  const nudgeTarget = (edge: 'from' | 'to', older: boolean): string | null => {
+    if (!diffPrev || !asof) return null
+    const i = scans.indexOf(edge === 'from' ? diffPrev : asof)
+    const s = i < 0 ? undefined : scans[i + (older ? 1 : -1)]
+    if (!s) return null
+    return (edge === 'from' ? scanCmp(s, asof, times) < 0 : scanCmp(s, diffPrev, times) > 0) ? s : null
+  }
+  const nudge = (edge: 'from' | 'to', older: boolean) => {
+    const s = nudgeTarget(edge, older)
+    if (s && diffPrev && asof) brushRange(edge === 'from' ? s : diffPrev, edge === 'to' ? s : asof)
+  }
+  const nudges = (edge: 'from' | 'to', children: ReactNode) => {
+    const btn = (older: boolean) => {
+      const s = nudgeTarget(edge, older)
+      return (
+        <Explain text={s ? <>{edge === 'from' ? 'Start' : 'End'} one scan {older ? 'earlier' : 'later'}: {fmtS(s)}</> : <>No {older ? 'earlier' : 'later'} scan for the {edge === 'from' ? 'start' : 'end'}</>}>
+          <button type="button" className="nudge" disabled={!s} aria-label={`${edge === 'from' ? 'Start' : 'End'} one scan ${older ? 'earlier' : 'later'}`} onClick={() => nudge(edge, older)}>{older ? '‹' : '›'}</button>
+        </Explain>
+      )
+    }
+    return <span className="nudges">{btn(true)}{children}{btn(false)}</span>
+  }
   // Two orthogonal, low-key toggles for the diff window (see scan.ts grammar):
   // the start is either a pinned scan (`from`) or a look-back span; the end
   // either follows the latest scan (floating) or is pinned. The end toggle only
@@ -1611,17 +1636,21 @@ function AppContent() {
           <DiffHeader model={diffModel} controls={<span className="sub">
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
-            <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              {union && diffPrev
-                ? <UnionScanPicker sources={union.sources} value={diffPrev} at={atFrom} scans={earlier} onChange={setFrom} onAt={setFromAt} label="Diff from scan" before={at ?? (asof ? cutoffOfScan(union.sources, asof) : null)} compact
-                    fallback={<ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />} />
-                : <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />}
-            </Explain>
+            {nudges('from', <>
+              <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends, or an edge's handle to move that end.</>}>
+                {union && diffPrev
+                  ? <UnionScanPicker sources={union.sources} value={diffPrev} at={atFrom} scans={earlier} onChange={setFrom} onAt={setFromAt} label="Diff from scan" before={at ?? (asof ? cutoffOfScan(union.sources, asof) : null)} compact
+                      fallback={<ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />} />
+                  : <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />}
+              </Explain>
+            </>)}
             <span className="arrow"> → </span>
-            {union && asof
-              ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Diff to scan (the page's scan)" compact
-                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
-              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
+            {nudges('to', <>
+              {union && asof
+                ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Diff to scan (the page's scan)" compact
+                    fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
+                : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
+            </>)}
             <span className="d-modes">
               <span className="gran d-mode" role="radiogroup" aria-label="Diff start">
                 <span className="d-mode-lbl">start</span>
