@@ -145,6 +145,9 @@ export interface Union {
   ctxs: Ctx[]
   obs: Observation[][]
   id: Identity | null
+  /** Where opening it went, in ms (Server-Timing `union-*`): the members' contexts, then their gates and observations
+   *  concurrently, each until its last member's settled. */
+  timing: { ctxs: number; gate: number; obs: number }
 }
 
 /** A cutoff: the scan id that names it (the client's as-of) and its instant. */
@@ -157,7 +160,9 @@ export interface Cutoff { date: string; at: string }
  * scans as observations.
  */
 export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promise<Union | Response> {
+  const t0 = performance.now()
   const ctxs = await memberCtxs(ctx, view)
+  const t1 = performance.now()
   if (ctxs instanceof Response) return ctxs
   for (const c of ctxs) {
     if (!c.env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
@@ -165,13 +170,14 @@ export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promi
   }
   // Each member's gate and its observations, all at once (in turn they were most of a union request's time before its
   // member's diff, cache hits included: r2, 0.4–0.8 s).
+  const timing = { ctxs: t1 - t0, gate: 0, obs: 0 }
   const [gates, obs] = await Promise.all([
-    gate ? Promise.all(ctxs.map(c => requireViewer(c as never))) : Promise.resolve([]),
-    Promise.all(ctxs.map(c => observations(c.env))),
+    (gate ? Promise.all(ctxs.map(c => requireViewer(c as never))) : Promise.resolve([])).finally(() => { timing.gate = performance.now() - t1 }),
+    Promise.all(ctxs.map(c => observations(c.env))).finally(() => { timing.obs = performance.now() - t1 }),
   ])
   const refused = gates.find(g => g instanceof Response)
   if (refused) return refused as Response
-  return { view, ctxs, obs, id: (gates[0] as Identity | undefined) ?? null }
+  return { view, ctxs, obs, id: (gates[0] as Identity | undefined) ?? null, timing }
 }
 
 /** The `at`-form param beside a scan-id param: `date` → `at`, `from` → `from_at`, `to` → `to_at`. */

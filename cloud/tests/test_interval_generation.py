@@ -176,8 +176,8 @@ def test_versions_carry_generation_through_build_append_and_carries(world, on, t
     assert _versions(full / ist.PREFIX / "g") == _through(5)
     # Served: the `path` sort carries it, last; `bysize` and the slice sorts never do.
     for served in [gen / "served", *(r / "served" for r in _newest_runs(gen))]:
-        assert _columns(served / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
-        assert _columns(served / "bysize.parquet") == ist.PVL_SCHEMA.names
+        assert _columns(served / "path.parquet") == ist.served_schema("path", True, churn=True).names
+        assert _columns(served / "bysize.parquet") == ist.served_schema("bysize", True, churn=True).names
     assert _columns(gen / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
@@ -187,7 +187,7 @@ def test_compaction_keeps_generation(on, tmp_path):
     ic.compact_gen(tmp_path / "g", out, tmp_path / "w", gen="g", new_gen="g.c001", level=None, rg_rows=RG, threads=2, mem="1GB")
     assert _versions(out) == _through(5)
     assert json.loads((out / "scans.json").read_text())["generation"] is True
-    assert _columns(out / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+    assert _columns(out / "served" / "path.parquet") == ist.served_schema("path", True, churn=True).names
     assert _columns(out / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
@@ -291,7 +291,7 @@ def test_backfill_fills_versions_live_since_the_first_generation(world, backfill
     assert _parquets(store / ist.PREFIX / "g") == backfilled["before"]
     assert json.loads((store / ic.CURRENT).read_text()) == {"gen": "g"}
     # Served as a build over generation-bearing sorts serves it (its versions are that build's: `_through(5)` above).
-    assert _columns(g2 / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+    assert _columns(g2 / "served" / "path.parquet") == ist.served_schema("path", True, churn=True).names
 
 
 def test_a_parallel_backfill_writes_the_serial_ones_bytes(world, off, backfilled, tmp_path):

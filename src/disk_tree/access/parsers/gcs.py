@@ -72,10 +72,15 @@ def parse(input_glob: str, store: str = 'gcs', con: "duckdb.DuckDBPyConnection |
     if con is None:
         con = _duckdb.connect()
 
-    # `read_csv` with a header-inferring load + explicit type hints so we can
-    # ingest arbitrary GCS bucket paths (gs://…), local globs, or fsspec URLs.
-    # `union_by_name=true` handles the (unlikely but possible) case where
-    # Google's field set drifts across days.
+    # `read_csv` with a header-inferring load so we can ingest arbitrary GCS
+    # bucket paths (gs://…), local globs, or fsspec URLs. Every column is read
+    # as text (`all_varchar`) and the projection below casts the numeric ones:
+    # sniffed types follow each hour's values, so a column empty on every row
+    # (`cs_bytes` / `sc_bytes` / `sc_status` in an hour of lifecycle operations
+    # only) came back VARCHAR and failed `COALESCE(…, 0)` (2026-11-01), and an
+    # all-digit `cs_object` would come back BIGINT. `union_by_name=true`
+    # handles the (unlikely but possible) case where Google's field set drifts
+    # across days.
     con.execute(f"""
         CREATE OR REPLACE VIEW {RAW_VIEW} AS
         SELECT *
@@ -83,7 +88,8 @@ def parse(input_glob: str, store: str = 'gcs', con: "duckdb.DuckDBPyConnection |
             {_sql_literal(input_glob)},
             header=true,
             filename=true,
-            union_by_name=true
+            union_by_name=true,
+            all_varchar=true
         )
     """)
 
@@ -131,15 +137,15 @@ def parse(input_glob: str, store: str = 'gcs', con: "duckdb.DuckDBPyConnection |
     # keeping both would add a row no consumer could ever tell apart.
     return con.sql(f"""
         SELECT DISTINCT
-            to_timestamp(time_micros / 1e6) AS ts,
+            to_timestamp(time_micros::BIGINT / 1e6) AS ts,
             '{store}'::VARCHAR AS store,
             cs_bucket::VARCHAR AS bucket,
             COALESCE(cs_object, '')::VARCHAR AS path,
             {_normalize_op_sql} AS op,
             (COALESCE(cs_operation, cs_method, ''))::VARCHAR AS op_raw,
             sc_status::INTEGER AS status,
-            COALESCE(sc_bytes, 0)::BIGINT AS bytes_out,
-            COALESCE(cs_bytes, 0)::BIGINT AS bytes_in,
+            COALESCE(sc_bytes::BIGINT, 0) AS bytes_out,
+            COALESCE(cs_bytes::BIGINT, 0) AS bytes_in,
             COALESCE(c_ip, '')::VARCHAR AS requester,
             COALESCE(cs_user_agent, '')::VARCHAR AS user_agent,
             s_request_id::VARCHAR AS request_id

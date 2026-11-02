@@ -21,6 +21,7 @@ from test_interval_store import V2_FROM, _scan_rows, _universe, _write
 from dt_cloud import append_runner as ar
 from dt_cloud import blobstore as bs
 from dt_cloud import interval_append as ia
+from dt_cloud import interval_churn as ich
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
@@ -95,17 +96,24 @@ def staged(world, local, tmp_path_factory):
         ist.fold_range(str(base), i, base, con)
         ist.build_slices_range(doc, ranges, i, base, con, mount=str(root))
         ist.slice_totals_range(str(base), i, base, con)
+    (base / "ranges.json").write_text(json.dumps(ranges))
+    ich.churn_gen(con, base, ranges["k"], ich.churn_from(scans[:BASE])["ts"], tmp / "churn-work")
+    (base / "ranges.json").unlink()
     for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
-        ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, base / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=RG,
-                         stamps=[s["ts"] for s in scans[:BASE]])
+        ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, base / "served" / f"{sort}.parquet", ist.served_schema(sort, churn=True),
+                         rg_rows=RG, stamps=[s["ts"] for s in scans[:BASE]])
     runs, prev = {}, None
-    for s in scans[BASE:]:
+    for j, s in enumerate(scans[BASE:], BASE):
         out = tmp / "runs" / s["id"]
+        count = ich.counts_at(scans[j - 1], s)
         for i in range(ranges["k"]):
             name = f"r{i:04d}"
-            state = ia.run_state_sql(str(prev / "state"), name) if prev else ia.base_state_sql(str(base), name)
-            ia.append_range(con, state, s, ranges["ranges"][i], name, out, bucket="b", mount=str(root))
-        ia.cut_run(con, str(out), out / "served", rg_rows=RG)
+            state = ia.run_state_sql(str(prev / "state"), name) if prev else ia.base_state_sql(str(base), name, churn=True)
+            ia.append_range(con, state, s, ranges["ranges"][i], name, out, bucket="b", mount=str(root), check=[str(base), *map(str, runs.values())],
+                            churn=True, count=count)
+        st = out / "state"
+        ich.apply_run(con, out, st, ranges, s["ts"], out, open_rows=lambda name: f"SELECT * FROM read_parquet('{st}/pvl/{name}.parquet')")
+        ia.cut_run(con, str(out), out / "served", rg_rows=RG, churn=True)
         runs[s["id"]] = out
         prev = out
     return {"base": base, "runs": runs, "ranges": ranges}
@@ -120,11 +128,11 @@ def test_build_writes_the_staged_generation(world, local, staged):
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
         [*(f"{s}{x}" for s in ist.served_sorts(True) for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     assert json.loads((gen / "scans.json").read_text()) == {
-        "bucket": str(world["root"]), "layouts": [LAYOUT],
+        "bucket": str(world["root"]), "layouts": [LAYOUT], "churn": True,
         "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": True}
     s = local["summary"]
     assert (s["gen"], s["scans"], s["ranges"], s["slices"], sorted(s["stages"]), sorted(s["peaks"])) == (
-        "g", BASE, staged["ranges"]["k"], True, ["cut", "slices", "versions"], ["cut", "slices", "versions"])
+        "g", BASE, staged["ranges"]["k"], True, ["churn", "cut", "slices", "versions"], ["churn", "cut", "slices", "versions"])
 
 
 def test_build_refuses_an_existing_generation(world, local, tmp_path):
@@ -164,7 +172,7 @@ def test_base_and_runs_are_a_full_rebuild(world, local, tmp_path, t):
     """Base + the newest manifest's runs (the merged one), and base + the level-0 runs alone: `build`/`fold` over every
     scan, version for version."""
     gen = local["gen"]
-    full = build_full(world["scans"], world["root"], tmp_path / "full")
+    full = build_full(world["scans"], world["root"], tmp_path / "full", churn=True)
     want = combine([_rows(full, t)], t)
     newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
     for runs in ([gen / r["key"] for r in newest["runs"]], [gen / "deltas" / d for d in DATES[BASE:]]):
@@ -182,7 +190,7 @@ def test_add_writes_each_scans_parity_marker(world, local, tmp_path):
     want = {}
     for j, d in enumerate(ids):
         s = world["scans"][BASE + j]
-        full = build_full(world["scans"][:BASE + j + 1], world["root"], tmp_path / f"full-{d}")
+        full = build_full(world["scans"][:BASE + j + 1], world["root"], tmp_path / f"full-{d}", churn=True)
         n = {t: sum(1 for p in sorted((full / t).glob("r*.parquet")) for r in pq.read_table(p, columns=["vf", "vt"]).to_pylist() if r["vf"] <= s["ts"] < r["vt"])
              for t in ia.tables()}
         cut = {sort: {"rows": pq.read_metadata(gen / "deltas" / d / "served" / f"{sort}.parquet").num_rows, "missing": 0, "extra": 0} for sort in ia.run_sorts()}
@@ -272,14 +280,15 @@ def test_publish_order():
 
 
 def test_open_state_is_the_staged_state(world, local, staged):
-    """`open_state_sql` over the base and the published runs is the staged path's `state/` after the newest scan."""
+    """`open_state_sql` over the base and the published runs is the staged path's `state/` after the newest scan, with its churn
+    apply's opened versions (`pvl-fix/`) in place of their paths'."""
     con = duckdb.connect()
     gen = local["gen"]
     newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
     last = staged["runs"][DATES[-1]]
     for i in range(staged["ranges"]["k"]):
         name = f"r{i:04d}"
-        got = il.open_state_sql(str(gen), [str(gen / r["key"]) for r in newest["runs"]], name)
+        got = il.open_state_sql(str(gen), [str(gen / r["key"]) for r in newest["runs"]], name, churn=True)
         want = ia.run_state_sql(str(last / "state"), name)
         for t in ia.tables():
             order = ", ".join(ia.IDENT[t])
@@ -365,7 +374,7 @@ def test_add_prunes_the_folded_runs_after_the_grace(world, tmp_path):
         assert sorted(p.relative_to(gen / key).as_posix() for p in (gen / key).rglob("*") if p.is_file()) == sorted(
             [*(f"ranges/{p.name}" for p in (gen / key / "ranges").glob("*")), "scans.json"]), key
     for t in ia.tables():
-        full = build_full(world["scans"], world["root"], tmp_path / f"full-{t}")
+        full = build_full(world["scans"], world["root"], tmp_path / f"full-{t}", churn=True)
         assert combine([_rows(gen, t), *(_rows(gen / k, t) for k in sorted(live))], t) == combine([_rows(full, t)], t)
 
 
@@ -409,11 +418,11 @@ def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
     gen, world = unowned["gen"], unowned["world"]
     ids = DATES[BASE:]
     assert json.loads((gen / "scans.json").read_text()) == {
-        "bucket": str(world["root"]), "layouts": [LAYOUT],
+        "bucket": str(world["root"]), "layouts": [LAYOUT], "churn": True,
         "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": False}
     assert json.loads((gen / "served" / "stats.json").read_text())["slices"] is False
     s = unowned["summary"]
-    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "path", "reads"])
+    assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["churn", "cut", "versions"], ["bysize", "path", "reads"])
     assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", "verify"]
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
         [*(f"{x}{e}" for x in ("path", "bysize", "reads") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
@@ -432,7 +441,7 @@ def test_an_unowned_generation_is_a_full_rebuild(unowned, tmp_path):
     from dt_cloud import interval_read as ir
 
     gen, world = unowned["gen"], unowned["world"]
-    full = build_full(world["scans"], world["root"], tmp_path / "full")
+    full = build_full(world["scans"], world["root"], tmp_path / "full", churn=True)
     want = combine([_rows(full, "pvl")], "pvl")
     newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
     for runs in ([gen / r["key"] for r in newest["runs"]], [gen / "deltas" / d for d in DATES[BASE:]]):
@@ -485,6 +494,7 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
         ["build-ranges", *common, "-r", every, "-S"],
         ["fold", *common, "-i", "0", "-n", str(k)],
         ["fold", *common, "-i", "0", "-n", str(k), "-S"],
+        ["churn", *common],
         ["cut", *common, "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))],
         ["cut", *common, "-i", str(ist.CUT_TASKS.index("stats"))],
     ]
