@@ -342,6 +342,24 @@ describe('<TimeSeries>', () => {
     expect(onBrush.mock.calls).toEqual([[0, 2], [0, 2], [1, 2]])
   })
 
+  it('onBrush: with both edges in reach (a narrow window), the first step picks the edge: leftward the start, rightward the end', () => {
+    // x = 0, 1, 2, 100 over 328px: 0 → 56, 1 → 59.3, 2 → 62.6, 100 → 384
+    const dense = [{ key: 'a', points: [0, 1, 2, 100].map(t => ({ t, y: 10 })) }]
+    const onBrush = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={dense} getX={p => p.t} getY={p => p.y} window={[1, 2]} onBrush={onBrush} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    const drag = (id: number, to: number) => {
+      fireEvent.pointerDown(svg, { clientX: 62, clientY: 100, button: 0, isPrimary: true, pointerId: id, pointerType: 'touch' })
+      fireEvent.pointerMove(svg, { clientX: to, clientY: 100, pointerId: id, pointerType: 'touch' })
+      fireEvent.pointerUp(window, { clientX: to, pointerId: id })
+    }
+    drag(1, 56)
+    drag(2, 384)
+    expect(onBrush.mock.calls).toEqual([[0, 2], [1, 100]])
+  })
+
   it('onBrush: holding a dragged edge still enters fine mode: one point per 28px of travel, a loupe in the label', () => {
     vi.useFakeTimers()
     try {
