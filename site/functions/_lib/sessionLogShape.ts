@@ -49,9 +49,16 @@ const BENIGN_ERRORS = [/^ResizeObserver loop /]
 /** Whether an error message is one of `BENIGN_ERRORS` (neither logged by the client nor counted by the feed). */
 export const benignError = (msg: unknown): boolean => typeof msg === 'string' && BENIGN_ERRORS.some(r => r.test(msg))
 
-/** Kinds (and api statuses) that count as errors in the session summary. */
-export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown }): boolean =>
-  e.k === 'error' || e.k === 'reject' || e.k === 'console' || (e.k === 'api' && typeof e.s === 'number' && (e.s === 0 || e.s >= 500))
+/** A request the page cancelled itself (`err: 'abort'`: its `AbortSignal` fired, e.g. a newer selection superseded it). */
+export const isCancelled = (e: { k?: unknown, s?: unknown, err?: unknown }): boolean => e.k === 'api' && e.s === 0 && e.err === 'abort'
+
+/** A request that failed: no response (other than the page's own cancel) or a 5xx. */
+export const isFailedApi = (e: { k?: unknown, s?: unknown, err?: unknown }): boolean =>
+  e.k === 'api' && typeof e.s === 'number' && (e.s >= 500 || (e.s === 0 && !isCancelled(e)))
+
+/** Kinds (and api statuses) that count as errors in the session summary; a cancelled request is not one. */
+export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown, err?: unknown }): boolean =>
+  e.k === 'error' || e.k === 'reject' || e.k === 'console' || isFailedApi(e)
 
 const ID = /^[A-Za-z0-9_-]{6,40}$/
 
@@ -216,7 +223,7 @@ export function summarize(e: SlogEvent): string {
     case 'prefetch': return `${str(e.w)} ${str(e.p) || '(root)'}${e.d ? ` @ ${str(e.d)}` : ''}`
     case 'api': {
       const b = e.b && typeof e.b === 'object' ? ` {${Object.entries(e.b).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : ''
-      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err ? ` · ${str(e.err)}` : ''}`
+      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${isCancelled(e) ? 'cancelled' : e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err && !isCancelled(e) ? ` · ${str(e.err)}` : ''}`
     }
     case 'error': return `${str(e.msg)}${e.src ? ` @ ${str(e.src)}` : ''}`
     case 'reject': return `unhandled rejection: ${str(e.msg)}`

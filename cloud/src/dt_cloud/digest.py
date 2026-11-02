@@ -411,6 +411,38 @@ def _span(a: dt.datetime, b: dt.datetime) -> str:
     return (f"{days}d" if days else "") + (f"{hours}h" if hours else "") or "0h"
 
 
+#: The OP's window reaches back this many days before the latest scan (specs/digest-rolling-window.md).
+WINDOW_DAYS = 30
+
+
+def window_start(month: dt.date, today: dt.date) -> dt.date:
+    """The first day of ``month``'s OP window: the longer of the last ``WINDOW_DAYS`` days to ``today`` (the latest
+    scan's date), inclusive, and the month to date. On 11/1 it's 10/3; from the month's ``WINDOW_DAYS``-th day on,
+    the month's 1st."""
+    return min(month.replace(day=1), today - dt.timedelta(days=WINDOW_DAYS - 1))
+
+
+def week_of(d: dt.date) -> dt.date:
+    """``d``'s ISO week's Monday (a weekly summary's key)."""
+    return d - dt.timedelta(days=d.weekday())
+
+
+def prior_month(month: dt.date) -> dt.date:
+    """The 1st of the month before ``month``'s."""
+    return (month.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+
+
+def window_label(start: dt.date, since: str) -> str:
+    """The OP's look-back figure's label: `last 30d` from the last scan before ``start`` (the window's first day),
+    else `since M/D` (``since``: the scan it starts from; a store with less history than the window)."""
+    return f"last {WINDOW_DAYS}d" if since[:10] < start.isoformat() else f"since {_md(since)}"
+
+
+def prev_month_link(month: dt.date, url: str | None) -> list[str]:
+    """The OP's link to the previous month's thread (`[← October](url)`), as lines; none without one."""
+    return [f"[← {prior_month(month):%B}]({url})"] if url else []
+
+
 #: The quota alert reply's sender icon (`converge_slack`).
 ALERT_ICON = ":warning:"
 
@@ -483,7 +515,7 @@ class Template(Protocol):
 
     def load(self, root: str, month: dt.date) -> Any | None: ...
     def n_scans(self, data: Any) -> int: ...
-    def op_body(self, data: Any, month: dt.date, plot_url: str | None) -> str: ...
+    def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str: ...
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
     def alert(self, data: Any) -> str | None: ...
@@ -531,8 +563,6 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     month's scans, and ``lead`` = every scan of the last calendar day before it
     (the first delta's baseline; empty for the first month ever). None if the
     month has no scans. ``scans``: ``list_scans(root)``, if already listed."""
-    from disk_tree import blobfs
-
     scans = list_scans(root) if scans is None else scans
     pfx = f"{month:%Y-%m}-"
     in_month = [s for s in scans if s.startswith(pfx)]
@@ -541,10 +571,27 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     before = [s for s in scans if s < in_month[0]]
     lead = [s for s in before if s[:10] == before[-1][:10]] if before else []
 
-    def read(s: str) -> tuple[str, dict]:
-        return s, json.loads(blobfs.read_text(f"{root.rstrip('/')}/{s}/meta.json"))
+    return read_metas(root, lead), read_metas(root, in_month)
 
-    return [read(s) for s in lead], [read(s) for s in in_month]
+
+def read_metas(root: str, scans: Iterable[str]) -> list[tuple[str, dict]]:
+    """``(scan id, meta.json)`` for each of ``scans``, under ``root``."""
+    from disk_tree import blobfs
+
+    return [(s, json.loads(blobfs.read_text(f"{root.rstrip('/')}/{s}/meta.json"))) for s in scans]
+
+
+def window_scans(scans: list[str], month: dt.date, before: str) -> list[str]:
+    """The scans (sorted ids) before ``before`` (the month's lead-in) that ``month``'s OP window draws: every scan
+    from the Monday of `window_start`'s week (its first weekly summary) on, after the last day's scans before that
+    (the first summary's baseline), whole days; the window ends at the month's latest scan."""
+    in_month = [s for s in scans if s.startswith(f"{month:%Y-%m}-")]
+    if not in_month:
+        return []
+    mon = week_of(window_start(month, dt.date.fromisoformat(in_month[-1][:10]))).isoformat()
+    older = [s for s in scans if s[:10] < mon]
+    first = older[-1][:10] if older else mon
+    return [s for s in scans if first <= s[:10] and s < before]
 
 
 def state_path(root: str, month: dt.date, state_dir: str) -> str:
@@ -673,7 +720,9 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if icons_dir is not None and deploy_plot is not None:
         _wait_reachable(plot_url)
 
-    body = tpl.op_body(data, month, plot_url)
+    # the previous month's thread, linked from the OP (its converge state, same channel and variant)
+    prev_op = load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+    body = tpl.op_body(data, month, plot_url, client.permalink(prev_op) if prev_op else None)
     op_ts = state.get("op_ts")
     if op_ts:
         client.edit(op_ts, body)
@@ -972,7 +1021,7 @@ def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, 
 
 def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None, plot_dir=None) -> str:
     """Render the plot (into ``plot_dir``, default the temp dir; skipped with a note when the template can't draw it
-    here, `PlotUnavailable`) and return the OP + every reply (+ the open day's provisional reply, last) as text;
+    here, `PlotUnavailable`) and return the OP (the previous month's thread linked as `<prev-thread>`) + every reply (+ the open day's provisional reply, last) as text;
     posts and hosts nothing."""
     import tempfile
 
@@ -986,7 +1035,7 @@ def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None
         _err(f"rendered plot → {out}")
     except PlotUnavailable as e:
         _err(f"plot not rendered: {e}")
-    lines = [tpl.op_body(data, month, "<plot-url>"), "", f"--- replies ({variant}: username | body | icon) ---"]
+    lines = [tpl.op_body(data, month, "<plot-url>", "<prev-thread>"), "", f"--- replies ({variant}: username | body | icon) ---"]
     open_ = tpl.provisional(data, variant) if tpl.cfg.provisional else None
     for u in tpl.units(data, variant) + ([open_] if open_ else []):
         r = u.reply

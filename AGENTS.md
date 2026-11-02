@@ -140,6 +140,11 @@ dt-cloud interval-store backfill-attribution -O NEW -o STORE [-s ROOT]  # The ro
                           # uncovered), carries and compaction; served sort `attribution` `(path, vf)` (`extras.ts`). This
                           # folds GEN into NEW with the table over every scan, checked against GEN's runs' table;
                           # `attribution-convert` first writes the parquet beside older scans' `attr.tsv`
+dt-cloud interval-store backfill-churn -O NEW -o STORE [-g GEN]  # GEN (base + runs) folded into NEW with churn on the folded
+                          # path versions (specs/diff-progressive.md §3): `churn_cum` (the path's cumulative churn at `vf`, each
+                          # file's |Δsize| rolled up to its ancestors, counted after the last v1 → v2 scan) and `churn_end` (at
+                          # `vt`, closed pieces), `"churn": true` in `scans.json`; a fresh `build`'s bytes. New builds (`churn`
+                          # after `fold`), appends and compactions carry it; source and `CURRENT.json` untouched
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier

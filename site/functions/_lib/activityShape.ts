@@ -3,7 +3,7 @@
  * session-log events are which kind, bursts, and the Slack / Discord renderings. No Workers or DOM types; the D1 and
  * sink I/O is `activity.ts`.
  */
-import { benignError, isErrorEvent, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
+import { benignError, isErrorEvent, isFailedApi, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
 
 export const NOTIFY = ['off', 'count', 'line'] as const
 export type Notify = typeof NOTIFY[number]
@@ -84,11 +84,11 @@ export function serverKind(method: string, path: string): string | null {
 }
 
 /** A session-log event's kind, or null (`dropped` markers). */
-export function clientKind(e: Pick<SlogEvent, 'k'> & { s?: unknown }): string | null {
+export function clientKind(e: Pick<SlogEvent, 'k'> & { s?: unknown, err?: unknown }): string | null {
   switch (e.k) {
     case 'start': return 'view'
     case 'error': case 'reject': case 'console': return 'error'
-    case 'api': return typeof e.s === 'number' && (e.s === 0 || e.s >= 500) ? 'error' : 'api'
+    case 'api': return isFailedApi(e) ? 'error' : 'api'
     case 'dropped': return null
     default: return e.k
   }

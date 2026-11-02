@@ -39,6 +39,7 @@ import pyarrow.parquet as pq
 
 from . import append_runner as ar
 from . import interval_append as ia
+from .interval_churn import has_churn, with_churn
 from . import interval_store as ist
 from . import static_names as sn
 from .append_runner import LocalRunStore, latest_key
@@ -99,12 +100,12 @@ def _class_renames(path: str) -> dict[str, str]:
     return {o: n for o, n in zip(old, ist.CLS) if o != n}
 
 
-def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: ist.Identity = False) -> str:
+def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: ist.Identity = False, churn: bool = False) -> str:
     """Key range `name`'s versions of table `t`: the base's range file and every run's delta, one row per version
     (`IDENT`, `usr` as '') with the smallest `vt`, in the base's columns (`interval_store.SUB_SCHEMA[t]`, `usr` '';
     `GENERATION` last in `pvl` with `generation`). Class columns of an older generation are read by position, under
-    `CLASS_COLS`' names."""
-    names = ist.with_generation(ist.SUB_SCHEMA[t], generation if t == "pvl" else False).names
+    `CLASS_COLS`' names. `churn`: `pvl` carries `churn_cum` (`interval_churn`)."""
+    names = ist.with_generation(with_churn(ist.SUB_SCHEMA[t], churn and t == "pvl"), generation if t == "pvl" else False).names
 
     def sel(path: str) -> str:
         back = {n: o for o, n in _class_renames(path).items()}
@@ -149,17 +150,18 @@ def attribution_versions_sql(base: str, runs: list[str], name: str) -> str:
 
 
 def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False,
-                  fill: Fill | None = None, fill_nulls: bool = False, attributed: bool = False) -> dict:
+                  fill: Fill | None = None, fill_nulls: bool = False, attributed: bool = False, churn: bool = False) -> dict:
     """Key range `name` of the generation folded from the base under `base` and the runs `runs` (dirs, oldest first) into
     `out`'s range files, as `build` writes them: `pvl/`, `pv/` and `rd/` (the islands of `pvl`'s pieces), and with the
     owner axis `sv/` and `svt/`. `generation`: the path versions carry `GENERATION` — read from the inputs, or, with
     `fill`, set by it on the path versions and taken by their pieces (`fill_nulls`: the inputs carry it, and only its NULLs
-    are filled). Its tables are `con`'s temp tables, so ranges
+    are filled). `churn`: the folded path versions carry `churn_cum`, kept as the inputs have it (`pv`'s islands don't
+    split on it). Its tables are `con`'s temp tables, so ranges
     run concurrently on cursors of one database (`fold_gen` `jobs`). Returns their row counts."""
     rf = lambda sub: out / sub / f"{name}.parquet"
     gen_in = generation if fill is None or fill_nulls else False
     gcol = [ist.identity_column(gen_in)] if gen_in else []
-    con.execute(f"CREATE OR REPLACE TEMP TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in)}")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in, churn)}")
     # A path version is the run of its pieces with equal change columns (`dr` as `build` derives it); `wts` (and
     # `GENERATION`) is carried from the version's first scan, which every piece shares (`fold`).
     change = [c for c in ist.change_cols(gen_in) if c != "dr"]
@@ -173,7 +175,7 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
         g = ist.GENERATION
         con.execute(f"""UPDATE pvl SET {g} = p.{g} FROM pv p
             WHERE p.depth = pvl.depth AND p.path = pvl.path AND p.vf <= pvl.vf AND pvl.vf < p.vt AND pvl.{g} IS NULL AND p.{g} IS NOT NULL""")
-    pvl_schema, pv_schema = (ist.with_generation(s, generation) for s in (ist.PVL_SCHEMA, ist.PV_SCHEMA))
+    pvl_schema, pv_schema = (ist.with_generation(s, generation) for s in (with_churn(ist.PVL_SCHEMA, churn), ist.PV_SCHEMA))
     doc = {"pvl": sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pvl_schema.names)} FROM pvl ORDER BY depth, path, vf"), rf("pvl"),
                                   pvl_schema, ist.RANGE_RG, dictionary=["kind", "us"])}
     doc["pv"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pv_schema.names)} FROM pv ORDER BY depth, path, vf"), rf("pv"), pv_schema,
@@ -215,7 +217,7 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
              mem: str = "4GB", jobs: int = 1, fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None,
              progress: Callable[..., None] | None = None,
-             identity: ist.Identity | None = None) -> tuple[dict, dict, dict, dict]:
+             identity: ist.Identity | None = None, before_cut: Callable[[object, Path, dict], None] | None = None) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
@@ -225,7 +227,9 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     are done) and around the served sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each
     range (a caller's heartbeat; in completion order, one call at a time). `progress(note[, next_phase])`: the run
     record's hook (`append_runner.compact_store`): each range's `i/k` note, then the ranges' total with `next_phase`
-    `sorts` as the served sorts' cut begins. Returns `(scans.json, rows per table, sorts, stats)`."""
+    `sorts` as the served sorts' cut begins. `before_cut(con, out, doc)`: a hook over the folded range files before the
+    cut (`interval_churn.backfill` sets `churn_cum` there, and records it in `doc`). Returns `(scans.json, rows per table,
+    sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = (ist.has_generation(base) or fill is not None) if identity is None else identity
@@ -248,7 +252,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
 
     def one(cur, i: int) -> dict:
         t0 = monotonic()
-        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill, fill_nulls, attributed)
+        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill, fill_nulls, attributed, has_churn(base))
         with lock:
             done[0] += 1
             err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s "
@@ -263,6 +267,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     for got in sn.each(con, one, list(range(k)), jobs):
         for t, n in got.items():
             rows[t] = rows.get(t, 0) + n
+    if before_cut is not None:
+        before_cut(con, out, doc)
     t0 = monotonic()
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
     if progress is not None:

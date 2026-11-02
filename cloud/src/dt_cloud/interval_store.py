@@ -7,6 +7,7 @@ with the attribution table (`ATTRIBUTION`, specs/attr-interval-table.md) also ve
 attribution map and serves it as the `attribution` sort.
 
     dt-cloud interval-store build-ranges -g GEN [-i TASK -n PER_TASK | -r RANGES]   # per range: pv/, rd/, digest/
+    dt-cloud interval-store churn -g GEN                                            # after fold: churn_cum on pvl/ (one task), `"churn": true` in scans.json
     dt-cloud interval-store cut -g GEN [-s SORT]                                    # served/{path,bysize,reads}.parquet + .groups.parquet
     dt-cloud interval-store build|add -g GEN -L LAYOUT -s SCANS -o STORE            # one machine, every stage (`interval_local`)
 
@@ -31,6 +32,7 @@ from click import Choice, IntRange, group, option
 from . import heartbeat as hb
 from . import static_names as sn
 from .blobstore import Store, store_url
+from .interval_churn import has_churn, with_churn
 from .static_names import OPEN, U64, connect, q, range_preds, write_sorted
 
 err = partial(print, file=sys.stderr, flush=True)
@@ -621,10 +623,11 @@ SLICE_SUBS = ("sv", "svt")
 GENERATION_SORT = "path"
 
 
-def served_schema(sort: str, generation: Identity = False) -> pa.Schema:
-    """A served sort's columns: its range files' (`SUB_SCHEMA`), and `GENERATION` last in `GENERATION_SORT` when the
-    generation carries it."""
-    return with_generation(SUB_SCHEMA[SORTS[sort][0]], generation if sort == GENERATION_SORT else False)
+def served_schema(sort: str, generation: Identity = False, churn: bool = False) -> pa.Schema:
+    """A served sort's columns: its range files' (`SUB_SCHEMA`), `churn_cum` in the folded path versions' sorts when the
+    generation carries it (`interval_churn`), and `GENERATION` last in `GENERATION_SORT` when it carries that."""
+    sub = SORTS[sort][0]
+    return with_generation(with_churn(SUB_SCHEMA[sub], churn and sub == "pvl"), generation if sort == GENERATION_SORT else False)
 
 
 def owners_of(digests) -> bool:
@@ -849,7 +852,7 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     serial pyarrow writer, which the other sorts overlap. Returns `({sort: {rows, groups, bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
     served = gen_dir / "served"
-    gen = has_generation(scans)
+    gen, churn = has_generation(scans), has_churn(scans)
     todo = served_sorts(scans["slices"], attributed(scans))
     size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
 
@@ -857,7 +860,7 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
         sub, _, _ = SORTS[sort]
         t1 = monotonic()
         est = sum(pq.read_metadata(p).num_rows for p in (gen_dir / sub).glob("r*.parquet"))
-        sd = write_served(cur, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen),
+        sd = write_served(cur, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen, churn),
                           rg_rows=rg_rows, stamps=stamps, est_rows=est)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
@@ -1006,6 +1009,36 @@ def fold_cmd(bucket, gen, index, mount, mem, per_task, out, threads, profile, sl
         print(json.dumps(doc), flush=True)
 
 
+@cli.command("churn")
+@option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
+@option("-g", "--gen", required=True, help="Generation (its folded `pvl/` range files)")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="Ranges at a time, on cursors of one DuckDB database")
+@option("-M", "--mem", default="64GB", help="DuckDB memory limit")
+@option("-o", "--out", default="/stage/out", help="Local work dir (the range files are copied here, uploaded, then removed)")
+@option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
+@option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
+@option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
+def churn_cmd(bucket, gen, jobs, mem, out, threads, profile, tmp, no_upload) -> None:
+    """Set `churn_cum` on every range's folded path versions (`interval_churn.churn_gen`: a rollup across the ranges, one
+    task, after `fold` and before `cut`), and flag it in `scans.json` (`"churn": true`)."""
+    from .blobstore import mirror
+    from .interval_churn import churn_from, churn_gen, record_churn
+
+    store = Store(_bucket(bucket, profile))
+    prefix = f"{PREFIX}/{gen}"
+    scans = store.read_json(f"{prefix}/scans.json")
+    local = Path(out) / "churn-gen"
+    mirror(store, prefix, local, keep=lambda rel: rel.startswith("pvl/") or rel == "ranges.json")
+    base = churn_from(scans["scans"])
+    doc = churn_gen(connect(threads, mem, tmp), local, json.loads((local / "ranges.json").read_text())["k"], base["ts"], Path(tmp), jobs=jobs)
+    if not no_upload:
+        store.put_tree(local / "pvl", f"{prefix}/pvl")
+        store.write_text(f"{prefix}/scans.json", json.dumps(record_churn(scans), indent=1) + "\n")
+        shutil.rmtree(local)
+    print(json.dumps({**doc, "base": base["id"]}), flush=True)
+
+
 def _refuse_overwrite(store: Store, keys: list[str]) -> None:
     """Published served files are immutable: a cut into a generation that already has them is refused
     (cut into a new one, `--to-gen`)."""
@@ -1063,7 +1096,7 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         if sort not in served_sorts(has_slices, True):
             err(f"cut {sort}: {prefix} names no owner; no slice sorts")
             continue
-        schema = served_schema(sort, has_gen)
+        schema = served_schema(sort, has_gen, has_churn(scans))
         if not no_upload:
             _refuse_overwrite(store, [f"{dst_prefix}/served/{sort}{x}" for x in (".parquet", ".groups.parquet", ".json")])
         t0 = monotonic()
