@@ -580,6 +580,17 @@ class Cw:
     def op_body(self, month: Month, m: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
         return op_body(month, m, plot_url, self.cfg, prev_url)
 
+    def image_request(self, month: Month, m: dt.date) -> dict:
+        return image_body(month, m, self.cfg)
+
+    def rows_json(self, month: Month) -> dict:
+        """The month's scans as the site's renderer reads them (`src/digest/cw.ts` `CwRows`)."""
+        def scan(r: Scan) -> dict:
+            return {"scan": r.scan, "slug": r.slug, "tb": r.tb, "extra": r.extra, "classes": None if r.classes is None else {str(c): v for c, v in r.classes.items()}}
+
+        return {"template": "cw", "closed": month.closed, "pre": [scan(r) for r in month.pre],
+                "lead": [scan(r) for r in month.lead], "rows": [scan(r) for r in month.rows]}
+
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(day.date, day.scan, reply(day, variant, self.cfg)) for day in day_rows(month, variant, self.cfg.reply_hour)]
 

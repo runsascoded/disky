@@ -134,7 +134,9 @@ class DigestConfig:
     or over this percent gets a `:warning:` in the daily replies, and the
     month's thread one alert reply also sent to the channel (Slack
     `reply_broadcast`), edited as its numbers move and deleted once every quota
-    is back under; None: neither."""
+    is back under; None: neither. ``preview``: where each Slack converge writes the month's preview bundle
+    (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
+    ``{variant}``) in the deployment's served store; None: none written."""
 
     template: str
     title: str
@@ -157,6 +159,7 @@ class DigestConfig:
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"
     alert_pct: float | None = None
+    preview: str | None = None
 
     @property
     def unit(self) -> Units:
@@ -246,7 +249,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
-    "units": (str,), "alert_pct": (int, float, type(None)),
+    "units": (str,), "alert_pct": (int, float, type(None)), "preview": (str, type(None)),
 }
 
 
@@ -516,6 +519,8 @@ class Template(Protocol):
     def load(self, root: str, month: dt.date) -> Any | None: ...
     def n_scans(self, data: Any) -> int: ...
     def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str: ...
+    def image_request(self, data: Any, month: dt.date) -> dict: ...
+    def rows_json(self, data: Any) -> dict: ...
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
     def alert(self, data: Any) -> str | None: ...
@@ -592,6 +597,39 @@ def window_scans(scans: list[str], month: dt.date, before: str) -> list[str]:
     older = [s for s in scans if s[:10] < mon]
     first = older[-1][:10] if older else mon
     return [s for s in scans if first <= s[:10] and s < before]
+
+
+#: The preview bundle's format (`preview_bundle`; the site's `src/digest` reads it).
+PREVIEW_VERSION = 1
+
+
+def cfg_json(cfg: DigestConfig) -> dict:
+    """The config fields the OP renders from (the site's `DigestCfg`): title, site, units, the primary and each
+    bucket's label, path and quotas, prices."""
+    u = cfg.unit
+    return {
+        "template": cfg.template, "title": cfg.title, "site_url": cfg.site_url, "host": cfg.host,
+        "unit": {"name": u.name, "bytes": u.bytes, "short": u.short}, "primary": cfg.primary,
+        "buckets": {
+            name: {"label": b.label, "path": b.path, "zone": b.zone,
+                   "quotas": [{"bytes": q.bytes, "name": q.name, "short": q.short, "classes": list(q.classes)} for q in b.quotas]}
+            for name, b in cfg.buckets.items()
+        },
+        "prices": dict(cfg.prices), "icons_base": cfg.icons_base,
+    }
+
+
+def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_url: str | None, prev_url: str | None,
+                   channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
+    """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
+    fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, and the
+    thread. The site re-renders the rows under other params beside it."""
+    return {
+        "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
+        "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
+        "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "op": op, "image": tpl.image_request(data, month),
+    }
 
 
 def state_path(root: str, month: dt.date, state_dir: str) -> str:
@@ -722,7 +760,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
 
     # the previous month's thread, linked from the OP (its converge state, same channel and variant)
     prev_op = load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
-    body = tpl.op_body(data, month, plot_url, client.permalink(prev_op) if prev_op else None)
+    prev_url = client.permalink(prev_op) if prev_op else None
+    body = tpl.op_body(data, month, plot_url, prev_url)
     op_ts = state.get("op_ts")
     if op_ts:
         client.edit(op_ts, body)
@@ -731,6 +770,16 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
+    if cfg.preview:
+        from disk_tree import blobfs
+
+        out = f"{cfg.preview.format(channel=channel, variant=variant).rstrip('/')}/{month:%Y-%m}.json"
+        bundle = preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
+                                variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts))
+        if not blobfs.is_url(out):
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+        blobfs.write_text(out, json.dumps(bundle, indent=1))
+        _err(f"digest: preview bundle → {out}")
 
     posted = state.setdefault("posted", {})
     new = 0
