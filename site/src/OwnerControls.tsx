@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { DEFAULT_STORE } from './stores'
 import { AssignSelect } from './AssignSelect'
 import { actionItem } from './objects'
@@ -21,8 +22,10 @@ import { ClassBar, OwnerBar, ownerShares } from './OwnerBar'
  * alone. `userIdx`: the site's user palette, so the ownership bar's colors
  * match the color-by-owner map.
  */
-export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser }: {
+export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser, stage }: {
   uri: string; idx: OwnerIndex; node?: TreeNode; lensed?: boolean; userIdx?: Map<string, UserIndexEntry>; onPickUser?: (u: string) => void
+  /** The prefix's own stage-for-deletion control, beside its assign control. */
+  stage?: ReactNode
 }) {
   const canAssign = useCanAssign()
   if (!DEFAULT_STORE.owners || !uri.startsWith('gs://') || uri.indexOf('/', 5) === -1) {
@@ -51,6 +54,7 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser }: {
               // attributed owners are people the lens hides — not "none".
               : <span className="none" title={lensed ? 'the owner filter hides other people\'s bytes here' : undefined}>—</span>}
         {canAssign && <AssignSelect items={item} assigned={cl?.who ?? null} />}
+        {stage}
         {node && node.cb && Object.values(node.cb).some(b => b > 0) && (
           <span className="classes">
             <span className="lbl">class</span>
