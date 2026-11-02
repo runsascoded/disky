@@ -508,11 +508,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             there) — no panel for an empty box. */}
         {hasPanel && (
           <div className="root-owner">
-            <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser} />
             {/* The folder itself, beside its owner: the same trash as its row one level up (never a whole bucket). */}
-            {stageHere && store.staging && canStage && (
-              <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.n).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={staged?.markOf(uriOf(path), true) ?? null} />
-            )}
+            <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser}
+              stage={stageHere && store.staging && canStage
+                ? <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.n).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={staged?.markOf(uriOf(path), true) ?? null} />
+                : null} />
             {keys}
           </div>
         )}
