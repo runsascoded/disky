@@ -158,6 +158,7 @@ SESSION_MONITOR = "0"           # shared D1: preview may dry-run, never send mon
 DIFF_DESCENT = "1"   # Δ-mode diffs by lazy descent over the interval store (`_lib/diffDescent.ts`; busy, broad paths handed to the as-of walk); dev only, prod off (Ryan, 2026-11-01: wait for a progressive, one-level-per-request design)
 SERVED_R2 = "1"   # snapshot JSONs (meta/age/lifecycle/rules) + extras read from INDEX_R2, not GCS (the job copies them: `publish-r2 -S`)
 PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`); the generation from INDEX_R2's `interval-store/CURRENT.json`
+INTERVAL_STORE_GEN = "2026-10-09b.g3.c"   # dev only: g3 + churn (`backfill-churn`, 2026-11-02) for `/api/diff/level`; frozen at its scans (prod's dailies append to g3), prod follows CURRENT.json
 STATIC_BENCH = "1"   # /api/static-bench: R2 read timings for the static name-search prototype
 FILTER_STATIC = "1"   # the map's filter (`q=`): a single literal's match roots from the static name index on R2 (INDEX_R2; `_lib/staticFilter.ts`), exact on every scan of its generation
 FILTER_STATIC_HEAVY = "1"   # with FILTER_STATIC: heavy literals (catalog members, every 1–2 character one) from the drilldown (`drill/` on INDEX_R2; `_lib/staticDrill.ts`) — match roots, or a heavy directory's per-child rollup; the base generation's scans, and per-scan runs past the drill base once each run's `drill/` lands
