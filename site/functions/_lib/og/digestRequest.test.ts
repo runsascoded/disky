@@ -167,13 +167,14 @@ describe('parseDigestRequest: pools', () => {
     })
     expect((parseDigestRequest({ ...pools, alert_pct: undefined }) as { alertPct: number }).alertPct).toBe(90)
   })
-  it('refuses no pools, a zero quota, a bad point or a bad alert share', () => {
+  it('refuses no pools, a zero quota, a bad point, a bad alert share, or pools with no points at all', () => {
     const bad = 'pools: [{name, quota > 0, points: [{scan, bytes}]}]'
     expect([
       parseDigestRequest({ ...pools, pools: [] }),
       parseDigestRequest({ ...pools, pools: [{ ...pools.pools[0], quota: 0 }] }),
       parseDigestRequest({ ...pools, pools: [{ ...pools.pools[0], points: [{ scan: 'x', bytes: 1 }] }] }),
       parseDigestRequest({ ...pools, alert_pct: 0 }),
-    ]).toEqual(['pools: 1–8 [{name, quota, points: [{scan, bytes}]}]', bad, bad, 'alert_pct: (0, 100]'])
+      parseDigestRequest({ ...pools, pools: pools.pools.map(pl => ({ ...pl, points: [] })) }),
+    ]).toEqual(['pools: 1–8 [{name, quota, points: [{scan, bytes}]}]', bad, bad, 'alert_pct: (0, 100]', 'pools: at least one point'])
   })
 })
