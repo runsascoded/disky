@@ -32,9 +32,18 @@ export interface DigestParams {
   headline: ('mtd' | 'window')[]
   /** Which weeks the summaries list: every one overlapping the window, or the month's. */
   weeks: 'window' | 'month'
+  /** cw: a quota line under the headline (every pool, most full first, marked by pressure), or none
+   *  (specs/digest-quota-pressure.md). */
+  quotas: 'off' | 'circles'
+  /** cw: the plot's chart: the primary's usage against its quota, or every pool's % of its quota. */
+  plot: 'usage' | 'pools'
+  /** The share (%) a pool is marked red at; orange from 10 points below. */
+  alertAt: number
 }
 
-export const DEFAULT_PARAMS: DigestParams = { windowDays: 30, todayAt: [0.7, 1], diff: 'window', headline: ['mtd', 'window'], weeks: 'window' }
+export const DEFAULT_PARAMS: DigestParams = {
+  windowDays: 30, todayAt: [0.7, 1], diff: 'window', headline: ['mtd', 'window'], weeks: 'window', quotas: 'off', plot: 'usage', alertAt: 90,
+}
 
 /** What the OP renders around its rows: the hosted plot's URL (null: no image line) and the previous thread's. */
 export interface OpLinks { plotUrl: string | null; prevUrl: string | null }

@@ -57,6 +57,7 @@ function Toks({ toks, plot }: { toks: Tok[]; plot: ReactNode }) {
       case 'italic': return <i key={i}>{k.s}</i>
       case 'link': return <a key={i} href={k.href} target="_blank" rel="noreferrer">{k.s}</a>
       case 'arrow': return <span key={i} className={`arrow ${k.deg > 0 ? 'up' : k.deg < 0 ? 'down' : 'flat'}`} style={{ transform: `rotate(${-k.deg}deg)` }} title={`arrow_deg${k.deg}`}>➜</span>
+      case 'emoji': return <span key={i} title={`:${k.name}:`}>{k.char}</span>
       case 'image': return <span key={i} className="plot">{plot}</span>
     }
   })}</>
@@ -91,6 +92,11 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
         {HEADLINES.map(([l, h]) => <option key={l} value={h.join()}>{l}</option>)}</select></label>
       <label>weeks <select value={p.weeks} onChange={e => set({ ...p, weeks: e.target.value as DigestParams['weeks'] })}>
         <option value="window">window's</option><option value="month">month's</option></select></label>
+      <label>quotas <select value={p.quotas} onChange={e => set({ ...p, quotas: e.target.value as DigestParams['quotas'] })}>
+        <option value="off">off</option><option value="circles">line, 🔴/🟠</option></select></label>
+      <label>plot <select value={p.plot} onChange={e => set({ ...p, plot: e.target.value as DigestParams['plot'] })}>
+        <option value="usage">usage vs quota</option><option value="pools">% of each quota</option></select></label>
+      <label>red at <input type="number" min={1} max={100} value={p.alertAt} onChange={e => set({ ...p, alertAt: num(e.target.value, 1, 100) })} />%</label>
     </div>
   )
 }
