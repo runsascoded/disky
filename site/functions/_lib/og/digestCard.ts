@@ -404,7 +404,12 @@ export function poolsSvg(d: PoolsCardInput): string {
   })
   const peak = Math.max(100, ...series.flatMap(s => s.pcts))
   const hi = Math.ceil(peak / 10) * 10 + 5
-  const f = frame(d, PAD, w)
+  // the loud pools' labels sit in a gutter right of the plot, never over the lines (the latest scan is often at the
+  // plot's right edge)
+  const loud = series.filter(s => !s.faint && s.points.length)
+  const labelOf = (s: (typeof series)[number]) => `${s.name} ${Math.round(s.pcts[s.pcts.length - 1])}%`
+  const gutter = loud.length ? Math.max(...loud.map(s => interWidth(labelOf(s), 12, 600))) + 14 : 0
+  const f = frame(d, PAD, w - gutter)
   const { left, pw, X } = f
   const Y = (v: number) => y0 + h - (v / hi) * h
   out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
@@ -428,17 +433,19 @@ export function poolsSvg(d: PoolsCardInput): string {
     if (s.points.length === 1) out.push(`<circle cx="${r1(X(s.points[0].t))}" cy="${r1(Y(s.pcts[0]))}" r="3" fill="${s.faint ? INK3 : s.color}"/>`)
     else out.push(`<polyline points="${line}" fill="none" stroke="${s.faint ? INK3 : s.color}" stroke-opacity="${s.faint ? 0.45 : 1}" stroke-width="${s.faint ? 1.5 : 2.2}" stroke-linejoin="round"/>`)
   }
-  // labels at each loud pool's latest point, pushed apart vertically
-  const loud = series.filter(s => !s.faint && s.points.length)
+  // each loud pool's latest point, its label in the gutter (pushed apart vertically, a leader when moved off its line)
   const labels = loud.map(s => {
     const i = s.points.length - 1
-    return { s, x: X(s.points[i].t), y: Y(s.pcts[i]), label: `${s.name} ${Math.round(s.pcts[i])}%` }
+    return { s, x: X(s.points[i].t), y: Y(s.pcts[i]), label: labelOf(s) }
   })
   const ys = spread(labels.map(l => l.y + 4), 15, y0 + 12, y0 + h - 2)
+  const gx = left + pw + 8
   labels.forEach((l, k) => {
     out.push(`<circle cx="${r1(l.x)}" cy="${r1(l.y)}" r="3.5" fill="${l.s.color}"/>`)
-    const right = l.x + 8 + interWidth(l.label, 12, 600) <= left + pw
-    out.push(text(right ? l.x + 8 : l.x - 8, ys[k], l.label, 12, { fill: l.s.color, weight: 600, anchor: right ? 'start' : 'end' }))
+    if (Math.abs(ys[k] - 4 - l.y) > 2 || gx - l.x > 12) {
+      out.push(`<polyline points="${r1(l.x + 4)},${r1(l.y)} ${r1(gx - 6)},${r1(l.y)} ${r1(gx - 2)},${r1(ys[k] - 4)}" fill="none" stroke="${l.s.color}" stroke-opacity="0.6"/>`)
+    }
+    out.push(text(gx, ys[k], l.label, 12, { fill: l.s.color, weight: 600 }))
   })
   let y = y0 + h + 30
   const quiet = series.filter(s => s.faint && s.points.length)
