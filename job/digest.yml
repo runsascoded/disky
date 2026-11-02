@@ -34,6 +34,9 @@ provisional: true
 # a quota at/over this percent: `:warning:` in the daily replies + one alert reply also sent to the channel, deleted
 # once every quota is back under. null until thrds' `post(broadcast=True)` (thrds specs/slack-reply-broadcast.md); then 90
 alert_pct: null
+# the daily replies' quota clauses fullest first, :red_circle: at/over alert_pct (else 90), :large_orange_circle:
+# within 10 points below (`warning`: config order, :warning: at/over alert_pct)
+quota_marks: circles
 primary: marin-us-east-02a
 # quotas from CoreWeave's `cwobject_quota_info` metric, which is per ZONE: 02a =
 # exactly 910 TiB ("1 PB"); US-EAST-08A = 500 TiB (100 until 2026-10-16) shared by

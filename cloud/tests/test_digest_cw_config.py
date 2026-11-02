@@ -23,6 +23,7 @@ CW = DG.DigestConfig(
     site_url="https://cw.oa.dev",
     root="gs://{DATA_BUCKET}/snapshots/cw",
     state="digest/cw/{channel}/{variant}",
+    quota_marks="circles",
     preview="r2://oa-cw-s3-usage-index/digest/preview/{channel}/{variant}",
     discord_state="digest/discord/{webhook}",
     discord_webhook_env=None,
