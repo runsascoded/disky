@@ -8,7 +8,8 @@ import { Avatar } from './Avatar'
 import { CopyName, copyText } from './CopyName'
 import { FaRegCopy } from 'react-icons/fa6'
 import { pathCopy, pathCrumbs, pathLead, pathText } from './pathCrumbs'
-import { useStagedIndex } from './StageAction'
+import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction'
+import { useCanStage } from './auth'
 import { cellAction } from './objects'
 import { canonId, UserChip, ghHandle, shortName } from './UserChip'
 import { newestLabel, shareOfTotal } from './viewNums'
@@ -178,7 +179,10 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stageHere = false }: {
+  /** Offer the drilled folder's own trash in the owner panel: an unfiltered view (under a filter the bulk bar
+   *  stages the matches; a folder's whole prefix never stands in for them). */
+  stageHere?: boolean
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -274,6 +278,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   )
 
   const staged = useStagedIndex()
+  const canStage = useCanStage()
   const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
   const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
   // a mixed-provider store's buckets title with their scheme (`r2://…`), so the map says which cloud each is on
@@ -504,6 +509,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         {hasPanel && (
           <div className="root-owner">
             <OwnerControls uri={uriOf(path)} idx={ownerIdx!} node={node} lensed={ownerLensed} userIdx={userIdx} onPickUser={onPickUser} />
+            {/* The folder itself, beside its owner: the same trash as its row one level up (never a whole bucket). */}
+            {stageHere && store.staging && canStage && (
+              <PrefixStageAction item={tableCoverItem(node, path.slice(1).map(n => n.n).join('/'))} scheme={schemeOf(path)} fmtBytes={fmtBytes} mark={staged?.markOf(uriOf(path), true) ?? null} />
+            )}
             {keys}
           </div>
         )}

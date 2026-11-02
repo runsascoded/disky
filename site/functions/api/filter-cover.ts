@@ -111,6 +111,18 @@ async function cover(ctx0: Ctx): Promise<Response> {
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return hit
 
+    // The view's own path matches (a match root, or inside one: every descendant of a match root matches): the
+    // folder whole is its cover, as the view draws it — its match list names no root below it.
+    if (path && query(path)) {
+      const t = await st.time('roots', pathTotals(ctx.env, date)([path]))
+      // One point lookup: never `'wide'` nor over budget.
+      if (!(t instanceof Map)) throw new Error(`filter-cover: ${path}'s totals unread (${t})`)
+      const r = t.get(path)
+      if (!r) throw new NotFound(path)
+      const body = { date, path, q: qRaw, items: [{ path, kind: r.kind, b: r.b, o: r.o, roots: 1 }], roots: { n: 1, b: r.b, o: r.o }, complete: true, looked: 1, unchecked: 0 }
+      return await cacheStore(ctx.env, cacheKey, JSON.stringify(body), { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
+    }
+
     const found = await st.time('roots', allMatchRoots(ctx.env, { date, path, query }))
     const roots = found?.roots ?? []
     const sum = { n: roots.length, b: roots.reduce((n, r) => n + r.b, 0), o: roots.reduce((n, r) => n + r.o, 0) }
