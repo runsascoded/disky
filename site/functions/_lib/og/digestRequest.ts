@@ -1,6 +1,6 @@
 /** `POST /api/digest-image`'s request, validated (pure; `api/digest-image.ts` resolves a `usage` diff and renders):
  *
- *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', points: [{scan, bytes}],
+ *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', today_at?: [p0, p1], points: [{scan, bytes}],
  *    quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → `digestSvg`: the usage line against its quota, over the headline interval's diff map (the cw template)
  *   {kind: 'tiers', title, note, month, from?, tiers: [name, …] (bottom → top), points: [{scan, bytes: [per tier]}],
@@ -63,17 +63,21 @@ function parseDiff(d: unknown): DiffSpec | null | string {
 
 /** Where the latest scan sits across a window card's width: 0.7 on the month's 1st, rising linearly to 1 on its last
  *  day (`days` in the month), so an early thread has some runway to its right and a late one ends at the latest scan. */
-export function todayAt(day: number, days: number): number {
-  return 0.7 + (0.3 * (Math.min(day, days) - 1)) / (days - 1)
+export function todayAt(day: number, days: number, [p0, p1]: [number, number] = TODAY_AT): number {
+  return p0 + ((p1 - p0) * (Math.min(day, days) - 1)) / (days - 1)
 }
+
+/** `todayAt`'s range by default: 0.7 on the 1st to 1 on the last day. A request's `today_at` overrides it (the
+ *  `/admin/slack` preview's candidates). */
+export const TODAY_AT: [number, number] = [0.7, 1]
 
 /** A window card's x span (specs/digest-rolling-window.md): from the window's first day (`start`, epoch ms) or its
  *  baseline scan before it, whichever is earlier, to the point that puts the latest scan (`ts`' last) at `todayAt`
  *  of the width: `today + (today − from) · (1 − p) / p`. */
-export function windowFrame(start: number, ts: number[], y: number, mo: number): { from: number; to: number } {
+export function windowFrame(start: number, ts: number[], y: number, mo: number, range: [number, number] = TODAY_AT): { from: number; to: number } {
   const today = Math.max(...ts)
   const from = Math.min(start, ...ts)
-  const p = todayAt(new Date(today).getUTCDate(), new Date(Date.UTC(y, mo + 1, 0)).getUTCDate())
+  const p = todayAt(new Date(today).getUTCDate(), new Date(Date.UTC(y, mo + 1, 0)).getUTCDate(), range)
   return { from, to: today + ((today - from) * (1 - p)) / p }
 }
 
@@ -90,11 +94,14 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
   if (!Array.isArray(raw)) return 'points: an array'
   const w = b.from === undefined ? null : typeof b.from === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(b.from) : null
   if (b.from !== undefined && !w) return 'from: YYYY-MM-DD'
+  const ta = b.today_at
+  const okAt = ta === undefined || (Array.isArray(ta) && ta.length === 2 && ta.every(v => typeof v === 'number') && 0 < ta[0] && ta[0] <= ta[1] && ta[1] <= 1)
+  if (!okAt) return 'today_at: [p0, p1], 0 < p0 ≤ p1 ≤ 1'
   const frame = (ts: number[]) => {
     const [y, mo] = [Number(m[1]), Number(m[2]) - 1]
     const month = Date.UTC(y, mo, 1)
     if (!w || !ts.length) return { from: Math.min(month - 16 * 3600_000, ...ts), to: Date.UTC(y, mo + 1, 1) - 8 * 3600_000, month }
-    return { ...windowFrame(Date.UTC(Number(w[1]), Number(w[2]) - 1, Number(w[3])), ts, y, mo), month }
+    return { ...windowFrame(Date.UTC(Number(w[1]), Number(w[2]) - 1, Number(w[3])), ts, y, mo, (ta as [number, number] | undefined) ?? TODAY_AT), month }
   }
   const diff = parseDiff(b.diff)
   if (typeof diff === 'string') return diff

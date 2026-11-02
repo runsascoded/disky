@@ -112,6 +112,13 @@ describe('parseDigestRequest: usage', () => {
       [-29, 0],
     ])
   })
+  it("takes today's position range (`today_at`), and refuses a bad one", () => {
+    const req = parseDigestRequest({ ...usage, from: '2026-09-02', today_at: [0.5, 0.9], points: [{ scan: '2026-09-01T0800', bytes: 13e12 }, ...usage.points] })
+    if (typeof req === 'string') throw new Error(req)
+    expect(+((Date.UTC(2026, 9, 1, 8) - req.from) / (req.to - req.from)).toFixed(9)).toBe(0.5)
+    const msg = 'today_at: [p0, p1], 0 < p0 ≤ p1 ≤ 1'
+    expect([[0.9, 0.5], [0, 1], [0.5], 'x'].map(today_at => parseDigestRequest({ ...usage, from: '2026-09-02', today_at }))).toEqual([msg, msg, msg, msg])
+  })
   it('refuses a malformed `from`', () => {
     expect(['2026-9-15', 20260915, null].map(from => parseDigestRequest({ ...usage, from }))).toEqual(['from: YYYY-MM-DD', 'from: YYYY-MM-DD', 'from: YYYY-MM-DD'])
   })

@@ -293,6 +293,17 @@ class Gcs:
     def op_body(self, data: Month, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
         return op_body(data, month, plot_url, self.cfg, prev_url)
 
+    def image_request(self, data: Month, month: dt.date) -> dict:
+        return image_body(data, month, self.cfg)
+
+    def rows_json(self, data: Month) -> dict:
+        """The month's rows as the site's renderer reads them (`src/digest/gcs.ts` `GcsRows`)."""
+        def row(r: Scan) -> dict:
+            return {"date": r.date, "slug": r.slug, "tb": r.tb, "cost": r.cost, "dtb": r.dtb, "dcost": r.dcost,
+                    "std": r.std, "near": r.near, "cold": r.cold, "arch": r.arch, "prev": r.prev}
+
+        return {"template": "gcs", "pre": [row(r) for r in data.pre], "rows": [row(r) for r in data.rows]}
+
     def units(self, data: Month, variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(r.date[:10], r.date, reply(r, self.cfg, platform)) for r in data.rows]
 

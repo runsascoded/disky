@@ -1,0 +1,42 @@
+/** The digest OP renderer (specs/slack-preview-page.md): a month's rows + the digest config + params → the OP's text
+ * and its plot's `/api/digest-image` request, for either template. The job's renderer (`dt_cloud.digest_cw` /
+ * `digest_gcs`) produces the same bytes under `DEFAULT_PARAMS` (`./parity.test.ts`). Pure; DOM-free. */
+import { DEFAULT_PARAMS, type DigestCfg, type DigestParams, monthOf, type OpLinks } from './common'
+import * as cw from './cw'
+import * as gcs from './gcs'
+
+export * from './common'
+export type { CwRows, CwScan } from './cw'
+export type { GcsRow, GcsRows } from './gcs'
+
+export type DigestRows = cw.CwRows | gcs.GcsRows
+
+/** The month's OP text. */
+export function opText(rows: DigestRows, month: string, cfg: DigestCfg, links: OpLinks, p: DigestParams = DEFAULT_PARAMS): string {
+  return rows.template === 'cw' ? cw.opText(rows, monthOf(month), cfg, p, links) : gcs.opText(rows, monthOf(month), cfg, p, links)
+}
+
+/** The month's plot request; `today_at` only when it differs from the default (the card's own). */
+export function imageRequest(rows: DigestRows, month: string, cfg: DigestCfg, p: DigestParams = DEFAULT_PARAMS): Record<string, unknown> {
+  const body = rows.template === 'cw' ? cw.imageRequest(rows, monthOf(month), cfg, p) : gcs.imageRequest(rows, monthOf(month), cfg, p)
+  const [p0, p1] = p.todayAt
+  if (p0 !== DEFAULT_PARAMS.todayAt[0] || p1 !== DEFAULT_PARAMS.todayAt[1]) body.today_at = p.todayAt
+  return body
+}
+
+/** The preview bundle a converge writes (`digest.preview_bundle`). */
+export interface PreviewBundle {
+  version: 1
+  month: string
+  channel: string
+  variant: string
+  posted_at: string
+  op_ts: string | null
+  permalink: string | null
+  plot_url: string | null
+  prev_url: string | null
+  cfg: DigestCfg
+  rows: DigestRows
+  op: string
+  image: Record<string, unknown>
+}
