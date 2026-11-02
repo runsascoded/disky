@@ -10,6 +10,7 @@ site_url: https://cw.oa.dev
 root: gs://{DATA_BUCKET}/snapshots/cw
 # keyed by channel (a staging converge never masquerades as prod) and variant
 state: digest/cw/{channel}/{variant}
+preview: r2://oa-cw-s3-usage-index/digest/preview/{channel}/{variant}  # each converge's OP bundle, for the site's /admin/slack
 discord_state: digest/discord/{webhook}
 discord_webhook_env: null
 icons_base: https://oa-cw-s3-usage-icons.pages.dev
