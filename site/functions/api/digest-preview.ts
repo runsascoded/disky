@@ -33,15 +33,20 @@ export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
     return json(doc, 200, { 'cache-control': 'private, max-age=60' })
   }
   const bundles: { key: string; month: string; channel: string; variant: string }[] = []
-  let cursor: string | undefined
-  do {
-    const page = await store.list(PREVIEW_PREFIX, { cursor })
-    for (const e of page.entries) {
-      const m = KEY_RE.exec(e.key)
-      if (!e.isDir && m) bundles.push({ key: e.key, channel: m[1], variant: m[2], month: m[3] })
-    }
-    cursor = page.cursor
-  } while (cursor)
+  // the store lists one level (`/`-delimited): walk `<channel>/<variant>/` down to the bundles
+  const dirs = [PREVIEW_PREFIX]
+  for (let dir = dirs.shift(); dir !== undefined; dir = dirs.shift()) {
+    let cursor: string | undefined
+    do {
+      const page = await store.list(dir, { cursor })
+      for (const e of page.entries) {
+        const m = KEY_RE.exec(e.key)
+        if (e.isDir) dirs.push(e.key)
+        else if (m) bundles.push({ key: e.key, channel: m[1], variant: m[2], month: m[3] })
+      }
+      cursor = page.cursor
+    } while (cursor)
+  }
   // newest month first, then by channel and variant
   bundles.sort((a, b) => b.month.localeCompare(a.month) || a.channel.localeCompare(b.channel) || a.variant.localeCompare(b.variant))
   return json({ bundles }, 200, { 'cache-control': 'private, max-age=60' })

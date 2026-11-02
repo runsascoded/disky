@@ -5,16 +5,22 @@ import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { onRequestGet } from './digest-preview'
 
+/** An `R2Bucket`'s `list` / `get` as `R2Store` uses them: `delimiter: '/'` rolls deeper keys up into
+ *  `delimitedPrefixes` (the bundles sit three levels under the prefix), pages of 2. */
 function fakeR2(files: Record<string, string>) {
   return {
-    async list({ prefix, cursor, limit }: { prefix: string; cursor?: string; limit: number }) {
-      const keys = Object.keys(files).filter(k => k.startsWith(prefix)).sort()
+    async list({ prefix, cursor, limit, delimiter }: { prefix: string; cursor?: string; limit: number; delimiter?: string }) {
+      const under = Object.keys(files).filter(k => k.startsWith(prefix)).sort()
+      const items = [...new Set(under.map(k => {
+        const i = delimiter ? k.indexOf(delimiter, prefix.length) : -1
+        return i < 0 ? k : k.slice(0, i + 1)
+      }))]
       const at = cursor ? Number(cursor) : 0
-      const page = keys.slice(at, at + Math.min(limit, 2))
-      const more = at + page.length < keys.length
+      const page = items.slice(at, at + Math.min(limit, 2))
+      const more = at + page.length < items.length
       return {
-        objects: page.map(key => ({ key, size: files[key].length, uploaded: new Date(0) })),
-        delimitedPrefixes: [], truncated: more, cursor: more ? String(at + page.length) : undefined,
+        objects: page.filter(k => !k.endsWith('/')).map(key => ({ key, size: files[key].length, uploaded: new Date(0) })),
+        delimitedPrefixes: page.filter(k => k.endsWith('/')), truncated: more, cursor: more ? String(at + page.length) : undefined,
       }
     },
     async get(key: string) {
