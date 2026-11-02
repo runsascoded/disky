@@ -620,6 +620,14 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   // (latest | pinned), each a labeled two-way toggle.
   .d-modes { display: inline-flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-left: 10px; vertical-align: middle; }
   .d-modes .gran { margin-left: 0; }
+  // One-scan steps either side of each diff picker: a finger-sized target, quiet until hovered.
+  .nudges { display: inline-flex; align-items: center; gap: 2px; vertical-align: middle; }
+  .nudge {
+    min-width: 28px; min-height: 28px; padding: 0 4px; font-size: 16px; line-height: 1;
+    background: none; border: 1px solid transparent; border-radius: 5px; color: var(--ink-2); cursor: pointer;
+    &:hover:not(:disabled) { border-color: var(--line, rgba(127,127,127,0.35)); color: var(--ink); }
+    &:disabled { opacity: 0.3; cursor: default; }
+  }
   .d-mode { gap: 0; button { border-radius: 0; } button:nth-of-type(1) { border-radius: 5px 0 0 5px; } button:nth-of-type(2) { border-radius: 0 5px 5px 0; margin-left: -1px; } }
   .d-mode-lbl { color: var(--ink-3); font-size: 11.5px; margin-right: 5px; }
 }
