@@ -18,20 +18,43 @@ export function encodeParams(p: DigestParams): string {
   return out.join(',')
 }
 
+/** Applies field `f` to `p`; false when it can't be read (left as it was). */
+function readField(p: DigestParams, f: string): boolean {
+  const [k, v] = [f[0], f.slice(1)]
+  if (k === 'w' && /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 92) p.windowDays = Number(v)
+  else if (k === 't') {
+    const [a, b] = v.split('-').map(Number)
+    if (!(0 < a && a <= b && b <= 1)) return false
+    p.todayAt = [a, b]
+  } else if (k === 'd' && (v === 'w' || v === 'm')) p.diff = v === 'w' ? 'window' : 'mtd'
+  else if (k === 'h' && /^[mw]{0,2}$/.test(v) && new Set(v).size === v.length) p.headline = [...v].map(c => (c === 'm' ? 'mtd' : 'window'))
+  else if (k === 'k' && (v === 'w' || v === 'm')) p.weeks = v === 'w' ? 'window' : 'month'
+  else if (k === 'q' && (v === 'o' || v === 'c')) p.quotas = v === 'o' ? 'off' : 'circles'
+  else if (k === 'p' && (v === 'u' || v === 'p')) p.plot = v === 'u' ? 'usage' : 'pools'
+  else if (k === 'a' && /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 100) p.alertAt = Number(v)
+  else return false
+  return true
+}
+
+function defaults(): DigestParams {
+  return { ...DEFAULT_PARAMS, todayAt: [...DEFAULT_PARAMS.todayAt], headline: [...DEFAULT_PARAMS.headline] }
+}
+
 export function decodeParams(s: string): DigestParams {
-  const p: DigestParams = { ...DEFAULT_PARAMS, todayAt: [...DEFAULT_PARAMS.todayAt], headline: [...DEFAULT_PARAMS.headline] }
-  for (const f of s.split(',').filter(Boolean)) {
-    const [k, v] = [f[0], f.slice(1)]
-    if (k === 'w' && /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 92) p.windowDays = Number(v)
-    else if (k === 't') {
-      const [a, b] = v.split('-').map(Number)
-      if (0 < a && a <= b && b <= 1) p.todayAt = [a, b]
-    } else if (k === 'd' && (v === 'w' || v === 'm')) p.diff = v === 'w' ? 'window' : 'mtd'
-    else if (k === 'h' && /^[mw]{0,2}$/.test(v) && new Set(v).size === v.length) p.headline = [...v].map(c => (c === 'm' ? 'mtd' : 'window'))
-    else if (k === 'k' && (v === 'w' || v === 'm')) p.weeks = v === 'w' ? 'window' : 'month'
-    else if (k === 'q' && (v === 'o' || v === 'c')) p.quotas = v === 'o' ? 'off' : 'circles'
-    else if (k === 'p' && (v === 'u' || v === 'p')) p.plot = v === 'u' ? 'usage' : 'pools'
-    else if (k === 'a' && /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 100) p.alertAt = Number(v)
+  const p = defaults()
+  for (const f of s.split(',').filter(Boolean)) readField(p, f)
+  return p
+}
+
+/** `decodeParams` for a caller that must not guess (the job's `/api/digest-op`): throws on a field it can't read, an
+ * empty field or a repeated key, where `decodeParams` would drop or override it. */
+export function parseParams(s: string): DigestParams {
+  const p = defaults()
+  const seen = new Set<string>()
+  for (const f of s === '' ? [] : s.split(',')) {
+    if (!f || !readField(p, f)) throw new Error(`digest params: unreadable field ${JSON.stringify(f)} in ${JSON.stringify(s)}`)
+    if (seen.has(f[0])) throw new Error(`digest params: repeated field ${JSON.stringify(f[0])} in ${JSON.stringify(s)}`)
+    seen.add(f[0])
   }
   return p
 }
