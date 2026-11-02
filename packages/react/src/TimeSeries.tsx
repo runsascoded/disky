@@ -440,15 +440,21 @@ export function TimeSeries<T>({
   const [hoverGrip, setHoverGrip] = useState(false)
   /** The window edge (0 = start, 1 = end) within reach of a pointer at clientX, else null: a press there drags that
    *  edge alone, the other staying put. */
-  const nearEdge = (clientX: number, touch: boolean): 0 | 1 | null => {
+  const nearEdge = (clientX: number, touch: boolean): 0 | 1 | 'both' | null => {
     const el = svgRef.current
     if (!el || !xWindow) return null
     const px = clientX - el.getBoundingClientRect().left
     const reach = touch ? EDGE_HIT.touch : EDGE_HIT.other
     const ds = xWindow.map(x => (x >= xMin && x <= xMax ? Math.abs(xToPx(x) - px) : Infinity))
+    if (ds[0] <= reach && ds[1] <= reach) return 'both'
     const i = ds[0] <= ds[1] ? 0 : 1
     return ds[i] <= reach ? i : null
   }
+  /** Both edges were in reach of the press (a narrow window): the first step decides — leftward moves the start,
+   *  rightward the end — so the window never flips inside out. */
+  const eitherEdgeRef = useRef(false)
+  /** The dragged edge's x at the press (a release back on it changes nothing). */
+  const edgeFromRef = useRef<number | null>(null)
   const [hoverEdge, setHoverEdge] = useState(false)
   // Fine mode (a held-still edge): its anchor is the pointer's x and the edge's point index when it began.
   const fineRef = useRef<{ clientX: number; i: number } | null>(null)
@@ -503,7 +509,17 @@ export function TimeSeries<T>({
     const x1 = f
       ? xsSorted[Math.max(0, Math.min(xsSorted.length - 1, f.i + Math.round((e.clientX - f.clientX) / FINE_PX)))]
       : x
-    if (x1 != null && x1 !== d.x1) { movedRef.current = true; setDrag({ x0: d.x0, x1 }); buzz() }
+    if (x1 == null || x1 === d.x1) return
+    let x0 = d.x0
+    if (eitherEdgeRef.current && xWindow) {
+      eitherEdgeRef.current = false
+      const left = x1 < d.x1
+      x0 = left ? xWindow[1] : xWindow[0]
+      edgeFromRef.current = left ? xWindow[0] : xWindow[1]
+    }
+    movedRef.current = true
+    setDrag({ x0, x1 })
+    buzz()
   }
   // Pointer events, so a finger brushes like a mouse: `touch-action: pan-y`
   // leaves vertical swipes to the page, and a horizontal drag reaches here. A
@@ -550,15 +566,18 @@ export function TimeSeries<T>({
     // A press on (or, by finger, near) a window edge drags that edge; the other stays.
     const edge = nearEdge(e.clientX, touchRef.current)
     if (edge != null && xWindow) {
-      const from = xWindow[edge]
-      setDrag({ x0: xWindow[1 - edge], x1: from })
+      const i = edge === 'both' ? 1 : edge
+      eitherEdgeRef.current = edge === 'both'
+      edgeFromRef.current = xWindow[i]
+      setDrag({ x0: xWindow[1 - i], x1: xWindow[i] })
       armHold(e.clientX)
       onEnd(up => {
         const d = dragRef.current
+        eitherEdgeRef.current = false
         if (!d) return
         setDrag(null)
         const x1 = releaseX(up, d)
-        if (x1 === from) { if (!movedRef.current) onPickX?.(x) }
+        if (x1 === edgeFromRef.current) { if (!movedRef.current) onPickX?.(x) }
         else if (x1 !== d.x0) onBrush(Math.min(d.x0, x1), Math.max(d.x0, x1))
       })
       return
