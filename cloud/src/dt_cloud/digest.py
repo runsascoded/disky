@@ -137,7 +137,10 @@ class DigestConfig:
     is back under; None: neither. ``quota_marks`` (cw replies): `warning` (the default) keeps the
     clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
-    points below (specs/digest-quota-pressure.md). ``preview``: where each Slack converge writes the month's preview bundle
+    points below (specs/digest-quota-pressure.md). ``renderer``: who renders the OP's text and plot request,
+    `local` (this package's `op_body` / `image_body`) or `site` (`POST /api/digest-op`, the renderer `/admin/slack`
+    previews with; specs/slack-preview-page.md phase 2) under ``params`` (the site's `src/digest/codec` string,
+    `''`: the defaults, which render `local`'s bytes). ``preview``: where each Slack converge writes the month's preview bundle
     (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
     ``{variant}``) in the deployment's served store; None: none written."""
 
@@ -163,6 +166,8 @@ class DigestConfig:
     units: str = "TiB"
     alert_pct: float | None = None
     quota_marks: str = "warning"
+    renderer: str = "local"
+    params: str = ""
     preview: str | None = None
 
     @property
@@ -253,13 +258,15 @@ def parse_bytes(v: int | str) -> int:
 
 TEMPLATES = ("gcs", "cw")
 QUOTA_MARKS = ("warning", "circles")
+RENDERERS = ("local", "site")
 # the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
 _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "template": (str,), "title": (str,), "site_url": (str,), "root": (str,), "state": (str,),
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
-    "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "preview": (str, type(None)),
+    "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "renderer": (str,), "params": (str,),
+    "preview": (str, type(None)),
 }
 
 
@@ -336,6 +343,8 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         raise ValueError(f"digest config alert_pct: {d['alert_pct']} is not a percent (0–100]")
     if "quota_marks" in d and d["quota_marks"] not in QUOTA_MARKS:
         raise ValueError(f"digest config quota_marks: {d['quota_marks']!r} is not one of {QUOTA_MARKS}")
+    if "renderer" in d and d["renderer"] not in RENDERERS:
+        raise ValueError(f"digest config renderer: {d['renderer']!r} is not one of {RENDERERS}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
     base = base or PRESETS[d["template"]]
@@ -347,7 +356,10 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         if bad := {k: v for k, v in prices.items() if not isinstance(v, (int, float)) or isinstance(v, bool)}:
             raise ValueError(f"digest config prices: expected numbers, got {bad}")
         d["prices"] = {str(k): float(v) for k, v in prices.items()}
-    return replace(base, **d)
+    cfg = replace(base, **d)
+    if cfg.params and cfg.renderer != "site":
+        raise ValueError(f"digest config params: {cfg.params!r} needs `renderer: site` (the local renderer has no params)")
+    return cfg
 
 
 def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
@@ -631,6 +643,21 @@ def cfg_json(cfg: DigestConfig) -> dict:
     }
 
 
+def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None) -> dict:
+    """`POST /api/digest-op` (``cfg.renderer == "site"``): the month's OP ``text`` and plot ``image`` request, rendered
+    by the site from ``rows`` (`Template.rows_json`) under ``cfg.params``, as the job (`$SITE_TOKEN`; required: the
+    OP has no other renderer then)."""
+    from .deploy import site_token
+    from .site import post_json
+
+    token = site_token()
+    if not token:
+        raise SystemExit("digest: `renderer: site` needs the site token ($SITE_TOKEN)")
+    body = {"month": f"{month:%Y-%m}", "rows": rows, "cfg": cfg_json(cfg), "params": cfg.params,
+            "plot_url": plot_url, "prev_url": prev_url}
+    return json.loads(post_json(cfg.site_url, token, "/api/digest-op", body))
+
+
 def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_url: str | None, prev_url: str | None,
                    channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
     """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
@@ -640,7 +667,8 @@ def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_ur
         "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
         "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
-        "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "op": op, "image": tpl.image_request(data, month),
+        "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "params": tpl.cfg.params, "op": op,
+        "image": tpl.image_request(data, month),
     }
 
 

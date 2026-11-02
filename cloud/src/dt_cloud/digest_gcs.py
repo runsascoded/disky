@@ -25,7 +25,8 @@ from pathlib import Path
 
 from .digest import (
     AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg,
-    list_scans, load_window, prev_month_link, read_metas, scan_slugs, scan_ts, week_of, window_label, window_scans, window_start,
+    list_scans, load_window, prev_month_link, read_metas, scan_slugs, scan_ts, site_render, week_of, window_label, window_scans,
+    window_start,
 )
 
 
@@ -291,9 +292,13 @@ class Gcs:
         return len(data.rows)
 
     def op_body(self, data: Month, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
+        if self.cfg.renderer == "site":
+            return site_render(self.cfg, self.rows_json(data), month, plot_url, prev_url)["text"]
         return op_body(data, month, plot_url, self.cfg, prev_url)
 
     def image_request(self, data: Month, month: dt.date) -> dict:
+        if self.cfg.renderer == "site":
+            return site_render(self.cfg, self.rows_json(data), month)["image"]
         return image_body(data, month, self.cfg)
 
     def rows_json(self, data: Month) -> dict:
@@ -324,4 +329,4 @@ class Gcs:
         token = site_token()
         if not token:
             raise PlotUnavailable("digest image: no site token ($SITE_TOKEN)")
-        Path(out).write_bytes(post_json(self.cfg.site_url, token, "/api/digest-image", image_body(data, month, self.cfg)))
+        Path(out).write_bytes(post_json(self.cfg.site_url, token, "/api/digest-image", self.image_request(data, month)))

@@ -104,9 +104,9 @@ def test_preview_bundle_is_the_parity_shape():
     data = DC.Month(lead=[], rows=rows)
     b = E.preview_bundle(tpl, data, date(2026, 9, 1), op="op", plot_url=PLOT, prev_url=None, channel="C1", variant="sender",
                          op_ts="m1", permalink="https://slack.example.org/p1")
-    assert sorted(b) == ["cfg", "channel", "image", "month", "op", "op_ts", "permalink", "plot_url", "posted_at", "prev_url",
-                         "rows", "variant", "version"]
-    assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"]) == (1, "2026-09", "cw", "2026-09")
+    assert sorted(b) == ["cfg", "channel", "image", "month", "op", "op_ts", "params", "permalink", "plot_url", "posted_at",
+                         "prev_url", "rows", "variant", "version"]
+    assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"], b["params"]) == (1, "2026-09", "cw", "2026-09", "")
 
 
 def test_converge_writes_the_preview_bundle(tmp_path: Path):
@@ -125,3 +125,45 @@ def test_converge_writes_the_preview_bundle(tmp_path: Path):
     )
     E.converge_slack(E.template(CW_EXAMPLE), str(cw_root(tmp_path / "bare")), date(2026, 9, 1), FakeSlack([]), "C1", "sender")
     assert not (tmp_path / "bare" / "served").exists()
+
+
+@pytest.mark.parametrize("name", ["cw-sep", "gcs-aug"])
+def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: Path, monkeypatch):
+    """`renderer: site` (phase 2): the OP text and plot request come from `POST /api/digest-op`, sent exactly the
+    parity fixture's request under the config's params; the site's answer here is the fixture's own (what
+    `digest-op.test.ts` asserts the site returns for it)."""
+    from dt_cloud import site
+
+    cfg, root, month, plot_url, prev_url = _case(name, tmp_path)
+    fx = json.loads((PARITY / f"{name}.json").read_text())
+    calls: list = []
+
+    def post_json(url, token, path, body, timeout=120):
+        calls.append((url, token, path, body))
+        return json.dumps({"text": fx["op"], "image": fx["image"]}).encode()
+
+    monkeypatch.setattr(site, "post_json", post_json)
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    tpl = E.template(replace(cfg, renderer="site", params="qc"))
+    data = tpl.load(str(root), month)
+    assert (tpl.op_body(data, month, plot_url, prev_url), tpl.image_request(data, month)) == (fx["op"], fx["image"])
+    req = {"month": fx["month"], "rows": fx["rows"], "cfg": fx["cfg"], "params": "qc"}
+    assert [(u, t, p, json.loads(json.dumps(b))) for u, t, p, b in calls] == [
+        (cfg.site_url, "tok", "/api/digest-op", {**req, "plot_url": plot_url, "prev_url": prev_url}),
+        (cfg.site_url, "tok", "/api/digest-op", {**req, "plot_url": None, "prev_url": None}),
+    ]
+    monkeypatch.delenv("SITE_TOKEN")
+    with pytest.raises(SystemExit) as e:
+        tpl.op_body(data, month, plot_url, prev_url)
+    assert str(e.value) == "digest: `renderer: site` needs the site token ($SITE_TOKEN)"
+
+
+def test_renderer_config():
+    assert (E.config_from_dict({"template": "cw"}).renderer, E.config_from_dict({"template": "cw", "renderer": "site", "params": "qc,pp"}).params) == (
+        "local", "qc,pp")
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "renderer": "ts"})
+    assert str(e.value) == "digest config renderer: 'ts' is not one of ('local', 'site')"
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "params": "qc"})
+    assert str(e.value) == "digest config params: 'qc' needs `renderer: site` (the local renderer has no params)"
