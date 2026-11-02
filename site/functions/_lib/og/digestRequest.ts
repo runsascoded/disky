@@ -9,8 +9,9 @@
  *       template)
  *
  * A body without `kind` is `usage` (the cw job's request predates the field). `from`: the OP window's first day
- * (specs/digest-rolling-window.md), before the month on all but its last days: the axis starts there and the card
- * shades the month. Either kind's `diff` is resolved by the endpoint (`buildDiff`). */
+ * (specs/digest-rolling-window.md), before the month on all but its last days: the axis starts there (or at the
+ * baseline scan before it), the latest scan sits at `todayAt` of the width, and the card shades the month. Without
+ * it, the axis is the month. Either kind's `diff` is resolved by the endpoint (`buildDiff`). */
 import { type DigestPoint, type DigestUnits, TIER_COLORS, type TierPoint } from './digestCard.js'
 import { isScanId, scanTime } from '../../../src/scanSlug.js'
 
@@ -60,6 +61,22 @@ function parseDiff(d: unknown): DiffSpec | null | string {
   return { from: f, to: t, path, title }
 }
 
+/** Where the latest scan sits across a window card's width: 0.7 on the month's 1st, rising linearly to 1 on its last
+ *  day (`days` in the month), so an early thread has some runway to its right and a late one ends at the latest scan. */
+export function todayAt(day: number, days: number): number {
+  return 0.7 + (0.3 * (Math.min(day, days) - 1)) / (days - 1)
+}
+
+/** A window card's x span (specs/digest-rolling-window.md): from the window's first day (`start`, epoch ms) or its
+ *  baseline scan before it, whichever is earlier, to the point that puts the latest scan (`ts`' last) at `todayAt`
+ *  of the width: `today + (today − from) · (1 − p) / p`. */
+export function windowFrame(start: number, ts: number[], y: number, mo: number): { from: number; to: number } {
+  const today = Math.max(...ts)
+  const from = Math.min(start, ...ts)
+  const p = todayAt(new Date(today).getUTCDate(), new Date(Date.UTC(y, mo + 1, 0)).getUTCDate())
+  return { from, to: today + ((today - from) * (1 - p)) / p }
+}
+
 /** The request, or the 400's message. */
 export function parseDigestRequest(b: unknown): DigestRequest | string {
   if (!isObj(b) || typeof b.title !== 'string' || typeof b.note !== 'string') return 'title and note required'
@@ -75,8 +92,9 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
   if (b.from !== undefined && !w) return 'from: YYYY-MM-DD'
   const frame = (ts: number[]) => {
     const [y, mo] = [Number(m[1]), Number(m[2]) - 1]
-    const start = Math.min(Date.UTC(y, mo, 1), ...(w ? [Date.UTC(Number(w[1]), Number(w[2]) - 1, Number(w[3]))] : []))
-    return { from: Math.min(start - 16 * 3600_000, ...ts), to: Date.UTC(y, mo + 1, 1) - 8 * 3600_000, month: Date.UTC(y, mo, 1) }
+    const month = Date.UTC(y, mo, 1)
+    if (!w || !ts.length) return { from: Math.min(month - 16 * 3600_000, ...ts), to: Date.UTC(y, mo + 1, 1) - 8 * 3600_000, month }
+    return { ...windowFrame(Date.UTC(Number(w[1]), Number(w[2]) - 1, Number(w[3])), ts, y, mo), month }
   }
   const diff = parseDiff(b.diff)
   if (typeof diff === 'string') return diff
