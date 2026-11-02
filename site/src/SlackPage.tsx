@@ -137,7 +137,7 @@ export function SlackPage() {
   const [c, setC] = useUrlState('dc', stringParam())
   const list = useQuery({ queryKey: ['digest-preview'], queryFn: () => getJson<Listing>('/api/digest-preview') })
   const key = k ?? list.data?.bundles[0]?.key
-  const b = useQuery({ queryKey: ['digest-preview', key], enabled: !!key, queryFn: () => getJson<PreviewBundle>(`/api/digest-preview?key=${encodeURIComponent(key!)}`) })
+  const b = useQuery({ queryKey: ['digest-preview', key], enabled: !!key, queryFn: () => getJson<PreviewBundle>(`/api/digest-preview?b=${encodeURIComponent(key!)}`) })
   // a default candidate is `.` in the URL (its params encode empty); no `dc` at all: one default candidate
   const cands = c === undefined ? [''] : c ? c.split(';').map(x => (x === '.' ? '' : x)) : []
   return (
