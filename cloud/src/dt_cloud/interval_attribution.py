@@ -154,9 +154,9 @@ def backfill_attribution(store: Store, gen: str, new_gen: str, scans_root: str, 
     rec = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "scans": len(doc["scans"]), "covered": covered,
            "uncovered": [s["id"] for s in doc["scans"] if not s.get(ist.ATTRIBUTION_SRC)], "checked": checked}
     (out / RECORD).write_text(json.dumps(rec, indent=1) + "\n")
-    from .interval_local import publish_order
+    from .interval_local import publish_order, publish_tier
 
-    files = upload_new(store, out, new_prefix, {}, publish_order)
+    files = upload_new(store, out, new_prefix, {}, publish_order, tier=publish_tier)
     s = round(monotonic() - t0, 1)
     err(f"backfill-attribution {gen} → {new_gen}: {len(covered)} of {len(doc['scans'])} scans covered, {sd['rows']:,} attribution versions, "
         f"{len(checked)} checked against the runs, {len(files)} files in {s}s")

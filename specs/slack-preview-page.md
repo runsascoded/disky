@@ -51,7 +51,7 @@ Writing it to the served store is needed because the converge state itself lives
 - **Rows inspector** (collapsed): the window's rows as a table, for checking a figure by hand.
 
 New endpoints:
-- `GET /api/digest-preview?month=YYYY-MM[&channel=…&variant=…]` (admin): the bundle.
+- `GET /api/digest-preview[?b=<bundle key>]` (admin): the bundles, or one (`b`, not `key`: the auth gate reads `?key=` as a share-link token).
 - `POST /api/digest-op` (viewer grant, the job's): `{rows, params, cfg}` → `{text, image}`.
 
 ## Phases

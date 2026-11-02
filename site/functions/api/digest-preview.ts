@@ -1,6 +1,6 @@
 /**
  * GET /api/digest-preview → { bundles: [{key, month, channel, variant}] }       admin
- * GET /api/digest-preview?key=digest/preview/<channel>/<variant>/<YYYY-MM>.json → the bundle
+ * GET /api/digest-preview?b=digest/preview/<channel>/<variant>/<YYYY-MM>.json → the bundle
  *
  * The digest's preview bundles (specs/slack-preview-page.md): each Slack converge writes the month's OP as posted,
  * with the rows and config it was rendered from (`digest.preview_bundle`), to the served store under
@@ -12,15 +12,18 @@ import { type Ctx, json, requireAdmin } from '../_lib/auth.js'
 import { servedStore } from '../_lib/index.js'
 
 export const PREVIEW_PREFIX = 'digest/preview/'
+/** The bundle's query parameter: not `key`, which the auth gate reads as a presented grant token (a share link),
+ *  so a signed-in browser's request would 401. */
+export const BUNDLE_PARAM = 'b'
 const KEY_RE = /^digest\/preview\/([^/]+)\/([^/]+)\/(\d{4}-\d{2})\.json$/
 
 export const onRequestGet = async (ctx: Ctx): Promise<Response> => {
   const gated = await requireAdmin(ctx)
   if (gated instanceof Response) return gated
   const store = servedStore(ctx.env, [PREVIEW_PREFIX])
-  const key = new URL(ctx.request.url).searchParams.get('key')
+  const key = new URL(ctx.request.url).searchParams.get(BUNDLE_PARAM)
   if (key !== null) {
-    if (!KEY_RE.test(key)) return json({ error: 'key: digest/preview/<channel>/<variant>/<YYYY-MM>.json' }, 400)
+    if (!KEY_RE.test(key)) return json({ error: 'b: digest/preview/<channel>/<variant>/<YYYY-MM>.json' }, 400)
     let doc
     try {
       doc = JSON.parse(new TextDecoder().decode((await store.get(key)).bytes))

@@ -3,7 +3,7 @@
 import { beforeAll, describe, expect, it } from 'vitest'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
-import { onRequestGet } from './digest-preview'
+import { BUNDLE_PARAM, onRequestGet } from './digest-preview'
 
 /** An `R2Bucket`'s `list` / `get` as `R2Store` uses them: `delimiter: '/'` rolls deeper keys up into
  *  `delimitedPrefixes` (the bundles sit three levels under the prefix), pages of 2. */
@@ -70,10 +70,17 @@ describe('/api/digest-preview', () => {
     ] }])
   })
   it('serves a bundle by key; another version or a missing one is a 404, a bad key a 400', async () => {
-    expect(await get('?key=digest/preview/C1/sender/2026-11.json', admin)).toEqual([200, { version: 1, month: '2026-11', op: 'OP 2026-11' }])
-    expect(await get('?key=digest/preview/C1/sender/2026-09.json', admin)).toEqual([404, { error: 'no preview bundle digest/preview/C1/sender/2026-09.json' }])
-    expect(await get('?key=digest/preview/C1/sender/2026-08.json', admin)).toEqual([404, { error: 'no preview bundle digest/preview/C1/sender/2026-08.json' }])
-    expect(await get('?key=digest/C1/sender/2026-11.json', admin)).toEqual([400, { error: 'key: digest/preview/<channel>/<variant>/<YYYY-MM>.json' }])
+    expect(await get('?b=digest/preview/C1/sender/2026-11.json', admin)).toEqual([200, { version: 1, month: '2026-11', op: 'OP 2026-11' }])
+    expect(await get('?b=digest/preview/C1/sender/2026-09.json', admin)).toEqual([404, { error: 'no preview bundle digest/preview/C1/sender/2026-09.json' }])
+    expect(await get('?b=digest/preview/C1/sender/2026-08.json', admin)).toEqual([404, { error: 'no preview bundle digest/preview/C1/sender/2026-08.json' }])
+    expect(await get('?b=digest/C1/sender/2026-11.json', admin)).toEqual([400, { error: 'b: digest/preview/<channel>/<variant>/<YYYY-MM>.json' }])
+  })
+  it("serves a bundle to a signed-in browser (a session cookie, not a token): its query never reads as a share link", async () => {
+    // the gate takes a `?key=` as a presented grant token, which would 401 the session (hf.oa.dev, 2026-11-02)
+    const e = { ...env, STAFF_DOMAIN: 'example.test' }
+    const cookie = (await gateFor(e as never)!.signIn('ops@example.test', new Request('https://site.example.test/signin')))!.cookie.split(';')[0]
+    const res = await onRequestGet({ request: new Request(`https://site.example.test/api/digest-preview?${BUNDLE_PARAM}=digest/preview/C1/sender/2026-11.json`, { headers: { cookie } }), env: e } as never)
+    expect([res.status, await res.json()]).toEqual([200, { version: 1, month: '2026-11', op: 'OP 2026-11' }])
   })
   it('is admin-only', async () => {
     expect([(await get('', viewer))[0], (await get(''))[0]]).toEqual([403, 401])

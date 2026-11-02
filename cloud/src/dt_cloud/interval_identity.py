@@ -11,7 +11,7 @@ from . import interval_compact as ic
 from . import interval_store as ist
 from .append_runner import latest_key
 from .blobstore import Store, mirror, upload_new
-from .interval_local import publish_order
+from .interval_local import publish_order, publish_tier
 from .static_local import _check_gen, workdir
 
 
@@ -45,7 +45,7 @@ def migrate(store: Store, gen: str, target: str, work: Path, *, ranges_gen: str 
     record = {"from": gen, "gen": target, "manifest": manifest, "scans": len(doc["scans"]),
               "object_version": doc["object_version"], "rows": rows}
     (out / "object-version-migration.json").write_text(json.dumps(record, indent=1) + "\n")
-    upload_new(store, out, prefix, {}, publish_order)
+    upload_new(store, out, prefix, {}, publish_order, tier=publish_tier)
     return record
 
 
