@@ -1,6 +1,6 @@
 # Progressive diffs: one directory level per request, bounded by construction
 
-**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; step 2 (`/api/diff/level`, `_lib/diffLevel.ts`) built 2026-11-02, branch `diff-level`; step 3 (the client) not started. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
+**Status:** step 1 (`churn_cum` / `churn_end` on the folded path versions: build, append, carries, compaction, `backfill-churn`) built 2026-11-01, branch `churn-cum`; step 2 (`/api/diff/level`, `_lib/diffLevel.ts`) built 2026-11-02, branch `diff-level`; step 2b (bounded level reads from dyadic churn blocks, §3b) specified 2026-11-02 for Ryan's review, after step 2's measurement on gcs dev showed its reads are O(children × versions); step 3 (the client) not started, and waits on 2b. Shared (`[cloud]`). Replaces the lazy descent's planner and budgets (`specs/diff-from-changes.md` revision 3: `DESCENT_MAX_EXPANDABLE`, `DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS`, `HandOff`), which were tuned per deployment rather than derived.
 
 ## Goal
 
@@ -89,9 +89,49 @@ The fix is structural: **don't chain levels inside a request.** Let the client d
 - **Totals.** A changed directory's own row comes from the same read. The root (no row) and a directory one version spans read their totals as of each scan (`readRootAgg`). `unchanged` is the directory less its changed children, by subtraction.
 - **Zero-churn directories are never asked** (the client knows from the parent's row).
 - **Chains.** A directory whose only changed child is a directory is followed into it in the same request (`next`, its answer included and cached on its own), a round of reads per link.
-- **Wide directories.** A directory whose changed children span more groups than the decoder takes (250 groups / 700K rows) is a 413. A batch that doesn't fit is split first. The `bychurn` sort (§3) is the bounded answer, not built yet.
+- **Wide directories.** A directory whose changed children span more groups than the decoder takes (250 groups / 700K rows) is a 413. A batch that doesn't fit is split first, but one such directory still fails its whole batch (measured, §3b). §3b replaces this.
 - **Refused (409):** a union view, a store or generation without churn, D1 before the churn base. A path-restricted link: a hidden directory is a 404 (nothing under a visible directory is hidden).
 - **Tests** (`diffLevel.test.ts`, fixture `fixtures/iv-churn/`: a base over four scans, three appended runs merged by the carries, 4 rows per group): every (from, to, directory) answer from the churn base on equals one computed from the scans' files alone (60 answers, renames and same-size swaps among them); a batch equals its directories alone; a chain; K folding and both measures; the churn-base refusal; the range plan is a subset of the unpruned plan, strictly smaller on some.
+
+### 3b. Bounded level reads: dyadic churn blocks (step 2b, for review)
+
+Step 2 is correct but not bounded. On gcs's dev stack, 2026-11-02, generation `2026-10-09b.g3.c` (scans to 11-01), 18 diff-check cases × cold/warm, K = 32, expanding every directory whose churn-sized cell holds ≥ 4 cells of 48² px on 1664×845:
+
+| | cold | warm |
+|---|---|---|
+| first level (one request) | 0.2–3.1 s | 0.1–0.5 s |
+| fully expanded (5–8 levels, 1–210 dirs) | 0.6–57 s | 0.1–6.4 s |
+| slowest single request | 21 s (8 dirs, 120 + 7 chained rounds of 60–110 groups) | 4.5 s |
+| failures | 4 of 36: 413 for the whole 10–13-dir batch, from one flat directory (`…/8582115warcs/deduped_c075_decon`, 10-24 → 10-31: changed children over 90 groups, 710K rows) | |
+
+**Cost model of step 2.** A level reads every version piece of its directories' children, not only the changed ones. The range pruning (group bounds `vf`/`vt` against `(D1, D2]`) rarely drops a group: a path-sorted group mixes long-lived and fresh pieces. So the work is O(children × versions) per directory, i.e. width × history. Server-Timing (k = 64, cache bypassed): a 1-directory request for `marin-us-east5` plans 43 groups / 339K rows; deeper batches 60–128 groups / 0.5–1M rows each, plus one more round per chain link. Fetch is bound by the Worker's ~6 concurrent connections (140 groups: 60 s of summed fetch, 12 s wall). Neither a per-directory read budget (a tuned cutoff) nor a `(parent, scan)` changes sort (O(change events in range): a month of warcs added to one directory is still unbounded) fixes this by construction.
+
+**Index: churn per child per dyadic block of scans.** Number the scan transitions `1..S` (transition `i` = scan `i−1` → scan `i`). A block at level `L` is `[b·2^L + 1, (b+1)·2^L]`. For every block at every level, and every directory `P`, store one row `(L, b, P, child, churn, net)` per child of `P` whose churn within the block is > 0. `churn` = the child's `churn_cum` at the block's end less at its start (cumulative churn differences: additive over disjoint blocks), and `net` = its size difference (additive too). Rows are sorted `(L, b, depth(P), P, churn desc, child)`: within one block, one depth's directories are adjacent in path order, so a batch of one depth's directories reads one run per block.
+- **Full segment tree, not the binary counter.** The interval store's carries keep only the counter's current runs (merging level `L` away into `L+1`). Here every aligned block at every level stays, so any range decomposes. An append writes level 0 for its transition, plus each level whose block it completes (its two halves' rows grouped by `(P, child)` and summed). A compaction rewrites the whole tree, so it keeps the same bytes as a fresh build. The backfill builds it from `churn_cum` at each scan boundary.
+- **Size.** ≤ E · (⌈log₂ S⌉ + 1) rows, where E = level-0 rows (changed paths summed over transitions). Directories that change every scan collapse at higher levels, so the real size is less. gcs's `.c` has 1.32B path pieces, 708M open, so ≈ 0.6B changes over its scans. The upper bound is ≈ 4B rows at S ≈ 40, against the `path` sort's 1.32B. **Measure E and the real total on `.c` before building the serving side.**
+
+**The level read for directory P over `(D1, D2]`.**
+1. Decompose `(D1, D2]` into its canonical dyadic blocks: m ≤ 2⌈log₂ S⌉ (≤ 12 at S = 40).
+2. P's own churn C over the range: `churn_cum` at D2 less at D1, two point reads (as step 2's own row).
+3. The cell threshold τ = C · minArea / area, from the canvas the client sends with its batch (`area` per directory: the cell it was drawn in, so it isn't keyed only by K). A child with range churn < τ can't get a cell and is folded into `other`.
+4. **Pigeonhole.** The blocks partition the range, so a child's range churn is the sum of its block churns. A child with churn ≥ τ has ≥ τ/m in at least one block. Read each block's P list in churn-desc order down to τ/m: a prefix of one sorted run.
+5. **Candidates.** The union X of what the prefixes return. Each prefix entry has block churn ≥ τ/m, and the block churns sum to C, so |X| ≤ Σ_blocks (block churn)/(τ/m) = m · C/τ = m · area/minArea (≈ 12 × 152 ≈ 1.8K at the root on 1664×845 with 4·48² cells). Rows read ≤ |X| + m (one past each prefix's end). That doesn't depend on P's width or how long the history is.
+6. **Each candidate's range churn and net.** Two options, for review:
+   - **(a) From the blocks alone (bounded, recommended).** A candidate's found block entries give a lower bound `lo`. Each block where it fell below τ/m adds < τ/m, so its true churn is in `[lo, lo + τ)`: its cell's area is right to within one minimum cell. Net likewise, to within ±τ. Cells are the candidates with `lo + slack ≥ τ`, ranked by `lo`. `other` = C − Σ cells, exact as an identity ("what isn't drawn as a cell"). A directory cell's exact churn arrives when it is expanded, since it is the `C` of its own level request. A file cell's exact values (tooltip) come from one point read on hover.
+   - **(b) Exact.** Point reads (`churn_cum` and size at D1 and D2) for the cells. That's ≤ area/minArea keys (≈ 150), but scattered: in a 710K-child directory each can land in its own `path` group. Bounded by the cell count, not the width, but at ~6 concurrent fetches that's seconds, not 100s of ms.
+7. **Net mode** (`m=net`) uses the same candidates: churn ≥ |net|, so every child with |net| ≥ τ is among them. With (a), net comes from the stored block nets, ±τ.
+
+**Bound per request.** Per directory: ≤ m runs, ≤ |X| + m rows (≤ ~2K at the root's area, fewer below it, since a child's area is a share of its parent's), plus 2 point reads for C. Directories of one depth are adjacent in each block's run, so a batch's groups are ≤ m × ⌈Σ rows / group rows⌉ plus the point reads. The client sizes batches against that (not a tuned budget: the per-directory row bound is a formula of the canvas). Chains follow only while a level's single changed child carries ≥ (1 − minArea/area) of C, so each link is another bounded read, not an open-ended round.
+
+**Failures are per directory.** Whatever the read path, one directory's failure never fails its batch: the response carries `errors: {dir: message}` beside `levels`, and the client redraws that cell from `/api/diff`. Ships with step 2b, or before it as a fix to step 2.
+
+**Tests.** Over `fixtures/iv-churn` with the tree built at every carry: (i) the dyadic decomposition and per-block sums equal per-transition churn sums for every child and range; (ii) with option (a), every cell's `[lo, lo + τ)` contains the oracle's churn, every child with oracle churn ≥ τ is a cell, and Σ cells + other = C; (iii) a 1M-child synthetic directory, all children changed across many scans, reads ≤ m runs and ≤ |X| + m rows (asserted from the decoder's counters), whatever the range length; (iv) a batch with one failing directory answers the others.
+
+**Measure before building the serving side.** On `.c`: E per transition and the tree's total rows and bytes; per diff-check case, the projected rows and groups per level request under the bound above (offline from the new sort's footers), against the "before" table.
+
+**Before any comparison with prod:** `.c` stops at 11-01; the daily scans since then are appended to g3 only. Append them to `.c` (`interval-store add -g 2026-10-09b.g3.c -C none`, so `CURRENT.json` doesn't move), or let the next compaction carry churn.
+
+**Separate lever (the backfill's runtime).** Cutting the served sorts took 1h30m of the backfill's 4h12m, on ~1.3 of 32 cores: each sort ends in one serial pyarrow writer (`-j 4` runs four sorts at a time, and the last ran alone). Parallel per-range writers, concatenated by row group into the one file, would make that wall time CPU-bound. That's a follow-up for `interval_compact` / `cut_gen`, independent of this design.
 
 ### 4. What goes away
 
