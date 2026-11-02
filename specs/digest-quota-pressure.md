@@ -37,7 +37,13 @@ The previews belong in the Slack control panel under construction (`/admin/slack
 
 ## Tests
 
-- Sort and marks: pools at 100.5 / 88.5 / 74.5 / 19 / 0% with `alert_pct` 90 → that order, 🔴 🟠 and three unmarked; an over-quota pool's `over` wording; no `alert_pct` → only over-quota pools are marked.
+- Sort and marks: pools at 100.5 / 88.5 / 74.5 / 19 / 0% with `alert_pct` 90 → that order, 🔴 🟠 and three unmarked; an over-quota pool's `over` wording; no `alert_pct` → the marks key on 90.
 - Zone pools aggregate before sorting (rno2a = marinfold + rno2a).
 - Plot: a pool's line crosses 100% on the day it went over (cw's rno2a, late October); a pool under the faint threshold isn't drawn but is in the legend.
 - Previews for cw (11/1, 11/2) on `/admin/slack`; no Slack posts until approved.
+
+## Status
+
+- Phase 1 (previews): the site's TS renderer has the quota line (`?dc=qc`) and the pools plot (`?dc=pp`) as `/admin/slack` options, default off (`site/src/digest/pools.ts`, `digestCard.ts` `poolsSvg`).
+- Daily replies (Python, `digest_cw._tail`): config `quota_marks: circles` sorts the clauses fullest first, marks 🔴 at or over `mark_pct` (`alert_pct`, else 90; always past a quota) and 🟠 within 10 points below, shrinks a pool under 25% to `NN%`, and reads `(N Ti over)` past a quota (in either mode). The default `warning` keeps config order with `:warning:` at `alert_pct`. cw sets `circles`.
+- Open: the OP's quota line and plot reach Slack with phase 2 of `slack-preview-page.md` (the job renders through the site); `alert_pct: 90` on cw waits on thrds' `post(broadcast=True)` (`~/c/thrds/specs/slack-reply-broadcast.md`); the gauge-emoji sweep (§2) is unstarted.
