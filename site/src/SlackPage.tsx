@@ -142,12 +142,15 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
 
 function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; setCands: (c: string[]) => void }) {
   const links = { plotUrl: PLOT, prevUrl: b.prev_url }
-  const rerender = opText(b.rows, b.month, b.cfg, { plotUrl: b.plot_url === null ? null : PLOT, prevUrl: b.prev_url })
+  // the bundle's params (`renderer: site`; absent or '' = the defaults) are what the job rendered under
+  const posted = b.params ?? ''
+  const rerender = opText(b.rows, b.month, b.cfg, { plotUrl: b.plot_url === null ? null : PLOT, prevUrl: b.prev_url }, decodeParams(posted))
   const matches = rerender.split('\n').map(norm).join('\n') === b.op.split('\n').map(norm).join('\n')
   const live = b.op.split('\n').map(norm)
   return <>
     <p className="dim">
       Posted {b.posted_at} to <code>{b.channel}</code> ({b.variant}){b.permalink && <> · <a href={b.permalink} target="_blank" rel="noreferrer">the thread</a></>}.
+      {posted && <> Rendered under params <code>{posted}</code>.</>}
       {' '}{matches ? 'The site\'s renderer reproduces it exactly.' : <span className="err">The site's renderer no longer reproduces it (the job or the renderer changed since).</span>}
     </p>
     <div className="slack-cols">
