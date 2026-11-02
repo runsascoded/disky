@@ -280,7 +280,8 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
     rec = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "scans": len(doc["scans"]), "listings": idx["scans"],
            "listed": idx["rows"], "filled": sum(counts.values()), **({"nulls": True} if nulls else {})}
     (out / BACKFILL).write_text(json.dumps(rec, indent=1) + "\n")
-    files = upload_new(store, out, new_prefix, {}, _publish_order)
+    from .interval_local import publish_tier
+    files = upload_new(store, out, new_prefix, {}, _publish_order, tier=publish_tier)
     s = round(monotonic() - t0, 1)
     err(f"backfill {gen} → {new_gen}: {rec['filled']:,} object versions given a generation from {len(idx['scans'])} listings, "
         f"{stats['versions']:,} versions, {len(files)} files in {s}s")

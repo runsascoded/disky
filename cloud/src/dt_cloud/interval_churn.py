@@ -308,6 +308,7 @@ def backfill(store, gen: str, new_gen: str, work: Path, *, ranges_gen: str | Non
     from .append_runner import LocalRunStore, latest_key
     from .blobstore import upload_new
     from .interval_backfill import _publish_order, mirror_source
+    from .interval_local import publish_tier
 
     t0 = monotonic()
     prefix, new_prefix = f"{ist.PREFIX}/{gen}", f"{ist.PREFIX}/{new_gen}"
@@ -331,7 +332,7 @@ def backfill(store, gen: str, new_gen: str, work: Path, *, ranges_gen: str | Non
                                           jobs=jobs, before_cut=before_cut)
     rec = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "scans": len(doc["scans"]), "base": churn_from(doc["scans"])["id"], **got}
     (out / BACKFILL).write_text(json.dumps(rec, indent=1) + "\n")
-    files = upload_new(store, out, new_prefix, {}, _publish_order)
+    files = upload_new(store, out, new_prefix, {}, _publish_order, tier=publish_tier)
     s = round(monotonic() - t0, 1)
     err(f"backfill-churn {gen} → {new_gen}: {got['pieces']:,} pieces (+{got['split']:,} split), {stats['versions']:,} versions, {len(files)} files in {s}s")
     return {**rec, "gen": new_gen, "rows": rows, "sorts": sorts, "files": len(files), "s": s}
