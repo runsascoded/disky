@@ -134,7 +134,10 @@ class DigestConfig:
     or over this percent gets a `:warning:` in the daily replies, and the
     month's thread one alert reply also sent to the channel (Slack
     `reply_broadcast`), edited as its numbers move and deleted once every quota
-    is back under; None: neither. ``preview``: where each Slack converge writes the month's preview bundle
+    is back under; None: neither. ``quota_marks`` (cw replies): `warning` (the default) keeps the
+    clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
+    marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
+    points below (specs/digest-quota-pressure.md). ``preview``: where each Slack converge writes the month's preview bundle
     (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
     ``{variant}``) in the deployment's served store; None: none written."""
 
@@ -159,11 +162,17 @@ class DigestConfig:
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"
     alert_pct: float | None = None
+    quota_marks: str = "warning"
     preview: str | None = None
 
     @property
     def unit(self) -> Units:
         return UNITS[self.units]
+
+    @property
+    def mark_pct(self) -> float:
+        """The share `quota_marks: circles` marks red (orange within 10 points below): ``alert_pct``, else 90."""
+        return 90.0 if self.alert_pct is None else self.alert_pct
 
     def need(self, key: str) -> str:
         """A deployment-resource field (``icons_base``, ``plot_base``,
@@ -243,13 +252,14 @@ def parse_bytes(v: int | str) -> int:
 
 
 TEMPLATES = ("gcs", "cw")
+QUOTA_MARKS = ("warning", "circles")
 # the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
 _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "template": (str,), "title": (str,), "site_url": (str,), "root": (str,), "state": (str,),
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
-    "units": (str,), "alert_pct": (int, float, type(None)), "preview": (str, type(None)),
+    "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "preview": (str, type(None)),
 }
 
 
@@ -324,6 +334,8 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         raise ValueError(f"digest config units: {d['units']!r} is not one of {tuple(UNITS)}")
     if d.get("alert_pct") is not None and not 0 < d["alert_pct"] <= 100:
         raise ValueError(f"digest config alert_pct: {d['alert_pct']} is not a percent (0–100]")
+    if "quota_marks" in d and d["quota_marks"] not in QUOTA_MARKS:
+        raise ValueError(f"digest config quota_marks: {d['quota_marks']!r} is not one of {QUOTA_MARKS}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
     base = base or PRESETS[d["template"]]

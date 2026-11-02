@@ -12,7 +12,8 @@ the previous month's thread, and a quota sparkline + diff treemap over the windo
 day's reply scan, the arrow normalised to the real interval; its tail is a
 linked `[<label>](<over-time>): NN.N% of <quota> (<free> Ti free)` clause per
 bucket (`cfg.buckets`; a bucket without a quota shows raw TiB; buckets sharing
-a `zone` collapse into one clause against the zone's quota).
+a `zone` collapse into one clause against the zone's quota). `quota_marks: circles`
+sorts the clauses fullest first and leads each with a 🔴 / 🟠 by its share (`_mark`).
 
 Two reply VARIANTS because Slack fixes a message's username + icon at post
 time (`chat.update` can't change them):
@@ -109,9 +110,19 @@ def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestC
     return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, path, slug)})"
 
 
-def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"]) -> str:
+#: `quota_marks: circles`: a pool under this share renders as a bare `NN%` (no quota, no headroom).
+QUIET_PCT = 25
+
+
+def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"], brief: bool = False) -> str:
+    """`NN.N% of <quota> (<n> Ti free)` (`over` past the quota); ``brief`` (`quota_marks: circles`): under
+    `QUIET_PCT`, just `NN%`."""
     qt = q.bytes / u.bytes
-    return f"{tb / qt * 100:.1f}% of {q.short or _qlabel(q.bytes)} ({qt - tb:,.1f} {u.short} free)"
+    pct = tb / qt * 100
+    if brief and pct < QUIET_PCT:
+        return f"{pct:.0f}%"
+    room = f"{qt - tb:,.1f} {u.short} free" if tb <= qt else f"{tb - qt:,.1f} {u.short} over"
+    return f"{pct:.1f}% of {q.short or _qlabel(q.bytes)} ({room})"
 
 
 def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None,
@@ -124,7 +135,7 @@ def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None,
     link = _bucket_link(bucket, scan, since, cfg, slug)
     if not qs:
         return f"{link}: {tb:,.0f} {cfg.unit.short}"
-    return f"{link}: " + ", ".join(_quota_clause(_scoped(tb, classes, q), q, cfg.unit) for q in qs)
+    return f"{link}: " + ", ".join(_quota_clause(_scoped(tb, classes, q), q, cfg.unit, cfg.quota_marks == "circles") for q in qs)
 
 
 def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
@@ -133,7 +144,7 @@ def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime
     q = cfg.buckets[members[0][0]].quota
     parts = " + ".join(f"{_bucket_link(b, scan, since, cfg, slug)} {tb:,.0f}" for b, tb in members)
     total = sum(tb for _, tb in members)
-    return f"{parts} {cfg.unit.short}" + (f": {_quota_clause(total, q, cfg.unit)}" if q else "")
+    return f"{parts} {cfg.unit.short}" + (f": {_quota_clause(total, q, cfg.unit, cfg.quota_marks == 'circles')}" if q else "")
 
 
 def _tail(day: DayRow, cfg: DigestConfig) -> str:
@@ -148,11 +159,27 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         link = _diff_url(day.scan, day.since, cfg.site_url, cfg.primary if b is None or b.path is None else b.path, day.slug)
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
-    return " · ".join(f"{ALERT_MARK} {c}" if over else c for c, over in _clauses(day, cfg))
+    cs = _clauses(day, cfg)
+    if cfg.quota_marks == "circles":
+        cs = sorted(cs, key=lambda c: -1.0 if c[1] is None else -c[1])
+    return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over in cs)
 
 
 #: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).
 ALERT_MARK = ":warning:"
+#: `quota_marks: circles`: at or over `mark_pct`, and within `ORANGE_PTS` below it.
+RED_MARK, ORANGE_MARK, ORANGE_PTS = ":red_circle:", ":large_orange_circle:", 10
+
+
+def _mark(fill: float | None, over: bool, cfg: DigestConfig) -> str | None:
+    """A clause's mark: `:warning:` when over ``alert_pct`` (`quota_marks: warning`), or a red / orange circle by its
+    fill (`circles`); None unmarked or without a quota."""
+    if cfg.quota_marks != "circles":
+        return ALERT_MARK if over else None
+    if fill is None:
+        return None
+    red = min(cfg.mark_pct, 100)
+    return RED_MARK if fill >= red else ORANGE_MARK if fill >= cfg.mark_pct - ORANGE_PTS else None
 
 
 def _groups(day: DayRow, cfg: DigestConfig) -> list[list[tuple[str, float]]]:
@@ -177,14 +204,15 @@ def _fill(g: list[tuple[str, float]], day: DayRow, cfg: DigestConfig) -> float |
     return max((_scoped(tb, classes, q) / (q.bytes / cfg.unit.bytes) * 100 for q in b.quotas), default=None) if b else None
 
 
-def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, bool]]:
-    """Each group's clause (`_bucket_clause` / `_zone_clause`), and whether its fill is at or over ``cfg.alert_pct``."""
+def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bool]]:
+    """Each group's clause (`_bucket_clause` / `_zone_clause`), its fill (`_fill`), and whether that is at or over
+    ``cfg.alert_pct``."""
     out = []
     for g in _groups(day, cfg):
         clause = (_bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
                   if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug))
         fill = _fill(g, day, cfg)
-        out.append((clause, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct))
+        out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct))
     return out
 
 
@@ -194,7 +222,10 @@ def alert_body(month: Month, cfg: DigestConfig) -> str | None:
     if cfg.alert_pct is None or month.closed:
         return None
     last = month.rows[-1]
-    over = [c for c, o in _clauses(_row(last.date, last, None), cfg) if o]
+    over = [(c, f) for c, f, o in _clauses(_row(last.date, last, None), cfg) if o]
+    if cfg.quota_marks == "circles":
+        over.sort(key=lambda c: -c[1])
+    over = [c for c, _ in over]
     if not over:
         return None
     return (f"{ALERT_MARK} **Quota alert**: {' · '.join(over)} · _as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_ "
