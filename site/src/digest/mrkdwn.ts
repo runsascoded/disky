@@ -11,9 +11,11 @@ export type Tok =
   | { t: 'emoji'; name: string; char: string }
 
 /** The stock Slack emoji the digest writes (the quota line's marks), by shortcode. */
-export const EMOJI: Record<string, string> = { red_circle: '🔴', large_orange_circle: '🟠' }
+export const EMOJI: Record<string, string> = {
+  red_circle: '🔴', large_orange_circle: '🟠', large_yellow_circle: '🟡', large_green_circle: '🟢', warning: '⚠️', hourglass_flowing_sand: '⏳',
+}
 
-const RE = /!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]+)\]\(([^)\s]+)\)|:arrow_deg(-?\d+):|:(red_circle|large_orange_circle):|\*\*([^*]+)\*\*|\*([^*]+)\*|(?<![\w])_([^_]+)_(?![\w])/g
+const RE = /!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]+)\]\(([^)\s]+)\)|:arrow_deg(-?\d+):|:(red_circle|large_orange_circle|large_yellow_circle|large_green_circle|warning|hourglass_flowing_sand):|\*\*([^*]+)\*\*|\*([^*]+)\*|(?<![\w])_([^_]+)_(?![\w])/g
 
 export function tokenize(line: string): Tok[] {
   const out: Tok[] = []

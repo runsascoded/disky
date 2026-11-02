@@ -220,8 +220,9 @@ def test_tail_zone_shared_quota():
 
 
 def test_tail_circles_fullest_first():
-    """`quota_marks: circles`: the clauses fullest first (a bucket without a quota last), red at or over `mark_pct`
-    (`alert_pct`, else 90), orange within 10 points below; the zone's fill is its members' sum."""
+    """`quota_marks: circles`: the clauses fullest first (a bucket without a quota last, unmarked), red at or over
+    `mark_pct` (`alert_pct`, else 90), orange within 10 points below, yellow within 40, green under; the zone's fill is
+    its members' sum."""
     z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
     cfg = replace(CFG, quota_marks="circles", buckets={
         **CFG.buckets,
@@ -236,15 +237,15 @@ def test_tail_circles_fullest_first():
     u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"  # noqa: E731
     main = f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
     zone = f"[hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
-    cold = f"[cold]({u('cold-data')}): 12%"  # under `QUIET_PCT`: the bare share
+    cold = f":large_green_circle: [cold]({u('cold-data')}): 12%"  # under `QUIET_PCT`: the bare share
     more = f"[more-data]({u('more-data')}): 2 Ti"
     assert D._tail(day, cfg).split(" · ") == [f":red_circle: {main}", f":large_orange_circle: {zone}", cold, more]
-    assert D._tail(day, replace(cfg, alert_pct=95)).split(" · ") == [f":large_orange_circle: {main}", f":large_orange_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=95)).split(" · ") == [f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", cold, more]
     assert D._tail(day, replace(cfg, alert_pct=85)).split(" · ") == [f":red_circle: {main}", f":red_circle: {zone}", cold, more]
     # past its quota a pool reads `over`, and stays red whatever `alert_pct` is
     full = replace(day, extra={**day.extra, "cold-data": 101.3})
     assert D._tail(full, replace(cfg, alert_pct=100)).split(" · ") == [
-        f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)", f":large_orange_circle: {main}", zone, more]
+        f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)", f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", more]
     # the default (`warning`): config order, full clauses, `:warning:` only at or over `alert_pct`
     assert D._tail(day, replace(cfg, quota_marks="warning", alert_pct=90)).split(" · ") == [
         f":warning: {main}", zone, more, f"[cold]({u('cold-data')}): 12.4% of 100Ti (87.6 Ti free)"]

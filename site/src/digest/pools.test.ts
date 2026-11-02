@@ -16,8 +16,10 @@ const TIB = 1024 ** 4
 
 describe('quota pressure', () => {
   it('marks: red at the alert share or the quota, orange within 10 points below', () => {
-    expect([mark(79.9, 90), mark(80, 90), mark(89.9, 90), mark(90, 90), mark(100, 100), mark(99, 100)])
-      .toEqual(['', ':large_orange_circle: ', ':large_orange_circle: ', ':red_circle: ', ':red_circle: ', ':large_orange_circle: '])
+    expect([mark(49.9, 90), mark(50, 90), mark(79.9, 90), mark(80, 90), mark(89.9, 90), mark(90, 90), mark(100, 100), mark(99, 100)]).toEqual([
+      ':large_green_circle: ', ':large_yellow_circle: ', ':large_yellow_circle: ', ':large_orange_circle: ', ':large_orange_circle: ', ':red_circle: ',
+      ':red_circle: ', ':large_orange_circle: ',
+    ])
   })
 
   it('the OP gains a quota line under the headline: most full first, marked, with headroom', async () => {
@@ -26,7 +28,7 @@ describe('quota pressure', () => {
     const off = at({})
     const on = at({ quotas: 'circles' })
     expect(on).toEqual([off[0], '*Quotas:* :red_circle: hot 99.5% of 100Ti (0.5 Ti free) · :large_orange_circle: main 86.8% of 1P (120.0 Ti free)', ...off.slice(1)])
-    expect(at({ quotas: 'circles', alertAt: 100 })[1]).toBe('*Quotas:* :large_orange_circle: hot 99.5% of 100Ti (0.5 Ti free) · main 86.8% of 1P (120.0 Ti free)')
+    expect(at({ quotas: 'circles', alertAt: 100 })[1]).toBe('*Quotas:* :large_orange_circle: hot 99.5% of 100Ti (0.5 Ti free) · :large_yellow_circle: main 86.8% of 1P (120.0 Ti free)')
   })
 
   it('a zone sums its buckets against its quota; an overage reads "over"; a quiet pool is a bare share', async () => {
@@ -44,7 +46,7 @@ describe('quota pressure', () => {
     }
     // z = main 790 + more 2.4 of 910; cold isn't in the scan (no clause)
     expect(quotaLine(last, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_orange_circle: z zone 87.1% of 1P (117.6 Ti free)')
-    expect(quotaLine({ ...last, tb: 100 }, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · z zone 11%')
+    expect(quotaLine({ ...last, tb: 100 }, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_green_circle: z zone 11%')
   })
 
   it('the pools plot: every pool’s used bytes per scan against its quota, the alert share, the same diff', async () => {
