@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -267,7 +268,8 @@ def mirror(store: Store, prefix: str, local: Path, keep: Callable[[str], bool] =
     not copied), `stage_files`' parallel copies, every one or it raises; returns the whole listing."""
     listing = store.listing(prefix)
     todo = {k: n for k, n in listing.items() if keep(rel := k[len(prefix) + 1:]) and not ((dst := local / rel).is_file() and dst.stat().st_size == n)}
-    got = stage_files(store.uri(prefix), {k[len(prefix) + 1:]: n for k, n in todo.items()}, local, label=f"mirror {prefix}")
+    got = stage_files(store.uri(prefix), {k[len(prefix) + 1:]: n for k, n in todo.items()}, local, label=f"mirror {prefix}",
+                      log=lambda m: print(m, file=sys.stderr, flush=True))
     if got["failed"]:
         raise OSError(f"mirror {prefix}: {len(got['failed'])} files not copied, e.g. {next(iter(got['failed'].items()))}")
     return listing
