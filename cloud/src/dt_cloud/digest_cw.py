@@ -13,7 +13,7 @@ day's reply scan, the arrow normalised to the real interval; its tail is a
 linked `[<label>](<over-time>): NN.N% of <quota> (<free> Ti free)` clause per
 bucket (`cfg.buckets`; a bucket without a quota shows raw TiB; buckets sharing
 a `zone` collapse into one clause against the zone's quota). `quota_marks: circles`
-sorts the clauses fullest first and leads each with a 🔴 / 🟠 by its share (`_mark`).
+sorts the clauses fullest first and leads each with a 🔴 / 🟠 / 🟡 / 🟢 by its share (`_mark`).
 
 Two reply VARIANTS because Slack fixes a message's username + icon at post
 time (`chat.update` can't change them):
@@ -167,19 +167,22 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
 
 #: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).
 ALERT_MARK = ":warning:"
-#: `quota_marks: circles`: at or over `mark_pct`, and within `ORANGE_PTS` below it.
-RED_MARK, ORANGE_MARK, ORANGE_PTS = ":red_circle:", ":large_orange_circle:", 10
+#: `quota_marks: circles`, every pool one: red at or over `mark_pct`, orange within `ORANGE_PTS` below it, yellow
+#: within `YELLOW_PTS`, green under that (the site's `digest/pools.ts` `mark`).
+RED_MARK, ORANGE_MARK, YELLOW_MARK, GREEN_MARK = ":red_circle:", ":large_orange_circle:", ":large_yellow_circle:", ":large_green_circle:"
+ORANGE_PTS, YELLOW_PTS = 10, 40
 
 
 def _mark(fill: float | None, over: bool, cfg: DigestConfig) -> str | None:
-    """A clause's mark: `:warning:` when over ``alert_pct`` (`quota_marks: warning`), or a red / orange circle by its
-    fill (`circles`); None unmarked or without a quota."""
+    """A clause's mark: `:warning:` when over ``alert_pct`` (`quota_marks: warning`), or a circle by its fill
+    (`circles`); None unmarked or without a quota."""
     if cfg.quota_marks != "circles":
         return ALERT_MARK if over else None
     if fill is None:
         return None
     red = min(cfg.mark_pct, 100)
-    return RED_MARK if fill >= red else ORANGE_MARK if fill >= cfg.mark_pct - ORANGE_PTS else None
+    return (RED_MARK if fill >= red else ORANGE_MARK if fill >= cfg.mark_pct - ORANGE_PTS
+            else YELLOW_MARK if fill >= cfg.mark_pct - YELLOW_PTS else GREEN_MARK)
 
 
 def _groups(day: DayRow, cfg: DigestConfig) -> list[list[tuple[str, float]]]:

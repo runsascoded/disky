@@ -137,7 +137,7 @@ class DigestConfig:
     is back under; None: neither. ``quota_marks`` (cw replies): `warning` (the default) keeps the
     clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
-    points below (specs/digest-quota-pressure.md). ``renderer``: who renders the OP's text and plot request,
+    points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md). ``renderer``: who renders the OP's text and plot request,
     `local` (this package's `op_body` / `image_body`) or `site` (`POST /api/digest-op`, the renderer `/admin/slack`
     previews with; specs/slack-preview-page.md phase 2) under ``params`` (the site's `src/digest/codec` string,
     `''`: the defaults, which render `local`'s bytes). ``preview``: where each Slack converge writes the month's preview bundle
@@ -661,15 +661,23 @@ def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | N
 def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_url: str | None, prev_url: str | None,
                    channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
     """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
-    fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, and the
-    thread. The site re-renders the rows under other params beside it."""
+    fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, the
+    replies (`replies_json`), and the thread. The site re-renders the rows under other params beside it."""
     return {
         "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
         "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
         "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "params": tpl.cfg.params, "op": op,
-        "image": tpl.image_request(data, month),
+        "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant),
     }
+
+
+def replies_json(tpl: Template, data: Any, variant: str) -> list[dict]:
+    """The month's replies as the converge posts them (each day's, then the open day's provisional one), newest first:
+    `{key, scan, username, body, icon_url, icon_emoji}`, for the preview page."""
+    units = [*tpl.units(data, variant), *filter(None, [tpl.provisional(data, variant)])]
+    return [{"key": u.key, "scan": u.scan, "username": u.reply.username, "body": u.reply.body, "icon_url": u.reply.icon_url,
+             "icon_emoji": u.reply.icon_emoji} for u in reversed(units)]
 
 
 def state_path(root: str, month: dt.date, state_dir: str) -> str:

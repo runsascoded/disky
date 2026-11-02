@@ -47,11 +47,15 @@ export function used(p: Pool, r: CwScan, cfg: DigestCfg): number | null {
 /** Used share of the quota, percent. */
 export const pctOf = (p: Pool, v: number, cfg: DigestCfg): number => (v / (p.quota.bytes / cfg.unit.bytes)) * 100
 
-/** The pressure mark for a share: red at or over `alertAt` (or the quota), orange within 10 points of it. */
+/** The pressure mark for a share, every pool one: red at or over `alertAt` (or the quota), orange within
+ *  `ORANGE_PTS` below it, yellow within `YELLOW_PTS`, green under that (`digest_cw._mark`'s scale). */
+export const ORANGE_PTS = 10
+export const YELLOW_PTS = 40
 export function mark(pct: number, alertAt: number): string {
   if (pct >= Math.min(alertAt, 100)) return ':red_circle: '
-  if (pct >= alertAt - 10) return ':large_orange_circle: '
-  return ''
+  if (pct >= alertAt - ORANGE_PTS) return ':large_orange_circle: '
+  if (pct >= alertAt - YELLOW_PTS) return ':large_yellow_circle: '
+  return ':large_green_circle: '
 }
 
 /** Below this share, a pool's clause is just its name and whole percent. */
@@ -65,7 +69,7 @@ export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number): string {
     return v == null ? [] : [{ p, v, pct: pctOf(p, v, cfg) }]
   }).sort((a, b) => b.pct - a.pct)
   const clauses = rows.map(({ p, v, pct }) => {
-    if (pct < QUIET_PCT) return `${p.name} ${fixed(pct, 0)}%`
+    if (pct < QUIET_PCT) return `${mark(pct, alertAt)}${p.name} ${fixed(pct, 0)}%`
     const free = p.quota.bytes / u.bytes - v
     const room = free >= 0 ? `${fixed(free, 1)} ${u.short} free` : `${fixed(-free, 1)} ${u.short} over`
     return `${mark(pct, alertAt)}${p.name} ${fixed(pct, 1)}% of ${p.quota.short ?? p.quota.name} (${room})`

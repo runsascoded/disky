@@ -39,4 +39,10 @@ export interface PreviewBundle {
   rows: DigestRows
   op: string
   image: Record<string, unknown>
+  /** The params the OP was rendered under (`renderer: site`); absent or `''`: the defaults. */
+  params?: string
+  /** The month's replies as posted, newest first (absent in bundles before 2026-11-02). */
+  replies?: PreviewReply[]
 }
+
+export interface PreviewReply { key: string; scan: string; username: string; body: string; icon_url: string | null; icon_emoji: string | null }

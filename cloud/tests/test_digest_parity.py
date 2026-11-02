@@ -105,7 +105,7 @@ def test_preview_bundle_is_the_parity_shape():
     b = E.preview_bundle(tpl, data, date(2026, 9, 1), op="op", plot_url=PLOT, prev_url=None, channel="C1", variant="sender",
                          op_ts="m1", permalink="https://slack.example.org/p1")
     assert sorted(b) == ["cfg", "channel", "image", "month", "op", "op_ts", "params", "permalink", "plot_url", "posted_at",
-                         "prev_url", "rows", "variant", "version"]
+                         "prev_url", "replies", "rows", "variant", "version"]
     assert (b["version"], b["month"], b["rows"]["template"], b["image"]["month"], b["params"]) == (1, "2026-09", "cw", "2026-09", "")
 
 
@@ -123,6 +123,9 @@ def test_converge_writes_the_preview_bundle(tmp_path: Path):
     assert (b["op"], b["op_ts"], b["permalink"], b["channel"], b["variant"], b["rows"]["template"]) == (
         op["content"], "m1", "https://slack.example.org/archives/C1/pm1", "C1", "sender", "cw",
     )
+    # the replies as posted (the thread's, oldest first), newest first
+    posted = [(c["username"], c["content"], c["icon_url"], c["icon_emoji"]) for c in log if c["op"] == "post" and c["thread_id"] == "m1"]
+    assert [(r["username"], r["body"], r["icon_url"], r["icon_emoji"]) for r in reversed(b["replies"])] == posted
     E.converge_slack(E.template(CW_EXAMPLE), str(cw_root(tmp_path / "bare")), date(2026, 9, 1), FakeSlack([]), "C1", "sender")
     assert not (tmp_path / "bare" / "served").exists()
 

@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
-import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type PreviewBundle } from './digest'
+import { DEFAULT_PARAMS, type DigestParams, imageRequest, opText, type PreviewBundle, type PreviewReply } from './digest'
 import { decodeParams, encodeParams } from './digest/codec'
 import { type Tok, tokenize } from './digest/mrkdwn'
 import './slack.scss'
@@ -63,10 +63,23 @@ function Toks({ toks, plot }: { toks: Tok[]; plot: ReactNode }) {
   })}</>
 }
 
-/** An OP as Slack shows it; `live`'s lines given, the lines not among them are marked. */
+/** A plot at full size over the page; a click or Escape closes it. */
+function Lightbox({ src, close }: { src: string; close: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [close])
+  return <div className="slack-lightbox" onClick={close} role="dialog" aria-label="plot"><img src={src} alt="plot" /></div>
+}
+
+/** An OP as Slack shows it; `live`'s lines given, the lines not among them are marked. The plot opens in a lightbox. */
 function Op({ text, plotReq, live }: { text: string; plotReq: Record<string, unknown>; live?: string[] }) {
   const plot = usePlot(plotReq)
-  const img = plot.error ? <span className="err">{plot.error.message}</span> : plot.data ? <img src={plot.data} alt="plot" /> : <span className="loading">drawing…</span>
+  const [big, setBig] = useState(false)
+  const img = plot.error ? <span className="err">{plot.error.message}</span>
+    : plot.data ? <><img src={plot.data} alt="plot" className="zoomable" onClick={() => setBig(true)} />{big && <Lightbox src={plot.data} close={() => setBig(false)} />}</>
+    : <span className="loading">drawing…</span>
   const seen = new Set(live)
   return (
     <div className="slack-op">
@@ -76,6 +89,32 @@ function Op({ text, plotReq, live }: { text: string; plotReq: Record<string, unk
     </div>
   )
 }
+
+/** A reply as Slack shows it: its sender (name + avatar, or emoji icon) over its body. */
+function Reply({ r }: { r: PreviewReply }) {
+  const icon = r.icon_url ? <img src={r.icon_url} alt="" /> : <span className="emoji-icon"><Toks toks={tokenize(r.icon_emoji ?? '')} plot={null} /></span>
+  return (
+    <div className="slack-reply">
+      <div className="avi">{icon}</div>
+      <div><div className="sender"><Toks toks={tokenize(r.username)} plot={null} /></div>
+        <div className="body"><Toks toks={tokenize(r.body)} plot={null} /></div></div>
+    </div>
+  )
+}
+
+/** The month's replies, newest first: the latest few, the rest behind a toggle. */
+function Replies({ replies }: { replies: PreviewReply[] }) {
+  const [all, setAll] = useState(false)
+  const shown = all ? replies : replies.slice(0, REPLIES_SHOWN)
+  return (
+    <div className="slack-replies">
+      <h3>Replies <span className="dim">({replies.length}, newest first)</span></h3>
+      {shown.map(r => <Reply key={r.key} r={r} />)}
+      {replies.length > REPLIES_SHOWN && <button onClick={() => setAll(!all)}>{all ? 'fewer' : `all ${replies.length}`}</button>}
+    </div>
+  )
+}
+const REPLIES_SHOWN = 4
 
 const HEADLINES: [string, DigestParams['headline']][] = [['mtd · window', ['mtd', 'window']], ['window · mtd', ['window', 'mtd']], ['mtd only', ['mtd']], ['window only', ['window']], ['none', []]]
 
@@ -93,7 +132,7 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
       <label>weeks <select value={p.weeks} onChange={e => set({ ...p, weeks: e.target.value as DigestParams['weeks'] })}>
         <option value="window">window's</option><option value="month">month's</option></select></label>
       <label>quotas <select value={p.quotas} onChange={e => set({ ...p, quotas: e.target.value as DigestParams['quotas'] })}>
-        <option value="off">off</option><option value="circles">line, 🔴/🟠</option></select></label>
+        <option value="off">off</option><option value="circles">line, 🔴🟠🟡🟢</option></select></label>
       <label>plot <select value={p.plot} onChange={e => set({ ...p, plot: e.target.value as DigestParams['plot'] })}>
         <option value="usage">usage vs quota</option><option value="pools">% of each quota</option></select></label>
       <label>red at <input type="number" min={1} max={100} value={p.alertAt} onChange={e => set({ ...p, alertAt: num(e.target.value, 1, 100) })} />%</label>
@@ -115,6 +154,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
       <section className="slack-col live">
         <h2>Live</h2>
         <Op text={b.op} plotReq={b.image} />
+        {b.replies?.length ? <Replies replies={b.replies} /> : null}
       </section>
       {cands.map((c, i) => {
         const p = decodeParams(c)
