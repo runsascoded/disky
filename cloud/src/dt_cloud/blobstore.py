@@ -271,7 +271,7 @@ def mirror(store: Store, prefix: str, local: Path, keep: Callable[[str], bool] =
     got = stage_files(store.uri(prefix), {k[len(prefix) + 1:]: n for k, n in todo.items()}, local, label=f"mirror {prefix}",
                       log=lambda m: print(m, file=sys.stderr, flush=True))
     if got["failed"]:
-        raise OSError(f"mirror {prefix}: {len(got['failed'])} files not copied, e.g. {next(iter(got['failed'].items()))}")
+        raise OSError(f"mirror {prefix}: {len(got['failed'])} files not copied, e.g. {got['failed'][0]}")
     return listing
 
 
