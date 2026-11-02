@@ -3,6 +3,10 @@
  *   {kind?: 'usage', title, note, month: 'YYYY-MM', from?: 'YYYY-MM-DD', today_at?: [p0, p1], points: [{scan, bytes}],
  *    quota?: {bytes, name}, diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → `digestSvg`: the usage line against its quota, over the headline interval's diff map (the cw template)
+ *   {kind: 'pools', title, note, month, from?, today_at?, alert_pct?, pools: [{name, quota, points: [{scan, bytes}]}],
+ *    diff?, units?}
+ *     → `poolsSvg`: every quota pool's share of its quota (one line each, the quota a rule at 100%), over the diff map
+ *       (the cw template's quota-pressure plot, specs/digest-quota-pressure.md)
  *   {kind: 'tiers', title, note, month, from?, tiers: [name, …] (bottom → top), points: [{scan, bytes: [per tier]}],
  *    diff?: {from, to, path, title}, units?: 'TiB' | 'TB'}
  *     → `tiersSvg`: the total line over the stacked storage classes, over the headline interval's diff map (the gcs
@@ -12,7 +16,7 @@
  * (specs/digest-rolling-window.md), before the month on all but its last days: the axis starts there (or at the
  * baseline scan before it), the latest scan sits at `todayAt` of the width, and the card shades the month. Without
  * it, the axis is the month. Either kind's `diff` is resolved by the endpoint (`buildDiff`). */
-import { type DigestPoint, type DigestUnits, TIER_COLORS, type TierPoint } from './digestCard.js'
+import { type DigestPoint, type DigestUnits, MAX_POOLS, type PoolSeries, TIER_COLORS, type TierPoint } from './digestCard.js'
 import { isScanId, scanTime } from '../../../src/scanSlug.js'
 
 /** The most tiers a card stacks (one default colour each). */
@@ -45,6 +49,7 @@ export type DigestRequest =
     diff: DiffSpec | null
   }
   | Common & { kind: 'tiers'; tiers: { name: string; color: string }[]; points: TierPoint[]; diff: DiffSpec | null }
+  | Common & { kind: 'pools'; pools: PoolSeries[]; alertPct: number; diff: DiffSpec | null }
 
 type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -85,7 +90,7 @@ export function windowFrame(start: number, ts: number[], y: number, mo: number, 
 export function parseDigestRequest(b: unknown): DigestRequest | string {
   if (!isObj(b) || typeof b.title !== 'string' || typeof b.note !== 'string') return 'title and note required'
   const kind = b.kind ?? 'usage'
-  if (kind !== 'usage' && kind !== 'tiers') return "kind: 'usage' | 'tiers'"
+  if (kind !== 'usage' && kind !== 'tiers' && kind !== 'pools') return "kind: 'usage' | 'tiers' | 'pools'"
   const m = typeof b.month === 'string' ? /^(\d{4})-(\d{2})$/.exec(b.month) : null
   if (!m) return 'month: YYYY-MM'
   if (b.units !== undefined && b.units !== 'TiB' && b.units !== 'TB') return "units: 'TiB' | 'TB'"
@@ -121,6 +126,25 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
     points.sort((x, y) => x.t - y.t)
     const tiers = (names as string[]).map((name, i) => ({ name, color: TIER_COLORS[i] }))
     return { kind, ...common, ...frame(points.map(p => p.t)), tiers, points, diff }
+  }
+  if (kind === 'pools') {
+    const ps = b.pools
+    if (!Array.isArray(ps) || !ps.length || ps.length > MAX_POOLS) return `pools: 1–${MAX_POOLS} [{name, quota, points: [{scan, bytes}]}]`
+    const pools: PoolSeries[] = []
+    for (const pl of ps) {
+      if (!isObj(pl) || typeof pl.name !== 'string' || !isBytes(pl.quota) || !pl.quota || !Array.isArray(pl.points)) {
+        return 'pools: [{name, quota > 0, points: [{scan, bytes}]}]'
+      }
+      const pts: DigestPoint[] = []
+      for (const p of pl.points) {
+        if (!isObj(p) || !isScanId(p.scan) || !isBytes(p.bytes)) return 'pools: [{name, quota > 0, points: [{scan, bytes}]}]'
+        pts.push({ t: scanTime(p.scan), bytes: p.bytes })
+      }
+      pools.push({ name: pl.name, quota: pl.quota, points: pts.sort((x, y) => x.t - y.t) })
+    }
+    const a = b.alert_pct ?? 90
+    if (typeof a !== 'number' || !(a > 0 && a <= 100)) return 'alert_pct: (0, 100]'
+    return { kind, ...common, ...frame(pools.flatMap(pl => pl.points.map(p => p.t))), pools, alertPct: a, diff }
   }
   const points: DigestPoint[] = []
   for (const p of raw) {

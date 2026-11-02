@@ -3,6 +3,7 @@
  * writes the scans (`Cw.rows_json`); the replies stay the job's. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
+import { pools, quotaLine, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 
 export interface CwScan {
@@ -90,6 +91,7 @@ export function opText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams
   const lines = [
     `:arrow_deg${deg(mweekly)}: ${p.headline.map(f => figures[f]).join('')}${primary}${grouped(last.tb, 0)} ${u.name}${quotas(last.tb, last.classes, qs, cfg)}` +
       `${extras(last, dextra(last, b0 !== last ? b0 : null), mtdSince, cfg)} · [dashboard](${site}/)`,
+    ...(p.quotas === 'off' ? [] : [quotaLine(last, cfg, p.alertAt)].filter(Boolean)),
     `_as of ${md(dayOf(date(last)))} ${hhmm(ts(last))}Z_`,
     '',
     '*Weekly summaries*',
@@ -139,6 +141,19 @@ export function imageRequest(m: CwRows, month: number, cfg: DigestCfg, p: Digest
     units: u.name,
   }
   if (q) body.quota = { bytes: q.bytes, name: q.name }
+  if (p.plot === 'pools') {
+    // every pool's share of its quota over the same scans (a scan without the pool's buckets: no point)
+    body.kind = 'pools'
+    body.alert_pct = p.alertAt
+    body.pools = pools(cfg).map(pl => ({
+      name: pl.name,
+      quota: pl.quota.bytes,
+      points: scans.flatMap(r => {
+        const v = used(pl, r, cfg)
+        return v == null ? [] : [{ scan: r.scan, bytes: pyRound(v * u.bytes) }]
+      }),
+    })).filter(pl => pl.points.length)
+  }
   const from = p.diff === 'mtd' ? base(m) : back
   if (from !== last) {
     const s = `${md(dayOf(date(from)))} → ${md(dayOf(date(last)))}`

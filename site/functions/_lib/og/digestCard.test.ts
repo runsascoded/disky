@@ -1,7 +1,7 @@
 /** The digest image: its chart and map texts, and the PNG it rasterizes to
  * (written to `tmp/digest-sample.png` for a look). */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { digestSvg, fmtIn, niceTicks, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type TiersCardInput } from './digestCard'
+import { digestSvg, fmtIn, niceTicks, poolsSvg, spread, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type PoolsCardInput, type TiersCardInput } from './digestCard'
 import { ensureWasm, svgToPng } from './render'
 import { diffRoot } from '../../../src/diffStyle'
 import type { DiffData } from '../../../src/diffModel'
@@ -98,6 +98,38 @@ describe('digestSvg', () => {
   })
 })
 
+// Four quota pools over 10/1 → 10/14: 02a near three quarters, 06a steady in the amber band, the rno2a zone over its
+// quota mid-month then cleaned up, 04a all but empty (faint).
+const poolsInput = (): PoolsCardInput => ({
+  title: 'Usage — October 2026', note: 'example.org · TiB',
+  pools: [
+    { name: '02a', quota: 910 * T, points: [700, 680, 678].map((v, i) => ({ t: day(1 + 6 * i), bytes: v * T })) },
+    { name: '06a', quota: 100 * T, points: [88.5, 88.5, 88.5].map((v, i) => ({ t: day(1 + 6 * i), bytes: v * T })) },
+    { name: 'rno2a zone', quota: 100 * T, points: [93, 100.5, 68].map((v, i) => ({ t: day(1 + 6 * i), bytes: v * T })) },
+    { name: '04a', quota: 100 * T, points: [0.2, 0.2, 0.2].map((v, i) => ({ t: day(1 + 6 * i), bytes: v * T })) },
+  ],
+  from: day(1) - 16 * 3600_000, to: day(31, 16), alertPct: 90,
+})
+
+describe('poolsSvg', () => {
+  it('draws every pool on one % axis: the quota at 100%, loud pools labelled at their latest share, quiet ones listed', () => {
+    expect(texts(poolsSvg(poolsInput()))).toEqual([
+      'Usage — October 2026', 'example.org · TiB',
+      '0%', '25%', '50%', '75%', '100%',
+      'quota (each pool’s own)',
+      '10/5', '10/12', '10/19', '10/26',
+      '02a 75%', '06a 89%', 'rno2a zone 68%',
+      'also: 04a 0%',
+    ])
+  })
+})
+
+describe('spread', () => {
+  it('pushes labels at least `gap` apart, order kept, inside the bounds', () => {
+    expect([spread([50, 52, 100], 15, 0, 200), spread([195, 198], 15, 0, 200), spread([], 15, 0, 200)]).toEqual([[50, 65, 100], [185, 200], []])
+  })
+})
+
 describe('digest PNG', () => {
   beforeAll(async () => {
     const { readFile } = await fsp()
@@ -121,6 +153,7 @@ describe('digest PNG', () => {
     await mkdir('tmp', { recursive: true })
     await writeFile('tmp/digest-tiers-sample.png', png)
     await writeFile('tmp/digest-tiers-sample-1.png', svgToPng(tiersSvg(tiersInput(1)), fonts, 1.5))  // a month's first scan
+    await writeFile('tmp/digest-pools-sample.png', svgToPng(poolsSvg({ ...poolsInput(), diff: { root: diffRoot(data, 'delta', true, false, 'bucket')!.root, title: 'What changed in bucket — 9/30 → 10/14' } }), fonts, 1.5))
     await writeFile('tmp/digest-tiers-diff-sample.png', svgToPng(tiersSvg({ ...tiersInput(), diff: { root: diffRoot(data, 'delta', true, false, 'all')!.root, title: 'What changed — 10/1 → 10/17' } }), fonts, 1.5))
   })
 })
