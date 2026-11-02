@@ -44,7 +44,7 @@ export interface Cover {
 
 /** `/api/filter-cover`'s version: in its cache key, and the client's `cv=` (a browser's private copy
  *  must not outlive a change either). Bumped when an answer would change. */
-export const COVER_V = 6
+export const COVER_V = 7
 
 /** Why a cover over the item cap (`/api/filter-cover` `COVER_ITEMS_MAX`) isn't offered (shown muted, on the disabled actions). */
 export const overCapReason = (n: number, atLeast = false): string =>

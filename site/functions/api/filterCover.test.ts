@@ -113,6 +113,13 @@ describe('D1', () => {
         ],
       }])
     })
+    it('a view whose own path matches: the folder whole (every descendant of a match root matches)', async () => {
+      expect(await cover(`date=${A}&path=bk/tmp/ttl=14d&q=ttl`)).toEqual([200, {
+        date: A, path: 'bk/tmp/ttl=14d', q: 'ttl', complete: true, looked: 1, unchecked: 0,
+        roots: { n: 1, b: 5242880, o: 2 },
+        items: [{ path: 'bk/tmp/ttl=14d', kind: 'dir', b: 5242880, o: 2, roots: 1 }],
+      }])
+    })
     it('refuses what isn\'t a set of exact prefixes, and a scan the store doesn\'t have', async () => {
       expect(await cover(`date=${A}&path=&q=ttl -misc`)).toEqual([400, { error: 'A filter with exclusions can’t be turned into whole folders or files to act on; drop the exclusion to act on the matches.', code: 'cover-exclusions' }])
       expect(await cover(`date=${A}&path=`)).toEqual([400, { error: 'q= (a filter) is required' }])
