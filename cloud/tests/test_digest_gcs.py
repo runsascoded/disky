@@ -172,15 +172,15 @@ def test_image_body():
         "title": "GCS usage — August 2026",
         "note": "site.example.org · TiB",
         "month": "2026-08",
-        # the window: 30 days back from the latest scan (8/4)
-        "from": "2026-07-05",
+        # the window: 30 days to the latest scan (8/4), inclusive
+        "from": "2026-07-06",
         "units": "TiB",
         "tiers": ["Archive", "Coldline", "Nearline", "Standard"],
         "points": [
             {"scan": "2026-08-03", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 330 * TIB]},
             {"scan": "2026-08-04", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]},
         ],
-        # month-to-date: the first scan's lead-in (8/2) → the latest
+        # the window's: its baseline (a store younger than it: the first scan's lead-in, 8/2) → the latest
         "diff": {"from": "2026-08-02", "to": "2026-08-04", "path": "", "title": "What changed — 8/2 → 8/4"},
     }
 

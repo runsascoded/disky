@@ -303,6 +303,13 @@ class Month:
         """The OP window's first day (`window_start`, to the latest scan) and every scan this holds, in order."""
         return window_start(m, dt.date.fromisoformat(self.rows[-1].date)), self.pre + self.lead + self.rows
 
+    def back(self, m: dt.date) -> Scan:
+        """The window's baseline (its look-back figure's, its plot's first point, its diff map's start): the last scan
+        before its first day, else the earliest this holds (a store younger than the window)."""
+        start, seen = self.window(m)
+        before = [r for r in seen if r.date < start.isoformat()]
+        return before[-1] if before else seen[0]
+
     @property
     def base(self) -> Scan:
         """Month-to-date / first-week baseline: the last pre-month scan, else
@@ -400,9 +407,8 @@ def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig, p
     # with extra buckets alongside, the headline total is visibly the primary's
     primary = f"{_bucket_link(cfg.primary, last.scan, mtd_since, cfg, last.slug)} " if cfg.primary and last.extra else ""
     start, seen = month.window(m)
-    # the look-back figure: from the window's first day's scan (else the earliest this holds: a younger store)
-    back = [r for r in seen if r.date <= start.isoformat()]
-    b30 = back[-1] if back else seen[0]
+    # the look-back figure, over the window
+    b30 = month.back(m)
     b30_url = _diff_url(last.scan, scan_ts(b30.scan) if b30 is not last else None, site_url, slug=last.slug)
     # (none when it starts where month-to-date does: a store whose first scan is this month's)
     look = f"**{_tb(last.tb - b30.tb)} {u.name}** [{window_label(start, b30.scan)}]({b30_url}) · " if b30 is not base else ""
@@ -527,13 +533,13 @@ def load_tree(root: str, scan: str, primary: str) -> dict:
 
 
 def image_body(month: Month, m: dt.date, cfg: DigestConfig) -> dict:
-    """`POST /api/digest-image`'s request for ``month``: every scan in the OP's window, from the last one before it on
+    """`POST /api/digest-image`'s request for ``month``: every scan in the OP's window, from its baseline (`back`) on
     (bytes of the primary, under its quota's classes), the window's first day (`from`: the site shades the month
-    after it), the primary's quota, and the headline interval's diff (none until the month spans two scans)."""
-    base, last = month.base, month.rows[-1]
+    after it), the primary's quota, and the window's diff (its baseline → the latest; none over a lone scan)."""
+    last = month.rows[-1]
     start, seen = month.window(m)
-    before = [r for r in seen if r.date < start.isoformat()]
-    scans = before[-1:] + [r for r in seen if r.date >= start.isoformat()]
+    base = month.back(m)
+    scans = [base] + [r for r in seen if r.date >= start.isoformat() and r is not base]
     q, u = cfg.primary_quota, cfg.unit
     body: dict = {
         "title": f"{cfg.title} — {m:%B %Y}",

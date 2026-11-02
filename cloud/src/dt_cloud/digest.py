@@ -417,9 +417,9 @@ WINDOW_DAYS = 30
 
 def window_start(month: dt.date, today: dt.date) -> dt.date:
     """The first day of ``month``'s OP window: the longer of the last ``WINDOW_DAYS`` days to ``today`` (the latest
-    scan's date) and the month to date. On 11/1 it's 10/2; once ``today`` is ``WINDOW_DAYS`` days into the month,
+    scan's date), inclusive, and the month to date. On 11/1 it's 10/3; from the month's ``WINDOW_DAYS``-th day on,
     the month's 1st."""
-    return min(month.replace(day=1), today - dt.timedelta(days=WINDOW_DAYS))
+    return min(month.replace(day=1), today - dt.timedelta(days=WINDOW_DAYS - 1))
 
 
 def week_of(d: dt.date) -> dt.date:
@@ -433,9 +433,9 @@ def prior_month(month: dt.date) -> dt.date:
 
 
 def window_label(start: dt.date, since: str) -> str:
-    """The OP's look-back figure's label: `last 30d` from a scan at or before ``start`` (the window's first day), else
-    `since M/D` (``since``: the scan it starts from; a store with less history than the window)."""
-    return f"last {WINDOW_DAYS}d" if since[:10] <= start.isoformat() else f"since {_md(since)}"
+    """The OP's look-back figure's label: `last 30d` from the last scan before ``start`` (the window's first day),
+    else `since M/D` (``since``: the scan it starts from; a store with less history than the window)."""
+    return f"last {WINDOW_DAYS}d" if since[:10] < start.isoformat() else f"since {_md(since)}"
 
 
 def prev_month_link(month: dt.date, url: str | None) -> list[str]:

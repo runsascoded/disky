@@ -69,6 +69,15 @@ class Month:
         """The OP window's first day (`window_start`, to the latest row) and every row this holds, in order."""
         return window_start(month, self.rows[-1].day), self.pre + self.rows
 
+    def back(self, month: dt.date) -> tuple[float, str]:
+        """The window's baseline (its look-back figure's, its diff map's start), as ``(TiB, scan id)``: the last row
+        before its first day, else the earliest row's own baseline (a store younger than the window)."""
+        start, seen = self.window(month)
+        before = [r for r in seen if r.day < start]
+        if before:
+            return before[-1].tb, before[-1].date
+        return seen[0].tb - (seen[0].dtb or 0), seen[0].prev or seen[0].date
+
 
 def _cost(class_bytes: dict, prices: dict[str, float]) -> float:
     return sum(class_bytes.get(c, 0) / GIB * prices[c] for c in prices)
@@ -121,12 +130,8 @@ def op_body(data: Month, month: dt.date, plot_url: str | None, cfg: DigestConfig
     mdtb = rows[-1].tb - base_tb
     mweekly = (mdtb / base_tb * 100 * 7 / len(rows)) if base_tb else 0
     start, seen = data.window(month)
-    # the look-back figure: from the window's first day's row (else the earliest row's baseline: a younger store)
-    back = [r for r in seen if r.day <= start]
-    if back:
-        b30_tb, b30_at = back[-1].tb, back[-1].date
-    else:
-        b30_tb, b30_at = seen[0].tb - (seen[0].dtb or 0), seen[0].prev or seen[0].date
+    # the look-back figure, over the window
+    b30_tb, b30_at = data.back(month)
     last = rows[-1]
     b30_url = f"{site_url}/?d={_dlink(last.date, last.slug)}-{_span(scan_ts(b30_at), scan_ts(last.date))}#over-time"
     # (none when it starts where month-to-date does: a store whose first scan is this month's)
@@ -183,8 +188,8 @@ TIERS = (("arch", "Archive"), ("cold", "Coldline"), ("near", "Nearline"), ("std"
 def image_body(data: Month, month: dt.date, cfg: DigestConfig) -> dict:
     """`POST /api/digest-image`'s request for ``month`` (`kind: tiers`): each day's sender's bytes per storage
     class, bottom → top (cold → hot), over the OP's window from the last day before it (`from`: its first day, the
-    site shades the month after it), drawn as the total line over the stacked classes, over the month-to-date diff
-    map (the first scan's lead-in → the latest, the OP's headline span; none until the month spans two scans)."""
+    site shades the month after it), drawn as the total line over the stacked classes, over the window's diff map
+    (its baseline, `Month.back` → the latest; none until there are two scans)."""
     rows = data.rows
     start, seen = data.window(month)
     before = [r for r in seen if r.day < start]
@@ -201,7 +206,7 @@ def image_body(data: Month, month: dt.date, cfg: DigestConfig) -> dict:
         "tiers": [name for _, name in TIERS],
         "points": [{"scan": r.date, "bytes": [round(getattr(r, k) * TIB) for k, _ in TIERS]} for r in by_day.values()],
     }
-    base, last = rows[0].prev or rows[0].date, rows[-1].date
+    base, last = data.back(month)[1], rows[-1].date
     if base < last:
         a, z = scan_ts(base), scan_ts(last)
         body["diff"] = {"from": base, "to": last, "path": "", "title": f"What changed — {a.month}/{a.day} → {z.month}/{z.day}"}
