@@ -12,7 +12,7 @@ import './slack.scss'
 // /admin/slack (specs/slack-preview-page.md), admin only: the monthly digest's OP as the job posted it (its preview
 // bundle, `/api/digest-preview`), beside the same rows re-rendered under other params (`src/digest`, the job's
 // renderer ported byte for byte) with their plots drawn by `/api/digest-image`. Read-only: nothing here changes what
-// the job posts. Candidates live in the URL (`?c=<params>;<params>…`, `digest/codec`), so a comparison is a link.
+// the job posts. Candidates live in the URL (`?dc=<params>;<params>…`, `digest/codec`), so a comparison is a link.
 
 interface Listing { bundles: { key: string; month: string; channel: string; variant: string }[] }
 
@@ -133,12 +133,12 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
 
 export function SlackPage() {
   useDocTitle('Slack digest', 'Admin')
-  const [k, setK] = useUrlState('k', stringParam())
-  const [c, setC] = useUrlState('c', stringParam())
+  const [k, setK] = useUrlState('dk', stringParam())
+  const [c, setC] = useUrlState('dc', stringParam())
   const list = useQuery({ queryKey: ['digest-preview'], queryFn: () => getJson<Listing>('/api/digest-preview') })
   const key = k ?? list.data?.bundles[0]?.key
   const b = useQuery({ queryKey: ['digest-preview', key], enabled: !!key, queryFn: () => getJson<PreviewBundle>(`/api/digest-preview?key=${encodeURIComponent(key!)}`) })
-  // a default candidate is `.` in the URL (its params encode empty); no `c` at all: one default candidate
+  // a default candidate is `.` in the URL (its params encode empty); no `dc` at all: one default candidate
   const cands = c === undefined ? [''] : c ? c.split(';').map(x => (x === '.' ? '' : x)) : []
   return (
     <div className="admin-page slack-page">

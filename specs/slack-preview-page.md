@@ -47,7 +47,7 @@ Writing it to the served store is needed because the converge state itself lives
 - **Month picker** (default: the current month), listing the months the bundles cover.
 - **Live** column: the posted OP from the bundle, as Slack renders it (mrkdwn → HTML: bold, italics, links, `:arrow_degN:` as the arrow images, the image line as the PNG). The plot is redrawn from the bundle's `image` request. A link goes to the thread (`permalink`).
 - **Candidate** columns (1–3, "+ compare"): the same rows under edited params, re-rendered client-side by the shared TS renderer (`opText`). The plot comes from `POST /api/digest-image` with `imageRequest(rows, params)`, so it costs one render per change, debounced. A column's controls are the params above, each with a "reset to live" control. Lines that differ from the live OP are marked.
-- **Params in the URL** (`use-prms`, e.g. `?c1=w30,t0.7-1,dw&c2=w45,…`), so a comparison is a link.
+- **Params in the URL** (`use-prms`: `?dk=<bundle key>&dc=<params>;<params>`, e.g. `?dc=.;w14,dm`), so a comparison is a link.
 - **Rows inspector** (collapsed): the window's rows as a table, for checking a figure by hand.
 
 New endpoints:

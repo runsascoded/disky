@@ -1,4 +1,4 @@
-/** `DigestParams` in a URL (`/admin/slack`'s candidate columns, `?c=w30,t0.7-1,dw,hmw,kw;w45,…`): `w<days>`,
+/** `DigestParams` in a URL (`/admin/slack`'s candidate columns, `?dc=w30,t0.7-1,dw,hmw,kw;w45,…`): `w<days>`,
  * `t<p0>-<p1>`, `d<w|m>` (diff: window | month-to-date), `h<m|w…>` (headline figures, in order; `h` alone: none),
  * `k<w|m>` (weeks: window | month). A field left out is the default's; an unreadable one is dropped. */
 import { DEFAULT_PARAMS, type DigestParams } from './common'
