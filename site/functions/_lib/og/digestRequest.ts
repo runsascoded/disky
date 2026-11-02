@@ -142,6 +142,7 @@ export function parseDigestRequest(b: unknown): DigestRequest | string {
       }
       pools.push({ name: pl.name, quota: pl.quota, points: pts.sort((x, y) => x.t - y.t) })
     }
+    if (!pools.some(pl => pl.points.length)) return 'pools: at least one point'
     const a = b.alert_pct ?? 90
     if (typeof a !== 'number' || !(a > 0 && a <= 100)) return 'alert_pct: (0, 100]'
     return { kind, ...common, ...frame(pools.flatMap(pl => pl.points.map(p => p.t))), pools, alertPct: a, diff }
