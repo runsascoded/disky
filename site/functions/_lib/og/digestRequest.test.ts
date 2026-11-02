@@ -1,7 +1,7 @@
 /** `POST /api/digest-image`'s request validation: both kinds' parsed form, and each 400's message. */
 import { describe, expect, it } from 'vitest'
 import { TIER_COLORS } from './digestCard'
-import { parseDigestRequest } from './digestRequest'
+import { parseDigestRequest, todayAt, windowFrame } from './digestRequest'
 
 const T = 2 ** 40
 const H = 3600_000
@@ -21,7 +21,7 @@ describe('parseDigestRequest: tiers', () => {
   it('parses the tiers (default colours, bottom → top) and the points (time-sorted) over the month frame', () => {
     expect(parseDigestRequest(tiers)).toEqual({
       kind: 'tiers', title: 'marin GCS — October 2026', note: 'gcs.oa.dev · TiB', units: 'TiB',
-      from: OCT - 16 * H, to: NOV - 8 * H,
+      from: OCT - 16 * H, to: NOV - 8 * H, month: OCT,
       tiers: [
         { name: 'Archive', color: TIER_COLORS[0] }, { name: 'Coldline', color: TIER_COLORS[1] },
         { name: 'Nearline', color: TIER_COLORS[2] }, { name: 'Standard', color: TIER_COLORS[3] },
@@ -65,7 +65,7 @@ describe('parseDigestRequest: usage', () => {
   it('is the kind when none is given (the cw job sends none); its frame widens to the lead-in scan', () => {
     expect(parseDigestRequest(usage)).toEqual({
       kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TB',
-      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H,
+      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H, month: OCT,
       points: [{ t: Date.UTC(2026, 8, 30, 8), bytes: 14e12 }, { t: Date.UTC(2026, 9, 1, 8), bytes: 15e12 }],
       quota: { bytes: 253e12, name: '253 TB public' },
       diff: { from: '2026-09-30T0800', to: '2026-10-01T0800', path: 'bucket', title: 'What changed' },
@@ -75,10 +75,45 @@ describe('parseDigestRequest: usage', () => {
   it('drops a malformed quota, and takes no diff', () => {
     expect(parseDigestRequest({ ...usage, quota: { bytes: '1' }, diff: null, units: undefined })).toEqual({
       kind: 'usage', title: 'Usage — October 2026', note: 'example.org · TB', units: 'TiB',
-      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H,
+      from: Date.UTC(2026, 8, 30, 8), to: NOV - 8 * H, month: OCT,
       points: [{ t: Date.UTC(2026, 8, 30, 8), bytes: 14e12 }, { t: Date.UTC(2026, 9, 1, 8), bytes: 15e12 }],
       quota: null, diff: null,
     })
+  })
+  it("over a window (`from`): from its baseline scan, the latest scan at `todayAt` of the width, the month its own", () => {
+    // 10/1 08:00, the 1st: the baseline 9/1 08:00 (before the window's first day, 9/2), the latest at 0.7
+    const req = parseDigestRequest({ ...usage, from: '2026-09-02', points: [{ scan: '2026-09-01T0800', bytes: 13e12 }, ...usage.points] })
+    if (typeof req === 'string') throw new Error(req)
+    const t = Date.UTC(2026, 9, 1, 8)
+    expect([req.from, req.month, +((t - req.from) / (req.to - req.from)).toFixed(9)]).toEqual([Date.UTC(2026, 8, 1, 8), OCT, 0.7])
+  })
+  it("places the latest scan at 0.7 of the width on the 1st, rising linearly to 1 on the month's last day", () => {
+    expect([todayAt(1, 31), todayAt(16, 31), todayAt(31, 31), todayAt(1, 28), todayAt(28, 28)].map(v => +v.toFixed(9))).toEqual([0.7, 0.85, 1, 0.7, 1])
+    expect(todayAt(15, 30)).toBeCloseTo(0.7 + 0.3 * 14 / 29, 12)
+  })
+  it('spans the window plus runway: [today − 29 d, today + 29 d · (1 − p) / p]', () => {
+    const D = 86400_000
+    const span = (y: number, mo: number, d: number) => {
+      const today = Date.UTC(y, mo, d)
+      const { from, to } = windowFrame(today - 29 * D, [today - 29 * D, today], y, mo)
+      return [(from - today) / D, +((to - today) / D).toFixed(6)]
+    }
+    expect([
+      span(2026, 10, 1),   // Nov 1: p 0.7 → 29 · 0.3 / 0.7 ≈ 12.43 days of runway
+      span(2026, 10, 15),  // Nov 15: p = 0.7 + 0.3 · 14/29
+      span(2026, 10, 30),  // Nov 30, the last day: p 1, no runway
+      span(2027, 1, 1),    // Feb 1 (28 days): p 0.7
+      span(2027, 1, 28),   // Feb 28: p 1
+    ]).toEqual([
+      [-29, +(29 * 0.3 / 0.7).toFixed(6)],
+      [-29, +(29 * (1 - todayAt(15, 30)) / todayAt(15, 30)).toFixed(6)],
+      [-29, 0],
+      [-29, +(29 * 0.3 / 0.7).toFixed(6)],
+      [-29, 0],
+    ])
+  })
+  it('refuses a malformed `from`', () => {
+    expect(['2026-9-15', 20260915, null].map(from => parseDigestRequest({ ...usage, from }))).toEqual(['from: YYYY-MM-DD', 'from: YYYY-MM-DD', 'from: YYYY-MM-DD'])
   })
   it('refuses a bad diff', () => {
     expect([

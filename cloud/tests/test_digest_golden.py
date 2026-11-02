@@ -178,6 +178,9 @@ class FakeSlack:
         self.log.append({"op": "post", "content": content, "thread_id": thread_id, "username": username, "icon_url": icon_url, "icon_emoji": icon_emoji})
         return _Msg(f"m{sum(c['op'] == 'post' for c in self.log)}")
 
+    def permalink(self, ts):
+        return f"https://slack.example.org/archives/C1/p{ts}"
+
     def edit(self, ts, content):
         self.log.append({"op": "edit", "ts": ts, "content": content})
         return _Msg(ts)

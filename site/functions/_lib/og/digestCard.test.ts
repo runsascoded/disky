@@ -62,6 +62,20 @@ describe('digestSvg', () => {
       '1 PiB quota', '830 TiB · 83%',
     ])
   })
+  it("over a window reaching back before the month: the month shaded from its start, a rule there, both months named", () => {
+    const sep = (d: number) => Date.UTC(2026, 8, d)
+    const svg = digestSvg({ ...input(false), from: sep(14) - 16 * 3600_000, month: day(1), points: [{ t: sep(14), bytes: 800 * T }, ...input(false).points] })
+    expect(texts(svg)).toEqual([
+      'Usage — October 2026', 'example.org · bucket · TiB',
+      '← Sep', 'Oct →',
+      '800', '850', '900', '950', '1,000',
+      '9/14', '9/21', '9/28', '10/5', '10/12', '10/19', '10/26',
+      '1 PiB quota', '830 TiB · 83%',
+    ])
+    expect(svg.match(/fill-opacity="0.045"/g)?.length).toBe(1)
+    // a span that is just the month: no shading, no rule
+    expect(digestSvg({ ...input(false), month: day(1) })).toEqual(digestSvg(input(false)))
+  })
   it('in decimal TB (`units: TB`): the axis, quota share and call-out', () => {
     const TB = 1e12
     expect(texts(digestSvg({

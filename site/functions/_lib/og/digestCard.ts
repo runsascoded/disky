@@ -43,9 +43,12 @@ export interface DigestCardInput {
   /** Header's right side, e.g. `cw-s3.oa.dev · marin-us-east-02a · TiB`. */
   note: string
   points: DigestPoint[]
-  /** The x axis' span, epoch ms (the month). */
+  /** The x axis' span, epoch ms (the month, or the OP's window reaching back before it). */
   from: number
   to: number
+  /** The month's first instant, epoch ms: when the span starts days before it, the month is shaded from here, a rule
+   *  at its start. */
+  month?: number
   quota?: { bytes: number; name: string } | null
   diff?: { root: DiffNode; title: string } | null
   /** The y axis' unit and every size label's (default `TiB`). */
@@ -89,6 +92,27 @@ export function yRange(vals: number[], q: number | null): [number, number] {
   return [lo - span * 0.08, hi + span * 0.06]
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** A panel's current month when the span reaches back before it (the OP's window): the month shaded, a rule at its
+ *  start, labelled with both months' names (`label`, the top panel's) — none on a span that is just the month. */
+function monthShade(d: { from: number; month?: number }, f: Frame, y0: number, h: number, label = true): string[] {
+  if (d.month == null || d.month - d.from < 2 * 86400_000) return []
+  const x = f.X(d.month)
+  const prev = MONTHS[(new Date(d.month).getUTCMonth() + 11) % 12]
+  const cur = MONTHS[new Date(d.month).getUTCMonth()]
+  const out = [
+    `<rect x="${r1(x)}" y="${r1(y0)}" width="${r1(f.left + f.pw - x)}" height="${r1(h)}" fill="${INK}" fill-opacity="0.045"/>`,
+    `<line x1="${r1(x)}" x2="${r1(x)}" y1="${r1(y0)}" y2="${r1(y0 + h)}" stroke="${INK3}" stroke-opacity="0.8" stroke-width="1.5"/>`,
+  ]
+  if (label) {
+    // above the panel (under the header), clear of the quota label and the latest call-out inside it
+    out.push(text(x - 6, y0 - 4, `← ${prev}`, 11, { fill: INK3, anchor: 'end' }))
+    out.push(text(x + 6, y0 - 4, `${cur} →`, 11, { fill: INK2, weight: 600 }))
+  }
+  return out
+}
+
 /** The x frame shared by a card's panels: the plot's left edge (after the y labels), its width, and time → x. */
 interface Frame { left: number; pw: number; X: (t: number) => number }
 function frame(d: { from: number; to: number }, x0: number, w: number): Frame {
@@ -121,9 +145,11 @@ function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: numb
   let [lo, hi] = yRange(vals, q)
   const ticks = niceTicks(lo, hi)
   lo = Math.min(lo, ticks[0])
-  const { left, pw, X } = frame(d, x0, w)
+  const f = frame(d, x0, w)
+  const { left, pw, X } = f
   const Y = (v: number) => y0 + h - ((v - lo) / (hi - lo)) * h
   out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  out.push(...monthShade(d, f, y0, h))
   for (const v of ticks) {
     if (v < lo || v > hi) continue
     out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
@@ -237,9 +263,11 @@ export interface TiersCardInput {
   /** The stack's tiers, bottom → top. */
   tiers: { name: string; color: string }[]
   points: TierPoint[]
-  /** The x axis' span, epoch ms (the month). */
+  /** The x axis' span, epoch ms (the month, or the OP's window reaching back before it). */
   from: number
   to: number
+  /** The month's first instant, epoch ms (as `DigestCardInput.month`). */
+  month?: number
   /** The y axes' unit and every size label's (default `TiB`). */
   units?: DigestUnits
   /** The headline interval's diff map, under the legend (as `DigestCardInput.diff`). */
@@ -265,9 +293,11 @@ function stackSvg(d: TiersCardInput, x0: number, y0: number, w: number, h: numbe
   const top = Math.max(...pts.map(p => sum(p.bytes) / per), 1) * 1.04
   const ticks = niceTicks(0, top, 4)
   const hi = Math.max(ticks[ticks.length - 1], top)
-  const { left, pw, X } = frame(d, x0, w)
+  const f = frame(d, x0, w)
+  const { left, pw, X } = f
   const Y = (v: number) => y0 + h - (v / hi) * h
   out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  out.push(...monthShade(d, f, y0, h, false))
   for (const v of ticks) {
     out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
     out.push(text(left - 6, Y(v) + 4, v.toLocaleString('en-US'), 11, { fill: INK3, anchor: 'end' }))
@@ -302,7 +332,7 @@ export function tiersSvg(d: TiersCardInput): string {
   const out = [header(d.title, d.note)]
   let y = PAD + 36
   const totals = d.points.map(p => ({ t: p.t, bytes: sum(p.bytes) }))
-  out.push(chartSvg({ title: d.title, note: d.note, points: totals, from: d.from, to: d.to, units }, PAD, y, w, TOTAL_H, { xLabels: false, call: fmt }))
+  out.push(chartSvg({ title: d.title, note: d.note, points: totals, from: d.from, to: d.to, month: d.month, units }, PAD, y, w, TOTAL_H, { xLabels: false, call: fmt }))
   y += TOTAL_H + 12
   out.push(stackSvg(d, PAD, y, w, STACK_H))
   y += STACK_H + 30
