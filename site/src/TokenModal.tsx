@@ -184,10 +184,16 @@ export default function TokenModal({ onClose }: { onClose: () => void }) {
               <button type="button" onClick={() => copy(phase.token)}>{copied ? 'Copied' : 'Copy'}</button>
             </div>
             <p className="token-muted token-small">Then, in your agent’s environment:</p>
+            {/* Safe to paste whole: the read runs, and the write stops in the shell until PREFIX is set (an
+                example path would be sent as-is). */}
             <pre className="token-recipe">{`export GCS_USAGE_TOKEN=${phase.token}
+# check it: who the token acts as
+curl -sS -H "Authorization: Bearer $GCS_USAGE_TOKEN" ${location.origin}/api/me
+# assign a prefix to yourself: set PREFIX to one you own, e.g. ${store.scheme}${store.buckets[0] ?? 'my-bucket'}/…/
 curl -sS -H "Authorization: Bearer $GCS_USAGE_TOKEN" -H 'content-type: application/json' \\
-  -d '{"pattern": "${store.scheme}${store.buckets[0] ?? 'my-bucket'}/path/to/my-run/", "owner": "@me"}' \\
-  ${location.origin}/api/actions`}</pre>
+  -d "{\\"pattern\\": \\"\${PREFIX:?set PREFIX to a prefix you own}\\", \\"owner\\": \\"@me\\"}" \\
+  ${location.origin}/api/actions
+# more: ${location.origin}/llms.txt`}</pre>
             <div className="token-actions">
               <button type="button" onClick={() => void loadStatus()}>Done</button>
             </div>
