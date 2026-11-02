@@ -10,7 +10,7 @@ import {
 } from './activity'
 import {
   addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
-  renderDiscord, renderLines, renderSummary, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
+  renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
 import { ingest } from './sessionLog'
@@ -151,6 +151,23 @@ describe('rendering', () => {
     ])
   })
 
+  it("Slack's post is one line (sent as the user when signed in, else naming who and how); the rest is its first reply", () => {
+    const o = { fmt: SLACK, conf, highlights: highlights(events) }
+    const act = `<${ORIGIN}/admin/activity?burst=7|activity>`
+    expect([renderHeadline(burst, o, true), renderHeadline({ ...burst, via: 'grant' }, o, false)]).toEqual([
+      `3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+      `*ann* (agent token / share link) · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · ${act}`,
+    ])
+    expect(renderDetails(burst, o).split('\n')).toEqual([
+      'Largest assignment: `gs://b/y/` (2.0 PiB) → bob',
+      'Owners: bob, cleared',
+      'Pages: `/` ×3 → `/users`',
+      `<${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
+    ])
+    expect(renderDetails({ ...burst, pages: {}, trail: emptyTrail(), sids: [] }, { ...o, highlights: {} })).toBe('')
+    expect([senderName('ann@example.test', 'Ann Lee'), senderName('ann@example.test', ' '), senderName('ann@example.test', null)]).toEqual(['Ann Lee', 'ann', 'ann'])
+  })
+
   it('a long trail: the most-viewed paths, then the last stops; many sessions link to the list', () => {
     const long: Burst = {
       ...burst, pages: { '/': 9, '/a': 4, '/b': 2 }, trail: { n: 14, last: [['/a', 1], ['/', 2]] },
@@ -274,11 +291,13 @@ describe('D1 and sinks', () => {
       ['resume', '/users', 'after 4h 17m', { sid: 'sid-aaaaaa' }],
       ['resume', '/', 'after 59m 59s', { sid: 'sid-bbbbbb' }],
     ])
-    // One parent, posted once; each resumption re-renders it and the one `resume` reply.
+    // One parent (+ its details reply), posted once; each resumption re-renders them and the one `resume` reply.
     expect(calls.filter(c => c.url.endsWith('chat.postMessage')).map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
-      [null, '*ann* (browser) · 2026-10-21 15:00Z'],
+      [null, `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['1.000001', 'Pages: `/`'],
       ['1.000001', '*1 resumption*'],
-      [null, '*ann* (browser) · 2026-10-21 21:17Z'],
+      [null, `1 page load · 2026-10-21 21:17Z · <${ORIGIN}/admin/activity?burst=2|activity>`],
+      ['1.000004', 'Pages: `/`'],
     ])
     expect(String(calls.filter(c => c.url.endsWith('chat.update')).at(-1)!.body.text).split('\n')).toEqual([
       '*2 resumptions*',
@@ -287,9 +306,10 @@ describe('D1 and sinks', () => {
     ])
   })
 
-  it('Slack: client errors post at once as a reply, each linked to its session, repeats folded', async () => {
+  it('Slack: client errors post at once as a reply, each linked to its session, repeats folded; the post is sent as the user', async () => {
     const calls = stubFetch()
-    const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    const { db, raw, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    raw.prepare('INSERT INTO profiles (email, name, avatar, avatar_src, updated_at) VALUES (?, ?, NULL, NULL, ?)').run(who.actor, 'Ann Lee', S)
     const fail = (t: number, u: string) => ({ t, k: 'api', u, s: 0, ms: 3300, err: 'TypeError: Failed to fetch' })
     const events = [{ t: NOW, k: 'start', u: '/admin' }, fail(NOW + 1, '/api/auth/whoami'), fail(NOW + 2, '/api/auth/whoami'), { t: NOW + 3, k: 'console', msg: 'a<b' }] as SlogEvent[]
     await feed(env, wait, 'sid-aaaaaa', events, NOW + 5000)
@@ -299,9 +319,10 @@ describe('D1 and sinks', () => {
       ['error', '/admin', 'console.error: a<b', { sid: 'sid-aaaaaa' }],
     ])
     const link = `<${ORIGIN}/admin/sessions/sid-aaaaaa?show=errors|15:00>`
-    expect(calls.map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')])).toEqual([
-      [null, ['*ann* (browser) · 2026-10-21 15:00Z', '1 page load · 3 errors', 'Pages: `/admin`', `<${ORIGIN}/admin/activity?burst=1|activity> · <${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
-      ['1.000001', ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+    expect(calls.map(c => [c.body.thread_ts ?? null, c.body.username ?? null, String(c.body.text).split('\n')])).toEqual([
+      [null, 'Ann Lee', [`1 page load · 3 errors · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`]],
+      ['1.000001', 'Ann Lee', ['Pages: `/admin`', `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
+      ['1.000001', null, ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
     ])
   })
 
@@ -318,8 +339,10 @@ describe('D1 and sinks', () => {
     ])
     expect(await rerender(env, [1, 7])).toEqual([1])
     expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), c.body.thread_ts ?? c.body.ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
-      ['chat.postMessage', null, '*ann* (browser) · 2026-10-21 15:00Z'],
-      ['chat.update', '1.000001', '*ann* (browser) · 2026-10-21 15:00Z'],
+      ['chat.postMessage', null, `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.postMessage', '1.000001', 'Pages: `/scans`'],
+      ['chat.update', '1.000001', `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.update', '1.000002', 'Pages: `/scans`'],
       ['chat.postMessage', '1.000001', '*1 error*'],
     ])
   })
@@ -336,16 +359,18 @@ describe('D1 and sinks', () => {
     ])
   })
 
-  it('Slack: a line event posts the summary and a reply, the next edits both', async () => {
+  it('Slack: a line event posts the summary, its details and a reply, the next edits all three', async () => {
     const calls = stubFetch()
     const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
     await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
     await recordServer(env, who, [assign(S + 60, 'gs://b/y/')], wait, NOW + 60_000)
     expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), c.body.thread_ts ?? c.body.ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
-      ['chat.postMessage', null, '*ann* (browser) · 2026-10-21 15:00Z'],
+      ['chat.postMessage', null, `1 assignment · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.postMessage', '1.000001', 'Owners: bob'],
       ['chat.postMessage', '1.000001', '*1 assignment*'],
-      ['chat.update', '1.000001', '*ann* (browser) · 2026-10-21 15:00–15:01Z'],
-      ['chat.update', '1.000002', '*2 assignments*'],
+      ['chat.update', '1.000001', `2 assignments · 2026-10-21 15:00–15:01Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.update', '1.000002', 'Owners: bob'],
+      ['chat.update', '1.000003', '*2 assignments*'],
     ])
   })
 
@@ -356,13 +381,15 @@ describe('D1 and sinks', () => {
     await feed(env, wait, 'sid-aaaaaa', page(NOW), NOW)
     vi.setSystemTime(NOW + 5000)
     await feed(env, wait, 'sid-aaaaaa', page(NOW + 5000), NOW + 5000)
-    expect(calls.length).toBe(1)
+    expect(calls.length).toBe(2)
     expect((await loadBurst(db, 1))!.dirty).toBe(true)
     await vi.advanceTimersByTimeAsync(THROTTLE_MS)
     await Promise.all(pending)
-    expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), String(c.body.text).split('\n')[1]])).toEqual([
-      ['chat.postMessage', '1 page load'],
-      ['chat.update', '2 page loads'],
+    expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), String(c.body.text).split('\n')[0]])).toEqual([
+      ['chat.postMessage', `1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.postMessage', 'Pages: `/`'],
+      ['chat.update', `2 page loads · 2026-10-21 15:00–15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['chat.update', 'Pages: `/` ×2'],
     ])
     expect((await loadBurst(db, 1))!.dirty).toBe(false)
   })
