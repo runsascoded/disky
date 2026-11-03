@@ -822,11 +822,37 @@ def cut_plan(segs: list[tuple[int, int]], rg_rows: int, k: int) -> list[list[tup
     return [p for p in parts if p] or [[]]
 
 
+#: The served sorts' columns with statistics (`_served_writer`): their pages' bounds are the page index's.
+STAT_COLS = ("depth", "path", "vf", "vt")
+
+
+def writer_meta(files: list[str], rg_rows: int, page_rows: int = SERVED_PAGE_ROWS) -> int:
+    """What a served sort's writer keeps per row group it has written (`tree_mem.group_meta`), from `files`' footers
+    (the range or delta files it's cut from): their widest column count, `rg_rows / page_rows` pages, and the string
+    statistics columns' bytes a value (the widest file's uncompressed bytes a row of each)."""
+    cols, stat = 1, 0
+    for f in files:
+        if not Path(f).exists():
+            continue
+        md = pq.read_metadata(f)
+        cols = max(cols, md.num_columns)
+        sch = md.schema.to_arrow_schema()
+        strs = {i for i, c in enumerate(sch) if c.name in STAT_COLS and (pa.types.is_string(c.type) or pa.types.is_large_string(c.type))}
+        size, rows = 0, 0
+        for g in range(md.num_row_groups):
+            rg = md.row_group(g)
+            size += sum(rg.column(i).total_uncompressed_size for i in strs)
+            rows += rg.num_rows
+        if rows:
+            stat = max(stat, -(-size // rows))
+    return tm.group_meta(cols, -(-rg_rows // page_rows), stat)
+
+
 def _served_writer(out: Path, schema: pa.Schema, page: int) -> pq.ParquetWriter:
     """A served sort's writer (`write_served`): zstd, `page`-row pages with a page index, statistics on the planning
     columns, a dictionary on the low-cardinality strings only."""
     return pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=[c for c in ("kind", "us", "usr", "user", "source") if c in schema.names],
-                            write_statistics=[c for c in ("depth", "path", "vf", "vt") if c in schema.names],
+                            write_statistics=[c for c in STAT_COLS if c in schema.names],
                             write_page_index=True, write_batch_size=page, data_page_size=1)
 
 
@@ -1355,13 +1381,14 @@ def write_groups(out: Path, bounds: Iterable[dict], sort: str, summary) -> dict:
 
 @contextmanager
 def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1, rg_rows: int = SERVED_RG,
-             what: str = "cut") -> Iterator[tuple[int, int]]:
+             what: str = "cut", sort_rows: int | None = None) -> Iterator[tuple[int, int]]:
     """The cut's `(procs, run budget)` for `at_once` sorts at once over `files` (local range or delta files: their
     footers size a row and count the rows), as every entry that cuts plans it. `tree`: the process tree's budget
     (`tree_mem.Budget`): the workers planned under it (`Budget.cut`, rows of the files' widest + `SPOOL_EXTRA`, no holder
-    charged more rows than the files have), DuckDB's limit set to the rest for the block, then the previous limit back;
-    None: the machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of DuckDB's limit
-    (`run_budget` over `at_once × procs`)."""
+    charged more rows than the files have, each sort's writers' metadata `writer_meta` a group over `sort_rows` rows —
+    the most one sort has, default all of `files`'), DuckDB's limit set to the rest for the block, then the previous
+    limit back; None: the machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of
+    DuckDB's limit (`run_budget` over `at_once × procs`)."""
     cores = os.cpu_count() or 1
     if tree is None:
         procs = max(1, cores // at_once)
@@ -1372,11 +1399,16 @@ def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1,
     if remote := [f for f in files if not Path(f).is_file()]:
         raise SystemExit(f"{what}: the cut's plan reads its inputs' footers, which aren't local files ({remote[0]}…): mount the store")
     rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files))
-    plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n)
+    sort_rows = min(n, sort_rows or n)
+    meta = writer_meta(files, rg_rows)
+    plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n, meta=meta, sort_rows=sort_rows)
+    groups = -(-sort_rows // rg_rows)
+    kept = at_once * plan.procs * -(-groups // plan.procs) * meta
     prev = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
     con.execute(tm.duck_sql(plan.duck))
     err(f"{what}: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + {at_once} sorts × {plan.procs} workers × "
-        f"{tree.proc_base / tm.MIB:,.0f} + Arrow {plan.arrow / tm.MIB:,.0f} ({rb} B a row) + DuckDB {plan.duck / tm.MIB:,.0f}")
+        f"{tree.proc_base / tm.MIB:,.0f} + Arrow {(plan.arrow - kept) / tm.MIB:,.0f} ({rb} B a row) + writers' metadata "
+        f"{kept / tm.MIB:,.0f} ({at_once} × {groups:,} groups × {meta:,} B) + DuckDB {plan.duck / tm.MIB:,.0f}")
     try:
         yield plan.procs, run_budget(con, at_once * plan.procs)
     finally:
@@ -1401,7 +1433,12 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
     at_once = max(1, min(jobs, len(todo)))
     ins = [str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))]
-    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows) as (procs, budget):
+    most = None
+    if tree is not None:
+        from .interval_compact import input_rows
+
+        most = max(input_rows([str(p) for p in (gen_dir / sub).glob("r*.parquet")]) for sub in size)
+    with plan_cut(con, tree, ins, at_once=at_once, rg_rows=rg_rows, sort_rows=most) as (procs, budget):
         def one(cur, sort: str) -> dict:
             sub, _, _ = SORTS[sort]
             t1 = monotonic()

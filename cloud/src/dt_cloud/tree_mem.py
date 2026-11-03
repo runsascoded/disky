@@ -62,10 +62,19 @@ FOLD_GROUPS = WRITER_ACTIVE + (FOLD_WRITERS - 1) * WRITER_IDLE
 #: Batches a run's or a piece's sort holds in this process (`_sort_run`): the fetched batch, and the spool writer's
 #: encoding of it.
 SORT_COPIES = 2
-#: Spool groups a writing worker holds (`cut_part`): the compressed group being read and its decoded rows.
-PART_SPOOL = 2
+#: Spool groups' worth of rows a writing worker holds while it reads (`cut_part` → `_file_rows`): the group's compressed
+#: column chunks (pyarrow reads a chunk whole), their decompressed pages, the decoded group, the batch sliced from it.
+#: Measured: 2.9–3.9 × a spool group's `rb` bytes past the worker's imports (64Ki-row spool groups, 270–440 B rows).
+PART_SPOOL = 4
 #: Served groups a writing worker holds: pending rows (≤ a group + a spool batch), the group's combined copy, its encoding.
 PART_GROUPS = 3
+#: Bytes the parquet writer keeps per column chunk it has written until it closes (`pq.ParquetWriter`: the chunk's
+#: metadata and statistics, its page-index builders): a worker's part grows by this × columns every served group.
+#: Measured ~2.1 KiB (one-page groups of 19 columns: 36–41 KiB a group).
+CHUNK_META = 2304
+#: Bytes it keeps per page of each column (its OffsetIndex location, its ColumnIndex entry): measured ~48 B, plus each
+#: statistics string column's min and max (`interval_store.STAT_COLS`; `group_meta`'s `stat_bytes`).
+PAGE_META = 48
 #: The buffer a joining worker copies through (`parquet_pages._copy_range`, without `copy_file_range`).
 CONCAT_BUF = 1 << 24
 #: The share of `-M` past `base` the cut's workers (their `proc_base` and buffers) and its sorts' batches may take;
@@ -152,13 +161,22 @@ def fold_arrow(jobs: int, rg_rows: int, rb: int) -> int:
 
 
 def part_bytes(spool_rows: int, rg_rows: int, rb: int) -> int:
-    """A writing worker's bytes: `PART_SPOOL` spool groups (≤ `spool_rows` rows) and `PART_GROUPS` served groups."""
+    """A writing worker's buffers: `PART_SPOOL` spool groups (≤ `spool_rows` rows) and `PART_GROUPS` served groups."""
     return (PART_SPOOL * spool_rows + PART_GROUPS * rg_rows) * rb
 
 
-def worker_bytes(spool_rows: int, rg_rows: int, rb: int) -> int:
-    """A cut worker's bytes: the more of its two tasks' (write, join)."""
-    return max(part_bytes(spool_rows, rg_rows, rb), CONCAT_BUF)
+def group_meta(cols: int, pages: int, stat_bytes: int = 0) -> int:
+    """What the parquet writer keeps per served row group it has written, until it closes: `CHUNK_META` a column chunk,
+    `PAGE_META` a page of each column, and the min and max of each page of its statistics string columns (`stat_bytes`
+    a value, summed over them)."""
+    return cols * CHUNK_META + pages * (cols * PAGE_META + 2 * stat_bytes)
+
+
+def worker_bytes(spool_rows: int, rg_rows: int, rb: int, groups: int = 0, meta: int = 0) -> int:
+    """A cut worker's bytes past its imports: the more of its two tasks' buffers (write, join), plus what its writer
+    kept for the `groups` served groups of its part (`meta` each, `group_meta`), which the join doesn't free (the
+    writer's metadata is the C++ heap's, not Arrow's pool)."""
+    return max(part_bytes(spool_rows, rg_rows, rb), CONCAT_BUF) + groups * meta
 
 
 def sort_bytes(procs: int, spool_rows: int, rb: int) -> int:
@@ -210,18 +228,22 @@ class Budget:
         a = fold_arrow(jobs, min(rg_rows, rows or rg_rows), rb)
         return a, self.duck(a, 0, f"{jobs} fold jobs")
 
-    def cut(self, at_once: int, cores: int, rg_rows: int, rb: int, spool_rows: int, rows: int | None = None) -> CutPlan:
+    def cut(self, at_once: int, cores: int, rg_rows: int, rb: int, spool_rows: int, rows: int | None = None, *,
+            meta: int = 0, sort_rows: int | None = None) -> CutPlan:
         """The cut's plan: the most workers (≤ `cores // at_once` a sort) whose bytes — `at_once × (procs × (proc_base +
         worker_bytes) + sort_bytes)`, each row count charged at most `rows` (the sorts' rows: no batch or group holds
-        more) — fit `WORKER_SHARE` of `total − base`; none fitting: one. DuckDB gets the rest, which its runs and pieces
-        (`interval_store.run_budget`) are sized to."""
+        more) — fit `WORKER_SHARE` of `total − base`; none fitting: one. A worker's part is its sort's served groups
+        (of `sort_rows`, default `rows`, the most any one sort has) over the workers, each kept by its writer (`meta`
+        bytes, `group_meta`) until the part closes: all of a sort's groups' metadata at once, however many workers.
+        DuckDB gets the rest, which its runs and pieces (`interval_store.run_budget`) are sized to."""
         cap = (lambda r: min(r, rows)) if rows else (lambda r: r)  # noqa: E731
         room = (self.total - self.base) * WORKER_SHARE
         top = max(1, cores // max(1, at_once))
+        groups = -(-(sort_rows or rows or 0) // rg_rows)
 
         def cost(procs: int) -> tuple[int, int]:
             sort = SORT_COPIES * cap(procs * spool_rows) * rb  # `sort_bytes`, capped
-            arrow = at_once * (procs * worker_bytes(cap(spool_rows), cap(rg_rows), rb) + sort)
+            arrow = at_once * (procs * worker_bytes(cap(spool_rows), cap(rg_rows), rb, -(-groups // procs), meta) + sort)
             return arrow, arrow + at_once * procs * self.proc_base
 
         procs = next((p for p in range(top, 0, -1) if cost(p)[1] <= room), 1)
