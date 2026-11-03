@@ -1388,31 +1388,32 @@ def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1,
     charged more rows than the files have, each sort's writers' metadata `writer_meta` a group over `sort_rows` rows —
     the most one sort has, default all of `files`'), DuckDB's limit set to the rest for the block, then the previous
     limit back; None: the machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of
-    DuckDB's limit (`run_budget` over `at_once × procs`)."""
-    cores = os.cpu_count() or 1
-    if tree is None:
-        procs = max(1, cores // at_once)
-        yield procs, run_budget(con, at_once * procs)
-        return
-    from .interval_compact import input_rows, row_bytes
+    DuckDB's limit (`run_budget` over `at_once × procs`). The block is `TreeWatch`'s phase `what`."""
+    with tm.phase(what):
+        cores = os.cpu_count() or 1
+        if tree is None:
+            procs = max(1, cores // at_once)
+            yield procs, run_budget(con, at_once * procs)
+            return
+        from .interval_compact import input_rows, row_bytes
 
-    if remote := [f for f in files if not Path(f).is_file()]:
-        raise SystemExit(f"{what}: the cut's plan reads its inputs' footers, which aren't local files ({remote[0]}…): mount the store")
-    rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files))
-    sort_rows = min(n, sort_rows or n)
-    meta = writer_meta(files, rg_rows)
-    plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n, meta=meta, sort_rows=sort_rows)
-    groups = -(-sort_rows // rg_rows)
-    kept = at_once * plan.procs * -(-groups // plan.procs) * meta
-    prev = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
-    con.execute(tm.duck_sql(plan.duck))
-    err(f"{what}: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + {at_once} sorts × {plan.procs} workers × "
-        f"{tree.proc_base / tm.MIB:,.0f} + Arrow {(plan.arrow - kept) / tm.MIB:,.0f} ({rb} B a row) + writers' metadata "
-        f"{kept / tm.MIB:,.0f} ({at_once} × {groups:,} groups × {meta:,} B) + DuckDB {plan.duck / tm.MIB:,.0f}")
-    try:
-        yield plan.procs, run_budget(con, at_once * plan.procs)
-    finally:
-        con.execute(f"SET memory_limit='{prev}'")
+        if remote := [f for f in files if not Path(f).is_file()]:
+            raise SystemExit(f"{what}: the cut's plan reads its inputs' footers, which aren't local files ({remote[0]}…): mount the store")
+        rb, n = row_bytes(files) + SPOOL_EXTRA, max(1, input_rows(files))
+        sort_rows = min(n, sort_rows or n)
+        meta = writer_meta(files, rg_rows)
+        plan = tree.cut(at_once, cores, rg_rows, rb, CUT_SPOOL_RG, n, meta=meta, sort_rows=sort_rows)
+        groups = -(-sort_rows // rg_rows)
+        kept = at_once * plan.procs * -(-groups // plan.procs) * meta
+        prev = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        con.execute(tm.duck_sql(plan.duck))
+        err(f"{what}: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + {at_once} sorts × {plan.procs} workers × "
+            f"{tree.proc_base / tm.MIB:,.0f} + Arrow {(plan.arrow - kept) / tm.MIB:,.0f} ({rb} B a row) + writers' metadata "
+            f"{kept / tm.MIB:,.0f} ({at_once} × {groups:,} groups × {meta:,} B) + DuckDB {plan.duck / tm.MIB:,.0f}")
+        try:
+            yield plan.procs, run_budget(con, at_once * plan.procs)
+        finally:
+            con.execute(f"SET memory_limit='{prev}'")
 
 
 def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None,
@@ -1442,8 +1443,9 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
         def one(cur, sort: str) -> dict:
             sub, _, _ = SORTS[sort]
             t1 = monotonic()
-            sd = write_served(cur, [str(p) for p in sorted((gen_dir / sub).glob("r*.parquet"))], sort, served / f"{sort}.parquet",
-                              served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
+            with tm.phase(f"sort {sort}"):
+                sd = write_served(cur, [str(p) for p in sorted((gen_dir / sub).glob("r*.parquet"))], sort, served / f"{sort}.parquet",
+                                  served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
             sd["s"] = round(monotonic() - t1, 1)
             (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
             return sd
@@ -1541,24 +1543,42 @@ def build_ranges_cmd(bucket, profile, force, gen, index, mount, mem, per_task, o
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
 
 
+def path_counts(con, files: list[str]) -> dict:
+    """The distinct paths of a generation's `pv/` range files (`{"all": n, "kinds": {kind: n}}`): each file counted alone,
+    one at a time, and summed, so a statement holds one range's paths however many the generation has. The sum is exact:
+    a range file holds the rows whose own `(depth, path)` is in its key range (`static_names.range_preds`: `[lo, hi)` over
+    that key, not over the objects under a directory), so no `(depth, path)` is in two files; and a path has one depth,
+    its segments', so neither is a `path`."""
+    out: dict = {"all": 0, "kinds": {}}
+    for f in files:
+        for kind, of_kind, of_all in con.execute(f"""SELECT kind, count(DISTINCT path), count(DISTINCT (depth, path)) FROM read_parquet({q(f)})
+                GROUP BY GROUPING SETS ((kind), ())""").fetchall():
+            if kind is None:  # the grand total's row (`kind` is never NULL)
+                out["all"] += of_all
+            else:
+                out["kinds"][kind] = out["kinds"].get(kind, 0) + of_kind
+    return out
+
+
 def churn_stats(con, root: str, scans: dict, paths: dict | None = None) -> dict:
     """Per scan: path versions opened and closed there, read versions likewise, and live rows — the
     delta a per-scan append writes — plus totals by kind. `paths`: the distinct paths, already counted by whoever wrote
     the range files (`{"all": n, "kinds": {kind: n}}`, `interval_compact.compact_range`'s, summed over key-disjoint
-    sub-ranges), so no `count(DISTINCT …)` holds every path of the generation at once."""
-    kind_paths, all_paths = ("0", "0") if paths is not None else ("count(DISTINCT path)", "count(DISTINCT (depth, path))")
-    ids = {s["ts"]: s["id"] for s in scans["scans"]}
-    pv, rd = f"read_parquet({q(root + '/pv/r*.parquet')})", f"read_parquet({q(root + '/rd/r*.parquet')})"
-    per = {i: {"id": i, "opened": 0, "closed": 0, "reads_opened": 0, "reads_closed": 0} for i in ids.values()}
-    for col, key, src in (("vf", "opened", pv), ("vt", "closed", pv), ("vf", "reads_opened", rd), ("vt", "reads_closed", rd)):
-        for t, n in con.execute(f"SELECT {col}, count(*) FROM {src} WHERE {col} <> {OPEN} GROUP BY {col}").fetchall():
-            per[ids[t]][key] = n
-    kinds = {k: {"versions": n, "open": o, "paths": paths["kinds"][k] if paths is not None else p} for k, n, o, p in con.execute(
-        f"SELECT kind, count(*), count(*) FILTER (WHERE vt = {OPEN}), {kind_paths} FROM {pv} GROUP BY kind ORDER BY kind").fetchall()}
-    tot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}), {all_paths} FROM {pv}").fetchone()
-    tot = (tot[0], tot[1], paths["all"]) if paths is not None else tot
-    rtot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {rd}").fetchone()
-    return {"versions": tot[0], "open": tot[1], "paths": tot[2], "reads": rtot[0], "reads_open": rtot[1], "kinds": kinds,
+    sub-ranges); None: counted here, a range file at a time (`path_counts`). No statement holds every path of the
+    generation at once."""
+    with tm.phase("churn_stats"):
+        ids = {s["ts"]: s["id"] for s in scans["scans"]}
+        pv, rd = f"read_parquet({q(root + '/pv/r*.parquet')})", f"read_parquet({q(root + '/rd/r*.parquet')})"
+        per = {i: {"id": i, "opened": 0, "closed": 0, "reads_opened": 0, "reads_closed": 0} for i in ids.values()}
+        for col, key, src in (("vf", "opened", pv), ("vt", "closed", pv), ("vf", "reads_opened", rd), ("vt", "reads_closed", rd)):
+            for t, n in con.execute(f"SELECT {col}, count(*) FROM {src} WHERE {col} <> {OPEN} GROUP BY {col}").fetchall():
+                per[ids[t]][key] = n
+        paths = path_counts(con, range_files(con, root + "/pv/r*.parquet")) if paths is None else paths
+        kinds = {k: {"versions": n, "open": o, "paths": paths["kinds"][k]} for k, n, o in con.execute(
+            f"SELECT kind, count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {pv} GROUP BY kind ORDER BY kind").fetchall()}
+        versions, live = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {pv}").fetchone()
+        rtot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {rd}").fetchone()
+    return {"versions": versions, "open": live, "paths": paths["all"], "reads": rtot[0], "reads_open": rtot[1], "kinds": kinds,
             "scans": [per[s["id"]] for s in scans["scans"]]}
 
 

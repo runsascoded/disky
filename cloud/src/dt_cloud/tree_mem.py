@@ -29,15 +29,19 @@ Every entry that ends in a served-sort cut takes `-M` this way (`interval-store 
 process leaves), each cut under its `Budget.cut` plan (`interval_store.plan_cut`). The check is measured, not modelled:
 each such entry runs under `TreeWatch`, which samples the tree's proportional resident bytes (`tree_pss`) every
 `WATCH_S` and logs `<entry>: peak tree PSS X MiB of budget M MiB` at its end; with `$DT_TREE_MEM_ASSERT` set, a peak past
-`-M` exits non-zero."""
+`-M` exits non-zero. Named blocks (`phase`: each sort, the cut's plan, the churn's counts, `add`'s stages) get their own peak,
+logged before the overall line: what a stage's real tree held, next to the plan that sized it."""
 from __future__ import annotations
 
 import os
 import resource
 import sys
+from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
 
 import pyarrow as pa
@@ -303,22 +307,82 @@ def tree_pss(root: int | None = None) -> int:
     return total
 
 
+@dataclass
+class PhasePeak:
+    """A `phase`'s peak tree PSS, over the `samples` taken while it ran."""
+
+    peak: int = 0
+    samples: int = 0
+
+    def add(self, pss: int) -> None:
+        self.peak = max(self.peak, pss)
+        self.samples += 1
+
+
+#: The running `TreeWatch`es, innermost last: what `phase` tags.
+_WATCHES: list[TreeWatch] = []
+
+
+@contextmanager
+def phase(name: str) -> Iterator[None]:
+    """The block is `name` to the innermost running `TreeWatch` (none: nothing; a call from anywhere, any thread).
+    Blocks may nest or overlap: a sample counts towards every phase running then, so overlapping sorts' peaks are the
+    tree's while each ran, not each's own. A name run again keeps its largest peak."""
+    w = _WATCHES[-1] if _WATCHES else None
+    if w is None:
+        yield
+        return
+    w._begin(name)
+    try:
+        yield
+    finally:
+        w._end(name)
+
+
 class TreeWatch:
     """The process tree's peak memory over a block, against `total` (`-M`): `tree_pss` sampled every `every` seconds on
-    a daemon thread (and once at the end). On exit it logs `<what>: peak tree PSS X MiB of budget M MiB`; with `check`
-    (default: `$DT_TREE_MEM_ASSERT` set) a peak past `total` exits non-zero (`SystemExit`), and a machine without procfs
+    a daemon thread (and once at the end). On exit it logs `<what>: peak tree PSS X MiB of budget M MiB`, after a
+    `<what>: phase <name>: …` line per `phase` the block ran (`phases`, in first-run order, sampled at least at their
+    start and end) and `(untagged)` for the samples outside them (`untagged`); with `check` (default:
+    `$DT_TREE_MEM_ASSERT` set) an overall peak past `total` exits non-zero (`SystemExit`), and a machine without procfs
     is refused at the start (it can't measure). Without procfs and `check` it logs that nothing was measured."""
 
     def __init__(self, total: int, what: str, *, every: float = WATCH_S, check: bool | None = None):
         self.total, self.what, self.every = total, what, every
         self.check = os.environ.get(ASSERT_ENV, "") not in ("", "0") if check is None else check
         self.peak, self.samples = 0, 0
+        self.phases: dict[str, PhasePeak] = {}
+        self.untagged = PhasePeak()
+        self._running: Counter[str] = Counter()
+        self._lock = Lock()
         self._stop = Event()
         self._thread: Thread | None = None
 
     def _sample(self) -> None:
-        self.peak = max(self.peak, tree_pss())
-        self.samples += 1
+        pss = tree_pss()
+        with self._lock:
+            self.peak = max(self.peak, pss)
+            self.samples += 1
+            running = [name for name, n in self._running.items() if n]
+            for name in running:
+                self.phases[name].add(pss)
+            if not running:
+                self.untagged.add(pss)
+
+    def _begin(self, name: str) -> None:
+        with self._lock:
+            self.phases.setdefault(name, PhasePeak())
+            self._running[name] += 1
+        self._sample()
+
+    def _end(self, name: str) -> None:
+        self._sample()
+        with self._lock:
+            self._running[name] -= 1
+
+    def _line(self, p: PhasePeak) -> str:
+        return (f"peak tree PSS {p.peak / MIB:,.0f} MiB ({100 * p.peak / self.total:.0f}%; {p.samples} samples)"
+                f"{' — OVER BUDGET' if p.peak > self.total else ''}")
 
     def _run(self) -> None:
         while not self._stop.wait(self.every):
@@ -331,6 +395,7 @@ class TreeWatch:
             return self
         self._t0 = monotonic()
         self._sample()
+        _WATCHES.append(self)
         self._thread = Thread(target=self._run, name="tree-watch", daemon=True)
         self._thread.start()
         return self
@@ -341,8 +406,12 @@ class TreeWatch:
             return
         self._stop.set()
         self._thread.join()
+        _WATCHES.remove(self)
         self._sample()
         over = self.peak > self.total
+        if self.phases:
+            for name, p in [*self.phases.items(), ("(untagged)", self.untagged)]:
+                print(f"{self.what}: phase {name}: {self._line(p)}", file=sys.stderr, flush=True)
         print(f"{self.what}: peak tree PSS {self.peak / MIB:,.0f} MiB of budget {self.total / MIB:,.0f} MiB "
               f"({100 * self.peak / self.total:.0f}%; {self.samples} samples over {monotonic() - self._t0:.0f}s)"
               f"{' — OVER BUDGET' if over else ''}", file=sys.stderr, flush=True)

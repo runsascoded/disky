@@ -232,23 +232,26 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     ranges = store.read_json("ranges.json")
     roots = [str(gen_dir / r["key"]) for r in runs]
     count = ich.counts_at(ia.scan_entry(store.read_json, base, have[-1]), scan)
-    for r in ranges["ranges"]:
-        name = f"r{r['i']:04d}"
-        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed, churn), scan, r, name, run,
-                              bucket=base["bucket"], mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots],
-                              attributed=attributed, churn=churn, count=count)
-        doc["prev"] = have[-1]
-        doc["check"]["runs"] = [x["key"] for x in runs]
-        (run / "ranges").mkdir(exist_ok=True)
-        (run / "ranges" / f"{name}.json").write_text(json.dumps(doc) + "\n")
+    with tm.phase("append ranges"):
+        for r in ranges["ranges"]:
+            name = f"r{r['i']:04d}"
+            doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed, churn), scan, r, name, run,
+                                  bucket=base["bucket"], mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots],
+                                  attributed=attributed, churn=churn, count=count)
+            doc["prev"] = have[-1]
+            doc["check"]["runs"] = [x["key"] for x in runs]
+            (run / "ranges").mkdir(exist_ok=True)
+            (run / "ranges" / f"{name}.json").write_text(json.dumps(doc) + "\n")
     if churn:
         st = run / "state"
-        ich.apply_run(con, run, st, ranges, int(scan["ts"]), run, open_rows=lambda name: f"SELECT * FROM read_parquet({q(str(st / 'pvl' / f'{name}.parquet'))})")
+        with tm.phase("append churn"):
+            ich.apply_run(con, run, st, ranges, int(scan["ts"]), run, open_rows=lambda name: f"SELECT * FROM read_parquet({q(str(st / 'pvl' / f'{name}.parquet'))})")
     shutil.rmtree(run / "state")
     t1 = monotonic()
     docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced, generation=gen_col, churn=churn, tree=tree)
     cut_s = round(monotonic() - t1, 1)
-    cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col, churn=churn)
+    with tm.phase("append check"):
+        cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col, churn=churn)
     new = {"key": rk, "first": d, "last": d, "level": 0, "scans": [d]}
     meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs, ia.run_attribution(pinned)), "cut_s": cut_s, "check": cut,
             "check_s": round(monotonic() - t1 - cut_s, 1)}
@@ -355,7 +358,8 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
     with tm.watch(mem, f"add {gen}"), workdir(work) as w:
         gen_dir = w / "store" / prefix
         keep = lambda rel: not rel.startswith(UNREAD)  # noqa: E731
-        reads, before = sl.read_gen(store, read_from, prefix, gen_dir, keep, label=f"add {gen}: read")
+        with tm.phase("read"):
+            reads, before = sl.read_gen(store, read_from, prefix, gen_dir, keep, label=f"add {gen}: read")
         if f"{prefix}/scans.json" not in before:
             raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
         base = json.loads((gen_dir / "scans.json").read_text())
@@ -384,16 +388,19 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
             if late := [s["id"] for s in pending if s.get("version") == 2 and ist.source_has_generation(con, sn._src(base["bucket"], s["src"], scans["mount"]))]:
                 err(f"{', '.join(late)}: the sorts carry `{ist.GENERATION}`, generation {gen} doesn't; appended without it "
                     "(`interval-store backfill-generation` folds it into a new generation that does)")
-        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed, tree=tree) for s in pending]
+        with tm.phase("append"):
+            added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed, tree=tree) for s in pending]
         # The append's database idle from here (the carries and the compaction open their own, each budget measured
         # with what this process then holds): its pages back first.
         con.close()
         k = lstore.read_json("ranges.json")["k"]
-        merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, k=k, compact_level=compact.carry_level, rg_rows=rg_rows,
-                                                                threads=threads, mem=mem)
+        with tm.phase("merge"):
+            merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, k=k, compact_level=compact.carry_level, rg_rows=rg_rows,
+                                                                    threads=threads, mem=mem)
         ours = {f"{prefix}/{p.relative_to(gen_dir).as_posix()}" for p in gen_dir.rglob("*") if p.is_file()}
         store.delete([key for key in stale if key not in ours])
-        uploaded = upload_new(store, gen_dir, prefix, before, publish_order, tier=publish_tier)
+        with tm.phase("upload"):
+            uploaded = upload_new(store, gen_dir, prefix, before, publish_order, tier=publish_tier)
         prune = ar.prune_folded(GenStore(store, prefix), now=sl.now(), grace_s=grace_s, retain=ia.FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
         if not prune_dry_run:
             ar.rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
@@ -401,8 +408,9 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
         compacted = None
         why = None if no_merge else ar.forced(gen_dir) if compact_now else ar.due_in(gen_dir, compact)
         if why is not None:
-            compacted = ar.compact_store(store, ic.compactor(rg_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, jobs=jobs,
-                                         reads=reads)
+            with tm.phase("compact"):
+                compacted = ar.compact_store(store, ic.compactor(rg_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, jobs=jobs,
+                                             reads=reads)
         preds = ic.prune_predecessors(store, gen, now=sl.now(), grace_s=grace_s, dry_run=prune_dry_run)
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
                       "prune": {k_: v for k_, v in prune.items() if k_ != "keys"}, "compact": compacted, "predecessors": preds}, indent=1))

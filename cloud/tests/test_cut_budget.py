@@ -7,8 +7,10 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor as Pool
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 
 import pytest
 from click.testing import CliRunner
@@ -188,3 +190,109 @@ def test_tree_watch_logs_and_asserts(capsys):
     with tm.TreeWatch(MIB, "x", check=False):
         pass
     assert re.fullmatch(line.format("1", " — OVER BUDGET"), capsys.readouterr().err)
+
+
+@pytest.fixture
+def pss(monkeypatch):
+    """A machine whose tree reads as `pss["mib"]` MiB, whatever its OS."""
+    now = {"mib": 1}
+    monkeypatch.setattr(tm, "has_procfs", lambda: True)
+    monkeypatch.setattr(tm, "tree_pss", lambda root=None: now["mib"] * MIB)
+    return now
+
+
+def _normal(stderr: str) -> list[str]:
+    return re.sub(r"over \d+s", "over <s>", stderr).splitlines()
+
+
+def test_tree_watch_peak_per_phase(pss, capsys):
+    """A sample counts towards every phase running (nested, overlapping, from any thread), each phase is sampled at its
+    start and end, a name run again keeps its largest peak; the phases' lines come before the overall one, which alone
+    is asserted on."""
+    pss["mib"] = 100
+    with tm.TreeWatch(1000 * MIB, "x", every=3600, check=True) as w:
+        with tm.phase("a"):  # sampled at 100
+            pss["mib"] = 300
+            w._sample()
+            with tm.phase("b"):  # 300, and 500 at its end
+                pss["mib"] = 500
+            pss["mib"] = 200
+        begun, sampled = Event(), Event()
+
+        def other_thread():
+            with tm.phase("c"):  # 200, and at its end
+                begun.set()
+                sampled.wait()
+
+        with Pool(1) as ex:
+            ran = ex.submit(other_thread)
+            begun.wait()
+            w._sample()  # c still running: 200
+            sampled.set()
+            ran.result()
+        pss["mib"] = 400
+        w._sample()  # no phase running
+        with tm.phase("b"):  # again: 400 < its 500
+            pass
+        pss["mib"] = 50
+    assert (w.phases, w.untagged) == ({"a": tm.PhasePeak(500 * MIB, 5), "b": tm.PhasePeak(500 * MIB, 4), "c": tm.PhasePeak(200 * MIB, 3)}, tm.PhasePeak(400 * MIB, 3))
+    assert _normal(capsys.readouterr().err) == [
+        "x: phase a: peak tree PSS 500 MiB (50%; 5 samples)",
+        "x: phase b: peak tree PSS 500 MiB (50%; 4 samples)",
+        "x: phase c: peak tree PSS 200 MiB (20%; 3 samples)",
+        "x: phase (untagged): peak tree PSS 400 MiB (40%; 3 samples)",
+        "x: peak tree PSS 500 MiB of budget 1,000 MiB (50%; 13 samples over <s>)",
+    ]
+    # No watch running: a phase is nothing.
+    with tm.phase("nobody"):
+        pass
+    assert (tm._WATCHES, capsys.readouterr().err) == ([], "")
+
+
+def test_tree_watch_phase_over_budget_and_the_assert_on_the_overall_peak(pss, capsys):
+    pss["mib"] = 90
+    with pytest.raises(SystemExit, match=r"^x: peak tree PSS 120 MiB over its budget 100 MiB \(\$DT_TREE_MEM_ASSERT\)$"):
+        with tm.TreeWatch(100 * MIB, "x", every=3600, check=True):
+            with tm.phase("a"):
+                pss["mib"] = 120
+    assert _normal(capsys.readouterr().err) == [
+        "x: phase a: peak tree PSS 120 MiB (120%; 2 samples) — OVER BUDGET",
+        "x: phase (untagged): peak tree PSS 120 MiB (120%; 2 samples) — OVER BUDGET",
+        "x: peak tree PSS 120 MiB of budget 100 MiB (120%; 4 samples over <s>) — OVER BUDGET",
+    ]
+
+
+def _phases(stderr: str, what: str) -> list[str]:
+    return re.findall(rf"^{re.escape(what)}: phase (.+?): peak tree PSS", stderr, re.M)
+
+
+def test_cut_all_names_its_phases(built, pss, tmp_path):
+    res = CliRunner().invoke(ist.cli, ["cut", "-b", str(built), "-g", "g", "-m", str(built), "-T", str(tmp_path / "t"), "-p", "2", "-M", MEM, "-U", "-r", str(RG),
+                                       "-o", str(tmp_path / "all"), "-a"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    gen = built / ist.PREFIX / "g"
+    sorts = [s for s in ist.served_sorts(*(json.loads((gen / "scans.json").read_text()).get(k, False) for k in ("slices", ist.ATTRIBUTION)))]
+    got = _phases(res.stderr, "cut g")
+    assert (got[0], got[-2:], sorted(got[1:-2])) == ("cut", ["churn_stats", "(untagged)"], sorted(f"sort {s}" for s in sorts))
+
+
+def test_add_names_its_stages(world, built, pss, tmp_path):  # noqa: F811
+    store = _copy(built, tmp_path)
+    res = CliRunner().invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(store), "-w", str(tmp_path / "w"),
+                                          "-r", str(RG), "-p", "2", "-M", MEM, "-t", DATES[BASE]], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert _phases(res.stderr, "add g") == [
+        "read", "append", "append ranges", "append churn",
+        "cut path", "cut bysize", "cut slices", "cut slices-bytotal", "cut slices-bysize-user",
+        "append check", "merge", "upload", "(untagged)",
+    ]
+    res = CliRunner().invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(store), "-w", str(tmp_path / "w2"),
+                                          "-r", str(RG), "-p", "2", "-M", MEM, "-K", "-t", DATES[BASE]], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    got = _phases(res.stderr, "add g")
+    # The sorts run largest source first; their order isn't the point.
+    assert (got[:7], sorted(got[7:-2]), got[-2:]) == (
+        ["read", "append", "merge", "upload", "compact", "fold ranges", "cut"],
+        sorted(f"sort {s}" for s in ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user", "reads")),
+        ["churn_stats", "(untagged)"],
+    )
