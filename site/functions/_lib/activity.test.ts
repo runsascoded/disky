@@ -14,6 +14,7 @@ import {
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
 import { ingest } from './sessionLog'
+import { resetSlackScopes } from './slack'
 import type { SlogEvent } from './sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 21, 15, 0, 0)  // 2026-10-21T15:00Z
@@ -210,10 +211,14 @@ describe('rendering', () => {
 })
 
 /** A stubbed `fetch`: Slack posts get ts `1.00000N`, Discord posts id `dN`; every call is recorded. */
-function stubFetch(fail = false) {
+/** Slack (and Discord) as fetch: posts get sequential ids; `auth.test` answers with `scopes` (the installed app's) and
+ *  isn't logged. */
+function stubFetch(fail = false, scopes = 'chat:write,chat:write.customize') {
   const calls: { url: string; method: string; body: Record<string, unknown> }[] = []
   let n = 0
+  resetSlackScopes()
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+    if (url.endsWith('auth.test')) return new Response(JSON.stringify({ ok: true }), { headers: { 'x-oauth-scopes': scopes } })
     const body = JSON.parse(String(init.body ?? '{}'))
     calls.push({ url, method: init.method ?? 'GET', body })
     if (fail) return new Response(JSON.stringify({ ok: false, error: 'channel_not_found' }))
@@ -323,6 +328,16 @@ describe('D1 and sinks', () => {
       [null, 'Ann Lee', [`1 page load · 3 errors · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`]],
       ['1.000001', 'Ann Lee', ['Pages: `/admin`', `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
       ['1.000001', null, ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+    ])
+  })
+
+  it('an app installed without `chat:write.customize` posts as itself, and the line says who', async () => {
+    const calls = stubFetch(false, 'chat:write')
+    const { env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    await feed(env, wait, 'sid-aaaaaa', [{ t: NOW, k: 'start', u: '/' }] as SlogEvent[], NOW)
+    expect(calls.map(c => [c.body.thread_ts ?? null, c.body.username ?? null, String(c.body.text).split('\n')[0]])).toEqual([
+      [null, null, `*ann* (browser) · 1 page load · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`],
+      ['1.000001', null, 'Pages: `/`'],
     ])
   })
 

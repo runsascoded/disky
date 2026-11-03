@@ -7,7 +7,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
-import { slackApi, type SlackEnv } from './slack.js'
+import { slackApi, type SlackEnv, slackScopes } from './slack.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
   addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
@@ -309,9 +309,10 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   const s = sinks(env)
   if (s.slack) {
     const channel = env.SLACK_ADMIN_CHANNEL!
-    // A signed-in burst posts as its user (the name only: profile faces are stored inline, never as a URL Slack could
-    // fetch); the post is one line, everything else in the thread
-    const asUser = b.via === 'session'
+    // A signed-in burst posts as its user (a `username` override on the bot's own post: the name only, since profile
+    // faces are stored inline, never at a URL Slack could fetch), when the installed app may override the sender;
+    // otherwise the line itself says who. The post is one line, everything else in the thread.
+    const asUser = b.via === 'session' && (await slackScopes(env)).has('chat:write.customize')
     const sender = asUser
       ? { username: senderName(b.actor, (await db.prepare('SELECT name FROM profiles WHERE email = ?').bind(b.actor).first<{ name: string | null }>())?.name) }
       : {}
