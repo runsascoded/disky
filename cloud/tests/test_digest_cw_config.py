@@ -24,7 +24,6 @@ CW = DG.DigestConfig(
     root="gs://{DATA_BUCKET}/snapshots/cw",
     state="digest/cw/{channel}/{variant}",
     quota_marks="runway",
-    renderer="site",
     params="qr,pp",
     preview="r2://oa-cw-s3-usage-index/digest/preview/{channel}/{variant}",
     discord_state="digest/discord/{webhook}",
@@ -72,9 +71,8 @@ def test_dry_run_with_config(monkeypatch, tmp_path: Path):
     names = {"marin-us-east-02a": P, "hero-checkpoints": HERO}
     cfg["primary"] = names[cfg["primary"]]
     cfg["buckets"] = {names.get(b, b): v for b, v in cfg["buckets"].items()}
-    # the file renders through the site (`renderer: site`); the golden pins the job's own bytes, which the site matches
-    # under default params (`test_digest_parity`, `digest-op.test.ts`)
-    cfg["renderer"], cfg["params"] = "local", ""
+    # the OP is the site's (conftest's stand-in here; its goldens are `site/src/digest/parity.test.ts`'s): the golden
+    # pins the replies the job renders under the file's settings
     config = tmp_path / "digest.yml"
     config.write_text(yaml.safe_dump(cfg))
     root = cw_root(tmp_path)

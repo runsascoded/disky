@@ -38,11 +38,9 @@ alert_pct: 90
 # 1/3/7 days (:red_circle: under 3 days or over quota, :large_orange_circle: under 14 or ≥ 95% full, :large_yellow_circle:
 # under 30), with `, +N Ti/d, ≈Nd to full` under 60 days (specs/digest-runway-marks.md; `circles`: by fill, fullest first)
 quota_marks: runway
-# who renders the OP's text + plot request: `local` (the job's Python) or `site` (`POST /api/digest-op`, the renderer
-# /admin/slack previews with) under `params` (its codec string, e.g. `qc,pp`; "" = the defaults = local's bytes)
-# site (2026-11-02): byte-identical to local under "" (checked on the live November OP); `qr,pp` = the quota line
-# (every pool, config order, circled by runway as the replies) under the headline + the plot as % of each pool's quota
-renderer: site
+# the OP's text + plot request are the site's (`POST /api/digest-op`, the renderer /admin/slack previews with), under
+# `params` (its codec string, e.g. `qc,pp`; "" = the defaults): `qr,pp` = the quota line (every pool, config order,
+# circled by runway as the replies) under the headline + the plot as % of each pool's quota
 params: qr,pp
 primary: marin-us-east-02a
 # quotas from CoreWeave's `cwobject_quota_info` metric, which is per ZONE: 02a =

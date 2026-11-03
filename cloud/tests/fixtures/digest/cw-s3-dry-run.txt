@@ -1,9 +1,4 @@
-:arrow_deg50: **+84.6 TiB** [month-to-date](https://cw.oa.dev/?d=260908-7d12h#over-time) · **+100.0 TiB** [since 8/30](https://cw.oa.dev/?d=260908-8d12h#over-time) · [02a](https://cw.oa.dev/main-data?d=260908-7d12h#over-time) 790 TiB · 86.8% of 1 PB · [hero](https://cw.oa.dev/hot-data?d=260908-7d12h#over-time) 100 TiB (+11.5) · [more-data](https://cw.oa.dev/more-data?d=260908-7d12h#over-time) 2 TiB · [dashboard](https://cw.oa.dev/)
-_as of 9/8 00:01Z_
-
-*Weekly summaries*
-:arrow_deg30: [wk of 8/31](https://cw.oa.dev/?d=26090412-5d#over-time): **+11.0 TiB** → 701 TiB · 77.0% of 1 PB
-:arrow_deg60: [wk of 9/7](https://cw.oa.dev/?d=260908-3d12h#over-time) _(partial)_: **+89.0 TiB** → 790 TiB · 86.8% of 1 PB
+<site OP: cw 2026-09, 9 scans to 2026-09-08T0001, params qr,pp>
 
 [← August](<prev-thread>)
 
