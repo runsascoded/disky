@@ -111,6 +111,33 @@ export function levelOf(dir: string, own: Sides, children: (Sides & { p: string;
   }
 }
 
+/** One directory's answer from several stores' answers for it (`parts`, each cut at `k` or more under the same
+ *  measure): a union view's root (`api/diff/level.ts`), whose children are its members' disjoint roots. Totals,
+ *  `unchanged` and `other` are summed; the rows are the parts' rows ranked as `levelOf` ranks them and cut at `k`
+ *  after the merge (the rest, and the parts' own `other`s, are `other`). The same answer as `levelOf` over every
+ *  part's children at once: a child in the merged top `k` is in its own part's top `k`. */
+export function mergeLevels(dir: string, parts: readonly Level[], k: number, m: Measure): Level {
+  const by = (c: Sides) => (m === 'churn' ? c.churn : Math.abs(c.b - c.a))
+  const rows = parts.flatMap(l => l.rows).sort((x, y) => by(y) - by(x) || (x.p < y.p ? -1 : x.p > y.p ? 1 : 0))
+  type Sum = { a: number; b: number; oa: number; ob: number; churn: number }
+  const zero = (): Sum => ({ a: 0, b: 0, oa: 0, ob: 0, churn: 0 })
+  const add = (t: Sum, c: Sides): Sum => ({ a: t.a + c.a, b: t.b + c.b, oa: t.oa + c.oa, ob: t.ob + c.ob, churn: t.churn + c.churn })
+  const rest = rows.slice(k)
+  const others = parts.flatMap(l => (l.other ? [l.other] : []))
+  const n = rest.length + others.reduce((t, o) => t + o.n, 0)
+  const own = parts.reduce(add, zero())
+  const unchanged = parts.reduce((t, l) => ({ a: t.a + l.unchanged.a, b: t.b + l.unchanged.b, oa: t.oa + l.unchanged.oa, ob: t.ob + l.unchanged.ob }), { a: 0, b: 0, oa: 0, ob: 0 })
+  const only = n === 0 && rows.length === 1 && rows[0].k === 'dir' ? (dir === '' ? rows[0].p : `${dir}/${rows[0].p}`) : undefined
+  return {
+    path: dir,
+    ...own,
+    rows: rows.slice(0, k),
+    other: n ? { n, ...[...rest, ...others].reduce(add, zero()) } : null,
+    unchanged,
+    ...(only ? { next: only } : {}),
+  }
+}
+
 export interface LevelOpts {
   from: string
   to: string

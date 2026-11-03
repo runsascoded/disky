@@ -52,6 +52,9 @@ FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every d
 # `interval-store/CURRENT.json`): without them dev searched nothing and read per-scan sorts (parity, 2026-10-22).
 STATIC_CURRENT_KEY = "static-names/primary-CURRENT.json"
 PATH_STORE = "intervals"
+# Pinned to the churn backfill (`demo-backfill-churn`) while its level diffs are checked against prod's; CURRENT.json
+# moves to it after, and this pin goes.
+INTERVAL_STORE_GEN = "2026-10-14.churn"
 FILTER_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"        # heavy literals (catalog members, 1–2 characters) from the drilldown (`drill/`)
 # No CACHE_NS: dev's response-cache keys carry its host (`cacheEnvTag`), so its newer code never answers for prod.

@@ -3,6 +3,7 @@ import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
 import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { indexedScan } from './scanArg'
+import { storeEnv } from './stores'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
 import { type D1Variant, fixture, readJson, seedGeneration } from './testStore'
@@ -572,6 +573,31 @@ describe('interval store: base + runs', () => {
       '2026-08-05',
       null,
       '2026-08-05',
+      null,
+    ])
+  })
+
+  it('lists and resolves a secondary store\'s held scans from its own interval store, beside its own D1 pointers only (S1)', async () => {
+    // A secondary store (`STORES_JSON` vars `PATH_STORE`, `INTERVAL_STORE_GEN`) serving the same store: its scans are its
+    // D1 pointers (`store = 'm'`) and every scan its generation holds, never the primary's pointers.
+    const { db, raw } = await sqliteD1()
+    raw.exec(`INSERT INTO index_schema (store, date, variant, version, schema_json, floor_bytes, gen, dir) VALUES
+      ('primary', '2026-07-28', 'path', 2, '{}', NULL, 'G', 'listing/2026-07-28/index/G'),
+      ('m', '2026-07-29', 'm:path', 2, '{}', NULL, 'G', 'm-l2/2026-07-29/index/G')`)
+    const primary = { ...at('g3', [], undefined, { rev: 's1-m' }), DB: db } as Env
+    const m = storeEnv(primary, 'm', { vars: { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g3', INTERVAL_STORE_REV: 's1-m' } })
+    expect([
+      (await pathScans(m, true)).results.map(r => r.date),
+      await indexedScan(m, '2026-08-05', true),
+      await indexedScan(m, '2026-08-05', false),
+      await indexedScan(m, '2026-07-29', true),
+      await indexedScan(m, '2026-07-28', true),
+    ]).toEqual([
+      // its D1's 07-29, the base's 07-30, 07-31, 08-02 and 08-03, the runs' 08-04 and 08-05; not the primary's 07-28
+      ['2026-07-29', '2026-07-30', '2026-07-31', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'],
+      '2026-08-05',
+      '2026-08-05',
+      '2026-07-29',
       null,
     ])
   })

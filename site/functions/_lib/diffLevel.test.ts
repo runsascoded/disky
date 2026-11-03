@@ -1,9 +1,10 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { buildLevels, type Level, levelK, levelOf, type LevelRow } from './diffLevel'
+import { buildLevels, type Level, levelK, levelOf, type LevelRow, mergeLevels } from './diffLevel'
 import { asOfScans, GetRounds, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
 import { sqliteD1 } from './testD1'
-import { fixture, readJson } from './testStore'
+import { fixtureR2 as r2 } from './testR2'
+import { readJson } from './testStore'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -12,37 +13,6 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./te
 // answer computed from the scans' files alone.
 
 type Want = { from: string; to: string; path: string; a: number; b: number; oa: number; ob: number; churn: number; rows: { p: string; k: 'file' | 'dir'; a: number; b: number; oa: number; ob: number; churn: number }[] }
-
-function r2(dir: string, reads: string[]): R2Bucket {
-  type Fs = { existsSync(p: string): boolean; readFileSync(p: string): Uint8Array; readdirSync(p: string, o: { recursive: true }): string[]; statSync(p: string): { isFile(): boolean } }
-  const nodeFs = async () => {
-    const mod = 'node:fs'
-    return (await import(/* @vite-ignore */ mod)) as Fs
-  }
-  const path = (key: string) => fixture(`${dir}/${key}`)
-  const list = async ({ prefix }: { prefix: string }) => {
-    const fs = await nodeFs()
-    const d = prefix.slice(0, prefix.lastIndexOf('/') + 1)
-    const root = path(d)
-    const keys = fs.existsSync(root) ? fs.readdirSync(root, { recursive: true }).map(f => `${d}${f}`).filter(k => k.startsWith(prefix) && fs.statSync(path(k)).isFile()).sort() : []
-    return { objects: keys.map(key => ({ key })), truncated: false }
-  }
-  const get = async (key: string, o?: { range?: { offset: number; length: number } }) => {
-    const fs = await nodeFs()
-    if (!fs.existsSync(path(key))) return null
-    const buf = fs.readFileSync(path(key))
-    const { offset = 0, length = buf.byteLength - offset } = o?.range ?? {}
-    reads.push(key)
-    const part = buf.slice(offset, offset + length)
-    return {
-      size: buf.byteLength,
-      arrayBuffer: async () => part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength),
-      json: async () => JSON.parse(new TextDecoder().decode(part)),
-    }
-  }
-  const head = async (key: string) => ((await nodeFs()).existsSync(path(key)) ? { key } : null)
-  return { get, list, head } as unknown as R2Bucket
-}
 
 /** The oracle's answer in the level's shape: rows by name under the path, each with its status. */
 function wanted(w: Want): Pick<Level, 'path' | 'a' | 'b' | 'oa' | 'ob' | 'churn' | 'rows' | 'unchanged'> {
@@ -115,6 +85,48 @@ describe('level diffs', () => {
     ])
     expect(levelOf('d', own, kids, 2, 'net').rows.map(r => r.p)).toEqual(['y', 'z'])
     expect([levelK(1), levelK(5), levelK(100), levelK(1e6)]).toEqual([4, 8, 128, 512])
+  })
+
+  it('merges stores\' answers for one directory as one store holding all of them answers it (a union view\'s root)', async () => {
+    // `interval-store-b1/`, `-b2/`: the same scans' files under `b1`, `b2` only (`gen.py b1|b2`): disjoint roots, as a
+    // union's members are. Each store's root answer, merged, is the whole store's, at any K (cut after the merge).
+    const store = async (prefix: string) => ({ DB: (await sqliteD1()).db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: prefix, INDEX_R2: r2('iv-churn', []) }) as Env
+    const [b1, b2] = await Promise.all([store('interval-store-b1'), store('interval-store-b2')])
+    const roots = cases.filter(c => c.path === '')
+    expect(roots.length).toBe(10)
+    const got: Level[] = [], want: Level[] = []
+    for (const c of roots) {
+      for (const k of [1, 512]) {
+        const o = { from: c.from, to: c.to, dirs: [''], k, m: 'churn' as const, chain: false }
+        const parts = await Promise.all([b1, b2].map(async e => (await buildLevels(e, o)).get('')!))
+        got.push(mergeLevels('', parts, k, 'churn'))
+        want.push((await buildLevels(env, o)).get('')!)
+      }
+    }
+    expect(got).toEqual(want)
+    // Both roots changed in some range (a real merge), and K = 1 cut one of them into `other`.
+    expect(want.some(l => l.other?.n === 1)).toBe(true)
+    // Below the root, a directory's answer is its own store's.
+    for (const c of cases.filter(x => x.path.startsWith('b1/'))) {
+      const o = { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn' as const, chain: false }
+      expect((await buildLevels(b1, o)).get(c.path)).toEqual((await buildLevels(env, o)).get(c.path))
+    }
+  })
+
+  it('merges by the measure, ranking and cutting as `levelOf` does', () => {
+    const kid = (p: string, a: number, b: number, churn: number) => ({ p, k: 'dir' as const, s: 'changed' as const, a, b, oa: 1, ob: 1, churn })
+    const kids = [kid('x', 10, 10, 30), kid('y', 10, 30, 20), kid('z', 5, 0, 5), kid('w', 7, 7, 0), kid('v', 1, 2, 1)]
+    const sum = (ks: typeof kids, extra: number) => ({ a: ks.reduce((n, c) => n + c.a, extra), b: ks.reduce((n, c) => n + c.b, extra), oa: ks.length + extra, ob: ks.length + extra, churn: ks.reduce((n, c) => n + c.churn, 0) })
+    const [m1, m2] = [[kids[0], kids[2], kids[4]], [kids[1], kids[3]]]
+    for (const m of ['churn', 'net'] as const) {
+      for (const k of [1, 2, 3, 8]) {
+        const parts = [levelOf('', sum(m1, 4), m1, k, m), levelOf('', sum(m2, 9), m2, k, m)]
+        expect(mergeLevels('', parts, k, m)).toEqual(levelOf('', sum(kids, 13), kids, k, m))
+      }
+    }
+    // One member's only change, a directory, and none in the other: the merged root leads into it.
+    const one = mergeLevels('', [levelOf('', sum([kids[0]], 0), [kids[0]], 4, 'churn'), levelOf('', sum([], 3), [], 4, 'churn')], 4, 'churn')
+    expect(one.next).toBe('x')
   })
 
   it('refuses a range from before the churn base', async () => {

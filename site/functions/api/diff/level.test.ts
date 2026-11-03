@@ -134,4 +134,19 @@ describe('a level request\'s fixed phase', () => {
     expect(t.fixed).toBeGreaterThanOrEqual(195)
     expect(t.fixed).toBeLessThan(330)
   })
+
+  it('a path-restricted identity asking a hidden dir is 404, though an unrestricted request left its level cached', async () => {
+    const { gateFor } = await import('../../_lib/auth')
+    const { hideScope } = await import('../../_lib/restrict')
+    // One cache namespace for both hosts: the unrestricted request's entry is the one the restricted request would hit.
+    env = { ...env, BASE_SCOPE: 'laptop', SESSION_SECRET: 'test-secret', CACHE_NS: '' } as Env
+    const { token } = await gateFor(env)!.mint({ email: null, scopes: ['laptop', hideScope('laptop', 'b1')], name: 'restricted link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })
+    const at = (host: string, headers?: Record<string, string>) =>
+      level({ request: new Request(`http://${host}/api/diff/level?from=2026-08-02&to=2026-08-06&p=b1`, { headers }), env })
+    const primed = await at('localhost')
+    const again = await at('localhost')
+    const hidden = await at('example.test', { authorization: `Bearer ${token}` })
+    expect([primed.status, primed.headers.get('x-cache'), again.headers.get('x-cache'), hidden.status, await hidden.text()])
+      .toEqual([200, 'miss', 'hit', 404, 'path not found'])
+  })
 })

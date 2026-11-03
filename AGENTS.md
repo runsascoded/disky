@@ -165,6 +165,12 @@ dt-cloud interval-store layout-sim GEN REQUESTS  # `/api/diff/level` reads of a 
                           # mirror `site/functions/_lib/index.ts`) at the sort's bytes/row; row groups cached under `-c`
                           # (`depth, path, vf, vt`), `-t` fetches over one footer, `-j` processes. JSONL out, p50/p90/p99/max
                           # summary (rows, runs, GET rounds at 2 and 3 waves) to stderr
+dt-cloud diff-bench -a BEFORE -b AFTER [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
+                          # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
+                          # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
+                          # `Server-Timing` total, the paired Δ (B − A), B-slower count + sign-test p; answers must agree
+                          # (totals, rows, nodes). Same reader flags on both (`DIFF_DESCENT` moves the tier). Exit 1 on an error
+                          # or a disagreement, 2 if B is slower (p < `-p`); `-o` every sample as TSV
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for
