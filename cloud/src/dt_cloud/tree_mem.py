@@ -49,12 +49,9 @@ WRITER_ACTIVE = 4
 FOLD_GROUPS = WRITER_ACTIVE + (FOLD_WRITERS - 1) * WRITER_IDLE
 
 # ── The served sorts' cut (`interval_store.write_served`) ──────────────────
-#: Batches a run's sort holds in this process (`_sort_run`): the fetched batch, and the spool writer's encoding of it.
+#: Batches a run's or a piece's sort holds in this process (`_sort_run`): the fetched batch, and the spool writer's
+#: encoding of it.
 SORT_COPIES = 2
-#: `merge_rows` multiples a merging worker holds (`merge_seg` over `pyrmts.runs.merge_sorted`): across its inputs
-#: (`merge_rows` rows a batch each, summed), each input's compressed spool group, its decoded batch and its buffered
-#: rows; the frontier's sorted copy (≤ every buffer); the output spool's encoding of it.
-MERGE_COPIES = 5
 #: Spool groups a writing worker holds (`cut_part`): the compressed group being read and its decoded rows.
 PART_SPOOL = 2
 #: Served groups a writing worker holds: pending rows (≤ a group + a spool batch), the group's combined copy, its encoding.
@@ -62,11 +59,8 @@ PART_GROUPS = 3
 #: The buffer a joining worker copies through (`parquet_pages._copy_range`, without `copy_file_range`).
 CONCAT_BUF = 1 << 24
 #: The share of `-M` past `base` the cut's workers (their `proc_base` and buffers) and its sorts' batches may take;
-#: DuckDB's sorts get the rest. Workers only add speed: fewer of them, or smaller merge batches, still cut the same bytes.
+#: DuckDB's sorts get the rest. Workers only add speed: fewer of them still cut the same bytes.
 WORKER_SHARE = 1 / 2
-#: The merge batches tried (`merge_rows`): `interval_store.MERGE_ROWS` halved down to this floor (a 16-input pass at
-#: `MERGE_MIN_BATCH` rows an input).
-MERGE_FLOOR = 1 << 16
 
 
 class TooSmall(SystemExit):
@@ -126,7 +120,6 @@ def worker_init() -> None:
 
 
 def _spawned_private() -> int:
-    import pyrmts.runs  # noqa: F401 — the merge's
     from . import interval_store, parquet_pages  # noqa: F401 — the cut's tasks'
 
     return private_bytes()
@@ -148,36 +141,30 @@ def fold_arrow(jobs: int, rg_rows: int, rb: int) -> int:
     return max(1, jobs) * FOLD_GROUPS * rg_rows * rb
 
 
-def merge_bytes(merge_rows: int, rb: int) -> int:
-    """A merging worker's bytes (`MERGE_COPIES` × `merge_rows` rows)."""
-    return MERGE_COPIES * merge_rows * rb
+def part_bytes(spool_rows: int, rg_rows: int, rb: int) -> int:
+    """A writing worker's bytes: `PART_SPOOL` spool groups (≤ `spool_rows` rows) and `PART_GROUPS` served groups."""
+    return (PART_SPOOL * spool_rows + PART_GROUPS * rg_rows) * rb
 
 
-def part_bytes(spool_rows: int, merge_rows: int, rg_rows: int, rb: int) -> int:
-    """A writing worker's bytes: `PART_SPOOL` spool groups (run spools of a merged sort are cut in groups of up to
-    `merge_rows`; the others in `spool_rows`) and `PART_GROUPS` served groups."""
-    return (PART_SPOOL * max(spool_rows, merge_rows) + PART_GROUPS * rg_rows) * rb
+def worker_bytes(spool_rows: int, rg_rows: int, rb: int) -> int:
+    """A cut worker's bytes: the more of its two tasks' (write, join)."""
+    return max(part_bytes(spool_rows, rg_rows, rb), CONCAT_BUF)
 
 
-def worker_bytes(spool_rows: int, merge_rows: int, rg_rows: int, rb: int) -> int:
-    """A cut worker's bytes: the most of its three tasks' (merge, write, join)."""
-    return max(merge_bytes(merge_rows, rb), part_bytes(spool_rows, merge_rows, rg_rows, rb), CONCAT_BUF)
-
-
-def sort_bytes(procs: int, spool_rows: int, merge_rows: int, rb: int) -> int:
-    """One sort's run batches in this process: its `procs` runs at once, a merged sort's `merge_rows` rows across them
-    (each `merge_rows // runs`), another's `spool_rows` each; `SORT_COPIES` each."""
-    return SORT_COPIES * max(merge_rows, procs * spool_rows) * rb
+def sort_bytes(procs: int, spool_rows: int, rb: int) -> int:
+    """One sort's run or piece batches in this process: its `procs` runs (or pieces) at once, `spool_rows` each (a
+    merged sort's run spools' groups are no larger), `SORT_COPIES` each."""
+    return SORT_COPIES * procs * spool_rows * rb
 
 
 @dataclass(frozen=True)
 class CutPlan:
-    """The served sorts' cut under a budget: `at_once` sorts, each over `procs` worker processes, merging `merge_rows`
-    rows a pass and spooling `spool_rows`-row groups; `arrow` the Arrow bytes and `duck` DuckDB's limit that leaves."""
+    """The served sorts' cut under a budget: `at_once` sorts, each over `procs` worker processes (and `procs` runs or
+    pieces sorting at once) spooling `spool_rows`-row groups; `arrow` the Arrow bytes and `duck` DuckDB's limit that
+    leaves."""
 
     at_once: int
     procs: int
-    merge_rows: int
     spool_rows: int
     arrow: int
     duck: int
@@ -213,29 +200,23 @@ class Budget:
         a = fold_arrow(jobs, min(rg_rows, rows or rg_rows), rb)
         return a, self.duck(a, 0, f"{jobs} fold jobs")
 
-    def cut(self, at_once: int, cores: int, rg_rows: int, rb: int, spool_rows: int, merge_max: int, rows: int | None = None) -> CutPlan:
-        """The cut's plan: the most workers (≤ `cores // at_once` a sort), then the largest merge batch (`merge_max`
-        halved down to `MERGE_FLOOR`), whose bytes — `at_once × (procs × (proc_base + worker_bytes) + sort_bytes)`, each
-        row count charged at most `rows` (the sorts' rows: no batch, group or merge holds more) — fit `WORKER_SHARE` of
-        `total − base`; none fitting: one worker at the floor. DuckDB gets the rest."""
+    def cut(self, at_once: int, cores: int, rg_rows: int, rb: int, spool_rows: int, rows: int | None = None) -> CutPlan:
+        """The cut's plan: the most workers (≤ `cores // at_once` a sort) whose bytes — `at_once × (procs × (proc_base +
+        worker_bytes) + sort_bytes)`, each row count charged at most `rows` (the sorts' rows: no batch or group holds
+        more) — fit `WORKER_SHARE` of `total − base`; none fitting: one. DuckDB gets the rest, which its runs and pieces
+        (`interval_store.run_budget`) are sized to."""
         cap = (lambda r: min(r, rows)) if rows else (lambda r: r)  # noqa: E731
         room = (self.total - self.base) * WORKER_SHARE
         top = max(1, cores // max(1, at_once))
-        sizes = [merge_max >> i for i in range(64) if merge_max >> i >= MERGE_FLOOR] or [merge_max]
 
-        def cost(procs: int, mr: int) -> tuple[int, int]:
-            sort = SORT_COPIES * cap(max(mr, procs * spool_rows)) * rb  # `sort_bytes`, capped
-            arrow = at_once * (procs * worker_bytes(cap(spool_rows), cap(mr), cap(rg_rows), rb) + sort)
+        def cost(procs: int) -> tuple[int, int]:
+            sort = SORT_COPIES * cap(procs * spool_rows) * rb  # `sort_bytes`, capped
+            arrow = at_once * (procs * worker_bytes(cap(spool_rows), cap(rg_rows), rb) + sort)
             return arrow, arrow + at_once * procs * self.proc_base
 
-        procs, mr = 1, sizes[-1]
-        for p in range(top, 0, -1):
-            fit = next((r for r in sizes if cost(p, r)[1] <= room), None)
-            if fit is not None:
-                procs, mr = p, fit
-                break
-        arrow, _ = cost(procs, mr)
-        return CutPlan(at_once, procs, mr, spool_rows, arrow, self.duck(arrow, at_once * procs, f"the cut ({at_once} sorts × {procs} workers)"))
+        procs = next((p for p in range(top, 0, -1) if cost(p)[1] <= room), 1)
+        arrow, _ = cost(procs)
+        return CutPlan(at_once, procs, spool_rows, arrow, self.duck(arrow, at_once * procs, f"the cut ({at_once} sorts × {procs} workers)"))
 
 
 def duck_sql(limit: int) -> str:

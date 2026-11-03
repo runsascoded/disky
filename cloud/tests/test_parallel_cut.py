@@ -147,11 +147,12 @@ def gen(tmp_path_factory) -> Path:
 
 
 @pytest.mark.parametrize("sort", list(ist.SORTS))
-def test_bounded_cut_is_one_order_by(gen, sort, tmp_path, monkeypatch):
+def test_bounded_cut_is_one_order_by(gen, sort, tmp_path):
     """Every served sort, cut from a generation's range files as runs (each range whole, or in key sub-ranges under a
-    tiny budget), sorted alone and concatenated (a sort led by `(depth, path)`) or k-way merged per segment (the others),
-    then written in 1 or several processes: the file and sidecar one `ORDER BY` of the whole generation streamed into one
-    writer leaves, byte for byte."""
+    tiny budget), sorted alone and concatenated (a sort led by `(depth, path)`) or cut per segment in key-range pieces
+    sorted alone (the others: one piece a segment, or many under a tiny piece share — splitters between rows equal on
+    the key's leading columns, spans cut inside spool groups), then written in 1 or several processes: the file and
+    sidecar one `ORDER BY` of the whole generation streamed into one writer leaves, byte for byte."""
     con = duckdb.connect()
     sub = ist.SORTS[sort][0]
     schema = ist.served_schema(sort)
@@ -164,17 +165,56 @@ def test_bounded_cut_is_one_order_by(gen, sort, tmp_path, monkeypatch):
     third = max(ic.sub_ranges([f], None)[0][2] for f in files) // 3
     assert len(ist.cut_runs(files, None)) == N_RANGES
     assert len(ist.cut_runs(files, 1)) > len(ist.cut_runs(files, third)) > N_RANGES
-    # Fan-in 2 merges a segment's runs in passes of pairs: 5 runs in 3, 40-odd sub-ranges in 6 or 7.
-    for procs, budget, fan_in in ((1, None, None), (4, None, None), (1, 1, None), (4, third, None), (1, None, 2), (4, 1, 2)):
-        if fan_in:
-            monkeypatch.setattr(ist, "MERGE_FAN_IN", fan_in)
-        out = tmp_path / f"p{procs}-b{budget}-f{fan_in}" / f"{sort}.parquet"
+    # `(procs, budget, piece rows, spool rows)`: a piece share of 7 or 50 rows cuts a segment in many pieces (fences
+    # every row, or every few), 8-row spool groups put a piece's span ends inside groups.
+    for procs, budget, piece, spool in ((1, None, None, None), (4, None, None, None), (1, 1, None, None), (4, third, None, None),
+                                        (4, None, 7, 8), (1, third, 50, 8), (4, 1, 50, None)):
+        out = tmp_path / f"p{procs}-b{budget}-r{piece}-s{spool}" / f"{sort}.parquet"
         doc = ist.write_served(con, files, sort, out, schema, rg_rows=RG, stamps=STAMPS, page_rows=PAGE, procs=procs, part_rows=0,
-                               budget=budget)
+                               budget=budget, piece_rows=piece, **({"spool_rows": spool} if spool else {}))
         assert doc == ref
         assert out.read_bytes() == (tmp_path / "ref" / f"{sort}.parquet").read_bytes()
         assert out.with_name(f"{sort}.groups.parquet").read_bytes() == (tmp_path / "ref" / f"{sort}.groups.parquet").read_bytes()
         assert sorted(x.name for x in out.parent.iterdir()) == [f"{sort}.groups.parquet", f"{sort}.parquet"]
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_piece_plan_is_exact(seed):
+    """Random runs of sorted keys, fenced every `stride` rows: unique keys at `write_served`'s stride, or few distinct
+    keys at any stride (equal keys repeat within and across runs and straddle fences). The pieces tile the key space in
+    order, a run's rows of a piece lie in its span, and a piece holds ≤ `share` rows — always over unique keys; over
+    repeated ones unless no fence key lies strictly between its `lo` and `hi` (its bound already over `share`)."""
+    rnd = random.Random(seed)
+    unique = seed % 2 == 1
+    n_runs = rnd.randrange(1, 6)
+    if unique:
+        pool = rnd.sample(range(10_000), rnd.randrange(1, 400))
+        cuts = sorted(rnd.choices(range(len(pool) + 1), k=n_runs - 1))
+        runs = [sorted((k // 100, f"{k % 100:02d}") for k in pool[a:z]) for a, z in zip([0, *cuts], [*cuts, len(pool)])]
+    else:
+        runs = [sorted((rnd.randrange(4), rnd.choice("ab")) for _ in range(rnd.randrange(0, 60))) for _ in range(n_runs)]
+    share = rnd.randrange(1, 40)
+    stride = max(1, share // (n_runs + 1)) if unique else rnd.randrange(1, 9)
+    # Each run's segment starts some rows into its spool.
+    offs = [rnd.randrange(0, 5) for _ in runs]
+    spec = [(o, o + len(r), [(r[i], o + i) for i in range(0, len(r), stride)]) for o, r in zip(offs, runs)]
+    cands = sorted({k for _, _, f in spec for k, _ in f})
+    pieces = ist.piece_plan(spec, share)
+    assert pieces[0][0] is None and pieces[-1][1] is None
+    assert [p[1] for p in pieces[:-1]] == [p[0] for p in pieces[1:]]
+    total = 0
+    for lo, hi, spans in pieces:
+        got = []
+        for j, (o, r) in enumerate(zip(offs, runs)):
+            rows = [o + i for i, k in enumerate(r) if (lo is None or k >= lo) and (hi is None or k < hi)]
+            if rows:
+                (_, a, z), = [s for s in spans if s[0] == j]
+                assert a <= rows[0] and rows[-1] < z
+            got += [r[i - o] for i in rows]
+        total += len(got)
+        forced = not any((lo is None or lo < c) and (hi is None or c < hi) for c in cands)
+        assert len(got) <= share or (forced and not unique)
+    assert total == sum(map(len, runs))
 
 
 def test_merge_keys_are_the_orders():
