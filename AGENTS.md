@@ -145,6 +145,11 @@ dt-cloud interval-store backfill-churn -O NEW -o STORE [-g GEN]  # GEN (base + r
                           # file's |Δsize| rolled up to its ancestors, counted after the last v1 → v2 scan) and `churn_end` (at
                           # `vt`, closed pieces), `"churn": true` in `scans.json`; a fresh `build`'s bytes. New builds (`churn`
                           # after `fold`), appends and compactions carry it; source and `CURRENT.json` untouched
+dt-cloud interval-store backfill-level -g GEN -o STORE  # The level index (specs/diff-progressive.md §3b, what
+                          # `/api/diff/level` reads): one row per child version transition keyed `(parent depth, parent
+                          # path, ts, name)`, cut into GEN's `served/level.*` and each listed run's, nothing else written
+                          # (not `scans.json`, not `CURRENT.json`); needs churn. Appends, carries and compactions then carry
+                          # it. New builds opt in with `build -l` (`"level": true`); without either, no served byte changes
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier

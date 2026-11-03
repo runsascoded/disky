@@ -22,6 +22,7 @@ from dt_cloud import interval_append as ia
 from dt_cloud import interval_churn as ich
 from dt_cloud import interval_compact as ic
 from dt_cloud import interval_identity as iid
+from dt_cloud import interval_level as ilv
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
@@ -170,6 +171,38 @@ def test_migrate_object_version(built, spy, tmp_path):
     store = _copy(built, tmp_path)
     _invoke(iid.migrate_cmd, ["-g", "g", "-O", "g2", "-o", str(store), "-w", str(tmp_path / "w"), "-r", str(RG), "-p", "2", "-M", MEM])
     within(spy)
+
+
+def test_level_sort_build_append_and_backfill(world, built, spy, tmp_path, monkeypatch):  # noqa: F811
+    """The level sort is cut under the entry's budget too, each plan charging its rows (up to `ROWS_PER_VERSION` per version
+    of `pvl`) rather than its source's: a `-l` build, an append carrying it, and `backfill-level` on a generation without."""
+    charged: list[int] = []
+    real_cut = tm.Budget.cut
+
+    def cut(self, *a, **kw):
+        charged.append(kw["sort_rows"])
+        return real_cut(self, *a, **kw)
+
+    monkeypatch.setattr(tm.Budget, "cut", cut)
+    leveled = tmp_path / "leveled"
+    _invoke(il.build_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(leveled), "-w", str(tmp_path / "w"), "-k", "3", "-r", str(RG),
+                           "-p", "2", "-M", MEM, "-l", "-t", DATES[BASE - 1]])
+    within(spy)
+    gen = leveled / ist.PREFIX / "g"
+    pvl = ic.input_rows([str(p) for p in (gen / "pvl").glob("r*.parquet")])
+    assert ([w["sort"] for w in spy["writes"]].count(ilv.LEVEL), charged) == (1, [ilv.ROWS_PER_VERSION * pvl])
+    charged.clear()
+    _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(leveled), "-w", str(tmp_path / "w2"), "-r", str(RG), "-p", "2",
+                         "-M", MEM, "-t", DATES[BASE]])
+    within(spy)
+    assert [w["sort"] for w in spy["writes"]].count(ilv.LEVEL) == 2
+    run_pvl = ic.input_rows([str(p) for p in (gen / f"deltas/{DATES[BASE]}/pvl").glob("r*.parquet")])
+    assert charged[-1] == ilv.ROWS_PER_VERSION * run_pvl
+    spy["writes"].clear()
+    store = _copy(built, tmp_path)
+    _invoke(ilv.backfill_cmd, ["-g", "g", "-o", str(store), "-w", str(tmp_path / "w3"), "-r", str(RG), "-p", "2", "-M", MEM])
+    within(spy)
+    assert [w["sort"] for w in spy["writes"]] == [ilv.LEVEL]
 
 
 def test_tree_watch_logs_and_asserts(capsys):

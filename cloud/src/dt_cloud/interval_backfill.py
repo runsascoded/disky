@@ -38,6 +38,7 @@ from . import static_names as sn
 from . import tree_mem as tm
 from .append_runner import LocalRunStore, latest_key
 from .blobstore import Store, mirror, upload_new
+from .interval_level import LEVEL_DOC
 from .static_local import _check_gen, workdir
 from .static_names import err, q
 
@@ -228,13 +229,13 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
 
 def mirror_source(store: Store, gen: str, new_gen: str, work: Path, ranges_gen: str | None = None) -> Path:
     """Generation `gen` of `store` mirrored into `work/store/` for a fold into `new_gen` (refused when `new_gen` exists:
-    a generation is never rewritten), but for what no fold reads (`UNREAD`). A staged build's generation may borrow its
+    a generation is never rewritten), but for what no fold reads (`UNREAD`; the level sort's record is kept). A staged build's generation may borrow its
     key ranges and base range files from `ranges_gen`: those are mirrored in beside its own. Returns its dir."""
     prefix, new_prefix = f"{PREFIX}/{gen}", f"{PREFIX}/{new_gen}"
     if store.listing(new_prefix):
         raise SystemExit(f"{store.root}/{new_prefix}/ exists: a generation is never rewritten")
     gen_dir = work / "store" / prefix
-    before = mirror(store, prefix, gen_dir, keep=lambda rel: not rel.startswith(UNREAD))
+    before = mirror(store, prefix, gen_dir, keep=lambda rel: rel == LEVEL_DOC or not rel.startswith(UNREAD))
     if f"{prefix}/scans.json" not in before:
         raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
     if ranges_gen and ranges_gen != gen:
