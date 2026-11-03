@@ -3,10 +3,11 @@ import type { Env } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { fixture, GETS } from '../_lib/testStore'
 
-// What a refused request with a well-formed junk credential can cost (`AHEAD_COST`): the lookups a route starts beside
+// What a refused request can cost: with a session cookie that verifies (`AHEAD_COST`), the lookups a route starts beside
 // its gate (`shared.ahead`) run to their end after the gate refuses it, on a cold isolate (nothing committed to join
 // or read back), against counting R2 / D1 / KV / colo mocks over `fixtures/iv-churn/` (an interval store whose
-// generation has 2 runs). The gate is the real one; its own reads are `GATE_COST`.
+// generation has 2 runs); with a forged or expired one, or a token, only the gate's own reads (`GATE_COST`). The gate is
+// the real one.
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_lib/testStore')).S3Store }))
 
@@ -16,6 +17,7 @@ const { onRequestGet: subtree } = await import('./subtree')
 const { AHEAD_COST, GATE_COST } = await import('../_lib/aheadCost')
 const { PLAN_AHEAD_FOOTERS } = await import('../_lib/diffLevel')
 const { clearIsolate, loadScopes } = await import('../_lib/shared')
+const { signSession } = await import('@open-athena/auth')
 const { coloPutsSettled } = await import('../_lib/index')
 await loadScopes()
 
@@ -56,13 +58,20 @@ function r2(dir: string): R2Bucket {
   return { get, list, head } as unknown as R2Bucket
 }
 
-/** `db`, every statement run (alone or in a batch) counted. */
+/** Each statement's wait before it runs (ms; negative: none, its answer a microtask away), so the gate refuses
+ *  sooner or later into the lookups it runs beside. */
+const d1Lag = { ms: -1 }
+/** `db`, every statement run (alone or in a batch) counted, after `d1Lag`. */
 function counted(db: D1Database): D1Database {
   const wrap = (st: D1PreparedStatement): D1PreparedStatement => new Proxy(st, {
     get(t, k) {
       const v = Reflect.get(t, k) as unknown
       if (k === 'bind') return (...a: unknown[]) => wrap((v as (...a: unknown[]) => D1PreparedStatement).apply(t, a))
-      if (k === 'first' || k === 'all' || k === 'run' || k === 'raw') return (...a: unknown[]) => { n.d1++; return (v as (...a: unknown[]) => unknown).apply(t, a) }
+      if (k === 'first' || k === 'all' || k === 'run' || k === 'raw') return async (...a: unknown[]) => {
+        n.d1++
+        if (d1Lag.ms >= 0) await new Promise(r => setTimeout(r, d1Lag.ms))
+        return (v as (...a: unknown[]) => unknown).apply(t, a)
+      }
       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v
     },
   })
@@ -75,6 +84,7 @@ function counted(db: D1Database): D1Database {
 /** Two scans D1 points at (per-scan pointers: their files are not in the store) that the interval store doesn't hold. */
 const [P1, P2] = ['2020-01-01', '2020-01-02']
 
+const SECRET = 'test-secret'
 let env: Env
 const reset = () => {
   n = { r2: 0, d1: 0, kv: 0, colo: 0 }
@@ -92,7 +102,7 @@ beforeEach(async () => {
     },
   }
   env = {
-    DB: counted(db), SESSION_SECRET: 'test-secret', BASE_SCOPE: 'laptop', ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g',
+    DB: counted(db), SESSION_SECRET: SECRET, BASE_SCOPE: 'laptop', ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g',
     INDEX_R2: r2('iv-churn'), GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'b',
     CACHE_KV: { get: async () => { n.kv++; return null }, put: async () => {} },
   } as unknown as Env
@@ -100,14 +110,21 @@ beforeEach(async () => {
   PLAN_AHEAD_FOOTERS.max = 16
 })
 
-/** A well-formed session cookie the gate can't verify (its signature is junk). */
-const JUNK_COOKIE = { cookie: 'oa_auth=eyJzdWIiOiJlOngifQ.c2lnbmF0dXJlLW5vdC1yZWFs' }
+/** A session cookie for `sub`, signed under `secret`, minted `ago` ms before now with a `ttl` (s). */
+const session = async (sub: string, { secret = SECRET, ago = 0, ttl }: { secret?: string; ago?: number; ttl?: number } = {}) =>
+  ({ cookie: `oa_auth=${await signSession(sub, secret, Date.now() - ago, ttl)}` })
+/** A session that verifies (the gate's secret, unexpired) for an email the allowlist doesn't hold: the gate refuses it. */
+const VALID = await session('e:removed@example.test')
+/** The same session signed under another secret. */
+const FORGED = await session('e:removed@example.test', { secret: 'not-the-secret' })
+/** The same session, signed under the gate's secret, expired an hour ago. */
+const EXPIRED = await session('e:removed@example.test', { ago: 2 * 3600_000, ttl: 3600 })
 /** A well-formed token no grant holds. */
-const JUNK_TOKEN = { authorization: `Bearer ${'A'.repeat(32)}` }
+const TOKEN = { authorization: `Bearer ${'A'.repeat(32)}` }
 
 /** `path`'s answer at a non-local host (the real gate) and what it read, once every lookup it started has settled:
  *  they run on past the refusal (`done()` discards their writes, it doesn't cancel them). */
-async function cost(route: (c: { request: Request; env: Env }) => Promise<Response>, path: string, headers: Record<string, string> = JUNK_COOKIE) {
+async function cost(route: (c: { request: Request; env: Env }) => Promise<Response>, path: string, headers: Record<string, string> = VALID) {
   const r = await route({ request: new Request(`http://example.test${path}`, { headers }), env })
   await r.text()
   for (let still = 0, last = ''; still < 5;) {
@@ -123,9 +140,10 @@ async function cost(route: (c: { request: Request; env: Env }) => Promise<Respon
 /** `LEVEL_DIRS` directories: the root, both buckets and the rest absent. */
 const DIRS = ['', 'b1', 'b2', ...Array.from({ length: LEVEL_DIRS - 3 }, (_, i) => `d${i}`)]
 const levelAt = (from: string, to: string) => `/api/diff/level?from=${from}&to=${to}${DIRS.map(p => `&p=${p}`).join('')}`
-const refused = (c: Counts) => ({ status: 401, ...c })
+/** Refused, having read `c` beside the gate, and the gate's own reads of the verifying session. */
+const refused = (c: Counts) => ({ status: 401, ...c, d1: c.d1 + GATE_COST.session.d1 })
 
-describe('a refused request with a well-formed junk credential reads at most `AHEAD_COST`', () => {
+describe('a refused request whose session cookie verifies reads at most `AHEAD_COST`', () => {
   it('level: R2, KV and colo at their worst over held scans and every directory it may ask; D1 over unheld ones', async () => {
     const held = await cost(level, levelAt('2026-08-02', '2026-08-06'))
     // The fixture's plan over these directories reads one footer group a tier.
@@ -134,6 +152,18 @@ describe('a refused request with a well-formed junk credential reads at most `AH
     reset()
     // Neither held: refused before any handle (the state and the base's footer indexes read), never a per-scan one.
     expect(await cost(level, levelAt(P1, P2))).toEqual(refused({ r2: 3 + 2, d1: worst.d1, kv: LEVEL_DIRS, colo: LEVEL_DIRS + 1 + 4 }))
+  })
+
+  it('level: the same whenever the gate refuses (its lookups, running on, read back what they read, never again)', async () => {
+    const got = []
+    for (const ms of [-1, 0, 1, 5, 20, 60]) {
+      reset()
+      d1Lag.ms = ms
+      got.push(await cost(level, levelAt('2026-08-02', '2026-08-06')))
+    }
+    d1Lag.ms = -1
+    const worst = AHEAD_COST.level({ dirs: LEVEL_DIRS, runs: RUNS, footers: 1 + RUNS })
+    expect(got).toEqual(Array(6).fill(refused({ ...worst, d1: 0 })))
   })
 
   it('level: the early plan reads at most `PLAN_AHEAD_FOOTERS.max` footer groups (a wider one is dropped: the read plans again)', async () => {
@@ -159,8 +189,25 @@ describe('a refused request with a well-formed junk credential reads at most `AH
     expect(await cost(subtree, '/api/subtree?d=200102&path=&w=1280&h=768')).toEqual(refused(AHEAD_COST.subtree))
   })
 
-  it('the gate\'s own reads: none for a session cookie it can\'t verify, a lookup and a logged denial for a token', async () => {
-    expect(await cost(subtree, '/api/subtree?date=2026-08-06&path=&w=1280&h=768', JUNK_TOKEN)).toEqual(refused({ ...AHEAD_COST.subtree, d1: GATE_COST.token.d1 }))
-    expect(GATE_COST.cookie.d1).toBe(0)
+  it('a forged or expired session cookie, or a token, reads exactly `GATE_COST`: nothing starts beside the gate', async () => {
+    const paths = [
+      [level, levelAt('2026-08-02', '2026-08-06')],
+      [diff, '/api/diff?from=2026-08-02&to=2026-08-06&path=&w=1280&h=768'],
+      [subtree, '/api/subtree?date=2026-08-06&path=&w=1280&h=768'],
+    ] as const
+    const got: unknown[] = []
+    for (const [route, path] of paths) {
+      for (const headers of [FORGED, EXPIRED, TOKEN]) {
+        reset()
+        got.push(await cost(route, path, headers))
+      }
+    }
+    const none = { r2: 0, kv: 0, colo: 0 }
+    expect(got).toEqual(paths.flatMap(() => [
+      { status: 401, ...none, d1: GATE_COST.cookie.d1 },
+      { status: 401, ...none, d1: GATE_COST.cookie.d1 },
+      { status: 401, ...none, d1: GATE_COST.token.d1 },
+    ]))
+    expect([GATE_COST.cookie.d1, GATE_COST.token.d1]).toEqual([0, 2])
   })
 })

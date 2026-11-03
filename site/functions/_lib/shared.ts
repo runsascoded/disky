@@ -69,12 +69,14 @@ export class Scope {
     this.local.clear()
     for (const w of log) w()
   }
-  /** The gate didn't pass (or was never reached): nothing logged lands, nor anything written later. */
+  /** The gate didn't pass (or was never reached): nothing logged lands, nor anything written later. The overlay stays
+   *  the scope's own: its lookups, running on to their end, still read back what they wrote (memos, colo puts, their
+   *  own pending entries), so they read nothing twice whenever the refusal lands (`AHEAD_COST` is timing-free), and
+   *  it leaves with the scope. */
   discard(): void {
     if (this.state !== 'provisional') return
     this.state = 'discarded'
     this.log = []
-    this.local.clear()
   }
 }
 
@@ -224,14 +226,15 @@ export class IsoSet<T> {
 
 /** What `shared` / `inFlight` need of their map. */
 type Pending<T> = Pick<Map<string, Promise<T>>, 'get' | 'set' | 'delete'>
-/** `map` as the request at hand writes its entries (pending and settled promises): an `IsoMap`, or any map outside a
- *  provisional scope, as is; a plain `Map` in one through the scope's overlay, as an `IsoMap` would — its entries are
+/** `map` as the request at hand writes its entries (pending and settled promises): an `IsoMap`, or any map outside an
+ *  uncommitted scope, as is; a plain `Map` in one through the scope's overlay, as an `IsoMap` would — its entries are
  *  seen by this request alone, so no other request ever joins (or is woken by the kill of) a provisional request's
- *  work, and they land at the commit (a removal only if the map still holds what this request removed). The scope is
- *  the one at hand when the view is taken: its eviction callbacks (`track`) may run outside it. */
+ *  work, and they land at the commit (a removal only if the map still holds what this request removed); a discarded
+ *  scope's stay its own (`Scope.discard`). The scope is the one at hand when the view is taken: its eviction callbacks
+ *  (`track`, a kill) may run outside it, and remove nothing from a discarded one. */
 function pendingIn<T>(map: Map<string, Promise<T>>): Pending<T> {
   const s = scopeOf()
-  if (!s || s.state !== 'provisional' || map instanceof IsoMap) return map
+  if (!s || map instanceof IsoMap) return map
   const over = () => s.overlay<string, Promise<T> | typeof TOMB>(map)
   const view: Pending<T> = {
     get(k) {
@@ -242,7 +245,7 @@ function pendingIn<T>(map: Map<string, Promise<T>>): Pending<T> {
     },
     set(k, v) {
       if (s.state === 'committed') map.set(k, v)
-      else if (s.state === 'provisional') {
+      else {
         over().set(k, v)
         s.defer(() => { map.set(k, v) })
       }
@@ -368,11 +371,13 @@ const entries = new WeakMap<Promise<unknown>, Entry>()
 export interface Join { name: string; req?: Req }
 
 /** Track `p`, which a memo now holds, as `j.req`'s work of kind `j.name`; `evict` removes it from the memo (only if
- *  the memo still holds it). A dead request's work is evicted at once: it's never joined. */
+ *  the memo still holds it). A dead request's work is evicted at once: it's never joined — unless a scope's overlay
+ *  holds it (a refused `ahead`'s lookups running on), which no other request sees: there it is read back, not read
+ *  again. */
 export function track(p: Promise<unknown>, j: Join, evict: () => void): void {
   const e = new Entry(evict, j.name, j.req)
   entries.set(p, e)
-  if (j.req?.dead) return e.drop()
+  if (j.req?.dead && !scopeOf()) return e.drop()
   j.req?.entries.add(e)
   p.then(() => settledIn(e.kind, Date.now() - e.at), () => {}).finally(() => {
     e.done = true

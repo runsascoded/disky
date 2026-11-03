@@ -109,7 +109,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
   const gate = member ? Promise.resolve(member.id) : st.time('auth', requireViewer(ctx as never))
   gate.catch(() => {})
   await loadScopes()
-  const early = ahead(ctx.env, !!member || presentsCredentials(ctx as never))
+  const early = ahead(ctx.env, !!member || await presentsCredentials(ctx as never))
   try {
     return await diffGated(ctx, st, early, gate, { from, to, path, w, h, minArea, atten, top, summary, depth, lens, rawOwner, owner, classes, qRaw, qp, query, member })
   } finally {

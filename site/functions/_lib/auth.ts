@@ -16,7 +16,7 @@
  * `scopesFor` on every request, so removal bites instantly. Grant sessions
  * carry the scopes they were minted with (normally just the base scope).
  */
-import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, hasScope, readCookie, type Subject } from '@open-athena/auth'
+import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, hasScope, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { grantCaller, meterOf } from './usage.js'
@@ -270,14 +270,8 @@ export function gateFor(env: Env): Gate | null {
   })
 }
 
-/** The session cookie the gate reads (`presentsCredentials` looks for it by name). */
+/** The session cookie the gate reads (`presentsCredentials` verifies it). */
 export const SESSION_COOKIE = DEFAULT_COOKIE_NAME
-/** A token the gate can find (`Bearer` / `?key=`): what `generateToken` mints, 24 random bytes base64url (32
- *  characters; the package doesn't export the shape, so `auth.test.ts` checks a minted one against it). The gate takes
- *  any string and refuses the rest at its lookup. */
-export const TOKEN_SHAPE = /^[A-Za-z0-9_-]{32}$/
-/** A session cookie's shape (`signSession`: base64url claims, `.`, base64url signature). */
-const SESSION_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/
 
 /** Identity + scopes however the request proved them; null if it didn't. */
 export interface Identity {
@@ -352,20 +346,22 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
   return authIdentity(auth)
 }
 
-/** Whether a request may pass the gate before it is asked: a public deployment, local dev, or a request presenting
- *  something the gate reads, well-formed — the session cookie (`SESSION_COOKIE`, `SESSION_SHAPE`), an
- *  `Authorization: Bearer` token or a `?key=` link (`TOKEN_SHAPE`). Anything else (no credential, other cookies, a
- *  `Basic` header, a malformed token) is refused or answered anonymously whatever the lookups say, so what a route
- *  starts beside its gate (`shared.ahead`) waits for it instead. A well-formed junk credential still starts them: what
- *  that can cost is bounded per route (`AHEAD_COST`). */
-export function presentsCredentials(ctx: Ctx): boolean {
+/** Whether a request may pass the gate before it is asked: a public deployment, local dev, or a session cookie
+ *  (`SESSION_COOKIE`) that verifies — the package's `verifySessionClaims` (its HMAC signature under the gate's
+ *  `SESSION_SECRET`, `crypto.subtle`, no I/O) with its expiry not past. Nothing else starts what a route starts beside
+ *  its gate (`shared.ahead`), which then waits for it: no credential, other cookies, a forged, malformed or expired
+ *  session, a `Basic` header — and a `Bearer` token or `?key=` link, which only the gate's D1 lookup can check (agent and
+ *  API calls, not the browser's latency-sensitive path; the gate reads a presented token first, so a cookie beside one
+ *  isn't the credential). Only a session minted under the secret can make a refused request cost more than the gate's
+ *  own reads (`AHEAD_COST`, `GATE_COST`). */
+export async function presentsCredentials(ctx: Ctx): Promise<boolean> {
   const url = new URL(ctx.request.url)
   if (ctx.env.PUBLIC_READ || url.hostname === 'localhost' || url.hostname === '127.0.0.1') return true
-  // The gate's order: a `Bearer` token (else `?key=`) is the credential whenever one is presented, the cookie only
-  // without one.
-  const bearer = ctx.request.headers.get('authorization')?.match(/^Bearer (.+)$/)?.[1] ?? url.searchParams.get('key')
-  if (bearer) return TOKEN_SHAPE.test(bearer)
-  return SESSION_SHAPE.test(readCookie(ctx.request, SESSION_COOKIE) ?? '')
+  if (/^Bearer (.+)$/.test(ctx.request.headers.get('authorization') ?? '') || url.searchParams.get('key')) return false
+  const cookie = readCookie(ctx.request, SESSION_COOKIE)
+  // No gate (`gateFor`), no pass.
+  if (!cookie || !ctx.env.DB || !ctx.env.SESSION_SECRET) return false
+  return (await verifySessionClaims(cookie, ctx.env.SESSION_SECRET, Date.now())) !== null
 }
 
 /** Gate a handler on a scope; 401/403 as JSON. */
