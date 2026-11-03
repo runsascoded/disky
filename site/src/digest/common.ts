@@ -32,9 +32,10 @@ export interface DigestParams {
   headline: ('mtd' | 'window')[]
   /** Which weeks the summaries list: every one overlapping the window, or the month's. */
   weeks: 'window' | 'month'
-  /** cw: a quota line under the headline (every pool, most full first, marked by pressure), or none
-   *  (specs/digest-quota-pressure.md). */
-  quotas: 'off' | 'circles'
+  /** cw: a quota line under the headline: every pool most full first, marked by pressure
+   *  (specs/digest-quota-pressure.md); every pool in the replies' order, marked by runway (specs/digest-runway-marks.md);
+   *  or none. */
+  quotas: 'off' | 'circles' | 'runway'
   /** cw: the plot's chart: the primary's usage against its quota, or every pool's % of its quota. */
   plot: 'usage' | 'pools'
   /** The share (%) a pool is marked red at; orange from 10 points below. */

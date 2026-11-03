@@ -137,7 +137,9 @@ class DigestConfig:
     is back under; None: neither. ``quota_marks`` (cw replies): `warning` (the default) keeps the
     clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
-    points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md). ``renderer``: who renders the OP's text and plot request,
+    points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
+    `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_cw._runway_mark`,
+    specs/digest-runway-marks.md). ``renderer``: who renders the OP's text and plot request,
     `local` (this package's `op_body` / `image_body`) or `site` (`POST /api/digest-op`, the renderer `/admin/slack`
     previews with; specs/slack-preview-page.md phase 2) under ``params`` (the site's `src/digest/codec` string,
     `''`: the defaults, which render `local`'s bytes). ``preview``: where each Slack converge writes the month's preview bundle
@@ -257,7 +259,7 @@ def parse_bytes(v: int | str) -> int:
 
 
 TEMPLATES = ("gcs", "cw")
-QUOTA_MARKS = ("warning", "circles")
+QUOTA_MARKS = ("warning", "circles", "runway")
 RENDERERS = ("local", "site")
 # the scalar fields' accepted YAML types (`buckets` / `prices` are parsed below)
 _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
