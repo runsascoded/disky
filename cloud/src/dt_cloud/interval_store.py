@@ -1341,6 +1341,9 @@ def write_groups(out: Path, bounds: Iterable[dict], sort: str, summary) -> dict:
                 segs_in.append({"seg": bd["seg"], "row_start": start, "row_end": start + rg.num_rows})
                 start += rg.num_rows
             w.write_table(pa.table({c: [r[c] for r in rows] for c in GROUPS_SCHEMA.names}, schema=GROUPS_SCHEMA), row_group_size=GROUPS_RG)
+        if not md.num_row_groups:
+            # An empty sort's sidecar holds one empty row group, as a fresh build's always has (its bytes are the contract).
+            w.write_table(GROUPS_SCHEMA.empty_table(), row_group_size=GROUPS_RG)
         if next(bds, None) is not None:
             raise RuntimeError(f"{out}: the writers saw more groups than its {md.num_row_groups}")
         segs = summary(segs_in)

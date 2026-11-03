@@ -3,6 +3,7 @@ alone, concatenated or merged, and parts written by processes and joined (`parqu
 `ORDER BY` streamed into one serial writer leaves, sidecar included."""
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 
@@ -289,3 +290,27 @@ def test_concat_is_one_writer(tmp_path):
     assert concat(parts, tmp_path / "cat.parquet", drop=True) == {"rows": 1037, "groups": 11, "bytes": one.stat().st_size}
     assert (tmp_path / "cat.parquet").read_bytes() == one.read_bytes()
     assert [p.exists() for p in parts] == [False] * 5
+
+
+def test_empty_sort_sidecar_bytes(tmp_path) -> None:
+    """A sort with no rows: `write_groups` writes one empty row group, the sidecar a fresh build has always had. The
+    reference is that writer's whole sequence over the same empty sort, so a change to the empty case changes bytes."""
+    from disk_tree.find.groups import schema_json
+
+    schema = ist.PVL_SCHEMA
+    out = tmp_path / "reads.parquet"
+    with ist._served_writer(out, schema, None) as w:
+        w.add_key_value_metadata({"store": "interval", "version": str(ist.STORE_VERSION), "sort": "reads"})
+    doc = ist.write_groups(out, [], "reads", lambda rows: ist._seg_summary(rows, True))
+    got = tmp_path / "reads.groups.parquet"
+    assert (doc["rows"], doc["groups"], pq.read_metadata(got).num_row_groups, pq.read_metadata(got).num_rows) == (0, 0, 1, 0)
+
+    md = pq.read_metadata(out)
+    ref = tmp_path / "ref.groups.parquet"
+    kv = {"groups_v": "1", "version": str(ist.STORE_VERSION), "schema": json.dumps(schema_json(md)["schema"], separators=(",", ":")), "sort": "reads",
+          "rows": "0", "segments": json.dumps({k: v["groups"] for k, v in ist._seg_summary([], True).items()})}
+    t = pa.table({c: [] for c in ist.GROUPS_SCHEMA.names}, schema=ist.GROUPS_SCHEMA)
+    with pq.ParquetWriter(ref, ist.GROUPS_SCHEMA, compression="zstd", write_statistics=ist.GROUPS_STAT_COLS, store_schema=False) as w:
+        w.write_table(t, row_group_size=512)
+        w.add_key_value_metadata(kv)
+    assert got.read_bytes() == ref.read_bytes()
