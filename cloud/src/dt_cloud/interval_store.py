@@ -1082,10 +1082,12 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
        `parquet_pages.concat` joins the parts on the same processes: the bytes one writer of every group leaves, whatever
        the parts, runs, pieces or budget.
 
-    Wall time: each pass is the sort's rows over `procs` cores at once — a merged sort's pieces are a second sort of
-    its rows, about the runs' time again (N rows / (`procs` × a core's DuckDB sort rate), reading lz4 spools instead of
-    the range files), plus each piece's reads past its key range (< 2 fence strides and 2 spool groups a run: ≤ ~¼
-    of its rows). Peak memory: DuckDB's limit (`procs` runs or pieces at once, each sized to its share) and ≤
+    Wall time: each pass is the sort's rows over `procs` cores at once, ≈ N / (`procs` × r) for N rows at a core's
+    DuckDB sort rate r (~40K rows/s measured for the run phase on an n2-highmem), whatever any segment's size: a merged
+    sort's pieces are a second sort of its rows, about the runs' time again (reading lz4 spools instead of the range
+    files), plus each piece's decode past its key range (< 2 fence strides and 2 spool groups a run, a group ≈ a
+    stride = `share / (FENCE_SLACK × (runs + 1))`: < ½ of its share, ~¼ on average; filtered before the sort). Peak
+    memory: DuckDB's limit (`procs` runs or pieces at once, each sized to its share) and ≤
     `tree_mem.SORT_COPIES` × `procs` × `spool_rows` rows of run or piece batches, plus a merged sort's fences (≈
     `FENCE_SLACK` × (runs + 1) keys a piece); then per worker its imports and `tree_mem.worker_bytes` (writing or
     joining): never the sort's size (`tree_mem.Budget.cut` sizes `procs` to a budget). Peak disk: the run spools (lz4,
