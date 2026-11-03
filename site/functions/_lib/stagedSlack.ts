@@ -20,7 +20,8 @@ import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
 import { expDay, IMAGE_TTL_DAYS, imagePath, ogKey } from './og/sign.js'
 import { imageParams } from './og/cred.js'
 import { serverToken } from './og/tokens.js'
-import { loadRegistry } from './identity.js'
+import { canonId, loadRegistry } from './identity.js'
+import type { Registry } from '../../src/identityRegistry.js'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { Memo, reqOf } from './shared.js'
 
@@ -329,7 +330,9 @@ export const COALESCE_S = BATCH_GAP_S
 /** The parent reaction that closes a thread: the next event starts a new one. */
 export const DONE_REACTION = 'white_check_mark'
 
-interface Event { text: string; blocks?: unknown[]; sender?: Sender }
+/** A thread reply; `by` (an email) posts it as that person, `text` then naming them (`name`) as the workspace or
+ *  the registry does. */
+interface Event { text: string | ((name: string) => string); blocks?: unknown[]; sender?: Sender; by?: { email: string; verb: string } }
 /** The plan's full-tier card for the parent message, or null when the
  * deployment draws no cards (or has no `og_tokens` table). Slack fetches it
  * once per URL, so the view carries the plan's digest (`v`): a new batch is
@@ -395,6 +398,12 @@ export async function slackNames(env: SlackEnv, emails: readonly string[]): Prom
  *  `chat:write.customize` scope, ignored otherwise). The thread's parent is
  *  the plan itself; an event posts as the person who did it. */
 export interface Sender { username: string; icon_url?: string; icon_emoji?: string }
+/** `email` as the deployment's registry knows them (the site's own name and GitHub avatar), for someone the Slack
+ *  workspace doesn't (a sign-in email outside it). */
+export function registryPerson(reg: Registry, email: string): SlackPerson | undefined {
+  const rec = reg[canonId(email, reg)]
+  return rec ? { name: rec.name, image: rec.github ? `https://avatars.githubusercontent.com/${rec.github}?s=192` : null } : undefined
+}
 export const PLAN_SENDER: Sender = { username: 'Staged deletions', icon_emoji: ':wastebasket:' }
 export function personSender(email: string, person: SlackPerson | undefined, verb: string): Sender {
   const name = person?.name ?? email.replace(/@.*$/, '')
@@ -631,19 +640,27 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const queued = v.prefixes.filter(p => !v.deleted.has(p))
     const stage = ev && 'stage' in ev ? ev.stage : null
     const runEv = ev && 'run' in ev ? ev : null
-    const by = stage?.by ?? (runEv?.phase === 'dispatched' ? runEv.run.actor : null)
+    const said = ev && !('stage' in ev) && !('run' in ev) ? ev as Event : null
+    const by = stage?.by ?? (runEv?.phase === 'dispatched' ? runEv.run.actor : said?.by?.email ?? null)
     const [at, reg, people] = await Promise.all([
       stagedStats(full, queued).catch(e => { console.log(`staged slack sizing failed for plan ${planId}: ${(e as Error).message}`); return null }),
       loadRegistry(full).catch(() => ({}) as Awaited<ReturnType<typeof loadRegistry>>),
       slackPeople(env, [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]),
     ])
+    // The workspace's members first; anyone it doesn't know (a sign-in email outside it), as the site names them.
+    for (const e of [...v.stagers, ...v.runs.map(r => r.actor), ...(by ? [by] : [])]) {
+      const k = e.toLowerCase()
+      const r = people[k] ? undefined : registryPerson(reg, e)
+      if (r) people[k] = r
+    }
     const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
     const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
     // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
     const parent = renderParent({ ...v, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
-      : stage ? undefined : (ev as Event | undefined)
+      : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
+      : undefined
     const channel = env.SLACK_ADMIN_CHANNEL!
     let ts = v.slack_ts
     if (ts && v.slack_channel !== channel) {
@@ -692,12 +709,12 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         sender: personSender(stage.by, people[stage.by.toLowerCase()], 'staged'),
       })
     } else if (event) {
-      await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ?? PLAN_SENDER), unfurl_links: false })
+      await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text as string, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ?? PLAN_SENDER), unfurl_links: false })
     }
     // Batches no reply shows (their own notify died) are announced now, by
     // whichever notify runs next, each in its stager's reply.
     for (const s of await unshownStagers(db, planId, now)) {
-      await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s], 'staged') })
+      await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s.toLowerCase()], 'staged') })
     }
   } catch (e) {
     console.log(`staged slack notify failed for plan ${planId}: ${(e as Error).message}`)
