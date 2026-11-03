@@ -98,9 +98,7 @@ options:
   # to nothing: 35 level-0 runs, and search refused every scan.)
   static-names: {profile: /app/job/static-names.json, compact_cmd: [env, MERGE=1, bash, /app/job/cw-static-submit.sh]}
   publish-r2: {barrier: true}
-  # `compact: none` holds the due level-5 compaction (2026-11-03T0344's ran out of DuckDB memory at 12 GB, after the
-  # append) until the served-sort cut is parallel; carries continue
-  interval-store: {timeout: 90m, mem: 12GB, compact: none}
+  interval-store: {timeout: 90m, mem: 12GB}
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects
