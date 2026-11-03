@@ -39,7 +39,7 @@ describe('kinds', () => {
       ['PUT /api/activity/kinds/view', 'admin'],
       ['PUT /api/digest-settings', 'admin'],
       ['POST /api/digest-op', 'digest'],
-      ['POST /api/digest-image', 'digest'],
+      ['POST /api/digest-image', '-'],
       ['POST /api/owner-prices', 'write'],
       ['GET /api/actions', '-'],
       ['POST /api/session-log', '-'],
