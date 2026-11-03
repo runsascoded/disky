@@ -1,0 +1,50 @@
+{
+ "versions": 17,
+ "open": 5,
+ "paths": 7,
+ "reads": 0,
+ "reads_open": 0,
+ "kinds": {
+  "dir": {
+   "versions": 11,
+   "open": 2,
+   "paths": 3
+  },
+  "file": {
+   "versions": 6,
+   "open": 3,
+   "paths": 4
+  }
+ },
+ "scans": [
+  {
+   "id": "2026-07-30",
+   "opened": 3,
+   "closed": 0,
+   "reads_opened": 0,
+   "reads_closed": 0
+  },
+  {
+   "id": "2026-07-31",
+   "opened": 3,
+   "closed": 3,
+   "reads_opened": 0,
+   "reads_closed": 0
+  },
+  {
+   "id": "2026-08-02",
+   "opened": 7,
+   "closed": 3,
+   "reads_opened": 0,
+   "reads_closed": 0
+  },
+  {
+   "id": "2026-08-03",
+   "opened": 4,
+   "closed": 6,
+   "reads_opened": 0,
+   "reads_closed": 0
+  }
+ ],
+ "slices": false
+}

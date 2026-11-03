@@ -11,7 +11,11 @@ With `PAGES` (an int), the same store cut in `PAGES`-row data pages with a page 
 (2b.1's page reads; `diffLevel.test.ts` checks both answer `expected.json`). `interval-store/` was cut before served
 sorts carried a page index, and stays so: the reader's whole-group path for older generations.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES]
+With `ROOT` (a top-level name, `b1` or `b2`), a store of only the files under it, under `interval-store-<ROOT>/`, and no
+`expected.json`: two of them, one per root, are a union view's members (`unionLevel.test.ts`), whose union answers as
+the whole store does.
+
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | ROOT]
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ def _load(name: str):
     return m
 
 
-def main(pages: int | None = None) -> None:
+def main(pages: int | None = None, root: str | None = None) -> None:
     from dt_cloud import interval_local as il
     from dt_cloud import interval_store as ist
     from dt_cloud import static_names as sn
@@ -55,6 +59,8 @@ def main(pages: int | None = None) -> None:
     for j, d in enumerate(t.DATES):
         v = 2 if j >= t.V2_FROM else 1
         fs = t._files(rng, j)
+        if root:
+            fs = {f: b for f, b in fs.items() if f.startswith(f"{root}/")}
         key = LAYOUT.replace("{id}", d)
         (work / "scans" / key).parent.mkdir(parents=True, exist_ok=True)
         t._write(t._rows(fs, v), work / "scans" / key, v)
@@ -64,13 +70,16 @@ def main(pages: int | None = None) -> None:
     for cmd, extra in [(il.build_cmd, ["-w", str(work / "build"), "-k", "3", "-t", t.DATES[BASE - 1]]), (il.add_cmd, ["-w", str(work / "add")])]:
         res = CliRunner().invoke(cmd, [*common, *extra], catch_exceptions=False)
         assert res.exit_code == 0, res.output
-    out = HERE / (f"interval-store-p{pages}" if pages else "interval-store")
+    out = HERE / (f"interval-store-p{pages}" if pages else f"interval-store-{root}" if root else "interval-store")
     shutil.rmtree(out, ignore_errors=True)
     # What the Worker reads: the served sorts, `scans.json`, the manifests and the runs' `meta.json` / `scans.json`.
     shutil.copytree(work / "store" / ist.PREFIX / "g", out / "g", ignore=shutil.ignore_patterns("verify", "state", "lease", "pv", "pvl", "rd", "ranges", "digest"))
     for f in [out / "g" / "scans.json", *(out / "g" / "deltas").glob("*/scans.json")]:
         doc = json.loads(f.read_text())
         f.write_text(json.dumps({**doc, "bucket": "b"}, indent=1) + "\n")
+    if root:
+        shutil.rmtree(work)
+        return
     expected = []
     base = t.V2_FROM
     for i in range(base, len(scans)):
@@ -129,4 +138,5 @@ def level(files: list[dict[str, int]], i: int, j: int, p: str) -> dict | None:
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]) if len(sys.argv) > 1 else None)
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    main(int(arg) if arg and arg.isdigit() else None, arg if arg and not arg.isdigit() else None)
