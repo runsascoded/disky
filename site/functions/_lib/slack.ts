@@ -28,7 +28,7 @@ export async function slackApi(env: SlackEnv, method: string, body: Record<strin
       body: JSON.stringify(body),
     })
     const j = (await r.json().catch(() => ({ ok: false, error: `http ${r.status}` }))) as SlackResult
-    if (!j.ok) console.log(`slack ${method} failed: ${j.error}`)
+    if (!j.ok) console.log(`slack ${method} failed: ${j.error}${j.response_metadata ? ` ${JSON.stringify(j.response_metadata)}` : ''}`)
     return j
   } catch (e) {
     console.log(`slack ${method} threw: ${(e as Error).message}`)

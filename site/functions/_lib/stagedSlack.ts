@@ -13,7 +13,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
-import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv } from './slack.js'
+import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
@@ -34,6 +34,8 @@ export const fmtBytes = (n: number): string => {
   return `${i ? v.toFixed(1) : v} ${u[i]}`
 }
 const fmtN = (n: number): string => n.toLocaleString('en-US')
+/** A count at a glance: `33.9M`, exact below a million. */
+const fmtCount = (n: number): string => n < 1e6 ? fmtN(n) : n < 1e9 ? `${(n / 1e6).toFixed(1)}M` : `${(n / 1e9).toFixed(1)}B`
 const utc = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ') + 'Z'
 const plural = (n: number, one: string, many = `${one}s`): string => `${fmtN(n)} ${n === 1 ? one : many}`
 
@@ -60,6 +62,8 @@ export interface ParentView {
   /** What is still queued: the items no real run has deleted (the title and
    *  "staged by"; the gate and the confirm stay on the whole plan). */
   queued?: { items: number; batches: number; stagers: string[] }
+  /** Unix seconds: whether a real run is still undoable (default: now). */
+  now?: number
 }
 
 /** A staged set at one scan: totals and its largest owners (by display name). */
@@ -79,40 +83,43 @@ const who = (email: string, names?: Names): string => names?.[email.toLowerCase(
  *  absent from the lookup): `/staged`'s "Empty at scan". Not counted as staged. */
 export const emptyAt = (st: PrefixStat | undefined): boolean => !st || (!st.b && !st.o)
 
-/** `51.0 TiB · 179,327,698 objects at scan 2026-10-02 · owners: Grace Hopper 16.0 TiB, hedy 6.0 TiB`,
- *  and, on a line of its own, how many staged prefixes were empty at the scan. */
-export function sizeLine(z: Sized): string {
-  const owners = z.owners.length ? ` · owners: ${z.owners.map(o => `${o.label} ${fmtBytes(o.b)}`).join(', ')}` : ''
-  const empty = z.empty ? `\n+${plural(z.empty, 'staged prefix', 'staged prefixes')} empty at scan, not counted` : ''
-  return `*${fmtBytes(z.b)}* · ${fmtN(z.o)} objects at scan ${z.scan}${owners}${empty}`
+/** The queue's total, as the parent's first line states it: `4,886 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02`
+ *  (unsized: the prefixes alone). */
+export const totalLine = (items: number, z?: Sized): string => {
+  const prefixes = plural(items, 'prefix', 'prefixes')
+  return z ? `*${prefixes} · ${fmtBytes(z.b)} · ${fmtCount(z.o)} objects* at scan ${z.scan}` : `*${prefixes}*`
+}
+
+/** The lines under the total: the largest owners only when they hold most of it (a few names beside a mostly unowned
+ *  total say nothing), and how many staged prefixes were empty at the scan. */
+export function sizeNotes(z: Sized): string[] {
+  const named = z.owners.reduce((n, o) => n + o.b, 0)
+  return [
+    ...(z.owners.length && 2 * named >= z.b ? [`owners: ${z.owners.map(o => `${o.label} ${fmtBytes(o.b)}`).join(', ')}`] : []),
+    ...(z.empty ? [`+${plural(z.empty, 'staged prefix', 'staged prefixes')} empty at scan, not counted`] : []),
+  ]
 }
 
 /** The thread's parent message: `{ text, blocks }` for chat.postMessage / chat.update. */
 export function renderParent(v: ParentView): { text: string; blocks: unknown[] } {
   const q = v.queued ?? { items: v.items, batches: v.batches, stagers: v.stagers }
-  const title = v.closed
-    ? `*Staged plan #${v.planId}* (closed)`
-    : `*Staged for deletion* · plan #${v.planId} · ${fmtN(q.items)} ${q.items === 1 ? 'prefix' : 'prefixes'} in ${q.batches} ${q.batches === 1 ? 'batch' : 'batches'}`
-  const by = (q.stagers.length ? `staged by ${q.stagers.map(e => who(e, v.names)).join(', ')}` : 'nothing staged')
-    + (v.size ? `\n${sizeLine(v.size)}` : '')
+  const title = v.closed ? `*Staged plan #${v.planId}* (closed)` : `*Staged for deletion* · plan #${v.planId}`
+  const by = q.stagers.length ? `staged by ${q.stagers.map(e => who(e, v.names)).join(', ')}` : 'nothing staged'
+  const head = [`${title}: ${totalLine(q.items, v.size)}`, ...(v.size ? sizeNotes(v.size) : []), by]
   const gate = realGate(v.runs, v.digest, v.items)
+  const now = v.now ?? Math.floor(Date.now() / 1000)
+  // Only what bears on the current set: a dry-run of a set since changed, or a real run past its undo window, is history (the thread and www keep it).
   const latestDry = [...v.runs].filter(r => r.mode === 'dry').sort((a, b) => b.started_ts - a.started_ts)[0]
-  let dryLine: string
-  if (!latestDry) dryLine = 'No dry-run yet.'
-  else if (latestDry.finished_ts == null) dryLine = `Dry-run running (${who(latestDry.actor, v.names)}, scan ${latestDry.scan}).`
-  else if (latestDry.plan_digest === '') dryLine = `Latest dry-run (\`${latestDry.run_id}\`) ended without a result.`
-  else {
-    const res = `would delete *${fmtBytes(latestDry.deleted_bytes)}* / ${fmtN(latestDry.deleted_objects)} objects (scan ${latestDry.scan})`
-    dryLine = latestDry.plan_digest === v.digest
-      ? `Latest dry-run ${res} — matches the current plan.`
-      : `Latest dry-run ${res} — *stale*: the plan changed since.`
-  }
+  const dryLine = !latestDry ? null
+    : latestDry.finished_ts == null ? `Dry-run running (${who(latestDry.actor, v.names)}, scan ${latestDry.scan}).`
+    : latestDry.plan_digest === '' ? `Latest dry-run (\`${latestDry.run_id}\`) ended without a result.`
+    : latestDry.plan_digest === v.digest ? `Latest dry-run would delete *${fmtBytes(latestDry.deleted_bytes)}* / ${fmtN(latestDry.deleted_objects)} objects (scan ${latestDry.scan}) — matches the current plan.`
+    : null
   const lastReal = [...v.runs].filter(r => r.mode === 'real').sort((a, b) => b.started_ts - a.started_ts)[0]
-  const realLine = lastReal
-    ? lastReal.finished_ts == null
-      ? `\nReal run in progress (${who(lastReal.actor, v.names)}).`
-      : `\nLast real run deleted ${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects${lastReal.undo_deadline ? `, undoable until ${utc(lastReal.undo_deadline)}` : ''}.`
-    : ''
+  const realLine = !lastReal ? null
+    : lastReal.finished_ts == null ? `Real run in progress (${who(lastReal.actor, v.names)}).`
+    : lastReal.undo_deadline != null && lastReal.undo_deadline > now ? `Last real run deleted ${fmtBytes(lastReal.deleted_bytes)} / ${fmtN(lastReal.deleted_objects)} objects, undoable until ${utc(lastReal.undo_deadline)}.`
+    : null
   const buttons: unknown[] = [
     { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${v.siteUrl}/staged` },
   ]
@@ -132,14 +139,37 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
       })
     }
   }
-  const hint = v.actions && !v.closed && v.items && !gate.ok ? `\n_Delete for real_ appears after a finished dry-run of the current set (${gate.reason}).` : ''
+  const hint = v.actions && !v.closed && v.items && !gate.ok ? `_Delete for real_ appears after a finished dry-run of the current set (${gate.reason}).` : null
+  const status = [dryLine, realLine, hint].filter(Boolean).join('\n')
   const blocks = [
-    { type: 'section', text: { type: 'mrkdwn', text: `${title}\n${by}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `${dryLine}${realLine}${hint}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: head.join('\n') } },
+    // Slack refuses a section with no text.
+    ...(status ? [{ type: 'section', text: { type: 'mrkdwn', text: status } }] : []),
     { type: 'actions', elements: buttons },
     ...(v.image && v.items ? [{ type: 'image', image_url: v.image, alt_text: `Plan #${v.planId}: the staged prefixes as a treemap, coloured by owner` }] : []),
   ]
   return { text: `Staged for deletion: plan #${v.planId}, ${plural(q.items, 'prefix', 'prefixes')}`, blocks }
+}
+
+type ParentMessage = ReturnType<typeof renderParent>
+
+/** Post (`ts` null) or update the parent, what it says landing even when its card can't: Slack fetches an image block's
+ *  URL during the call and refuses the whole message (`invalid_blocks`) when that fails or outlasts its wait, as a new
+ *  card's cold render over a large plan can. Then the text goes without the card, the card is rendered (its colo copy is
+ *  what Slack's next fetch reads), and the card is put back. */
+export async function sendParent(env: SlackEnv, channel: string, ts: string | null, parent: ParentMessage): Promise<SlackResult> {
+  const send = (at: string | null, m: ParentMessage): Promise<SlackResult> => at
+    ? slackApi(env, 'chat.update', { channel, ts: at, ...m })
+    : slackApi(env, 'chat.postMessage', { channel, ...m, ...PLAN_SENDER, unfurl_links: false })
+  const got = await send(ts, parent)
+  const image = (parent.blocks as { type: string; image_url?: string }[]).find(b => b.type === 'image')?.image_url
+  if (got.ok || got.error !== 'invalid_blocks' || !image) return got
+  const bare = await send(ts, { ...parent, blocks: (parent.blocks as { type: string }[]).filter(b => b.type !== 'image') })
+  const at = ts ?? bare.ts
+  if (!bare.ok || !at) return bare
+  const rendered = await fetch(image).then(r => r.arrayBuffer().then(() => r.ok)).catch(() => false)
+  if (rendered) await send(at, parent)
+  return bare
 }
 
 /** The old parent once its plan moved to a new thread (`link`: the new parent). */
@@ -658,7 +688,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       }
     }
     if (!ts) {
-      const p = await slackApi(env, 'chat.postMessage', { channel, ...parent, ...PLAN_SENDER, unfurl_links: false })
+      const p = await sendParent(env, channel, null, parent)
       if (!p.ok || !p.ts) return
       // Two concurrent first events would each post a parent: the claim is
       // the tiebreak, and the loser deletes its own.
@@ -669,10 +699,10 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
         const row = await db.prepare('SELECT slack_channel, slack_ts FROM plans WHERE id = ?').bind(planId).first<{ slack_channel: string; slack_ts: string }>()
         if (!row?.slack_ts || row.slack_channel !== channel) return
         ts = row.slack_ts
-        await slackApi(env, 'chat.update', { channel, ts, ...parent })
+        await sendParent(env, channel, ts, parent)
       }
     } else {
-      await slackApi(env, 'chat.update', { channel, ts, ...parent })
+      await sendParent(env, channel, ts, parent)
     }
     if (old) {
       const pl = await slackApi(env, 'chat.getPermalink', { channel, message_ts: ts })
