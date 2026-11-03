@@ -6,6 +6,7 @@ leaves the store after the grace, but for its forwarding record."""
 from __future__ import annotations
 
 import json
+from bisect import bisect_left
 import random
 import shutil
 from pathlib import Path
@@ -305,7 +306,9 @@ def test_sub_ranges_fold_the_whole_ranges_bytes(run, tmp_path):
     # Every sub-range [lo, hi) after the first starts where the one before it ends.
     assert all([lo for lo, _, _ in plan] == [None, *(hi for _, hi, _ in plan[:-1])] and plan[-1][1] is None for plan in plans.values())
     keys = sorted({key for f in inputs for g in _keys(f) for key in g})
-    assert any(keys[keys.index(c) - 1][0] == c[0] for c in cuts)
+    # A cut is a row group's statistics' first key, a key bound (not a key, where the group's depth varies): the last key
+    # before it, and the first at or after it, at its depth.
+    assert any(0 < (i := bisect_left(keys, c)) < len(keys) and keys[i - 1][0] == keys[i][0] == c[0] for c in cuts)
     straddled = {g1[0] for f in inputs for g0, g1 in zip(_keys(f), _keys(f)[1:]) if g0[-1] == g1[0]}
     assert straddled & cuts
 
