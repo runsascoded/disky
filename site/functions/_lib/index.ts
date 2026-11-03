@@ -2582,7 +2582,10 @@ async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1
     const metadata = { version: t.version, schema: t.schema, num_rows: p.rg.num_rows, row_groups: [p.rg], metadata_length: 0 } as unknown as FileMetaData
     const pageLocationsByGroup = [Object.fromEntries(cols.map(name => [name, p.locs[name]]))]
     const opts = { file, metadata, columns: cols, compressors, pageRangesByGroup: [p.ranges], pageLocationsByGroup }
-    const raw = (await parquetReadObjects(opts as Parameters<typeof parquetReadObjects>[0])) as Record<string, unknown>[]
+    const raw = (await parquetReadObjects(opts as Parameters<typeof parquetReadObjects>[0]).catch((e: Error) => {
+      const layout = cols.map(name => `${name}:${p.locs[name].map(l => `${l.first_row_index}@${l.offset}+${l.compressed_page_size}`).join(',')}`).join(' ')
+      throw new Error(`page read of group ${p.s.rg} (${p.n} rows, ranges ${JSON.stringify(p.ranges)}): ${e.message}; pages ${layout}`)
+    })) as Record<string, unknown>[]
     for (const r of raw) out.push(shape(r))
   }
   trace?.('pgroups', planned.length)
