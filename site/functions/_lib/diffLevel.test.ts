@@ -201,6 +201,80 @@ describe('level diffs', () => {
     }
   })
 
+  describe('from the level index (`interval-store-level/`: the same store built with `build -l`, its runs carrying it)', () => {
+    const levelEnv = async (reads: string[]) => {
+      const { db } = await sqliteD1()
+      return { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: 'interval-store-level', INDEX_R2: r2('iv-churn', reads) } as Env
+    }
+    const traced = () => {
+      const t: Record<string, number> = {}
+      return { t, trace: (name: string, v: number) => { t[name] = (t[name] ?? 0) + v } }
+    }
+
+    it('answers every directory as the scans\' files do, reading the level index only', async () => {
+      const lv = await levelEnv([])
+      const got = []
+      for (const c of cases) {
+        const { t, trace } = traced()
+        const l = (await buildLevels(lv, { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn', chain: false, trace })).get(c.path)!
+        expect([c.from, c.to, c.path, t['level-index']]).toEqual([c.from, c.to, c.path, 1])
+        got.push(shape(l))
+      }
+      expect(got).toEqual(cases.map(wanted))
+    })
+
+    it('answers a batch of directories as each alone, and follows chains', async () => {
+      const lv = await levelEnv([])
+      for (const pr of [...new Set(cases.map(c => `${c.from}|${c.to}`))]) {
+        const [from, to] = pr.split('|')
+        const dirs = cases.filter(c => c.from === from && c.to === to).map(c => c.path)
+        const batch = await buildLevels(lv, { from, to, dirs, k: 512, m: 'churn', chain: false })
+        expect(dirs.map(d => shape(batch.get(d)!))).toEqual(dirs.map(d => wanted(cases.find(c => c.from === from && c.to === to && c.path === d)!)))
+      }
+      const c = cases.find(x => x.path === '' && x.rows.length === 1 && x.rows[0].k === 'dir')!
+      const got = await buildLevels(lv, { from: c.from, to: c.to, dirs: [''], k: 512, m: 'churn' })
+      expect(got.get('')!.next).toBe(c.rows[0].p)
+      expect(shape(got.get(c.rows[0].p)!)).toEqual(wanted(cases.find(x => x.from === c.from && x.to === c.to && x.path === c.rows[0].p)!))
+    })
+
+    // The files holding a scan of `(from, to]`: the base (scans to 2026-08-03) and the newest manifest's two runs.
+    const touched = (from: string, to: string): string[] => [
+      ...(from < '2026-08-03' ? ['served/level.parquet'] : []),
+      ...(from < '2026-08-05' && to >= '2026-08-04' ? ['deltas/2026-08-04_2026-08-05/served/level.parquet'] : []),
+      ...(to >= '2026-08-06' ? ['deltas/2026-08-06/served/level.parquet'] : []),
+    ].map(k => `interval-store-level/g/${k}`)
+
+    it.each([
+      ['one directory', ['b1']],
+      ['a batch of three (siblings b1, b2, and b1/x)', ['b1', 'b2', 'b1/x']],
+    ])('reads %s with one run per touched file in each of two waves, and no other data', async (_, dirs) => {
+      const reads: string[] = []
+      const lv = await levelEnv(reads)
+      const from = '2026-08-02', to = '2026-08-06'
+      // Footers first (a warm isolate's): what's counted is the request's data reads.
+      await buildLevels(lv, { from, to, dirs, k: 512, m: 'churn', chain: false })
+      reads.length = 0
+      const { t, trace } = traced()
+      const got = await buildLevels(lv, { from, to, dirs, k: 512, m: 'churn', chain: false, trace })
+      expect(dirs.map(d => shape(got.get(d)!))).toEqual(dirs.map(d => wanted(cases.find(c => c.from === from && c.to === to && c.path === d)!)))
+      const files = touched(from, to).sort()
+      // Wave 1 (page indexes), then wave 2 (pages): each file once per wave (its dirs' ranges are near: one run), every
+      // run of a wave on one limiter, so each wave is ⌈runs / RUN_READS⌉ rounds; nothing else is read.
+      const data = reads.filter(k => k.endsWith('.parquet') && !k.endsWith('.groups.parquet'))
+      expect([data.slice(0, files.length).sort(), data.slice(files.length).sort()]).toEqual([files, files])
+      expect([t['lv-index-gets'], t['lv-data-gets'], t['lv-index-rounds'], t['lv-data-rounds']]).toEqual([files.length, files.length, 1, 1])
+      expect(t['lv-groups']).toBeGreaterThan(files.length) // several groups per file, still one run each
+    })
+
+    it('reads the path sort where a touched file lacks the level index', async () => {
+      // `interval-store/` has no level sort: the same answers, by the old read.
+      const { t, trace } = traced()
+      const c = cases[0]
+      const l = (await buildLevels(env, { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn', chain: false, trace })).get(c.path)!
+      expect([shape(l), t['level-index']]).toEqual([wanted(c), undefined])
+    })
+  })
+
   it('reads only the groups whose versions change in the range', async () => {
     let fewer = 0
     for (const c of cases) {

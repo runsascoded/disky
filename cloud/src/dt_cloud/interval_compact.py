@@ -43,6 +43,7 @@ import pyarrow.parquet as pq
 from . import append_runner as ar
 from . import interval_append as ia
 from .interval_churn import has_churn, with_churn
+from .interval_level import LEVEL_FLAG, leveled, record_level
 from . import interval_store as ist
 from . import static_names as sn
 from . import tree_mem as tm
@@ -416,6 +417,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices", ist.GENERATION, ist.ATTRIBUTION)},
            "scans": [*base["scans"], *run_scans(gen_dir, gen, runs)], "slices": sliced, **({ist.ATTRIBUTION: True} if attributed else {})}
     doc = ist.record_generation(doc, generation)
+    # The level sort: the base's flag, or its sort added by `backfill-level` (its record mirrored, `interval_local.reads`).
+    doc = record_level(doc) if leveled(base, gen_dir) else {k: v for k, v in doc.items() if k != LEVEL_FLAG}
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -505,10 +508,10 @@ def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: 
 def compactor(rg_rows: int = ist.SERVED_RG) -> ar.Compactor:
     """The interval store's plug into the shared compaction (`append_runner.compact_store`): `fold`, the publish order
     (data, then `scans.json`, the generation's liveness marker), predecessors pruned after the grace."""
-    from .interval_local import UNREAD, publish_order, publish_tier
+    from .interval_local import publish_order, publish_tier, reads
 
     return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, rg_rows=rg_rows), publish_order=publish_order, last=("scans.json",),
-                        keep=lambda rel: not rel.startswith(UNREAD), publish_tier=publish_tier)
+                        keep=reads, publish_tier=publish_tier)
 
 
 def due(gen_dir: Path, policy: ar.Policy | int | None) -> str | None:
