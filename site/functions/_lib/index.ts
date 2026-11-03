@@ -37,7 +37,7 @@ import { type ColumnIndex, type FileMetaData, parquetMetadata, parquetMetadataAs
 import type { Env } from './auth.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
-import { inFlight, join, JOIN, type Join, Memo, reqOf, shared, STALLED, track } from './shared.js'
+import { colo, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
 import { compressors } from './zstd.js'
 
@@ -108,6 +108,12 @@ export type Trace = (name: string, ms: number, desc?: string) => void
 export const withTrace = <H extends IndexHandle>(h: H, trace?: Trace): H => (trace ? { ...h, trace } : h)
 const now = () => performance.now()
 
+/** A bound on the distinct footer groups a plan reads (`IndexHandle.footerBudget`), across its tiers and rect batches. */
+export class FooterBudget {
+  readonly seen = new Set<string>()
+  constructor(readonly max: number) {}
+}
+
 // D1-backed: metadata comes from index_schema/index_row_groups per query.
 interface D1Handle {
   mode: 'd1'
@@ -138,6 +144,9 @@ interface D1Handle {
   asOf?: number
   /** A bounded history read plans versions overlapping this inclusive scan range. */
   historyRange?: [number, number]
+  /** The distinct footer groups a plan over this handle (and its runs, sharing one) may read at most (`pqGroups`; past
+   *  it, `TooWide`): a plan started beside the request's gate (`planLevel`) is bounded by it, whatever the rects. */
+  footerBudget?: FooterBudget
   /** Where the handle's own files are read from, when not the deployment's store (the interval
    *  store on `INDEX_R2`). */
   src?: ByteStore
@@ -362,8 +371,12 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
   if (!env.DB || !dates.length) return ''
   const gens = new Map<string, string>()
   const uniq = [...new Set(dates)]
-  for (let i = 0; i < uniq.length; i += 90) {
-    const chunk = uniq.slice(i, i + 90)
+  // The interval store's dates (below) are keyed by its generation whatever D1 says: only the others ask D1 (an
+  // interval-store deployment's request then costs no D1 round trip here; its state is held per isolate).
+  const ivDates = intervalsOn(env) ? ivKeyed(await ivState(env), uniq) : new Set<string>()
+  const asked = uniq.filter(d => !ivDates.has(d))
+  for (let i = 0; i < asked.length; i += 90) {
+    const chunk = asked.slice(i, i + 90)
     const marks = chunk.map(() => '?').join(', ')
     // Both sorts' generations: a view may read either, and `bysize` is repointed on its own (a re-cut,
     // `index-sync -v bysize`), so a key over `path` alone kept serving the old cut's cached views.
@@ -376,15 +389,16 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
   // The interval store's dates: their answers are the store's generation's (and its reader's, `IV_ANSWER_V`), keyed apart.
   // A date a broken run cuts out (`IvState.refused`) keeps its key: what was cached for it was the store's answer
   // (the store is append-only), and a miss refuses (`IvUnavailable`), never reads per-scan.
-  if (intervalsOn(env)) {
-    const st = await ivState(env)
-    for (const d of uniq) if (st.scans.has(d) || st.refused.has(d)) gens.set(d, `iv:${ivPrefix(env)}:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
-  }
+  for (const d of ivDates) gens.set(d, `iv:${ivPrefix(env)}:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
   for (const d of [...uniq].sort()) {
     for (const ch of `${d}=${gens.get(d) ?? ''};`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193)
   }
   return (h >>> 0).toString(36)
 }
+
+/** Of `dates`, those whose cache keys are the interval store's (`pathGens`): the scans its state holds, and those a
+ *  broken run cuts out (`IvState.refused`). */
+const ivKeyed = (st: IvState, dates: string[]): Set<string> => new Set(dates.filter(d => st.scans.has(d) || st.refused.has(d)))
 
 /** Every scan of the env's store: each one D1 points at (a synced floor-free `path` index; the primary's query as it
  *  always was, a secondary store's scoped), and, where the store serves its interval store (`PATH_STORE=intervals`),
@@ -450,8 +464,8 @@ function fileFor(env: Env, dir: string, variant: string): FileSlice {
 // `index-gc` runs at the end of the job, well past the TTL, so a live handle
 // never outlives its generation's rows.
 const HANDLE_TTL = 60_000
-const handles = new Map<string, Promise<IndexHandle>>()
-const handleAt = new Map<string, number>()
+const handles = new IsoMap<string, Promise<IndexHandle>>('handles')
+const handleAt = new IsoMap<string, number>('handleAt')
 
 export async function openIndex(env: Env, date: string, variant = 'path'): Promise<IndexHandle> {
   if (intervalsOn(env)) {
@@ -519,13 +533,13 @@ export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals'
  *  (`withStaticGen`), whatever the path store. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const w = (ctx as { waitUntil?: unknown }).waitUntil
-  const env = await withStaticGen(ctx.env)
   const out = (e: Env): C => (e === ctx.env ? ctx : { ...ctx, env: e, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) })
-  if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return out(env)
-  const u = new URL(ctx.request.url).searchParams
-  const ps = u.get('ps')
-  const on = ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
-  const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
+  const store = ctx.env.PATH_STORE === 'opt-in' || ctx.env.PATH_STORE === 'intervals'
+  const ps = new URL(ctx.request.url).searchParams.get('ps')
+  const on = store && ps !== 'scan' && (ctx.env.PATH_STORE === 'intervals' || ps === 'iv')
+  // The two pointers at once (neither reads what the other sets): a cold isolate's two colo lookups overlap.
+  const [env, gen] = await Promise.all([withStaticGen(ctx.env), on ? ivGen(ctx.env) : Promise.resolve(ctx.env.INTERVAL_STORE_GEN)])
+  if (!store) return out(env)
   return out({ ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined })
 }
 
@@ -561,7 +575,7 @@ export async function withStaticGen<E extends StaticGenEnv>(env: E): Promise<E> 
   return gen ? { ...env, STATIC_GEN: gen } : env
 }
 
-const currents = new Map<string, { at: number; p: Promise<string | null>; ok?: string | null }>()
+const currents = new IsoMap<string, { at: number; p: Promise<string | null>; ok?: string | null }>('currents')
 
 /** The generation a store's `CURRENT.json` pointer (`key`: `{"gen": …}`) names (null without one or without
  *  `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the colo's TTL
@@ -641,11 +655,11 @@ const IV_SLICE_SORTS = new Map([['path', 'slices'], ['bysize', 'slices-bytotal']
  *  `slices-bysize-user` — no owners, as the per-scan reader reads a scan without `usr`. */
 const IV_UNSLICED_SORTS = new Map([['path', 'path'], ['bysize', 'bysize'], ['bysize-user', 'bysize']])
 /** Generations found without slice sorts (their held dates' sliced reads are "not synced"), held a minute. */
-const ivNoSlices = new Map<string, number>()
+const ivNoSlices = new IsoMap<string, number>('ivNoSlices')
 /** The sort a read of each sort also opens (its footer is prefetched with it). */
 const IV_SIBLING = new Map([['path', 'bysize'], ['bysize', 'path'], ['slices', 'slices-bytotal'], ['slices-bytotal', 'slices']])
 /** A served sort's footer, opened once per isolate for every scan (a generation's files are immutable). */
-const ivFooters = new Map<string, Promise<FooterIndex>>()
+const ivFooters = new IsoMap<string, Promise<FooterIndex>>('ivFooters')
 function ivFooter(env: Env, file: string): Promise<FooterIndex> {
   const key = ivKey(env, `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN!}/served/${file}.groups.parquet`)
   return shared(ivFooters, `${storeKey(env)}|${key}`, () => openIvFooter(env, key, r2Bytes(env.INDEX_R2!)), 30_000, ivJoin(env, 'footer'))
@@ -699,7 +713,7 @@ interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]
 export const IV_STATE_TTL = 60_000
 /** How long a broken run stays cut out (then it is tried again: a publish caught mid-copy heals). */
 export const IV_BROKEN_TTL = 30_000
-const ivStates = new Map<string, { at: number; p: Promise<IvState>; ok?: IvState }>()
+const ivStates = new IsoMap<string, { at: number; p: Promise<IvState>; ok?: IvState }>('ivStates')
 /** The bounds on a read joining an interval-store promise another request started (its state, a handle, a footer
  *  or footer group, a row group) before it evicts it and reads for itself (`shared.ts`' `JOIN`). Workers freeze a
  *  cancelled request's promises: a viewer leaving a slow lens view left its handle or groups pending forever, and
@@ -708,7 +722,7 @@ const ivStates = new Map<string, { at: number; p: Promise<IvState>; ok?: IvState
 export const IV_JOIN = JOIN
 /** A memo `name` of the interval store, joined as `env`'s request (`Server-Timing`: `join-<name>`). */
 const ivJoin = (env: Env, name: string): Join => ({ name, req: reqOf(env) })
-const ivBroken = new Map<string, { at: number; error: string }>()
+const ivBroken = new IsoMap<string, { at: number; error: string }>('ivBroken')
 const ivGenKey = (env: Env): string => `${storeKey(env)}|${ivPrefix(env)}|${env.INTERVAL_STORE_GEN}${ivRev(env)}`
 
 /** A read of an interval store's run failed: the run is cut out (`ivMarkBroken`) and the read can be retried
@@ -748,7 +762,7 @@ function ivCutOut(env: Env, st: IvState, date: string): IvUnavailable | null {
 }
 
 /** `openIndex` past `openInterval`'s null: a date the store holds (or a broken run cut out) never reads per-scan. */
-async function ivRefuseHeld(env: Env, date: string, variant: string): Promise<void> {
+export async function ivRefuseHeld(env: Env, date: string, variant: string): Promise<void> {
   const st = await ivState(env)
   const cut = ivCutOut(env, st, date)
   if (cut) throw cut
@@ -1240,7 +1254,7 @@ export const blobKey = (dir: string, variant: string): string => indexKey(dir, v
 
 async function openBlob(env: Env, date: string, variant: string, gen: string, dir: string): Promise<BlobHandle> {
   const key = blobKey(dir, variant)
-  const cache = (caches as unknown as { default: Cache }).default
+  const cache = colo()
   // A secondary store's bucket may hold the same key: its entries get their own segment.
   const st = storeKey(env)
   const ck = new Request(`https://index-blob.cache/${st === PRIMARY_STORE ? '' : `@${st}/`}${key}`)
@@ -1285,7 +1299,6 @@ const FOOTER_TAIL = 1 << 18
  *  groups, gcs `2026-10-09b`) in the one request. */
 const FOOTER_TAIL_SUFFIX = 1 << 20
 
-const colo = (): Cache => (caches as unknown as { default: Cache }).default
 /** A colo-cache key for part of a store object — a secondary store's under its own segment. */
 const coloKey = (env: Env, key: string, part: string): Request => {
   const st = storeKey(env)
@@ -1460,7 +1473,7 @@ const IV_FOOTER_COLS = [...FOOTER_BOUNDS, 'vf_min', 'vf_max', 'vt_min', 'vt_max'
 const IV_FOOTER_DOC = 2
 /** A footer group as the colo holds it: one array per column of `IV_FOOTER_COLS`, in its rows' (`rg`) order. */
 type FooterDoc = Record<string, (number | string | null)[]>
-const docsInFlight = new Map<string, Promise<{ groups: BlobGroup[]; json: [number, string][] }>>()
+const docsInFlight = new IsoMap<string, Promise<{ groups: BlobGroup[]; json: [number, string][] }>>('docsInFlight')
 
 /** One footer group of an interval store, whole — its tier groups' bounds and their metadata — once per isolate
  *  (the two halves seeded into the footer LRU as `fg:<n>` and `fj:<n>`, read back by `readFooterGroup` /
@@ -1528,7 +1541,7 @@ async function readFooterGroup(h: PqHandle, fg: FooterGroup): Promise<BlobGroup[
 }
 
 /** Footer decodes in flight (`footerOnce`): concurrent reads of one footer group share its decode. */
-const footersInFlight = new Map<string, Promise<unknown[]>>()
+const footersInFlight = new IsoMap<string, Promise<unknown[]>>('footersInFlight')
 
 /** A footer group's decode (`part`), cached per isolate and shared while in flight. Keyed per scan for a
  *  per-scan store; an interval store's footer serves every scan, so its entries are keyed without one. */
@@ -1576,6 +1589,12 @@ async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds'
   // buckets spans nearly every footer group of every segment (~300 a sort on gcs): it decoded them all, then threw
   // `TooWide` at its group cap and halved — the root `q=tokenizer` view ran out of memory (1102).
   if (sel.length > cap) throw new TooWide(`query too wide: >${cap} footer groups (drill deeper or raise minArea)`)
+  if (h.footerBudget) {
+    const b = h.footerBudget
+    const fresh = sel.map(fg => `${h.footer.key}|${fg.n}`).filter(k => !b.seen.has(k))
+    if (b.seen.size + fresh.length > b.max) throw new TooWide(`plan bound: >${b.max} footer groups`)
+    for (const k of fresh) b.seen.add(k)
+  }
   const all = (await mapLimit(sel, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
   if (!near) return all.filter(pass)
   // `all` is in `rg` order, a footer group's tier groups after the previous one's: a group's neighbours in the file
@@ -1917,7 +1936,7 @@ function putColoGroup(h: IndexHandle, rg: number, d: GroupDoc): void {
   coloPuts.add(p)
 }
 /** Decoded row groups being put in the colo (`putColoGroup`). */
-const coloPuts = new Set<Promise<void>>()
+const coloPuts = new IsoSet<Promise<void>>('coloPuts')
 /** Resolves once every colo put of a decoded row group started so far has landed (or failed). */
 export const coloPutsSettled = async (): Promise<void> => { await Promise.all([...coloPuts]) }
 
@@ -1974,12 +1993,25 @@ const ROW_BYTES = 400
  *  `rg_json`), which in the rows' LRU evicted the very row groups a warm read wanted. */
 const FOOTER_CACHE_CAP = 12 << 20
 
-/** An LRU of decoded entries by an estimated byte size. */
+/** An LRU of decoded entries by an estimated byte size. In a scope (`shared.Scope`), a put is the request's own until
+ *  the commit, and a hit is moved to the front then. */
 class Lru {
   private m = new Map<string, { v: unknown[]; bytes: number }>()
   private bytes = 0
-  constructor(private cap: number) {}
+  /** Its registry entry (held here: the registry's reference is weak). */
+  private readonly held: object
+  constructor(name: string, private cap: number) {
+    this.held = registerIsolate({ name, entries: () => this.m.entries(), clear: () => { this.m.clear(); this.bytes = 0 } })
+  }
   get<T>(k: string): T[] | undefined {
+    const s = scopeOf()
+    if (s) {
+      const own = s.peek<string, unknown[]>(this)?.get(k)
+      if (own) return own as T[]
+      const hit = this.m.get(k)
+      if (hit) s.defer(() => { this.get(k) })
+      return hit?.v as T[] | undefined
+    }
     const hit = this.m.get(k)
     if (!hit) return undefined
     this.m.delete(k)
@@ -1988,6 +2020,12 @@ class Lru {
   }
   put(k: string, v: unknown[], bytes: number): void {
     if (bytes > this.cap) return
+    const s = scopeOf()
+    if (s) {
+      s.overlay<string, unknown[]>(this).set(k, v)
+      s.defer(() => this.put(k, v, bytes))
+      return
+    }
     const old = this.m.get(k)
     if (old) {
       this.m.delete(k)
@@ -2003,8 +2041,8 @@ class Lru {
   }
 }
 /** Tier groups (`…|<rg>` → `Row[]`) and the search's decoded entries. */
-const groupCache = new Lru(GROUP_CACHE_CAP)
-const footerCache = new Lru(FOOTER_CACHE_CAP)
+const groupCache = new Lru('groupCache', GROUP_CACHE_CAP)
+const footerCache = new Lru('footerCache', FOOTER_CACHE_CAP)
 
 export function cacheGet<T>(k: string): T[] | undefined {
   return groupCache.get<T>(k)
@@ -2021,7 +2059,7 @@ const groupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|${h.date}|$
  *  read of the same group waits for instead of fetching and decoding it again. One entry for both
  *  sides is what lets a root diff's ~20 groups fit the LRU (gcs `2026-10-09b`). */
 const ivGroupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|${ivPrefix(h.env)}|iv|${h.variant}|${h.gen}|${rg}${h.columns?.includes(IV_CHURN_COLS[0]) ? '|c' : ''}`
-const groupsInFlight = new Map<string, Promise<IvGroup | null>>()
+const groupsInFlight = new IsoMap<string, Promise<IvGroup | null>>('groupsInFlight')
 
 /** An interval store's group held by the isolate (every version), or undefined. */
 const cachedIvGroup = (h: IndexHandle, rg: number): IvGroup | undefined => cacheGet<IvGroup>(ivGroupKey(h, rg))?.[0]
@@ -3004,7 +3042,7 @@ async function selectSizeSpans1(h: IndexHandle, ranges: { pLo: string; pHi: stri
 /** The deepest row the tier holds (`MAX(d_max)` over its groups), memoized
  * per generation — the depth an unbounded read's floor is taken at when the
  * threshold falls with depth (`atten < 1`). */
-const maxDepths = new Map<string, Promise<number>>()
+const maxDepths = new IsoMap<string, Promise<number>>('maxDepths')
 async function tierMaxDepth(h: IndexHandle): Promise<number> {
   // A run may hold paths deeper than its base's.
   if (h.runs?.length) return Math.max(...await Promise.all(tiersOf(h).map((t, i) => onTier(h, i, () => tierMaxDepth({ ...t, runs: undefined })))))
@@ -3254,7 +3292,7 @@ async function readLargestIv(h: IndexHandle, path: string, n: number, maxRows: n
 }
 
 /** Lookups this isolate found too wide (`readAsks`' `rememberWide`), oldest dropped past `TOO_WIDE_HELD`. */
-const tooWide = new Map<string, string>()
+const tooWide = new IsoMap<string, string>('tooWide')
 const TOO_WIDE_HELD = 256
 
 /** A lookup: one path, or every path under a prefix, at one depth. On an interval store an ask may

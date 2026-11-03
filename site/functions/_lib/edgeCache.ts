@@ -20,6 +20,7 @@
 
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
+import { colo, isolatePut, IsoMap, IsoSet } from './shared.js'
 import { currentMeter } from './usage.js'
 
 const TTL = 86400
@@ -79,8 +80,6 @@ export function cacheKeyFor(kind: string, tag: string, parts: string, store?: st
   const s = store && store !== PRIMARY_STORE ? `@${store}/` : ''
   return new Request(`https://${kind}.cache/v${CACHE_V}/${e}${s}${parts}`)
 }
-
-const colo = () => (caches as unknown as { default: Cache }).default
 
 async function kvKey(key: Request): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key.url))
@@ -145,7 +144,7 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
       return
     }
     const ps: Promise<unknown>[] = [colo().put(key, publicRes(body))]
-    if (env.CACHE_KV) ps.push(env.CACHE_KV.put(await kvKey(key), body, { expirationTtl: KV_TTL }))
+    if (env.CACHE_KV) { const kv = env.CACHE_KV; const k = await kvKey(key); ps.push(isolatePut(() => kv.put(k, body, { expirationTtl: KV_TTL }))) }
     await Promise.all(ps)
   }
   let stored = partial != null ? `partial;ttl=${partial}` : 'deferred'
@@ -179,8 +178,8 @@ export const UPGRADE_WALK_MS = 5_000
 /** Per isolate: keys with a background full run in flight (one each: concurrent partial hits don't
  *  stampede), and keys whose run was cut short too — not retried until the partial they'd replace expires
  *  (`PARTIAL_TTL`), so a heavy key doesn't re-run every hit. */
-const upgrading = new Set<string>()
-const gaveUp = new Map<string, number>()
+const upgrading = new IsoSet<string>('edge-upgrading')
+const gaveUp = new IsoMap<string, number>('edge-gave-up')
 
 /** What `upgradePartial` did: `scheduled`, or why not. */
 export type Upgrade = 'scheduled' | 'no-waituntil' | 'in-flight' | 'gave-up'
@@ -226,8 +225,10 @@ export const resetUpgrades = (): void => { upgrading.clear(); gaveUp.clear() }
 export const isPartial = (r: Response): boolean => r.headers.has('x-cache-partial')
 
 /** A `Trace` sink plus its `Server-Timing` rendering (`fetch;dur=812,…`;
- * counts ride as `dur` too — DevTools shows them the same way). */
-export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; header: () => string } {
+ * counts ride as `dur` too — DevTools shows them the same way). `mark(name)`: the
+ * time from the sink's creation (the request's start) to now, once — the first
+ * call sticks (`fixed`: the request's fixed phase, up to its first data read). */
+export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; mark: (name: string) => void; header: () => string } {
   const t: Record<string, number> = {}
   // A phase's `desc`: the distinct labels its calls carried (the index sort
   // that answered a read — `bysize`, `path`, …), in first-seen order, so a
@@ -241,6 +242,7 @@ export function serverTiming(): { trace: (name: string, ms: number, desc?: strin
   return {
     trace,
     time: async (name, p) => { const s = performance.now(); try { return await p } finally { trace(name, performance.now() - s) } },
+    mark: name => { if (!(name in t)) t[name] = performance.now() - t0 },
     header: () => [...Object.entries(t), ['total', performance.now() - t0] as [string, number]]
       .map(([k, v]) => `${k};dur=${Math.round(v)}${d[k] ? `;desc="${d[k].join('+')}"` : ''}`).join(', '),
   }

@@ -16,7 +16,7 @@
  *  together, each group decoded once. A directory whose only changed child is a directory is followed into it in the
  *  same request (`next`), a round of reads per link, so a deep single change isn't a request per level. */
 import type { Env } from './auth.js'
-import { asOfScans, DiffUnavailable, type IndexHandle, ivChurnFrom, openIndex, planChanged, readChanged, readFits, type Rect, type Row, type Trace, withChurn, withTrace } from './index.js'
+import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, openInterval, planChanged, readChanged, readFits, type Rect, type Row, type Trace, withChurn, withTrace } from './index.js'
 import { readRootAgg } from './view.js'
 
 /** The answer's version, in its edge-cache key: bumped with every change to what a level answers. */
@@ -147,27 +147,71 @@ export interface LevelOpts {
   /** Follow single-changed-directory chains (`next`) in the same request (default on). */
   chain?: boolean
   trace?: Trace
+  /** Called as the first data read (`readChanged`) starts: the end of the request's fixed phase (`Server-Timing` `fixed`). */
+  onRead?: () => void
+}
+
+/** What every round of a level request reads through: both scans' interval-store stamps and the `to` scan's `path`
+ *  sort with its churn columns. */
+export interface LevelPrep { env: Env; h: IndexHandle; d1: number; d2: number }
+
+/** `buildLevels`' handles and checks, before any directory's read: what a request can start beside its gate (a
+ *  `DiffUnavailable` it throws is the request's only once it reads). */
+export async function prepareLevels(env0: Env, o: { from: string; to: string; trace?: Trace }): Promise<LevelPrep> {
+  const env = asOfScans(env0, [o.from, o.to])
+  // The interval store's handles only: a scan it doesn't hold is refused before any per-scan pointer or footer is read
+  // (what `openIndex` would open, only to be refused here: this runs beside the gate, `AHEAD_COST`).
+  const open = async (date: string): Promise<IndexHandle & { asOf: number }> => {
+    const h = intervalsOn(env) ? await openInterval(env, date, 'path') : null
+    if (h?.asOf != null) return h as IndexHandle & { asOf: number }
+    // A date the store holds but can't open now (a broken run's scan) is its refusal, as `openIndex`'s.
+    if (!h && intervalsOn(env)) await ivRefuseHeld(env, date, 'path')
+    throw new DiffUnavailable('a per-scan store', 'a level diff reads the interval store; one scan is per-scan')
+  }
+  const [hA, hB] = await Promise.all([open(o.from), open(o.to)])
+  const [d1, d2] = [hA.asOf, hB.asOf]
+  const base = await ivChurnFrom(env)
+  if (base == null) throw new DiffUnavailable('churn', 'the interval store generation carries no churn')
+  if (d1 < base) throw new DiffUnavailable('churn', `churn is counted from scan stamp ${base}; ${o.from} is before it`)
+  const h0 = withChurn(hB)
+  if (!h0) throw new DiffUnavailable('churn', 'the path sort has no churn columns')
+  return { env, h: withTrace(h0, o.trace), d1, d2 }
+}
+
+/** The rects of `dirs`' read: each one's children, and (not the root) its own row. */
+const levelRects = (dirs: string[]): Rect[] => dirs.flatMap((p): Rect[] => {
+  const d = depthOf(p)
+  const kids = { dLo: d + 1, dHi: d + 1, pLo: p ? `${p}/` : '', pHi: p ? `${p}0` : '\uffff' }
+  return p ? [kids, { dLo: d, dHi: d, pLo: p, pHi: p }] : [kids]
+})
+
+/** The distinct footer groups a plan made beside the gate (`planLevel`) reads at most, across its tiers: a wider plan is
+ *  left to the read, after the gate (`AHEAD_COST`). A knob object: tests shrink it. */
+export const PLAN_AHEAD_FOOTERS = { max: 16 }
+
+/** The groups a first round over `dirs` reads (`planChanged`): planned beside the response-cache lookups, it is
+ *  `buildLevels`' plan when the lookups leave every directory to read. It reads at most `PLAN_AHEAD_FOOTERS` footer
+ *  groups (else `TooWide`: no plan, and the read plans again). */
+export const planLevel = (p: LevelPrep, dirs: string[]): Promise<ChangedPlan> => {
+  const footerBudget = new FooterBudget(PLAN_AHEAD_FOOTERS.max)
+  const cap = (t: IndexHandle): IndexHandle => ({ ...t, footerBudget })
+  const h = { ...cap(p.h), ...(p.h.runs ? { runs: p.h.runs.map(cap) } : {}) }
+  return planChanged(h, levelRects([...new Set(dirs)]), p.d1, p.d2)
 }
 
 /** Links followed at most: well past any store's depth. */
 const CHAIN_MAX = 64
 
 /** The level answers of `o.dirs` (and of the chains they lead into), by path. */
-export async function buildLevels(env0: Env, o: LevelOpts): Promise<Map<string, Level>> {
-  const env = asOfScans(env0, [o.from, o.to])
-  const [hA, hB] = await Promise.all([openIndex(env, o.from, 'path'), openIndex(env, o.to, 'path')])
-  const [d1, d2] = [hA.asOf, hB.asOf]
-  if (d1 == null || d2 == null) throw new DiffUnavailable('a per-scan store', 'a level diff reads the interval store; one scan is per-scan')
-  const base = await ivChurnFrom(env)
-  if (base == null) throw new DiffUnavailable('churn', 'the interval store generation carries no churn')
-  if (d1 < base) throw new DiffUnavailable('churn', `churn is counted from scan stamp ${base}; ${o.from} is before it`)
-  const h0 = withChurn(hB)
-  if (!h0) throw new DiffUnavailable('churn', 'the path sort has no churn columns')
-  const h = withTrace(h0, o.trace)
+export async function buildLevels(env0: Env, o: LevelOpts, given?: { prep?: LevelPrep; plan?: ChangedPlan }): Promise<Map<string, Level>> {
+  const { env, h, d1, d2 } = given?.prep ?? await prepareLevels(env0, o)
   const out = new Map<string, Level>()
   let todo = [...new Set(o.dirs)]
+  // A plan made beside the cache lookups answers the first round when it planned exactly that round's directories.
+  let plan = given?.plan
   for (let link = 0; todo.length && link <= CHAIN_MAX; link++) {
-    const got = await round(env, h, todo, d1, d2, o)
+    const got = await round(env, h, todo, d1, d2, o, plan)
+    plan = undefined
     for (const l of got) out.set(l.path, l)
     todo = o.chain === false ? [] : got.flatMap(l => (l.next && !out.has(l.next) ? [l.next] : []))
   }
@@ -175,19 +219,16 @@ export async function buildLevels(env0: Env, o: LevelOpts): Promise<Map<string, 
 }
 
 /** One read of `dirs`' changed children (and their own versions), split while it doesn't fit the decoder. */
-async function round(env: Env, h: IndexHandle, dirs: string[], d1: number, d2: number, o: LevelOpts): Promise<Level[]> {
-  const rects = dirs.flatMap((p): Rect[] => {
-    const d = depthOf(p)
-    const kids = { dLo: d + 1, dHi: d + 1, pLo: p ? `${p}/` : '', pHi: p ? `${p}0` : '￿' }
-    return p ? [kids, { dLo: d, dHi: d, pLo: p, pHi: p }] : [kids]
-  })
-  const plan = await planChanged(h, rects, d1, d2)
+async function round(env: Env, h: IndexHandle, dirs: string[], d1: number, d2: number, o: LevelOpts, given?: ChangedPlan): Promise<Level[]> {
+  const rects = levelRects(dirs)
+  const plan = given ?? await planChanged(h, rects, d1, d2)
   o.trace?.('level-plan', plan.spans.length, `${dirs.length} dirs, ${plan.spans.length} groups, ${plan.rows} rows`)
   if (!readFits(plan.spans)) {
     if (dirs.length === 1) throw new Error(`query too wide: ${dirs[0] || '(root)'}'s changed children span ${plan.spans.length} row groups (${plan.rows} rows)`)
     const m = dirs.length >> 1
     return [...await round(env, h, dirs.slice(0, m), d1, d2, o), ...await round(env, h, dirs.slice(m), d1, d2, o)]
   }
+  o.onRead?.()
   const rows = await readChanged(h, rects, d1, d2, { plan })
   const byPath = new Map<string, Row[]>()
   for (const r of rows) {

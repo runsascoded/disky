@@ -11,6 +11,11 @@
  *  are read, together. Unscoped diffs of an interval store with churn only: anything else is a 409 (the client draws
  *  `/api/diff` then).
  *
+ *  The fixed phase overlaps (`shared.ahead`): the gate (`requireViewer`) runs beside the path store's pointers, and,
+ *  for a request presenting credentials (or a union member's, its gate passed), beside the scans' checks, the cache-key generations, the asked directories'
+ *  cache lookups and the first round's handles and plan (its footer reads). Nothing is used before the gate passes;
+ *  a refused request's lookups are dropped. `Server-Timing` `fixed`: request start to the first data read.
+ *
  *  On a union view (`_lib/union.ts`) both cutoffs resolve as `/api/diff`'s do, and each member answers at its own
  *  scans (its own cache entries): a directory below the root by the member holding it (an unchanged member, its one
  *  scan against itself: no rows); the root by every comparable member's root, merged (`mergeLevels`: totals summed,
@@ -18,13 +23,13 @@
  *  cutoff left out (`union.sources[].change`). A changed member that has no level (no interval store, no churn) makes
  *  the root a 409 naming it.
  */
-import { type Env, type Identity, json, requireViewer } from '../../_lib/auth.js'
-import { buildLevels, type Level, LEVEL_V, levelK, type Measure, mergeLevels } from '../../_lib/diffLevel.js'
+import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../../_lib/auth.js'
+import { buildLevels, type Level, LEVEL_V, levelK, type Measure, mergeLevels, planLevel, prepareLevels } from '../../_lib/diffLevel.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../../_lib/edgeCache.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, storeReady, withPathStore } from '../../_lib/index.js'
 import { isHidden, isHideRoot, restrictionFor } from '../../_lib/restrict.js'
 import { scanArg } from '../../_lib/scanArg.js'
-import { traceJoins } from '../../_lib/shared.js'
+import { ahead, loadScopes, traceJoins } from '../../_lib/shared.js'
 import { storeKey, withStore } from '../../_lib/stores.js'
 import { cutoffOf, type Member, memberOf, memberRequest, membersAt, openUnion, UnionOverlap, unionFor } from '../../_lib/union.js'
 import type { UnionView } from '../../_lib/stores.js'
@@ -57,14 +62,11 @@ function levelArgs(sp: URLSearchParams): { dirs: string[]; k: number; m: Measure
 }
 
 async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
+  const st = serverTiming()
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = await withPathStore(ctx1)
-  const st = serverTiming()
-  traceJoins(ctx.env, st.trace)
-  if (!storeReady(ctx.env)) return new Response('diff API not configured (missing index store creds)', { status: 503 })
-  const url = new URL(ctx.request.url)
-  const sp = url.searchParams
+  if (!storeReady(ctx1.env)) return new Response('diff API not configured (missing index store creds)', { status: 503 })
+  const sp = new URL(ctx1.request.url).searchParams
   const from = sp.get('from') ?? ''
   const to = sp.get('to') ?? ''
   if (!isScanId(from) || !isScanId(to)) return new Response('bad from/to', { status: 400 })
@@ -72,61 +74,94 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
   const args = levelArgs(sp)
   if (args instanceof Response) return args
   const { dirs, k, m } = args
-  if (!intervalsOn(ctx.env)) return new Response('level diffs read the interval store', { status: 409 })
 
-  const gated = member ? member.id : await st.time('auth', requireViewer(ctx as never))
-  if (gated instanceof Response) return gated
-  // A path-restricted link: a hidden directory (or one shown as a leaf) has no level; nothing under a visible one is
-  // hidden.
-  const restriction = restrictionFor(gated, ctx.env)
-  const shut = (p: string) => !!restriction && (isHidden(p, restriction) || isHideRoot(p, restriction))
-  if (dirs.some(shut)) return new Response('path not found', { status: 404 })
-  const miss = (await Promise.all(['from', 'to'].map(key => scanArg(ctx.env, sp, key)))).find(r => r instanceof Response)
-  if (miss) return miss
-
+  // The gate, beside the path store's pointers (the identity reads neither); a union member's was passed already.
+  const gate = member ? Promise.resolve(member.id) : st.time('auth', requireViewer(ctx1 as never))
+  gate.catch(() => {})
+  const ctx = await withPathStore(ctx1)
+  traceJoins(ctx.env, st.trace)
+  await loadScopes()
+  const early = ahead(ctx.env, !!member || await presentsCredentials(ctx1 as never))
   try {
-    const g = await st.time('pre', pathGens(ctx.env, [from, to]))
+    if (!intervalsOn(ctx.env)) return new Response('level diffs read the interval store', { status: 409 })
+    // What the answer needs whoever asks: started now for a request that may pass the gate, used once it has.
+    const scans = early.later(() => Promise.all(['from', 'to'].map(key => scanArg(ctx.env, sp, key))))
+    const gens = early.later(() => st.time('pre', pathGens(ctx.env, [from, to])))
     const tag = cacheEnvTag(ctx.env, ctx.request)
-    const keyOf = (p: string) => cacheKeyFor('level', tag, `${from}/${to}/${encodeURIComponent(p)}?k=${k}&m=${m}&g=${g}&v=${LEVEL_V}`, storeKey(ctx.env))
-    const out = new Map<string, Level>()
-    // Cached answers, and the chains they lead into, a link at a time.
-    let look = dirs
-    const todo: string[] = []
-    while (look.length) {
-      const hits = await st.time('match', Promise.all(look.map(async p => [p, await cacheMatch(ctx.env, keyOf(p))] as const)))
-      const next: string[] = []
-      for (const [p, hit] of hits) {
-        if (!hit) { todo.push(p); continue }
-        const l = await hit.json<Level>()
-        out.set(p, l)
-        if (l.next && !out.has(l.next) && !shut(l.next)) next.push(l.next)
+    const keyOf = (g: string, p: string) => cacheKeyFor('level', tag, `${from}/${to}/${encodeURIComponent(p)}?k=${k}&m=${m}&g=${g}&v=${LEVEL_V}`, storeKey(ctx.env))
+    const lookup = (g: string, ps: string[]) => st.time('match', Promise.all(ps.map(async p => [p, await cacheMatch(ctx.env, keyOf(g, p))] as const)))
+    const asked = early.later(async () => lookup(await gens(), dirs))
+    // The first round's handles and plan (its footer reads), beside the lookups: a read of every asked directory
+    // takes them as they are; a read of fewer plans again over the footers they left held.
+    const prep = early.later(() => prepareLevels(ctx.env, { from, to, trace: st.trace }))
+    // A failed plan here is no answer: the read plans again and fails as it would have.
+    const plan = early.later(() => prep().then(p => planLevel(p, dirs)).catch(() => undefined))
+
+    const gated = await gate
+    if (gated instanceof Response) return gated
+    early.commit()
+    // A path-restricted link: a hidden directory (or one shown as a leaf) has no level; nothing under a visible one is
+    // hidden.
+    const restriction = restrictionFor(gated, ctx.env)
+    const shut = (p: string) => !!restriction && (isHidden(p, restriction) || isHideRoot(p, restriction))
+    if (dirs.some(shut)) return new Response('path not found', { status: 404 })
+    const miss = (await scans()).find(r => r instanceof Response)
+    if (miss) return miss
+
+    try {
+      const g = await gens()
+      const out = new Map<string, Level>()
+      // Cached answers, and the chains they lead into, a link at a time.
+      let hits = await asked()
+      const todo: string[] = []
+      while (hits.length) {
+        const next: string[] = []
+        for (const [p, hit] of hits) {
+          if (!hit) { todo.push(p); continue }
+          const l = await hit.json<Level>()
+          out.set(p, l)
+          if (l.next && !out.has(l.next) && !shut(l.next)) next.push(l.next)
+        }
+        hits = next.length ? await lookup(g, next) : []
       }
-      look = next
-    }
-    const cached = out.size
-    st.trace('level-hits', cached, `${cached} cached, ${todo.length} read`)
-    if (todo.length) {
-      const built = await ivRetry(() => buildLevels(ctx.env, { from, to, dirs: todo, k, m, trace: st.trace }))
-      for (const [p, l] of built) {
-        if (shut(p)) continue
-        out.set(p, l)
-        await cacheStore(ctx.env, keyOf(p), JSON.stringify(l), {}, ctx.waitUntil?.bind(ctx))
+      const cached = out.size
+      st.trace('level-hits', cached, `${cached} cached, ${todo.length} read`)
+      if (todo.length) {
+        // The handles and plan made beside the lookups serve the first attempt; a retry (a broken run cut out) opens afresh.
+        let first = true
+        const built = await ivRetry(async () => {
+          const given = first ? { prep: await prep(), plan: sameSet(todo, dirs) ? await plan() : undefined } : undefined
+          first = false
+          return buildLevels(ctx.env, { from, to, dirs: todo, k, m, trace: st.trace, onRead: () => st.mark('fixed') }, given)
+        })
+        for (const [p, l] of built) {
+          if (shut(p)) continue
+          out.set(p, l)
+          await cacheStore(ctx.env, keyOf(g, p), JSON.stringify(l), {}, ctx.waitUntil?.bind(ctx))
+        }
       }
+      const levels = [...out.values()].map(l => (l.next && shut(l.next) ? { ...l, next: undefined } : l))
+      st.mark('fixed')
+      return new Response(JSON.stringify({ from, to, k, m, levels }), {
+        headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300', 'server-timing': st.header(), 'x-cache': !todo.length ? 'hit' : cached ? 'partial' : 'miss' },
+      })
+    } catch (e) {
+      const refused = ivRefusal(e)
+      if (refused) return refused
+      if (e instanceof DiffUnavailable) return new Response(e.message, { status: 409 })
+      const msg = String((e as Error).message ?? e)
+      if (msg.startsWith('query too wide')) return new Response(msg, { status: 413 })
+      if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
+      return new Response(`level diff failed: ${msg}`, { status: 500 })
     }
-    const levels = [...out.values()].map(l => (l.next && shut(l.next) ? { ...l, next: undefined } : l))
-    return new Response(JSON.stringify({ from, to, k, m, levels }), {
-      headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=300', 'server-timing': st.header(), 'x-cache': !todo.length ? 'hit' : cached ? 'partial' : 'miss' },
-    })
-  } catch (e) {
-    const refused = ivRefusal(e)
-    if (refused) return refused
-    if (e instanceof DiffUnavailable) return new Response(e.message, { status: 409 })
-    const msg = String((e as Error).message ?? e)
-    if (msg.startsWith('query too wide')) return new Response(msg, { status: 413 })
-    if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
-    return new Response(`level diff failed: ${msg}`, { status: 500 })
+  } finally {
+    // A union member's request is its siblings' too: its unused lookups run out rather than cancel theirs.
+    early.done(!member)
   }
 }
+
+/** Whether `a` and `b` hold the same directories. */
+const sameSet = (a: string[], b: string[]): boolean => a.length === b.length && a.every(x => b.includes(x))
 
 type LevelBody = { from: string; to: string; k: number; m: Measure; levels: Level[] }
 
