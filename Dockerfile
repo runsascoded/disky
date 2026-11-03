@@ -56,6 +56,12 @@ COPY --from=site /repo/site/dist ./dist
 COPY job ./job
 # The Pages config the `cf-usage` step filters Cloudflare's analytics by (`options.cf-usage.config`)
 COPY site/wrangler.toml ./site/wrangler.toml
+# The source revision (`job/build.sh` → `cloudbuild.yaml` build args), last so a new sha rebuilds no layer above:
+# OCI labels for the registry, env for the code (`dt-cloud image-sha [--expect SHA]`, the stages' start-up log).
+ARG DISKY_GIT_SHA=""
+ARG DISKY_GIT_DIRTY=""
+LABEL org.opencontainers.image.revision=$DISKY_GIT_SHA disky.dirty=$DISKY_GIT_DIRTY
+ENV DISKY_GIT_SHA=$DISKY_GIT_SHA DISKY_GIT_DIRTY=$DISKY_GIT_DIRTY
 # The entrypoint runs `job/$JOB` (`job/build.sh` passes `--build-arg JOB=…`):
 # the CoreWeave scan job, `cw-run.sh`, by default, under `dt-cloud scan-run
 # supervise` (specs/scan-job-wrapper.md, "The entrypoint"): a preemption, cancel

@@ -23,6 +23,7 @@ if [ -z "${SITE_TOKEN+set}" ] && [ -n "${GCS_USAGE_TOKEN+set}" ]; then export SI
 unset GCS_USAGE_TOKEN
 # The R2 archive through blobfs (`R2_ARCHIVE`): R2's own credentials profile + `buckets.yml` entry.
 . "$(dirname "${BASH_SOURCE[0]}")/r2-profile.sh"
+echo "cw-env: image $(dt-cloud image-sha)" >&2
 set -x
 
 # Deployment config for the shared CLI (cloud/src/dt_cloud/{index_footer,warm}.py).
