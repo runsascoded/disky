@@ -640,18 +640,20 @@ def test_interval_store_staged_append(tmp_path, env, monkeypatch):
 
 def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):
     """The one-machine `add` reads the scans' sorts from the store by default, and from the data store with
-    `source: data` (so `publish-r2 -S` needn't copy them; specs/lean-scans.md §1.1); a bad `source` is refused."""
+    `source: data` (so `publish-r2 -S` needn't copy them; specs/lean-scans.md §1.1); `compact` passes the policy (`-C`);
+    a bad `source` is refused."""
     from dt_cloud import scan_runs
 
     ran = []
     monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, env=None, **kw: (ran.append(" ".join(cmd)), scan_runs.Ran(0, False, None))[1])
     env["R2_ARCHIVE"] = "r2://idx"
-    for source in ({}, {"source": "data"}):
+    for source in ({}, {"source": "data"}, {"compact": "none"}):
         c = gcs_ctx(tmp_path, dict(env), monkeypatch, **{"interval-store": {"mem": "12GB", **source}})
         c.sh_impl = Runner(tmp_path, stdout={"dt-cloud interval-store current": "g1\n"})
         S.interval_store(c, None)
     add = "dt-cloud interval-store add -L listing/{id}/index/{gen}/path-index.parquet -s {src} -o r2://idx -w <tmp>/t/dt-scan/2026-10-16T1200/interval-store -M 12GB -p 32"
-    assert [r.replace(str(tmp_path), "<tmp>") for r in ran] == [add.replace("{src}", "r2://idx"), add.replace("{src}", "gs://dvx")]
+    assert [r.replace(str(tmp_path), "<tmp>") for r in ran] == [add.replace("{src}", "r2://idx"), add.replace("{src}", "gs://dvx"),
+                                                                add.replace("{src}", "r2://idx") + " -C none"]
     with pytest.raises(ValueError) as e:
         gcs_ctx(tmp_path, dict(env), monkeypatch, **{"interval-store": {"source": "r2"}})
     assert str(e.value) == "profile: options.interval-store.source: 'r2' (one of store, data)"
