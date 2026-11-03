@@ -351,7 +351,7 @@ def test_converge_discord_edit_replies():
     hook, bot, rhook = _FakeHook(), _FakeBot(), _FakeHook()
     state = {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03": "m2", "2026-08-04": "m3"}}
     E.converge_discord(TPL, D.Month(ROWS), AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot="/x/plot.png", edit_replies=True, reply_hook=rhook)
-    assert hook.calls == [("edit", "m1", OP_TWO_SCANS, ["/x/plot.png"])]
+    assert hook.calls == [("edit", "m1", OP_TWO_SCANS, [Image(path="/x/plot.png")])]
     assert rhook.calls == [
         ("edit", "m2", "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)", []),
         ("edit", "m3", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", []),
@@ -375,7 +375,7 @@ def test_redo_discord_since():
     assert (hook.calls, rhook.calls) == ([], [])
     state = E.redo_discord(TPL, D.Month(ROWS), AUG, state, since=date(2026, 8, 4), for_real=True, **kw)
     assert hook.calls == [
-        ("edit", "m1", OP_TWO_SCANS, ["/x/plot.png"]),
+        ("edit", "m1", OP_TWO_SCANS, [Image(path="/x/plot.png")]),
         ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TiB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
     ]
     assert rhook.calls == [("delete", "m4")]
