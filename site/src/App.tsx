@@ -1488,6 +1488,7 @@ function AppContent() {
             onBrush={setBrush}
             band={band}
             onBand={setBand}
+            stageHere={!fq}
           />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories

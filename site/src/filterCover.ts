@@ -94,7 +94,9 @@ export function prefetchCover(qc: QueryClient, fetcher: Fetcher, storeKey: strin
  *  view's isn't, since a row's matches may collapse further. */
 export async function rowCover(qc: QueryClient, fetcher: Fetcher, storeKey: string, view: CoverArgs, row: string): Promise<Resolved> {
   const v = qc.getQueryData<FilterCover>(coverQuery(fetcher, storeKey, { ...view, enabled: true }).queryKey)
-  if (v?.complete) return { items: rowItems(v.items, row), complete: true }
+  // A row inside one of the view's items (the view itself matched whole) is matched whole too: its own cover
+  // names it, with its own totals.
+  if (v?.complete && !v.items.some(i => row.startsWith(i.path + '/'))) return { items: rowItems(v.items, row), complete: true }
   return fetchCover(qc, fetcher, storeKey, { ...view, path: row })
 }
 
