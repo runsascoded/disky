@@ -574,11 +574,9 @@ export interface Ahead {
   /** Discard an uncommitted scope; `kill` (default): evict what is still pending. */
   done(kill?: boolean): void
 }
-/** Knobs for tests: `eager: false` starts nothing before the gate (what a request without `ahead` does). */
-export const AHEAD = { eager: true }
 export function ahead(env: object, eager: boolean): Ahead {
   let pending = 0
-  const als = eager && AHEAD.eager ? scopeAls : null
+  const als = eager ? scopeAls : null
   const scope = als ? new Scope() : null
   return {
     later<T>(f: () => Promise<T>): () => Promise<T> {
