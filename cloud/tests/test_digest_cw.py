@@ -9,6 +9,7 @@ Hand-built series (12-hourly, 00:00Z / 12:00Z): a lead day Mon 8/31 (700,
 the bullet label is unambiguous. Quota (main) = 910 TiB."""
 import datetime as dt
 import json
+import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -41,6 +42,8 @@ def redo_replies(root, m, token, channel, variant="sender", client=None, reply_h
 
 TIB = 1024**4
 UTC = dt.timezone.utc
+# the real `live_settings`, before conftest's autouse stub replaces the module's (tests never reach a live site)
+LIVE_SETTINGS = E.live_settings
 SITE = "https://cw.example.org"
 AV = "https://icons.example.org/arrows/av_deg"
 SEP = date(2026, 9, 1)
@@ -254,10 +257,118 @@ def test_tail_circles_fullest_first():
         f":warning: {main}", zone, more, f"[cold]({u('cold-data')}): 12.4% of 100Ti (87.6 Ti free)"]
 
 
+def test_runway_rules():
+    """`quota_marks: runway` (specs/digest-runway-marks.md §2): growth is the fastest net fill over 1, 3 and 7 days (a
+    one-day jump over a flat week shows); runway = free ÷ growth; the mark by runway, ≥ 95% full never calmer than 🟠;
+    the rate text only under 60 days. The site's `digest/pools.ts` mirrors these (its own spec, same numbers)."""
+    t = dt.datetime(2026, 9, 23, 12, tzinfo=UTC)
+    flat_then_jump = [(t - dt.timedelta(days=d), 80.0) for d in (7, 3, 1)]
+    assert D._growth(flat_then_jump, t, 90.0) == 10.0
+    assert D._growth([(t - dt.timedelta(days=7), 46.0), (t - dt.timedelta(days=3), 77.0), (t - dt.timedelta(days=1), 83.0)], t, 85.0) == 39 / 7
+    assert D._growth([(t - dt.timedelta(hours=12), 80.0)], t, 90.0) is None  # nothing a whole day back
+    assert [D._runway(15.0, 5.0), D._runway(15.0, 0.0), D._runway(15.0, -2.0), D._runway(15.0, None), D._runway(-1.3, 4.0)] == [
+        D.Runway(3.0, 5.0), D.Runway(D.math.inf, 0.0), D.Runway(D.math.inf, -2.0), D.Runway(D.math.inf, None), D.Runway(0.0, 4.0)]
+    R, O, Y, G = D.RED_MARK, D.ORANGE_MARK, D.YELLOW_MARK, D.GREEN_MARK
+    marks = [D._runway_mark(D.Runway(d, 1.0), fill) for d, fill in [
+        (0.0, 101.0), (2.9, 50.0), (3.0, 50.0), (13.9, 50.0), (14.0, 50.0), (14.0, 95.0), (29.9, 50.0), (30.0, 50.0),
+        (D.math.inf, 88.5), (D.math.inf, 96.0)]]
+    assert marks == [R, R, O, O, Y, O, Y, G, G, O]
+    texts = [D._runway_text(r, CFG) for r in [D.Runway(8.2, 4.1), D.Runway(0.5, 30.0), D.Runway(59.9, 1.0), D.Runway(60.0, 1.0),
+                                               D.Runway(D.math.inf, 0.0), D.Runway(0.0, 4.0)]]
+    assert texts == [", +4.1 Ti/d, ≈8d to full", ", +30.0 Ti/d, ≈<1d to full", ", +1.0 Ti/d, ≈60d to full", "", "", ""]
+
+
+def test_runway_hue_steps():
+    """`quota_marks: runway-hue` (specs/digest-runway-marks.md §3): `:runway-N:`, N one more than the cut points
+    (1.8, 3, 6, 10, 19, 33, 60 days) the runway reaches; over quota 1, not filling 8; ≥ 95% full never calmer than 3."""
+    days = [0.0, 1.79, 1.8, 2.9, 3.0, 5.9, 6.0, 9.9, 10.0, 18.9, 19.0, 32.9, 33.0, 59.9, 60.0, D.math.inf]
+    assert [D._runway_hue(D.Runway(d, 1.0), 50.0) for d in days] == [
+        ":runway-1:", ":runway-1:", ":runway-2:", ":runway-2:", ":runway-3:", ":runway-3:", ":runway-4:", ":runway-4:",
+        ":runway-5:", ":runway-5:", ":runway-6:", ":runway-6:", ":runway-7:", ":runway-7:", ":runway-8:", ":runway-8:"]
+    assert [D._runway_hue(D.Runway(d, 1.0), fill) for d, fill in [(D.math.inf, 94.9), (D.math.inf, 95.0), (2.0, 99.0), (0.0, 101.0)]] == [
+        ":runway-8:", ":runway-3:", ":runway-2:", ":runway-1:"]
+
+
+def _hist_scan(scan: str, tb: float, extra: dict[str, float]) -> "D.Scan":
+    return D.Scan(scan=scan, tb=tb, objs=0, dtb=None, dobjs=None, hours=None, extra=extra)
+
+
+def test_tail_runway_fixed_order():
+    """`quota_marks: runway`: the clauses in the replies' fixed order (meta order, a zone at its first member), each
+    marked by its runway over the day's history: the primary flat at 90.8% is 🟢 (fully used, not filling); the zone
+    filling ~5.6 Ti/d with 15 Ti free is 🔴; `cold`, flat all week then +10 Ti yesterday, is 🟠 by its one-day rate;
+    past its quota a pool is 🔴 with no rate text."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway", buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8"),
+        "side-data": E.Bucket("side", z8, "z8"),
+        "cold-data": E.Bucket("cold", z8),
+    })
+    now = {"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 12.4}
+    hist = (
+        _hist_scan("2026-09-16T1201", 825.9, {"hot-data": 43.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-20T1201", 825.9, {"hot-data": 74.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-22T1201", 825.9, {"hot-data": 80.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-23T1201", 825.9, now),
+    )
+    day = D.DayRow(date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0, since=None, extra=now, hist=hist)
+    u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"  # noqa: E731
+    main = f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
+    zone = f"[hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+    more = f"[more-data]({u('more-data')}): 2 Ti"
+    assert D._tail(day, cfg).split(" · ") == [
+        f":large_green_circle: {main}",
+        f":red_circle: {zone}, +5.6 Ti/d, ≈3d to full",
+        more,
+        f":large_orange_circle: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+    ]
+    over = replace(day, extra={**now, "cold-data": 101.3}, hist=hist[:-1] + (_hist_scan("2026-09-23T1201", 825.9, {**now, "cold-data": 101.3}),))
+    assert D._tail(over, cfg).split(" · ")[3] == f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)"
+    # no history (a store's first day): nothing is filling, so only the 95% floor and an overage can mark it hot
+    assert D._tail(replace(day, hist=()), cfg).split(" · ") == [
+        f":large_green_circle: {main}", f":large_green_circle: {zone}", more, f":large_green_circle: [cold]({u('cold-data')}): 12%"]
+    # `runway-hue`: the same order, rate text and runways, each as its `:runway-N:` step
+    assert D._tail(day, replace(cfg, quota_marks="runway-hue")).split(" · ") == [
+        f":runway-8: {main}",
+        f":runway-2: {zone}, +5.6 Ti/d, ≈3d to full",
+        more,
+        f":runway-4: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+    ]
+    # `circles` is unchanged by the history: fullest first, by fill
+    assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
+        f":red_circle: {main}", f":large_orange_circle: {zone}", f":large_green_circle: [cold]({u('cold-data')}): 12%", more]
+
+
+def test_day_rows_carry_runway_history():
+    """Each reply's `hist`: the window's scans up to and including its own, back past the longest look-back."""
+    rows = D.day_rows(MONTH, "sender", 12)
+    assert [[x.scan for x in r.hist] for r in rows] == [
+        ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200"],
+        ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200", "2026-09-02T0000", "2026-09-02T1200"],
+    ]
+
+
+def test_runway_reaches_before_the_month():
+    """Early in a month the runway still looks back 7 days, into the previous month's scans (`Month.pre`, not just
+    the lead-in day): on 11/2 a zone that crept +0.1 Ti/d within November but filled from 45 a week before is 🔴 by its
+    7-day rate; the same day without `pre` reads 🟢."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway", buckets={**CFG.buckets, "hot-data": E.Bucket("hot", z8, "z8"), "side-data": E.Bucket("side", z8, "z8")})
+    s = lambda scan, hot: _hist_scan(scan, 825.9, {"hot-data": hot, "side-data": 3.0})  # noqa: E731
+    month = D.Month(pre=[s("2026-10-26T1201", 42.0)], lead=[s("2026-10-31T1201", 81.8)], rows=[s("2026-11-01T1201", 81.9), s("2026-11-02T1201", 82.0)])
+    links = lambda t: re.sub(r"\]\([^)]*\)", "](…)", t)  # noqa: E731
+    day2 = D.day_rows(month, "sender", 12)[1]
+    assert day2.date == "2026-11-02"
+    assert links(D._tail(day2, cfg).split(" · ")[1]) == ":red_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free), +5.7 Ti/d, ≈3d to full"
+    alone = D.day_rows(replace(month, pre=[]), "sender", 12)[1]
+    assert links(D._tail(alone, cfg).split(" · ")[1]) == ":large_green_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+
+
 def test_quota_marks_must_be_known():
     with pytest.raises(ValueError) as e:
         E.config_from_dict({"template": "cw", "quota_marks": "squares"})
-    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles')"
+    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue')"
 
 
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
@@ -777,6 +888,106 @@ def test_post_digest_edit_replies(tmp_path: Path):
     fake.calls.clear()
     post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
     assert [_post(c) for c in fake.calls] == [("edit", "m1")]
+
+
+def test_apply_slack_reapplies_only_the_selected_messages(tmp_path: Path):
+    """`apply_slack` (`digest -d/-y/-o`): exactly the selected, already-posted messages are edited to their current
+    rendering; no post, no other edit, no provisional or alert handling; a day without a reply is skipped; `dry_run`
+    edits nothing and returns the same changes."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    state = post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
+    assert (state["op_ts"], state["posted"]) == ("m1", {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T1200"}, "2026-09-02": {"ts": "m3", "scan": "2026-09-02T1200"}})
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    sep1 = E.Change("2026-09-01", "m2", f"[main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)")
+    sep2 = E.Change("2026-09-02", "m3", f"[main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)")
+
+    fake.calls.clear()
+    assert E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", days=["2026-09-01", "2026-09-02", "2026-09-30"], dry_run=True) == [sep1, sep2]
+    assert fake.calls == []
+
+    assert E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", days=E.day_range("2026-09-02..2026-09-02")) == [sep2]
+    assert fake.calls == [("edit", "m3", sep2.body)]
+
+    fake.calls.clear()
+    norm = lambda t: re.sub(r"\?v=\d+", "?v=<ts>", t)  # noqa: E731
+    [op] = E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True)
+    assert (op.what, op.ts, [c[:2] for c in fake.calls]) == ("op", "m1", [("edit", "m1")])
+    assert norm(fake.calls[0][2]) == norm(op.body)
+    assert norm(op.body) == norm(E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True, dry_run=True)[0].body)
+    assert json.loads((tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json").read_text())["posted"] == state["posted"]
+
+
+def test_day_range():
+    assert [E.day_range("2026-11-01"), E.day_range("2026-10-31..2026-11-02")] == [["2026-11-01"], ["2026-10-31", "2026-11-01", "2026-11-02"]]
+    with pytest.raises(ValueError) as e:
+        E.day_range("2026-11-02..2026-11-01")
+    assert str(e.value) == "day range '2026-11-02..2026-11-01': 2026-11-01 is before 2026-11-02"
+
+
+def test_digest_cli_reply_selector_dry_run(tmp_path: Path, monkeypatch):
+    """`digest -y A..B -n`: lists each selected reply's ts and new body, and edits nothing."""
+    import thrds.slack
+    from click.testing import CliRunner
+
+    from dt_cloud import cli
+
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    post_digest(str(root), SEP, "xoxb", "C1", "sender", client=_FakeSlack())
+    fake = _FakeSlack()
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: fake)
+    cfg = config_file(replace(CFG, root=str(root)), tmp_path / "digest.yml")
+    r = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb",
+                                      "-y", "2026-09-01..2026-09-02", "-n"])
+    assert r.exit_code == 0, r.output
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    assert r.stdout.split("\n") == [
+        "digest 2026-09 in C1 (sender): 2 to edit; dry-run, nothing edited",
+        "  2026-09-01  ts=m2",
+        f"    [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)",
+        "  2026-09-02  ts=m3",
+        f"    [main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)",
+        "",
+    ]
+    assert fake.calls == []
+    bad = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-d", "2026-09-01", "-E"])
+    assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (
+        2, "Error: -o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+
+
+def test_live_settings_override_the_file(monkeypatch):
+    """The site's live settings (`GET /api/digest-settings?template=cw`, edited on /admin/slack) replace the file's
+    `params` and `quota_marks`; no row, no token or an unreachable site leave the file's; a bad value raises."""
+    from dt_cloud import site
+    from dt_cloud.digest import with_settings
+
+    calls: list = []
+    rows = {"cw": {"params": "qh,pp", "quota_marks": "runway-hue", "updated_by": "admin", "updated_at": 1}}
+
+    def get_json(url, token, path, params=None, timeout=30):
+        calls.append((url, token, path, params))
+        if url == "https://down.example.org":
+            raise site.SiteError("HTTP 503: unavailable", 503)
+        return {"settings": rows.get(params["template"])}
+
+    monkeypatch.setattr(site, "get_json", get_json)
+    cfg = replace(CFG, renderer="site", params="qr,pp", quota_marks="runway")
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    got = with_settings(cfg, LIVE_SETTINGS(cfg))
+    assert (got.params, got.quota_marks, calls) == ("qh,pp", "runway-hue", [(SITE, "tok", "/api/digest-settings", {"template": "cw"})])
+    rows.clear()
+    assert with_settings(cfg, LIVE_SETTINGS(cfg)) == cfg
+    assert LIVE_SETTINGS(replace(cfg, site_url="https://down.example.org")) is None
+    monkeypatch.delenv("SITE_TOKEN")
+    assert (LIVE_SETTINGS(cfg), len(calls)) == (None, 3)
+    with pytest.raises(ValueError) as e:
+        with_settings(cfg, {"params": "", "quota_marks": "squares"})
+    assert str(e.value) == "digest settings quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue')"
+    with pytest.raises(ValueError) as e:
+        with_settings(replace(cfg, renderer="local", params=""), {"params": "qh", "quota_marks": "runway"})
+    assert str(e.value) == "digest settings params: 'qh' needs `renderer: site` (the local renderer has no params)"
 
 
 def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):

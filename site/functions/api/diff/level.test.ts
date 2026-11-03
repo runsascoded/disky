@@ -29,8 +29,15 @@ const knobs = vi.hoisted(() => ({ credentials: true }))
 
 vi.mock('../../_lib/auth.js', async orig => {
   const m = await orig<typeof import('../../_lib/auth.js')>()
-  // `x-deny`: the gate refuses (a session it can't find), after its latency.
-  return { ...m, presentsCredentials: (ctx: Parameters<typeof m.presentsCredentials>[0]) => knobs.credentials && m.presentsCredentials(ctx), requireViewer: slowed('auth', async (ctx: Parameters<typeof m.requireViewer>[0]) => (ctx.request.headers.has('x-deny') ? m.json({ error: 'unauthenticated' }, 401) : m.requireViewer(ctx))) }
+  // `x-deny`: the gate refuses (a session it can't find), after its latency (and `x-gate-ms` more).
+  return {
+    ...m,
+    presentsCredentials: (ctx: Parameters<typeof m.presentsCredentials>[0]) => knobs.credentials && m.presentsCredentials(ctx),
+    requireViewer: slowed('auth', async (ctx: Parameters<typeof m.requireViewer>[0]) => {
+      await sleep(Number(ctx.request.headers.get('x-gate-ms') ?? 0))
+      return ctx.request.headers.has('x-deny') ? m.json({ error: 'unauthenticated' }, 401) : m.requireViewer(ctx)
+    }),
+  }
 })
 vi.mock('../../_lib/scanArg.js', async orig => {
   const m = await orig<typeof import('../../_lib/scanArg.js')>()
@@ -55,8 +62,10 @@ const { clearIsolate, isolateSnapshot, loadScopes } = await import('../../_lib/s
 const { coloPutsSettled } = await import('../../_lib/index')
 await loadScopes()
 
-/** `INDEX_R2` over a fixture dir (`diffLevel.test.ts`'s, without the read log). */
-function r2(dir: string): R2Bucket {
+/** Each `INDEX_R2` read waits this long first (a slow store: a request's lookups stay in flight). */
+const r2Lag = { ms: 0 }
+/** `INDEX_R2` over a fixture dir (`diffLevel.test.ts`'s, without the read log); `gets`: its `get`s counted. */
+function r2(dir: string, gets = { n: 0 }): R2Bucket {
   type Fs = { existsSync(p: string): boolean; readFileSync(p: string): Uint8Array; readdirSync(p: string, o: { recursive: true }): string[]; statSync(p: string): { isFile(): boolean } }
   const nodeFs = async () => {
     const mod = 'node:fs'
@@ -71,6 +80,8 @@ function r2(dir: string): R2Bucket {
     return { objects: keys.map(key => ({ key })), truncated: false }
   }
   const get = async (key: string, o?: { range?: { offset: number; length: number } }) => {
+    gets.n++
+    await sleep(r2Lag.ms)
     const fs = await nodeFs()
     if (!fs.existsSync(path(key))) return null
     const buf = fs.readFileSync(path(key))
@@ -105,13 +116,24 @@ async function cold(): Promise<void> {
 }
 beforeEach(async () => {
   const { db } = await sqliteD1()
-  env = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INDEX_R2: r2('iv-churn'), GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'b' } as Env
+  env = { DB: db, SESSION_SECRET: SECRET, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INDEX_R2: r2('iv-churn'), GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'b' } as Env
   await cold()
   calls.length = 0
   settled.length = 0
   Object.assign(lag, { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 })
+  r2Lag.ms = 0
   knobs.credentials = true
 })
+
+const { signSession } = await import('@open-athena/auth')
+/** The gate's secret (`env.SESSION_SECRET`). */
+const SECRET = 'test-secret'
+/** A session cookie for `sub`, signed under `secret`, minted `ago` ms before now with a `ttl` (s). */
+const session = async (sub: string, { secret = SECRET, ago = 0, ttl }: { secret?: string; ago?: number; ttl?: number } = {}) =>
+  `oa_auth=${await signSession(sub, secret, Date.now() - ago, ttl)}`
+/** A session cookie that verifies (signed under the gate's secret, unexpired) for an email the allowlist doesn't hold
+ *  (a user since removed): its lookups start beside the gate, which then refuses it. */
+const REFUSED_COOKIE = { cookie: await session('e:removed@example.test') }
 
 /** A level request for the root between two scans; `localhost`: the gate's dev identity (and credentials presented). */
 const ask = (from: string, to: string, o: { host?: string; headers?: Record<string, string> } = {}) =>
@@ -201,7 +223,7 @@ const quiesce = async () => {
 }
 
 describe('what a level request starts beside its gate (`ahead`) lands only once the gate passes', () => {
-  it('a refused junk credential leaves the isolate, the colo and KV exactly as they were, every lookup having finished first', async () => {
+  it('a refused session (it verifies; its user is no longer allowed) leaves the isolate, the colo and KV exactly as they were, every lookup having finished first', async () => {
     // A warm isolate: one authorized request's memos, colo and KV entries.
     expect((await askAt('localhost', '2026-08-02', '2026-08-04', '')).status).toBe(200)
     await quiesce()
@@ -210,7 +232,7 @@ describe('what a level request starts beside its gate (`ahead`) lands only once 
     calls.length = 0
     settled.length = 0
     lag.auth = 300
-    const r = await askAt('example.test', '2026-08-04', '2026-08-06', 'b1', { cookie: 'oa_auth=junk' })
+    const r = await askAt('example.test', '2026-08-04', '2026-08-06', 'b1', REFUSED_COOKIE)
     // Every lookup ran, and settled, before the gate refused (its own `auth` last).
     expect([r.status, [...new Set(calls)].sort(), settled.at(-1), [...new Set(settled)].sort()])
       .toEqual([401, ['auth', 'gens', 'match', 'prep', 'scan'], 'auth', ['auth', 'gens', 'match', 'prep', 'scan']])
@@ -240,5 +262,81 @@ describe('what a level request starts beside its gate (`ahead`) lands only once 
     expect([strict.status, strict.body]).toEqual([200, after.body])
     expect(strict.after).toEqual(after.after)
     expect(strict.after).not.toEqual(strict.warm)
+  })
+})
+
+describe('which requests start their lookups beside the gate (`presentsCredentials`)', () => {
+  /** What a refused request at a non-local host started: `auth` alone, or every lookup too. */
+  const started = async (headers: Record<string, string>, qs = '') => {
+    calls.length = 0
+    lag.auth = 20
+    const r = await level({ request: new Request(`http://example.test/api/diff/level?from=2026-08-03&to=2026-08-05&p=${qs}`, { headers: { 'x-deny': '1', ...headers } }), env })
+    await r.text()
+    return [r.status, [...new Set(calls)].sort().join(',')]
+  }
+  const NONE = [401, 'auth']
+  const ALL = [401, 'auth,gens,match,prep,scan']
+  const TOKEN = 'A'.repeat(31) + '_'
+
+  it('none for anything but a session cookie that verifies: other cookies, a malformed, forged or expired one, a token', async () => {
+    const [forged, expired, unshaped] = await Promise.all([
+      session('e:removed@example.test', { secret: 'not-the-secret' }),
+      session('e:removed@example.test', { ago: 2 * 3600_000, ttl: 3600 }),
+      // A forged signature in the cookie's shape, the claims' own.
+      session('e:removed@example.test').then(c => `${c.slice(0, c.indexOf('.'))}.c2lnbmF0dXJlLW5vdC1yZWFs`),
+    ])
+    expect(await Promise.all([
+      started({}),
+      started({ cookie: '__cf_bm=abc.def; _ga=GA1.2.345.678' }),
+      started({ cookie: 'oa_oidc=nonce.signature; oa_google_hint=x' }),
+      started({ cookie: 'oa_auth=junk' }),
+      started({ cookie: 'oa_auth=a.b.c' }),
+      started({ cookie: forged }),
+      started({ cookie: expired }),
+      started({ cookie: unshaped }),
+      started({ authorization: 'Basic dXNlcjpwYXNz' }),
+      started({ authorization: 'Bearer short' }),
+      started({ authorization: `Bearer ${TOKEN}` }),
+      started({}, `&key=${TOKEN}`),
+      // The gate reads a presented token first: it is the credential, whatever cookie comes with it.
+      started({ authorization: `Bearer ${TOKEN}`, ...REFUSED_COOKIE }),
+      started(REFUSED_COOKIE, `&key=${TOKEN}`),
+    ])).toEqual(Array(14).fill(NONE))
+  })
+
+  it('every lookup for a session cookie that verifies, alone or among other cookies', async () => {
+    expect(await Promise.all([
+      started(REFUSED_COOKIE),
+      started({ cookie: `_ga=GA1.2.3; ${REFUSED_COOKIE.cookie}; __cf_bm=x` }),
+    ])).toEqual(Array(2).fill(ALL))
+  })
+})
+
+describe('a refused request\'s lookups are its own: an authorized request racing it never joins them', () => {
+  it('the authorized request reads as it would alone, with no join, unaffected by the refused one\'s kill', async () => {
+    const [from, to] = ['2026-08-02', '2026-08-06']
+    /** An authorized request (its gate passing at once), against an `INDEX_R2` of its own, counted. */
+    const authed = async () => {
+      const gets = { n: 0 }
+      const r = await level({ request: new Request(`http://localhost/api/diff/level?from=${from}&to=${to}&p=`), env: { ...env, INDEX_R2: r2('iv-churn', gets) } })
+      return { status: r.status, body: await r.text(), gets: gets.n, joins: Object.keys(timing(r)).filter(k => k.startsWith('join')) }
+    }
+    r2Lag.ms = 10
+    const alone = await authed()
+    await quiesce()
+    await cold()
+    calls.length = 0
+    // A refused session, its gate refusing at 60 ms: its lookups (the same keys) are in flight from the start, and
+    // killed (`done()`) at the refusal, while the authorized request (started 5 ms in) is still reading.
+    const junkGets = { n: 0 }
+    const junk = level({ request: new Request(`http://example.test/api/diff/level?from=${from}&to=${to}&p=`, { headers: { ...REFUSED_COOKIE, 'x-deny': '1', 'x-gate-ms': '60' } }), env: { ...env, INDEX_R2: r2('iv-churn', junkGets) } })
+    await sleep(5)
+    const raced = await authed()
+    const refused = await junk
+    expect([refused.status, raced.status, raced.body === alone.body, raced.gets, raced.joins, junkGets.n > 0])
+      .toEqual([401, 200, true, alone.gets, [], true])
+    // Each request ran each lookup once: none restarted.
+    expect(['auth', 'gens', 'match', 'prep', 'scan'].map(c => [c, calls.filter(x => x === c).length]))
+      .toEqual([['auth', 2], ['gens', 2], ['match', 2], ['prep', 2], ['scan', 4]])
   })
 })

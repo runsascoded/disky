@@ -16,7 +16,7 @@
  * `scopesFor` on every request, so removal bites instantly. Grant sessions
  * carry the scopes they were minted with (normally just the base scope).
  */
-import { type Auth, createGate, type Gate, hasScope, type Subject } from '@open-athena/auth'
+import { type Auth, createGate, DEFAULT_COOKIE_NAME, type Gate, hasScope, readCookie, type Subject, verifySessionClaims } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 import { grantCaller, meterOf } from './usage.js'
@@ -268,8 +268,12 @@ export function gateFor(env: Env): Gate | null {
     profiles: d1ProfileStore(env.DB),
     secret: env.SESSION_SECRET,
     policy: scopesFor(env),
+    cookieName: SESSION_COOKIE,
   })
 }
+
+/** The session cookie the gate reads (`presentsCredentials` verifies it). */
+export const SESSION_COOKIE = DEFAULT_COOKIE_NAME
 
 /** Identity + scopes however the request proved them; null if it didn't. */
 export interface Identity {
@@ -344,15 +348,22 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
   return authIdentity(auth)
 }
 
-/** Whether a request may pass the gate before it is asked: a public deployment, local dev, or a request presenting
- *  something the gate reads (a session cookie, a `Bearer` token, a `?key=` link). A request without any is refused
- *  (or answered anonymously) whatever the lookups say, so what a route starts beside its gate (`shared.ahead`) waits
- *  for it instead. */
-export function presentsCredentials(ctx: Ctx): boolean {
+/** Whether a request may pass the gate before it is asked: a public deployment, local dev, or a session cookie
+ *  (`SESSION_COOKIE`) that verifies — the package's `verifySessionClaims` (its HMAC signature under the gate's
+ *  `SESSION_SECRET`, `crypto.subtle`, no I/O) with its expiry not past. Nothing else starts what a route starts beside
+ *  its gate (`shared.ahead`), which then waits for it: no credential, other cookies, a forged, malformed or expired
+ *  session, a `Basic` header — and a `Bearer` token or `?key=` link, which only the gate's D1 lookup can check (agent and
+ *  API calls, not the browser's latency-sensitive path; the gate reads a presented token first, so a cookie beside one
+ *  isn't the credential). Only a session minted under the secret can make a refused request cost more than the gate's
+ *  own reads (`AHEAD_COST`, `GATE_COST`). */
+export async function presentsCredentials(ctx: Ctx): Promise<boolean> {
   const url = new URL(ctx.request.url)
   if (ctx.env.PUBLIC_READ || url.hostname === 'localhost' || url.hostname === '127.0.0.1') return true
-  const h = ctx.request.headers
-  return !!(h.get('cookie') || h.get('authorization') || url.searchParams.has('key'))
+  if (/^Bearer (.+)$/.test(ctx.request.headers.get('authorization') ?? '') || url.searchParams.get('key')) return false
+  const cookie = readCookie(ctx.request, SESSION_COOKIE)
+  // No gate (`gateFor`), no pass.
+  if (!cookie || !ctx.env.DB || !ctx.env.SESSION_SECRET) return false
+  return (await verifySessionClaims(cookie, ctx.env.SESSION_SECRET, Date.now())) !== null
 }
 
 /** Gate a handler on a scope; 401/403 as JSON. */

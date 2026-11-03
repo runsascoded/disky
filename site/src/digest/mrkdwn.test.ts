@@ -22,4 +22,10 @@ describe('the OP markdown, tokenized', () => {
       { t: 'emoji', name: 'large_orange_circle', char: '🟠' }, { t: 'text', s: ' main 86.8% · ' }, { t: 'emoji', name: 'large_green_circle', char: '🟢' }, { t: 'text', s: ' z 4% · :tada:' },
     ])
   })
+  it("`runway-hue`'s marks: the workspace's :runway-1: … :runway-8:, by their circle colors", () => {
+    expect(tokenize('*Quotas:* :runway-8: main 86.8% · :runway-1: hot 99.5% · :runway-9: x')).toEqual([
+      { t: 'bold', s: 'Quotas:' }, { t: 'text', s: ' ' }, { t: 'hue', n: 8, color: '#1e8e4a' }, { t: 'text', s: ' main 86.8% · ' },
+      { t: 'hue', n: 1, color: '#e01e1e' }, { t: 'text', s: ' hot 99.5% · :runway-9: x' },
+    ])
+  })
 })

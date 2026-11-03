@@ -118,7 +118,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
   const gated = gating ? st.time('auth', requireViewer(ctx as never)) : Promise.resolve(member?.id ?? null)
   gated.catch(() => {})
   await loadScopes()
-  const early = ahead(ctx.env, !gating || presentsCredentials(ctx as never))
+  const early = ahead(ctx.env, !gating || await presentsCredentials(ctx as never))
   try {
     return await subtreeGated(ctx, st, early, gated, { date0, path, w, h, minArea, atten, lens, rawOwner, owner, by, depth, classes, qRaw, full, qp, query, member })
   } finally {

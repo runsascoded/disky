@@ -81,7 +81,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
   const ctx = await withPathStore(ctx1)
   traceJoins(ctx.env, st.trace)
   await loadScopes()
-  const early = ahead(ctx.env, !!member || presentsCredentials(ctx1 as never))
+  const early = ahead(ctx.env, !!member || await presentsCredentials(ctx1 as never))
   try {
     if (!intervalsOn(ctx.env)) return new Response('level diffs read the interval store', { status: 409 })
     // What the answer needs whoever asks: started now for a request that may pass the gate, used once it has.

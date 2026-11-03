@@ -96,6 +96,10 @@ def _deployment_env(monkeypatch):
     from dt_cloud import digest_cw
 
     monkeypatch.setattr(digest_cw, "site_triggers", lambda cfg: {})
+    # …and its live settings (`/api/digest-settings`): none, so the config file's stand
+    from dt_cloud import digest
+
+    monkeypatch.setattr(digest, "live_settings", lambda cfg: None)
 
 
 @pytest.fixture

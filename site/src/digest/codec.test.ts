@@ -9,6 +9,10 @@ describe('digest params in a URL', () => {
     }
     expect([encodeParams(DEFAULT_PARAMS), encodeParams(p), decodeParams(encodeParams(p))]).toEqual(['', 'w45,t0.6-0.95,dm,hw,km,qc,pp,a85', p])
     expect(decodeParams('h')).toEqual({ ...DEFAULT_PARAMS, headline: [] })
+    const r: DigestParams = { ...DEFAULT_PARAMS, quotas: 'runway' }
+    expect([encodeParams(r), decodeParams('qr'), parseParams('qr')]).toEqual(['qr', r, r])
+    const h: DigestParams = { ...DEFAULT_PARAMS, quotas: 'runway-hue' }
+    expect([encodeParams(h), decodeParams('qh'), parseParams('qh,pp')]).toEqual(['qh', h, { ...h, plot: 'pools' }])
   })
   it('drops what it cannot read', () => {
     expect(decodeParams('w0,w999,t0.9-0.5,dx,hmm,kq,zz,qx,pz,a0,a101')).toEqual(DEFAULT_PARAMS)
@@ -18,7 +22,7 @@ describe('digest params in a URL', () => {
       windowDays: 45, todayAt: [0.6, 0.95], diff: 'mtd', headline: ['window'], weeks: 'month', quotas: 'circles', plot: 'pools', alertAt: 85,
     }
     expect([parseParams(''), parseParams(encodeParams(p)), parseParams('h')]).toEqual([DEFAULT_PARAMS, p, { ...DEFAULT_PARAMS, headline: [] }])
-    const bad = ['w0', 'w999', 't0.9-0.5', 'dx', 'hmm', 'kq', 'zz', 'qx', 'pz', 'a0', 'a101', 'w30,', ',w30', 'w30,w45']
+    const bad = ['w0', 'w999', 't0.9-0.5', 'dx', 'hmm', 'kq', 'zz', 'qx', 'qconstructor', 'pz', 'a0', 'a101', 'w30,', ',w30', 'w30,w45']
     const errs = bad.map(s => {
       try {
         parseParams(s)
@@ -28,7 +32,7 @@ describe('digest params in a URL', () => {
       }
     })
     expect(errs).toEqual([
-      ...bad.slice(0, 11).map(s => `digest params: unreadable field "${s}" in "${s}"`),
+      ...bad.slice(0, 12).map(s => `digest params: unreadable field "${s}" in "${s}"`),
       'digest params: unreadable field "" in "w30,"',
       'digest params: unreadable field "" in ",w30"',
       'digest params: repeated field "w" in "w30,w45"',

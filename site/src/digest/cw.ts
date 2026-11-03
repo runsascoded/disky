@@ -91,7 +91,7 @@ export function opText(m: CwRows, month: number, cfg: DigestCfg, p: DigestParams
   const lines = [
     `:arrow_deg${deg(mweekly)}: ${p.headline.map(f => figures[f]).join('')}${primary}${grouped(last.tb, 0)} ${u.name}${quotas(last.tb, last.classes, qs, cfg)}` +
       `${extras(last, dextra(last, b0 !== last ? b0 : null), mtdSince, cfg)} · [dashboard](${site}/)`,
-    ...(p.quotas === 'off' ? [] : [quotaLine(last, cfg, p.alertAt)].filter(Boolean)),
+    ...(p.quotas === 'off' ? [] : [quotaLine(last, cfg, p.alertAt, p.quotas, seen)].filter(Boolean)),
     `_as of ${md(dayOf(date(last)))} ${hhmm(ts(last))}Z_`,
     '',
     '*Weekly summaries*',
