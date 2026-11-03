@@ -147,7 +147,7 @@ def backfill_attribution(store: Store, gen: str, new_gen: str, scans_root: str, 
     shutil.copytree(built / AT, out / AT)
     for x in ("parquet", "groups.parquet", "json"):
         (out / "served" / f"{AT}.{x}").unlink(missing_ok=True)
-    sd = ist.write_served(con, f"read_parquet({q(str(out / AT / 'r*.parquet'))})", AT, out / "served" / f"{AT}.parquet", ist.served_schema(AT),
+    sd = ist.write_served(con, [str(p) for p in sorted((out / AT).glob("r*.parquet"))], AT, out / "served" / f"{AT}.parquet", ist.served_schema(AT),
                          rg_rows=rg_rows, stamps=stamps)
     (out / "served" / f"{AT}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
