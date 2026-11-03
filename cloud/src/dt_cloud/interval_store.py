@@ -34,6 +34,7 @@ from . import heartbeat as hb
 from . import static_names as sn
 from . import tree_mem as tm
 from .blobstore import Store, store_url
+from .image_sha import expect_sha_options, log_job_stamp
 from .interval_churn import has_churn, with_churn
 from . import interval_level as ilv
 from .interval_level import LEVEL, LEVEL_SCHEMA, leveled
@@ -1351,6 +1352,7 @@ def _seg_summary(rows: list[dict], dyadic: bool) -> dict:
 @group("interval-store")
 def cli() -> None:
     """The change-interval path store (specs/interval-store.md)."""
+    log_job_stamp("interval-store")
 
 
 @cli.command("build-ranges")
@@ -1509,6 +1511,7 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 
 
 @cli.command("cut")
+@expect_sha_options("interval-store cut")
 @option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
 @option("-D", "--no-dyadic", is_flag=True, help="One closed segment, not one per dyadic block of scans (`seg_sql`)")
 @option("-g", "--gen", required=True, help="Generation (its pv/, rd/ range files)")
