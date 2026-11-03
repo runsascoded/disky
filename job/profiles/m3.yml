@@ -35,6 +35,8 @@ env:
   D1_DB_NAME: disk-tree-m3-db
   R2_BUCKET: disk-tree
   AWS_DEFAULT_REGION: auto
+  # the scan head refuses an unlabelled run (specs/done/cost-labels-required.md)
+  DISKY_LABELS: app=disky,deployment=m3
 labels: {deployment: m3}
 options:
   index:
