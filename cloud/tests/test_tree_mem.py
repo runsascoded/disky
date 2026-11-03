@@ -4,7 +4,6 @@ and a compaction under a small one stays within it, measured over the tree."""
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tracemalloc
@@ -155,23 +154,6 @@ def test_footers_stream_a_row_group_at_a_time(tmp_path):
 # ── A compaction under a small budget, measured over its process tree ──────
 
 
-def _tree_pss(root: int) -> int:
-    """The proportional resident bytes (`smaps_rollup` `Pss`) of `root` and every descendant: the tree's share of
-    physical memory, shared pages counted once across it."""
-    todo, total = [root], 0
-    while todo:
-        pid = todo.pop()
-        try:
-            with open(f"/proc/{pid}/smaps_rollup") as f:
-                total += next(int(line.split()[1]) << 10 for line in f if line.startswith("Pss:"))
-            for task in os.listdir(f"/proc/{pid}/task"):
-                with open(f"/proc/{pid}/task/{task}/children") as f:
-                    todo += [int(c) for c in f.read().split()]
-        except (FileNotFoundError, ProcessLookupError, StopIteration):  # legitimate: the process exited between reads
-            continue
-    return total
-
-
 #: Paths in each scan, scans in the base, scans appended as runs.
 N_PATHS, BASE, RUNS = 600_000, 2, 2
 DATES = [f"2026-09-{d:02d}" for d in range(1, BASE + RUNS + 1)]
@@ -245,7 +227,7 @@ def test_compaction_stays_within_its_budget(generation, tmp_path):
 
     def sample():
         while not stop.is_set():
-            peak[0] = max(peak[0], _tree_pss(proc.pid))
+            peak[0] = max(peak[0], tm.tree_pss(proc.pid))
             stop.wait(0.01)
 
     th = Thread(target=sample, daemon=True)

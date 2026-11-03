@@ -354,6 +354,7 @@ def backfill_cmd(gen, jobs, mem, store_root, to_gen, threads, ranges_gen, rg_row
     base, rolled up to its ancestors. The source and `CURRENT.json` are left as they are: verify the new generation, then
     `interval-store current -s TO_GEN`. Prints a JSON summary."""
     from . import interval_compact as ic
+    from . import tree_mem as tm
     from .blobstore import Store
     from .static_local import _check_gen, workdir
 
@@ -366,5 +367,5 @@ def backfill_cmd(gen, jobs, mem, store_root, to_gen, threads, ranges_gen, rg_row
         if gen is None:
             raise SystemExit(f"{store.root}/interval-store: no current generation ({how}): name one with -g")
     gen = ic.chain(store, gen)[-1]
-    with workdir(work) as w:
+    with tm.watch(mem, f"backfill-churn {gen}"), workdir(work) as w:
         print(json.dumps(backfill(store, gen, to_gen, w, ranges_gen=ranges_gen, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs), indent=1))

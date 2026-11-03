@@ -22,13 +22,23 @@ column chunk; pyarrow's parsed footer ~50 B) and decode it one row group at a ti
 `GROUPS_RG` groups at a time: ~0.3 GiB at a billion rows (2.3M column chunks), where the decoded footer was ~40× that.
 
 Freed Arrow memory goes back to the OS at once (`arrow_returns_freed`: jemalloc's decay off, in this process and every
-worker), so a phase's peak is what it holds, not what its predecessors held."""
+worker), so a phase's peak is what it holds, not what its predecessors held.
+
+Every entry that ends in a served-sort cut takes `-M` this way (`interval-store cut`/`build`/`add`, the `backfill-*`s,
+`migrate-object-version`, the staged `publish`/`carry`/`compact`): its DuckDB stages run under `stage_mem` (what this
+process leaves), each cut under its `Budget.cut` plan (`interval_store.plan_cut`). The check is measured, not modelled:
+each such entry runs under `TreeWatch`, which samples the tree's proportional resident bytes (`tree_pss`) every
+`WATCH_S` and logs `<entry>: peak tree PSS X MiB of budget M MiB` at its end; with `$DT_TREE_MEM_ASSERT` set, a peak past
+`-M` exits non-zero."""
 from __future__ import annotations
 
+import os
 import resource
 import sys
 from dataclasses import dataclass
 from functools import cache
+from threading import Event, Thread
+from time import monotonic
 
 import pyarrow as pa
 
@@ -222,3 +232,93 @@ class Budget:
 def duck_sql(limit: int) -> str:
     """DuckDB's `SET memory_limit` to `limit` bytes (whole MiB, rounded down)."""
     return f"SET memory_limit='{limit // MIB}MiB'"
+
+
+def stage_mem(tree: Budget, what: str = "") -> str:
+    """DuckDB's limit for an entry's stages outside the fold and the cut (whose Arrow side is a batch or two, freed at
+    once): all of `-M` this process leaves (`Budget.duck` with no workers or buffers), as `static_names.connect` takes it."""
+    return f"{tree.duck(0, 0, what) // MIB}MiB"
+
+
+# ── The check: the tree's peak, measured ───────────────────────────────────
+
+#: Set (to anything but `""` or `0`) to make `TreeWatch` exit non-zero when the tree's peak passes the budget.
+ASSERT_ENV = "DT_TREE_MEM_ASSERT"
+#: Seconds between `TreeWatch`'s samples.
+WATCH_S = 1.0
+
+
+def has_procfs() -> bool:
+    return os.path.exists("/proc/self/smaps_rollup")
+
+
+def tree_pss(root: int | None = None) -> int:
+    """The proportional resident bytes (`smaps_rollup`'s `Pss`) of `root` (default this process) and every descendant:
+    the tree's share of physical memory, a page shared by several of them (their libraries) counted once across them.
+    Linux only (`has_procfs`)."""
+    todo, total = [os.getpid() if root is None else root], 0
+    while todo:
+        pid = todo.pop()
+        try:
+            with open(f"/proc/{pid}/smaps_rollup") as f:
+                total += next(int(line.split()[1]) << 10 for line in f if line.startswith("Pss:"))
+            for task in os.listdir(f"/proc/{pid}/task"):
+                with open(f"/proc/{pid}/task/{task}/children") as f:
+                    todo += [int(c) for c in f.read().split()]
+        except (FileNotFoundError, ProcessLookupError, StopIteration):  # legitimate: the process exited between reads
+            continue
+    return total
+
+
+class TreeWatch:
+    """The process tree's peak memory over a block, against `total` (`-M`): `tree_pss` sampled every `every` seconds on
+    a daemon thread (and once at the end). On exit it logs `<what>: peak tree PSS X MiB of budget M MiB`; with `check`
+    (default: `$DT_TREE_MEM_ASSERT` set) a peak past `total` exits non-zero (`SystemExit`), and a machine without procfs
+    is refused at the start (it can't measure). Without procfs and `check` it logs that nothing was measured."""
+
+    def __init__(self, total: int, what: str, *, every: float = WATCH_S, check: bool | None = None):
+        self.total, self.what, self.every = total, what, every
+        self.check = os.environ.get(ASSERT_ENV, "") not in ("", "0") if check is None else check
+        self.peak, self.samples = 0, 0
+        self._stop = Event()
+        self._thread: Thread | None = None
+
+    def _sample(self) -> None:
+        self.peak = max(self.peak, tree_pss())
+        self.samples += 1
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.every):
+            self._sample()
+
+    def __enter__(self) -> TreeWatch:
+        if not has_procfs():
+            if self.check:
+                raise SystemExit(f"{self.what}: ${ASSERT_ENV} set, but the tree's memory is read from procfs (Linux), which this machine lacks")
+            return self
+        self._t0 = monotonic()
+        self._sample()
+        self._thread = Thread(target=self._run, name="tree-watch", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, typ, exc, tb) -> None:
+        if self._thread is None:
+            print(f"{self.what}: peak tree PSS not measured (no procfs); budget {self.total / MIB:,.0f} MiB", file=sys.stderr, flush=True)
+            return
+        self._stop.set()
+        self._thread.join()
+        self._sample()
+        over = self.peak > self.total
+        print(f"{self.what}: peak tree PSS {self.peak / MIB:,.0f} MiB of budget {self.total / MIB:,.0f} MiB "
+              f"({100 * self.peak / self.total:.0f}%; {self.samples} samples over {monotonic() - self._t0:.0f}s)"
+              f"{' — OVER BUDGET' if over else ''}", file=sys.stderr, flush=True)
+        if typ is None and over and self.check:
+            raise SystemExit(f"{self.what}: peak tree PSS {self.peak / MIB:,.0f} MiB over its budget {self.total / MIB:,.0f} MiB (${ASSERT_ENV})")
+
+
+def watch(mem: str, what: str) -> TreeWatch:
+    """`TreeWatch` over an entry's `-M` (a DuckDB-style size: `4GB`, `100GB`)."""
+    from .static_names import mem_bytes
+
+    return TreeWatch(mem_bytes(mem), what)
