@@ -39,8 +39,10 @@ alert_pct: null
 quota_marks: circles
 # who renders the OP's text + plot request: `local` (the job's Python) or `site` (`POST /api/digest-op`, the renderer
 # /admin/slack previews with) under `params` (its codec string, e.g. `qc,pp`; "" = the defaults = local's bytes)
-renderer: local
-params: ""
+# site (2026-11-02): byte-identical to local under "" (checked on the live November OP); `qc,pp` = the quota line
+# (every pool, fullest first, circled) under the headline + the plot as % of each pool's quota (Ryan's pick)
+renderer: site
+params: qc,pp
 primary: marin-us-east-02a
 # quotas from CoreWeave's `cwobject_quota_info` metric, which is per ZONE: 02a =
 # exactly 910 TiB ("1 PB"); US-EAST-08A = 500 TiB (100 until 2026-10-16) shared by
