@@ -142,7 +142,7 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
 
 function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; setCands: (c: string[]) => void }) {
   const links = { plotUrl: PLOT, prevUrl: b.prev_url }
-  // the bundle's params (`renderer: site`; absent or '' = the defaults) are what the job rendered under
+  // the bundle's params (absent or '' = the defaults) are what the OP was rendered under
   const posted = b.params ?? ''
   const rerender = opText(b.rows, b.month, b.cfg, { plotUrl: b.plot_url === null ? null : PLOT, prevUrl: b.prev_url }, decodeParams(posted))
   const matches = rerender.split('\n').map(norm).join('\n') === b.op.split('\n').map(norm).join('\n')

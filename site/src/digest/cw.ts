@@ -1,6 +1,5 @@
 /** The `cw` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
- * (`cloud/src/dt_cloud/digest_cw.py`'s `op_body` / `image_body`, ported byte for byte: `./parity.test.ts`). The job
- * writes the scans (`Cw.rows_json`); the replies stay the job's. Pure; DOM-free. */
+ * (the job sends them: `Cw.rows_json`; goldens: `./parity.test.ts`). The replies stay the job's. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
 import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
 import { pools, quotaLine, used } from './pools'

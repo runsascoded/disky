@@ -1,7 +1,7 @@
-"""The site's OP renderer (`site/src/digest`) against the job's: each case here renders a month's OP text and plot
-request in Python and pins them, with the rows and config they came from, as a JSON fixture under
-`tests/fixtures/digest/parity/` (`DT_UPDATE_GOLDEN=1` rewrites). `site/src/digest/parity.test.ts` renders each
-fixture's rows in TS and asserts the same text and request, byte for byte (specs/slack-preview-page.md, phase 1)."""
+"""The digest OP's goldens (specs/slack-preview-page.md): each case's JSON fixture under
+`tests/fixtures/digest/parity/` holds what the job sends the site's renderer for a month (`cfg`, `rows`, the plot
+and previous-thread urls), pinned here (`DT_UPDATE_GOLDEN=1` rewrites those fields), and the OP text and plot request
+the renderer must answer, pinned by `site/src/digest/parity.test.ts` (byte for byte)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -108,19 +108,16 @@ CASES = ["gcs-aug", "gcs-aug-discord", "gcs-first", "cw-sep", "cw6-oct", "cw-fir
 
 @pytest.mark.parametrize("name", CASES)
 def test_parity_fixture(name: str, tmp_path: Path):
+    # the job's side of the fixture: what it sends the site for the case (the answer, `op` / `image`, is the site's)
     cfg, root, month, plot_url, prev_url = _case(name, tmp_path)
     tpl = E.template(cfg)
     data = tpl.load(str(root), month)
-    actual = {
-        "cfg": E.cfg_json(cfg), "month": f"{month:%Y-%m}", "plot_url": plot_url, "prev_url": prev_url,
-        "rows": tpl.rows_json(data), "op": tpl.op_body(data, month, plot_url, prev_url), "image": tpl.image_request(data, month),
-    }
     path = PARITY / f"{name}.json"
-    text = json.dumps(actual, indent=1, ensure_ascii=False) + "\n"
+    fx = json.loads(path.read_text())
+    actual = {"cfg": E.cfg_json(cfg), "month": f"{month:%Y-%m}", "plot_url": plot_url, "prev_url": prev_url, "rows": tpl.rows_json(data)}
     if os.environ.get("DT_UPDATE_GOLDEN"):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-    assert text == path.read_text()
+        path.write_text(json.dumps({**fx, **actual}, indent=1, ensure_ascii=False) + "\n")
+    assert {k: fx[k] for k in actual} == json.loads(json.dumps(actual))
 
 
 def test_preview_bundle_is_the_parity_shape():
@@ -156,9 +153,10 @@ def test_converge_writes_the_preview_bundle(tmp_path: Path):
     assert not (tmp_path / "bare" / "served").exists()
 
 
+@pytest.mark.real_site_render
 @pytest.mark.parametrize("name", ["cw-sep", "gcs-aug"])
 def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: Path, monkeypatch):
-    """`renderer: site` (phase 2): the OP text and plot request come from `POST /api/digest-op`, sent exactly the
+    """The OP text and plot request come from `POST /api/digest-op`, sent exactly the
     parity fixture's request under the config's params; the site's answer here is the fixture's own (what
     `digest-op.test.ts` asserts the site returns for it)."""
     from dt_cloud import site
@@ -173,7 +171,7 @@ def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: P
 
     monkeypatch.setattr(site, "post_json", post_json)
     monkeypatch.setenv("SITE_TOKEN", "tok")
-    tpl = E.template(replace(cfg, renderer="site", params="qc"))
+    tpl = E.template(replace(cfg, params="qc"))
     data = tpl.load(str(root), month)
     assert (tpl.op_body(data, month, plot_url, prev_url), tpl.image_request(data, month)) == (fx["op"], fx["image"])
     req = {"month": fx["month"], "rows": fx["rows"], "cfg": fx["cfg"], "params": "qc"}
@@ -184,15 +182,12 @@ def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: P
     monkeypatch.delenv("SITE_TOKEN")
     with pytest.raises(SystemExit) as e:
         tpl.op_body(data, month, plot_url, prev_url)
-    assert str(e.value) == "digest: `renderer: site` needs the site token ($SITE_TOKEN)"
+    assert str(e.value) == "digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN)"
 
 
-def test_renderer_config():
-    assert (E.config_from_dict({"template": "cw"}).renderer, E.config_from_dict({"template": "cw", "renderer": "site", "params": "qc,pp"}).params) == (
-        "local", "qc,pp")
+def test_params_config():
+    assert (E.config_from_dict({"template": "cw"}).params, E.config_from_dict({"template": "cw", "params": "qc,pp"}).params) == ("", "qc,pp")
+    # `renderer` is gone (the site is the only one): a config still naming it is refused, as any unknown key
     with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "renderer": "ts"})
-    assert str(e.value) == "digest config renderer: 'ts' is not one of ('local', 'site')"
-    with pytest.raises(ValueError) as e:
-        E.config_from_dict({"template": "cw", "params": "qc"})
-    assert str(e.value) == "digest config params: 'qc' needs `renderer: site` (the local renderer has no params)"
+        E.config_from_dict({"template": "cw", "renderer": "site"})
+    assert str(e.value) == "unknown digest config keys: ['renderer']"

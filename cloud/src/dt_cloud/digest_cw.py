@@ -50,8 +50,8 @@ from pathlib import Path
 
 from .digest import (
     AVATAR_REV, HOURS_PER_WEEK, LINK_ARROW, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
-    _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, prev_month_link, read_metas, site_render,
-    scan_slugs, scan_ts, week_of, window_label, window_scans, window_start,
+    _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, read_metas, site_render,
+    scan_slugs, scan_ts, window_scans, window_start,
 )
 
 VARIANTS = ("sender", "body")
@@ -74,21 +74,6 @@ def _scoped(tb: float, classes: dict[int, float] | None, q: Quota) -> float:
     return sum(classes.get(c, 0.0) for c in q.classes)
 
 
-def _quotas(tb: float, classes: dict[int, float] | None, qs: tuple[Quota, ...], u: Units) -> str:
-    """` · NN.N% of <quota>` per quota (each over its own classes); `''` with none."""
-    return "".join(_quota(_scoped(tb, classes, q), q, u) for q in qs)
-
-
-def _extras(extra: dict[str, float], dextra: dict[str, float | None], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
-    """` · [<label>](<over-time url>) <N> TiB (Δ)` per non-primary bucket (Δ
-    omitted when the prior scan lacked the bucket), linked over the same span
-    as the line it's on; `''` with none. The OP's form; the daily reply uses
-    `_tail` (per-bucket quota clauses)."""
-    out = ""
-    for b, tb in extra.items():
-        d = dextra.get(b)
-        out += f" · {_bucket_link(b, scan, since, cfg, slug)} {tb:,.0f} {cfg.unit.name}" + (f" ({_tb(d)})" if d is not None else "")
-    return out
 
 
 def _qlabel(b: int) -> str:
@@ -531,70 +516,6 @@ def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False, seen:
     )
 
 
-def op_body(month: Month, m: dt.date, plot_url: str | None, cfg: DigestConfig, prev_url: str | None = None) -> str:
-    """OP markdown: month-to-date headline beside the window's look-back figure, the latest scan's "as of" line,
-    per-ISO-week bullets over the window (weeks ending before the month marked with its predecessor's name), the
-    previous month's thread (``prev_url``; none: no link), trailing sparkline. The month/year title is NOT in
-    the body -- it's folded into the OP's sender name by the poster.
-    ``plot_url=None`` omits the image line."""
-    site_url, qs, u = cfg.site_url, cfg.primary_quotas, cfg.unit
-    rows, base = month.rows, month.base
-    last = rows[-1]
-    mdtb = last.tb - base.tb
-    days = (scan_ts(last.scan) - scan_ts(base.scan)).total_seconds() / 86400 or 1.0
-    mweekly = (mdtb / base.tb * 100 * 7 / days) if base.tb else 0
-    # "month-to-date" opens the Diff section over the whole month so far
-    # (lead-in scan -> latest), the same way each weekly bullet links its span
-    mtd_since = scan_ts(base.scan) if base is not last else None
-    mtd_url = _diff_url(last.scan, mtd_since, site_url, slug=last.slug)
-    # with extra buckets alongside, the headline total is visibly the primary's
-    primary = f"{_bucket_link(cfg.primary, last.scan, mtd_since, cfg, last.slug)} " if cfg.primary and last.extra else ""
-    start, seen = month.window(m)
-    # the look-back figure, over the window
-    b30 = month.back(m)
-    b30_url = _diff_url(last.scan, scan_ts(b30.scan) if b30 is not last else None, site_url, slug=last.slug)
-    # (none when it starts where month-to-date does: a store whose first scan is this month's)
-    look = f"**{_tb(last.tb - b30.tb)} {u.name}** [{window_label(start, b30.scan)}]({b30_url}) · " if b30 is not base else ""
-    lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} {u.name}** [month-to-date]({mtd_url}) · {look}{primary}{last.tb:,.0f} {u.name}{_quotas(last.tb, last.classes, qs, u)}{_extras(last.extra, _dextra(last, base if base is not last else None), last.scan, mtd_since, cfg, last.slug)} · [dashboard]({site_url}/)",
-        # the OP is re-edited every scan, so it is the thread's live view; say which scan it reflects
-        f"_as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_",
-        "",
-        "*Weekly summaries*",
-    ]
-    # every week overlapping the window, each over the previous one's last scan (the first: the last scan before it)
-    mon0 = week_of(start).isoformat()
-    older = [r for r in seen if r.date < mon0]
-    weeks: OrderedDict[dt.date, list[Scan]] = OrderedDict()
-    for r in seen:
-        if r.date >= mon0:
-            weeks.setdefault(week_of(dt.date.fromisoformat(r.date)), []).append(r)
-    last_mon = list(weeks)[-1]
-    prev_end = older[-1] if older else seen[0]
-    for mon, ws in weeks.items():
-        end = ws[-1]
-        if end is prev_end:
-            # a week holding only the store's first scan: nothing before it to measure from
-            continue
-        wdtb = end.tb - prev_end.tb
-        wpct = wdtb / prev_end.tb * 100 if prev_end.tb else 0
-        # partial while the week's Sunday has no scan yet
-        partial = " _(partial)_" if mon == last_mon and dt.date.fromisoformat(end.date) < mon + dt.timedelta(days=6) else ""
-        # a week over before the month began, named for the month its last scan fell in (the previous one's, but
-        # for a week straddling the month before that)
-        earlier = f" ({dt.date.fromisoformat(end.date):%b})" if mon + dt.timedelta(days=6) < m.replace(day=1) else ""
-        # the link opens the Diff section over exactly this bullet's span
-        lines.append(
-            f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({_diff_url(end.scan, scan_ts(prev_end.scan) if prev_end is not end else None, site_url, slug=end.slug)}){earlier}{partial}: "
-            f"**{_tb(wdtb)} {u.name}** → {end.tb:,.0f} {u.name}{_quotas(end.tb, end.classes, qs, u)}"
-        )
-        prev_end = end
-    if prev_url:
-        lines += ["", *prev_month_link(m, prev_url)]
-    if plot_url is not None:
-        lines += ["", f"![{cfg.title} — {m:%B %Y}]({plot_url})"]
-    return "\n".join(lines)
-
 
 def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     """One day's reply. ``sender``: headline as the sender name (plain text --
@@ -675,34 +596,6 @@ def load_tree(root: str, scan: str, primary: str) -> dict:
     return primary_node(json.loads(blobfs.read_text(f"{root.rstrip('/')}/{scan}/tree.json")), primary)
 
 
-def image_body(month: Month, m: dt.date, cfg: DigestConfig) -> dict:
-    """`POST /api/digest-image`'s request for ``month``: every scan in the OP's window, from its baseline (`back`) on
-    (bytes of the primary, under its quota's classes), the window's first day (`from`: the site shades the month
-    after it), the primary's quota, and the window's diff (its baseline → the latest; none over a lone scan)."""
-    last = month.rows[-1]
-    start, seen = month.window(m)
-    base = month.back(m)
-    scans = [base] + [r for r in seen if r.date >= start.isoformat() and r is not base]
-    q, u = cfg.primary_quota, cfg.unit
-    body: dict = {
-        "title": f"{cfg.title} — {m:%B %Y}",
-        # the line is the primary's; say so once there are other buckets
-        "note": " · ".join([cfg.host, *([cfg.primary] if cfg.primary and last.extra else []), u.name]),
-        "month": f"{m:%Y-%m}",
-        "from": start.isoformat(),
-        # under the plotted quota's classes, so the line and the quota line measure the same bytes
-        "points": [{"scan": r.scan, "bytes": round((_scoped(r.tb, r.classes, q) if q else r.tb) * u.bytes)} for r in scans],
-        # the card's axis + labels
-        "units": u.name,
-    }
-    if q:
-        body["quota"] = {"bytes": q.bytes, "name": q.name}
-    if base is not last:
-        span = f"{_md(base.date)} → {_md(last.date)}"
-        body["diff"] = {"from": base.scan, "to": last.scan, "path": cfg.primary or "",
-                        "title": f"What changed in {cfg.primary} — {span}" if cfg.primary else f"What changed — {span}"}
-    return body
-
 
 class Cw:
     """The `cw` template over a :class:`DigestConfig` (see `digest.Template`)."""
@@ -721,14 +614,10 @@ class Cw:
         return len(month.rows)
 
     def op_body(self, month: Month, m: dt.date, plot_url: str | None, prev_url: str | None = None) -> str:
-        if self.cfg.renderer == "site":
-            return site_render(self.cfg, self.rows_json(month), m, plot_url, prev_url)["text"]
-        return op_body(month, m, plot_url, self.cfg, prev_url)
+        return site_render(self.cfg, self.rows_json(month), m, plot_url, prev_url)["text"]
 
     def image_request(self, month: Month, m: dt.date) -> dict:
-        if self.cfg.renderer == "site":
-            return site_render(self.cfg, self.rows_json(month), m)["image"]
-        return image_body(month, m, self.cfg)
+        return site_render(self.cfg, self.rows_json(month), m)["image"]
 
     def rows_json(self, month: Month) -> dict:
         """The month's scans as the site's renderer reads them (`src/digest/cw.ts` `CwRows`)."""

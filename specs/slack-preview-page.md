@@ -61,7 +61,7 @@ New endpoints:
    - The job writes the preview bundle; it is additive and posts nothing new.
    - `GET /api/digest-preview`, `/admin/slack` with live + candidate columns.
    - **Test** on the r2.rbw.sh demo (its digest's state and snapshots are already on R2; deployed from `cloud`/`dev` by `deploy-r2.yml`) and on gcs dev (dev.gcs.oa.dev, a month of real history; deployed by the gcs session). Not hf: under three weeks of history.
-2. **The job renders through the site.** `dt-cloud digest` posts `rows` + `params` to `/api/digest-op`, and the Python `op_body` / `image_body` are deleted. The goldens then pin the job's calls, with the site's answers recorded. Per deployment, after its site ships phase 1. The job already requires the site token for the plot, so no new failure mode.
+2. **The job renders through the site.** `dt-cloud digest` posts `rows` + `params` to `/api/digest-op`, and the Python `op_body` / `image_body` are deleted. The goldens then pin the job's calls, with the site's answers recorded. Per deployment, after its site ships phase 1. The job already requires the site token for the plot, so no new failure mode. **Done 2026-11-03**: every deployment rendered through the site (`renderer: site`) first; then the Python renderer and the `renderer` option went. The parity fixtures pin the job's side (`cfg`, `rows`, urls: `test_digest_parity.py`) and the site's answer (`op`, `image`: `parity.test.ts`); the Python goldens see a stand-in OP (conftest's `fake_site_render`).
 3. **Saving params (needs Ryan's go: D1 table + migration).** See below.
 
 ## Phase 3: saved params (for Ryan)

@@ -301,10 +301,8 @@ def site_image(monkeypatch) -> list:
 def test_gcs_dry_run(monkeypatch, tmp_path: Path, site_image: list):
     root = gcs_root(tmp_path)
     golden("gcs-dry-run.txt", _dry_run(monkeypatch, tmp_path, ["digest", "-C", str(config_file(GCS_EXAMPLE, tmp_path / "digest.yml")), "-n", "-r", str(root), "-m", "2026-08"]))
-    # the image is the site's storage-class card, over the month's daily scans (8/1 → 8/11, 8/6 missing)
-    assert [(path, body["kind"], [p["scan"] for p in body["points"]]) for _, _, path, body in site_image] == [
-        ("/api/digest-image", "tiers", [f"2026-08-{d:02d}" for d in (*range(1, 6), *range(7, 12))]),
-    ]
+    # the image is drawn by the site, from the request its OP render answered (conftest's stand-in), to the last scan
+    assert [(path, body) for _, _, path, body in site_image] == [("/api/digest-image", {"site_image": "gcs", "month": "2026-08", "to": "2026-08-11"})]
 
 
 @pytest.mark.parametrize("variant", ["sender", "body"])

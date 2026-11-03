@@ -3112,7 +3112,7 @@ def _digest_options(template_default: str):
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
         option("-o", "--op", "op_only", is_flag=True, help="Re-apply only the OP (its plot re-rendered and hosted) to its current rendering, touching no reply (Slack; with -d/-y, those replies too; `-n` prints the edits)"),
-        option("-p", "--params", "params_override", default=None, help="The OP's site-renderer params (the site's codec string, e.g. `qh,pp`) for this run, over the live settings and the file (`renderer: site`)"),
+        option("-p", "--params", "params_override", default=None, help="The OP's site-renderer params (the site's codec string, e.g. `qh,pp`) for this run, over the live settings and the file"),
         option("-P", "--platform", type=Choice(["slack", "discord"]), default="slack", help="Which thread to converge (default slack)"),
         option("-q", "--quota-marks", "marks_override", type=Choice(["warning", "circles", "runway", "runway-hue"]), default=None, help="The replies' quota marks for this run, over the live settings and the file"),
         option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`; the month's state lives beside it); default the config's `root` (presets: gs://$DATA_BUCKET/snapshots)"),
