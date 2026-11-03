@@ -16,6 +16,11 @@ sizes the box, not just DuckDB:
 - `duck`: DuckDB's `memory_limit`, set per phase (`SET memory_limit`), at least `DUCK_MIN`; a budget that can't leave it
   that much is refused (`TooSmall`, naming the smallest `-M` that fits).
 
+Not counted, because not a function of the settings but of the sort's size: the served sort's footer. The cut's join
+(`parquet_pages.concat`) and its groups sidecar (`interval_store.write_groups`) hold a part's footer bytes (~120 B a
+column chunk; pyarrow's parsed footer ~50 B) and decode it one row group at a time (`row_group_stream`), the sidecar
+`GROUPS_RG` groups at a time: ~0.3 GiB at a billion rows (2.3M column chunks), where the decoded footer was ~40× that.
+
 Freed Arrow memory goes back to the OS at once (`arrow_returns_freed`: jemalloc's decay off, in this process and every
 worker), so a phase's peak is what it holds, not what its predecessors held."""
 from __future__ import annotations

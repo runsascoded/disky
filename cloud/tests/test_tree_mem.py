@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tracemalloc
 import warnings
 from pathlib import Path
 from threading import Event, Thread
@@ -21,6 +22,7 @@ from dt_cloud import append_runner as ar
 from dt_cloud import interval_compact as ic
 from dt_cloud import interval_local as il
 from dt_cloud import interval_store as ist
+from dt_cloud import parquet_pages as pp
 from dt_cloud import static_names as sn
 from dt_cloud import tree_mem as tm
 
@@ -108,6 +110,41 @@ def test_row_bytes_is_the_widest_groups(tmp_path):
     assert whole < wide
     assert ic.row_bytes([str(f), str(small)]) == wide
     assert ic.row_bytes([]) == 1
+
+
+def _many_groups(d: Path, parts: int, groups: int) -> list[Path]:
+    """`parts` files of `groups` 4-row groups × 19 int columns each, page index on: footers of many column chunks."""
+    out = []
+    for i in range(parts):
+        n = groups * 4
+        p = d / f"part{i}.parquet"
+        pq.write_table(pa.table({f"c{j}": pa.array(range(i * n, (i + 1) * n), pa.int64()) for j in range(19)}), p, row_group_size=4,
+                       write_page_index=True, compression="zstd")
+        out.append(p)
+    return out
+
+
+def _traced_peak(fn) -> int:
+    tracemalloc.start()
+    try:
+        fn()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def test_footers_stream_a_row_group_at_a_time(tmp_path):
+    """The cut's join (`concat`) and its page-index reads hold a part's footer bytes and one row group's decoded tree,
+    never the whole footer decoded (~40× its bytes as Python lists): over 2 × 1,000 groups × 19 chunks, the peak stays
+    within 1.5× one part's footer, and the joined bytes are one writer's."""
+    parts = _many_groups(tmp_path, 2, 1000)
+    fb = len(pp.footer(parts[0]))
+    whole = tmp_path / "whole.parquet"
+    pq.write_table(pa.concat_tables([pq.read_table(p) for p in parts]), whole, row_group_size=4, write_page_index=True, compression="zstd")
+    assert _traced_peak(lambda: pp.concat(parts, tmp_path / "out.parquet")) <= 1.5 * fb
+    assert (tmp_path / "out.parquet").read_bytes() == whole.read_bytes()
+    assert _traced_peak(lambda: sum(len(g) for g in pp.iter_chunk_indexes(parts[0]))) <= 1.5 * fb
+    assert pp.chunk_indexes(parts[0]) == list(pp.iter_chunk_indexes(parts[0]))
 
 
 # ── A compaction under a small budget, measured over its process tree ──────

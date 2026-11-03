@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Iterable, Iterator
 from functools import partial
 from pathlib import Path
 from time import monotonic
@@ -948,14 +949,15 @@ def merge_seg(inputs: list[tuple[str, int, int]], key: list[str], columns: list[
 
 
 def cut_part(pieces: list[tuple[str, int, int]], groups: list[tuple[int, int, int]], out: str, schema: pa.Schema,
-             size_col: str | None, kv: dict, page: int, rg_rows: int) -> list[dict]:
+             size_col: str | None, kv: dict, page: int, rg_rows: int) -> int:
     """One part of a cut (`write_served`): its `groups` (`cut_plan`'s) read from the spool `pieces` holding exactly the
     part's rows (`(file, first row, rows)`, in order) and written to `out` as one writer of the whole sort writes them,
-    then `kv`. Returns each group's `_bounds`. Holds a spool batch and one group decoded at a time."""
+    then `kv`; each group's `_bounds` a JSON line of `<out>.bounds` (`read_bounds`). Returns its groups. Holds a spool
+    batch and one group decoded at a time."""
     import pyarrow.compute as pc
 
-    bounds: list[dict] = []
-    with _served_writer(Path(out), schema, page) as w:
+    n_groups = 0
+    with _served_writer(Path(out), schema, page) as w, open(f"{out}.bounds", "w") as fb:
         if groups:
             cols = [*schema.names, "__seg"]
             it = (pa.Table.from_batches([b]) for f, a, n in pieces for b in _file_rows(f, a, n, rg_rows, cols))
@@ -975,9 +977,18 @@ def cut_part(pieces: list[tuple[str, int, int]], groups: list[tuple[int, int, in
                 g = g.drop_columns(["__seg"])
                 g = g.cast(schema) if g.schema != schema else g
                 w.write_table(g, row_group_size=rg_rows)
-                bounds.append(_bounds(g, s, size_col))
+                fb.write(json.dumps(_bounds(g, s, size_col), separators=(",", ":")) + "\n")
+                n_groups += 1
         w.add_key_value_metadata(kv)
-    return bounds
+    return n_groups
+
+
+def read_bounds(files: list[Path]) -> Iterator[dict]:
+    """`cut_part`'s bounds files, in order, a group at a time."""
+    for f in files:
+        with open(f) as fb:
+            for line in fb:
+                yield json.loads(line)
 
 
 def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Schema, *, rg_rows: int = SERVED_RG,
@@ -1088,6 +1099,8 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
                     f.add_done_callback(lambda _, r=sum(g[2] for g in p): prog.tick(rows=r))
                 got = [f.result() for f in futs]
             prog.done()
+            if sum(got) != sum(len(p) for p in parts):
+                raise RuntimeError(f"{out.name}: parts wrote {sum(got)} groups of {sum(len(p) for p in parts)}")
             for p in [*work.glob("run-*.parquet"), *work.glob("seg-*.parquet")]:
                 p.unlink()
             t3 = monotonic()
@@ -1097,44 +1110,56 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         err(f"  {sort}: {total:,} rows in {len(segs)} segments (open {seg_rows.get(0, 0):,}): {len(runs)} runs sorted in "
             f"{t1 - t0:.1f}s, {len(merges)} segments merged in {t2 - t1:.1f}s, {len(parts)} parts written in {t3 - t2:.1f}s, "
             f"joined in {monotonic() - t3:.1f}s")
+        return write_groups(out, read_bounds([work / f"part-{i:04d}.parquet.bounds" for i in range(len(parts))]), sort,
+                            lambda rows: _seg_summary(rows, bool(stamps)))
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    return write_groups(out, [b for bs in got for b in bs], sort, lambda rows: _seg_summary(rows, bool(stamps)))
 
 
-def write_groups(out: Path, bounds: list[dict], sort: str, summary) -> dict:
+#: The rows of `<sort>.groups.parquet` per row group, and per batch `write_groups` holds.
+GROUPS_RG = 512
+
+
+def write_groups(out: Path, bounds: Iterable[dict], sort: str, summary) -> dict:
     """`<out stem>.groups.parquet` beside a served sort just written (`GROUPS_SCHEMA`): per row group its exact `bounds`
-    (as the writer saw them) and the compact metadata the Worker revives; `summary(rows)` = the segments' summary."""
-    from .parquet_pages import chunk_indexes
+    (as the writer saw them, in order) and the compact metadata the Worker revives; `summary(rows)` = the segments'
+    summary (over each group's `seg`, `row_start`, `row_end`). Streamed: `GROUPS_RG` groups' rows at a time, the sort's
+    page indexes a row group at a time (`iter_chunk_indexes`), the bounds as `bounds` yields them."""
+    from .parquet_pages import iter_chunk_indexes
 
     md = pq.read_metadata(out)
-    # Each chunk's ColumnIndex / OffsetIndex ranges ride along in its tuple, when it has them (2b.1's page reads).
-    ixs = chunk_indexes(out)
-    rows, start = [], 0
-    for g in range(md.num_row_groups):
-        rg = md.row_group(g)
-        chunks = [rg.column(c) for c in range(rg.num_columns)]
-        codecs = {cc.compression for cc in chunks}
-        cmeta = [[cc.data_page_offset, cc.total_compressed_size, cc.dictionary_page_offset or 0, *(list(ix) if ix.offset_index_length else [])]
-                 for cc, ix in zip(chunks, ixs[g])]
-        bd = bounds[g]
-        if bd["rows"] != rg.num_rows:
-            raise RuntimeError(f"{out}: group {g} holds {rg.num_rows} rows, the writer saw {bd['rows']}")
-        rows.append({"rg": g, **{k: v for k, v in bd.items() if k != "rows"}, "row_start": start, "row_end": start + rg.num_rows,
-                     "rg_json": json.dumps([rg.num_rows, codecs.pop(), cmeta], separators=(",", ":"))})
-        start += rg.num_rows
     from disk_tree.find.groups import schema_json
 
     sj = schema_json(md)
-    t = pa.table({c: [r[c] for r in rows] for c in GROUPS_SCHEMA.names}, schema=GROUPS_SCHEMA)
-    segs = summary(rows)
-    kv = {"groups_v": "1", "version": str(STORE_VERSION), "schema": json.dumps(sj["schema"], separators=(",", ":")), "sort": sort,
-          "rows": str(start), "segments": json.dumps({k: v["groups"] for k, v in segs.items()})}
+    # Each chunk's ColumnIndex / OffsetIndex ranges ride along in its tuple, when it has them (2b.1's page reads).
+    ixs = iter_chunk_indexes(out)
+    bds = iter(bounds)
     gp = out.with_name(out.name.removesuffix(".parquet") + ".groups.parquet")
+    segs_in: list[dict] = []
+    start = 0
     with pq.ParquetWriter(gp, GROUPS_SCHEMA, compression="zstd", write_statistics=GROUPS_STAT_COLS, store_schema=False) as w:
-        w.write_table(t, row_group_size=512)
-        w.add_key_value_metadata(kv)
-    return {"sort": sort, "rows": start, "groups": len(rows), "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
+        for lo in range(0, md.num_row_groups, GROUPS_RG):
+            rows = []
+            for g in range(lo, min(lo + GROUPS_RG, md.num_row_groups)):
+                rg = md.row_group(g)
+                chunks = [rg.column(c) for c in range(rg.num_columns)]
+                codecs = {cc.compression for cc in chunks}
+                cmeta = [[cc.data_page_offset, cc.total_compressed_size, cc.dictionary_page_offset or 0, *(list(ix) if ix.offset_index_length else [])]
+                         for cc, ix in zip(chunks, next(ixs))]
+                bd = next(bds, None)
+                if bd is None or bd["rows"] != rg.num_rows:
+                    raise RuntimeError(f"{out}: group {g} holds {rg.num_rows} rows, the writer saw {bd and bd['rows']}")
+                rows.append({"rg": g, **{k: v for k, v in bd.items() if k != "rows"}, "row_start": start, "row_end": start + rg.num_rows,
+                             "rg_json": json.dumps([rg.num_rows, codecs.pop(), cmeta], separators=(",", ":"))})
+                segs_in.append({"seg": bd["seg"], "row_start": start, "row_end": start + rg.num_rows})
+                start += rg.num_rows
+            w.write_table(pa.table({c: [r[c] for r in rows] for c in GROUPS_SCHEMA.names}, schema=GROUPS_SCHEMA), row_group_size=GROUPS_RG)
+        if next(bds, None) is not None:
+            raise RuntimeError(f"{out}: the writers saw more groups than its {md.num_row_groups}")
+        segs = summary(segs_in)
+        w.add_key_value_metadata({"groups_v": "1", "version": str(STORE_VERSION), "schema": json.dumps(sj["schema"], separators=(",", ":")),
+                                  "sort": sort, "rows": str(start), "segments": json.dumps({k: v["groups"] for k, v in segs.items()})})
+    return {"sort": sort, "rows": start, "groups": md.num_row_groups, "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
 def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None,
