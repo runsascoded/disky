@@ -344,6 +344,17 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
   return authIdentity(auth)
 }
 
+/** Whether a request may pass the gate before it is asked: a public deployment, local dev, or a request presenting
+ *  something the gate reads (a session cookie, a `Bearer` token, a `?key=` link). A request without any is refused
+ *  (or answered anonymously) whatever the lookups say, so what a route starts beside its gate (`shared.ahead`) waits
+ *  for it instead. */
+export function presentsCredentials(ctx: Ctx): boolean {
+  const url = new URL(ctx.request.url)
+  if (ctx.env.PUBLIC_READ || url.hostname === 'localhost' || url.hostname === '127.0.0.1') return true
+  const h = ctx.request.headers
+  return !!(h.get('cookie') || h.get('authorization') || url.searchParams.has('key'))
+}
+
 /** Gate a handler on a scope; 401/403 as JSON. */
 export async function requireScope(ctx: Ctx, scope: string): Promise<Identity | Response> {
   // Public deploy: the base viewer scope is granted anonymously so read
