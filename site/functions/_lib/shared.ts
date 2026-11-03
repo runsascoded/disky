@@ -39,8 +39,9 @@ export const JOIN = { k: 2, min: 1_000, max: 8_000, cold: 3_000, budget: 8_000 }
 // `IsoMap`'s per-scope overlay). The gate passing commits the log in order (`Scope.commit`): the isolate then holds
 // exactly what the same lookups started after the gate would have left. Anything else (refused, thrown, returned
 // before the gate) discards it: the isolate is left as it was. A scope reads committed state and joins other
-// requests' in-flight work (all of it authorized: a provisional entry is never visible to another request), but never
-// evicts or convicts it.
+// requests' in-flight work (all of it authorized: a provisional entry, pending or settled, is never visible to another
+// request — `IsoMap`'s overlay, and `pendingIn`'s for a plain `Map` handed to `shared` / `inFlight`), but never evicts
+// or convicts it. So a refused request's kill (`done()`) drops only its own entries: no other request was joining them.
 
 /** A request's provisional writes (see above). */
 export class Scope {
@@ -221,6 +222,45 @@ export class IsoSet<T> {
   [Symbol.iterator](): IterableIterator<T> { return this.m.keys() }
 }
 
+/** What `shared` / `inFlight` need of their map. */
+type Pending<T> = Pick<Map<string, Promise<T>>, 'get' | 'set' | 'delete'>
+/** `map` as the request at hand writes its entries (pending and settled promises): an `IsoMap`, or any map outside a
+ *  provisional scope, as is; a plain `Map` in one through the scope's overlay, as an `IsoMap` would — its entries are
+ *  seen by this request alone, so no other request ever joins (or is woken by the kill of) a provisional request's
+ *  work, and they land at the commit (a removal only if the map still holds what this request removed). The scope is
+ *  the one at hand when the view is taken: its eviction callbacks (`track`) may run outside it. */
+function pendingIn<T>(map: Map<string, Promise<T>>): Pending<T> {
+  const s = scopeOf()
+  if (!s || s.state !== 'provisional' || map instanceof IsoMap) return map
+  const over = () => s.overlay<string, Promise<T> | typeof TOMB>(map)
+  const view: Pending<T> = {
+    get(k) {
+      if (s.state === 'committed') return map.get(k)
+      const o = s.peek<string, Promise<T> | typeof TOMB>(map)
+      if (o?.has(k)) { const v = o.get(k)!; return v === TOMB ? undefined : v }
+      return map.get(k)
+    },
+    set(k, v) {
+      if (s.state === 'committed') map.set(k, v)
+      else if (s.state === 'provisional') {
+        over().set(k, v)
+        s.defer(() => { map.set(k, v) })
+      }
+      return map
+    },
+    delete(k) {
+      if (s.state === 'committed') return map.delete(k)
+      const cur = view.get(k)
+      if (s.state === 'provisional') {
+        over().set(k, TOMB)
+        s.defer(() => { if (map.get(k) === cur) map.delete(k) })
+      }
+      return cur !== undefined
+    },
+  }
+  return view
+}
+
 /** The colo cache (the Workers Cache API's default), its puts as isolate writes: in a scope, held for that request
  *  (its own `match`es see them) and put at the commit. */
 export function colo(): Cache {
@@ -399,7 +439,8 @@ export async function join<T>(p: Promise<T>, j: Join): Promise<T | typeof STALLE
 /** A memo of `make()` at `key`. With `j`, the entry is tracked as `j.req`'s and another request's is joined
  *  (`join`); without, a held entry is waited on up to `waitMs` like the caller's own. The caller's own computation is
  *  bounded by `waitMs` (a stall evicts it and fails). */
-export async function shared<T>(map: Map<string, Promise<T>>, key: string, make: () => Promise<T>, waitMs: number, j?: Join): Promise<T> {
+export async function shared<T>(base: Map<string, Promise<T>>, key: string, make: () => Promise<T>, waitMs: number, j?: Join): Promise<T> {
+  const map = pendingIn(base)
   const start = (): Promise<T> => {
     const q = make()
     map.set(key, q)
@@ -428,19 +469,20 @@ export async function shared<T>(map: Map<string, Promise<T>>, key: string, make:
   if (got !== STALLED) return got
   // Another request may have put its fresh entry in place meanwhile: that one is joined.
   const cur = map.get(key)
-  return cur && cur !== held ? shared(map, key, make, waitMs, j) : own(start())
+  return cur && cur !== held ? shared(base, key, make, waitMs, j) : own(start())
 }
 
 /** A computation shared only while in flight: a caller finding `key` pending joins it (`join`), and once it's
  *  evicted runs `make` itself — in its own context, unbounded (it's that request's own I/O). The entry leaves the map
  *  once it settles, either way. Unlike `shared`, which memoizes: for work whose result is cached apart. */
-export async function inFlight<T>(map: Map<string, Promise<T>>, key: string, make: () => Promise<T>, j: Join): Promise<T> {
+export async function inFlight<T>(base: Map<string, Promise<T>>, key: string, make: () => Promise<T>, j: Join): Promise<T> {
+  const map = pendingIn(base)
   const held = map.get(key)
   if (held) {
     const got = await join(held, j)
     if (got !== STALLED) return got
     const cur = map.get(key)
-    if (cur && cur !== held) return inFlight(map, key, make, j)
+    if (cur && cur !== held) return inFlight(base, key, make, j)
   }
   const p = make()
   map.set(key, p)

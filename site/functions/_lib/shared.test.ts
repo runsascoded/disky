@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ahead, cellsBytes, HeldAnswers, hitsBytes, inFlight, IsoMap, JOIN, joinBound, loadScopes, Memo, Req, resetJoinStats, scopeOf, shared, snapshotsPrefix, track } from './shared'
+import { ahead, cellsBytes, HeldAnswers, hitsBytes, inFlight, IsoMap, JOIN, joinBound, joinOf, loadScopes, Memo, REQ, Req, reqOf, resetJoinStats, scopeOf, shared, snapshotsPrefix, track } from './shared'
 
 describe('shared', () => {
   beforeEach(() => vi.useFakeTimers())
@@ -349,5 +349,57 @@ describe('ahead scopes', () => {
     const got = await get()
     early.done()
     expect([before, got, [...m.entries()]]).toEqual([[], { state: undefined, own: [['a', 1]], size: 1 }, [['a', 1]]])
+  })
+})
+
+// A provisional request's in-flight work is its own: another request never joins it, so the provisional request's
+// refusal (`done()`: its owner killed) can't make an authorized request wait on it or redo it.
+describe('ahead scopes: in-flight work', () => {
+  const tick = (ms: number) => new Promise(r => setTimeout(r, ms))
+  /** A junk request's lookup (pending 20 ms in its scope) racing an authorized request's of the same key; the junk
+   *  request is refused at 5 ms. Each request's computes, and the authorized request's join traces. */
+  async function race(run: (env: object, make: () => Promise<string>) => Promise<string>) {
+    await loadScopes()
+    const computed: string[] = []
+    const joins: string[] = []
+    const junk = { [REQ]: new Req() }
+    const authed = { [REQ]: new Req() }
+    authed[REQ].trace = (name, _ms, desc) => joins.push(desc ? `${name}:${desc}` : name)
+    const make = (who: string, ms: number) => async () => { computed.push(who); await tick(ms); return who }
+    const early = ahead(junk, true)
+    const j = early.later(() => run(junk, make('junk', 20)))
+    j().catch(() => {})
+    await tick(1)
+    const a = run(authed, make('authed', 10))
+    await tick(4)
+    early.done()
+    return { got: await a, computed, joins, junkDead: junk[REQ].dead }
+  }
+  const want = { got: 'authed', computed: ['junk', 'authed'], joins: [], junkDead: true }
+
+  it('inFlight over a plain Map', async () => {
+    const map = new Map<string, Promise<string>>()
+    expect(await race((env, make) => inFlight(map, 'k', make, joinOf(env, 'x')))).toEqual(want)
+    expect(map.size).toBe(0)
+  })
+
+  it('inFlight over an IsoMap', async () => {
+    const map = new IsoMap<string, Promise<string>>('t-inflight')
+    expect(await race((env, make) => inFlight(map, 'k', make, joinOf(env, 'x')))).toEqual(want)
+    expect(map.size).toBe(0)
+  })
+
+  it('shared over a plain Map: the authorized value is the one held', async () => {
+    const map = new Map<string, Promise<string>>()
+    expect(await race((env, make) => shared(map, 'k', make, 1000, joinOf(env, 'x')))).toEqual(want)
+    await tick(30)
+    expect(await map.get('k')).toBe('authed')
+  })
+
+  it('a Memo', async () => {
+    const memo = new Memo<string>('t-race')
+    expect(await race((env, make) => memo.get('k', make, reqOf(env)))).toEqual(want)
+    await tick(30)
+    expect([...memo.entries()]).toEqual([['k', 'authed']])
   })
 })

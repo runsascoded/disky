@@ -29,8 +29,15 @@ const knobs = vi.hoisted(() => ({ credentials: true }))
 
 vi.mock('../../_lib/auth.js', async orig => {
   const m = await orig<typeof import('../../_lib/auth.js')>()
-  // `x-deny`: the gate refuses (a session it can't find), after its latency.
-  return { ...m, presentsCredentials: (ctx: Parameters<typeof m.presentsCredentials>[0]) => knobs.credentials && m.presentsCredentials(ctx), requireViewer: slowed('auth', async (ctx: Parameters<typeof m.requireViewer>[0]) => (ctx.request.headers.has('x-deny') ? m.json({ error: 'unauthenticated' }, 401) : m.requireViewer(ctx))) }
+  // `x-deny`: the gate refuses (a session it can't find), after its latency (and `x-gate-ms` more).
+  return {
+    ...m,
+    presentsCredentials: (ctx: Parameters<typeof m.presentsCredentials>[0]) => knobs.credentials && m.presentsCredentials(ctx),
+    requireViewer: slowed('auth', async (ctx: Parameters<typeof m.requireViewer>[0]) => {
+      await sleep(Number(ctx.request.headers.get('x-gate-ms') ?? 0))
+      return ctx.request.headers.has('x-deny') ? m.json({ error: 'unauthenticated' }, 401) : m.requireViewer(ctx)
+    }),
+  }
 })
 vi.mock('../../_lib/scanArg.js', async orig => {
   const m = await orig<typeof import('../../_lib/scanArg.js')>()
@@ -55,8 +62,10 @@ const { clearIsolate, isolateSnapshot, loadScopes } = await import('../../_lib/s
 const { coloPutsSettled } = await import('../../_lib/index')
 await loadScopes()
 
-/** `INDEX_R2` over a fixture dir (`diffLevel.test.ts`'s, without the read log). */
-function r2(dir: string): R2Bucket {
+/** Each `INDEX_R2` read waits this long first (a slow store: a request's lookups stay in flight). */
+const r2Lag = { ms: 0 }
+/** `INDEX_R2` over a fixture dir (`diffLevel.test.ts`'s, without the read log); `gets`: its `get`s counted. */
+function r2(dir: string, gets = { n: 0 }): R2Bucket {
   type Fs = { existsSync(p: string): boolean; readFileSync(p: string): Uint8Array; readdirSync(p: string, o: { recursive: true }): string[]; statSync(p: string): { isFile(): boolean } }
   const nodeFs = async () => {
     const mod = 'node:fs'
@@ -71,6 +80,8 @@ function r2(dir: string): R2Bucket {
     return { objects: keys.map(key => ({ key })), truncated: false }
   }
   const get = async (key: string, o?: { range?: { offset: number; length: number } }) => {
+    gets.n++
+    await sleep(r2Lag.ms)
     const fs = await nodeFs()
     if (!fs.existsSync(path(key))) return null
     const buf = fs.readFileSync(path(key))
@@ -110,8 +121,12 @@ beforeEach(async () => {
   calls.length = 0
   settled.length = 0
   Object.assign(lag, { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 })
+  r2Lag.ms = 0
   knobs.credentials = true
 })
+
+/** A well-formed session cookie (`<claims>.<signature>`, base64url) the gate can't verify. */
+const JUNK_COOKIE = { cookie: 'oa_auth=eyJzdWIiOiJlOngifQ.c2lnbmF0dXJlLW5vdC1yZWFs' }
 
 /** A level request for the root between two scans; `localhost`: the gate's dev identity (and credentials presented). */
 const ask = (from: string, to: string, o: { host?: string; headers?: Record<string, string> } = {}) =>
@@ -240,5 +255,34 @@ describe('what a level request starts beside its gate (`ahead`) lands only once 
     expect([strict.status, strict.body]).toEqual([200, after.body])
     expect(strict.after).toEqual(after.after)
     expect(strict.after).not.toEqual(strict.warm)
+  })
+})
+
+describe('a refused request\'s lookups are its own: an authorized request racing it never joins them', () => {
+  it('the authorized request reads as it would alone, with no join, unaffected by the refused one\'s kill', async () => {
+    const [from, to] = ['2026-08-02', '2026-08-06']
+    /** An authorized request (its gate passing at once), against an `INDEX_R2` of its own, counted. */
+    const authed = async () => {
+      const gets = { n: 0 }
+      const r = await level({ request: new Request(`http://localhost/api/diff/level?from=${from}&to=${to}&p=`), env: { ...env, INDEX_R2: r2('iv-churn', gets) } })
+      return { status: r.status, body: await r.text(), gets: gets.n, joins: Object.keys(timing(r)).filter(k => k.startsWith('join')) }
+    }
+    r2Lag.ms = 10
+    const alone = await authed()
+    await quiesce()
+    await cold()
+    calls.length = 0
+    // A junk credential, its gate refusing at 60 ms: its lookups (the same keys) are in flight from the start, and
+    // killed (`done()`) at the refusal, while the authorized request (started 5 ms in) is still reading.
+    const junkGets = { n: 0 }
+    const junk = level({ request: new Request(`http://example.test/api/diff/level?from=${from}&to=${to}&p=`, { headers: { ...JUNK_COOKIE, 'x-deny': '1', 'x-gate-ms': '60' } }), env: { ...env, INDEX_R2: r2('iv-churn', junkGets) } })
+    await sleep(5)
+    const raced = await authed()
+    const refused = await junk
+    expect([refused.status, raced.status, raced.body === alone.body, raced.gets, raced.joins, junkGets.n > 0])
+      .toEqual([401, 200, true, alone.gets, [], true])
+    // Each request ran each lookup once: none restarted.
+    expect(['auth', 'gens', 'match', 'prep', 'scan'].map(c => [c, calls.filter(x => x === c).length]))
+      .toEqual([['auth', 2], ['gens', 2], ['match', 2], ['prep', 2], ['scan', 4]])
   })
 })
