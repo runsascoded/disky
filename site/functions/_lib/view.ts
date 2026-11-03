@@ -2277,7 +2277,12 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
       if (pv) node.pv = pv
     }
     const childPaths = kidsOf.get(p) ?? []
-    if (!childPaths.length) return node
+    if (!childPaths.length) {
+      // The view's own folder with no child over the threshold (a flat folder of many small objects) is drawn as one
+      // `(other)`, never as nothing; a frontier node below it is a leaf cell.
+      if (p === path && node.k === 'dir' && (a.b > 0 || a.o > 0)) node.c = [{ ...nodeOf('(other)', subtract(a, [])), f: a.nc ?? foldedOf.get(p) ?? 0 } as ViewNode]
+      return node
+    }
     const kids = childPaths
       .map(cp => build(cp, kept.get(cp)!))
       .sort((x, y) => y.b - x.b)
