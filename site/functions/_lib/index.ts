@@ -33,7 +33,7 @@
 import type { Store } from '@rdub/file-tree'
 import { R2Store } from '@rdub/file-tree/stores/r2'
 import { S3Store } from '@rdub/file-tree/stores/s3'
-import { type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, parquetReadObjects, type RowGroup } from 'hyparquet'
+import { type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, parquetReadObjects, readColumnIndex, readOffsetIndex, type RowGroup } from 'hyparquet'
 import type { Env } from './auth.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
@@ -1466,7 +1466,9 @@ const docsInFlight = new Map<string, Promise<{ groups: BlobGroup[]; json: [numbe
  *  `readFooterJson`), from the colo's decoded copy, or on a miss fetched, decoded and put there. A read that
  *  plans on a group's bounds then wants its `rg_json`: reading the two apart would cost a round trip each. */
 async function ivFooterDoc(h: PqHandle, fg: FooterGroup): Promise<{ groups: BlobGroup[]; json: [number, string][] }> {
-  const fk = (part: string) => `${storeKey(h.env)}|iv|${h.variant}|${h.gen}|${part}`
+  // Scoped by the store's prefix, as every other interval-store key is: two stores under one bucket can hold a
+  // generation of one name, and one's groups' offsets read in the other's file are garbage.
+  const fk = (part: string) => `${storeKey(h.env)}|${ivPrefix(h.env)}|iv|${h.variant}|${h.gen}|${part}`
   return inFlight(docsInFlight, fk(`fd:${fg.n}`), async () => {
     const t0 = now()
     const ck = coloKey(h.env, h.footer.key, `fd=${fg.n}&d=${IV_FOOTER_DOC}`)
@@ -1530,7 +1532,7 @@ const footersInFlight = new Map<string, Promise<unknown[]>>()
 /** A footer group's decode (`part`), cached per isolate and shared while in flight. Keyed per scan for a
  *  per-scan store; an interval store's footer serves every scan, so its entries are keyed without one. */
 async function footerOnce<T>(h: PqHandle, part: string, make: () => Promise<[T[], number]>): Promise<T[]> {
-  const k = `${storeKey(h.env)}|${h.asOf != null ? 'iv' : h.date}|${h.variant}|${h.gen}|${part}`
+  const k = `${storeKey(h.env)}|${h.asOf != null ? `${ivPrefix(h.env)}|iv` : h.date}|${h.variant}|${h.gen}|${part}`
   const hit = footerCache.get<T>(k)
   if (hit) return hit
   return inFlight(footersInFlight, k, () => make().then(([v, bytes]) => { footerCache.put(k, v, bytes); return v as unknown[] }), ivJoin(h.env, 'footer-group')) as Promise<T[]>
@@ -1677,8 +1679,10 @@ export const toRow = (h: { version: number }): ((r: Record<string, unknown>) => 
 /** The compact form `index-sync` stores (index_footer.py): `[num_rows, codec,
  * [[data_page_offset, total_compressed_size, dictionary_page_offset|0], …]]`,
  * one triple per leaf column in schema order — the only column-chunk fields
- * hyparquet reads (plus `type`/`path_in_schema`, taken from the schema). */
-type CompactGroup = [number, string, [number, number, number][]]
+ * hyparquet reads (plus `type`/`path_in_schema`, taken from the schema). An
+ * interval store's served sort with a page index (2b.1) appends each chunk's
+ * `column_index_offset, column_index_length, offset_index_offset, offset_index_length`. */
+type CompactGroup = [number, string, ([number, number, number] | [number, number, number, number, number, number, number])[]]
 
 export function reviveRowGroup(json: string, schema: SchemaElement[]): Record<string, unknown> {
   const [numRows, codec, cols] = JSON.parse(json) as CompactGroup
@@ -1686,7 +1690,9 @@ export function reviveRowGroup(json: string, schema: SchemaElement[]): Record<st
   if (cols.length !== leaves.length) throw new Error(`row group has ${cols.length} columns, schema ${leaves.length}`)
   return {
     num_rows: BigInt(numRows),
-    columns: cols.map(([dpo, size, dict], i) => ({
+    columns: cols.map(([dpo, size, dict, ciOff, ciLen, oiOff, oiLen], i) => ({
+      ...(oiLen ? { offset_index_offset: BigInt(oiOff!), offset_index_length: oiLen } : {}),
+      ...(ciLen ? { column_index_offset: BigInt(ciOff!), column_index_length: ciLen } : {}),
       meta_data: {
         type: leaves[i].type,
         path_in_schema: [leaves[i].name],
@@ -2403,9 +2409,193 @@ export async function planChanged(h: IndexHandle, rects: Rect[], d1: number, d2:
 export async function readChanged(h: IndexHandle, rects: Rect[], d1: number, d2: number, { plan, pre, stop }: { plan?: ChangedPlan; pre?: Pre; stop?: () => boolean } = {}): Promise<Row[]> {
   if (!rects.length) return []
   const { spans } = plan ?? await planChanged(h, rects, d1, d2)
+  if (!readFits(spans)) throw new Error('query too wide: drill deeper or raise minArea')
   const at = (depth: number, path: string) => rects.some(q => depth >= q.dLo && depth <= q.dHi && path >= q.pLo && path <= q.pHi)
-  const rows = await decodeSpans(h, spans, r => at(r.depth, r.path), stop, (d, p, b) => at(d, p) && (!pre || pre(d, p, b)), true)
-  return rows.filter(r => changesIn(r.vf!, r.vt!, d1, d2))
+  const keep = (r: Row) => at(r.depth, r.path)
+  // A group not held decoded and cut with a page index reads only its pages that can hold an answer (2b.1); the
+  // rest (held, without an index, or every page kept) read whole, as before. Exact either way: the same rows pass.
+  const paged = await Promise.all(tiersOf(h).map((_, i) => onTier(h, i, t => readChangedPages(t, spans.filter(s => (s.tier ?? 0) === i), rects, d1, d2, h.trace))))
+  const whole = paged.flatMap(p => p.rest)
+  const byPage = paged.flatMap(p => p.rows.filter(keep))
+  const rows = whole.length ? await decodeSpans(h, whole, keep, stop, (d, p, b) => at(d, p) && (!pre || pre(d, p, b)), true) : []
+  // With runs, each tier's versions combine (a close record's `vt` over the row it ends): as `decodeSpans` does when
+  // it reads every group.
+  const all = h.runs?.length ? combineVersions([...rows, ...byPage]) : [...rows, ...byPage]
+  return all.filter(r => changesIn(r.vf!, r.vt!, d1, d2))
+}
+
+/** The columns a page read plans by (each with a ColumnIndex): a page is kept when its rows can meet a rect and hold
+ *  a version opening or closing in the range. */
+const PAGE_PLAN = ['depth', 'path', 'vf', 'vt'] as const
+
+/** One page's place in its column chunk (an OffsetIndex entry). */
+type PageLocation = ReturnType<typeof readOffsetIndex>['page_locations'][number]
+
+/** Several fetched byte runs as one `FileSlice` (absolute offsets): a slice is copied from the runs covering it, which
+ *  must cover it contiguously (a read outside them is a planning bug, never a silent short read). */
+function runsSlice(runs: { start: number; buf: ArrayBuffer }[]): FileSlice {
+  const sorted = [...runs].sort((a, b) => a.start - b.start)
+  return {
+    byteLength: sorted.reduce((n, r) => Math.max(n, r.start + r.buf.byteLength), 0),
+    slice: async (s, e) => {
+      if (e == null) throw new Error('page read: an open-ended slice')
+      const out = new Uint8Array(e - s)
+      let at = s
+      for (const r of sorted) {
+        const end = r.start + r.buf.byteLength
+        if (end <= at || r.start > at) continue
+        const take = Math.min(e, end) - at
+        out.set(new Uint8Array(r.buf, at - r.start, take), at - s)
+        at += take
+        if (at >= e) break
+      }
+      if (at < e) throw new Error(`page read [${s}, ${e}) outside the fetched runs`)
+      return out.buffer
+    },
+  }
+}
+
+/** Byte spans fetched as merged range reads (`planRuns`, `RUN_READS` in flight), as one `FileSlice`. */
+async function fetchSpans(h: IndexHandle, spans: { start: number; end: number }[]): Promise<FileSlice> {
+  const runs = planRuns(spans)
+  const bufs = await mapLimit(runs, RUN_READS, r => fetchRange(h, r.start, r.end))
+  return runsSlice(runs.map((r, i) => ({ start: r.start, buf: bufs[i] })))
+}
+
+/** A revived column chunk, with the page-index ranges a 2b.1 cut carries. */
+type IndexedChunk = { offset_index_offset?: bigint; offset_index_length?: number; column_index_offset?: bigint; column_index_length?: number; meta_data: { data_page_offset: bigint; dictionary_page_offset?: bigint } }
+
+/** The pages of `locs` overlapping rows `[a, b)` of a group of `n` rows: `[first, last]`, inclusive (`[-1, -1]`: none). */
+function pagesOf(locs: PageLocation[], a: number, b: number, n: number): [number, number] {
+  let first = -1
+  let last = -1
+  for (let i = 0; i < locs.length; i++) {
+    const s = Number(locs[i].first_row_index)
+    const e = i + 1 < locs.length ? Number(locs[i + 1].first_row_index) : n
+    if (e > a && s < b) {
+      if (first < 0) first = i
+      last = i
+    }
+  }
+  return [first, last]
+}
+
+/** The rows of `spans` (one tier's groups) a range read can need, read by page where the group allows (2b.1): its page
+ *  index says which pages can meet a rect and hold a change in `(d1, d2]`; only those are fetched and decoded. `rest`:
+ *  the groups to read whole (held decoded already, cut without a page index, or every page kept). Server-Timing:
+ *  `pgroups` groups read by page, `pages` / `pskip` their pages decoded / skipped, `prows` the rows decoded, on the
+ *  request's `trace` (a run tier's handle carries none of its own). */
+async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1: number, d2: number, trace?: Trace): Promise<{ rows: Row[]; rest: Span[] }> {
+  const leaves = t.schema.slice(1)
+  const idx = new Map(leaves.map((e, i) => [e.name, i]))
+  const cols = t.columns ?? leaves.map(e => e.name)
+  const want = [...new Set([...cols, ...PAGE_PLAN])]
+  if (!spans.length || !want.every(c => idx.has(c))) return { rows: [], rest: spans }
+  const rest: Span[] = []
+  const jsons = await fetchGroupJson(t, spans.map(s => s.rg))
+  type Group = { num_rows: bigint; columns: IndexedChunk[] }
+  type Cand = { s: Span; rg: Group }
+  const cands: Cand[] = []
+  for (const s of spans) {
+    const json = jsons.get(s.rg)
+    const rg = json ? reviveRowGroup(json, t.schema) as unknown as Group : null
+    const indexed = !!rg && want.every(c => rg.columns[idx.get(c)!].offset_index_length) && PAGE_PLAN.every(c => rg.columns[idx.get(c)!].column_index_length)
+    if (!rg || !indexed || (t.asOf != null && cachedIvGroup(t, s.rg))) rest.push(s)
+    else cands.push({ s, rg })
+  }
+  if (!cands.length) return { rows: [], rest }
+  const chunk = (c: Cand, name: string): IndexedChunk => c.rg.columns[idx.get(name)!]
+  const ixFile = await fetchSpans(t, cands.flatMap(c => [
+    ...PAGE_PLAN.map(n => { const k = chunk(c, n); return { start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length! } }),
+    ...want.map(n => { const k = chunk(c, n); return { start: Number(k.offset_index_offset), end: Number(k.offset_index_offset) + k.offset_index_length! } }),
+  ]))
+  const reader = async (start: bigint | undefined, len: number | undefined) => ({ view: new DataView(await ixFile.slice(Number(start), Number(start) + len!)), offset: 0 })
+  const text = (v: unknown): string => (v instanceof Uint8Array ? new TextDecoder().decode(v) : String(v))
+  type Planned = Cand & { ranges: [number, number][]; locs: Record<string, PageLocation[]>; n: number; pages: number; skipped: number }
+  const planned: Planned[] = []
+  for (const c of cands) {
+    const n = Number(c.rg.num_rows)
+    const locs: Record<string, PageLocation[]> = {}
+    for (const name of want) {
+      const k = chunk(c, name)
+      locs[name] = readOffsetIndex(await reader(k.offset_index_offset, k.offset_index_length)).page_locations
+    }
+    const stats = Object.fromEntries(await Promise.all(PAGE_PLAN.map(async name => {
+      const k = chunk(c, name)
+      return [name, readColumnIndex(await reader(k.column_index_offset, k.column_index_length), leaves[idx.get(name)!] as never)] as const
+    })))
+    const starts = (name: string) => locs[name].map(l => Number(l.first_row_index)).join()
+    // The planning columns' pages align (the cut writes them so); a file whose don't is read whole.
+    if (!PAGE_PLAN.every(name => starts(name) === starts('depth'))) {
+      rest.push(c.s)
+      continue
+    }
+    const pages = locs.depth
+    const kept: number[] = []
+    for (let i = 0; i < pages.length; i++) {
+      const nul = PAGE_PLAN.some(name => stats[name].null_pages[i])
+      const [dMin, dMax] = [num(stats.depth.min_values[i]), num(stats.depth.max_values[i])]
+      const [pMin, pMax] = [text(stats.path.min_values[i]), text(stats.path.max_values[i])]
+      const [vfMin, vfMax, vtMin, vtMax] = [num(stats.vf.min_values[i]), num(stats.vf.max_values[i]), num(stats.vt.min_values[i]), num(stats.vt.max_values[i])]
+      const meets = rects.some(q => dMax >= q.dLo && dMin <= q.dHi && pMax >= q.pLo && pMin <= q.pHi)
+      if (nul || (meets && ((vfMax > d1 && vfMin <= d2) || (vtMax > d1 && vtMin <= d2)))) kept.push(i)
+    }
+    // Kept pages as row ranges, then merged as hyparquet merges them: two ranges sharing a page in any column read are one.
+    const ranges: [number, number][] = []
+    for (const i of kept) {
+      const a = Number(pages[i].first_row_index)
+      const b = i + 1 < pages.length ? Number(pages[i + 1].first_row_index) : n
+      const last = ranges[ranges.length - 1]
+      if (last && last[1] === a) last[1] = b
+      else ranges.push([a, b])
+    }
+    const merged: [number, number][] = []
+    for (const r of ranges) {
+      const last = merged[merged.length - 1]
+      const shares = last && cols.some(name => pagesOf(locs[name], r[0], r[1], n)[0] <= pagesOf(locs[name], last[0], last[1], n)[1])
+      if (shares) last[1] = r[1]
+      else merged.push([r[0], r[1]])
+    }
+    if (merged.reduce((m, [a, b]) => m + b - a, 0) === n) {
+      rest.push(c.s)
+      continue
+    }
+    planned.push({ ...c, ranges: merged, locs, n, pages: kept.length, skipped: pages.length - kept.length })
+  }
+  if (!planned.length) return { rows: [], rest }
+  // What hyparquet's `readSelectedPages` slices per (range, column): the chunk's dictionary page, and the pages from the
+  // range's first to its last.
+  const file = await fetchSpans(t, planned.flatMap(p => p.ranges.flatMap(([a, b]) => cols.flatMap(name => {
+    const k = chunk(p, name)
+    const locs = p.locs[name]
+    const [f, l] = pagesOf(locs, a, b, p.n)
+    if (f < 0) return []
+    const chunkStart = Number(k.meta_data.dictionary_page_offset || k.meta_data.data_page_offset)
+    const hasDict = !!k.meta_data.dictionary_page_offset || Number(k.meta_data.data_page_offset) < Number(locs[0].offset)
+    return [
+      ...(hasDict ? [{ start: chunkStart, end: Number(locs[0].offset) }] : []),
+      { start: Number(locs[f].offset), end: Number(locs[l].offset) + locs[l].compressed_page_size },
+    ]
+  }))))
+  const t0 = now()
+  const out: Row[] = []
+  const shape = toRow(t)
+  for (const p of planned) {
+    const metadata = { version: t.version, schema: t.schema, num_rows: p.rg.num_rows, row_groups: [p.rg], metadata_length: 0 } as unknown as FileMetaData
+    const pageLocationsByGroup = [Object.fromEntries(cols.map(name => [name, p.locs[name]]))]
+    const opts = { file, metadata, columns: cols, compressors, pageRangesByGroup: [p.ranges], pageLocationsByGroup }
+    const raw = (await parquetReadObjects(opts as Parameters<typeof parquetReadObjects>[0]).catch((e: Error) => {
+      const layout = cols.map(name => `${name}:${p.locs[name].map(l => `${l.first_row_index}@${l.offset}+${l.compressed_page_size}`).join(',')}`).join(' ')
+      throw new Error(`page read of group ${p.s.rg} (${p.n} rows, ranges ${JSON.stringify(p.ranges)}): ${e.message}; pages ${layout}`)
+    })) as Record<string, unknown>[]
+    for (const r of raw) out.push(shape(r))
+  }
+  trace?.('pgroups', planned.length)
+  trace?.('pages', planned.reduce((m, p) => m + p.pages, 0))
+  trace?.('pskip', planned.reduce((m, p) => m + p.skipped, 0))
+  trace?.('prows', out.length)
+  trace?.('pdecode', now() - t0, t.variant)
+  return { rows: out, rest }
 }
 
 /** At most `n` of the calls it wraps running at once (the rest queue). */

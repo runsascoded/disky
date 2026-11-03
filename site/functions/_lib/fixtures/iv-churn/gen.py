@@ -7,7 +7,11 @@ sizes) from `cloud/tests/test_interval_churn.py`'s generator, under `interval-st
 computed from the scans' files alone: each child that changed (its range churn, bytes and objects at both scans), and
 the path's own.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py
+With `PAGES` (an int), the same store cut in `PAGES`-row data pages with a page index, under `interval-store-p<PAGES>/`
+(2b.1's page reads; `diffLevel.test.ts` checks both answer `expected.json`). `interval-store/` was cut before served
+sorts carried a page index, and stays so: the reader's whole-group path for older generations.
+
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES]
 """
 from __future__ import annotations
 
@@ -35,10 +39,13 @@ def _load(name: str):
     return m
 
 
-def main() -> None:
+def main(pages: int | None = None) -> None:
     from dt_cloud import interval_local as il
     from dt_cloud import interval_store as ist
     from dt_cloud import static_names as sn
+
+    if pages:
+        ist.SERVED_PAGE_ROWS = pages
 
     t = _load("test_interval_churn")
     work = HERE / "work"
@@ -57,7 +64,7 @@ def main() -> None:
     for cmd, extra in [(il.build_cmd, ["-w", str(work / "build"), "-k", "3", "-t", t.DATES[BASE - 1]]), (il.add_cmd, ["-w", str(work / "add")])]:
         res = CliRunner().invoke(cmd, [*common, *extra], catch_exceptions=False)
         assert res.exit_code == 0, res.output
-    out = HERE / "interval-store"
+    out = HERE / (f"interval-store-p{pages}" if pages else "interval-store")
     shutil.rmtree(out, ignore_errors=True)
     # What the Worker reads: the served sorts, `scans.json`, the manifests and the runs' `meta.json` / `scans.json`.
     shutil.copytree(work / "store" / ist.PREFIX / "g", out / "g", ignore=shutil.ignore_patterns("verify", "state", "lease", "pv", "pvl", "rd", "ranges", "digest"))
@@ -122,4 +129,4 @@ def level(files: list[dict[str, int]], i: int, j: int, p: str) -> dict | None:
 
 
 if __name__ == "__main__":
-    main()
+    main(int(sys.argv[1]) if len(sys.argv) > 1 else None)

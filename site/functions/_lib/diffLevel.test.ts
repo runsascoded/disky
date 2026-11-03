@@ -121,6 +121,27 @@ describe('level diffs', () => {
     await expect(buildLevels(env, { from: '2026-07-31', to: '2026-08-03', dirs: [''], k: 8, m: 'churn' })).rejects.toThrow(/churn is counted from/)
   })
 
+  it('cut in pages with a page index (2b.1), answers exactly as whole groups, decoding fewer rows than they hold', async () => {
+    // `interval-store-p2/`: the same store cut in 2-row pages (`gen.py 2`); its own prefix keeps its groups apart in
+    // the isolate's cache, so every read here is by page or whole by its own index.
+    const { db } = await sqliteD1()
+    const paged = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: 'interval-store-p2', INDEX_R2: r2('iv-churn', []) } as Env
+    const got = []
+    const counts = { pgroups: 0, pages: 0, pskip: 0, prows: 0 }
+    const decoded: [number, number][] = []
+    for (const c of cases) {
+      const t: Record<string, number> = {}
+      const trace = (name: string, v: number) => { t[name] = (t[name] ?? 0) + v }
+      got.push(shape((await buildLevels(paged, { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn', chain: false, trace })).get(c.path)!))
+      for (const k of Object.keys(counts) as (keyof typeof counts)[]) counts[k] += t[k] ?? 0
+      decoded.push([t.prows ?? 0, t.pgroups ?? 0])
+    }
+    expect(got).toEqual(cases.map(wanted))
+    // Pages were read and skipped, and a group read by page decodes fewer rows than its 4 (it'd be read whole otherwise).
+    expect([counts.pgroups > 0, counts.pskip > 0, counts.pages > 0]).toEqual([true, true, true])
+    expect(decoded.filter(([rows, groups]) => rows >= 4 * groups && groups > 0)).toEqual([])
+  })
+
   it('reads only the groups whose versions change in the range', async () => {
     let fewer = 0
     for (const c of cases) {
