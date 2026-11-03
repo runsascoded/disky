@@ -44,6 +44,20 @@ describe('apiErrorMessage: a structured refusal becomes the filter box\'s messag
       apiErrorMessage(503, JSON.stringify({ error: 'busy' })),
     ]).toEqual(['400: bad query: Search isn’t available for this scan yet.', '400: bad query: invalid regex', '503: {"error":"busy"}'])
   })
+  it('Cloudflare\'s own failure pages by what they mean, never their markup', () => {
+    const page = (code: string) => `<!DOCTYPE html>\n<html><head><title>Worker exceeded resource limits | example.com | Cloudflare</title></head><body>error code: ${code}</body></html>`
+    expect([
+      apiErrorMessage(503, 'error code: 1102'),
+      apiErrorMessage(503, page('1102')),
+      apiErrorMessage(502, page('1101')),
+      apiErrorMessage(500, '<html><head><title>Internal error</title></head></html>'),
+    ]).toEqual([
+      '503: this view needs more work than one request can do — drill in, or narrow the scope',
+      '503: this view needs more work than one request can do — drill in, or narrow the scope',
+      '502: the server failed (Cloudflare error 1101)',
+      '500: Internal error',
+    ])
+  })
 })
 
 describe('apiError / refusalOf: a filter refusal is a reason to state inline, not a failure', () => {
