@@ -225,7 +225,7 @@ describe('what a level request starts beside its gate (`ahead`) lands only once 
     calls.length = 0
     settled.length = 0
     lag.auth = 300
-    const r = await askAt('example.test', '2026-08-04', '2026-08-06', 'b1', { cookie: 'oa_auth=junk' })
+    const r = await askAt('example.test', '2026-08-04', '2026-08-06', 'b1', JUNK_COOKIE)
     // Every lookup ran, and settled, before the gate refused (its own `auth` last).
     expect([r.status, [...new Set(calls)].sort(), settled.at(-1), [...new Set(settled)].sort()])
       .toEqual([401, ['auth', 'gens', 'match', 'prep', 'scan'], 'auth', ['auth', 'gens', 'match', 'prep', 'scan']])
@@ -255,6 +255,52 @@ describe('what a level request starts beside its gate (`ahead`) lands only once 
     expect([strict.status, strict.body]).toEqual([200, after.body])
     expect(strict.after).toEqual(after.after)
     expect(strict.after).not.toEqual(strict.warm)
+  })
+})
+
+describe('which requests start their lookups beside the gate (`presentsCredentials`)', () => {
+  /** What a refused request at a non-local host started: `auth` alone, or every lookup too. */
+  const started = async (headers: Record<string, string>, qs = '') => {
+    calls.length = 0
+    lag.auth = 20
+    const r = await level({ request: new Request(`http://example.test/api/diff/level?from=2026-08-03&to=2026-08-05&p=${qs}`, { headers: { 'x-deny': '1', ...headers } }), env })
+    await r.text()
+    return [r.status, [...new Set(calls)].sort().join(',')]
+  }
+  const NONE = [401, 'auth']
+  const ALL = [401, 'auth,gens,match,prep,scan']
+  const TOKEN = 'A'.repeat(31) + '_'
+
+  it('none for what the gate doesn\'t read, or reads malformed', async () => {
+    expect(await Promise.all([
+      started({}),
+      started({ cookie: '__cf_bm=abc.def; _ga=GA1.2.345.678' }),
+      started({ cookie: 'oa_oidc=nonce.signature; oa_google_hint=x' }),
+      started({ cookie: 'oa_auth=junk' }),
+      started({ cookie: 'oa_auth=a.b.c' }),
+      started({ authorization: 'Basic dXNlcjpwYXNz' }),
+      started({ authorization: 'Bearer short' }),
+      started({ authorization: `Bearer ${TOKEN}=` }),
+      // The gate reads a presented token first: a malformed one is the credential, whatever cookie comes with it.
+      started({ authorization: 'Bearer short', ...JUNK_COOKIE }),
+      started({}, '&key=short'),
+    ])).toEqual(Array(10).fill(NONE))
+  })
+
+  it('every lookup for the session cookie by name, a token-shaped `Bearer`, or a token-shaped `?key=`', async () => {
+    expect(await Promise.all([
+      started(JUNK_COOKIE),
+      started({ cookie: `_ga=GA1.2.3; ${JUNK_COOKIE.cookie}; __cf_bm=x` }),
+      started({ authorization: `Bearer ${TOKEN}` }),
+      started({}, `&key=${TOKEN}`),
+    ])).toEqual(Array(4).fill(ALL))
+  })
+
+  it('a minted token is token-shaped', async () => {
+    const { gateFor, TOKEN_SHAPE } = await import('../../_lib/auth')
+    env = { ...env, BASE_SCOPE: 'laptop', SESSION_SECRET: 'test-secret' } as Env
+    const tokens = await Promise.all([0, 1, 2].map(async () => (await gateFor(env)!.mint({ email: null, scopes: ['laptop'], name: 'link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })).token))
+    expect(tokens.map(t => TOKEN_SHAPE.test(t))).toEqual([true, true, true])
   })
 })
 
