@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { buildLevels, type Level, levelK, levelOf, type LevelRow } from './diffLevel'
-import { asOfScans, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
+import { asOfScans, GetRounds, openIndex, planChanged, planRects, type Rect, withChurn } from './index'
 import { sqliteD1 } from './testD1'
 import { fixture, readJson } from './testStore'
 
@@ -140,6 +140,65 @@ describe('level diffs', () => {
     // Pages were read and skipped, and a group read by page decodes fewer rows than its 4 (it'd be read whole otherwise).
     expect([counts.pgroups > 0, counts.pskip > 0, counts.pages > 0]).toEqual([true, true, true])
     expect(decoded.filter(([rows, groups]) => rows >= 4 * groups && groups > 0)).toEqual([])
+  })
+
+  it('counts GET rounds: a slot-bound GET is in the round after the one freeing its slot; colo lookups add none', async () => {
+    const lim = new GetRounds(2)
+    const get = (dep: number, free = false) => lim.run(dep, async () => null, free).then(r => r.round)
+    // Three independent GETs on two slots: the third waits a round; one depending on round 1 is in round 2; a colo
+    // lookup holds a slot but adds no round: queued, it is in the round of the GET whose slot it took.
+    expect(await Promise.all([get(0), get(0), get(0), get(1), get(0, true)])).toEqual([1, 1, 2, 2, 2])
+    expect([lim.gets, lim.rounds]).toEqual([4, 2])
+    const free = new GetRounds(2)
+    expect(await free.run(0, async () => null, true).then(r => r.round)).toBe(0)
+    expect(await free.run(0, async () => null).then(r => r.round)).toBe(1)
+    expect([free.gets, free.rounds]).toEqual([1, 1])
+  })
+
+  it('a paged level request: the page index is a wave of GETs only cold; held (isolate or colo), the pages are the only GETs', async () => {
+    // Each step on a fresh module graph is a fresh isolate (its footers, groups and page indexes unheld); the colo is
+    // a cache kept across them.
+    const c = cases.find(x => x.from === '2026-08-02' && x.to === '2026-08-06' && x.path === '')!
+    const held = new Map<string, ArrayBuffer>()
+    const colo = {
+      match: async (r: Request) => (held.has(r.url) ? new Response(held.get(r.url)!.slice(0)) : undefined),
+      put: async (r: Request, res: Response) => { held.set(r.url, await res.arrayBuffer()) },
+    }
+    const g = globalThis as unknown as { caches: unknown }
+    const prev = g.caches
+    g.caches = { default: colo }
+    const log: string[] = []
+    const { db } = await sqliteD1()
+    const paged = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: 'interval-store-p2', INDEX_R2: r2('iv-churn', log) } as Env
+    const KEYS = ['pindex-gets', 'pindex-held', 'pindex-colo', 'pdata-gets', 'pgroups', 'pgets', 'prounds'] as const
+    const request = async (build: typeof buildLevels) => {
+      const t: Record<string, number> = {}
+      const at = log.length
+      const l = (await build(paged, { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn', chain: false, trace: (name, v) => { t[name] = (t[name] ?? 0) + v } })).get(c.path)!
+      expect(shape(l)).toEqual(wanted(c))
+      // The data files' GETs (the base's and each run's sort), from the store's log: the paged read's (`pgets`), then
+      // the whole groups' (`readChanged` reads those after it; here, 4-row groups whose every 2-row page is kept).
+      return { ...Object.fromEntries(KEYS.map(k => [k, t[k]])), files: log.slice(at).filter(k => k.endsWith('/served/path.parquet')).length }
+    }
+    const fresh = async () => {
+      vi.resetModules()
+      return (await import('./diffLevel')).buildLevels
+    }
+    try {
+      const build = await fresh()
+      // Cold: per tier (the base and its two runs) one index GET (the fixture's index spans merge within a tier), then
+      // its pages: 2 rounds, then 6 whole groups. Before the pipelining: the same GETs, the same rounds, with a barrier.
+      expect(await request(build)).toEqual({ 'pindex-gets': 3, 'pindex-held': 0, 'pindex-colo': 0, 'pdata-gets': 3, pgroups: 5, pgets: 6, prounds: 2, files: 12 })
+      // The same isolate again: every index held, the pages are the only GETs (1 round; the whole groups are held
+      // decoded, so one group fewer is a paged candidate). Before, the 3 index GETs ran again, a round ahead of the pages.
+      expect(await request(build)).toEqual({ 'pindex-gets': 0, 'pindex-held': 5, 'pindex-colo': 0, 'pdata-gets': 3, pgroups: 5, pgets: 3, prounds: 1, files: 3 })
+      // A new isolate in the same colo: every index from the colo's copies (the 6th group's too, read whole again), no
+      // index GET: 1 round of pages, then the whole groups.
+      expect(await request(await fresh())).toEqual({ 'pindex-gets': 0, 'pindex-held': 0, 'pindex-colo': 6, 'pdata-gets': 3, pgroups: 5, pgets: 3, prounds: 1, files: 9 })
+    } finally {
+      g.caches = prev
+      vi.resetModules()
+    }
   })
 
   it('reads only the groups whose versions change in the range', async () => {
