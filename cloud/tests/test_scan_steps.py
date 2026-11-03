@@ -1068,6 +1068,19 @@ def test_retire_local_data_retires_the_archive(tmp_path, env):
     assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 7 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o r2://idx -S r2://idx -w {w} -s r2://idx"]
 
 
+def test_age_store_local_data_reads_the_archive(tmp_path, env):
+    """A local data store (m3's: the task's ephemeral disk, R2 the store of record) holds only this scan's pyramid: the
+    history's inputs and the retirement root are the archive's."""
+    env.update(R2_ARCHIVE="r2://idx")
+    opts = {**NL_OPTS, "age-store": {"store": "r2://idx/history/age", "gen": "a1", "execute": True}}
+    c = ctx(tmp_path, env, steps=["age-store"], options=opts)
+    S.age_store(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/age-store"
+    assert c.sh_impl.calls == [
+        f"dt-cloud age-store -g a1 -L l2/{{id}}/index/{{gen}}/age-pyramid-1h.parquet -o r2://idx/history/age -s r2://idx -T {c.profile.store} -t 2026-10-16T1200 -w {w} -k 2 -r r2://idx -x",
+        "dt-cloud store-gc -t interval-store -l -x -o r2://idx/history/age",
+    ]
+
 NL_OPTS = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}}
 
 
