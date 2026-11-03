@@ -80,7 +80,7 @@ export function serverKind(method: string, path: string): string | null {
   if (path === '/api/token') return 'token'
   if (path === '/api/auth/profile' || path === '/api/auth/avatar') return 'profile'
   if (path.startsWith('/api/auth/') || path.startsWith('/api/og/')) return 'access'
-  if (path === '/api/digest-op' || path === '/api/digest-image') return 'digest'
+  if (path === '/api/digest-op') return 'digest'
   if (path.startsWith('/api/db') || path === '/api/session-log/switch' || path.startsWith('/api/activity/') || path === '/api/digest-settings') return 'admin'
   return 'write'
 }
