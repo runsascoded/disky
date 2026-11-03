@@ -254,10 +254,84 @@ def test_tail_circles_fullest_first():
         f":warning: {main}", zone, more, f"[cold]({u('cold-data')}): 12.4% of 100Ti (87.6 Ti free)"]
 
 
+def test_runway_rules():
+    """`quota_marks: runway` (specs/digest-runway-marks.md §2): growth is the fastest net fill over 1, 3 and 7 days (a
+    one-day jump over a flat week shows); runway = free ÷ growth; the mark by runway, ≥ 95% full never calmer than 🟠;
+    the rate text only under 60 days. The site's `digest/pools.ts` mirrors these (its own spec, same numbers)."""
+    t = dt.datetime(2026, 9, 23, 12, tzinfo=UTC)
+    flat_then_jump = [(t - dt.timedelta(days=d), 80.0) for d in (7, 3, 1)]
+    assert D._growth(flat_then_jump, t, 90.0) == 10.0
+    assert D._growth([(t - dt.timedelta(days=7), 46.0), (t - dt.timedelta(days=3), 77.0), (t - dt.timedelta(days=1), 83.0)], t, 85.0) == 39 / 7
+    assert D._growth([(t - dt.timedelta(hours=12), 80.0)], t, 90.0) is None  # nothing a whole day back
+    assert [D._runway(15.0, 5.0), D._runway(15.0, 0.0), D._runway(15.0, -2.0), D._runway(15.0, None), D._runway(-1.3, 4.0)] == [
+        D.Runway(3.0, 5.0), D.Runway(D.math.inf, 0.0), D.Runway(D.math.inf, -2.0), D.Runway(D.math.inf, None), D.Runway(0.0, 4.0)]
+    R, O, Y, G = D.RED_MARK, D.ORANGE_MARK, D.YELLOW_MARK, D.GREEN_MARK
+    marks = [D._runway_mark(D.Runway(d, 1.0), fill) for d, fill in [
+        (0.0, 101.0), (2.9, 50.0), (3.0, 50.0), (13.9, 50.0), (14.0, 50.0), (14.0, 95.0), (29.9, 50.0), (30.0, 50.0),
+        (D.math.inf, 88.5), (D.math.inf, 96.0)]]
+    assert marks == [R, R, O, O, Y, O, Y, G, G, O]
+    texts = [D._runway_text(r, CFG) for r in [D.Runway(8.2, 4.1), D.Runway(0.5, 30.0), D.Runway(59.9, 1.0), D.Runway(60.0, 1.0),
+                                               D.Runway(D.math.inf, 0.0), D.Runway(0.0, 4.0)]]
+    assert texts == [", +4.1 Ti/d, ≈8d to full", ", +30.0 Ti/d, ≈<1d to full", ", +1.0 Ti/d, ≈60d to full", "", "", ""]
+
+
+def _hist_scan(scan: str, tb: float, extra: dict[str, float]) -> "D.Scan":
+    return D.Scan(scan=scan, tb=tb, objs=0, dtb=None, dobjs=None, hours=None, extra=extra)
+
+
+def test_tail_runway_fixed_order():
+    """`quota_marks: runway`: the clauses in the replies' fixed order (meta order, a zone at its first member), each
+    marked by its runway over the day's history: the primary flat at 90.8% is 🟢 (fully used, not filling); the zone
+    filling ~5.6 Ti/d with 15 Ti free is 🔴; `cold`, flat all week then +10 Ti yesterday, is 🟠 by its one-day rate;
+    past its quota a pool is 🔴 with no rate text."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway", buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8"),
+        "side-data": E.Bucket("side", z8, "z8"),
+        "cold-data": E.Bucket("cold", z8),
+    })
+    now = {"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 12.4}
+    hist = (
+        _hist_scan("2026-09-16T1201", 825.9, {"hot-data": 43.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-20T1201", 825.9, {"hot-data": 74.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-22T1201", 825.9, {"hot-data": 80.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-23T1201", 825.9, now),
+    )
+    day = D.DayRow(date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0, since=None, extra=now, hist=hist)
+    u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"  # noqa: E731
+    main = f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
+    zone = f"[hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+    more = f"[more-data]({u('more-data')}): 2 Ti"
+    assert D._tail(day, cfg).split(" · ") == [
+        f":large_green_circle: {main}",
+        f":red_circle: {zone}, +5.6 Ti/d, ≈3d to full",
+        more,
+        f":large_orange_circle: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+    ]
+    over = replace(day, extra={**now, "cold-data": 101.3}, hist=hist[:-1] + (_hist_scan("2026-09-23T1201", 825.9, {**now, "cold-data": 101.3}),))
+    assert D._tail(over, cfg).split(" · ")[3] == f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)"
+    # no history (a store's first day): nothing is filling, so only the 95% floor and an overage can mark it hot
+    assert D._tail(replace(day, hist=()), cfg).split(" · ") == [
+        f":large_green_circle: {main}", f":large_green_circle: {zone}", more, f":large_green_circle: [cold]({u('cold-data')}): 12%"]
+    # `circles` is unchanged by the history: fullest first, by fill
+    assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
+        f":red_circle: {main}", f":large_orange_circle: {zone}", f":large_green_circle: [cold]({u('cold-data')}): 12%", more]
+
+
+def test_day_rows_carry_runway_history():
+    """Each reply's `hist`: the window's scans up to and including its own, back past the longest look-back."""
+    rows = D.day_rows(MONTH, "sender", 12)
+    assert [[x.scan for x in r.hist] for r in rows] == [
+        ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200"],
+        ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200", "2026-09-02T0000", "2026-09-02T1200"],
+    ]
+
+
 def test_quota_marks_must_be_known():
     with pytest.raises(ValueError) as e:
         E.config_from_dict({"template": "cw", "quota_marks": "squares"})
-    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles')"
+    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway')"
 
 
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:

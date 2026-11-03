@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -110,8 +111,10 @@ def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestC
     return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, path, slug)})"
 
 
-#: `quota_marks: circles`: a pool under this share renders as a bare `NN%` (no quota, no headroom).
+#: `quota_marks: circles` / `runway`: a pool under this share renders as a bare `NN%` (no quota, no headroom).
 QUIET_PCT = 25
+#: The `quota_marks` whose clauses are brief (`QUIET_PCT`) and marked by a circle.
+BRIEF_MARKS = ("circles", "runway")
 
 
 def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"], brief: bool = False) -> str:
@@ -135,7 +138,7 @@ def _bucket_clause(bucket: str, tb: float, scan: str, since: dt.datetime | None,
     link = _bucket_link(bucket, scan, since, cfg, slug)
     if not qs:
         return f"{link}: {tb:,.0f} {cfg.unit.short}"
-    return f"{link}: " + ", ".join(_quota_clause(_scoped(tb, classes, q), q, cfg.unit, cfg.quota_marks == "circles") for q in qs)
+    return f"{link}: " + ", ".join(_quota_clause(_scoped(tb, classes, q), q, cfg.unit, cfg.quota_marks in BRIEF_MARKS) for q in qs)
 
 
 def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
@@ -144,7 +147,7 @@ def _zone_clause(members: list[tuple[str, float]], scan: str, since: dt.datetime
     q = cfg.buckets[members[0][0]].quota
     parts = " + ".join(f"{_bucket_link(b, scan, since, cfg, slug)} {tb:,.0f}" for b, tb in members)
     total = sum(tb for _, tb in members)
-    return f"{parts} {cfg.unit.short}" + (f": {_quota_clause(total, q, cfg.unit, cfg.quota_marks == 'circles')}" if q else "")
+    return f"{parts} {cfg.unit.short}" + (f": {_quota_clause(total, q, cfg.unit, cfg.quota_marks in BRIEF_MARKS)}" if q else "")
 
 
 def _tail(day: DayRow, cfg: DigestConfig) -> str:
@@ -160,9 +163,12 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
     cs = _clauses(day, cfg)
+    if cfg.quota_marks == "runway":
+        # config order: a reply series reads by position, the marks draw the eye (specs/digest-runway-marks.md)
+        return " · ".join(f"{_runway_mark(r, fill)} {c}{_runway_text(r, cfg)}" if fill is not None else c for c, fill, _, r in cs)
     if cfg.quota_marks == "circles":
         cs = sorted(cs, key=lambda c: -1.0 if c[1] is None else -c[1])
-    return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over in cs)
+    return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _ in cs)
 
 
 #: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).
@@ -183,6 +189,84 @@ def _mark(fill: float | None, over: bool, cfg: DigestConfig) -> str | None:
     red = min(cfg.mark_pct, 100)
     return (RED_MARK if fill >= red else ORANGE_MARK if fill >= cfg.mark_pct - ORANGE_PTS
             else YELLOW_MARK if fill >= cfg.mark_pct - YELLOW_PTS else GREEN_MARK)
+
+
+#: `quota_marks: runway` (specs/digest-runway-marks.md §2; the site's `digest/pools.ts` mirrors these names and rules):
+#: growth is the fastest net fill over these look-backs (days), each from the latest scan at or before it.
+RUNWAY_WINDOWS_D = (1, 3, 7)
+#: 🔴 under `RUNWAY_RED_D` days to full (or over quota), 🟠 under `RUNWAY_ORANGE_D` (or at least `RUNWAY_FULL_PCT` full),
+#: 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `RUNWAY_TEXT_D` days also shows its rate and runway.
+RUNWAY_RED_D, RUNWAY_ORANGE_D, RUNWAY_YELLOW_D, RUNWAY_TEXT_D = 3, 14, 30, 60
+RUNWAY_FULL_PCT = 95
+
+
+@dataclass(frozen=True)
+class Runway:
+    """A quota group's runway at a scan: ``days`` to full at ``growth`` (its unit per day; None: no earlier scan in
+    reach), ``math.inf`` when not growing, 0 when at or over quota."""
+    days: float
+    growth: float | None
+
+
+def _growth(hist: list[tuple[dt.datetime, float]], t: dt.datetime, v: float) -> float | None:
+    """The fastest net fill per day reaching ``v`` at ``t`` over `RUNWAY_WINDOWS_D`: each window from the latest
+    ``hist`` point at or before ``t`` minus it; None when no window has one."""
+    rates = []
+    for w in RUNWAY_WINDOWS_D:
+        then = [(ts, x) for ts, x in hist if ts <= t - dt.timedelta(days=w)]
+        if then:
+            ts0, v0 = then[-1]
+            rates.append((v - v0) / ((t - ts0).total_seconds() / 86400))
+    return max(rates) if rates else None
+
+
+def _runway(free: float, growth: float | None) -> Runway:
+    if free <= 0:
+        return Runway(0.0, growth)
+    return Runway(free / growth if growth is not None and growth > 0 else math.inf, growth)
+
+
+def _runway_mark(r: Runway, fill: float) -> str:
+    """A pool's circle by its runway (`RUNWAY_*`)."""
+    if r.days < RUNWAY_RED_D:
+        return RED_MARK
+    if r.days < RUNWAY_ORANGE_D or fill >= RUNWAY_FULL_PCT:
+        return ORANGE_MARK
+    return YELLOW_MARK if r.days < RUNWAY_YELLOW_D else GREEN_MARK
+
+
+def _runway_text(r: Runway, cfg: DigestConfig) -> str:
+    """`, +4.1 Ti/d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days (commas: ` · ` separates the pools);
+    `''` otherwise (flat, shrinking, far off, or already over: its clause says so)."""
+    if not 0 < r.days < RUNWAY_TEXT_D or r.growth is None:
+        return ""
+    days = "<1d" if r.days < 1 else f"{r.days:.0f}d"
+    return f", +{r.growth:.1f} {cfg.unit.short}/d, ≈{days} to full"
+
+
+def _group_used(g: list[str], s: Scan | DayRow, q: Quota, cfg: DigestConfig) -> float:
+    """What quota ``q`` counts of group ``g`` (bucket names) at scan / day ``s``: a zone's buckets summed (raw sizes,
+    as `_zone_clause`), a lone bucket over ``q``'s classes (the primary's; the others' raw)."""
+    def size(b: str) -> float:
+        return s.tb if b == cfg.primary else s.extra.get(b, 0.0)
+    if len(g) > 1:
+        return sum(size(b) for b in g)
+    return _scoped(s.tb, s.classes, q) if g[0] == cfg.primary else size(g[0])
+
+
+def _group_runway(g: list[str], day: DayRow, cfg: DigestConfig) -> Runway | None:
+    """The group's shortest runway over its quotas (a zone: the zone's), from ``day.hist``; None without a quota."""
+    qs = (cfg.buckets[g[0]].quota,) if len(g) > 1 else (cfg.buckets[g[0]].quotas if g[0] in cfg.buckets else ())
+    qs = tuple(q for q in qs if q is not None)
+    if not qs:
+        return None
+    t = scan_ts(day.scan)
+    out = []
+    for q in qs:
+        v = _group_used(g, day, q, cfg)
+        hist = [(scan_ts(x.scan), _group_used(g, x, q, cfg)) for x in day.hist if x.scan < day.scan]
+        out.append(_runway(q.bytes / cfg.unit.bytes - v, _growth(hist, t, v)))
+    return min(out, key=lambda r: r.days)
 
 
 def _groups(day: DayRow, cfg: DigestConfig) -> list[list[tuple[str, float]]]:
@@ -207,15 +291,16 @@ def _fill(g: list[tuple[str, float]], day: DayRow, cfg: DigestConfig) -> float |
     return max((_scoped(tb, classes, q) / (q.bytes / cfg.unit.bytes) * 100 for q in b.quotas), default=None) if b else None
 
 
-def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bool]]:
-    """Each group's clause (`_bucket_clause` / `_zone_clause`), its fill (`_fill`), and whether that is at or over
-    ``cfg.alert_pct``."""
+def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bool, Runway | None]]:
+    """Each group's clause (`_bucket_clause` / `_zone_clause`), its fill (`_fill`), whether that is at or over
+    ``cfg.alert_pct``, and its runway (`quota_marks: runway`; else None)."""
     out = []
     for g in _groups(day, cfg):
         clause = (_bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
                   if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug))
         fill = _fill(g, day, cfg)
-        out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct))
+        r = _group_runway([b for b, _ in g], day, cfg) if cfg.quota_marks == "runway" else None
+        out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct, r))
     return out
 
 
@@ -225,7 +310,7 @@ def alert_body(month: Month, cfg: DigestConfig) -> str | None:
     if cfg.alert_pct is None or month.closed:
         return None
     last = month.rows[-1]
-    over = [(c, f) for c, f, o in _clauses(_row(last.date, last, None), cfg) if o]
+    over = [(c, f) for c, f, o, _ in _clauses(_row(last.date, last, None), cfg) if o]
     if cfg.quota_marks == "circles":
         over.sort(key=lambda c: -c[1])
     over = [c for c, _ in over]
@@ -368,6 +453,8 @@ class DayRow:
     provisional: bool = False  # `sender`: the day's latest scan before its reply scan has landed
     slug: str | None = field(default=None, compare=False)  # `scan`'s canonical `?d=` slug; None: its minute
     classes: dict[int, float] | None = field(default=None, compare=False)  # `scan`'s primary per class (`Scan.classes`)
+    # the scans up to and including `scan` within the runway look-back (`RUNWAY_WINDOWS_D`; `quota_marks: runway`)
+    hist: tuple[Scan, ...] = field(default=(), compare=False)
 
 
 def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = False) -> list[DayRow]:
@@ -383,6 +470,7 @@ def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = Fa
     reply is re-edited as the day's scans land)."""
     if variant not in VARIANTS:
         raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
+    seen = month.pre + month.lead + month.rows
     days: OrderedDict[str, list[Scan]] = OrderedDict()
     for r in month.lead + month.rows:
         days.setdefault(r.date, []).append(r)
@@ -397,17 +485,20 @@ def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = Fa
             if s is None:
                 if provisional and date >= month.rows[0].date:
                     # the day's morning scan is still to come: its numbers so far
-                    out.append(_row(date, rs[-1], prev, provisional=True))
+                    out.append(_row(date, rs[-1], prev, provisional=True, seen=seen))
                 continue
         if date >= month.rows[0].date:
-            out.append(_row(date, s, prev))
+            out.append(_row(date, s, prev, seen=seen))
         prev = s
     return out
 
 
-def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False) -> DayRow:
-    """``date``'s reply over scan ``s``, Δ vs ``prev`` (the prior day's reply scan)."""
+def _row(date: str, s: Scan, prev: Scan | None, provisional: bool = False, seen: list[Scan] | tuple[Scan, ...] = ()) -> DayRow:
+    """``date``'s reply over scan ``s``, Δ vs ``prev`` (the prior day's reply scan); ``seen`` (chronological) gives
+    its runway history."""
+    reach = scan_ts(s.scan) - dt.timedelta(days=max(RUNWAY_WINDOWS_D) + 1)
     return DayRow(
+        hist=tuple(x for x in seen if x.scan <= s.scan and scan_ts(x.scan) >= reach),
         date=date,
         scan=s.scan,
         tb=s.tb,

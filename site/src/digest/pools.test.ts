@@ -2,8 +2,8 @@
  * 790 of 910 TiB, `hot` (hot-data) 99.5 of 100 TiB at the month's last scan; `more-data` has no quota. */
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS, type DigestCfg, type DigestParams, type DigestRows, imageRequest, opText } from './index'
-import type { CwRows } from './cw'
-import { mark, quotaLine } from './pools'
+import type { CwRows, CwScan } from './cw'
+import { growth, mark, quotaLine, runway, runwayMark, runwayText } from './pools'
 
 interface Fs { readFile(p: string, enc: 'utf8'): Promise<string> }
 const fsp = () => import(/* @vite-ignore */ 'node:fs/promises' as string) as Promise<Fs>
@@ -47,6 +47,40 @@ describe('quota pressure', () => {
     // z = main 790 + more 2.4 of 910; cold isn't in the scan (no clause)
     expect(quotaLine(last, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_orange_circle: z zone 87.1% of 1P (117.6 Ti free)')
     expect(quotaLine({ ...last, tb: 100 }, zoned, 90)).toBe('*Quotas:* :red_circle: hot 101.0% of 100Ti (1.0 Ti over) · :large_green_circle: z zone 11%')
+  })
+
+  it('runway: the fastest fill over 1, 3 and 7 days; marks by runway, ≥ 95% never calmer than orange (digest_cw)', async () => {
+    const f = await load()
+    const D = 86400_000
+    const t = Date.UTC(2026, 8, 23, 12)
+    expect(growth([[t - 7 * D, 80], [t - 3 * D, 80], [t - D, 80]], t, 90)).toBe(10)
+    expect(growth([[t - 7 * D, 46], [t - 3 * D, 77], [t - D, 83]], t, 85)).toBe(39 / 7)
+    expect(growth([[t - D / 2, 80]], t, 90)).toBe(null)
+    expect([runway(15, 5), runway(15, 0), runway(15, -2), runway(15, null), runway(-1.3, 4)]).toEqual([
+      { days: 3, growth: 5 }, { days: Infinity, growth: 0 }, { days: Infinity, growth: -2 }, { days: Infinity, growth: null }, { days: 0, growth: 4 },
+    ])
+    const [R, O, Y, G] = [':red_circle: ', ':large_orange_circle: ', ':large_yellow_circle: ', ':large_green_circle: ']
+    const marks = ([[0, 101], [2.9, 50], [3, 50], [13.9, 50], [14, 50], [14, 95], [29.9, 50], [30, 50], [Infinity, 88.5], [Infinity, 96]] as [number, number][])
+      .map(([days, pct]) => runwayMark({ days, growth: 1 }, pct))
+    expect(marks).toEqual([R, R, O, O, Y, O, Y, G, G, O])
+    expect([{ days: 8.2, growth: 4.1 }, { days: 0.5, growth: 30 }, { days: 59.9, growth: 1 }, { days: 60, growth: 1 }, { days: Infinity, growth: 0 }, { days: 0, growth: 4 }]
+      .map(r => runwayText(r, f.cfg))).toEqual([', +4.1 Ti/d, ≈8d to full', ', +30.0 Ti/d, ≈<1d to full', ', +1.0 Ti/d, ≈60d to full', '', '', ''])
+  })
+
+  it('the runway quota line: the replies’ order, a flat full pool green, a filling one red with its rate', async () => {
+    const f = await load()
+    const s = (scan: string, hot: number): CwScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
+    const seen = [s('2026-09-01T0001', 50), s('2026-09-05T0001', 80), s('2026-09-07T0001', 90), s('2026-09-08T0001', 99.5)]
+    const last = seen[seen.length - 1]
+    // main flat at 86.8%: never filling, green; hot +9.5 Ti over the last day with 0.5 Ti free: red, under a day
+    expect(quotaLine(last, f.cfg, 90, 'runway', seen)).toBe(
+      '*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :red_circle: hot 99.5% of 100Ti (0.5 Ti free), +9.5 Ti/d, ≈<1d to full')
+    // no history: nothing filling; hot ≥ 95% stays orange
+    expect(quotaLine(last, f.cfg, 90, 'runway', [last])).toBe(
+      '*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_orange_circle: hot 99.5% of 100Ti (0.5 Ti free)')
+    // `circles` ignores the history: most full first, by share
+    expect(quotaLine(last, f.cfg, 90, 'circles', seen)).toBe(
+      '*Quotas:* :red_circle: hot 99.5% of 100Ti (0.5 Ti free) · :large_orange_circle: main 86.8% of 1P (120.0 Ti free)')
   })
 
   it('the pools plot: every pool’s used bytes per scan against its quota, the alert share, the same diff', async () => {

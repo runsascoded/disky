@@ -9,6 +9,8 @@ describe('digest params in a URL', () => {
     }
     expect([encodeParams(DEFAULT_PARAMS), encodeParams(p), decodeParams(encodeParams(p))]).toEqual(['', 'w45,t0.6-0.95,dm,hw,km,qc,pp,a85', p])
     expect(decodeParams('h')).toEqual({ ...DEFAULT_PARAMS, headline: [] })
+    const r: DigestParams = { ...DEFAULT_PARAMS, quotas: 'runway' }
+    expect([encodeParams(r), decodeParams('qr'), parseParams('qr')]).toEqual(['qr', r, r])
   })
   it('drops what it cannot read', () => {
     expect(decodeParams('w0,w999,t0.9-0.5,dx,hmm,kq,zz,qx,pz,a0,a101')).toEqual(DEFAULT_PARAMS)

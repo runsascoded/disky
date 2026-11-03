@@ -1,6 +1,6 @@
 /** `DigestParams` in a URL (`/admin/slack`'s candidate columns, `?dc=w30,t0.7-1,dw,hmw,kw;w45,…`): `w<days>`,
  * `t<p0>-<p1>`, `d<w|m>` (diff: window | month-to-date), `h<m|w…>` (headline figures, in order; `h` alone: none),
- * `k<w|m>` (weeks: window | month), `q<o|c>` (the quota line: off | circles), `p<u|p>` (the plot: usage | pools),
+ * `k<w|m>` (weeks: window | month), `q<o|c|r>` (the quota line: off | circles | runway), `p<u|p>` (the plot: usage | pools),
  * `a<pct>` (the red mark's share). A field left out is the default's; an unreadable one is dropped. */
 import { DEFAULT_PARAMS, type DigestParams } from './common'
 
@@ -29,7 +29,7 @@ function readField(p: DigestParams, f: string): boolean {
   } else if (k === 'd' && (v === 'w' || v === 'm')) p.diff = v === 'w' ? 'window' : 'mtd'
   else if (k === 'h' && /^[mw]{0,2}$/.test(v) && new Set(v).size === v.length) p.headline = [...v].map(c => (c === 'm' ? 'mtd' : 'window'))
   else if (k === 'k' && (v === 'w' || v === 'm')) p.weeks = v === 'w' ? 'window' : 'month'
-  else if (k === 'q' && (v === 'o' || v === 'c')) p.quotas = v === 'o' ? 'off' : 'circles'
+  else if (k === 'q' && (v === 'o' || v === 'c' || v === 'r')) p.quotas = v === 'o' ? 'off' : v === 'c' ? 'circles' : 'runway'
   else if (k === 'p' && (v === 'u' || v === 'p')) p.plot = v === 'u' ? 'usage' : 'pools'
   else if (k === 'a' && /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 100) p.alertAt = Number(v)
   else return false
