@@ -8,6 +8,7 @@ Hand-built series (12-hourly, 00:00Z / 12:00Z): a lead day Mon 8/31 (700,
 705 TiB) then Tue 9/1 (710, 713) and Wed 9/2 (712, 715) — one ISO week, so
 the bullet label is unambiguous. Quota (main) = 910 TiB."""
 import datetime as dt
+import re
 import json
 from dataclasses import replace
 from datetime import date
@@ -326,6 +327,22 @@ def test_day_rows_carry_runway_history():
         ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200"],
         ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200", "2026-09-02T0000", "2026-09-02T1200"],
     ]
+
+
+def test_runway_reaches_before_the_month():
+    """Early in a month the runway still looks back 7 days, into the previous month's scans (`Month.pre`, not just
+    the lead-in day): on 11/2 a zone that crept +0.1 Ti/d within November but filled from 45 a week before is 🔴 by its
+    7-day rate; the same day without `pre` reads 🟢."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway", buckets={**CFG.buckets, "hot-data": E.Bucket("hot", z8, "z8"), "side-data": E.Bucket("side", z8, "z8")})
+    s = lambda scan, hot: _hist_scan(scan, 825.9, {"hot-data": hot, "side-data": 3.0})  # noqa: E731
+    month = D.Month(pre=[s("2026-10-26T1201", 42.0)], lead=[s("2026-10-31T1201", 81.8)], rows=[s("2026-11-01T1201", 81.9), s("2026-11-02T1201", 82.0)])
+    links = lambda t: re.sub(r"\]\([^)]*\)", "](…)", t)  # noqa: E731
+    day2 = D.day_rows(month, "sender", 12)[1]
+    assert day2.date == "2026-11-02"
+    assert links(D._tail(day2, cfg).split(" · ")[1]) == ":red_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free), +5.7 Ti/d, ≈3d to full"
+    alone = D.day_rows(replace(month, pre=[]), "sender", 12)[1]
+    assert links(D._tail(alone, cfg).split(" · ")[1]) == ":large_green_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
 
 
 def test_quota_marks_must_be_known():
