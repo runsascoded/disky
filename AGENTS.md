@@ -160,7 +160,7 @@ dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`i
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
-dt-cloud diff-bench -a BEFORE -b AFTER [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
+dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
                           # `Server-Timing` total, the paired Δ (B − A), B-slower count + sign-test p; answers must agree
