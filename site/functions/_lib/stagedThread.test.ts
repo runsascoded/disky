@@ -31,7 +31,7 @@ vi.mock('./prefixes.js', async orig => ({
 }))
 vi.mock('./identity.js', async orig => ({
   ...(await orig<typeof import('./identity.js')>()),
-  loadRegistry: async () => ({ 'ann-bee': { name: 'Ann Bee' } }),
+  loadRegistry: async () => ({ 'ann-bee': { name: 'Ann Bee' }, kai: { u: 'kai', name: 'Kai', github: 'kai-gh' } }),
 }))
 
 const { notifyPlan, refreshThread } = await import('./stagedSlack.js')
@@ -117,6 +117,20 @@ describe('D1', () => {
       expect([lookups, calls.map(c => [c.method, c.body.ts, sectionText(c.body.blocks)])]).toEqual([
         [1000, 1000, 501],
         [['chat.update', PARENT, `${PARENT_TEXT(2500, 1, '2.4 PiB', '25,000')}\n+1 staged prefix empty at scan, not counted`]],
+      ])
+    })
+  })
+
+  describe('who a post is from', () => {
+    it('someone outside the workspace posts as the registry names them (its name, their GitHub avatar); an unstage posts as its actor', async () => {
+      const calls = fakeSlack()
+      const { db } = await planDb()
+      const KAI = 'kai@elsewhere.example'
+      await notifyPlan(env, db, 1, SITE, await stage(db, 1, run(1, 1), { by: KAI }), { now: 1000 })
+      await notifyPlan(env, db, 1, SITE, { text: (name: string) => `:leftwards_arrow_with_hook: ${name} unstaged 1 prefix`, by: { email: KAI, verb: 'unstaged' } }, { now: 1100 })
+      expect(calls.filter(c => c.method === 'chat.postMessage').map(c => [c.body.username, c.body.icon_url, c.body.icon_emoji, c.body.blocks ? sectionText(c.body.blocks) : c.body.text])).toEqual([
+        ['Kai · staged', 'https://avatars.githubusercontent.com/kai-gh?s=192', undefined, ':wastebasket: *Kai* staged 1 path · *1.0 TiB* · 10 objects\nin `b/ckpt/run-1/step-0/`'],
+        ['Kai · unstaged', 'https://avatars.githubusercontent.com/kai-gh?s=192', undefined, ':leftwards_arrow_with_hook: Kai unstaged 1 prefix'],
       ])
     })
   })

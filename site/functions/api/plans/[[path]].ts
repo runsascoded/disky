@@ -263,7 +263,7 @@ export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promi
       const n = (body.added ?? body.removed ?? []).length
       const verb = body.added ? "added" : "unstaged"
       background(ctx, notifyPlan(ctx.env, db, id, new URL(ctx.request.url).origin,
-        { text: `:leftwards_arrow_with_hook: ${who.replace(/@.*$/, "")} ${verb} ${n} ${n === 1 ? "prefix" : "prefixes"}` }))
+        { text: (name: string) => `:leftwards_arrow_with_hook: ${name} ${verb} ${n} ${n === 1 ? "prefix" : "prefixes"}`, by: { email: who, verb } }))
     }
     return res
   }
