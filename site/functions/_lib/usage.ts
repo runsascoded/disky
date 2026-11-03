@@ -72,6 +72,7 @@ export const ROUTES: readonly string[] = [
   '/data/*', '/og/*', '/v1/files/*', '/v1/objects/*', '/slack/actions',
   '/assignments', '/staged', '/users', '/user/*',
   '/assets/*',
+  '/a/*',
 ]
 
 /** `pathname`'s route pattern (`ROUTES`), `page` or `other`. */

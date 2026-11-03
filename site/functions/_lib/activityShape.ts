@@ -32,6 +32,7 @@ export const KIND_DEFS: KindDef[] = [
   def('admin', 'server', 'Admin console edits and site settings', ['admin edit', 'admin edits'], 'line'),
   def('token', 'server', 'Agent / CLI token minted', ['token', 'tokens'], 'line'),
   def('profile', 'server', 'Profile name or avatar', ['profile edit', 'profile edits'], 'count'),
+  def('digest', 'server', "The Slack digest job's own syncs (the OP's state, its plot)", ['digest sync', 'digest syncs'], 'off'),
   def('write', 'server', 'Any other change', ['other change', 'other changes'], 'count'),
   def('view', 'client', 'Page loads', ['page load', 'page loads'], 'count'),
   def('nav', 'client', 'URL changes: routes, drills, query params, the section in view', ['URL change', 'URL changes'], 'count'),
@@ -79,7 +80,8 @@ export function serverKind(method: string, path: string): string | null {
   if (path === '/api/token') return 'token'
   if (path === '/api/auth/profile' || path === '/api/auth/avatar') return 'profile'
   if (path.startsWith('/api/auth/') || path.startsWith('/api/og/')) return 'access'
-  if (path.startsWith('/api/db') || path === '/api/session-log/switch' || path.startsWith('/api/activity/')) return 'admin'
+  if (path === '/api/digest-op' || path === '/api/digest-image') return 'digest'
+  if (path.startsWith('/api/db') || path === '/api/session-log/switch' || path.startsWith('/api/activity/') || path === '/api/digest-settings') return 'admin'
   return 'write'
 }
 
@@ -273,7 +275,9 @@ export const fmtBytes = (n: number): string => {
 }
 
 /** How a burst names its actor: the email's local part, else the grant's name as given. */
-export const actorName = (actor: string): string => actor.includes('@') ? actor.replace(/@.*$/, '') : actor
+/** A burst actor's short name: an email's local part, a grant's label (`grant:<name>`, or `grant:<id>` unnamed). */
+export const actorName = (actor: string): string =>
+  actor.startsWith('grant:') ? actor.slice('grant:'.length) : actor.includes('@') ? actor.replace(/@.*$/, '') : actor
 
 /** `n noun(s)` for a kind. */
 export const countText = (kind: string, n: number): string => {
@@ -317,6 +321,8 @@ export interface SummaryOpts {
   highlights: Highlights
   /** `/admin/activity?burst=<id>` etc. are built from the burst's origin. */
   topPages?: number
+  /** Who the burst is, as resolved for its sender (a profile's or grant's name); default `actorName(actor)`. */
+  name?: string
 }
 
 const via = (v: string): string => v === 'grant' ? 'agent token / share link' : v === 'public' ? 'signed out' : 'browser'
@@ -331,15 +337,16 @@ const activityLink = (b: Pick<Burst, 'origin' | 'id'>, fmt: Fmt): string => fmt.
 export function renderSummary(b: Burst, o: SummaryOpts): string {
   const { fmt, conf } = o
   const counts = countsText(b, conf)
-  const lines = [`${fmt.bold(actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
+  const lines = [`${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
   return [...lines, ...detailLines(b, o, [activityLink(b, fmt)])].join('\n')
 }
 
-/** A burst's Slack post, one line: the counts, when, the activity link; signed in (`via` session) the post is sent
- *  as the user (`sender`), so the line leaves out who; otherwise it leads with who and how. */
-export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf'>, asUser: boolean): string {
+/** A burst's Slack post, one line: the counts, when, the activity link. Sent as its actor (`asUser`: their name and
+ *  face as the sender) the line leaves out who, keeping how for a grant (`agent token / share link`); otherwise it
+ *  leads with who and how. */
+export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf' | 'name'>, asUser: boolean): string {
   const { fmt, conf } = o
-  const who = asUser ? [] : [`${fmt.bold(actorName(b.actor))} (${via(b.via)})`]
+  const who = asUser ? (b.via === 'session' ? [] : [via(b.via)]) : [`${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)})`]
   return [...who, ...countsText(b, conf), spanText(b), activityLink(b, fmt)].join(' · ')
 }
 
