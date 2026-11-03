@@ -67,6 +67,17 @@ describe('quota pressure', () => {
       .map(r => runwayText(r, f.cfg))).toEqual([', +4.1 Ti/d, ≈8d to full', ', +30.0 Ti/d, ≈<1d to full', ', +1.0 Ti/d, ≈60d to full', '', '', ''])
   })
 
+  it('the runway quota line looks back into the previous month: day 2 of November sees October’s 7-day fill', async () => {
+    const f = await load()
+    const s = (scan: string, hot: number): CwScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
+    const m: CwRows = { template: 'cw', closed: false, pre: [s('2026-10-26T1201', 42)], lead: [s('2026-10-31T1201', 81.8)], rows: [s('2026-11-01T1201', 81.9), s('2026-11-02T1201', 82)] }
+    const line = (rows: CwRows) => opText(rows, '2026-11' as typeof f.month, f.cfg, links, { ...DEFAULT_PARAMS, quotas: 'runway' }).split('\n')[1]
+    // +0.1 Ti/d within November, but 42 → 82 over the week before: orange by the 7-day rate, 18 Ti free ≈ 3 days
+    expect(line(m)).toBe('*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_orange_circle: hot 82.0% of 100Ti (18.0 Ti free), +5.7 Ti/d, ≈3d to full')
+    // without the previous month's scans it would read calm
+    expect(line({ ...m, pre: [] })).toBe('*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_green_circle: hot 82.0% of 100Ti (18.0 Ti free)')
+  })
+
   it('the runway quota line: the replies’ order, a flat full pool green, a filling one red with its rate', async () => {
     const f = await load()
     const s = (scan: string, hot: number): CwScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
