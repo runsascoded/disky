@@ -1,3 +1,5 @@
+import { Memo, reqOf } from './shared.js'
+
 /**
  * Slack Web API + request verification for the staged-deletion review loop
  * (specs/done/staged-slack.md). Pure fetch — no SDK. The bot token is the
@@ -83,4 +85,27 @@ export async function verifySlackSignature(
   let diff = 0
   for (let i = 0; i < want.length; i++) diff |= want.charCodeAt(i) ^ signature.charCodeAt(i)
   return diff === 0
+}
+
+/** A workspace member, as `users.lookupByEmail` returns them. */
+export interface SlackPerson { name: string | null; image: string | null }
+
+// email → member (or null: not in the workspace), per isolate; a lookup pending in another request is joined (`shared.ts`).
+const personMemo = new Memo<SlackPerson | null>('slack-person')
+
+/** Workspace members for `emails` (`users.lookupByEmail`; the bot has
+ *  `users:read.email`). Unknown emails are left out. */
+export async function slackPeople(env: SlackEnv, emails: readonly string[]): Promise<Record<string, SlackPerson>> {
+  const out: Record<string, SlackPerson> = {}
+  await Promise.all([...new Set(emails.map(e => e.toLowerCase()))].map(async e => {
+    const v = await personMemo.get(e, () => (async () => {
+        if (!env.SLACK_BOT_TOKEN) return null
+        const r = await fetch(`https://slack.com/api/users.lookupByEmail?email=${encodeURIComponent(e)}`, { headers: { authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } })
+        const j = (await r.json().catch(() => null)) as { ok?: boolean; user?: { id?: string; deleted?: boolean; real_name?: string; profile?: { real_name?: string; image_192?: string } } } | null
+        const u = j?.ok ? j.user : undefined
+        return u?.id && !u.deleted ? { name: u.profile?.real_name || u.real_name || null, image: u.profile?.image_192 ?? null } : null
+      })().catch(() => null), reqOf(env))
+    if (v) out[e] = v
+  }))
+  return out
 }

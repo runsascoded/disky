@@ -154,6 +154,9 @@ export interface Burst {
   sids: string[]
 }
 
+/** A burst as stored: when it was last rendered, and whether it changed since. */
+export type StoredBurst = Burst & { rendered_ms: number | null; dirty: boolean }
+
 /** A burst's path trail: `n` stops in all (a repeat of the previous path is the same stop, counted), the latest
  *  `TRAIL_KEEP` kept as `[path, views]`. */
 export interface Trail { n: number; last: [string, number][] }

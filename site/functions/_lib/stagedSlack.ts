@@ -13,7 +13,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type FinishedRun, type Gate, planDigest, planItemLines, planRuns, realGate, type RunRow, unstageDeleted } from './plans.js'
-import { slackApi, slackReady, type SlackEnv } from './slack.js'
+import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv } from './slack.js'
 import type { Env } from './auth.js'
 import { pathScans, storeReady } from './index.js'
 import { MAX_PREFIXES, type PrefixStat, prefixesAt } from './prefixes.js'
@@ -23,7 +23,6 @@ import { serverToken } from './og/tokens.js'
 import { canonId, loadRegistry } from './identity.js'
 import type { Registry } from '../../src/identityRegistry.js'
 import { BATCH_GAP_S } from './batchGroups.js'
-import { Memo, reqOf } from './shared.js'
 
 export type { RunRow }
 
@@ -364,29 +363,6 @@ export interface StageArgs { stage: { planId: number; batchId: number; by: strin
  *  dispatch, post as them). */
 export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null }
 
-/** A workspace member, as `users.lookupByEmail` returns them. */
-export interface SlackPerson { name: string | null; image: string | null }
-
-// email → member (or null: not in the workspace), per isolate; a lookup pending in another request is joined (`shared.ts`).
-const personMemo = new Memo<SlackPerson | null>('slack-person')
-
-/** Workspace members for `emails` (`users.lookupByEmail`; the bot has
- *  `users:read.email`). Unknown emails are left out. */
-export async function slackPeople(env: SlackEnv, emails: readonly string[]): Promise<Record<string, SlackPerson>> {
-  const out: Record<string, SlackPerson> = {}
-  await Promise.all([...new Set(emails.map(e => e.toLowerCase()))].map(async e => {
-    const v = await personMemo.get(e, () => (async () => {
-        if (!env.SLACK_BOT_TOKEN) return null
-        const r = await fetch(`https://slack.com/api/users.lookupByEmail?email=${encodeURIComponent(e)}`, { headers: { authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } })
-        const j = (await r.json().catch(() => null)) as { ok?: boolean; user?: { id?: string; deleted?: boolean; real_name?: string; profile?: { real_name?: string; image_192?: string } } } | null
-        const u = j?.ok ? j.user : undefined
-        return u?.id && !u.deleted ? { name: u.profile?.real_name || u.real_name || null, image: u.profile?.image_192 ?? null } : null
-      })().catch(() => null), reqOf(env))
-    if (v) out[e] = v
-  }))
-  return out
-}
-
 /** How automatic posts name `emails`: their Slack names where the workspace
  *  knows them (callers fall back to the local part). */
 export async function slackNames(env: SlackEnv, emails: readonly string[]): Promise<Names> {
@@ -397,6 +373,8 @@ export async function slackNames(env: SlackEnv, emails: readonly string[]): Prom
 /** Who a message posts as (`username` / `icon_*`; honoured only with the
  *  `chat:write.customize` scope, ignored otherwise). The thread's parent is
  *  the plan itself; an event posts as the person who did it. */
+export { slackPeople, type SlackPerson }
+
 export interface Sender { username: string; icon_url?: string; icon_emoji?: string }
 /** `email` as the deployment's registry knows them (the site's own name and GitHub avatar), for someone the Slack
  *  workspace doesn't (a sign-in email outside it). */

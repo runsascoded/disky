@@ -7,7 +7,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
-import { slackApi, type SlackEnv, slackScopes } from './slack.js'
+import { slackApi, type SlackEnv, slackPeople, slackScopes } from './slack.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
   addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
@@ -70,7 +70,8 @@ interface BurstRow {
   id: number; actor: string; via: string; origin: string; first_ts: number; last_ts: number
   counts: string; pages: string; trail: string; sids: string; rendered_ms: number | null; dirty: number
 }
-export type StoredBurst = Burst & { rendered_ms: number | null; dirty: boolean }
+import type { StoredBurst } from './activityShape.js'
+export type { StoredBurst }
 
 const parse = (r: BurstRow): StoredBurst => ({
   id: r.id, actor: r.actor, via: r.via, origin: r.origin, first_ts: r.first_ts, last_ts: r.last_ts,
@@ -309,12 +310,16 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   const s = sinks(env)
   if (s.slack) {
     const channel = env.SLACK_ADMIN_CHANNEL!
-    // A signed-in burst posts as its user (a `username` override on the bot's own post: the name only, since profile
-    // faces are stored inline, never at a URL Slack could fetch), when the installed app may override the sender;
-    // otherwise the line itself says who. The post is one line, everything else in the thread.
+    // A signed-in burst posts as its user (`username` / `icon_url` overrides on the bot's own post), when the installed
+    // app may override the sender; otherwise the line itself says who. The face is the user's Slack profile image (the
+    // site's profile faces are stored inline, never at a URL Slack could fetch); someone the workspace doesn't know
+    // keeps the app's icon. The post is one line, everything else in the thread.
     const asUser = b.via === 'session' && (await slackScopes(env)).has('chat:write.customize')
+    const person = asUser
+      ? (await slackPeople(env, [b.actor]))[b.actor.toLowerCase()]
+      : undefined
     const sender = asUser
-      ? { username: senderName(b.actor, (await db.prepare('SELECT name FROM profiles WHERE email = ?').bind(b.actor).first<{ name: string | null }>())?.name) }
+      ? { username: senderName(b.actor, (await db.prepare('SELECT name FROM profiles WHERE email = ?').bind(b.actor).first<{ name: string | null }>())?.name), ...(person?.image ? { icon_url: person.image } : {}) }
       : {}
     const text = renderHeadline(b, { fmt: SLACK, conf }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
