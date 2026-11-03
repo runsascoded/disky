@@ -11,7 +11,11 @@ With `PAGES` (an int), the same store cut in `PAGES`-row data pages with a page 
 (2b.1's page reads; `diffLevel.test.ts` checks both answer `expected.json`). `interval-store/` was cut before served
 sorts carried a page index, and stays so: the reader's whole-group path for older generations.
 
-    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES]
+With `level`, the same store built with the level sort (`build -l`; its runs carry it), in 2-row pages, under
+`interval-store-level/` (`/api/diff/level`'s level index, specs/diff-progressive.md §3b); `expected.json` is checked, not
+rewritten.
+
+    cloud/.venv-or-root/bin/python site/functions/_lib/fixtures/iv-churn/gen.py [PAGES | level]
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ def _load(name: str):
     return m
 
 
-def main(pages: int | None = None) -> None:
+def main(pages: int | None = None, with_level: bool = False) -> None:
     from dt_cloud import interval_local as il
     from dt_cloud import interval_store as ist
     from dt_cloud import static_names as sn
@@ -61,10 +65,11 @@ def main(pages: int | None = None) -> None:
         scans.append({"id": d, "ts": sn.scan_epoch(d)})
         files.append(fs)
     common = ["-g", "g", "-L", LAYOUT, "-s", str(work / "scans"), "-o", str(work / "store"), "-r", "4", "-p", "2", "-M", "1GB"]
-    for cmd, extra in [(il.build_cmd, ["-w", str(work / "build"), "-k", "3", "-t", t.DATES[BASE - 1]]), (il.add_cmd, ["-w", str(work / "add")])]:
+    build = ["-w", str(work / "build"), "-k", "3", "-t", t.DATES[BASE - 1], *(["-l"] if with_level else [])]
+    for cmd, extra in [(il.build_cmd, build), (il.add_cmd, ["-w", str(work / "add")])]:
         res = CliRunner().invoke(cmd, [*common, *extra], catch_exceptions=False)
         assert res.exit_code == 0, res.output
-    out = HERE / (f"interval-store-p{pages}" if pages else "interval-store")
+    out = HERE / ("interval-store-level" if with_level else f"interval-store-p{pages}" if pages else "interval-store")
     shutil.rmtree(out, ignore_errors=True)
     # What the Worker reads: the served sorts, `scans.json`, the manifests and the runs' `meta.json` / `scans.json`.
     shutil.copytree(work / "store" / ist.PREFIX / "g", out / "g", ignore=shutil.ignore_patterns("verify", "state", "lease", "pv", "pvl", "rd", "ranges", "digest"))
@@ -79,7 +84,11 @@ def main(pages: int | None = None) -> None:
                 a = level(files, i, j, p)
                 if a is not None:
                     expected.append({"from": scans[i]["id"], "to": scans[j]["id"], **a})
-    (HERE / "expected.json").write_text(json.dumps(expected, indent=1, sort_keys=True) + "\n")
+    text = json.dumps(expected, indent=1, sort_keys=True) + "\n"
+    if with_level:
+        assert (HERE / "expected.json").read_text() == text, "the level fixture's scans differ from expected.json's"
+    else:
+        (HERE / "expected.json").write_text(text)
     shutil.rmtree(work)
     print(f"{len(expected)} level answers", file=sys.stderr)
 
@@ -129,4 +138,5 @@ def level(files: list[dict[str, int]], i: int, j: int, p: str) -> dict | None:
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]) if len(sys.argv) > 1 else None)
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    main(2, with_level=True) if arg == "level" else main(int(arg) if arg else None)
