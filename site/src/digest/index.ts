@@ -1,6 +1,6 @@
 /** The digest OP renderer (specs/slack-preview-page.md): a month's rows + the digest config + params → the OP's text
- * and its plot's `/api/digest-image` request, for either template. The job's renderer (`dt_cloud.digest_cw` /
- * `digest_gcs`) produces the same bytes under `DEFAULT_PARAMS` (`./parity.test.ts`). Pure; DOM-free. */
+ * and its plot's `/api/digest-image` request, for either template: the only OP renderer (the job posts the rows to
+ * `/api/digest-op`; goldens: `./parity.test.ts`). Pure; DOM-free. */
 import { DEFAULT_PARAMS, type DigestCfg, type DigestParams, monthOf, type OpLinks } from './common'
 import * as cw from './cw'
 import * as gcs from './gcs'
@@ -39,7 +39,7 @@ export interface PreviewBundle {
   rows: DigestRows
   op: string
   image: Record<string, unknown>
-  /** The params the OP was rendered under (`renderer: site`); absent or `''`: the defaults. */
+  /** The params the OP was rendered under; absent or `''`: the defaults. */
   params?: string
   /** The month's replies as posted, newest first (absent in bundles before 2026-11-02). */
   replies?: PreviewReply[]
