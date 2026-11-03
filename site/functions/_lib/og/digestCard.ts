@@ -349,3 +349,111 @@ export function tiersSvg(d: TiersCardInput): string {
   if (d.diff) y = diffSection(d.diff, UNITS[units].fmt, y + 14, out)
   return page(y, out)
 }
+
+// ---- the quota-pools card ---------------------------------------------------------------------------------------
+
+/** One quota pool's series: its name, quota (bytes) and used bytes per scan. */
+export interface PoolSeries { name: string; quota: number; points: DigestPoint[] }
+
+/** The pools' line colours, in request order. */
+export const POOL_COLORS = [S1, '#e3b341', '#2dd4bf', '#a78bfa', '#f472b6', '#4ade80', '#fb923c', '#94a3b8']
+/** The most pools a card draws. */
+export const MAX_POOLS = POOL_COLORS.length
+/** A pool that stayed under this share (%) across the span is drawn faint, unlabelled, and listed under the chart. */
+export const FAINT_PCT = 20
+const AMBER = '#e3b341'
+
+export interface PoolsCardInput {
+  title: string
+  note: string
+  pools: PoolSeries[]
+  from: number
+  to: number
+  month?: number
+  /** Where the amber band ends and the marks turn red (%); the band starts 10 points below. */
+  alertPct: number
+  diff?: { root: DiffNode; title: string } | null
+  units?: DigestUnits
+}
+
+/** Labels' y's pushed apart to at least `gap`, kept inside `[lo, hi]` (order preserved). */
+export function spread(ys: number[], gap: number, lo: number, hi: number): number[] {
+  const order = ys.map((y, i) => [y, i] as const).sort((a, b) => a[0] - b[0])
+  const out = order.map(([y]) => y)
+  for (let k = 1; k < out.length; k++) out[k] = Math.max(out[k], out[k - 1] + gap)
+  const over = out.length ? out[out.length - 1] - hi : 0
+  if (over > 0) for (let k = out.length - 1; k >= 0; k--) out[k] = Math.min(out[k] - over, k < out.length - 1 ? out[k + 1] - gap : Infinity)
+  for (let k = 0; k < out.length; k++) out[k] = Math.max(out[k], lo + k * gap)
+  const res = new Array<number>(ys.length)
+  order.forEach(([, i], k) => { res[i] = out[k] })
+  return res
+}
+
+/** The quota-pools digest image's SVG, `DIGEST_W` wide (specs/digest-quota-pressure.md): every pool's share of its
+ *  own quota on one % axis, the quota a rule at 100% (amber from `alertPct` − 10, red above 100), each line labelled
+ *  at its latest point; quiet pools faint and listed under the chart; then the diff map when given. */
+export function poolsSvg(d: PoolsCardInput): string {
+  const w = DIGEST_W - 2 * PAD
+  const { fmt } = UNITS[d.units ?? 'TiB']
+  const out = [header(d.title, d.note)]
+  const y0 = PAD + 36
+  const h = CHART_H
+  const series = d.pools.map((p, i) => {
+    const pcts = p.points.map(q => (100 * q.bytes) / p.quota)
+    return { ...p, color: POOL_COLORS[i % POOL_COLORS.length], pcts, faint: Math.max(...pcts) < FAINT_PCT }
+  })
+  const peak = Math.max(100, ...series.flatMap(s => s.pcts))
+  const hi = Math.ceil(peak / 10) * 10 + 5
+  // the loud pools' labels sit in a gutter right of the plot, never over the lines (the latest scan is often at the
+  // plot's right edge)
+  const loud = series.filter(s => !s.faint && s.points.length)
+  const labelOf = (s: (typeof series)[number]) => `${s.name} ${Math.round(s.pcts[s.pcts.length - 1])}%`
+  const gutter = loud.length ? Math.max(...loud.map(s => interWidth(labelOf(s), 12, 600))) + 14 : 0
+  const f = frame(d, PAD, w - gutter)
+  const { left, pw, X } = f
+  const Y = (v: number) => y0 + h - (v / hi) * h
+  out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  // the pressure bands: amber up to the quota, red past it
+  const amber = Math.max(0, d.alertPct - 10)
+  out.push(`<rect x="${r1(left)}" y="${r1(Y(100))}" width="${r1(pw)}" height="${r1(Y(amber) - Y(100))}" fill="${AMBER}" fill-opacity="0.10"/>`)
+  out.push(`<rect x="${r1(left)}" y="${r1(Y(hi))}" width="${r1(pw)}" height="${r1(Y(100) - Y(hi))}" fill="${DANGER}" fill-opacity="0.12"/>`)
+  out.push(...monthShade(d, f, y0, h))
+  for (const v of [0, 25, 50, 75, 100, ...(hi > 125 ? [125, 150, 175, 200].filter(t => t < hi) : [])]) {
+    out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
+    out.push(text(left - 6, Y(v) + 4, `${v}%`, 11, { fill: INK3, anchor: 'end' }))
+  }
+  out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(100))}" y2="${r1(Y(100))}" stroke="${DANGER}" stroke-width="2"/>`)
+  out.push(text(left + 6, Y(100) - 6, 'quota (each pool’s own)', 12, { fill: DANGER, weight: 600 }))
+  out.push(...mondays(d, X, y0 + h))
+  // faint pools first, so the pressing ones draw over them
+  const order = [...series].sort((a, b) => Number(b.faint) - Number(a.faint))
+  for (const s of order) {
+    if (!s.points.length) continue
+    const line = s.points.map((p, i) => `${r1(X(p.t))},${r1(Y(s.pcts[i]))}`).join(' ')
+    if (s.points.length === 1) out.push(`<circle cx="${r1(X(s.points[0].t))}" cy="${r1(Y(s.pcts[0]))}" r="3" fill="${s.faint ? INK3 : s.color}"/>`)
+    else out.push(`<polyline points="${line}" fill="none" stroke="${s.faint ? INK3 : s.color}" stroke-opacity="${s.faint ? 0.45 : 1}" stroke-width="${s.faint ? 1.5 : 2.2}" stroke-linejoin="round"/>`)
+  }
+  // each loud pool's latest point, its label in the gutter (pushed apart vertically, a leader when moved off its line)
+  const labels = loud.map(s => {
+    const i = s.points.length - 1
+    return { s, x: X(s.points[i].t), y: Y(s.pcts[i]), label: labelOf(s) }
+  })
+  const ys = spread(labels.map(l => l.y + 4), 15, y0 + 12, y0 + h - 2)
+  const gx = left + pw + 8
+  labels.forEach((l, k) => {
+    out.push(`<circle cx="${r1(l.x)}" cy="${r1(l.y)}" r="3.5" fill="${l.s.color}"/>`)
+    if (Math.abs(ys[k] - 4 - l.y) > 2 || gx - l.x > 12) {
+      out.push(`<polyline points="${r1(l.x + 4)},${r1(l.y)} ${r1(gx - 6)},${r1(l.y)} ${r1(gx - 2)},${r1(ys[k] - 4)}" fill="none" stroke="${l.s.color}" stroke-opacity="0.6"/>`)
+    }
+    out.push(text(gx, ys[k], l.label, 12, { fill: l.s.color, weight: 600 }))
+  })
+  let y = y0 + h + 30
+  const quiet = series.filter(s => s.faint && s.points.length)
+  if (quiet.length) {
+    const s = `also: ${quiet.map(q => `${q.name} ${Math.round(q.pcts[q.pcts.length - 1])}%`).join(' · ')}`
+    out.push(text(left, y, s, 12, { fill: INK3 }))
+    y += 16
+  }
+  if (d.diff) y = diffSection(d.diff, fmt, y, out)
+  return page(y, out)
+}

@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { DEFAULT_PALETTE } from '@open-athena/treemap'
 import { pow10 } from './stats'
@@ -246,6 +246,15 @@ const PAD = { top: 12, right: 16, bottom: 24, left: 56 }
 export const TS_PAD = { left: PAD.left, right: PAD.right } as const
 /** Height of the window's grip: a strip along the band's top edge that slides the window (anywhere else brushes). */
 const GRIP = 12
+/** How near (px) a press must land to a window edge to drag that edge alone: a fingertip gets a wide target. */
+const EDGE_HIT = { touch: 22, other: 6 } as const
+/** Holding a dragged edge this still (within `HOLD_SLOP` px) for `HOLD_MS` enters fine mode: one point per `FINE_PX`
+ *  of finger travel, whatever the chart's spacing (the video-trim "hold to zoom"). */
+const HOLD_MS = 350
+const HOLD_SLOP = 5
+const FINE_PX = 28
+/** Neighbours shown each side of the edge in fine mode's loupe. */
+const LOUPE = 3
 
 function niceTicks(min: number, max: number, count: number, log = false): number[] {
   if (log) {
@@ -429,30 +438,102 @@ export function TimeSeries<T>({
     return y >= pad.top && y <= pad.top + GRIP
   }
   const [hoverGrip, setHoverGrip] = useState(false)
+  /** The window edge (0 = start, 1 = end) within reach of a pointer at clientX, else null: a press there drags that
+   *  edge alone, the other staying put. */
+  const nearEdge = (clientX: number, touch: boolean): 0 | 1 | 'both' | null => {
+    const el = svgRef.current
+    if (!el || !xWindow) return null
+    const px = clientX - el.getBoundingClientRect().left
+    const reach = touch ? EDGE_HIT.touch : EDGE_HIT.other
+    const ds = xWindow.map(x => (x >= xMin && x <= xMax ? Math.abs(xToPx(x) - px) : Infinity))
+    if (ds[0] <= reach && ds[1] <= reach) return 'both'
+    const i = ds[0] <= ds[1] ? 0 : 1
+    return ds[i] <= reach ? i : null
+  }
+  /** Both edges were in reach of the press (a narrow window): the first step decides — leftward moves the start,
+   *  rightward the end — so the window never flips inside out. */
+  const eitherEdgeRef = useRef(false)
+  /** The dragged edge's x at the press (a release back on it changes nothing). */
+  const edgeFromRef = useRef<number | null>(null)
+  const [hoverEdge, setHoverEdge] = useState(false)
+  // Fine mode (a held-still edge): its anchor is the pointer's x and the edge's point index when it began.
+  const fineRef = useRef<{ clientX: number; i: number } | null>(null)
+  const [fine, setFine] = useState(false)
+  const holdRef = useRef<{ t: ReturnType<typeof setTimeout> | null; clientX: number }>({ t: null, clientX: 0 })
+  const lastXRef = useRef(0)
+  const touchRef = useRef(false)
+  const movedRef = useRef(false)
+  /** A short tick as a dragged edge crosses onto another point (touch only; a no-op where `vibrate` is missing). */
+  const buzz = (ms = 4) => { if (touchRef.current) navigator.vibrate?.(ms) }
+  const armHold = (clientX: number) => {
+    const h = holdRef.current
+    if (h.t) clearTimeout(h.t)
+    h.clientX = clientX
+    h.t = setTimeout(() => {
+      h.t = null
+      const d = dragRef.current
+      if (!d || slideRef.current || fineRef.current) return
+      fineRef.current = { clientX: lastXRef.current, i: idxOf(d.x1) }
+      setFine(true)
+      buzz(12)
+    }, HOLD_MS)
+  }
+  const endHold = () => {
+    if (holdRef.current.t) clearTimeout(holdRef.current.t)
+    holdRef.current.t = null
+    fineRef.current = null
+    setFine(false)
+  }
+  useEffect(() => () => { if (holdRef.current.t) clearTimeout(holdRef.current.t) }, [])
   const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const x = xAt(e.clientX)
     setHoverX(x)
-    setHoverGrip(onGrip(x, e.clientY))
     const d = dragRef.current
-    if (!d || x == null) return
+    if (!d) {
+      setHoverGrip(onGrip(x, e.clientY))
+      setHoverEdge(!!onBrush && nearEdge(e.clientX, e.pointerType === 'touch') != null)
+      return
+    }
+    lastXRef.current = e.clientX
     const s = slideRef.current
     if (s) {
+      if (x == null) return
       // Sliding: shift the fixed-span window by the pointer's index delta.
       const i0 = Math.max(0, Math.min(xsSorted.length - 1 - s.span, s.i0 + (idxOf(x) - s.start)))
       const x0 = xsSorted[i0]
-      if (x0 !== d.x0) setDrag({ x0, x1: xsSorted[i0 + s.span] })
-    } else if (x !== d.x1) setDrag({ x0: d.x0, x1: x })
+      if (x0 !== d.x0) { movedRef.current = true; setDrag({ x0, x1: xsSorted[i0 + s.span] }); buzz() }
+      return
+    }
+    const f = fineRef.current
+    if (!f && Math.abs(e.clientX - holdRef.current.clientX) > HOLD_SLOP) armHold(e.clientX)
+    const x1 = f
+      ? xsSorted[Math.max(0, Math.min(xsSorted.length - 1, f.i + Math.round((e.clientX - f.clientX) / FINE_PX)))]
+      : x
+    if (x1 == null || x1 === d.x1) return
+    let x0 = d.x0
+    if (eitherEdgeRef.current && xWindow) {
+      eitherEdgeRef.current = false
+      const left = x1 < d.x1
+      x0 = left ? xWindow[1] : xWindow[0]
+      edgeFromRef.current = left ? xWindow[0] : xWindow[1]
+    }
+    movedRef.current = true
+    setDrag({ x0, x1 })
+    buzz()
   }
   // Pointer events, so a finger brushes like a mouse: `touch-action: pan-y`
   // leaves vertical swipes to the page, and a horizontal drag reaches here. A
   // cancelled gesture (the browser took it over as a scroll) drops the drag.
   const onEnd = (commit: (up: PointerEvent) => void) => {
-    const up = (ev: PointerEvent) => { off(); commit(ev) }
-    const cancel = () => { off(); slideRef.current = null; setDrag(null) }
+    const up = (ev: PointerEvent) => { off(); commit(ev); endHold() }
+    const cancel = () => { off(); slideRef.current = null; setDrag(null); endHold() }
     const off = () => { window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel) }
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', cancel)
   }
+  /** Where a release puts the moving edge: in fine mode the edge as last drawn (the finger is off it by design),
+   *  else under the pointer (a drag often ends past the plot's edge). */
+  const releaseX = (up: PointerEvent, d: { x1: number }): number => (fineRef.current ? d.x1 : xAt(up.clientX) ?? d.x1)
   const onDown = (e: React.PointerEvent<SVGSVGElement>) => {
     if (!onBrush || !e.isPrimary || e.button !== 0) return
     e.preventDefault() // no text selection while dragging
@@ -460,6 +541,9 @@ export function TimeSeries<T>({
     if (x == null) return
     setHoverX(x)
     e.currentTarget.setPointerCapture?.(e.pointerId)
+    touchRef.current = e.pointerType === 'touch'
+    movedRef.current = false
+    lastXRef.current = e.clientX
     // A press on the window's grip slides it (keeps its point span); any other
     // press brushes a fresh window.
     if (onGrip(x, e.clientY) && xWindow && xsSorted.length > 1) {
@@ -479,14 +563,33 @@ export function TimeSeries<T>({
       })
       return
     }
+    // A press on (or, by finger, near) a window edge drags that edge; the other stays.
+    const edge = nearEdge(e.clientX, touchRef.current)
+    if (edge != null && xWindow) {
+      const i = edge === 'both' ? 1 : edge
+      eitherEdgeRef.current = edge === 'both'
+      edgeFromRef.current = xWindow[i]
+      setDrag({ x0: xWindow[1 - i], x1: xWindow[i] })
+      armHold(e.clientX)
+      onEnd(up => {
+        const d = dragRef.current
+        eitherEdgeRef.current = false
+        if (!d) return
+        setDrag(null)
+        const x1 = releaseX(up, d)
+        if (x1 === edgeFromRef.current) { if (!movedRef.current) onPickX?.(x) }
+        else if (x1 !== d.x0) onBrush(Math.min(d.x0, x1), Math.max(d.x0, x1))
+      })
+      return
+    }
     setDrag({ x0: x, x1: x })
-    // Commit on the release wherever it lands (a drag often ends past the
-    // plot's edge), from the pointer's own x rather than the last move.
+    armHold(e.clientX)
+    // Commit on the release wherever it lands, from the pointer's own x rather than the last move.
     onEnd(up => {
       const d = dragRef.current
       if (!d) return
       setDrag(null)
-      const x1 = xAt(up.clientX) ?? d.x1
+      const x1 = releaseX(up, d)
       if (x1 === d.x0) onPickX?.(d.x0)
       else onBrush(Math.min(d.x0, x1), Math.max(d.x0, x1))
     })
@@ -536,12 +639,14 @@ export function TimeSeries<T>({
           width={dims.w}
           height={dims.h}
           onPointerMove={onMove}
-          onPointerLeave={() => { if (!dragRef.current) { setHoverX(null); setHoverGrip(false) } }}
+          onPointerLeave={() => { if (!dragRef.current) { setHoverX(null); setHoverGrip(false); setHoverEdge(false) } }}
+          // A long press is a hold (fine mode), never the browser's context menu / selection.
+          onContextMenu={onBrush ? e => e.preventDefault() : undefined}
           onPointerDown={onDown}
           // With a brush, clicks resolve in mouseup (a zero-width drag) — a
           // separate click handler would fire the pick twice.
           onClick={onPickX && !onBrush ? () => { if (hoverX != null) onPickX(hoverX) } : undefined}
-          style={{ display: 'block', cursor: drag ? (slideRef.current ? 'grabbing' : 'col-resize') : onBrush ? (hoverGrip ? 'grab' : 'crosshair') : onPickX ? 'pointer' : undefined, userSelect: 'none', touchAction: onBrush ? 'pan-y' : undefined }}
+          style={{ display: 'block', cursor: drag ? (slideRef.current ? 'grabbing' : 'col-resize') : onBrush ? (hoverGrip ? 'grab' : hoverEdge ? 'ew-resize' : 'crosshair') : onPickX ? 'pointer' : undefined, userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none', WebkitTapHighlightColor: 'transparent', touchAction: onBrush ? 'pan-y' : undefined }}
         >
           {/* Window band (the highlighted x-range, or the drag in progress) */}
           {band && band[1] > band[0] && (
@@ -575,6 +680,20 @@ export function TimeSeries<T>({
                   fill={hoverGrip || drag ? 'var(--dt-ts-grip-hover, rgba(255,255,255,0.28))' : 'var(--dt-ts-grip, rgba(255,255,255,0.14))'}
                 />
               )}
+              {/* The edges' handles: press one (a finger gets a wide target) to move that end alone. */}
+              {onBrush && [band[0], band[1]].map((x, i) => (
+                <rect
+                  key={`h${i}`}
+                  className="dt-ts-handle"
+                  x={xToPx(x) - 3}
+                  y={pad.top + plotH / 2 - Math.min(14, plotH / 4)}
+                  width={6}
+                  height={Math.min(28, plotH / 2)}
+                  rx={3}
+                  fill="var(--dt-ts-handle, rgba(255,255,255,0.7))"
+                  stroke="var(--dt-ts-handle-edge, rgba(0,0,0,0.4))"
+                />
+              ))}
             </g>
           )}
           {/* Gaps: each stretch of x's without data, shaded. */}
@@ -799,6 +918,56 @@ export function TimeSeries<T>({
           </div>
         )
       })}
+      {/* While dragging: the point the moving edge snaps to, above the finger (which hides the chart), and in fine
+          mode a loupe of its neighbours at the fine spacing. */}
+      {drag && (() => {
+        const fmt = formatTipX ?? formatX
+        const slide = !!slideRef.current
+        const n = Math.abs(idxOf(drag.x1) - idxOf(drag.x0))
+        const left = Math.max(pad.left, Math.min(dims.w - pad.right, xToPx(slide ? (drag.x0 + drag.x1) / 2 : drag.x1)))
+        const i = idxOf(drag.x1)
+        return (
+          <div
+            className="dt-ts-drag-label"
+            style={{
+              position: 'absolute',
+              left,
+              top: pad.top + 2,
+              transform: `translateX(${left < pad.left + 60 ? '0' : left > dims.w - pad.right - 60 ? '-100%' : '-50%'})`,
+              background: 'var(--dt-ts-tip-bg, rgba(20,20,24,0.94))',
+              color: 'var(--dt-ts-tip-ink, #e6e6ea)',
+              border: `1px solid ${fine ? 'var(--dt-ts-fine, #d29922)' : 'var(--dt-ts-tip-border, #333)'}`,
+              borderRadius: 4,
+              padding: '3px 8px',
+              fontSize: 12,
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+              textAlign: 'center',
+            }}
+          >
+            <b>{slide ? <>{fmt(drag.x0)} → {fmt(drag.x1)}</> : fmt(drag.x1)}</b>
+            {n > 0 && <span style={{ opacity: 0.7 }}> · {n} {n === 1 ? 'step' : 'steps'}</span>}
+            {fine && (
+              <div className="dt-ts-loupe" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 12, marginTop: 2 }}>
+                {Array.from({ length: 2 * LOUPE + 1 }, (_, k) => i - LOUPE + k).map(j => (
+                  <span
+                    key={j}
+                    style={{
+                      width: FINE_PX / 2, display: 'flex', justifyContent: 'center',
+                      visibility: j >= 0 && j < xsSorted.length ? 'visible' : 'hidden',
+                    }}
+                  >
+                    <span style={{
+                      width: j === i ? 8 : 4, height: j === i ? 8 : 4, borderRadius: '50%',
+                      background: j === i ? 'var(--dt-ts-fine, #d29922)' : 'currentColor', opacity: j === i ? 1 : 0.5,
+                    }} />
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })()}
       {/* Tooltip */}
       {tip && hoverX != null && (
         <div

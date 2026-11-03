@@ -123,7 +123,7 @@ async function cover(ctx0: Ctx): Promise<Response> {
       return await cacheStore(ctx.env, cacheKey, JSON.stringify(body), { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
     }
 
-    const found =await st.time('roots', allMatchRoots(ctx.env, { date, path, query }))
+    const found = await st.time('roots', allMatchRoots(ctx.env, { date, path, query }))
     const roots = found?.roots ?? []
     const sum = { n: roots.length, b: roots.reduce((n, r) => n + r.b, 0), o: roots.reduce((n, r) => n + r.o, 0) }
     const why = found?.rollup ? 'There are too many matches under this folder to list them. Open a folder below to act on its matches.'

@@ -34,6 +34,27 @@ export async function slackApi(env: SlackEnv, method: string, body: Record<strin
   }
 }
 
+const scopeCache = new Map<string, Promise<ReadonlySet<string>>>()
+
+/** The bot token's granted scopes, as installed (Slack's `X-OAuth-Scopes` header on `auth.test`), once per token per
+ *  isolate; empty when the call fails. What a post may rely on: `chat:write.customize` is what makes a `username`
+ *  override show (without it Slack drops the override silently). */
+export function slackScopes(env: SlackEnv): Promise<ReadonlySet<string>> {
+  const token = env.SLACK_BOT_TOKEN
+  if (!token) return Promise.resolve(new Set())
+  let p = scopeCache.get(token)
+  if (!p) {
+    p = fetch('https://slack.com/api/auth.test', { method: 'POST', headers: { authorization: `Bearer ${token}` } })
+      .then(r => new Set((r.headers.get('x-oauth-scopes') ?? '').split(',').map(x => x.trim()).filter(Boolean)))
+      .catch(e => { console.log(`slack auth.test threw: ${(e as Error).message}`); return new Set<string>() })
+    scopeCache.set(token, p)
+  }
+  return p
+}
+
+/** Forget the cached scopes (tests). */
+export const resetSlackScopes = (): void => scopeCache.clear()
+
 /** A Slack user's email (`users.info`, needs `users:read.email`), lowercased, or null. */
 export async function slackUserEmail(env: SlackEnv, userId: string): Promise<string | null> {
   if (!env.SLACK_BOT_TOKEN) return null

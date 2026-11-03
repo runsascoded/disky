@@ -142,7 +142,39 @@ describe('parseDigestRequest: common', () => {
       { ...tiers, units: 'PiB' },
       { ...tiers, points: {} },
     ].map(parseDigestRequest)).toEqual([
-      'title and note required', 'title and note required', "kind: 'usage' | 'tiers'", 'month: YYYY-MM', "units: 'TiB' | 'TB'", 'points: an array',
+      'title and note required', 'title and note required', "kind: 'usage' | 'tiers' | 'pools'", 'month: YYYY-MM', "units: 'TiB' | 'TB'", 'points: an array',
     ])
+  })
+})
+
+describe('parseDigestRequest: pools', () => {
+  const pools = {
+    kind: 'pools', title: 'CoreWeave usage — October 2026', note: 'cw.oa.dev · TiB', month: '2026-10', alert_pct: 85,
+    pools: [
+      { name: '02a', quota: 910 * T, points: [{ scan: '2026-10-02', bytes: 700 * T }, { scan: '2026-10-01T1236', bytes: 690 * T }] },
+      { name: 'rno2a zone', quota: 100 * T, points: [{ scan: '2026-10-02', bytes: 101 * T }] },
+    ],
+  }
+  it('parses each pool (points time-sorted) and the alert share, over the frame of every pool’s scans', () => {
+    expect(parseDigestRequest(pools)).toEqual({
+      kind: 'pools', title: 'CoreWeave usage — October 2026', note: 'cw.oa.dev · TiB', units: 'TiB',
+      from: OCT - 16 * H, to: NOV - 8 * H, month: OCT, alertPct: 85,
+      pools: [
+        { name: '02a', quota: 910 * T, points: [{ t: Date.UTC(2026, 9, 1, 12, 36), bytes: 690 * T }, { t: Date.UTC(2026, 9, 2), bytes: 700 * T }] },
+        { name: 'rno2a zone', quota: 100 * T, points: [{ t: Date.UTC(2026, 9, 2), bytes: 101 * T }] },
+      ],
+      diff: null,
+    })
+    expect((parseDigestRequest({ ...pools, alert_pct: undefined }) as { alertPct: number }).alertPct).toBe(90)
+  })
+  it('refuses no pools, a zero quota, a bad point, a bad alert share, or pools with no points at all', () => {
+    const bad = 'pools: [{name, quota > 0, points: [{scan, bytes}]}]'
+    expect([
+      parseDigestRequest({ ...pools, pools: [] }),
+      parseDigestRequest({ ...pools, pools: [{ ...pools.pools[0], quota: 0 }] }),
+      parseDigestRequest({ ...pools, pools: [{ ...pools.pools[0], points: [{ scan: 'x', bytes: 1 }] }] }),
+      parseDigestRequest({ ...pools, alert_pct: 0 }),
+      parseDigestRequest({ ...pools, pools: pools.pools.map(pl => ({ ...pl, points: [] })) }),
+    ]).toEqual(['pools: 1–8 [{name, quota, points: [{scan, bytes}]}]', bad, bad, 'alert_pct: (0, 100]', 'pools: at least one point'])
   })
 })

@@ -219,6 +219,45 @@ def test_tail_zone_shared_quota():
     )
 
 
+def test_tail_circles_fullest_first():
+    """`quota_marks: circles`: the clauses fullest first (a bucket without a quota last, unmarked), red at or over
+    `mark_pct` (`alert_pct`, else 90), orange within 10 points below, yellow within 40, green under; the zone's fill is
+    its members' sum."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="circles", buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8"),
+        "side-data": E.Bucket("side", z8, "z8"),
+        "cold-data": E.Bucket("cold", z8),
+    })
+    day = D.DayRow(
+        date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0,
+        since=None, extra={"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 12.4},
+    )
+    u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"  # noqa: E731
+    main = f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
+    zone = f"[hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+    cold = f":large_green_circle: [cold]({u('cold-data')}): 12%"  # under `QUIET_PCT`: the bare share
+    more = f"[more-data]({u('more-data')}): 2 Ti"
+    assert D._tail(day, cfg).split(" · ") == [f":red_circle: {main}", f":large_orange_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=95)).split(" · ") == [f":large_orange_circle: {main}", f":large_orange_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=96)).split(" · ") == [f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=85)).split(" · ") == [f":red_circle: {main}", f":red_circle: {zone}", cold, more]
+    # past its quota a pool reads `over`, and stays red whatever `alert_pct` is
+    full = replace(day, extra={**day.extra, "cold-data": 101.3})
+    assert D._tail(full, replace(cfg, alert_pct=100)).split(" · ") == [
+        f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)", f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", more]
+    # the default (`warning`): config order, full clauses, `:warning:` only at or over `alert_pct`
+    assert D._tail(day, replace(cfg, quota_marks="warning", alert_pct=90)).split(" · ") == [
+        f":warning: {main}", zone, more, f"[cold]({u('cold-data')}): 12.4% of 100Ti (87.6 Ti free)"]
+
+
+def test_quota_marks_must_be_known():
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "quota_marks": "squares"})
+    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles')"
+
+
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
     """A multi-bucket scan's meta.json (specs/done/cw-multi-bucket.md §2)."""
     return {

@@ -7,11 +7,12 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
-import { slackApi, type SlackEnv } from './slack.js'
+import { slackApi, type SlackEnv, slackScopes } from './slack.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
   addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
-  type KindRow, type KindsConf, mergeKinds, renderDiscord, renderLines, renderSummary, reported, type ServerEvent, sessionUrl,
+  type KindRow, type KindsConf, mergeKinds, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, reported, senderName,
+  type ServerEvent, sessionUrl,
   SLACK, tallyClient,
 } from './activityShape.js'
 
@@ -308,11 +309,24 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   const s = sinks(env)
   if (s.slack) {
     const channel = env.SLACK_ADMIN_CHANNEL!
-    const text = renderSummary(b, { fmt: SLACK, conf, highlights: h })
+    // A signed-in burst posts as its user (a `username` override on the bot's own post: the name only, since profile
+    // faces are stored inline, never at a URL Slack could fetch), when the installed app may override the sender;
+    // otherwise the line itself says who. The post is one line, everything else in the thread.
+    const asUser = b.via === 'session' && (await slackScopes(env)).has('chat:write.customize')
+    const sender = asUser
+      ? { username: senderName(b.actor, (await db.prepare('SELECT name FROM profiles WHERE email = ?').bind(b.actor).first<{ name: string | null }>())?.name) }
+      : {}
+    const text = renderHeadline(b, { fmt: SLACK, conf }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
-      async () => (await slackApi(env, 'chat.postMessage', { channel, text, unfurl_links: false, unfurl_media: false })).ts ?? null,
+      async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
     if (parent) {
+      const details = renderDetails(b, { fmt: SLACK, conf, highlights: h })
+      if (details) {
+        await ensurePost(db, b.id, 'slack', 'details', now,
+          async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: details, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
+          ts => slackApi(env, 'chat.update', { channel, ts, text: details }))
+      }
       for (const [kind, es] of lineKinds) {
         const reply = renderLines(kind, lineEvents(es, SLACK), SLACK)
         await ensurePost(db, b.id, 'slack', kind, now,

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render } from '@testing-library/react'
+import { act, fireEvent, render } from '@testing-library/react'
 import { BytesOverTime, gapStretches, placeMarkers, plotExtent, splitAtGaps, TimeSeries } from '../src/TimeSeries'
 import type { Series } from '../src/TimeSeries'
 
@@ -291,13 +291,13 @@ describe('<TimeSeries>', () => {
     const svg = container.querySelector('svg') as SVGSVGElement
     const grip = () => container.querySelector('.dt-ts-grip')
     expect([grip()?.getAttribute('x'), grip()?.getAttribute('width'), grip()?.getAttribute('height')]).toEqual(['56', '164', '12'])
-    // Hovering inside the window below the grip: crosshair (a press there brushes); on the grip: grab.
-    fireEvent.pointerMove(svg, { clientX: 60, clientY: 100 })
+    // Hovering inside the window below the grip, clear of its edges: crosshair (a press there brushes); on the grip: grab.
+    fireEvent.pointerMove(svg, { clientX: 100, clientY: 100 })
     expect(svg.style.cursor).toBe('crosshair')
-    fireEvent.pointerMove(svg, { clientX: 60, clientY: 18 })
+    fireEvent.pointerMove(svg, { clientX: 100, clientY: 18 })
     expect(svg.style.cursor).toBe('grab')
-    // Inside the window, below the grip: a fresh brush from t=0 to t=2.
-    fireEvent.pointerDown(svg, { clientX: 56, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+    // Inside the window, below the grip: a fresh brush from t=0 (the nearest point) to t=2.
+    fireEvent.pointerDown(svg, { clientX: 100, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
     fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
     expect(svg.style.cursor).toBe('col-resize')
     expect(grip()).toBeNull()
@@ -314,6 +314,75 @@ describe('<TimeSeries>', () => {
     })
     fireEvent.pointerUp(window, { clientX: 220, pointerId: 2 })
     expect(onBrush.mock.calls).toEqual([[0, 2], [1, 2]])
+  })
+
+  it('onBrush: a press on a window edge moves that edge alone (a finger reaches 22px, a mouse 6px)', () => {
+    const onBrush = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} formatX={x => `t${x}`} window={[0, 1]} onBrush={onBrush} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    const label = () => container.querySelector('.dt-ts-drag-label')?.textContent ?? null
+    expect([...container.querySelectorAll('.dt-ts-handle')].map(h => h.getAttribute('x'))).toEqual(['53', '217'])
+    fireEvent.pointerMove(svg, { clientX: 224, clientY: 100 })
+    expect(svg.style.cursor).toBe('ew-resize')
+    // The end edge (t=1, x=220) dragged to t=2: the start stays at t=0; the label names the snapped end.
+    fireEvent.pointerDown(svg, { clientX: 224, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
+    expect(label()).toBe('t2 · 2 steps')
+    fireEvent.pointerUp(window, { clientX: 384, pointerId: 1 })
+    expect(label()).toBeNull()
+    // 20px from the edge: a finger drags the edge (t=1 → t=2); a mouse there brushes fresh from t=1.
+    fireEvent.pointerDown(svg, { clientX: 240, clientY: 100, button: 0, isPrimary: true, pointerId: 2, pointerType: 'touch' })
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100, pointerId: 2, pointerType: 'touch' })
+    fireEvent.pointerUp(window, { clientX: 384, pointerId: 2 })
+    fireEvent.pointerDown(svg, { clientX: 240, clientY: 100, button: 0, isPrimary: true, pointerId: 3 })
+    fireEvent.pointerMove(svg, { clientX: 384, clientY: 100 })
+    fireEvent.pointerUp(window, { clientX: 384, pointerId: 3 })
+    expect(onBrush.mock.calls).toEqual([[0, 2], [0, 2], [1, 2]])
+  })
+
+  it('onBrush: with both edges in reach (a narrow window), the first step picks the edge: leftward the start, rightward the end', () => {
+    // x = 0, 1, 2, 100 over 328px: 0 → 56, 1 → 59.3, 2 → 62.6, 100 → 384
+    const dense = [{ key: 'a', points: [0, 1, 2, 100].map(t => ({ t, y: 10 })) }]
+    const onBrush = vi.fn()
+    const { container } = withSize(() =>
+      render(<TimeSeries series={dense} getX={p => p.t} getY={p => p.y} window={[1, 2]} onBrush={onBrush} />),
+    )
+    const svg = container.querySelector('svg') as SVGSVGElement
+    const drag = (id: number, to: number) => {
+      fireEvent.pointerDown(svg, { clientX: 62, clientY: 100, button: 0, isPrimary: true, pointerId: id, pointerType: 'touch' })
+      fireEvent.pointerMove(svg, { clientX: to, clientY: 100, pointerId: id, pointerType: 'touch' })
+      fireEvent.pointerUp(window, { clientX: to, pointerId: id })
+    }
+    drag(1, 56)
+    drag(2, 384)
+    expect(onBrush.mock.calls).toEqual([[0, 2], [1, 100]])
+  })
+
+  it('onBrush: holding a dragged edge still enters fine mode: one point per 28px of travel, a loupe in the label', () => {
+    vi.useFakeTimers()
+    try {
+      const onBrush = vi.fn()
+      const { container } = withSize(() =>
+        render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} formatX={x => `t${x}`} window={[0, 1]} onBrush={onBrush} />),
+      )
+      const svg = container.querySelector('svg') as SVGSVGElement
+      const loupe = () => container.querySelector('.dt-ts-loupe')
+      fireEvent.pointerDown(svg, { clientX: 220, clientY: 100, button: 0, isPrimary: true, pointerId: 1 })
+      act(() => { vi.advanceTimersByTime(349) })
+      expect(loupe()).toBeNull()
+      act(() => { vi.advanceTimersByTime(1) })
+      expect(loupe()?.children.length).toBe(7)
+      // 30px right: a coarse drag would stay on t=1 (nearest point to x=250); fine mode steps one point.
+      fireEvent.pointerMove(svg, { clientX: 250, clientY: 100 })
+      expect(container.querySelector('.dt-ts-drag-label')?.firstChild?.textContent).toBe('t2')
+      // The release commits the edge as drawn, not the point under the finger.
+      fireEvent.pointerUp(window, { clientX: 250, pointerId: 1 })
+      expect([onBrush.mock.calls, loupe()]).toEqual([[[0, 2]], null])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('the tooltip keeps clear of the trace (far side of the crosshair, the half the points miss) and hides while dragging', () => {

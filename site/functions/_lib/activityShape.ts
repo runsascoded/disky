@@ -321,22 +321,46 @@ export interface SummaryOpts {
 
 const via = (v: string): string => v === 'grant' ? 'agent token / share link' : v === 'public' ? 'signed out' : 'browser'
 
-/** The burst's summary: who, how, when, the reported counts, highlights, links. */
+const spanText = (b: Pick<Burst, 'first_ts' | 'last_ts'>): string =>
+  `${day(b.first_ts)} ${b.first_ts === b.last_ts ? hm(b.first_ts) : `${hm(b.first_ts)}–${hm(b.last_ts)}`}Z`
+const countsText = (b: Pick<Burst, 'counts'>, conf: KindsConf): string[] =>
+  KIND_DEFS.filter(d => (b.counts[d.kind] ?? 0) > 0 && conf[d.kind]?.notify !== 'off').map(d => countText(d.kind, b.counts[d.kind]))
+const activityLink = (b: Pick<Burst, 'origin' | 'id'>, fmt: Fmt): string => fmt.link(`${b.origin}/admin/activity?burst=${b.id}`, 'activity')
+
+/** The burst's summary (Discord's one message): who, how, when, the reported counts, highlights, links. */
 export function renderSummary(b: Burst, o: SummaryOpts): string {
   const { fmt, conf } = o
-  const span = b.first_ts === b.last_ts ? hm(b.first_ts) : `${hm(b.first_ts)}–${hm(b.last_ts)}`
-  const lines = [`${fmt.bold(actorName(b.actor))} (${via(b.via)}) · ${day(b.first_ts)} ${span}Z`]
-  const counts = KIND_DEFS.filter(d => (b.counts[d.kind] ?? 0) > 0 && conf[d.kind]?.notify !== 'off').map(d => countText(d.kind, b.counts[d.kind]))
-  if (counts.length) lines.push(counts.join(' · '))
+  const counts = countsText(b, conf)
+  const lines = [`${fmt.bold(actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
+  return [...lines, ...detailLines(b, o, [activityLink(b, fmt)])].join('\n')
+}
+
+/** A burst's Slack post, one line: the counts, when, the activity link; signed in (`via` session) the post is sent
+ *  as the user (`sender`), so the line leaves out who; otherwise it leads with who and how. */
+export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf'>, asUser: boolean): string {
+  const { fmt, conf } = o
+  const who = asUser ? [] : [`${fmt.bold(actorName(b.actor))} (${via(b.via)})`]
+  return [...who, ...countsText(b, conf), spanText(b), activityLink(b, fmt)].join(' · ')
+}
+
+/** The rest of a burst's Slack post, as its first reply: highlights, pages, session / plan links. */
+export const renderDetails = (b: Burst, o: SummaryOpts): string => detailLines(b, o, []).join('\n')
+
+function detailLines(b: Burst, o: SummaryOpts, lead: string[]): string[] {
+  const { fmt, conf } = o
+  const lines: string[] = []
   const h = o.highlights
   if (h.largest) lines.push(`Largest assignment: ${fmt.code(h.largest.pattern)} (${fmtBytes(h.largest.bytes)}) → ${h.largest.owner ?? 'nobody'}`)
   if (h.owners && (h.owners.length > 1 || !h.largest)) lines.push(`Owners: ${h.owners.map(x => x ?? 'cleared').join(', ')}`)
   if (conf.view?.notify !== 'off') lines.push(...pageLines(b, fmt, o.topPages ?? 5))
-  const links = [fmt.link(`${b.origin}/admin/activity?burst=${b.id}`, 'activity'), ...sessionLinks(b, fmt)]
+  const links = [...lead, ...sessionLinks(b, fmt)]
   for (const p of h.plans ?? []) links.push(fmt.link(`${b.origin}/staged?plan=${p}`, `plan ${p}`))
-  lines.push(links.join(' · '))
-  return lines.join('\n')
+  if (links.length) lines.push(links.join(' · '))
+  return lines
 }
+
+/** Who a signed-in burst's Slack post is sent as: the profile's name, else the email's local part. */
+export const senderName = (actor: string, profileName: string | null | undefined): string => profileName?.trim() || actorName(actor)
 
 const stop = (fmt: Fmt, [p, n]: [string, number]): string => `${fmt.code(p)}${n > 1 ? ` ×${n}` : ''}`
 
