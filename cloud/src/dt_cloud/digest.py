@@ -673,9 +673,11 @@ def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_ur
 
 
 def replies_json(tpl: Template, data: Any, variant: str) -> list[dict]:
-    """The month's replies as the converge posts them (each day's, then the open day's provisional one), newest first:
+    """The month's replies as the converge posts them (each day's, then the open day's provisional one when the config
+    posts one), newest first:
     `{key, scan, username, body, icon_url, icon_emoji}`, for the preview page."""
-    units = [*tpl.units(data, variant), *filter(None, [tpl.provisional(data, variant)])]
+    open_ = tpl.provisional(data, variant) if tpl.cfg.provisional else None
+    units = [*tpl.units(data, variant), *([open_] if open_ else [])]
     return [{"key": u.key, "scan": u.scan, "username": u.reply.username, "body": u.reply.body, "icon_url": u.reply.icon_url,
              "icon_emoji": u.reply.icon_emoji} for u in reversed(units)]
 

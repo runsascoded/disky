@@ -240,7 +240,8 @@ def test_tail_circles_fullest_first():
     cold = f":large_green_circle: [cold]({u('cold-data')}): 12%"  # under `QUIET_PCT`: the bare share
     more = f"[more-data]({u('more-data')}): 2 Ti"
     assert D._tail(day, cfg).split(" · ") == [f":red_circle: {main}", f":large_orange_circle: {zone}", cold, more]
-    assert D._tail(day, replace(cfg, alert_pct=95)).split(" · ") == [f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=95)).split(" · ") == [f":large_orange_circle: {main}", f":large_orange_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=96)).split(" · ") == [f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", cold, more]
     assert D._tail(day, replace(cfg, alert_pct=85)).split(" · ") == [f":red_circle: {main}", f":red_circle: {zone}", cold, more]
     # past its quota a pool reads `over`, and stays red whatever `alert_pct` is
     full = replace(day, extra={**day.extra, "cold-data": 101.3})
