@@ -23,7 +23,7 @@ export interface PageView {
  * in `src/Root.tsx` is one of these or a card kind (`routes.test.ts` checks): an
  * app page read as a folder drew an empty map of a path named `scans`, `meta`, …. */
 const NOT_MAP = new Set([
-  'api', 'auth', 'data', 'v1', 'og', 'slack', 'assets', '_fonts', 'files', 'admin', 'about', 'help', 'privacy', 'token', 'login',
+  'a', 'api', 'auth', 'data', 'v1', 'og', 'slack', 'assets', '_fonts', 'files', 'admin', 'about', 'help', 'privacy', 'token', 'login',
   'signin', 'dev', 'meta', 'runs', 'scans', 'health', 'names', 'dups', 'sweep', 'hot', 'marks', 'mark',
 ])
 
