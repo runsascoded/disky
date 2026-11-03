@@ -91,17 +91,17 @@ describe('/api/admin/r2-probe', () => {
 
   it('is admin only: an anonymous request is a 401 and reads nothing', async () => {
     const { b, log } = bucket()
-    const r = await at('example.test', `key=${KEY}`, env(b))
+    const r = await at('example.test', `object=${KEY}`, env(b))
     expect([r.status, log]).toEqual([401, []])
   })
 
   it('refuses a key outside the prefixes, a bad n or len, and a missing object', async () => {
     const { b, log } = bucket()
     expect(await Promise.all([
-      at('localhost', 'key=snapshots/x/tree.json', env(b)).then(body),
-      at('localhost', `key=${KEY}&n=0`, env(b)).then(body),
-      at('localhost', `key=${KEY}&len=1.5`, env(b)).then(body),
-      at('localhost', 'key=interval-store/g/nope.parquet', env(b)).then(body),
+      at('localhost', 'object=snapshots/x/tree.json', env(b)).then(body),
+      at('localhost', `object=${KEY}&n=0`, env(b)).then(body),
+      at('localhost', `object=${KEY}&len=1.5`, env(b)).then(body),
+      at('localhost', 'object=interval-store/g/nope.parquet', env(b)).then(body),
     ])).toEqual([
       [400, 'no-store', { error: 'key must be under interval-store/ or static-names/' }],
       [400, 'no-store', { error: 'n: an integer in [1, 64]' }],
@@ -113,7 +113,7 @@ describe('/api/admin/r2-probe', () => {
 
   it('answers the probe, uncached, with the colo', async () => {
     const { b, log } = bucket()
-    const req = new Request(`http://localhost/api/admin/r2-probe?key=${KEY}&n=2&len=100`)
+    const req = new Request(`http://localhost/api/admin/r2-probe?object=${KEY}&n=2&len=100`)
     Object.defineProperty(req, 'cf', { value: { colo: 'EWR' } })
     const r = await onRequestGet({ request: req, env: env(b) } as never)
     const [status, cc, j] = await body(r) as [number, string, { key: string; size: number; n: number; len: number; colo: string; samples: ProbeSample[]; parallel: { samples: ProbeSample[] } }]
