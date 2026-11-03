@@ -204,12 +204,14 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
     in effect at `vf` (the newest first listed at or before it), else, for a version that began before any listing
     had generations, the first listed within it; one first listed at or after `vt` never counts (`index`: `gen_index`'s
     file). A `(path, generation)` never comes back once replaced, so a generation's first listing bounds it. Only a version
-    whose `GENERATION` is NULL is filled (all of them, unless the source carries it: `backfill`'s `nulls`). Counted in
-    `counts`."""
+    whose `GENERATION` is NULL is filled (all of them, unless the source carries it: `backfill`'s `nulls`). Over the key
+    sub-range `pieces` the fold holds (None: the whole range), the index read only there. Counted in `counts`, per range."""
     by_name = {f"r{r['i']:04d}": r for r in ranges["ranges"]}
 
-    def fill(con, name: str) -> None:
+    def fill(con, name: str, pieces: list[str] | None = None) -> None:
         preds = " OR ".join(f"({p})" for p in sn.range_preds(by_name[name]))
+        if pieces is not None:
+            preds = f"({preds}) AND ({' OR '.join(f'({p})' for p in pieces)})"
         g = ist.GENERATION
         con.execute(f"""CREATE OR REPLACE TEMP TABLE __fill AS
             SELECT p.depth, p.path, p.vf,
@@ -218,7 +220,7 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
             WHERE p.kind = 'file' AND p.{g} IS NULL AND g.first_ts < p.vt
             GROUP BY p.depth, p.path, p.vf""")
         con.execute(f"UPDATE pv SET {g} = f.{g} FROM __fill f WHERE pv.depth = f.depth AND pv.path = f.path AND pv.vf = f.vf")
-        counts[name] = con.execute("SELECT count(*) FROM __fill").fetchone()[0]
+        counts[name] = counts.get(name, 0) + con.execute("SELECT count(*) FROM __fill").fetchone()[0]
         con.execute("DROP TABLE __fill")
     return fill
 
