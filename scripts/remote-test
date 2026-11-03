@@ -19,7 +19,7 @@
 #   -h HOST   ssh host (default `$REMOTE_TEST_HOST`; required)
 #   -n N      xdist workers (default `auto`, `--dist loadgroup`; `0` = serial)
 #   -P VER    Python version for the remote env (default `$REMOTE_TEST_PYTHON`, else 3.13)
-#   -s        sync only, run nothing
+#   -s        sync only (the source and the Python env from the lock), run nothing
 # Output streams here and is saved to `tmp/remote-test-<timestamp>.log`; the exit code is the test runner's (the
 # first suite's nonzero code, a suite that selected no tests excepted).
 #
@@ -149,8 +149,7 @@ exec 9>.git/remote-test.lock
 flock 9
 git checkout -qf --detach $sha
 git clean -fdq -e .venv -e node_modules -e .pytest_cache -e __pycache__ -e tmp -e .duckdb-tmp -e site/dist
-[ -n "$sync_only" ] && exit 0
-if [ -n "$site" ]; then
+if [ -n "$site" ] && [ -z "$sync_only" ]; then
   if ! command -v node >/dev/null; then
     arch=\$(uname -m); case \$arch in aarch64) arch=arm64 ;; x86_64) arch=x64 ;; esac
     v=\$(curl -fsSL https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt | grep -o "node-v[0-9.]*-linux-\$arch.tar.xz" | head -1)
@@ -167,6 +166,7 @@ key=\$(cat uv.lock pyproject.toml cloud/pyproject.toml | sha256sum | cut -c1-16)
 if [ "\$(cat .venv/.remote-test-key 2>/dev/null)" != "\$key" ]; then
   uv sync -q --frozen --all-packages --all-extras --all-groups -p $py && echo "\$key" > .venv/.remote-test-key || exit 1
 fi
+[ -n "$sync_only" ] && exit 0  # -s: the source and the uv env, so a later direct pytest there runs the lock deps
 rc=0; ran=0
 suite() {  # suite <dir> <pytest args…>: run one suite from <dir>, folding its exit code into rc
   local dir=\$1; shift
