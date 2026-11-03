@@ -29,7 +29,7 @@ import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, storeReady, withPathStore } from '../../_lib/index.js'
 import { isHidden, isHideRoot, restrictionFor } from '../../_lib/restrict.js'
 import { scanArg } from '../../_lib/scanArg.js'
-import { ahead, traceJoins } from '../../_lib/shared.js'
+import { ahead, loadScopes, traceJoins } from '../../_lib/shared.js'
 import { storeKey, withStore } from '../../_lib/stores.js'
 import { cutoffOf, type Member, memberOf, memberRequest, membersAt, openUnion, UnionOverlap, unionFor } from '../../_lib/union.js'
 import type { UnionView } from '../../_lib/stores.js'
@@ -80,6 +80,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
   gate.catch(() => {})
   const ctx = await withPathStore(ctx1)
   traceJoins(ctx.env, st.trace)
+  await loadScopes()
   const early = ahead(ctx.env, !!member || presentsCredentials(ctx1 as never))
   try {
     if (!intervalsOn(ctx.env)) return new Response('level diffs read the interval store', { status: 409 })
@@ -98,6 +99,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
 
     const gated = await gate
     if (gated instanceof Response) return gated
+    early.commit()
     // A path-restricted link: a hidden directory (or one shown as a leaf) has no level; nothing under a visible one is
     // hidden.
     const restriction = restrictionFor(gated, ctx.env)
@@ -154,7 +156,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
     }
   } finally {
     // A union member's request is its siblings' too: its unused lookups run out rather than cancel theirs.
-    if (!member) early.done()
+    early.done(!member)
   }
 }
 

@@ -12,7 +12,7 @@
  */
 import type { Env } from './auth.js'
 import { ivAttributes, ivAttribution, servedStore } from './index.js'
-import { joinOf, shared } from './shared.js'
+import { IsoMap, joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
 
 export type Provenance = [source: string, evidence: string | null, prefix: string]
@@ -34,13 +34,13 @@ export interface ExtrasView {
   provenance(path: string, user: string): Provenance | null
 }
 
-const idxMemo = new Map<string, Promise<{ dir: string; attr: BlockIndex | null } | null>>()
+const idxMemo = new IsoMap<string, Promise<{ dir: string; attr: BlockIndex | null } | null>>('idxMemo')
 // A scan WITHOUT sidecars is re-probed after a minute, so a backfill shows
 // up promptly rather than after the isolate's next recycle. Tracked by
 // timestamp, not a timer: a `setTimeout` armed inside a request can be
 // dropped once that request's context ends.
 const MISS_TTL_MS = 60_000
-const missAt = new Map<string, number>()
+const missAt = new IsoMap<string, number>('missAt')
 
 /** The sidecars' store: the served seam (`INDEX_R2` under `SERVED_R2`), allowed only the scan's listing dir. */
 const sidecars = (env: Env, date: string) => servedStore(env, [`listing/${date}/`])

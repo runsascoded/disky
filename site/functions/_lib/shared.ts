@@ -30,7 +30,225 @@ export const STALLED: unique symbol = Symbol('stalled')
  *  waited on until it is `k ×` the typical time `K` takes to settle in this isolate (an EWMA of the settled ones;
  *  `cold` before any has), clamped to `[min, max]`. */
 export const JOIN = { k: 2, min: 1_000, max: 8_000, cold: 3_000, budget: 8_000 }
-const typical = new Map<string, number>()
+
+// --- provisional scopes (`ahead`): what a request starts beside its gate lands only once the gate passes ----------
+//
+// The lookups a request starts beside its gate (`ahead`) run in a `Scope` (the async context's, `AsyncLocalStorage`):
+// every write they would make to isolate state — a memo's entry (`IsoMap`, `Memo`, the LRUs), a colo cache put
+// (`colo`), a KV put or a queued D1 write (`isolateWrite`) — is logged instead, and seen by that request alone (each
+// `IsoMap`'s per-scope overlay). The gate passing commits the log in order (`Scope.commit`): the isolate then holds
+// exactly what the same lookups started after the gate would have left. Anything else (refused, thrown, returned
+// before the gate) discards it: the isolate is left as it was. A scope reads committed state and joins other
+// requests' in-flight work (all of it authorized: a provisional entry is never visible to another request), but never
+// evicts or convicts it.
+
+/** A request's provisional writes (see above). */
+export class Scope {
+  state: 'provisional' | 'committed' | 'discarded' = 'provisional'
+  private log: (() => void)[] = []
+  private local = new Map<object, Map<unknown, unknown>>()
+  /** `owner`'s overlay in this scope (its writes, visible to this request only). */
+  overlay<K, V>(owner: object): Map<K, V> {
+    let m = this.local.get(owner)
+    if (!m) this.local.set(owner, (m = new Map()))
+    return m as Map<K, V>
+  }
+  /** `owner`'s overlay, if this scope wrote to it. */
+  peek<K, V>(owner: object): Map<K, V> | undefined { return this.local.get(owner) as Map<K, V> | undefined }
+  /** Run `write` at the commit (dropped if the scope is discarded). */
+  defer(write: () => void): void {
+    if (this.state === 'provisional') this.log.push(write)
+  }
+  /** The gate passed: every logged write lands, in order; later writes are direct. */
+  commit(): void {
+    if (this.state !== 'provisional') return
+    this.state = 'committed'
+    const log = this.log
+    this.log = []
+    this.local.clear()
+    for (const w of log) w()
+  }
+  /** The gate didn't pass (or was never reached): nothing logged lands, nor anything written later. */
+  discard(): void {
+    if (this.state !== 'provisional') return
+    this.state = 'discarded'
+    this.log = []
+    this.local.clear()
+  }
+}
+
+interface ScopeAls {
+  run<R>(store: Scope, f: () => R): R
+  getStore(): Scope | undefined
+}
+// Computed so the Functions bundler leaves it to the runtime (as `usage.ts`' meter store).
+const SCOPE_ALS_MODULE = ['node', 'async_hooks'].join(':')
+let scopeAlsP: Promise<ScopeAls | null> | null = null
+let scopeAls: ScopeAls | null = null
+/** Load the scopes' async context (once; null without one: `ahead` then starts nothing before the gate). */
+export const loadScopes = (): Promise<ScopeAls | null> =>
+  (scopeAlsP ??= import(/* @vite-ignore */ SCOPE_ALS_MODULE)
+    .then((m: { AsyncLocalStorage: new () => ScopeAls }) => (scopeAls = new m.AsyncLocalStorage()))
+    .catch(() => null))
+
+/** The uncommitted scope this code runs in, if any (a discarded one too: its writes are dropped). */
+export const scopeOf = (): Scope | undefined => {
+  const s = scopeAls?.getStore()
+  return s && s.state !== 'committed' ? s : undefined
+}
+
+/** Write to isolate (or colo, KV, D1-queue) state: now, or at the scope's commit. */
+export function isolateWrite(write: () => void): void {
+  const s = scopeOf()
+  if (s) s.defer(write)
+  else write()
+}
+/** `isolateWrite` for an async write (a cache put): awaited now, or started at the commit (not awaited). */
+export async function isolatePut(put: () => Promise<unknown>): Promise<void> {
+  const s = scopeOf()
+  if (!s) {
+    await put()
+    return
+  }
+  s.defer(() => { put().catch(() => {}) })
+}
+
+/** Isolate state a test can snapshot and clear (`isolateSnapshot`, `clearIsolate`). */
+interface Held { name: string; entries(): Iterable<[unknown, unknown]>; clear(): void }
+const registry = new Set<WeakRef<Held>>()
+/** Hold `h` in the registry, weakly (a dropped handle's memos leave with it): its owner keeps it (the returned value). */
+export function registerIsolate(h: Held): Held {
+  registry.add(new WeakRef(h))
+  return h
+}
+const refIds = new WeakMap<object, number>()
+let nextRef = 0
+const refId = (v: unknown): unknown => (v !== null && (typeof v === 'object' || typeof v === 'function') ? `#${refIds.get(v) ?? (refIds.set(v, ++nextRef), nextRef)}` : v)
+/** Every registered memo's entries, in order (objects by identity: `#<n>`), keyed by name; empty ones left out. */
+export function isolateSnapshot(): Record<string, [unknown, unknown][]> {
+  const out: Record<string, [unknown, unknown][]> = {}
+  for (const r of registry) {
+    const h = r.deref()
+    if (!h) { registry.delete(r); continue }
+    const es = [...h.entries()].map(([k, v]): [unknown, unknown] => [refId(k), refId(v)])
+    if (es.length) (out[h.name] ??= []).push(...es)
+  }
+  return out
+}
+/** Tests: empty every registered memo. */
+export function clearIsolate(): void {
+  for (const r of registry) r.deref()?.clear()
+}
+
+const TOMB: unique symbol = Symbol('deleted')
+let mapIds = 0
+/** A `Map` of isolate state: in a scope (`scopeOf`), its writes go to the scope's overlay (read back by that request)
+ *  and land at the commit; elsewhere it is a plain `Map`. */
+export class IsoMap<K, V> extends Map<K, V> {
+  readonly name: string
+  /** Its registry entry (held here: the registry's reference is weak). */
+  private readonly held: Held
+  constructor(name: string) {
+    super()
+    this.name = `${name}#${mapIds++}`
+    const base = (): Iterable<[unknown, unknown]> => super.entries()
+    const clear = () => super.clear()
+    this.held = registerIsolate({ name, entries: base, clear })
+  }
+  private ov(): Map<K, V | typeof TOMB> | undefined { return scopeOf()?.peek(this) }
+  override get(k: K): V | undefined {
+    const o = this.ov()
+    if (o?.has(k)) { const v = o.get(k)!; return v === TOMB ? undefined : v as V }
+    return super.get(k)
+  }
+  override has(k: K): boolean {
+    const o = this.ov()
+    return o?.has(k) ? o.get(k) !== TOMB : super.has(k)
+  }
+  override set(k: K, v: V): this {
+    const s = scopeOf()
+    if (!s) return super.set(k, v)
+    const o = s.overlay<K, V | typeof TOMB>(this)
+    o.delete(k)
+    o.set(k, v)
+    s.defer(() => { super.set(k, v) })
+    return this
+  }
+  override delete(k: K): boolean {
+    const s = scopeOf()
+    if (!s) return super.delete(k)
+    const had = this.has(k)
+    const o = s.overlay<K, V | typeof TOMB>(this)
+    o.delete(k)
+    o.set(k, TOMB)
+    s.defer(() => { super.delete(k) })
+    return had
+  }
+  override clear(): void {
+    const s = scopeOf()
+    if (!s) return super.clear()
+    for (const k of [...this.keys()]) this.delete(k)
+  }
+  override *entries(): MapIterator<[K, V]> {
+    const o = this.ov()
+    if (!o) return yield* super.entries()
+    for (const [k, v] of super.entries()) if (!o.has(k)) yield [k, v]
+    for (const [k, v] of o) if (v !== TOMB) yield [k, v as V]
+  }
+  override *keys(): MapIterator<K> { for (const [k] of this.entries()) yield k }
+  override *values(): MapIterator<V> { for (const [, v] of this.entries()) yield v }
+  override [Symbol.iterator](): MapIterator<[K, V]> { return this.entries() }
+  override forEach(f: (v: V, k: K, m: Map<K, V>) => void, self?: unknown): void {
+    for (const [k, v] of this.entries()) f.call(self, v, k, this)
+  }
+  override get size(): number {
+    if (!this.ov()) return super.size
+    let n = 0
+    for (const _ of this.entries()) n++
+    return n
+  }
+}
+
+/** A `Set` of isolate state, as `IsoMap`. */
+export class IsoSet<T> {
+  private m: IsoMap<T, true>
+  constructor(name: string) { this.m = new IsoMap(name) }
+  has(v: T): boolean { return this.m.has(v) }
+  add(v: T): this { this.m.set(v, true); return this }
+  delete(v: T): boolean { return this.m.delete(v) }
+  clear(): void { this.m.clear() }
+  get size(): number { return this.m.size }
+  [Symbol.iterator](): IterableIterator<T> { return this.m.keys() }
+}
+
+/** The colo cache (the Workers Cache API's default), its puts as isolate writes: in a scope, held for that request
+ *  (its own `match`es see them) and put at the commit. */
+export function colo(): Cache {
+  const c = (caches as unknown as { default: Cache }).default
+  const s = scopeOf()
+  if (!s) return c
+  type Put = { buf: ArrayBuffer; init: ResponseInit }
+  const keyOf = (r: RequestInfo | URL): string => (typeof r === 'string' ? r : r instanceof URL ? r.href : r.url)
+  return {
+    async match(r: RequestInfo | URL, o?: CacheQueryOptions) {
+      const p = s.peek<string, Put>(c)?.get(keyOf(r))
+      return p ? new Response(p.buf.slice(0), p.init) : c.match(r, o)
+    },
+    async put(r: RequestInfo | URL, res: Response) {
+      const buf = await res.arrayBuffer()
+      const init = { status: res.status, headers: [...res.headers] }
+      s.overlay<string, Put>(c).set(keyOf(r), { buf, init })
+      s.defer(() => { c.put(r, new Response(buf, init)).catch(() => {}) })
+    },
+    async delete(r: RequestInfo | URL, o?: CacheQueryOptions) {
+      s.overlay<string, Put>(c).delete(keyOf(r))
+      s.defer(() => { c.delete(r, o).catch(() => {}) })
+      return true
+    },
+  } as Cache
+}
+
+const typical = new IsoMap<string, number>('join-typical')
 /** How old an entry of `kind` may get before its owner is taken for dead. */
 export const joinBound = (kind: string): number => {
   const t = typical.get(kind)
@@ -147,7 +365,8 @@ export async function join<T>(p: Promise<T>, j: Join): Promise<T | typeof STALLE
   if (!e) return within(p, joinBound(j.name))
   if (e.done || (e.owner && e.owner === j.req)) return p
   if (e.gone || e.owner?.dead) {
-    e.drop()
+    // A scope evicts nothing (`Scope`): it computes afresh in its overlay.
+    if (!scopeOf()) e.drop()
     return STALLED
   }
   const bound = joinBound(e.kind)
@@ -167,6 +386,8 @@ export async function join<T>(p: Promise<T>, j: Join): Promise<T | typeof STALLE
     j.req?.trace?.(`join-${j.name}`, Date.now() - t0)
   }
   if (got !== STALLED || e.gone) return got
+  // A scope convicts no one (its gate hasn't passed): it computes afresh in its overlay.
+  if (scopeOf()) return STALLED
   if (convicts) {
     j.req?.trace?.('join-evict', 1, j.name)
     if (e.owner) e.owner.kill()
@@ -285,9 +506,12 @@ export const cellsBytes = (cells: readonly { child: string }[]): number => cells
  *  rejection is never held. `max`: settled values kept, the least recently used dropped past it. For a class's
  *  isolate-lived caches, each call passing the request at hand (`reqOf(env)`). */
 export class Memo<T> {
-  private vals = new Map<string, T>()
-  private pending = new Map<string, Promise<T>>()
-  constructor(readonly name: string, readonly max = Infinity) {}
+  private vals: IsoMap<string, T>
+  private pending: IsoMap<string, Promise<T>>
+  constructor(readonly name: string, readonly max = Infinity) {
+    this.vals = new IsoMap(`memo:${name}`)
+    this.pending = new IsoMap(`memo:${name}:pending`)
+  }
 
   /** Whether `key` is settled here. */
   has(key: string): boolean { return this.vals.has(key) }
@@ -335,33 +559,47 @@ export class Memo<T> {
 
 /** A request's lookups that don't depend on who asks, started beside its gate (`requireViewer`) instead of after it:
  *  the fixed phase's steps overlapped. `later(f)` is `f`'s promise as a getter — started at once when `eager` (a
- *  request that may pass the gate: `presentsCredentials`), else on its first call, so a request that can't pass
- *  costs nothing past the gate. Nothing is used before the gate passes: the request awaits the gate first, and
- *  every return path ends in `done()`, which evicts what is still pending (`Req.kill`: never left in a memo for
- *  another request to join, frozen) — a failed gate's lookups, or those its answer didn't need. A rejection is the
- *  awaiting caller's alone (an unawaited one is swallowed). */
+ *  request that may pass the gate: `presentsCredentials`) and the scopes' async context is loaded (`loadScopes`), else
+ *  on its first call, so a request that can't pass costs nothing past the gate. A started `f` runs in the request's
+ *  `Scope`: what it would write to isolate state (memos, the colo cache, KV, queued D1 writes) is held for this request
+ *  alone until `commit()` — called once the gate passes — lands it; every return path ends in `done()`, which
+ *  discards an uncommitted scope (a refused gate, a throw, a return before the gate: the isolate is left exactly as it
+ *  was) and evicts what is still pending (`Req.kill`: never left for another request to join, frozen) — a failed gate's
+ *  lookups, or those its answer didn't need. Nothing is used before the gate passes: the request awaits it first. A
+ *  rejection is the awaiting caller's alone (an unawaited one is swallowed). */
 export interface Ahead {
   later<T>(f: () => Promise<T>): () => Promise<T>
-  done(): void
+  /** The gate passed: what the lookups wrote lands (and what they write from now on, directly). */
+  commit(): void
+  /** Discard an uncommitted scope; `kill` (default): evict what is still pending. */
+  done(kill?: boolean): void
 }
+/** Knobs for tests: `eager: false` starts nothing before the gate (what a request without `ahead` does). */
+export const AHEAD = { eager: true }
 export function ahead(env: object, eager: boolean): Ahead {
   let pending = 0
+  const als = eager && AHEAD.eager ? scopeAls : null
+  const scope = als ? new Scope() : null
   return {
     later<T>(f: () => Promise<T>): () => Promise<T> {
       let p: Promise<T> | undefined
       const get = (): Promise<T> => {
         if (!p) {
           pending++
-          p = f()
+          p = als && scope?.state === 'provisional' ? als.run(scope, f) : f()
           p.then(() => { pending-- }, () => { pending-- })
         }
         return p
       }
-      if (eager) get()
+      if (scope) get()
       return get
     },
-    done(): void {
-      if (pending) reqOf(env)?.kill()
+    commit(): void {
+      scope?.commit()
+    },
+    done(kill = true): void {
+      scope?.discard()
+      if (kill && pending) reqOf(env)?.kill()
     },
   }
 }

@@ -21,6 +21,7 @@
  * Nothing here names a deployment or a store: the config drives it. A
  * deployment without a union view never reaches this module.
  */
+import { colo as coloCache, isolateWrite, IsoMap } from './shared.js'
 import { decodeScan, isScanId, scanInstant } from '../../src/scanSlug.js'
 import { compareScans, latestObserved, type Observation, parseCutoff } from '../../src/federatedScans.js'
 import { type Env, json, type Identity, requireViewer } from './auth.js'
@@ -118,13 +119,16 @@ const observed = new WeakMap<object, Map<string, { at: number; obs: Promise<Obse
 function observations(env: Env): Promise<Observation[]> {
   const db = env.DB as unknown as object
   let byStore = observed.get(db)
-  if (!byStore) observed.set(db, byStore = new Map())
+  if (!byStore) {
+    const b = byStore = new IsoMap('union-observed')
+    isolateWrite(() => { observed.set(db, b) })
+  }
   const key = storeKey(env)
   const hit = byStore.get(key)
   if (hit && Date.now() - hit.at < OBSERVATIONS_TTL) return hit.obs
   const obs = (async () => {
     // Then the colo's copy, so any isolate there reuses it (r2: one client's requests land on different isolates).
-    const colo = typeof caches === 'undefined' ? null : (caches as unknown as { default: Cache }).default
+    const colo = typeof caches === 'undefined' ? null : coloCache()
     const ck = new Request(`https://union-observations.cache/${encodeURIComponent(env.PROD_HOST ?? '-')}/${encodeURIComponent(key)}`)
     const hit = await colo?.match(ck)
     if (hit) return await hit.json<Observation[]>()

@@ -26,7 +26,7 @@ import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { indexedScan, noScan, scanArg } from '../_lib/scanArg.js'
-import { ahead, traceJoins } from '../_lib/shared.js'
+import { ahead, loadScopes, traceJoins } from '../_lib/shared.js'
 import { type FilteredRoot, filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, type Resolved, resolveUnion, UnionOverlap, unionFiltered, unionFor, unionRoot, vectorOf } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
@@ -117,6 +117,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
   const gating = gate && !member
   const gated = gating ? st.time('auth', requireViewer(ctx as never)) : Promise.resolve(member?.id ?? null)
   gated.catch(() => {})
+  await loadScopes()
   const early = ahead(ctx.env, !gating || presentsCredentials(ctx as never))
   try {
     return await subtreeGated(ctx, st, early, gated, { date0, path, w, h, minArea, atten, lens, rawOwner, owner, by, depth, classes, qRaw, full, qp, query, member })
@@ -166,6 +167,7 @@ async function subtreeGated(
 
   const g0 = await gated
   if (g0 instanceof Response) return g0
+  early.commit()
   const id: Identity | null = g0
   // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
   // and every body (cached or fresh) is filtered on the way out.

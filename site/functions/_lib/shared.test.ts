@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cellsBytes, HeldAnswers, hitsBytes, inFlight, JOIN, joinBound, Memo, Req, resetJoinStats, shared, snapshotsPrefix, track } from './shared'
+import { ahead, cellsBytes, HeldAnswers, hitsBytes, inFlight, IsoMap, JOIN, joinBound, loadScopes, Memo, Req, resetJoinStats, scopeOf, shared, snapshotsPrefix, track } from './shared'
 
 describe('shared', () => {
   beforeEach(() => vi.useFakeTimers())
@@ -303,5 +303,51 @@ describe('HeldAnswers', () => {
 
   it('estimates hits and cells by count and name length', () => {
     expect([hitsBytes([{ path: 'ab' }, { path: 'abcd' }]), cellsBytes([{ child: 'x' }])]).toEqual([2 * 256 + 6, 161])
+  })
+})
+
+// `ahead`'s scope: what a request starts beside its gate writes to isolate state only once the gate passes.
+describe('ahead scopes', () => {
+  /** A lookup started beside the gate: it writes `m` (`a` → 1, then deletes `b`) and reads back what it wrote. */
+  const lookup = (m: IsoMap<string, number>) => async () => {
+    await new Promise(r => setTimeout(r, 1))
+    m.set('a', 1)
+    m.delete('b')
+    return { state: scopeOf()?.state, own: [...m.entries()], size: m.size }
+  }
+
+  it('commit lands the writes in order; until then only the request sees them', async () => {
+    await loadScopes()
+    const m = new IsoMap<string, number>('t-commit')
+    m.set('b', 2)
+    const early = ahead({}, true)
+    const got = await early.later(lookup(m))()
+    const outside = [...m.entries()]
+    early.commit()
+    early.done()
+    expect([got, outside, [...m.entries()]]).toEqual([{ state: 'provisional', own: [['a', 1]], size: 1 }, [['b', 2]], [['a', 1]]])
+  })
+
+  it('done without a commit (a refused gate) discards them, and anything written after', async () => {
+    await loadScopes()
+    const m = new IsoMap<string, number>('t-discard')
+    m.set('b', 2)
+    const early = ahead({}, true)
+    const late = early.later(async () => { await new Promise(r => setTimeout(r, 5)); m.set('late', 3) })
+    await early.later(lookup(m))()
+    early.done()
+    await late()
+    expect([...m.entries()]).toEqual([['b', 2]])
+  })
+
+  it('a request that may not pass starts nothing before its gate, and writes directly after it', async () => {
+    await loadScopes()
+    const m = new IsoMap<string, number>('t-lazy')
+    const early = ahead({}, false)
+    const get = early.later(lookup(m))
+    const before = [...m.entries()]
+    const got = await get()
+    early.done()
+    expect([before, got, [...m.entries()]]).toEqual([[], { state: undefined, own: [['a', 1]], size: 1 }, [['a', 1]]])
   })
 })
