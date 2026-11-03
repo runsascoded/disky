@@ -196,6 +196,39 @@ describe('a level request\'s fixed phase', () => {
   })
 })
 
+describe('a bench\'s cache-key nonce (`nc=`)', () => {
+  const at = (host: string, nc: string | null, headers?: Record<string, string>) =>
+    level({ request: new Request(`http://${host}/api/diff/level?from=2026-08-02&to=2026-08-06&p=b1${nc == null ? '' : `&nc=${nc}`}`, { headers }), env })
+  const cached = async (r: Response) => [r.status, r.headers.get('x-cache')]
+  beforeEach(async () => {
+    // What earlier tests left landing (their deferred puts), then cold again.
+    await quiesce()
+    await cold()
+    // One cache namespace for both hosts: localhost's admin and a viewer's token share keys but for the nonce.
+    env = { ...env, BASE_SCOPE: 'laptop', SESSION_SECRET: 'test-secret', CACHE_NS: '' } as Env
+  })
+
+  it('an admin\'s nonce is its own cache key: a miss per new nonce, a hit on its repeat', async () => {
+    // `localhost`: the dev identity, an admin.
+    const got = []
+    for (const nc of [null, 'a', 'a', 'b', null]) got.push(await cached(await at('localhost', nc)))
+    expect(got).toEqual([[200, 'miss'], [200, 'miss'], [200, 'hit'], [200, 'miss'], [200, 'hit']])
+  })
+
+  it('anyone else\'s nonce is ignored: the same key, and answer, as without it', async () => {
+    const { gateFor } = await import('../../_lib/auth')
+    const { token } = await gateFor(env)!.mint({ email: null, scopes: ['laptop'], name: 'viewer link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })
+    const viewer = { authorization: `Bearer ${token}` }
+    const primed = await at('localhost', null)
+    const want = await primed.text()
+    const rs = [await at('example.test', 'x1', viewer), await at('example.test', 'x2', viewer)]
+    expect([primed.headers.get('x-cache'), ...await Promise.all(rs.map(async r => [...await cached(r), await r.text() === want]))])
+      .toEqual(['miss', [200, 'hit', true], [200, 'hit', true]])
+    // The admin's nonce was never written by them: still a miss.
+    expect(await cached(await at('localhost', 'x1'))).toEqual([200, 'miss'])
+  })
+})
+
 /** Everything a request can leave behind: the isolate's memos (`isolateSnapshot`: in order, objects by identity), the
  *  colo cache and KV (keys in order, bytes). */
 const state = () => ({

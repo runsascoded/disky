@@ -23,6 +23,16 @@ def test_requests_are_the_browsers_mix():
     ]
 
 
+def test_a_secondary_stores_requests_name_it():
+    assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:"], 640, 307, "meta") == [
+        Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta", "depth": 1}),
+        Req("diff f→t /m", "diff:full", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta"}),
+        Req("diff f→t /m", "diff:summary", "/api/diff", {"cv": 3, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "summary": 1}),
+        Req("subtree d /", "subtree:d1", "/api/subtree", {"cv": 3, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307, "depth": 1}),
+        Req("subtree d /", "subtree:full", "/api/subtree", {"cv": 3, "store": "meta", "date": "d", "path": "", "w": 640, "h": 307}),
+    ]
+
+
 def test_random_buckets_are_distinct_and_taller_than_wide():
     bs = random_buckets(50)
     assert len(set(bs)) == 50
