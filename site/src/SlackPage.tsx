@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
@@ -11,8 +11,10 @@ import './slack.scss'
 
 // /admin/slack (specs/slack-preview-page.md), admin only: the monthly digest's OP as the job posted it (its preview
 // bundle, `/api/digest-preview`), beside the same rows re-rendered under other params (`src/digest`, the job's
-// renderer ported byte for byte) with their plots drawn by `/api/digest-image`. Read-only: nothing here changes what
-// the job posts. Candidates live in the URL (`?dc=<params>;<params>…`, `digest/codec`), so a comparison is a link.
+// renderer ported byte for byte) with their plots drawn by `/api/digest-image`. Candidates live in the URL
+// (`?dc=<params>;<params>…`, `digest/codec`), so a comparison is a link. Two panels act (specs/digest-runway-marks.md
+// §4): the live settings the job renders under (`/api/digest-settings`, D1), and re-applying the digest to chosen
+// messages of the thread (`/api/digest-reapply`: a Batch job running the CLI's selectors, a dry run first).
 
 interface Listing { bundles: { key: string; month: string; channel: string; variant: string }[] }
 
@@ -58,6 +60,7 @@ function Toks({ toks, plot }: { toks: Tok[]; plot: ReactNode }) {
       case 'link': return <a key={i} href={k.href} target="_blank" rel="noreferrer">{k.s}</a>
       case 'arrow': return <span key={i} className={`arrow ${k.deg > 0 ? 'up' : k.deg < 0 ? 'down' : 'flat'}`} style={{ transform: `rotate(${-k.deg}deg)` }} title={`arrow_deg${k.deg}`}>➜</span>
       case 'emoji': return <span key={i} title={`:${k.name}:`}>{k.char}</span>
+      case 'hue': return <span key={i} className="hue" title={`:runway-${k.n}:`} style={{ background: k.color }} />
       case 'image': return <span key={i} className="plot">{plot}</span>
     }
   })}</>
@@ -140,6 +143,123 @@ function Controls({ p, set }: { p: DigestParams; set: (p: DigestParams) => void 
   )
 }
 
+interface Settings { template: string; params: string; quota_marks: string; updated_by: string; updated_at: number }
+interface Run { job_id: string; month: string; channel: string; target: string; dry_run: boolean; params: string | null; quota_marks: string | null; actor: string; ts: number }
+interface RunDetail { run: Run; status: string | null; output: string | null }
+
+const MARKS = ['warning', 'circles', 'runway', 'runway-hue']
+const DONE = ['SUCCEEDED', 'FAILED', 'DELETION_IN_PROGRESS']
+const when = (ts: number) => new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ') + 'Z'
+
+async function send<T>(url: string, method: string, body: unknown): Promise<T> {
+  const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const j = await r.json().catch(() => ({})) as T & { error?: string }
+  if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`)
+  return j
+}
+
+/** A button that asks once more before it acts (no browser dialogs). */
+function Confirm({ label, confirm, onClick, disabled }: { label: string; confirm: string; onClick: () => void; disabled?: boolean }) {
+  const [armed, setArmed] = useState(false)
+  useEffect(() => { if (armed) { const t = setTimeout(() => setArmed(false), 6000); return () => clearTimeout(t) } }, [armed])
+  return <button disabled={disabled} className={armed ? 'armed' : ''} onClick={() => (armed ? (setArmed(false), onClick()) : setArmed(true))}>{armed ? confirm : label}</button>
+}
+
+/** The live settings: what the job renders the OP (`params`) and replies (`quota_marks`) under, over its file's. */
+function LiveSettings({ b, cands, form, setForm }: { b: PreviewBundle; cands: string[]; form: { params: string; quota_marks: string }; setForm: (f: { params: string; quota_marks: string }) => void }) {
+  const qc = useQueryClient()
+  const template = b.cfg.template
+  const s = useQuery({ queryKey: ['digest-settings', template], queryFn: () => getJson<{ settings: Settings | null }>(`/api/digest-settings?template=${template}`) })
+  const save = useMutation({
+    mutationFn: () => send<{ settings: Settings }>('/api/digest-settings', 'PUT', { template, ...form }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['digest-settings', template] }),
+  })
+  const cur = s.data?.settings
+  // the form starts from the live row (none: the bundle's params; reply marks unknown to the page until set)
+  const [seeded, setSeeded] = useState(false)
+  useEffect(() => {
+    if (!seeded && cur) { setForm({ params: cur.params, quota_marks: cur.quota_marks }); setSeeded(true) }
+  }, [cur, seeded, setForm])
+  return (
+    <section className="slack-act">
+      <h2>Live settings</h2>
+      <p className="dim">
+        {s.isLoading ? 'Loading…' : cur
+          ? <>The job renders under params <code>{cur.params || '(defaults)'}</code> and quota marks <code>{cur.quota_marks}</code> (set by {cur.updated_by}, {when(cur.updated_at)}).</>
+          : <>No live settings: the job uses its config file's (this bundle was rendered under params <code>{b.params || '(defaults)'}</code>).</>}
+        {' '}A change applies from the next converge (the next scan, or a re-apply below).
+      </p>
+      {s.error && <p className="err">{s.error.message}</p>}
+      <div className="slack-controls">
+        <label>OP params <input className="wide" value={form.params} onChange={e => setForm({ ...form, params: e.target.value })} placeholder="(defaults)" /></label>
+        {cands.map((c, i) => <button key={i} onClick={() => setForm({ ...form, params: c })} disabled={form.params === c}>candidate {i + 1}'s</button>)}
+        <label>reply marks <select value={form.quota_marks} onChange={e => setForm({ ...form, quota_marks: e.target.value })}>
+          {MARKS.map(m => <option key={m} value={m}>{m}</option>)}</select></label>
+        <Confirm label="save" confirm={`save as live (${template})?`} disabled={save.isPending || (cur?.params === form.params && cur?.quota_marks === form.quota_marks)} onClick={() => save.mutate()} />
+      </div>
+      {save.error && <p className="err">{save.error.message}</p>}
+    </section>
+  )
+}
+
+/** Re-apply the digest to chosen messages of the thread: a dry run lists what would change; apply edits exactly those. */
+function Reapply({ b, form }: { b: PreviewBundle; form: { params: string; quota_marks: string } }) {
+  const qc = useQueryClient()
+  const [channel, setChannel] = useState(b.channel)
+  const [kind, setKind] = useState<'op' | 'days' | 'thread'>('op')
+  const [from, setFrom] = useState(`${b.month}-01`)
+  const [to, setTo] = useState(`${b.month}-01`)
+  const [underForm, setUnderForm] = useState(true)
+  const [job, setJob] = useState<string | null>(null)
+  const target = kind === 'days' ? (from === to ? from : `${from}..${to}`) : kind
+  const runs = useQuery({ queryKey: ['digest-reapply'], queryFn: () => getJson<{ runs: Run[] }>('/api/digest-reapply') })
+  const detail = useQuery({
+    queryKey: ['digest-reapply', job], enabled: !!job,
+    queryFn: () => getJson<RunDetail>(`/api/digest-reapply?job=${job}`),
+    refetchInterval: q => (q.state.data && DONE.includes(q.state.data.status ?? '') ? false : 5000),
+  })
+  const go = useMutation({
+    mutationFn: (dry: boolean) => send<{ run: Run }>('/api/digest-reapply', 'POST', {
+      month: b.month, channel, target, dry_run: dry, ...(underForm ? { params: form.params, quota_marks: form.quota_marks } : {}),
+    }),
+    onSuccess: ({ run }) => { setJob(run.job_id); qc.invalidateQueries({ queryKey: ['digest-reapply'] }) },
+  })
+  const days = { min: `${b.month}-01`, max: `${b.month}-31` }
+  return (
+    <section className="slack-act">
+      <h2>Re-apply</h2>
+      <p className="dim">Re-renders exactly the chosen messages of {b.month}'s thread and edits them in place (no new replies, no alert); a whole-thread run converges as the cron does. Runs as a Batch job (~2 min). Preview first.</p>
+      <div className="slack-controls">
+        <label>channel <input className="wide" value={channel} onChange={e => setChannel(e.target.value.trim())} /></label>
+        <label>what <select value={kind} onChange={e => setKind(e.target.value as typeof kind)}>
+          <option value="op">the OP</option><option value="days">replies of days…</option><option value="thread">the whole thread</option></select></label>
+        {kind === 'days' && <>
+          <input type="date" {...days} value={from} onChange={e => { setFrom(e.target.value); if (e.target.value > to) setTo(e.target.value) }} />
+          → <input type="date" {...days} value={to} min={from} onChange={e => setTo(e.target.value)} />
+        </>}
+        <label><input type="checkbox" checked={underForm} onChange={e => setUnderForm(e.target.checked)} /> under the form's settings above (else the live ones)</label>
+        <button disabled={go.isPending} onClick={() => go.mutate(true)}>preview (dry run)</button>
+        <Confirm label="apply" confirm={`edit ${target} in ${channel}?`} disabled={go.isPending} onClick={() => go.mutate(false)} />
+      </div>
+      {go.error && <p className="err">{go.error.message}</p>}
+      {runs.data && runs.data.runs.length > 0 && (
+        <ul className="slack-runs">
+          {runs.data.runs.map(r => (
+            <li key={r.job_id}><button className={job === r.job_id ? 'on' : ''} onClick={() => setJob(r.job_id)}>{when(r.ts)}</button>
+              {' '}{r.dry_run ? 'preview' : <b>apply</b>} {r.target} in <code>{r.channel}</code>
+              {(r.params !== null || r.quota_marks !== null) && <> under <code>{r.params || '(defaults)'}</code> / <code>{r.quota_marks}</code></>} · {r.actor}</li>
+          ))}
+        </ul>
+      )}
+      {job && detail.data && <div className="slack-run">
+        <p className="dim"><code>{job}</code>: {detail.data.status ?? 'status unknown'}{!DONE.includes(detail.data.status ?? '') && ' …'}</p>
+        <pre>{detail.data.output ?? '(no output yet)'}</pre>
+      </div>}
+      {detail.error && <p className="err">{detail.error.message}</p>}
+    </section>
+  )
+}
+
 function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; setCands: (c: string[]) => void }) {
   const links = { plotUrl: PLOT, prevUrl: b.prev_url }
   // the bundle's params (`renderer: site`; absent or '' = the defaults) are what the job rendered under
@@ -147,6 +267,7 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
   const rerender = opText(b.rows, b.month, b.cfg, { plotUrl: b.plot_url === null ? null : PLOT, prevUrl: b.prev_url }, decodeParams(posted))
   const matches = rerender.split('\n').map(norm).join('\n') === b.op.split('\n').map(norm).join('\n')
   const live = b.op.split('\n').map(norm)
+  const [form, setForm] = useState({ params: posted, quota_marks: 'runway' })
   return <>
     <p className="dim">
       Posted {b.posted_at} to <code>{b.channel}</code> ({b.variant}){b.permalink && <> · <a href={b.permalink} target="_blank" rel="noreferrer">the thread</a></>}.
@@ -173,6 +294,8 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
       })}
       {cands.length < 3 && <button className="slack-add" onClick={() => setCands([...cands, cands[cands.length - 1] ?? ''])}>+ compare</button>}
     </div>
+    <LiveSettings b={b} cands={cands} form={form} setForm={setForm} />
+    <Reapply b={b} form={form} />
     <details className="slack-rows">
       <summary>Rows ({b.rows.template})</summary>
       <pre>{JSON.stringify(b.rows, null, 1)}</pre>
@@ -196,7 +319,7 @@ export function SlackPage() {
       <h1>Slack digest</h1>
       <p className="dim">
         The month thread's OP as the job last posted it, beside the same scans re-rendered under other parameters.
-        Nothing here changes what the job posts.
+        Below them, the live settings the job renders under, and re-applying the digest to chosen messages.
       </p>
       {list.error && <p className="err">{list.error.message}</p>}
       {list.data && !list.data.bundles.length && <p>No preview bundles yet: the job writes one per converge once its digest config sets <code>preview</code>.</p>}

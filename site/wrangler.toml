@@ -93,6 +93,10 @@ EXECUTOR = "plan-sweep"
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
 # `GCP_SA_KEY` is the `cw-s3-dispatch` key that may act as it).
 JOB_SA = "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com"
+# The Slack digest's channel (#cw-usage), the default `/admin/slack` re-applies to (`/api/digest-reapply`), and the CF
+# account its `-o` plot deploy targets (the scan job's `CLOUDFLARE_ACCOUNT_ID`).
+DIGEST_CHANNEL = "C0C1YR7D0KU"
+CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 # R2 serving (specs/done/r2-serving-migration.md): the same store seam the base's
 # r2.rbw.sh deploy uses (`_lib/index.ts` storeTarget/storeCreds — S3-over-R2,
 # NOT a native R2 binding, so cw matches the base byte-for-byte). The bucket is
@@ -226,6 +230,10 @@ EXECUTOR = "plan-sweep"
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
 # `GCP_SA_KEY` is the `cw-s3-dispatch` key that may act as it).
 JOB_SA = "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com"
+# The Slack digest's channel (#cw-usage), the default `/admin/slack` re-applies to (`/api/digest-reapply`), and the CF
+# account its `-o` plot deploy targets (the scan job's `CLOUDFLARE_ACCOUNT_ID`).
+DIGEST_CHANNEL = "C0C1YR7D0KU"
+CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 # R2, flipped here first (2026-09-25) and in production on 2026-09-28
 # (specs/done/r2-serving-migration.md step 6): same bucket, preview-scoped secrets.
 STORE_BUCKET = "oa-cw-s3-usage-index"

@@ -37,10 +37,15 @@ Runway → one of 8 custom workspace emoji, `:runway-1:` (red, least runway) …
 - **Push**: for a chosen month, edit its OP (the site renders it and holds the bot token: `chat.update`) and its replies (a Batch job, `dt-cloud digest -m M -E`, or the site directly once replies render in TS), all of them or one day's reply. Admin-only, with a confirm showing what changes.
 - **Selectors (built):** the push re-applies exactly what's chosen, never a whole-thread sweep. `dt-cloud digest -o/--op` (the OP, its plot re-rendered), `-d/--reply DAY` (repeatable) and `-y/--replies A..B` (an inclusive UTC-day range) edit only those already-posted messages to their current rendering: no new replies, no provisional reply, no alert, no plot unless `-o`; `-n` lists each message's ts and new body (`digest.apply_slack`). From a laptop: `job/cw-digest-local` (the CLI with cw's config, this checkout's code and its secrets from Secret Manager), e.g. `job/cw-digest-local -m 2026-11 -y 2026-11-01..2026-11-02 -c <channel> -n`.
 
-Live params: a D1 row (the admin page already writes D1; each change logged).
+**Built (phase 3; D1 recipe `site/migrations/digest-settings.sql` pending Ryan's apply):**
+
+- **Live settings:** D1 `digest_settings` (one row per template: `params`, `quota_marks`, who/when; each change logged in `admin_edits`). `GET /api/digest-settings?template=cw` (viewer: the job's grant), `PUT` (admin). The job reads it before rendering (`digest.live_settings` → `with_settings`), over `job/digest.yml`'s values; no row, no token or an unreachable site keep the file's. CLI: `-L/--file-settings` ignores the live row; `-p/--params` and `-q/--quota-marks` override both for one run (a DM try-out).
+- **Re-apply:** `POST /api/digest-reapply {month, channel?, target, dry_run, params?, quota_marks?}` (admin) submits a Batch job on the scan image running `dt-cloud digest -T cw -C job/digest.yml` with the selectors (`target`: `op` → `-o`, a day or `A..B` → `-y`, `thread` → a full converge), `-n` for a preview, `-p`/`-q` for candidate settings; output at `gs://<data>/digest/reapply/<job>.txt`, runs in D1 `digest_reapply`. `channel` defaults to `DIGEST_CHANNEL`; any channel id (a DM) is allowed.
+- **Admin page:** `/admin/slack` gains a "Live settings" panel (params, optionally from a candidate column; reply marks; save with a second click) and a "Re-apply" panel (channel, the OP / a day range / the whole thread, under the form's settings or the live ones; preview, then apply with a second click; recent runs with their status and output). `:runway-N:` marks draw as their circle colors.
+- **Replies preview:** still Python-only: a re-apply's dry run shows the replies' new bodies.
 
 ## 5. Phases
 
 1. Runway marks + fixed order + rate text, Python and TS together, golden tests on both sides; cw flips to `runway`; re-edit November (`-E`).
 2. Hue emoji (generate + upload), `runway-hue` (built; cw stays on `runway` until Ryan picks from a preview).
-3. Admin knobs: live params, replies preview, push.
+3. Admin knobs: live params, push (built; replies preview via the re-apply dry run).
