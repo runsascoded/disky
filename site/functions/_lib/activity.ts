@@ -335,7 +335,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
       for (const [kind, es] of lineKinds) {
         const reply = renderLines(kind, lineEvents(es, SLACK), SLACK)
         await ensurePost(db, b.id, 'slack', kind, now,
-          async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: reply, unfurl_links: false, unfurl_media: false })).ts ?? null,
+          async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: reply, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
           ts => slackApi(env, 'chat.update', { channel, ts, text: reply }))
       }
     }

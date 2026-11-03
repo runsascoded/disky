@@ -327,7 +327,7 @@ describe('D1 and sinks', () => {
     expect(calls.map(c => [c.body.thread_ts ?? null, c.body.username ?? null, String(c.body.text).split('\n')])).toEqual([
       [null, 'Ann Lee', [`1 page load · 3 errors · 2026-10-21 15:00Z · <${ORIGIN}/admin/activity?burst=1|activity>`]],
       ['1.000001', 'Ann Lee', ['Pages: `/admin`', `<${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
-      ['1.000001', null, ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+      ['1.000001', 'Ann Lee', ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
     ])
   })
 
