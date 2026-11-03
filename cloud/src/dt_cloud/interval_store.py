@@ -1183,10 +1183,12 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     procs = max(1, (os.cpu_count() or 1) // at_once)
     merge_rows = MERGE_ROWS
     if tree is not None:
-        from .interval_compact import row_bytes
+        from .interval_compact import input_rows, row_bytes
 
-        rb = row_bytes(str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))) + SPOOL_EXTRA
-        plan = tree.cut(at_once, os.cpu_count() or 1, rg_rows, rb, CUT_SPOOL_RG, MERGE_ROWS)
+        ins = [str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))]
+        rb, n = row_bytes(ins) + SPOOL_EXTRA, max(1, input_rows(ins))
+        # No batch, group or merge holds more rows than the sorts have.
+        plan = tree.cut(at_once, os.cpu_count() or 1, rg_rows, rb, CUT_SPOOL_RG, MERGE_ROWS, n)
         procs, merge_rows = plan.procs, plan.merge_rows
         con.execute(tm.duck_sql(plan.duck))
         err(f"cut: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + {at_once} sorts × {procs} workers × "

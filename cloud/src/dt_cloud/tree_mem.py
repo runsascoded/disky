@@ -207,26 +207,30 @@ class Budget:
                            f"{arrow / MIB:,.0f} MiB leave DuckDB {d / MIB:,.0f} MiB (< {DUCK_MIN / MIB:,.0f}); needs ≥ {need / MIB:,.0f} MiB")
         return d
 
-    def fold(self, jobs: int, rg_rows: int, rb: int) -> tuple[int, int]:
-        """The fold's `(arrow, duck)`: `fold_arrow(jobs, rg_rows, rb)`, DuckDB the rest (no workers)."""
-        a = fold_arrow(jobs, rg_rows, rb)
+    def fold(self, jobs: int, rg_rows: int, rb: int, rows: int | None = None) -> tuple[int, int]:
+        """The fold's `(arrow, duck)`: `fold_arrow(jobs, min(rg_rows, rows), rb)` (`rows`: the inputs', which no group
+        exceeds), DuckDB the rest (no workers)."""
+        a = fold_arrow(jobs, min(rg_rows, rows or rg_rows), rb)
         return a, self.duck(a, 0, f"{jobs} fold jobs")
 
-    def cut(self, at_once: int, cores: int, rg_rows: int, rb: int, spool_rows: int, merge_max: int) -> CutPlan:
+    def cut(self, at_once: int, cores: int, rg_rows: int, rb: int, spool_rows: int, merge_max: int, rows: int | None = None) -> CutPlan:
         """The cut's plan: the most workers (≤ `cores // at_once` a sort), then the largest merge batch (`merge_max`
-        halved down to `MERGE_FLOOR`), whose bytes — `at_once × (procs × (proc_base + worker_bytes) + sort_bytes)` —
-        fit `WORKER_SHARE` of `total − base`; none fitting: one worker at the floor. DuckDB gets the rest."""
+        halved down to `MERGE_FLOOR`), whose bytes — `at_once × (procs × (proc_base + worker_bytes) + sort_bytes)`, each
+        row count charged at most `rows` (the sorts' rows: no batch, group or merge holds more) — fit `WORKER_SHARE` of
+        `total − base`; none fitting: one worker at the floor. DuckDB gets the rest."""
+        cap = (lambda r: min(r, rows)) if rows else (lambda r: r)  # noqa: E731
         room = (self.total - self.base) * WORKER_SHARE
         top = max(1, cores // max(1, at_once))
-        rows = [merge_max >> i for i in range(64) if merge_max >> i >= MERGE_FLOOR] or [merge_max]
+        sizes = [merge_max >> i for i in range(64) if merge_max >> i >= MERGE_FLOOR] or [merge_max]
 
         def cost(procs: int, mr: int) -> tuple[int, int]:
-            arrow = at_once * (procs * worker_bytes(spool_rows, mr, rg_rows, rb) + sort_bytes(procs, spool_rows, mr, rb))
+            sort = SORT_COPIES * cap(max(mr, procs * spool_rows)) * rb  # `sort_bytes`, capped
+            arrow = at_once * (procs * worker_bytes(cap(spool_rows), cap(mr), cap(rg_rows), rb) + sort)
             return arrow, arrow + at_once * procs * self.proc_base
 
-        procs, mr = 1, rows[-1]
+        procs, mr = 1, sizes[-1]
         for p in range(top, 0, -1):
-            fit = next((r for r in rows if cost(p, r)[1] <= room), None)
+            fit = next((r for r in sizes if cost(p, r)[1] <= room), None)
             if fit is not None:
                 procs, mr = p, fit
                 break

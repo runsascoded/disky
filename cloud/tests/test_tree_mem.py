@@ -34,6 +34,8 @@ def test_fold_split():
     b = tm.Budget(total=1 << 30, base=200 * MIB, proc_base=50 * MIB)
     assert tm.FOLD_GROUPS == 6
     assert b.fold(2, 65536, 100) == (78_643_200, (1 << 30) - 200 * MIB - 78_643_200)
+    # Inputs of 1,000 rows: no group holds more.
+    assert b.fold(2, 65536, 100, rows=1000) == (1_200_000, (1 << 30) - 200 * MIB - 1_200_000)
 
 
 def test_cut_plan_most_workers_then_largest_merge():
@@ -53,6 +55,11 @@ def test_cut_plan_most_workers_then_largest_merge():
                                                                   arrow=(3 * 40 + 48) * MIB, duck=(1024 - 200 - 3 * 80 - 168) * MIB)
     tiny = tm.Budget(total=600 * MIB, base=200 * MIB, proc_base=80 * MIB)
     assert tiny.cut(1, 8, 8192, 128, 65536, 1 << 20).procs == 1
+    # Sorts of 10,000 rows: each count charged at most that (2 × 10,000 rows sorting; a worker's largest task the join's
+    # 16 MiB buffer): 4 workers fit (96 MiB each), the merge batch stays the largest (its rows never exceed the sort's).
+    assert small.cut(1, 8, 8192, 128, 65536, 1 << 20, rows=10_000) == tm.CutPlan(
+        at_once=1, procs=4, merge_rows=1 << 20, spool_rows=65536, arrow=4 * tm.CONCAT_BUF + 2 * 10_000 * 128,
+        duck=(1024 - 200 - 4 * 80) * MIB - 4 * tm.CONCAT_BUF - 2 * 10_000 * 128)
 
 
 def test_too_small_names_the_least_budget():
@@ -173,7 +180,7 @@ DATES = [f"2026-09-{d:02d}" for d in range(1, BASE + RUNS + 1)]
 LAYOUT = "listing/{id}/path-index.parquet"
 #: The budget the compaction runs under, and the tolerance its measured peak gets (sampling every 10 ms; DuckDB's own
 #: allocations past its buffer pool).
-BUDGET, TOLERANCE = 1024 * MIB, 0.10
+BUDGET, TOLERANCE = 768 * MIB, 0.10
 
 
 def _scan(rng: np.random.Generator, j: int) -> pa.Table:
@@ -231,7 +238,7 @@ print(json.dumps({"rows": rows, "sorts": {s: v["rows"] for s, v in sorts.items()
 @pytest.mark.slow
 @pytest.mark.skipif(not Path("/proc/self/smaps_rollup").exists(), reason="the tree's memory is read from procfs (Linux)")
 def test_compaction_stays_within_its_budget(generation, tmp_path):
-    """The fold of the base and both runs (two jobs, then the cut over every core) under a 1 GiB budget: the whole
+    """The fold of the base and both runs (two jobs, then the cut over every core) under a 768 MiB budget: the whole
     process tree's peak (sampled every 10 ms) stays within it, `TOLERANCE` aside; and the plan it logs says how it split."""
     g = generation
     proc = subprocess.Popen([sys.executable, "-c", FOLD, str(g["gen_dir"]), str(tmp_path / "out"), str(tmp_path / "work"), json.dumps(g["runs"]),
