@@ -2,6 +2,14 @@
 
 Running record of disk-cleanup passes on this Mac. Newest first. Each entry: what was scanned (free space before/after), what was deleted, and the **measured** bytes freed (`reclaim`/`overcount`, not apparent size).
 
+## Pass (2026-11-03): ENOSPC, 12 → 23 G free
+
+- Start: **12 G free (98%)**; another session hit `ENOSPC`. Swap 19.3 of 20 GiB used. Since 10/21 (site diff 10/21 18:04 → 11/3 06:06): free −55 G; growth in `Library/Caches/go-build` (+11 G), `.claude/worktrees` (+7.2 G), `c/disky/tmp` (+6.6 G), `.cache/uv` (+5.4 G), `c/disky/wt` (+4.8 G).
+- Deleted (each `df` delta measured):
+  - `~/c/disky/tmp/cells*.duckdb` (10/25 bench databases, none open; the `cells_*.py` scripts and `*.out` timings kept): **5.60 GiB**.
+  - `go clean -cache`: **5.85 GiB**. Refill: next Go builds.
+- End: **23 G free (96%)**. Still open: restart (swap ~20 GiB), stale agent worktrees (2.84 GiB exclusive, root's call), `~/.cache/{codex-runtimes,puppeteer}` (1.55 / 1.04 GiB).
+
 ## Pass (2026-10-21): stale scratch and tool caches, ≈17 GiB
 
 - Start: `df` swung 17 → 45 G free within minutes (swap: the `VM` volume held 19.8 GiB, 13.9 GiB used). Since 10/18's 52 G: `~` is 408 GiB (scan `2026-10-21T1023`), `wt/app/apps/tauri/target` rebuilt to 5.85 GiB exclusive.
