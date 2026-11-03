@@ -8,8 +8,8 @@ Hand-built series (12-hourly, 00:00Z / 12:00Z): a lead day Mon 8/31 (700,
 705 TiB) then Tue 9/1 (710, 713) and Wed 9/2 (712, 715) — one ISO week, so
 the bullet label is unambiguous. Quota (main) = 910 TiB."""
 import datetime as dt
-import re
 import json
+import re
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -868,6 +868,73 @@ def test_post_digest_edit_replies(tmp_path: Path):
     fake.calls.clear()
     post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
     assert [_post(c) for c in fake.calls] == [("edit", "m1")]
+
+
+def test_apply_slack_reapplies_only_the_selected_messages(tmp_path: Path):
+    """`apply_slack` (`digest -d/-y/-o`): exactly the selected, already-posted messages are edited to their current
+    rendering; no post, no other edit, no provisional or alert handling; a day without a reply is skipped; `dry_run`
+    edits nothing and returns the same changes."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    state = post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
+    assert (state["op_ts"], state["posted"]) == ("m1", {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T1200"}, "2026-09-02": {"ts": "m3", "scan": "2026-09-02T1200"}})
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    sep1 = E.Change("2026-09-01", "m2", f"[main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)")
+    sep2 = E.Change("2026-09-02", "m3", f"[main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)")
+
+    fake.calls.clear()
+    assert E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", days=["2026-09-01", "2026-09-02", "2026-09-30"], dry_run=True) == [sep1, sep2]
+    assert fake.calls == []
+
+    assert E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", days=E.day_range("2026-09-02..2026-09-02")) == [sep2]
+    assert fake.calls == [("edit", "m3", sep2.body)]
+
+    fake.calls.clear()
+    norm = lambda t: re.sub(r"\?v=\d+", "?v=<ts>", t)  # noqa: E731
+    [op] = E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True)
+    assert (op.what, op.ts, [c[:2] for c in fake.calls]) == ("op", "m1", [("edit", "m1")])
+    assert norm(fake.calls[0][2]) == norm(op.body)
+    assert norm(op.body) == norm(E.apply_slack(_tpl(), str(root), SEP, fake, "C1", "sender", op=True, dry_run=True)[0].body)
+    assert json.loads((tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json").read_text())["posted"] == state["posted"]
+
+
+def test_day_range():
+    assert [E.day_range("2026-11-01"), E.day_range("2026-10-31..2026-11-02")] == [["2026-11-01"], ["2026-10-31", "2026-11-01", "2026-11-02"]]
+    with pytest.raises(ValueError) as e:
+        E.day_range("2026-11-02..2026-11-01")
+    assert str(e.value) == "day range '2026-11-02..2026-11-01': 2026-11-01 is before 2026-11-02"
+
+
+def test_digest_cli_reply_selector_dry_run(tmp_path: Path, monkeypatch):
+    """`digest -y A..B -n`: lists each selected reply's ts and new body, and edits nothing."""
+    import thrds.slack
+    from click.testing import CliRunner
+
+    from dt_cloud import cli
+
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    post_digest(str(root), SEP, "xoxb", "C1", "sender", client=_FakeSlack())
+    fake = _FakeSlack()
+    monkeypatch.setattr(thrds.slack, "SlackClient", lambda token, channel: fake)
+    cfg = config_file(replace(CFG, root=str(root)), tmp_path / "digest.yml")
+    r = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb",
+                                      "-y", "2026-09-01..2026-09-02", "-n"])
+    assert r.exit_code == 0, r.output
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    assert r.stdout.split("\n") == [
+        "digest 2026-09 in C1 (sender): 2 to edit; dry-run, nothing edited",
+        "  2026-09-01  ts=m2",
+        f"    [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)",
+        "  2026-09-02  ts=m3",
+        f"    [main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)",
+        "",
+    ]
+    assert fake.calls == []
+    bad = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-d", "2026-09-01", "-E"])
+    assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (
+        2, "Error: -o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
 
 
 def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):

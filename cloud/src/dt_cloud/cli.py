@@ -3102,6 +3102,7 @@ def _digest_options(template_default: str):
         option("-b", "--bot-token", help="Discord bot token: opens the month's thread + resolves app emoji (default $DISCORD_BOT_TOKEN; with -P discord)"),
         option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)"),
         option("-C", "--config", "config_path", type=Path, help="YAML/JSON DigestConfig overlaid on the template's preset (title, site, root, state, plot host, buckets/quotas, prices…; see specs/done/digest-unification.md)"),
+        option("-d", "--reply", "reply_days", multiple=True, help="Re-apply only this day's already-posted reply (YYYY-MM-DD; repeatable) to its current rendering, touching nothing else: no new replies, no provisional reply, no alert, no plot (Slack; `-n` prints the edits)"),
         option("-D", "--reply-delay", "reply_delay", default=0.0, type=float, help="Seconds to sleep between replies (e.g. 305 for a spaced Slack backfill so per-reply sender chrome survives; Discord needs none)"),
         option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; a Slack sender-variant reply keeps its name + avatar)"),
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
@@ -3109,6 +3110,7 @@ def _digest_options(template_default: str):
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
+        option("-o", "--op", "op_only", is_flag=True, help="Re-apply only the OP (its plot re-rendered and hosted) to its current rendering, touching no reply (Slack; with -d/-y, those replies too; `-n` prints the edits)"),
         option("-P", "--platform", type=Choice(["slack", "discord"]), default="slack", help="Which thread to converge (default slack)"),
         option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`; the month's state lives beside it); default the config's `root` (presets: gs://$DATA_BUCKET/snapshots)"),
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack, or Discord with -P discord; dry-run unless --for-real)"),
@@ -3117,6 +3119,7 @@ def _digest_options(template_default: str):
         option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per day, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
         option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's `site_url`, else $SITE_URL)"),
         option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
+        option("-y", "--replies", "reply_range", help="Re-apply only the already-posted replies of this inclusive day range (`A..B`, YYYY-MM-DD) to their current rendering, as -d/--reply"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
     ]
 
@@ -3131,6 +3134,7 @@ def _digest(
     bot_token: str | None,
     channel: str | None,
     config_path: Path | None,
+    reply_days: tuple[str, ...],
     reply_delay: float,
     edit_replies: bool,
     for_real: bool,
@@ -3138,6 +3142,7 @@ def _digest(
     icons_dir: Path | None,
     month: str | None,
     dry_run: bool,
+    op_only: bool,
     platform: str,
     root: str | None,
     redo_replies: bool,
@@ -3147,6 +3152,7 @@ def _digest(
     site_url: str | None,
     variant: str | None,
     webhook: str | None,
+    reply_range: str | None,
 ) -> None:
     from dataclasses import replace
 
@@ -3168,7 +3174,11 @@ def _digest(
     since_d = dt.date.fromisoformat(since) if since else None
     if since_d and not redo_replies:
         raise UsageError("-s/--since applies to -R/--redo-replies")
-    if dry_run:
+    days = [d for spec in reply_days for d in dg.day_range(spec)] + (dg.day_range(reply_range) if reply_range else [])
+    selected = op_only or bool(days)
+    if selected and (edit_replies or redo_replies or platform != "slack"):
+        raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+    if dry_run and not selected:
         print(dg.dry_run(tpl, root, m, variant))
         return
 
@@ -3198,6 +3208,17 @@ def _digest(
         # production branch whose root alias serves the arrow avatars
         return dg.pages_deploy(icons, cfg.plot_project, cfg.plot_branch)
 
+    if selected:
+        changes = dg.apply_slack(tpl, root, m, client, channel, variant, op=op_only, days=days, icons_dir=icons, deploy_plot=deploy,
+                                 dry_run=dry_run)
+        if dry_run:
+            print(f"digest {m:%Y-%m} in {channel} ({variant}): {len(changes)} to edit; dry-run, nothing edited")
+            for c in changes:
+                print(f"  {'OP' if c.what == 'op' else c.what}  ts={c.ts}")
+                print("\n".join(f"    {line}" for line in c.body.split("\n")))
+        else:
+            err(f"digest: re-applied {len(changes)} message(s) in {m:%Y-%m}'s thread ({variant})")
+        return
     if redo_replies:
         # rule change: re-post every reply under the current day rule, then retire the old ones
         plan = dg.redo_replies(tpl, root, m, client, channel, variant, since=since_d, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, for_real=for_real)
