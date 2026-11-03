@@ -3598,8 +3598,10 @@ def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
     """Run scan step NAME (ARG: `list`'s source URI) for the scan `$SNAP_ID` / `$GEN` / `$DT_JOB_START` the head
     stamped, recording its phases into the run `$DT_RUN_ID`. Idempotent: done work is skipped. Steps:
     `dt_cloud.scan_steps.STEPS`."""
+    from .image_sha import log_job_stamp
     from .scan_steps import run_step
 
+    log_job_stamp(f"scan step {name}")
     sys.exit(run_step(name, arg, profile_path=profile_path))
 
 
@@ -3613,8 +3615,10 @@ def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
 def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, launch_dir: Path | None, profile_path: Path) -> None:
     """Run one scan of the deployment PROFILE_PATH describes (`job/profiles/<deployment>.yml`) through
     `job/nf/scan.nf`: `$SNAP_ID` / `$GEN` / `$DT_JOB_START` when set (resuming that scan's session), else stamped now."""
+    from .image_sha import log_job_stamp
     from .scan_head import head
 
+    log_job_stamp("scan head")
     nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
     sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
 
@@ -3631,6 +3635,10 @@ main.add_command(_cf_usage)
 from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
 
 main.add_command(_deploy_cost)
+
+from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
+
+main.add_command(_image_sha)
 
 if __name__ == "__main__":
     main()

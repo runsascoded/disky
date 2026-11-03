@@ -32,6 +32,7 @@ from click import Choice, IntRange, group, option
 from . import heartbeat as hb
 from . import static_names as sn
 from .blobstore import Store, store_url
+from .image_sha import log_job_stamp
 from .interval_churn import has_churn, with_churn
 from .static_names import OPEN, U64, connect, q, range_preds, write_sorted
 
@@ -911,6 +912,7 @@ def _seg_summary(rows: list[dict], dyadic: bool) -> dict:
 @group("interval-store")
 def cli() -> None:
     """The change-interval path store (specs/interval-store.md)."""
+    log_job_stamp("interval-store")
 
 
 @cli.command("build-ranges")

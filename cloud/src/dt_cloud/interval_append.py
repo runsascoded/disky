@@ -79,6 +79,7 @@ from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as thi
     scans_of,
 )
 from .blobstore import Store, gs_bucket, run_store, serves, store_url
+from .image_sha import log_job_stamp
 from .maint_runs import NULL, from_env
 from .interval_churn import CHURN, CHURN_END, FIX, with_churn
 from .static_names import OPEN, U64, err, q, write_sorted
@@ -1043,6 +1044,7 @@ def prune_state(gcs, gen: str, scan: str, k: int, *, bucket: str, scratch: str, 
 @group("runs")
 def cli() -> None:
     """The interval store's per-scan runs beside a base generation (specs/interval-store.md §2.7): the chain's stages."""
+    log_job_stamp("interval-store runs")
 
 
 def stage_options(f):

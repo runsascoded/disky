@@ -154,6 +154,12 @@ dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE 
                           # from the scans whose listings have them all: gcs's depth-2/3 objects had none before 2026-10-22)
                           # `-j N` (also `add`'s compaction; `build`'s cut): N key ranges, then N served sorts, at a time on
                           # cursors of one DuckDB database (`-p`/`-M` shared; each ends in a serial pyarrow writer), same bytes
+dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
+                          # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
+                          # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
+                          # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
+                          # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
+                          # `interval-store` stage tasks) log it
 dt-cloud diff-bench -a BEFORE -b AFTER [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
