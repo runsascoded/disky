@@ -61,6 +61,12 @@ def _root(store: Store, prefix: str, mount: str | None) -> str:
 
 #: A served sort's row-group size: the per-scan path store's (decode cost per group is the same).
 SERVED_RG = 8192
+#: A served sort's rows per data page, every column's pages aligned on them, with a page index (ColumnIndex +
+#: OffsetIndex) so a reader decodes only the pages its rect and range can touch (specs/diff-progressive.md §3b, 2b.1).
+#: Measured over gcs's 804 level requests: rows decoded fall about linearly with the page (p50 per request 132,717 at
+#: whole 8,192-row groups; 9,216 at 1,024; 2,304 at 256; 1,152 at 128) while the ranged GETs stay ~flat; 256 is 44×
+#: fewer rows than whole groups for 32 pages a group. Read at call time, so a test can cut tiny pages.
+SERVED_PAGE_ROWS = 256
 #: The range files' row-group size (an intermediate: only `cut` and the verifier read them).
 RANGE_RG = 65536
 
@@ -746,13 +752,17 @@ def _bounds(t: pa.Table, seg: int, size_col: str | None) -> dict:
 
 
 def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_rows: int = SERVED_RG,
-                 stamps: list[int] | None = None, est_rows: int | None = None) -> dict:
+                 stamps: list[int] | None = None, est_rows: int | None = None, page_rows: int | None = None) -> dict:
     """One served sort of `src` (a relation of `schema` rows) to `out`: its segments in order (`seg_sql`:
     the open versions, then the closed ones — one segment, or with `stamps` one per dyadic block of
     scans), each in the sort's order and cut in `rg_rows`-row groups (a segment's last may be short, so
     no group mixes segments), zstd. Writes `<out stem>.groups.parquet` beside it (`GROUPS_SCHEMA`: per
     group the exact bounds of its rows — never truncated statistics — and the compact metadata the
-    Worker revives). Logs the rows written (of `est_rows`, when known) at most once a minute."""
+    Worker revives). Pages hold `page_rows` rows (`SERVED_PAGE_ROWS`; a group's last may be short), aligned across
+    columns: pyarrow caps a page by bytes, not rows, so a 1-byte target closes one after every `write_batch_size`
+    values (an all-null column, encoding no bytes, stays one page a group). The page index carries `path`'s bounds too (its statistics on), and `path` has no dictionary (it's almost
+    all distinct: its dictionary page would be about the whole chunk, fetched by every page read). Logs the rows
+    written (of `est_rows`, when known) at most once a minute."""
     import pyarrow.compute as pc
 
     _, order, size_col = SORTS[sort]
@@ -761,7 +771,9 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
     out.parent.mkdir(parents=True, exist_ok=True)
     dictionary = [c for c in ("kind", "us", "usr", "user", "source") if c in schema.names]
     seg_rows: dict[int, int] = {}
-    with pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=dictionary, write_statistics=["depth", "vf", "vt"]) as w:
+    page = page_rows or SERVED_PAGE_ROWS
+    with pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=dictionary, write_statistics=[c for c in ("depth", "path", "vf", "vt") if c in schema.names],
+                          write_page_index=True, write_batch_size=page, data_page_size=1) as w:
         pending: list[pa.Table] = []
         n = 0
         cur: int | None = None
@@ -816,13 +828,18 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
 def write_groups(out: Path, bounds: list[dict], sort: str, summary) -> dict:
     """`<out stem>.groups.parquet` beside a served sort just written (`GROUPS_SCHEMA`): per row group its exact `bounds`
     (as the writer saw them) and the compact metadata the Worker revives; `summary(rows)` = the segments' summary."""
+    from .parquet_pages import chunk_indexes
+
     md = pq.read_metadata(out)
+    # Each chunk's ColumnIndex / OffsetIndex ranges ride along in its tuple, when it has them (2b.1's page reads).
+    ixs = chunk_indexes(out)
     rows, start = [], 0
     for g in range(md.num_row_groups):
         rg = md.row_group(g)
         chunks = [rg.column(c) for c in range(rg.num_columns)]
         codecs = {cc.compression for cc in chunks}
-        cmeta = [[cc.data_page_offset, cc.total_compressed_size, cc.dictionary_page_offset or 0] for cc in chunks]
+        cmeta = [[cc.data_page_offset, cc.total_compressed_size, cc.dictionary_page_offset or 0, *(list(ix) if ix.offset_index_length else [])]
+                 for cc, ix in zip(chunks, ixs[g])]
         bd = bounds[g]
         if bd["rows"] != rg.num_rows:
             raise RuntimeError(f"{out}: group {g} holds {rg.num_rows} rows, the writer saw {bd['rows']}")

@@ -558,17 +558,27 @@ export async function audit(
  * (`deleted_by`), so `/staged` shows those batches as deleted, not unstaged.
  * An undo deliberately does not re-stage: restoring means "keep these".
  * Idempotent; returns the prefixes removed. */
+/** Run ids per `unstageDeleted` query: D1's 100 bound parameters, less the plan id. */
+const RUN_CHUNK = 99
+
 export async function unstageDeleted(db: D1Database, planId: number, succeededRuns: readonly string[]): Promise<string[]> {
-  if (!succeededRuns.length) return []
-  const { results } = await db.prepare(`
-    SELECT i.prefix, min(r.run_id) AS run_id FROM plan_items i
-    JOIN deletion_bands b ON b.prefix = i.prefix
-    JOIN deletion_runs r ON r.run_id = b.run_id
-    WHERE i.plan_id = ? AND r.plan_id = i.plan_id AND r.mode = 'real' AND r.finished_ts IS NOT NULL
-      AND r.started_ts >= i.added_ts AND b.undone_objects = 0 AND r.plan_digest IS NOT ''
-      AND r.run_id IN (${succeededRuns.map(() => '?').join(',')})
-    GROUP BY i.prefix ORDER BY i.prefix
-  `).bind(planId, ...succeededRuns).all<{ prefix: string; run_id: string }>()
+  // Each prefix's first deleting run, over the runs a chunk at a time: D1 binds at most 100 parameters a statement
+  // (the plan id is one), and an executor poll passes every succeeded run.
+  const first = new Map<string, string>()
+  for (let i = 0; i < succeededRuns.length; i += RUN_CHUNK) {
+    const runs = succeededRuns.slice(i, i + RUN_CHUNK)
+    const { results } = await db.prepare(`
+      SELECT i.prefix, min(r.run_id) AS run_id FROM plan_items i
+      JOIN deletion_bands b ON b.prefix = i.prefix
+      JOIN deletion_runs r ON r.run_id = b.run_id
+      WHERE i.plan_id = ? AND r.plan_id = i.plan_id AND r.mode = 'real' AND r.finished_ts IS NOT NULL
+        AND r.started_ts >= i.added_ts AND b.undone_objects = 0 AND r.plan_digest IS NOT ''
+        AND r.run_id IN (${runs.map(() => '?').join(',')})
+      GROUP BY i.prefix
+    `).bind(planId, ...runs).all<{ prefix: string; run_id: string }>()
+    for (const r of results) { const was = first.get(r.prefix); if (was === undefined || r.run_id < was) first.set(r.prefix, r.run_id) }
+  }
+  const results = [...first].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([prefix, run_id]) => ({ prefix, run_id }))
   const byRun = new Map<string, string[]>()
   for (const r of results) byRun.set(r.run_id, [...(byRun.get(r.run_id) ?? []), r.prefix])
   for (const [run, prefixes] of byRun) {

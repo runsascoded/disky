@@ -52,7 +52,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // root child missing from `open-athena/models`'s answer, served from KV after the fix deployed).
 // 9 (2026-11-01): a union root's `(other)` is each changed member's totals less its drawn depth-1 rows (r2: a member
 // that drew nothing at the union's threshold was missing from the root, its Δ in no row).
-export const CACHE_V = '9'
+// 10 (2026-11-02): a view whose children are all under its threshold is one `(other)` (a flat folder of many small
+// objects answered an empty tree, and the map drew nothing).
+export const CACHE_V = '10'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)

@@ -311,6 +311,14 @@ describe('D1', () => {
       ])
     })
 
+    it('any number of succeeded runs (an executor poll passes every one; D1 binds ≤ 100 parameters a statement)', async () => {
+      const { db, raw } = await gcsDb()
+      const done = `gs://${B1}/ckpt/b/`
+      raw.exec(`INSERT INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts) VALUES (1, '${done}', NULL, 'ann', 50)`)
+      const runs = [...Array.from({ length: 149 }, (_, i) => `r-${String(i).padStart(3, '0')}`), RUN]
+      expect(await unstageDeleted(db, 1, runs)).toEqual([done])
+    })
+
     it('does not consume dry or failed-summary staging', async () => {
       const { db, raw } = await gcsDb()
       const prefix = `gs://${B1}/ckpt/b/`
