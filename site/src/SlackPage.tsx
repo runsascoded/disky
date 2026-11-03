@@ -161,7 +161,8 @@ async function send<T>(url: string, method: string, body: unknown): Promise<T> {
 /** A button that asks once more before it acts (no browser dialogs). */
 function Confirm({ label, confirm, onClick, disabled }: { label: string; confirm: string; onClick: () => void; disabled?: boolean }) {
   const [armed, setArmed] = useState(false)
-  useEffect(() => { if (armed) { const t = setTimeout(() => setArmed(false), 6000); return () => clearTimeout(t) } }, [armed])
+  // Armed long enough to read the prompt (e.g. "edit thread in D0CE8QE83EH?") before confirming.
+  useEffect(() => { if (armed) { const t = setTimeout(() => setArmed(false), 15000); return () => clearTimeout(t) } }, [armed])
   return <button disabled={disabled} className={armed ? 'armed' : ''} onClick={() => (armed ? (setArmed(false), onClick()) : setArmed(true))}>{armed ? confirm : label}</button>
 }
 
