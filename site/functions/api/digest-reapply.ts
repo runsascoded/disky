@@ -81,7 +81,7 @@ export const reapplyScript = (args: string[], outMnt: string): string => [
   `dt-cloud digest -T cw -C job/digest.yml -r "gs://$DATA_BUCKET/snapshots/cw" ${args.map(sq).join(' ')} 2>&1 | tee "$OUT"`,
 ].join('\n')
 
-type Env = BatchEnv & { DB?: D1Database; JOB_SA?: string; DIGEST_CHANNEL?: string; SITE_URL?: string }
+type Env = BatchEnv & { DB?: D1Database; JOB_SA?: string; DIGEST_CHANNEL?: string }
 
 const COLS = 'job_id, month, channel, target, dry_run, params, quota_marks, actor, ts, out'
 const row = (r: Record<string, unknown>): ReapplyRun => ({ ...(r as unknown as ReapplyRun), dry_run: !!r.dry_run })
@@ -101,7 +101,7 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const out = `gs://${cfg.dataBucket}/digest/reapply/${jobId}.txt`
   const script = reapplyScript(reapplyArgs(req), `/gcs/${cfg.dataBucket}/digest/reapply/${jobId}.txt`)
   const spec = sweepBatchSpec(cfg, env.JOB_SA, script, "", {
-    JOB_ID: jobId, SITE_URL: env.SITE_URL ?? new URL(ctx.request.url).origin, ...(cfg.cfAccountId ? { CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId } : {}),
+    JOB_ID: jobId, SITE_URL: new URL(ctx.request.url).origin, ...(cfg.cfAccountId ? { CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId } : {}),
   }, {
     SITE_TOKEN: secretRef(cfg, 'cw-s3-job-grant'),
     SLACK_BOT_TOKEN: secretRef(cfg, 'cw-s3-slack-bot-token'),

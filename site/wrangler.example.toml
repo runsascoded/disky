@@ -107,6 +107,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # DUPS = "1"                                  # the duplicate-candidate report: `/api/dups` + the `/dups` page, over the `dups` scan step's `dups.{json,parquet}` beside each scan's index
 # EXECUTOR = "plan-sweep"                     # `plan-sweep` (default) | `sweep`
 # JOB_SA = "<job>@<project>.iam.gserviceaccount.com"  # the service account dispatched Batch jobs run as (with GCP_SA_KEY)
+# DIGEST_CHANNEL = "C0123456789"               # the Slack digest's channel: /admin/slack's re-apply default (/api/digest-reapply)
 # GCP_PROJECT = "my-project"                  # the GCP project the Batch jobs, secrets and logs live in; unset = GCP_SA_KEY's project_id
 # META_TREE_URL = "https://other.example/meta"  # /scans links each scan output to its dir in the `/meta` store tree (the deployments' own data bucket); unset = no tree links
 # GCP_LOG_VIEW = "projects/my-project/locations/global/buckets/_Default/views/sweep-task-logs"  # IaC-managed task-log-only view; grant the site view-scoped logging.viewAccessor
