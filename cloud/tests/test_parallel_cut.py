@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from dt_cloud import interval_compact as ic
+from dt_cloud import interval_level as ilv
 from dt_cloud import interval_store as ist
 from dt_cloud import static_names as sn
 from dt_cloud.parquet_pages import concat, decode, encode, footer
@@ -146,7 +147,7 @@ def gen(tmp_path_factory) -> Path:
     return root
 
 
-@pytest.mark.parametrize("sort", list(ist.SORTS))
+@pytest.mark.parametrize("sort", [s for s in ist.SORTS if s != ist.LEVEL])
 def test_bounded_cut_is_one_order_by(gen, sort, tmp_path, monkeypatch):
     """Every served sort, cut from a generation's range files as runs (each range whole, or in key sub-ranges under a
     tiny budget), sorted alone and concatenated (a sort led by `(depth, path)`) or k-way merged per segment (the others),
@@ -178,14 +179,45 @@ def test_bounded_cut_is_one_order_by(gen, sort, tmp_path, monkeypatch):
 
 
 def test_merge_keys_are_the_orders():
-    """Every sort not led by `(depth, path)` has merge keys, and those sorts' `MERGE_KEYS` are exactly the others."""
-    assert sorted(s for s, (_, o, _) in ist.SORTS.items() if not o.startswith("depth, path")) == sorted(ist.MERGE_KEYS)
+    """Every sort not led by the range key `(depth, path)` has merge keys, and those sorts' `MERGE_KEYS` are exactly the
+    others: the level sort's `(depth, path)` are its rows' parents', so it merges too."""
+    assert sorted([*(s for s, (_, o, _) in ist.SORTS.items() if not o.startswith("depth, path")), ist.LEVEL]) == sorted(ist.MERGE_KEYS)
     assert {s: ist.merge_key(s) for s in ist.MERGE_KEYS} == {
         "bysize": ["__b", "path", "vf"],
         "slices-bytotal": ["__b", "path", "__un", "__u", "vf"],
         "slices-bysize-user": ["__un", "__u", "__b", "path", "vf"],
         ist.ATTRIBUTION: ["path", "vf"],
+        ist.LEVEL: ["depth", "path", "ts", "name"],
     }
+
+
+def test_the_level_cut_is_the_same_bytes_at_any_parallelism(gen, tmp_path, monkeypatch):
+    """The level sort (`interval_level`), segmented by the generation's key ranges over its parent key, cut as runs (each
+    range whole, or in key sub-ranges), merged per segment in one pass or several, and written by 1 or several processes:
+    the same bytes every time, and its rows the transitions of every path version, in key order."""
+    con = duckdb.connect()
+    files = []
+    (tmp_path / "pvl").mkdir()
+    for f in sorted((gen / "pvl").glob("r*.parquet")):
+        dst = tmp_path / "pvl" / f.name
+        con.execute(f"""COPY (SELECT *, (hash(path, vf) % 1000)::BIGINT AS churn_cum,
+            CASE WHEN vt <> {sn.OPEN} THEN (hash(path, vt) % 1000)::BIGINT END AS churn_end FROM read_parquet('{f}')) TO '{dst}' (FORMAT parquet)""")
+        files.append(str(dst))
+    bounds = [[0, ""], *(list(con.execute(f"SELECT depth, path FROM read_parquet('{f}') LIMIT 1").fetchone()) for f in files[1:])]
+    schema = ist.served_schema(ist.LEVEL)
+    third = max(ic.sub_ranges([f], None)[0][2] for f in files) // 3
+    ref = None
+    for procs, budget, fan_in in ((1, None, None), (4, None, None), (1, 1, None), (4, third, None), (1, None, 2), (4, 1, 2)):
+        if fan_in:
+            monkeypatch.setattr(ist, "MERGE_FAN_IN", fan_in)
+        out = tmp_path / f"p{procs}-b{budget}-f{fan_in}" / "level.parquet"
+        doc = ist.write_served(con, files, ist.LEVEL, out, schema, rg_rows=RG, page_rows=PAGE, procs=procs, part_rows=0, budget=budget, key_bounds=bounds)
+        got = (doc, out.read_bytes(), out.with_name("level.groups.parquet").read_bytes())
+        ref = ref or got
+        assert got == ref
+    assert len(ref[0]["segments"]) >= 2 or ref[0]["groups"] >= 20
+    want = con.execute(f"SELECT * FROM ({ilv.rows_sql(f"read_parquet('{tmp_path}/pvl/r*.parquet')")}) ORDER BY depth, path, ts, name").fetchall()
+    assert want and con.execute(f"SELECT * FROM read_parquet('{out}')").fetchall() == want
 
 
 def test_cut_plan_splits_on_group_boundaries():
