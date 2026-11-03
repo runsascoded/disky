@@ -374,6 +374,42 @@ def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
     return config_from_dict({"template": template, **_mapping(str(path), yaml.safe_load(Path(path).read_text()) or {})})
 
 
+#: The site's live digest settings (`GET /api/digest-settings`; specs/digest-runway-marks.md §4).
+SETTINGS_PATH = "/api/digest-settings"
+
+
+def with_settings(cfg: DigestConfig, settings: dict | None) -> DigestConfig:
+    """``cfg`` under the site's live settings row (``{params, quota_marks, …}``; None: no row, the file's values
+    stand), validated as the config file's own values are."""
+    if settings is None:
+        return cfg
+    marks, params = settings["quota_marks"], settings["params"]
+    if marks not in QUOTA_MARKS:
+        raise ValueError(f"digest settings quota_marks: {marks!r} is not one of {QUOTA_MARKS}")
+    if params and cfg.renderer != "site":
+        raise ValueError(f"digest settings params: {params!r} needs `renderer: site` (the local renderer has no params)")
+    return replace(cfg, quota_marks=marks, params=params)
+
+
+def live_settings(cfg: DigestConfig) -> dict | None:
+    """The site's live settings row for ``cfg.template`` (the admin page's `/admin/slack` edits), or None: no row, no
+    `site_url` or no `$SITE_TOKEN`, or the site unreachable (warned: the config file's values are the fallback, and a
+    digest in the old format beats none)."""
+    from .deploy import site_token
+    from .site import SiteError, get_json
+
+    token = site_token()
+    if not (cfg.site_url and token):
+        return None
+    try:
+        doc = get_json(cfg.site_url, token, SETTINGS_PATH, {"template": cfg.template})
+    except SiteError as e:
+        print(f"digest: no live settings from {cfg.site_url}{SETTINGS_PATH} ({e}); using the config file's", file=sys.stderr)
+        return None
+    assert isinstance(doc, dict)
+    return doc["settings"]
+
+
 # ---- pure helpers ---------------------------------------------------------------
 
 

@@ -3108,10 +3108,13 @@ def _digest_options(template_default: str):
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
         option("-H", "--reply-hour", type=int, default=None, help="cw template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
+        option("-L", "--file-settings", is_flag=True, help="Use the config file's `params` / `quota_marks`, not the site's live settings (`/api/digest-settings`, edited on /admin/slack; the default when the site has a row)"),
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
         option("-o", "--op", "op_only", is_flag=True, help="Re-apply only the OP (its plot re-rendered and hosted) to its current rendering, touching no reply (Slack; with -d/-y, those replies too; `-n` prints the edits)"),
+        option("-p", "--params", "params_override", default=None, help="The OP's site-renderer params (the site's codec string, e.g. `qh,pp`) for this run, over the live settings and the file (`renderer: site`)"),
         option("-P", "--platform", type=Choice(["slack", "discord"]), default="slack", help="Which thread to converge (default slack)"),
+        option("-q", "--quota-marks", "marks_override", type=Choice(["warning", "circles", "runway", "runway-hue"]), default=None, help="The replies' quota marks for this run, over the live settings and the file"),
         option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`; the month's state lives beside it); default the config's `root` (presets: gs://$DATA_BUCKET/snapshots)"),
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack, or Discord with -P discord; dry-run unless --for-real)"),
         option("-s", "--since", help="With --redo-replies: redo only the days from this one (YYYY-MM-DD) on; earlier days keep their replies, re-keyed to the current rule (a day's extra replies stay in the thread)"),
@@ -3140,10 +3143,13 @@ def _digest(
     for_real: bool,
     reply_hour: int | None,
     icons_dir: Path | None,
+    file_settings: bool,
     month: str | None,
     dry_run: bool,
     op_only: bool,
+    params_override: str | None,
     platform: str,
+    marks_override: str | None,
     root: str | None,
     redo_replies: bool,
     since: str | None,
@@ -3160,6 +3166,11 @@ def _digest(
 
     cfg = dg.load_config(template, config_path)
     cfg = replace(cfg, site_url=site_url or cfg.site_url, reply_hour=cfg.reply_hour if reply_hour is None else reply_hour)
+    if not file_settings:
+        cfg = dg.with_settings(cfg, dg.live_settings(cfg))
+    cfg = dg.with_settings(cfg, {"params": cfg.params if params_override is None else params_override,
+                                 "quota_marks": marks_override or cfg.quota_marks})
+    err(f"digest: quota_marks {cfg.quota_marks}, params {cfg.params!r}")
     tpl = dg.template(cfg)
     variant = variant or cfg.variant
     if variant not in tpl.variants:
