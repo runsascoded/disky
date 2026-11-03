@@ -11,11 +11,17 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../.
 
 const lag = { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 }
 const calls: string[] = []
+/** The wrapped lookups that settled, in order. */
+const settled: string[] = []
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const slowed = <A extends unknown[], R>(name: keyof typeof lag, f: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
   calls.push(name)
   await sleep(lag[name])
-  return f(...a)
+  try {
+    return await f(...a)
+  } finally {
+    settled.push(name)
+  }
 }
 
 vi.mock('../../_lib/auth.js', async orig => {
@@ -42,6 +48,9 @@ vi.mock('../../_lib/diffLevel.js', async orig => {
 
 const { onRequestGet: level } = await import('./level')
 const { buildLevels } = await import('../../_lib/diffLevel')
+const { AHEAD, clearIsolate, isolateSnapshot, loadScopes } = await import('../../_lib/shared')
+const { coloPutsSettled } = await import('../../_lib/index')
+await loadScopes()
 
 /** `INDEX_R2` over a fixture dir (`diffLevel.test.ts`'s, without the read log). */
 function r2(dir: string): R2Bucket {
@@ -75,19 +84,30 @@ function r2(dir: string): R2Bucket {
 }
 
 let env: Env
-beforeEach(async () => {
-  // A fresh colo per test: every request below starts cold at the edge.
-  const held = new Map<string, ArrayBuffer>()
+/** The colo cache's and KV's entries (key -> bytes / text), fresh per test. */
+let held: Map<string, ArrayBuffer>
+let kv: Map<string, string>
+/** Fresh colo and KV, and an empty isolate: every request below starts cold. */
+async function cold(): Promise<void> {
+  const h = held = new Map<string, ArrayBuffer>()
   ;(globalThis as unknown as { caches: unknown }).caches = {
     default: {
-      match: async (r: Request) => (held.has(r.url) ? new Response(held.get(r.url)!.slice(0)) : undefined),
-      put: async (r: Request, res: Response) => { held.set(r.url, await res.arrayBuffer()) },
+      match: async (r: Request) => (h.has(r.url) ? new Response(h.get(r.url)!.slice(0)) : undefined),
+      put: async (r: Request, res: Response) => { h.set(r.url, await res.arrayBuffer()) },
     },
   }
+  const k = kv = new Map<string, string>()
+  env = { ...env, CACHE_KV: { get: async (key: string) => k.get(key) ?? null, put: async (key: string, v: string) => { k.set(key, v) } } } as unknown as Env
+  clearIsolate()
+}
+beforeEach(async () => {
   const { db } = await sqliteD1()
   env = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INDEX_R2: r2('iv-churn'), GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'b' } as Env
+  await cold()
   calls.length = 0
+  settled.length = 0
   Object.assign(lag, { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 })
+  AHEAD.eager = true
 })
 
 /** A level request for the root between two scans; `localhost`: the gate's dev identity (and credentials presented). */
@@ -148,5 +168,74 @@ describe('a level request\'s fixed phase', () => {
     const hidden = await at('example.test', { authorization: `Bearer ${token}` })
     expect([primed.status, primed.headers.get('x-cache'), again.headers.get('x-cache'), hidden.status, await hidden.text()])
       .toEqual([200, 'miss', 'hit', 404, 'path not found'])
+  })
+})
+
+/** Everything a request can leave behind: the isolate's memos (`isolateSnapshot`: in order, objects by identity), the
+ *  colo cache and KV (keys in order, bytes). */
+const state = () => ({
+  isolate: isolateSnapshot(),
+  colo: [...held].map(([k, b]) => [k, new Uint8Array(b).join(',')]),
+  kv: [...kv],
+})
+/** `state()`'s keys alone, sorted (two runs' timestamps and object identities differ). */
+const keys = () => {
+  const { isolate, colo, kv } = state()
+  return {
+    isolate: Object.fromEntries(Object.entries(isolate).map(([n, es]) => [n, es.map(([k]) => String(k)).sort()]).sort()),
+    colo: colo.map(([k]) => k).sort(),
+    kv: kv.map(([k]) => k).sort(),
+  }
+}
+/** A level request of `p` between two scans, at `host`. */
+const askAt = (host: string, from: string, to: string, p: string, headers?: Record<string, string>) =>
+  level({ request: new Request(`http://${host}/api/diff/level?from=${from}&to=${to}&p=${p}`, { headers }), env })
+/** Let every put and continuation a request started land. */
+const quiesce = async () => {
+  await coloPutsSettled()
+  await sleep(50)
+  await coloPutsSettled()
+}
+
+describe('what a level request starts beside its gate (`ahead`) lands only once the gate passes', () => {
+  it('a refused junk credential leaves the isolate, the colo and KV exactly as they were, every lookup having finished first', async () => {
+    // A warm isolate: one authorized request's memos, colo and KV entries.
+    expect((await askAt('localhost', '2026-08-02', '2026-08-04', '')).status).toBe(200)
+    await quiesce()
+    const before = state()
+    expect(Object.keys(before.isolate).length).toBeGreaterThan(0)
+    calls.length = 0
+    settled.length = 0
+    lag.auth = 300
+    const r = await askAt('example.test', '2026-08-04', '2026-08-06', 'b1', { cookie: 'oa_auth=junk' })
+    // Every lookup ran, and settled, before the gate refused (its own `auth` last).
+    expect([r.status, [...new Set(calls)].sort(), settled.at(-1), [...new Set(settled)].sort()])
+      .toEqual([401, ['auth', 'gens', 'match', 'prep', 'scan'], 'auth', ['auth', 'gens', 'match', 'prep', 'scan']])
+    await quiesce()
+    expect(state()).toEqual(before)
+  })
+
+  it('a passed gate commits them: what the request leaves is what the same lookups started after the gate leave', async () => {
+    const run = async (eager: boolean) => {
+      await cold()
+      AHEAD.eager = true
+      expect((await askAt('localhost', '2026-08-02', '2026-08-04', '')).status).toBe(200)
+      await quiesce()
+      const warm = keys()
+      AHEAD.eager = eager
+      settled.length = 0
+      lag.auth = 100
+      const r = await askAt('localhost', '2026-08-04', '2026-08-06', 'b1')
+      const body = await r.text()
+      await quiesce()
+      return { status: r.status, body, warm, after: keys(), early: settled[0] !== 'auth' }
+    }
+    const strict = await run(true)
+    const after = await run(false)
+    // Started beside the gate, and not after it.
+    expect([strict.early, after.early]).toEqual([true, false])
+    expect([strict.status, strict.body]).toEqual([200, after.body])
+    expect(strict.after).toEqual(after.after)
+    expect(strict.after).not.toEqual(strict.warm)
   })
 })

@@ -27,7 +27,7 @@ import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
-import { ahead, traceJoins } from '../_lib/shared.js'
+import { ahead, loadScopes, traceJoins } from '../_lib/shared.js'
 import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, type Union, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
@@ -108,6 +108,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
   // used only once it has): both scans' checks, the cache key's generations and, unscoped, the cache lookup.
   const gate = member ? Promise.resolve(member.id) : st.time('auth', requireViewer(ctx as never))
   gate.catch(() => {})
+  await loadScopes()
   const early = ahead(ctx.env, !!member || presentsCredentials(ctx as never))
   try {
     return await diffGated(ctx, st, early, gate, { from, to, path, w, h, minArea, atten, top, summary, depth, lens, rawOwner, owner, classes, qRaw, qp, query, member })
@@ -148,6 +149,7 @@ async function diffGated(
 
   const gated = await gate
   if (gated instanceof Response) return gated
+  early.commit()
   // A path-restricted link (specs/path-scopes.md): a hidden path is absent,
   // and every body (cached or fresh) is filtered on the way out.
   const restriction = restrictionFor(gated, ctx.env)

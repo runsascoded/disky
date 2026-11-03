@@ -37,7 +37,7 @@ import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
 import { planNegative, planPositive } from './searchQuery.js'
 import { hasLedger } from './ledger.js'
 import { ownerAssignments } from './ownerTotals.js'
-import { joinOf, shared } from './shared.js'
+import { IsoMap, joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
 import { loadRegistry } from './identity.js'
@@ -368,7 +368,7 @@ function display(a: Agg): Record<string, unknown> {
  * A miss is remembered for as long as a handle is (`openIndex`'s TTL): a
  * store generation has no coarse tiers and a v1 one no `bysize`, so every
  * view of it would otherwise re-ask D1 for the tiers it will never have. */
-const missing = new Map<string, number>()
+const missing = new IsoMap<string, number>('missing')
 const MISS_TTL = 60_000
 async function tryOpen(env: Env, date: string, variant: string): Promise<IndexHandle | null> {
   // Keyed by path store too: the interval store's read of a held v1 date finds no coarse tier (its
@@ -600,7 +600,7 @@ export async function readRootHistory(env: Env, dates: string[], scope: { lens?:
 
 /** The owner lens for a scan: the live assignments folded against it (cached per
  * (scan, ledger head) by the totals machinery) — null when nothing is assigned. */
-const assignerMemo = new Map<string, Promise<Map<string, string>>>()
+const assignerMemo = new IsoMap<string, Promise<Map<string, string>>>('assignerMemo')
 /** email → canonical user id (`user_emails`), memoized per isolate — to match
  * an assignment's assigner (`actions.actor`, an email) against a `by=` (canonical). */
 async function assignerMap(env: Env): Promise<Map<string, string>> {
