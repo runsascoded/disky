@@ -70,6 +70,7 @@ export const ROUTES: readonly string[] = [
   '/api/activity/*', '/api/auth/*', '/api/cost/*', '/api/db/*', '/api/og/*', '/api/scan-runs/*', '/api/session-log/*',
   '/auth/google/*', '/auth/email/*',
   '/data/*', '/og/*', '/v1/files/*', '/v1/objects/*', '/slack/actions',
+  '/api/app-link', '/auth/app-handoff', '/auth/app-link', '/api/hosts/*', '/v1/laptop-files/*',
   '/assignments', '/staged', '/users', '/user/*',
   '/assets/*',
 ]
