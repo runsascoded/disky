@@ -1,0 +1,53 @@
+# The r2.rbw.sh demo's interval store, folded into a new generation that carries churn
+# (`dt-cloud interval-store backfill-churn`, specs/diff-progressive.md §3): a store built before churn existed has
+# none, and `/api/diff/level` answers 409 until it does. On GHA, not a laptop (the fold reads every range file).
+# `step: fold` writes the new generation; the source and CURRENT.json are untouched. Check it (pin dev to it), then
+# `step: current` moves CURRENT.json, which prod follows. Run both between daily ingests, so no scan is appended to
+# the source after the fold.
+name: demo-backfill-churn
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "fold: write the new generation; current: point CURRENT.json at it"
+        type: choice
+        options: [fold, current]
+        default: fold
+      gen:
+        description: Source generation (fold; default the store's current)
+        required: false
+      to_gen:
+        description: The new generation
+        required: true
+
+concurrency:
+  group: daily-ingest  # never beside an ingest's append
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    if: github.repository == 'runsascoded/disky'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BUCKET: disk-tree-demo
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+      GEN: ${{ inputs.gen }}
+      TO_GEN: ${{ inputs.to_gen }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv python install 3.12
+      - run: uv sync --frozen --all-packages --all-extras
+      - name: Fold churn into the new generation
+        if: inputs.step == 'fold'
+        working-directory: cloud
+        run: uv run dt-cloud interval-store backfill-churn ${GEN:+-g "$GEN"} -O "$TO_GEN" -o "r2://$BUCKET" -j 4 -p 4 -M 10GB
+      - name: Move CURRENT.json
+        if: inputs.step == 'current'
+        working-directory: cloud
+        run: uv run dt-cloud interval-store current -o "r2://$BUCKET" -s "$TO_GEN"
