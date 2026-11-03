@@ -356,7 +356,8 @@ async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
  *  something the gate reads, well-formed — the session cookie (`SESSION_COOKIE`, `SESSION_SHAPE`), an
  *  `Authorization: Bearer` token or a `?key=` link (`TOKEN_SHAPE`). Anything else (no credential, other cookies, a
  *  `Basic` header, a malformed token) is refused or answered anonymously whatever the lookups say, so what a route
- *  starts beside its gate (`shared.ahead`) waits for it instead. A well-formed junk credential still starts them. */
+ *  starts beside its gate (`shared.ahead`) waits for it instead. A well-formed junk credential still starts them: what
+ *  that can cost is bounded per route (`AHEAD_COST`). */
 export function presentsCredentials(ctx: Ctx): boolean {
   const url = new URL(ctx.request.url)
   if (ctx.env.PUBLIC_READ || url.hostname === 'localhost' || url.hostname === '127.0.0.1') return true

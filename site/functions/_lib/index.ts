@@ -108,6 +108,12 @@ export type Trace = (name: string, ms: number, desc?: string) => void
 export const withTrace = <H extends IndexHandle>(h: H, trace?: Trace): H => (trace ? { ...h, trace } : h)
 const now = () => performance.now()
 
+/** A bound on the distinct footer groups a plan reads (`IndexHandle.footerBudget`), across its tiers and rect batches. */
+export class FooterBudget {
+  readonly seen = new Set<string>()
+  constructor(readonly max: number) {}
+}
+
 // D1-backed: metadata comes from index_schema/index_row_groups per query.
 interface D1Handle {
   mode: 'd1'
@@ -138,6 +144,9 @@ interface D1Handle {
   asOf?: number
   /** A bounded history read plans versions overlapping this inclusive scan range. */
   historyRange?: [number, number]
+  /** The distinct footer groups a plan over this handle (and its runs, sharing one) may read at most (`pqGroups`; past
+   *  it, `TooWide`): a plan started beside the request's gate (`planLevel`) is bounded by it, whatever the rects. */
+  footerBudget?: FooterBudget
   /** Where the handle's own files are read from, when not the deployment's store (the interval
    *  store on `INDEX_R2`). */
   src?: ByteStore
@@ -753,7 +762,7 @@ function ivCutOut(env: Env, st: IvState, date: string): IvUnavailable | null {
 }
 
 /** `openIndex` past `openInterval`'s null: a date the store holds (or a broken run cut out) never reads per-scan. */
-async function ivRefuseHeld(env: Env, date: string, variant: string): Promise<void> {
+export async function ivRefuseHeld(env: Env, date: string, variant: string): Promise<void> {
   const st = await ivState(env)
   const cut = ivCutOut(env, st, date)
   if (cut) throw cut
@@ -1580,6 +1589,12 @@ async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds'
   // buckets spans nearly every footer group of every segment (~300 a sort on gcs): it decoded them all, then threw
   // `TooWide` at its group cap and halved — the root `q=tokenizer` view ran out of memory (1102).
   if (sel.length > cap) throw new TooWide(`query too wide: >${cap} footer groups (drill deeper or raise minArea)`)
+  if (h.footerBudget) {
+    const b = h.footerBudget
+    const fresh = sel.map(fg => `${h.footer.key}|${fg.n}`).filter(k => !b.seen.has(k))
+    if (b.seen.size + fresh.length > b.max) throw new TooWide(`plan bound: >${b.max} footer groups`)
+    for (const k of fresh) b.seen.add(k)
+  }
   const all = (await mapLimit(sel, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
   if (!near) return all.filter(pass)
   // `all` is in `rg` order, a footer group's tier groups after the previous one's: a group's neighbours in the file
