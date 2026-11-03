@@ -162,9 +162,11 @@ dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE 
 dt-cloud interval-store layout-sim GEN REQUESTS  # `/api/diff/level` reads of a generation's served sort (`-s`, default
                           # `path`; GEN a dir or `gs://`/`s3://`/`r2://` URL through `blobstore.Store`) simulated offline
                           # (specs/diff-progressive.md §3b): per `{path, from, to}` request, rows decoded and GET runs for
-                          # today's kept groups, `-p` page sizes within them, `-b` band counts (`(band, depth, path, vf)`)
-                          # and `-k` chunked dyadic K0s (levels < K0 in 2^K0-scan chunks); `-H R` re-runs the layouts in a
-                          # store R× as old. Runs merge as the site's `planRuns` (`RUN_GAP`/`RUN_BYTES`/`RUN_READS`
+                          # today's kept groups, `-p` page sizes within them, `-b` band counts (`(band, depth, path, vf)`),
+                          # and `-l` a dedicated level sort: one row per child version transition, keyed `(parent depth,
+                          # parent path, b, child)`, one file per base / newest-manifest run (`-f N`: N even files), one
+                          # run a file touched; `-C` its size over the whole generation (transitions, estimated bytes).
+                          # Runs merge as the site's `planRuns` (`RUN_GAP`/`RUN_BYTES`/`RUN_READS`
                           # mirror `site/functions/_lib/index.ts`) at the sort's bytes/row; row groups cached under `-c`
                           # (`depth, path, vf, vt`), `-t` fetches over one footer, `-j` processes. JSONL out, p50/p90/p99/max
                           # summary (rows, runs, GET rounds at 2 and 3 waves) to stderr

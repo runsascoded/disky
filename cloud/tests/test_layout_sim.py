@@ -26,10 +26,12 @@ import json
 import re
 from pathlib import Path
 
+import pyarrow.parquet as pq
 from click.testing import CliRunner
 
+from dt_cloud.blobstore import Store
 from dt_cloud.cli import main
-from dt_cloud.layout_sim import RUN_BYTES, RUN_GAP, RUN_READS, plan_runs, summary
+from dt_cloud.layout_sim import RUN_BYTES, RUN_GAP, RUN_READS, level_cost, plan_runs, summary
 
 ROOT = Path(__file__).parents[2]
 GEN = ROOT / "site/functions/_lib/fixtures/iv-churn/interval-store/g"
@@ -85,14 +87,14 @@ def test_adjacent_runs(tmp_path):
     ]
     assert summary(got) == [
         "2 requests: p50 / p90 / p99 / max",
-        "needed    rows [3, 4, 4, 4]",
-        "groups    rows [12, 17, 17, 17] runs [2, 3, 3, 3] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
-        "p1        rows [3, 4, 4, 4] runs [2, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
-        "p2        rows [6, 9, 9, 9] runs [2, 5, 5, 5] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
-        "p4        rows [8, 17, 17, 17] runs [2, 3, 3, 3] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
-        "B=1       rows [3, 4, 4, 4] runs [1, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
-        "B=2       rows [3, 6, 6, 6] runs [2, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
-        "B=4       rows [3, 6, 6, 6] runs [2, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
+        "needed   rows [3, 4, 4, 4]",
+        "groups   rows [12, 17, 17, 17] runs [2, 3, 3, 3] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
+        "p1       rows [3, 4, 4, 4] runs [2, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
+        "p2       rows [6, 9, 9, 9] runs [2, 5, 5, 5] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
+        "p4       rows [8, 17, 17, 17] runs [2, 3, 3, 3] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
+        "B=1      rows [3, 4, 4, 4] runs [1, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
+        "B=2      rows [3, 6, 6, 6] runs [2, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
+        "B=4      rows [3, 6, 6, 6] runs [2, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
     ]
 
 
@@ -114,45 +116,52 @@ def test_modes_skipped(tmp_path):
     assert sorted(int(p.stem.removeprefix("rg-")) for p in (tmp_path / "cache").rglob("rg-*.parquet")) == [0, 1, 3, 4, 5, 7]
 
 
-def test_chunks(tmp_path):
-    """`-k`: `a`'s closed versions are all level 0 at scans 0, 1, 2 (`x` s0-s1, s1-s2; `a.bin`, `x` s2-s3). K0 = 0:
-    each its own segment, only scan 2's (2 rows) and the open band (2 rows) kept. K0 = 1: chunks {0, 1} (not kept) and
-    {2} (kept). K0 = 2: one chunk of 4 rows, both its pages reaching s3. `b`'s one closed version (`b2/z` s0-s1, level 1)
-    is a band of its own under every K0."""
-    got = run(tmp_path, "-g", "0", "-j", "1", "-p", "none", "-b", "none", "-k", "0,1,2")
-    assert [(r["rect_rows"], r["chunks"]) for r in got] == [
-        (6, {"0": {"rows": 4, "runs": 2, "bands_hit": 2}, "1": {"rows": 4, "runs": 2, "bands_hit": 2}, "2": {"rows": 6, "runs": 2, "bands_hit": 2}}),
-        (3, {"0": {"rows": 3, "runs": 2, "bands_hit": 2}, "1": {"rows": 3, "runs": 2, "bands_hit": 2}, "2": {"rows": 3, "runs": 2, "bands_hit": 2}}),
+LEVEL_REQS = [
+    {"path": "b1", "from": "2026-08-02", "to": "2026-08-06"},
+    {"path": "b1", "from": "2026-08-04", "to": "2026-08-05"},
+]
+
+
+def test_level(tmp_path):
+    """`-l` over the base (scans s0..s3 = 07-30 … 08-03) and the newest manifest's runs (`m001`: A = 08-04, 08-05 (t4,
+    t5); B = 08-06 (t6)). `b1`'s children's versions, base + runs combined (smallest `vt`):
+
+        a.bin: s2-s3, s3-t5 (base open, A closes it), t6-O → opens s2, s3, t6 + deleted at t5 (nothing starts there)
+        x:     s0-s1, s1-s2, s2-s3, s3-t4, t4-t5, t5-t6, t6-O → 7 opens, no deletions
+
+    11 transitions. (s2, t6]: base {a s3, x s3} = 2, A {a t5, x t4, x t5} = 3, B {a t6, x t6} = 2: 7 needed, 3 files,
+    rows at the worst alignment ⌈(c + p − 1) / p⌉·p: p=1 7, p=2 4+4+4, p=4 8+8+8. (t4, t5]: A only, {a t5, x t5}."""
+    got = run(tmp_path, "-j", "1", "-b", "none", "-l", reqs_=LEVEL_REQS)
+    assert [r["level"] for r in got] == [
+        {"transitions": 11, "needed": 7, "files": 3, "files_total": 3, "pages": {"1": {"rows": 7, "runs": 3}, "2": {"rows": 12, "runs": 3}, "4": {"rows": 24, "runs": 3}}},
+        {"transitions": 11, "needed": 2, "files": 1, "files_total": 3, "pages": {"1": {"rows": 2, "runs": 1}, "2": {"rows": 4, "runs": 1}, "4": {"rows": 8, "runs": 1}}},
+    ]
+    assert summary(got)[2] == "needed L rows [2, 7, 7, 7] files [1, 3, 3, 3]"
+    assert [line.split(" rows")[0].strip() for line in summary(got)[3:]] == ["groups", "p1", "p2", "p4", "L1", "L2", "L4"]
+
+
+def test_level_files(tmp_path):
+    """`-f N`: the 7 scans in N contiguous files. N = 1: (s2, t6]'s 7 transitions in one range; N = 2: {s0..s3} holds
+    2 of them, {t4..t6} 5."""
+    one = run(tmp_path, "-j", "1", "-b", "none", "-l", "-f", "1", reqs_=LEVEL_REQS[:1])
+    two = run(tmp_path, "-j", "1", "-b", "none", "-l", "-f", "2", reqs_=LEVEL_REQS[:1])
+    assert [r["level"] for r in one + two] == [
+        {"transitions": 11, "needed": 7, "files": 1, "files_total": 1, "pages": {"1": {"rows": 7, "runs": 1}, "2": {"rows": 8, "runs": 1}, "4": {"rows": 12, "runs": 1}}},
+        {"transitions": 11, "needed": 7, "files": 2, "files_total": 2, "pages": {"1": {"rows": 7, "runs": 2}, "2": {"rows": 10, "runs": 2}, "4": {"rows": 16, "runs": 2}}},
     ]
 
 
-def test_history(tmp_path):
-    """`-H 2` on `a`: scans e0..e7 (copy 1 = +5 days), the request shifted to (e6, e7]. Copy 0's open `a.bin`, `x`
-    close at e4 (level 0, scan 3); copy 1's versions sit at scans 4-6 (+ open at 7): 12 rect rows, 4 changed (`a.bin`,
-    `x` at e6-e7 and open from e7). Pages of 2 by (path, vf):
-
-        B=1: a e2-3 a e3-4 | a e6-7 a e7-O | x e0-1 x e1-2 | x e2-3 x e3-4 | x e4-5 x e5-6 | x e6-7 x e7-O → pages 1, 5
-        B=2: open {a, x e7-O}; closed: a e2-3 a e3-4 | a e6-7 x e0-1 | x e1-2 x e2-3 | x e3-4 x e4-5 | x e5-6 x e6-7
-        k=0: open; per scan i ∈ {0..6}: only i = 6's {a, x e6-7} kept
-        k=2: open; chunk 0 (i < 4: 6 rows, none kept); chunk 1: a e6-7 x e4-5 | x e5-6 x e6-7, both kept
-    """
-    got = run(tmp_path, "-g", "0", "-j", "1", "-p", "none", "-b", "1,2", "-k", "0,2", "-H", "2", reqs_=REQS[:1])
-    assert [{k: r[k] for k in ("rect_rows", "bands", "chunks", "history")} for r in got] == [{
-        "rect_rows": 6,
-        "bands": {"1": {"rows": 4, "runs": 2, "bands_hit": 1}, "2": {"rows": 6, "runs": 2, "bands_hit": 2}},
-        "chunks": {"0": {"rows": 4, "runs": 2, "bands_hit": 2}, "2": {"rows": 6, "runs": 2, "bands_hit": 2}},
-        "history": {
-            "R": 2, "rect_rows": 12, "needed": 4,
-            "bands": {"1": {"rows": 4, "runs": 2, "bands_hit": 1}, "2": {"rows": 6, "runs": 3, "bands_hit": 2}},
-            "chunks": {"0": {"rows": 4, "runs": 2, "bands_hit": 2}, "2": {"rows": 6, "runs": 2, "bands_hit": 2}},
-        },
-    }]
-    assert summary(got)[1:4] == [
-        "needed    rows [4, 4, 4, 4]",
-        "needed@R2 rows [4, 4, 4, 4]",
-        "groups    rows [12, 12, 12, 12] runs [2, 2, 2, 2] rounds×2 [2, 2, 2, 2] rounds×3 [3, 3, 3, 3]",
-    ]
-    assert [line.split(" rows")[0].strip() for line in summary(got)[4:]] == ["B=1", "B=2", "k=0", "k=2", "B=1@R2", "B=2@R2", "k=0@R2", "k=2@R2"]
+def test_level_cost():
+    """Every path's versions over base (25 rows) + A (25) + B (17), one version's rows counted once: b1 7, b2 5, b1/a.bin
+    3, b1/x 7, b2/f.bin 2, b2/z 3, b1/x/b.bin 2, b1/x/c.bin 5, b2/z/g.bin 2, b2/z/h.bin 2, b1/x/y 6, b1/x/y/d.bin 3,
+    b1/x/y/e.bin 3 = 50; deletions: a.bin at t5, f.bin at t5, y at s3, d.bin at s3 and t6 = 5."""
+    store = Store(str(GEN))
+    got = level_cost(store, "path", ["", "deltas/2026-08-04_2026-08-05", "deltas/2026-08-06"], 2)
+    meta = pq.ParquetFile(GEN / "served/path.parquet").metadata
+    names = [meta.schema.column(i).name for i in range(meta.num_columns)]
+    cols = ["path", "depth", "vf", "size", "n_files", "churn_cum", "churn_end"]
+    bpr = sum(meta.row_group(g).column(names.index(c)).total_compressed_size for g in range(meta.num_row_groups) for c in cols) / meta.num_rows
+    assert {k: got[k] for k in ("versions", "deletions", "transitions", "bytes")} == {"versions": 50, "deletions": 5, "transitions": 55, "bytes": round(55 * bpr)}
 
 
 def test_plan_runs():
