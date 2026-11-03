@@ -19,9 +19,14 @@ For each quota group (a bucket, or a zone's buckets summed), at a scan:
 
 Knobs: Python `quota_marks: runway` (beside `warning`, `circles`); the site's OP params `q=r` (beside `q=o` off, `q=c` circles). The quota alert keeps `alert_pct` for now.
 
-## 3. Hue sweep (phase 2)
+## 3. Hue sweep (phase 2, built)
 
-Runway → hue from green (120°, ≥ 60 d) to red (0°, ≤ 1 d), log-scaled, quantized to 8 steps, as 8 custom workspace emoji `:cwq-0:` … `:cwq-7:` (circles; Slack's built-in emoji only have 7 colors). A bot can't upload emoji (`admin.emoji.add` is Enterprise Grid only): they're added at slack.com/customize/emoji, driven in Chrome (Ryan's go covers the Save clicks) or by a reusable skill. Knob: `quota_marks: runway-hue` / `q=h`. Per-pool shapes dropped: the fixed order already identifies a pool.
+Runway → one of 8 custom workspace emoji, `:runway-1:` (red, least runway) … `:runway-8:` (deep green), uploaded 2026-11-03 (circles: `#e01e1e #ec4e0c #f27c00 #f2a900 #ddc800 #9cc41a #4fae34 #1e8e4a`, hand-picked; `tmp/emoji/gen.py`). A bot can't upload emoji (`admin.emoji.add` is Enterprise Grid only): they were added at slack.com/customize/emoji in Chrome.
+
+- Step N = 1 + the number of cut points (days to full) the runway reaches, `RUNWAY_HUE_D = (1.8, 3, 6, 10, 19, 33, 60)` (log-spaced, 60^(k/7)): over quota or under 1.8 d → 1; not filling or ≥ 60 d → 8.
+- A pool ≥ 95% full is never calmer than step 3 (`RUNWAY_HUE_FULL_N`), as `runway` holds it at 🟠.
+- The names are a plain 1–8 scale and carry no thresholds, so the cut points can move without re-uploading.
+- Order and rate text as `runway`. Knobs: `quota_marks: runway-hue` (`digest_cw._runway_hue`); the OP's params `q=h` (`pools.ts` `runwayHue`); the admin page's quota select.
 
 ## 4. Admin page knobs and push (phase 3)
 
@@ -37,5 +42,5 @@ Live params: a D1 row (the admin page already writes D1; each change logged).
 ## 5. Phases
 
 1. Runway marks + fixed order + rate text, Python and TS together, golden tests on both sides; cw flips to `runway`; re-edit November (`-E`).
-2. Hue emoji (generate + upload), `runway-hue`.
+2. Hue emoji (generate + upload), `runway-hue` (built; cw stays on `runway` until Ryan picks from a preview).
 3. Admin knobs: live params, replies preview, push.
