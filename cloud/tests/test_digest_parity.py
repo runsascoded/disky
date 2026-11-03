@@ -53,6 +53,21 @@ def _tb_meta(i: int) -> dict:
             "class_bytes": {"1": round(pub * 10**12), "5": round(priv * 10**12), "6": round(git * 10**12)}}
 
 
+def _cw_flat(tib: float) -> dict:
+    return {"total_bytes": round(tib * TIB), "total_objects": 1_000_000, "class_bytes": {}}
+
+
+def _publish(root: Path, dated_meta) -> None:
+    for scan, m in dated_meta:
+        (root / scan).mkdir(parents=True, exist_ok=True)
+        (root / scan / "meta.json").write_text(json.dumps(m))
+
+
+#: A lead day (Mon 8/31: 700, 705 TiB), then 9/1 (710, 713) and 9/2 (712, 715), 12-hourly: one ISO week.
+CW_LEAD = [("2026-08-31T0000", _cw_flat(700)), ("2026-08-31T1200", _cw_flat(705))]
+CW_SEPT = [("2026-09-01T0000", _cw_flat(710)), ("2026-09-01T1200", _cw_flat(713)), ("2026-09-02T0000", _cw_flat(712)), ("2026-09-02T1200", _cw_flat(715))]
+
+
 def _case(name: str, tmp_path: Path):
     """``(config, snapshot root, month, plot url, prev url)`` for case ``name``."""
     if name == "gcs-aug":
@@ -70,6 +85,17 @@ def _case(name: str, tmp_path: Path):
         root = tmp_path / "snapshots" / "cw"
         _daily(root, date(2026, 7, 27), date(2026, 9, 1), lambda i: {"total_bytes": (700 + i) * TIB, "total_objects": 1, "class_bytes": {}})
         return CW_EXAMPLE, root, date(2026, 9, 1), PLOT, PREV
+    if name == "cw-noquota":
+        # no quota on any bucket: no `% of` clauses, one bucket's raw TiB
+        root = tmp_path / "snapshots" / "cw"
+        _publish(root, CW_LEAD + CW_SEPT)
+        return replace(CW_EXAMPLE, buckets={}), root, date(2026, 9, 1), PLOT, None
+    if name == "cw-two-weeks":
+        # a completed week (Sunday scanned) is not partial; the next week's bullet is Δ vs that week's end
+        root = tmp_path / "snapshots" / "cw"
+        scans = [(f"2026-09-{d:02d}T{h}", _cw_flat(700 + i)) for i, (d, h) in enumerate(((d, h) for d in range(1, 8) for h in ("0000", "1200")), start=1)]
+        _publish(root, CW_LEAD + scans)
+        return CW_EXAMPLE, root, date(2026, 9, 1), None, None
     if name == "cw-tb":
         root = tmp_path / "snapshots" / "hf"
         _daily(root, date(2026, 9, 20), date(2026, 10, 9), _tb_meta)
@@ -77,7 +103,7 @@ def _case(name: str, tmp_path: Path):
     raise ValueError(name)
 
 
-CASES = ["gcs-aug", "gcs-aug-discord", "gcs-first", "cw-sep", "cw6-oct", "cw-first", "cw-tb"]
+CASES = ["gcs-aug", "gcs-aug-discord", "gcs-first", "cw-sep", "cw6-oct", "cw-first", "cw-noquota", "cw-two-weeks", "cw-tb"]
 
 
 @pytest.mark.parametrize("name", CASES)
