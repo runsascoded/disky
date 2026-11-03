@@ -14,10 +14,12 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from thrds.slack import SlackClient
 
 from dt_cloud import digest as E
 from dt_cloud import digest_cw as D
 
+from conftest import thrds_fake
 from digest_examples import CW_EXAMPLE, config_file
 
 CFG = CW_EXAMPLE
@@ -666,6 +668,7 @@ class _Msg:
         self.id = id
 
 
+@thrds_fake(SlackClient)
 class _FakeSlack:
     """Records `post`/`edit` calls as tuples; message ids are sequential."""
 

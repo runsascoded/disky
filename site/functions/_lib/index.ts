@@ -2492,7 +2492,20 @@ async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1
   const want = [...new Set([...cols, ...PAGE_PLAN])]
   if (!spans.length || !want.every(c => idx.has(c))) return { rows: [], rest: spans }
   const rest: Span[] = []
-  const jsons = await fetchGroupJson(t, spans.map(s => s.rg))
+  // Each wave's wall time, GETs (`planRuns`' runs, `RUN_READS` at a time) and bytes: the paged read's cost is its
+  // dependent waves (group metadata → page index → pages), not its decode.
+  const wave = async <T>(name: string, spans: { start: number; end: number }[] | null, f: () => Promise<T>): Promise<T> => {
+    const t1 = now()
+    const out = await f()
+    trace?.(`${name}`, now() - t1, t.variant)
+    if (spans) {
+      const runs = planRuns(spans)
+      trace?.(`${name}-gets`, runs.length)
+      trace?.(`${name}-bytes`, runs.reduce((m, r) => m + r.end - r.start, 0))
+    }
+    return out
+  }
+  const jsons = await wave('pjson', null, () => fetchGroupJson(t, spans.map(s => s.rg)))
   type Group = { num_rows: bigint; columns: IndexedChunk[] }
   type Cand = { s: Span; rg: Group }
   const cands: Cand[] = []
@@ -2505,10 +2518,11 @@ async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1
   }
   if (!cands.length) return { rows: [], rest }
   const chunk = (c: Cand, name: string): IndexedChunk => c.rg.columns[idx.get(name)!]
-  const ixFile = await fetchSpans(t, cands.flatMap(c => [
+  const ixSpans = cands.flatMap(c => [
     ...PAGE_PLAN.map(n => { const k = chunk(c, n); return { start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length! } }),
     ...want.map(n => { const k = chunk(c, n); return { start: Number(k.offset_index_offset), end: Number(k.offset_index_offset) + k.offset_index_length! } }),
-  ]))
+  ])
+  const ixFile = await wave('pindex', ixSpans, () => fetchSpans(t, ixSpans))
   const reader = async (start: bigint | undefined, len: number | undefined) => ({ view: new DataView(await ixFile.slice(Number(start), Number(start) + len!)), offset: 0 })
   const text = (v: unknown): string => (v instanceof Uint8Array ? new TextDecoder().decode(v) : String(v))
   type Planned = Cand & { ranges: [number, number][]; locs: Record<string, PageLocation[]>; n: number; pages: number; skipped: number }
@@ -2565,7 +2579,7 @@ async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1
   if (!planned.length) return { rows: [], rest }
   // What hyparquet's `readSelectedPages` slices per (range, column): the chunk's dictionary page, and the pages from the
   // range's first to its last.
-  const file = await fetchSpans(t, planned.flatMap(p => p.ranges.flatMap(([a, b]) => cols.flatMap(name => {
+  const dataSpans = planned.flatMap(p => p.ranges.flatMap(([a, b]) => cols.flatMap(name => {
     const k = chunk(p, name)
     const locs = p.locs[name]
     const [f, l] = pagesOf(locs, a, b, p.n)
@@ -2576,7 +2590,8 @@ async function readChangedPages(t: IndexHandle, spans: Span[], rects: Rect[], d1
       ...(hasDict ? [{ start: chunkStart, end: Number(locs[0].offset) }] : []),
       { start: Number(locs[f].offset), end: Number(locs[l].offset) + locs[l].compressed_page_size },
     ]
-  }))))
+  })))
+  const file = await wave('pdata', dataSpans, () => fetchSpans(t, dataSpans))
   const t0 = now()
   const out: Row[] = []
   const shape = toRow(t)

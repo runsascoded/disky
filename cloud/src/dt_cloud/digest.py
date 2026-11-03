@@ -1036,15 +1036,17 @@ def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, h
     (a backfill after a format change) through ``reply_hook``, a webhook client
     bound to the thread — a webhook edit inside a thread must carry the thread
     id, which the OP-level ``hook`` doesn't."""
+    from thrds import Image
+
     save = save or (lambda s: None)
     title = f"{tpl.cfg.title} — {month:%B %Y}"
     body = discordify(tpl.op_body(data, month, None), emoji)
     op_id = state.get("op_id")
     if op_id:
-        hook.edit(op_id, body, files=[plot])
+        hook.edit(op_id, body, images=[Image(path=plot)])
         _err(f"digest: edited OP {op_id} ({tpl.n_scans(data)} scans)")
     else:
-        op_id = hook.post(body, username=title, icon_url=tpl.cfg.op_sender().get("icon_url") or f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", files=[plot]).id
+        op_id = hook.post(body, username=title, icon_url=tpl.cfg.op_sender().get("icon_url") or f"{tpl.cfg.need('icons_base')}/calendar.png?v=2", images=[Image(path=plot)]).id
         state["op_id"] = op_id
         state["thread_id"] = bot.create_thread(op_id, title)
         save(state)
