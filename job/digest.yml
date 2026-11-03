@@ -31,9 +31,9 @@ reply_hour: 12
 # (`10/3 · so far`, numbers in the body, edited in place), deleted when the
 # final reply posts
 provisional: true
-# a quota at/over this percent: `:warning:` in the daily replies + one alert reply also sent to the channel, deleted
-# once every quota is back under. null until thrds' `post(broadcast=True)` (thrds specs/slack-reply-broadcast.md); then 90
-alert_pct: null
+# a quota at/over this percent: :red_circle: in the daily replies + one alert reply also sent to the channel (thrds
+# `post(broadcast=True)`), deleted once every quota is back under
+alert_pct: 90
 # the daily replies' quota clauses fullest first, :red_circle: at/over alert_pct (else 90), :large_orange_circle:
 # within 10 points below (`warning`: config order, :warning: at/over alert_pct)
 quota_marks: circles

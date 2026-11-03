@@ -38,6 +38,7 @@ CW = DG.DigestConfig(
     variant="sender",
     reply_hour=12,
     provisional=True,
+    alert_pct=90,
     primary="marin-us-east-02a",
     buckets={
         "marin-us-east-02a": DG.Bucket("02a", DG.Quota(910 * TIB, "1 PB", "1P")),
