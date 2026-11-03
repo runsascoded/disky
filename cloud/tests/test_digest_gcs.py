@@ -10,11 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from thrds import Image
+from thrds import DiscordClient, DiscordWebhookClient, Image
 
 from dt_cloud import digest as E
 from dt_cloud import digest_gcs as D
 
+from conftest import thrds_fake
 from digest_examples import GCS_EXAMPLE
 
 CFG = GCS_EXAMPLE
@@ -262,6 +263,7 @@ class _Msg:
         self.id = id
 
 
+@thrds_fake(DiscordWebhookClient)
 class _FakeHook:
     """Records webhook calls as tuples; message ids are sequential."""
 
@@ -282,6 +284,7 @@ class _FakeHook:
         self.calls.append(("delete", message_id))
 
 
+@thrds_fake(DiscordClient)
 class _FakeBot:
     def __init__(self):
         self.calls: list[tuple] = []
