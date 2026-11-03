@@ -35,6 +35,9 @@ done
 unset n v
 set -x
 
+# The image's source revision (`job/build.sh`'s stamp; `unstamped` for an older build), first in every run's log.
+echo "run.sh: image $(dt-cloud image-sha)" >&2
+
 # The scan id keys everything this run writes (listing/, snapshots/, the index
 # generation, D1): `YYYY-MM-DDTHHMM` by default, so a later cron stays after an
 # earlier manual scan in the append stores' ID order. Explicit SNAP_ID and

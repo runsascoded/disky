@@ -56,5 +56,11 @@ COPY --from=site /repo/site/dist ./dist
 COPY job ./job
 # the deployment's Pages config: `dt-cloud cf-usage` reads its resources (project, buckets, D1s, KV, dataset) from it
 COPY site/wrangler.toml ./site/wrangler.toml
+# The source revision (`job/build.sh` → `cloudbuild.yaml` build args), last so a new sha rebuilds no layer above:
+# OCI labels for the registry, env for the code (`dt-cloud image-sha [--expect SHA]`, the stages' start-up log).
+ARG DISKY_GIT_SHA=""
+ARG DISKY_GIT_DIRTY=""
+LABEL org.opencontainers.image.revision=$DISKY_GIT_SHA disky.dirty=$DISKY_GIT_DIRTY
+ENV DISKY_GIT_SHA=$DISKY_GIT_SHA DISKY_GIT_DIRTY=$DISKY_GIT_DIRTY
 # `supervise` records a platform-terminated or OOM-killed run as failed (specs/scan-job-wrapper.md).
 ENTRYPOINT ["dt-cloud", "scan-run", "supervise", "--", "bash", "job/run.sh"]

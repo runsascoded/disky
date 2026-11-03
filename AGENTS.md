@@ -374,6 +374,13 @@ stay behind the site's auth.
 branch (live in GCP, body edited in place, never regenerated). A rebuild is how
 `job/` or pipeline changes reach prod.
 
+`build.sh` images the checkout it lives in, stamped with its `git rev-parse HEAD`
+and dirty state (`dt-cloud image-sha` reads it back). From a worktree, run that
+worktree's own `job/build.sh` (another checkout's is refused); a dirty tree is
+refused unless `ALLOW_DIRTY=1`. A benchmark on a throwaway tag:
+`IMAGE=…:bench-<sha7> job/build.sh`, then the job runs
+`dt-cloud image-sha -e <sha>` (or the harness's `-E <sha>`) before measuring.
+
 #### Dev workflow
 
 - `site/dev` — Vite on **:3253** + `wrangler pages dev` on **:3254** (a stale
