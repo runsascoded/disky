@@ -1129,14 +1129,15 @@ def _iv_check(p: ScanProfile) -> list[str]:
 
 
 @step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
-                                                             "source": str},
+                                                             "source": str, "compact": str},
       requires=_iv_check)
 def interval_store(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any pending) to the change-interval path store beside its current generation, then the
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
     catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store, or with
     `options.interval-store.source: data` from the data store, as `static-names` does (so `publish-r2 -S` needn't copy
-    the sorts to the store: specs/lean-scans.md §1.1).
+    the sorts to the store: specs/lean-scans.md §1.1). `options.interval-store.compact`: the compaction policy (`-C`, e.g.
+    `none` to hold a due compaction while carries continue; default `add`'s).
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
     jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task."""
     if ctx.reproc:
@@ -1179,7 +1180,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
     source = ctx.data_uri if ctx.opt("interval-store", "source", "store") == "data" else store
     cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", source, "-o", store, "-w", str(ctx.work / "interval-store"),
-           *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc)]
+           *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc),
+           *(["-C", str(ctx.opt("interval-store", "compact"))] if ctx.opt("interval-store", "compact") else [])]
     err("+ " + " ".join(cmd))
     with ctx.beating("interval-store") as tail:
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
