@@ -1466,7 +1466,9 @@ const docsInFlight = new Map<string, Promise<{ groups: BlobGroup[]; json: [numbe
  *  `readFooterJson`), from the colo's decoded copy, or on a miss fetched, decoded and put there. A read that
  *  plans on a group's bounds then wants its `rg_json`: reading the two apart would cost a round trip each. */
 async function ivFooterDoc(h: PqHandle, fg: FooterGroup): Promise<{ groups: BlobGroup[]; json: [number, string][] }> {
-  const fk = (part: string) => `${storeKey(h.env)}|iv|${h.variant}|${h.gen}|${part}`
+  // Scoped by the store's prefix, as every other interval-store key is: two stores under one bucket can hold a
+  // generation of one name, and one's groups' offsets read in the other's file are garbage.
+  const fk = (part: string) => `${storeKey(h.env)}|${ivPrefix(h.env)}|iv|${h.variant}|${h.gen}|${part}`
   return inFlight(docsInFlight, fk(`fd:${fg.n}`), async () => {
     const t0 = now()
     const ck = coloKey(h.env, h.footer.key, `fd=${fg.n}&d=${IV_FOOTER_DOC}`)
@@ -1530,7 +1532,7 @@ const footersInFlight = new Map<string, Promise<unknown[]>>()
 /** A footer group's decode (`part`), cached per isolate and shared while in flight. Keyed per scan for a
  *  per-scan store; an interval store's footer serves every scan, so its entries are keyed without one. */
 async function footerOnce<T>(h: PqHandle, part: string, make: () => Promise<[T[], number]>): Promise<T[]> {
-  const k = `${storeKey(h.env)}|${h.asOf != null ? 'iv' : h.date}|${h.variant}|${h.gen}|${part}`
+  const k = `${storeKey(h.env)}|${h.asOf != null ? `${ivPrefix(h.env)}|iv` : h.date}|${h.variant}|${h.gen}|${part}`
   const hit = footerCache.get<T>(k)
   if (hit) return hit
   return inFlight(footersInFlight, k, () => make().then(([v, bytes]) => { footerCache.put(k, v, bytes); return v as unknown[] }), ivJoin(h.env, 'footer-group')) as Promise<T[]>
