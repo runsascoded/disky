@@ -181,7 +181,8 @@ async function unionLevels(ctx0: Ctx, view: UnionView): Promise<Response> {
         if (p.change === 'changed') return ask(p, [''])
         // An unchanged member: its root total on both sides, nothing changed (whatever store it is).
         const r = await readRootAgg(p.env, { date: p.from!, path: '' })
-        const t = { a: r?.b ?? 0, b: r?.b ?? 0, oa: r?.o ?? 0, ob: r?.o ?? 0 }
+        if (!r) return new Response(`its root at ${p.from} has no total (an indexed scan with no root rows)`, { status: 500 })
+        const t = { a: r.b, b: r.b, oa: r.o, ob: r.o }
         return { path: '', ...t, churn: 0, rows: [], other: null, unchanged: t }
       }))
       const bad = roots.findIndex(r => r instanceof Response)

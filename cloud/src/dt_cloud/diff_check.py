@@ -71,10 +71,10 @@ def check(a: dict, b: dict, tier: str | None, atten: float = 2.0) -> dict:
     return out
 
 
-def fetch(host: str, q: dict, token: str, retries: int = 6) -> tuple[int, dict | str, float, str, str]:
-    """`/api/diff` on `host` (a 202 / 503 retried): status, body, seconds, `Server-Timing`, `x-cache` (`hit` / `kv`: an
-    edge copy, not a compute; `miss`)."""
-    url = f"{host.rstrip('/') if '://' in host else 'https://' + host}/api/diff?{urllib.parse.urlencode(q)}"
+def fetch(host: str, q: dict, token: str, retries: int = 6, route: str = "/api/diff") -> tuple[int, dict | str, float, str, str]:
+    """`route` (`/api/diff`) on `host` (a 202 / 503 retried): status, body, seconds, `Server-Timing`, `x-cache` (`hit` /
+    `kv`: an edge copy, not a compute; `miss`)."""
+    url = f"{host.rstrip('/') if '://' in host else 'https://' + host}{route}?{urllib.parse.urlencode(q)}"
     for i in range(retries):
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": "dt-cloud-diff-check/1"})
         t = time.time()
