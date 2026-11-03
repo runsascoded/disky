@@ -4,7 +4,7 @@ import { cacheKeyFor, cacheMatch } from './edgeCache'
 import { withStore } from './stores'
 import { loadHosts } from './hosts'
 import { sqliteD1 } from './testD1'
-import { anonymousCaller, grantCaller, Meter, METER, meterOf, ROUTES, routeOf, type UsagePoint, writeUsage } from './usage'
+import { anonymousCaller, grantCaller, instrumentBindings, Meter, METER, meterOf, ROUTES, routeOf, type UsagePoint, writeUsage } from './usage'
 
 const stampPage = vi.fn(async (_env: unknown, _url: URL, res: Response) => res)
 const anonymousPage = vi.fn(async (): Promise<Response | null> => null)
@@ -167,8 +167,9 @@ async function serveOne(request: Request, env: Record<string, unknown>, handler:
     waitUntil: (p: Promise<unknown>) => { pending.push(p) },
     next: () => handler({ request, env: env as Env, data }),
   }
-  // The capture hosts (`loadHosts`) are cached per isolate for a TTL: warm, as a serving isolate's are, so a point
-  // counts only the request's own reads.
+  // The capture hosts (`loadHosts`) are cached per isolate for a TTL, keyed by its (once-instrumented) DB: warm, as a
+  // serving isolate's are, so a point counts only the request's own reads.
+  instrumentBindings(env)
   await loadHosts(env as never)
   const res = await onRequest(ctx)
   await Promise.all(pending)
