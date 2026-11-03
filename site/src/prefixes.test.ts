@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { relAgo, sortPrefixRows } from './prefixes'
+import { CHUNK, fetchPrefixStats, relAgo, sortPrefixRows } from './prefixes'
 
 describe('relAgo', () => {
   it('each unit once its count is unambiguous', () => {
@@ -28,5 +28,47 @@ describe('sortPrefixRows', () => {
       ['b', 'c', 'd', 'a'],
       ['d', 'c', 'b', 'a'],
     ])
+  })
+})
+
+describe('fetchPrefixStats', () => {
+  const keys = Array.from({ length: 2 * CHUNK + 5 }, (_, i) => `gs://b/${String(i).padStart(5, '0')}/`)
+  /** A fake `/api/prefixes`: each prefix's stat is its index; `fail(n, body)` decides the n-th call's fate. */
+  const server = (fail: (n: number, prefixes: string[]) => 'drop' | 'http' | null = () => null) => {
+    const calls: { n: number; first: string; size: number }[] = []
+    let open = 0, peak = 0
+    const f = (async (_url: string, init: RequestInit) => {
+      const { prefixes } = JSON.parse(init.body as string) as { prefixes: string[] }
+      const n = calls.length
+      calls.push({ n, first: prefixes[0], size: prefixes.length })
+      peak = Math.max(peak, ++open)
+      await new Promise(r => setTimeout(r, 5))
+      open--
+      const fate = fail(n, prefixes)
+      if (fate === 'drop') throw new TypeError('Load failed')
+      if (fate === 'http') return new Response(JSON.stringify({ error: 'boom' }), { status: 503 })
+      return new Response(JSON.stringify({ stats: Object.fromEntries(prefixes.map(p => [p, { b: keys.indexOf(p), o: 1 }])) }))
+    }) as unknown as typeof fetch
+    return { f, calls, peak: () => peak }
+  }
+  const want = Object.fromEntries(keys.map((p, i) => [p, { b: i, o: 1 }]))
+
+  it('sends every chunk at once and merges them', async () => {
+    const s = server()
+    expect(await fetchPrefixStats('d', keys, s.f)).toEqual(want)
+    expect([s.calls.map(c => [c.first, c.size]), s.peak()]).toEqual([[[keys[0], CHUNK], [keys[CHUNK], CHUNK], [keys[2 * CHUNK], 5]], 3])
+  })
+  it('a dropped connection resends that chunk alone, once', async () => {
+    const s = server(n => (n === 1 ? 'drop' : null))
+    expect(await fetchPrefixStats('d', keys, s.f)).toEqual(want)
+    expect(s.calls.map(c => [c.n, c.first])).toEqual([[0, keys[0]], [1, keys[CHUNK]], [2, keys[2 * CHUNK]], [3, keys[CHUNK]]])
+  })
+  it('a chunk dropping twice fails the set; an HTTP error is not resent', async () => {
+    const twice = server((_n, p) => (p[0] === keys[CHUNK] ? 'drop' : null))
+    await expect(fetchPrefixStats('d', keys, twice.f)).rejects.toEqual(new TypeError('Load failed'))
+    expect(twice.calls.filter(c => c.first === keys[CHUNK]).length).toBe(2)
+    const http = server(n => (n === 0 ? 'http' : null))
+    await expect(fetchPrefixStats('d', keys, http.f)).rejects.toEqual(new Error('boom'))
+    expect(http.calls.length).toBe(3)
   })
 })
