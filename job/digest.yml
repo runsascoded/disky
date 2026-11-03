@@ -26,3 +26,7 @@ prices:
   "2": 0.01
   "3": 0.004
   "4": 0.0012
+# The OP's text and plot request rendered by the site (`POST /api/digest-op`, the renderer /admin/slack previews
+# with) under the default params, checked byte-identical to the local renderer on 2026-10 and 2026-11's rows first.
+renderer: site
+params: ""
