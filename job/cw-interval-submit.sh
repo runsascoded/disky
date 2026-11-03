@@ -8,6 +8,8 @@
 #   job/cw-interval-submit.sh build -t <scan>   # … through one scan (extra args go to the command)
 #   job/cw-interval-submit.sh add               # append every scan after the generation's newest
 #   job/cw-interval-submit.sh verify -s A,B,…   # parity against the per-scan path store at those scans (the base's)
+#   TO_GEN=<new> job/cw-interval-submit.sh backfill-churn [-j N]  # $INTERVAL_STORE_GEN (base + runs) folded into a new
+#                                               # generation carrying churn; then verify, `interval-store current -s <new>`
 #   TASKS=8 job/cw-interval-submit.sh verify -s A,B,…  # … split over 8 Batch tasks (each its share of the scans)
 #   DRY=1 job/cw-interval-submit.sh build       # print the body only
 #
@@ -15,9 +17,10 @@
 # over a generation: `build` refuses an existing one. Standard (not spot) VM: a build has no resume.
 set -euo pipefail
 
-if [ $# -eq 0 ]; then echo "usage: $0 build|add|verify [args…]" >&2; exit 2; fi
+if [ $# -eq 0 ]; then echo "usage: $0 build|add|verify|backfill-churn [args…]" >&2; exit 2; fi
 CMD=$1; shift
-case $CMD in build|add|verify) ;; *) echo "$0: build, add or verify, not $CMD" >&2; exit 2 ;; esac
+case $CMD in build|add|verify|backfill-churn) ;; *) echo "$0: build, add, verify or backfill-churn, not $CMD" >&2; exit 2 ;; esac
+if [ "$CMD" = backfill-churn ] && [ -z "${TO_GEN:-}" ]; then echo "$0 backfill-churn: set TO_GEN (the new generation)" >&2; exit 2; fi
 
 PROJECT=oa-internal-450019
 REGION=us-central1
@@ -33,7 +36,9 @@ STORE=${STORE:-}
 SEED_GEN=${SEED_GEN:-}
 TASKS=${TASKS:-1}
 
-export PROJECT SA IMAGE R2_BUCKET GEN MACHINE MEM DISK_GB CMD STORE SEED_GEN TASKS
+TO_GEN=${TO_GEN:-}
+
+export PROJECT SA IMAGE R2_BUCKET GEN MACHINE MEM DISK_GB CMD STORE SEED_GEN TASKS TO_GEN
 body=$(python3 - "$@" <<'EOF'
 import json, os, shlex, sys
 extra = " ".join(shlex.quote(a) for a in sys.argv[1:])
@@ -43,6 +48,9 @@ out = shlex.quote(STORE) if STORE else '"$R2_ARCHIVE"'
 if CMD == "verify":  # every case's lines + summary land in /stage/verify (and the generation's verify/ on R2); the summary is printed
     # each task its share of the sampled scans (`-i` defaults to $BATCH_TASK_INDEX); each scan's marker lands in the generation's verify/
     run = f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -n {os.environ["TASKS"]} -T /stage/tmp -o /stage {extra}\n'
+elif CMD == "backfill-churn":  # GEN's source and CURRENT.json stay as they are
+    run = (f'dt-cloud interval-store backfill-churn -g {GEN} -O {shlex.quote(os.environ["TO_GEN"])} -o {out} -w /stage/iv'
+           f' -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
 else:
     run = (f"dt-cloud interval-store {CMD} -g {GEN} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
            f' -s "$R2_ARCHIVE" -o {out} -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
