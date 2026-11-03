@@ -16,7 +16,9 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 type Body = { from: string; to: string; k: number; m: string; levels: Level[]; union?: { view: string; sources: { store: string; from: string | null; to: string | null; change: string }[] } }
 
 const IV = { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g' }
-const B2 = { vars: { ...IV, ROOT_LABEL: 'b2', INTERVAL_STORE_PREFIX: 'interval-store-b2' } }
+/** The index store's readiness (`storeReady`: creds and a bucket); every read goes to `INDEX_R2`. */
+const READY = { GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'my-data', STORE_B2_KEY: 'x' }
+const B2 = { vars: { ...IV, ROOT_LABEL: 'b2', INTERVAL_STORE_PREFIX: 'interval-store-b2', STORE_BUCKET: 'b2-data' }, secrets: { STORE_ACCESS_KEY_ID: 'STORE_B2_KEY', STORE_SECRET_ACCESS_KEY: 'STORE_B2_KEY' } }
 
 let union: Env
 let whole: Env
@@ -25,8 +27,8 @@ let pairs: [string, string][]
 beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
   const r2 = fixtureR2('iv-churn', [])
-  union = { DB: (await sqliteD1()).db, ROOT_LABEL: 'all', ...IV, INTERVAL_STORE_PREFIX: 'interval-store-b1', INDEX_R2: r2, STORES_JSON: JSON.stringify({ b2: B2, all: { union: ['primary', 'b2'], main: true } }) } as Env
-  whole = { DB: (await sqliteD1()).db, ROOT_LABEL: 'all', ...IV, INDEX_R2: r2 } as Env
+  union = { DB: (await sqliteD1()).db, ROOT_LABEL: 'all', ...READY, ...IV, INTERVAL_STORE_PREFIX: 'interval-store-b1', INDEX_R2: r2, STORES_JSON: JSON.stringify({ b2: B2, all: { union: ['primary', 'b2'], main: true } }) } as Env
+  whole = { DB: (await sqliteD1()).db, ROOT_LABEL: 'all', ...READY, ...IV, INDEX_R2: r2 } as Env
   const cases = await readJson<{ from: string; to: string; path: string }[]>('iv-churn/expected.json')
   pairs = [...new Set(cases.filter(c => c.path === '').map(c => `${c.from}|${c.to}`))].map(p => p.split('|') as [string, string])
 })
