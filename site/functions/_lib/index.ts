@@ -387,7 +387,7 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
 }
 
 /** Every scan of the env's store: each one D1 points at (a synced floor-free `path` index; the primary's query as it
- *  always was, a secondary store's scoped), and, where the primary serves the interval store (`PATH_STORE=intervals`),
+ *  always was, a secondary store's scoped), and, where the store serves its interval store (`PATH_STORE=intervals`),
  *  every scan its current generation holds (`storeHeldScans`), so a scan the job appended without per-scan pointers
  *  (or whose pointers `scan retire -P` dropped) is listed (specs/lean-scans.md §1.4, S1). */
 export async function pathScans(env: Env, order: boolean): Promise<{ results: { date: string }[] }> {
@@ -402,9 +402,10 @@ export async function pathScans(env: Env, order: boolean): Promise<{ results: { 
   return { results: dates.map(date => ({ date })) }
 }
 
-/** The scans the interval store holds where the env's store serves it for every request: the primary under
- *  `PATH_STORE=intervals`, at its pinned or current generation (`ivGen`). None under `opt-in` (a default request
- *  reads per-scan stores), or with no generation yet. */
+/** The scans the interval store holds where the env's store serves it for every request: the primary, or a secondary
+ *  store with its own (its vars' `PATH_STORE`, `INTERVAL_STORE_PREFIX`), under `PATH_STORE=intervals`, at its pinned
+ *  or current generation (`ivGen`). None under `opt-in` (a default request reads per-scan stores), or with no
+ *  generation yet. */
 export async function storeHeldScans(env: Env): Promise<string[]> {
   if (env.PATH_STORE !== 'intervals') return []
   const gen = await ivGen(env)
