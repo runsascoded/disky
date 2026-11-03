@@ -21,6 +21,21 @@ function useGoogleClient() {
   })
 }
 
+/** Whether "Sign in with OA" (OA's broker, specs/oa-login-rp.md) is configured here: the wall then offers it first. */
+function useOaLogin() {
+  return useQuery({
+    queryKey: ['oa-login'],
+    queryFn: async (): Promise<boolean> => {
+      const r = await fetch('/auth/oa/client', { credentials: 'include' })
+      if (!r.ok) return false
+      return ((await r.json()) as { enabled?: boolean }).enabled === true
+    },
+    staleTime: Infinity,
+    retry: false,
+    enabled: AUTH_MODE === 'app',
+  })
+}
+
 // Gate the human-facing routes on an identity: the app session (our own Google
 // OIDC or an emailed code, minted at `/auth/google` / `/auth/email/*`, or a
 // `?key=` share link, which <Gate> redeems before probing). The static shell +
@@ -68,6 +83,9 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
   const google = useGoogleClient()
   const clientId = google.data ?? null
   const googleUrl = next ? `/auth/google?next=${encodeURIComponent(next)}` : '/auth/google'
+  const oa = useOaLogin()
+  // Inside <Gate> (no `next`), back to the page the wall stands in for.
+  const oaUrl = `/auth/oa?next=${encodeURIComponent(next ?? window.location.pathname + window.location.search)}`
   // A verified-but-not-allowed address from the in-page button: land on the
   // same `?denied=` the redirect flow bounces to, so the wall unfolds
   // request-access pre-filled with it.
@@ -85,6 +103,9 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
         {error && <p className="signin-error" role="alert">{error}</p>}
         {/* Wait for the client id (one small request) rather than flash the
             redirect button and swap it for Google's. */}
+        {oa.data && (
+          <a className="signin signin-oa" href={oaUrl}>Sign in with OA</a>
+        )}
         {google.isFetched && (
           <SignInPanel
             title={null}   // the card's own <h1> + `restrict` line already say what this is
@@ -148,6 +169,14 @@ function signInError(code: string | null): string | undefined {
     return replay
       ? "Google sign-in didn't complete — the attempt expired or the page was reloaded mid-way. Try again."
       : `Google sign-in didn't complete (${why}). Try again, or use an emailed code.`
+  }
+  if (code.startsWith('oa:')) {
+    const why = code.slice('oa:'.length)
+    if (why === 'login_required') return 'Sign in with OA needs you to sign in at OA first. Click "Sign in with OA" to continue.'
+    if (why === 'access_denied') return 'OA sign-in was cancelled or refused. It admits openathena.ai accounts only; others can use an emailed code.'
+    return /state|nonce/.test(why)
+      ? "OA sign-in didn't complete — the attempt expired or the page was reloaded mid-way. Try again."
+      : `OA sign-in didn't complete (${why}). Try again, or use another way below.`
   }
   return 'Sign-in didn\'t complete. Try again.'
 }

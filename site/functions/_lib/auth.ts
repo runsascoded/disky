@@ -34,6 +34,11 @@ export interface Env {
   /** OIDC (our own Google client) — the ZT-free sign-in path. Set as Pages
    *  secrets; see specs/done/oidc-cutover-cw.md. Absent → `/auth/google` 503s. */
   GOOGLE_CLIENT_ID?: string
+  /** "Sign in with OA" (specs/oa-login-rp.md): OA's broker as an OIDC provider (`https://login.oa.dev`), this
+   *  deployment's client there, and its secret. Any unset: no `/auth/oa`, no button. */
+  OA_LOGIN_ISSUER?: string
+  OA_LOGIN_CLIENT_ID?: string
+  OA_LOGIN_CLIENT_SECRET?: string
   GOOGLE_CLIENT_SECRET?: string
   /** Email-code fallback (ZT One-Time-PIN replacement) — Resend sender + `from`
    *  address (`Name <addr@verified-domain>`). Absent → `/auth/email/*` 503s. */

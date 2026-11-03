@@ -6,6 +6,7 @@
  * dev stack (the Pages preview), and localhost all work, provided each origin's
  * callback is registered on the Google client. See specs/done/oidc-cutover-cw.md.
  */
+import type { OidcOptions } from '@open-athena/auth/oidc'
 import { type Env, gateFor } from './auth.js'
 
 export interface OidcCfg {
@@ -25,5 +26,26 @@ export function oidcConfig(env: Env, request: Request): OidcCfg | null {
     clientId: env.GOOGLE_CLIENT_ID,
     clientSecret: env.GOOGLE_CLIENT_SECRET,
     redirectUri: `${new URL(request.url).origin}/auth/google/callback`,
+  }
+}
+
+/** The adapter config for "Sign in with OA" (`/auth/oa` + its callback, specs/oa-login-rp.md): OA's broker
+ *  (`OA_LOGIN_ISSUER`, e.g. https://login.oa.dev) as the OIDC provider, or null where it isn't configured (no gate, or
+ *  any of `OA_LOGIN_ISSUER` / `OA_LOGIN_CLIENT_ID` / `OA_LOGIN_CLIENT_SECRET` unset). No `hd`: the broker admits only
+ *  its Workspace; the gate's policy decides admission as for every other path. Its own nonce cookie (a Google
+ *  round trip in another tab keeps its own) and no account-hint cookies (those name Google accounts for Google's
+ *  chooser; the broker holds its own session). */
+export function oaLoginConfig(env: Env, request: Request): OidcCfg & Required<Pick<OidcOptions, 'provider' | 'nonceCookieName' | 'accountHintCookie'>> | null {
+  const gate = gateFor(env)
+  const issuer = env.OA_LOGIN_ISSUER?.replace(/\/+$/, '')
+  if (!gate || !issuer || !env.OA_LOGIN_CLIENT_ID || !env.OA_LOGIN_CLIENT_SECRET) return null
+  return {
+    gate,
+    clientId: env.OA_LOGIN_CLIENT_ID,
+    clientSecret: env.OA_LOGIN_CLIENT_SECRET,
+    redirectUri: `${new URL(request.url).origin}/auth/oa/callback`,
+    provider: { authUrl: `${issuer}/oidc/authorize`, tokenUrl: `${issuer}/oidc/token`, jwksUrl: `${issuer}/oidc/jwks`, issuer, scope: 'openid email profile' },
+    nonceCookieName: 'oa_login_nonce',
+    accountHintCookie: false,
   }
 }
