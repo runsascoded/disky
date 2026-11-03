@@ -42,6 +42,8 @@ def redo_replies(root, m, token, channel, variant="sender", client=None, reply_h
 
 TIB = 1024**4
 UTC = dt.timezone.utc
+# the real `live_settings`, before conftest's autouse stub replaces the module's (tests never reach a live site)
+LIVE_SETTINGS = E.live_settings
 SITE = "https://cw.example.org"
 AV = "https://icons.example.org/arrows/av_deg"
 SEP = date(2026, 9, 1)
@@ -953,6 +955,39 @@ def test_digest_cli_reply_selector_dry_run(tmp_path: Path, monkeypatch):
     bad = CliRunner().invoke(cli.main, ["digest", "-T", "cw", "-C", str(cfg), "-r", str(root), "-m", "2026-09", "-c", "C1", "-t", "xoxb", "-d", "2026-09-01", "-E"])
     assert (bad.exit_code, bad.output.strip().split("\n")[-1]) == (
         2, "Error: -o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+
+
+def test_live_settings_override_the_file(monkeypatch):
+    """The site's live settings (`GET /api/digest-settings?template=cw`, edited on /admin/slack) replace the file's
+    `params` and `quota_marks`; no row, no token or an unreachable site leave the file's; a bad value raises."""
+    from dt_cloud import site
+    from dt_cloud.digest import with_settings
+
+    calls: list = []
+    rows = {"cw": {"params": "qh,pp", "quota_marks": "runway-hue", "updated_by": "admin", "updated_at": 1}}
+
+    def get_json(url, token, path, params=None, timeout=30):
+        calls.append((url, token, path, params))
+        if url == "https://down.example.org":
+            raise site.SiteError("HTTP 503: unavailable", 503)
+        return {"settings": rows.get(params["template"])}
+
+    monkeypatch.setattr(site, "get_json", get_json)
+    cfg = replace(CFG, renderer="site", params="qr,pp", quota_marks="runway")
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    got = with_settings(cfg, LIVE_SETTINGS(cfg))
+    assert (got.params, got.quota_marks, calls) == ("qh,pp", "runway-hue", [(SITE, "tok", "/api/digest-settings", {"template": "cw"})])
+    rows.clear()
+    assert with_settings(cfg, LIVE_SETTINGS(cfg)) == cfg
+    assert LIVE_SETTINGS(replace(cfg, site_url="https://down.example.org")) is None
+    monkeypatch.delenv("SITE_TOKEN")
+    assert (LIVE_SETTINGS(cfg), len(calls)) == (None, 3)
+    with pytest.raises(ValueError) as e:
+        with_settings(cfg, {"params": "", "quota_marks": "squares"})
+    assert str(e.value) == "digest settings quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue')"
+    with pytest.raises(ValueError) as e:
+        with_settings(replace(cfg, renderer="local", params=""), {"params": "qh", "quota_marks": "runway"})
+    assert str(e.value) == "digest settings params: 'qh' needs `renderer: site` (the local renderer has no params)"
 
 
 def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):

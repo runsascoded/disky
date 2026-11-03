@@ -128,6 +128,27 @@ CREATE TABLE chart_annotations (
   updated INTEGER NOT NULL
 , path TEXT, url TEXT, kind TEXT);
 
+CREATE TABLE digest_reapply (
+  job_id      TEXT PRIMARY KEY,
+  month       TEXT NOT NULL,
+  channel     TEXT NOT NULL,
+  target      TEXT NOT NULL,
+  dry_run     INTEGER NOT NULL,
+  params      TEXT,
+  quota_marks TEXT,
+  actor       TEXT NOT NULL,
+  ts          INTEGER NOT NULL,
+  out         TEXT NOT NULL
+);
+
+CREATE TABLE digest_settings (
+  template    TEXT PRIMARY KEY,
+  params      TEXT NOT NULL,
+  quota_marks TEXT NOT NULL,
+  updated_by  TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+
 CREATE TABLE footer_cache (
   date            TEXT NOT NULL,
   variant         TEXT NOT NULL,
@@ -459,6 +480,8 @@ CREATE INDEX admin_edits_tbl ON admin_edits (tbl, ts);
 CREATE INDEX chart_annotations_store ON chart_annotations (store, at);
 
 CREATE INDEX idx_deletion_bands_prefix ON deletion_bands (prefix);
+
+CREATE INDEX digest_reapply_ts ON digest_reapply (ts);
 
 CREATE INDEX idx_footer_cache_lru ON footer_cache (state, last_access_day, date);
 
