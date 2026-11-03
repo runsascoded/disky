@@ -13,7 +13,8 @@
  *
  *  The fixed phase overlaps (`shared.ahead`): the gate (`requireViewer`) runs beside the path store's pointers, and,
  *  for a request presenting credentials (or a union member's, its gate passed), beside the scans' checks, the cache-key generations, the asked directories'
- *  cache lookups and the first round's handles and plan (its footer reads). Nothing is used before the gate passes;
+ *  cache lookups and the first round's handles: the level sort's where the generation has it, else the `path` sort's
+ *  and the plan (its footer reads). Nothing is used before the gate passes;
  *  a refused request's lookups are dropped. `Server-Timing` `fixed`: request start to the first data read.
  *
  *  On a union view (`_lib/union.ts`) both cutoffs resolve as `/api/diff`'s do, and each member answers at its own
@@ -24,7 +25,7 @@
  *  the root a 409 naming it.
  */
 import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../../_lib/auth.js'
-import { buildLevels, type Level, LEVEL_V, levelK, type Measure, mergeLevels, planLevel, prepareLevels } from '../../_lib/diffLevel.js'
+import { buildLevels, type Level, LEVEL_V, levelK, type Measure, mergeLevels, openLevelIndex, planLevel, prepareLevels } from '../../_lib/diffLevel.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../../_lib/edgeCache.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, storeReady, withPathStore } from '../../_lib/index.js'
 import { isHidden, isHideRoot, restrictionFor } from '../../_lib/restrict.js'
@@ -91,11 +92,13 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
     const keyOf = (g: string, p: string) => cacheKeyFor('level', tag, `${from}/${to}/${encodeURIComponent(p)}?k=${k}&m=${m}&g=${g}&v=${LEVEL_V}`, storeKey(ctx.env))
     const lookup = (g: string, ps: string[]) => st.time('match', Promise.all(ps.map(async p => [p, await cacheMatch(ctx.env, keyOf(g, p))] as const)))
     const asked = early.later(async () => lookup(await gens(), dirs))
-    // The first round's handles and plan (its footer reads), beside the lookups: a read of every asked directory
-    // takes them as they are; a read of fewer plans again over the footers they left held.
-    const prep = early.later(() => prepareLevels(ctx.env, { from, to, trace: st.trace }))
-    // A failed plan here is no answer: the read plans again and fails as it would have.
-    const plan = early.later(() => prep().then(p => planLevel(p, dirs)).catch(() => undefined))
+    // The first round's handles, beside the lookups: the level sort's (its tiers' footers) where the generation has
+    // it; only where it hasn't, the `path` sort's and the plan (its footer reads). A read of every asked directory
+    // takes them as they are; a read of fewer plans again over the footers they left held. A failed open or plan here
+    // is no answer: the read opens or plans again and fails as it would have.
+    const lvl = early.later(() => openLevelIndex(ctx.env, { from, to }).catch(() => undefined))
+    const prep = early.later(async () => ((await lvl()) === null ? prepareLevels(ctx.env, { from, to, trace: st.trace }) : undefined))
+    const plan = early.later(() => prep().then(p => p && planLevel(p, dirs)).catch(() => undefined))
 
     const gated = await gate
     if (gated instanceof Response) return gated
@@ -130,7 +133,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
         // The handles and plan made beside the lookups serve the first attempt; a retry (a broken run cut out) opens afresh.
         let first = true
         const built = await ivRetry(async () => {
-          const given = first ? { prep: await prep(), plan: sameSet(todo, dirs) ? await plan() : undefined } : undefined
+          const given = first ? { level: await lvl(), prep: await prep(), plan: sameSet(todo, dirs) ? await plan() : undefined } : undefined
           first = false
           return buildLevels(ctx.env, { from, to, dirs: todo, k, m, trace: st.trace, onRead: () => st.mark('fixed') }, given)
         })
