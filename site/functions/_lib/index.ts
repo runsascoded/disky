@@ -1490,6 +1490,7 @@ async function ivFooterDoc(h: PqHandle, fg: FooterGroup): Promise<{ groups: Blob
     let doc: FooterDoc
     if (hit) doc = await hit.json<FooterDoc>()
     else {
+      h.trace?.('fdoc-r2', 1)
       const full = h.footer.full ? await h.footer.full() : h.footer
       const ffg = full.groups[fg.n]
       const buf = toBuffer((await h.src!.get(h.footer.key, { offset: ffg.byteStart, length: ffg.byteEnd - ffg.byteStart })).bytes)
@@ -2848,9 +2849,11 @@ const ivNoLevel = new IsoMap<string, number>('ivNoLevel')
 /** The level sort of every tier of `env`'s interval store holding a scan in `(from, to]`, or null when the store doesn't
  *  hold both scans or some such tier lacks the sort (the caller reads the `path` sort instead). A run that fails to open
  *  otherwise is cut out (`IvTierBroken`), as any run read is. */
-export async function openIvLevel(env: Env, from: string, to: string): Promise<LevelHandle | null> {
+export async function openIvLevel(env: Env, from: string, to: string, trace?: Trace): Promise<LevelHandle | null> {
   if (!intervalsOn(env)) return null
+  const t0 = now()
   const st = await ivState(env)
+  trace?.('lv-state', now() - t0)
   for (const d of [from, to]) {
     const cut = ivCutOut(env, st, d)
     if (cut) throw cut
@@ -2864,7 +2867,9 @@ export async function openIvLevel(env: Env, from: string, to: string): Promise<L
   const missing = (run: string | null) => { const at = ivNoLevel.get(`${ivGenKey(env)}|${run ?? ''}`); return at != null && Date.now() - at < 60_000 }
   if (tiers.some(missing)) return null
   const src = r2Bytes(env.INDEX_R2!)
+  let footerMax = 0
   const open = async (run: string | null): Promise<PqHandle | null> => {
+    const t1 = now()
     const dir = run ? `${ivPrefix(env)}/${gen}/${run}/served` : `${ivPrefix(env)}/${gen}/served`
     const key = ivKey(env, `${dir}/${IV_LEVEL}.parquet`)
     let footer: FooterIndex
@@ -2877,6 +2882,7 @@ export async function openIvLevel(env: Env, from: string, to: string): Promise<L
       }
       throw run ? ivMarkBroken(env, run, e) : e
     }
+    footerMax = Math.max(footerMax, now() - t1)
     const kv = new Map((footer.metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
     const file: FileSlice = { get byteLength() { return 0 }, slice: async (s0, e) => toBuffer((await src.get(key, { offset: s0, length: (e ?? s0) - s0 })).bytes) }
     // `asOf` / `historyRange`: the sidecar is an interval store's (`ivFooterDoc`), its `vf`/`vt` bounds the groups' `ts`.
@@ -2884,6 +2890,8 @@ export async function openIvLevel(env: Env, from: string, to: string): Promise<L
       version: Number(kv.get('version')), columns: IV_LEVEL_COLS, floor: null, footer, asOf: d2, historyRange: [d1, d2], src, dataKey: key, ...(run ? { run } : {}) }
   }
   const hs = await Promise.all(tiers.map(open))
+  trace?.('lv-tiers', tiers.length)
+  trace?.('lv-footer', footerMax)
   if (hs.some(h => !h)) return null
   return { env, d1, d2, tiers: hs as PqHandle[] }
 }
@@ -2896,8 +2904,10 @@ const LEVEL_MAX_ROWS = 700_000
  *  each tier's groups whose bounds can hold one (sidecar), then two waves over all tiers at once — the kept groups' page
  *  indexes, then the pages that can hold one — each wave's merged runs (`planRuns`) `RUN_READS` at a time on one limiter.
  *  Server-Timing: `lv-index` / `lv-data` (ms, `-gets`, `-rounds`, `-bytes`), `lv-groups`, `lv-pages`, `lv-rows`. Throws
- *  "query too wide" past `LEVEL_MAX_GROUPS` groups or `LEVEL_MAX_ROWS` page rows. */
-export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace): Promise<LevelRec[]> {
+ *  "query too wide" past `LEVEL_MAX_GROUPS` groups or `LEVEL_MAX_ROWS` page rows. `lap`: the request's phases
+ *  (`serverTiming`'s), with a clock sync (`syncClock`) after the read's CPU-only stretches so they're counted as theirs;
+ *  also `lv-plan-bounds` / `lv-plan-json` (tier-ms, overlapping), `fgroups`, `footer`, `fdoc-r2`. */
+export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace, lap?: (name: string) => void): Promise<LevelRec[]> {
   const { d1, d2 } = lh
   const keys = dirs.map(p => ({ d: p === '' ? 0 : p.split('/').length, p }))
   const want = new Set(keys.map(k => `${k.d}\0${k.p}`))
@@ -2908,10 +2918,14 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace):
   const cands: Cand[] = []
   await Promise.all(lh.tiers.map(async t => {
     try {
-      const gs = (await pqGroups(t, b => meets(b.dMin, b.dMax, b.pMin, b.pMax)))
+      const t1 = now()
+      const gs = (await pqGroups(withTrace(t, trace), b => meets(b.dMin, b.dMax, b.pMin, b.pMax)))
         .filter(g => meets(g.dMin, g.dMax, g.pMin, g.pMax) && g.vfMax! > d1 && g.vfMin! <= d2)
+      trace?.('lv-plan-bounds', now() - t1)
       if (!gs.length) return
+      const t2 = now()
       const jsons = await fetchGroupJson(t, gs.map(g => g.rg))
+      trace?.('lv-plan-json', now() - t2)
       for (const g of gs) {
         const rg = reviveRowGroup(jsons.get(g.rg)!, t.schema) as unknown as Group
         if (rg.columns.some(c => !c.offset_index_length)) throw new Error(`${t.dataKey}: group ${g.rg} has no page index`)
@@ -2923,6 +2937,7 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace):
   }))
   trace?.('lv-plan', now() - t0)
   trace?.('lv-groups', cands.length)
+  lap?.('plan')
   if (cands.length > LEVEL_MAX_GROUPS) throw new Error(`query too wide: ${cands.length} level groups`)
   if (!cands.length) return []
   const lim = limiter(RUN_READS)
@@ -2956,6 +2971,7 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace):
     ...LEVEL_PLAN.map(n => { const k = chunk(c, n); return { start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length! } }),
     ...IV_LEVEL_COLS.map(n => { const k = chunk(c, n); return { start: Number(k.offset_index_offset), end: Number(k.offset_index_offset) + k.offset_index_length! } }),
   ]))
+  lap?.('index')
   const text = (v: unknown): string => (v instanceof Uint8Array ? new TextDecoder().decode(v) : String(v))
   type Planned = Cand & { ranges: [number, number][]; locs: Record<string, PageLocation[]>; n: number; pages: number }
   const planned: Planned[] = []
@@ -2999,6 +3015,11 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace):
   }
   const rows = planned.reduce((m, p) => m + p.ranges.reduce((x, [a, b]) => x + b - a, 0), 0)
   trace?.('lv-pages', planned.reduce((m, p) => m + p.pages, 0))
+  trace?.('lv-page-rows', rows)
+  if (lap) {
+    await syncClock()
+    lap('pages')
+  }
   if (rows > LEVEL_MAX_ROWS) throw new Error(`query too wide: ${rows} level rows`)
   if (!planned.length) return []
   const dataFiles = await wave('lv-data', byTier(planned as Cand[], c => {
@@ -3016,6 +3037,7 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace):
       ]
     }))
   }))
+  lap?.('data')
   const t2 = now()
   const out: LevelRec[] = []
   for (const p of planned) {
@@ -3030,10 +3052,16 @@ export async function readLevel(lh: LevelHandle, dirs: string[], trace?: Trace):
         sizePrev: num(r.size_prev), nFilesPrev: num(r.n_files_prev), churnCum: num(r.churn_cum), churnPrev: num(r.churn_prev) })
     }
   }
+  if (lap) await syncClock()
   trace?.('lv-decode', now() - t2)
   trace?.('lv-rows', out.length)
+  lap?.('decode')
   return out
 }
+
+/** A timer's turn of the event loop: a Worker's clock advances only across I/O (`Server-Timing` hides CPU), so a span
+ *  read after this counts the CPU before it. Costs one timer tick; for tracing only. */
+export const syncClock = (): Promise<void> => new Promise(r => setTimeout(r, 0))
 
 /** At most `n` of the calls it wraps running at once (the rest queue). */
 export function limiter(n: number): <T>(f: () => Promise<T>) => Promise<T> {

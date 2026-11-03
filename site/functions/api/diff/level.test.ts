@@ -158,6 +158,17 @@ describe('a level request\'s fixed phase', () => {
       .toEqual([200, 'miss', want, 200, 'hit', want])
   })
 
+  it('its `ph-*` phases cover the request: they sum to `total`', async () => {
+    lag.gens = 12
+    const [from, to] = ['2026-08-03', '2026-08-06']
+    const t = timing(await ask(from, to))
+    const phases = Object.keys(t).filter(k => k.startsWith('ph-')).sort()
+    expect(phases).toEqual(['pointers', 'creds', 'gate', 'scans', 'gens', 'lookup', 'open', 'read', 'store', 'encode', 'rest'].map(k => `ph-${k}`).sort())
+    // Each is rounded: at most half a millisecond off apiece.
+    expect(Math.abs(phases.reduce((n, k) => n + t[k], 0) - t.total)).toBeLessThanOrEqual(Math.ceil((phases.length + 1) / 2))
+    expect(t['ph-gate'] + t['ph-scans'] + t['ph-gens']).toBeGreaterThanOrEqual(10)
+  })
+
   it('a refused gate answers its 401 and nothing else, though its lookups had started', async () => {
     lag.auth = 50
     const r = await ask('2026-08-03', '2026-08-05', { headers: { 'x-deny': '1' } })

@@ -20,7 +20,7 @@
  *  `openIvLevel`), a round reads it instead (`levelRound`): each asked directory's transitions in `(D1, D2]`, one key
  *  range per file, every directory and file planned together and read in two waves (`readLevel`). Same answers. */
 import type { Env } from './auth.js'
-import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, type LevelHandle, type LevelRec, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, type Trace, withChurn, withTrace } from './index.js'
+import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, type LevelHandle, type LevelRec, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, syncClock, type Trace, withChurn, withTrace } from './index.js'
 import { readRootAgg } from './view.js'
 
 /** The answer's version, in its edge-cache key: bumped with every change to what a level answers. */
@@ -153,6 +153,9 @@ export interface LevelOpts {
   trace?: Trace
   /** Called as the first data read (`readChanged`) starts: the end of the request's fixed phase (`Server-Timing` `fixed`). */
   onRead?: () => void
+  /** The request's phases (`serverTiming`'s `lap`), through a level-index read: `churn`, then each round's `plan`, `index`,
+   *  `pages`, `data`, `decode`, `rollup`, `own`. */
+  lap?: (name: string) => void
 }
 
 /** What every round of a level request reads through: both scans' interval-store stamps and the `to` scan's `path`
@@ -205,8 +208,8 @@ export const planLevel = (p: LevelPrep, dirs: string[]): Promise<ChangedPlan> =>
 
 /** The level sort's handles for the range (`openIvLevel`: its tiers' footers), or null when some tier the range touches
  *  lacks it: what a request opens beside its gate, before the `path` sort's prep (only wanted on null). */
-export const openLevelIndex = (env0: Env, o: { from: string; to: string }): Promise<LevelHandle | null> =>
-  openIvLevel(asOfScans(env0, [o.from, o.to]), o.from, o.to)
+export const openLevelIndex = (env0: Env, o: { from: string; to: string; trace?: Trace }): Promise<LevelHandle | null> =>
+  openIvLevel(asOfScans(env0, [o.from, o.to]), o.from, o.to, o.trace)
 
 /** Links followed at most: well past any store's depth. */
 const CHAIN_MAX = 64
@@ -221,6 +224,7 @@ export async function buildLevels(env0: Env, o: LevelOpts, given?: { level?: Lev
     const base = await ivChurnFrom(env)
     if (base == null) throw new DiffUnavailable('churn', 'the interval store generation carries no churn')
     if (lh.d1 < base) throw new DiffUnavailable('churn', `churn is counted from scan stamp ${base}; ${o.from} is before it`)
+    o.lap?.('churn')
     const got = await chained(o, dirs => levelRound(env, lh, dirs, o))
     if (got) {
       o.trace?.('level-index', 1)
@@ -270,7 +274,7 @@ export function transitionsChange(ts: LevelRec[]): (Sides & { k: 'file' | 'dir';
 async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpts): Promise<Level[] | null> {
   let recs: LevelRec[]
   try {
-    recs = await readLevel(lh, dirs, o.trace)
+    recs = await readLevel(lh, dirs, o.trace, o.lap)
   } catch (e) {
     if (!String((e as Error).message).startsWith('query too wide') || dirs.length === 1) throw e
     const m = dirs.length >> 1
@@ -299,7 +303,12 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
     const c = transitionsChange(ts)
     if (c) kids.get(dir)?.push({ p: dir ? `${dir}/${nm}` : nm, ...c })
   }
-  return Promise.all(dirs.map(async p => {
+  if (o.lap) {
+    await syncClock()
+    o.lap('rollup')
+  }
+  o.trace?.('lv-own-dirs', dirs.filter(p => !own.has(p)).length)
+  const levels = await Promise.all(dirs.map(async p => {
     const children = kids.get(p)!
     let mine = own.get(p)
     if (!mine) {
@@ -309,6 +318,8 @@ async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpt
     }
     return levelOf(p, mine, children, o.k, o.m)
   }))
+  o.lap?.('own')
+  return levels
 }
 
 /** One read of `dirs`' changed children (and their own versions), split while it doesn't fit the decoder. */

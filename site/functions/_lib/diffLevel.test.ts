@@ -278,6 +278,14 @@ describe('level diffs', () => {
       expect(t['lv-groups']).toBeGreaterThan(files.length) // several groups per file, still one run each
     })
 
+    it('its read laps every phase, each round in order, wherever a directory has no transition', async () => {
+      const lv = await levelEnv([])
+      const laps: string[] = []
+      const c = cases.find(c => c.path === '')!
+      await buildLevels(lv, { from: c.from, to: c.to, dirs: [''], k: 512, m: 'churn', chain: false, lap: n => { laps.push(n) } })
+      expect(laps).toEqual(['churn', 'plan', 'index', 'pages', 'data', 'decode', 'rollup', 'own'])
+    })
+
     it('reads the path sort where a touched file lacks the level index', async () => {
       // `interval-store/` has no level sort: the same answers, by the old read.
       const { t, trace } = traced()
