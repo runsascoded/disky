@@ -38,27 +38,25 @@ def test_fold_split():
     assert b.fold(2, 65536, 100, rows=1000) == (1_200_000, (1 << 30) - 200 * MIB - 1_200_000)
 
 
-def test_cut_plan_most_workers_then_largest_merge():
-    """8 cores, 4 GiB, rows of 128 B: half of what this process leaves (1,948 MiB) holds 8 workers (80 MiB each) merging
-    128Ki rows (5 copies: 80 MiB) and 8 runs' sort batches (2 × 8 × 64Ki rows: 128 MiB) — 256Ki rows would take 2,048.
-    DuckDB gets 4,096 − 200 − 8 × 80 − 768."""
+def test_cut_plan_most_workers():
+    """8 cores, 4 GiB, rows of 128 B: half of what this process leaves (1,948 MiB) holds 8 workers (80 MiB each, + a
+    writer's 2 spool groups and 3 served groups: 19 MiB) and 8 runs' or pieces' sort batches (2 × 8 × 64Ki rows: 128
+    MiB). DuckDB gets 4,096 − 200 − 8 × 80 − 280."""
     b = tm.Budget(total=4096 * MIB, base=200 * MIB, proc_base=80 * MIB)
-    assert b.cut(1, 8, 8192, 128, 65536, 1 << 20) == tm.CutPlan(at_once=1, procs=8, merge_rows=1 << 17, spool_rows=65536, arrow=768 * MIB,
-                                                              duck=2488 * MIB)
-    # Two sorts at once split the cores: 4 workers each, the same merge batch fits.
-    assert b.cut(2, 8, 8192, 128, 65536, 1 << 20) == tm.CutPlan(at_once=2, procs=4, merge_rows=1 << 17, spool_rows=65536,
-                                                              arrow=2 * (4 * 80 + 64) * MIB, duck=(4096 - 200 - 8 * 80 - 768) * MIB)
-    # A small budget (412 MiB for the workers): fewer of them at the floor's merge batch (64Ki rows: 40 MiB a worker, 3
-    # runs' sort batches 48 MiB); none fitting, one.
+    assert b.cut(1, 8, 8192, 128, 65536) == tm.CutPlan(at_once=1, procs=8, spool_rows=65536, arrow=280 * MIB, duck=2976 * MIB)
+    # Two sorts at once split the cores: 4 workers each.
+    assert b.cut(2, 8, 8192, 128, 65536) == tm.CutPlan(at_once=2, procs=4, spool_rows=65536, arrow=2 * (4 * 19 + 64) * MIB,
+                                                     duck=(4096 - 200 - 8 * 80 - 280) * MIB)
+    # A small budget (412 MiB for the workers): fewer of them (115 MiB each with its sort batches); none fitting, one.
     small = tm.Budget(total=1024 * MIB, base=200 * MIB, proc_base=80 * MIB)
-    assert small.cut(1, 8, 8192, 128, 65536, 1 << 20) == tm.CutPlan(at_once=1, procs=3, merge_rows=1 << 16, spool_rows=65536,
-                                                                  arrow=(3 * 40 + 48) * MIB, duck=(1024 - 200 - 3 * 80 - 168) * MIB)
+    assert small.cut(1, 8, 8192, 128, 65536) == tm.CutPlan(at_once=1, procs=3, spool_rows=65536, arrow=(3 * 19 + 48) * MIB,
+                                                         duck=(1024 - 200 - 3 * 80 - 105) * MIB)
     tiny = tm.Budget(total=600 * MIB, base=200 * MIB, proc_base=80 * MIB)
-    assert tiny.cut(1, 8, 8192, 128, 65536, 1 << 20).procs == 1
+    assert tiny.cut(1, 8, 8192, 128, 65536).procs == 1
     # Sorts of 10,000 rows: each count charged at most that (2 × 10,000 rows sorting; a worker's largest task the join's
-    # 16 MiB buffer): 4 workers fit (96 MiB each), the merge batch stays the largest (its rows never exceed the sort's).
-    assert small.cut(1, 8, 8192, 128, 65536, 1 << 20, rows=10_000) == tm.CutPlan(
-        at_once=1, procs=4, merge_rows=1 << 20, spool_rows=65536, arrow=4 * tm.CONCAT_BUF + 2 * 10_000 * 128,
+    # 16 MiB buffer): 4 workers fit (96 MiB each).
+    assert small.cut(1, 8, 8192, 128, 65536, rows=10_000) == tm.CutPlan(
+        at_once=1, procs=4, spool_rows=65536, arrow=4 * tm.CONCAT_BUF + 2 * 10_000 * 128,
         duck=(1024 - 200 - 4 * 80) * MIB - 4 * tm.CONCAT_BUF - 2 * 10_000 * 128)
 
 
