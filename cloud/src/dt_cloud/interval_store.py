@@ -771,17 +771,18 @@ CUT_SPOOL_RG = 65536
 #: encoding.
 CUT_PART_ROWS = 1 << 20
 #: A merged sort's pieces (`piece_plan`) are at least this many rows, whatever the budget: each is one DuckDB query over
-#: every run, whose fixed costs (the runs' footers, the query's set-up) a smaller piece would repeat for few rows.
+#: its spans of every run, whose fixed cost (the query's set-up, a spool group decoded at each span end) a smaller piece
+#: would repeat for few rows.
 PIECE_MIN_ROWS = 1 << 16
 #: A merged sort's run spool records a fence (`_sort_run`: a row's merge key and position) every `stride` rows of each
 #: segment, `stride = share // (FENCE_SLACK × (runs + 1))`: a piece's row bound (`piece_plan`) overstates its rows by
 #: < 2 strides a run, and a piece one candidate too long overstates `share` by < `(runs + 1)` strides, so pieces fill
 #: ≥ 1 − 3 / `FENCE_SLACK` of `share` and never pass it.
 FENCE_SLACK = 8
-#: The smallest row group of a merged sort's run spools: a piece reads each run's rows by `__i` (its row number, with
-#: statistics), so a group is the waste at each end of a run's span; smaller groups would only grow the footers.
+#: The smallest row group of a merged sort's run spools: a piece reads each run's span by row-group index (`RunSpool`),
+#: so a group is the waste at each end of a run's span; smaller groups would only grow the footers.
 PIECE_MIN_RG = 1024
-#: Bytes a spooled row carries past its range-file row (`write_served`'s `__seg`, a merged sort's `__i` and computed merge
+#: Bytes a spooled row carries past its range-file row (`write_served`'s `__seg`, a merged sort's computed merge
 #: keys: `__b`, `__un`, `__u`, a copy of `usr` as a short string), charged on top of `interval_compact.row_bytes`
 #: (`cut_gen`'s plan).
 SPOOL_EXTRA = 4 * 8 + 16
@@ -908,24 +909,28 @@ def range_files(con, pattern: str) -> list[str]:
 
 
 def _sort_run(con, sql: str, out: Path, rg: int, name: str, key: list[str] | None = None, stride: int = 0,
-              params: list | None = None) -> tuple[dict[int, int], dict[int, list[tuple[tuple, int]]]]:
+              params: list | None = None, timing: dict | None = None) -> tuple[dict[int, int], dict[int, list[tuple[tuple, int]]]]:
     """`sql` (ordered, with `__seg`) streamed into spool `out` (lz4, `rg`-row groups). Returns its rows per segment, and
     with `key` (a merged sort's run, ordered by `(__seg, key)`) its fences: per segment `(key, row)` of its first row and
-    every `stride`-th after; the spool then carries `__i` (each row's number, delta-encoded, with statistics), which a
-    piece (`_piece_sql`) reads a run's span by."""
+    every `stride`-th after (a row's number in the spool, by which a piece reads a run's span: `RunSpool`). `timing`
+    gets `first` (seconds from the query's start to its first batch: an `ORDER BY`'s whole sort) and `s` (to the
+    spool's close)."""
     import numpy as np
     import pyarrow.compute as pc
 
     counts: dict[int, int] = {}
     fences: dict[int, list[tuple[tuple, int]]] = {}
     starts: dict[int, int] = {}
+    t0 = monotonic()
     reader = con.execute(sql, params or []).to_arrow_reader(rg)
-    schema = reader.schema.append(pa.field("__i", pa.int64())) if key else reader.schema
-    opts = ({"use_dictionary": list(reader.schema.names), "write_statistics": ["__i"], "column_encoding": {"__i": "DELTA_BINARY_PACKED"}}
-            if key else {"write_statistics": False})
+    schema = reader.schema
+    opts = {"use_dictionary": list(schema.names), "write_statistics": False} if key else {"write_statistics": False}
     at = 0
+    first = None
     with pq.ParquetWriter(out, schema, compression="lz4", **opts) as w:
         for b in reader:
+            if first is None:
+                first = monotonic() - t0
             if not b.num_rows:
                 continue
             s = b.column("__seg")
@@ -942,10 +947,70 @@ def _sort_run(con, sql: str, out: Path, rg: int, name: str, key: list[str] | Non
                     if idx:
                         cols = [b.column(c).take(idx).to_pylist() for c in key]
                         fences.setdefault(int(segs[x]), []).extend(zip(zip(*cols), (at + i for i in idx)))
-                b = pa.RecordBatch.from_arrays([*b.columns, pa.array(np.arange(at, at + b.num_rows, dtype=np.int64))], schema=schema)
             w.write_table(pa.Table.from_batches([b]), row_group_size=rg)
             at += b.num_rows
+    if timing is not None:
+        timing["s"] = monotonic() - t0
+        timing["first"] = timing["s"] if first is None else first
     return counts, fences
+
+
+class RunSpool:
+    """A merged sort's run spool (`_sort_run`'s, `write_served`'s pass 1) for its pieces' reads: its footer parsed once
+    and its row groups' first rows, so a span's rows `[a, z)` are read by row-group index (`batches`), never touching
+    the file's other groups. DuckDB's `read_parquet` costs a file's every row group on each query naming it (bind and
+    scan set-up: ~5 ms per 1K groups measured, and it didn't scale across concurrent queries), and a piece names every
+    run: at ~330 runs of ~1K groups, that fixed cost, not the rows, was the piece pass's time."""
+
+    def __init__(self, path: str):
+        import numpy as np
+
+        self.path = path
+        self.md = pq.read_metadata(path)
+        self.starts = np.cumsum([0, *(self.md.row_group(g).num_rows for g in range(self.md.num_row_groups))])
+
+    def batches(self, a: int, z: int, batch: int, columns: list[str], stat: dict) -> Iterator[pa.RecordBatch]:
+        """Rows `[a, z)` (`columns`), decoding only the row groups holding them, about `batch` rows' worth of groups at
+        a time (so ≤ `batch` + a group's rows held). Adds to `stat`'s `groups`, `decoded` (rows) and `read` (seconds)."""
+        import numpy as np
+
+        if a >= z:
+            return
+        starts = self.starts
+        g = int(np.searchsorted(starts, a, "right")) - 1
+        g1 = int(np.searchsorted(starts, z, "left"))
+        pf = pq.ParquetFile(self.path, metadata=self.md)
+        while g < g1:
+            e = max(g + 1, min(g1, int(np.searchsorted(starts, starts[g] + batch, "left"))))
+            t0 = monotonic()
+            t = pf.read_row_groups(list(range(g, e)), columns=columns, use_threads=False)
+            x, y = max(a, int(starts[g])), min(z, int(starts[e]))
+            t = t.slice(x - int(starts[g]), y - x)
+            stat["read"] += monotonic() - t0
+            stat["groups"] += e - g
+            stat["decoded"] += int(starts[e] - starts[g])
+            yield from t.to_batches()
+            g = e
+
+
+def _quantile(xs: list, p: float) -> float:
+    """The `p` quantile of `xs` (nearest rank; 0 when empty)."""
+    ys = sorted(xs)
+    return ys[min(len(ys) - 1, int(p * len(ys)))] if ys else 0
+
+
+#: A piece's `write_served` stats, summed or quantiled by `piece_summary`.
+PIECE_STATS = ("spans", "groups", "decoded", "rows", "read", "sort", "write", "s")
+
+
+def piece_summary(stats: list[dict]) -> str:
+    """One line over pieces' `write_served` stats: their count, sums, and p50/p99 of each phase."""
+    tot = {k: sum(s[k] for s in stats) for k in PIECE_STATS}
+    pq_ = {k: (_quantile([s[k] for s in stats], 0.5), _quantile([s[k] for s in stats], 0.99)) for k in PIECE_STATS}
+    return (f"{len(stats)} pieces, {tot['rows']:,} rows (p50 {pq_['rows'][0]:,}, p99 {pq_['rows'][1]:,}) from {tot['spans']:,} spans, "
+            f"{tot['groups']:,} spool groups ({tot['decoded']:,} rows decoded); seconds summed: read {tot['read']:.1f}, sort "
+            f"{tot['sort']:.1f}, write {tot['write']:.1f}; a piece p50 {pq_['s'][0]:.2f}s p99 {pq_['s'][1]:.2f}s (read p99 "
+            f"{pq_['read'][1]:.2f}, sort p99 {pq_['sort'][1]:.2f}, write p99 {pq_['write'][1]:.2f})")
 
 
 def piece_plan(runs: list[tuple[int, int, list[tuple[tuple, int]]]], share: int) -> list[tuple[tuple | None, tuple | None, list[tuple[int, int, int]]]]:
@@ -998,11 +1063,9 @@ def piece_plan(runs: list[tuple[int, int, list[tuple[tuple, int]]]], share: int)
         lo, lows, i = hi, low(hi), t + 1
 
 
-def _piece_sql(files: list[str], spans: list[tuple[int, int, int]], cols: list[str], key: list[str], lo: tuple | None,
-               hi: tuple | None) -> tuple[str, list]:
-    """A piece's (`piece_plan`) rows sorted by `key`: each span's rows of its run spool (by `__i`, so DuckDB reads only
-    the row groups holding them), those with `lo ≤ key < hi` (lexicographic, strings by code point). Returns `(sql,
-    params)`."""
+def _piece_sql(src: str, cols: list[str], key: list[str], lo: tuple | None, hi: tuple | None) -> tuple[str, list]:
+    """A piece's (`piece_plan`) rows sorted by `key`: relation `src`'s (its spans of every run spool, `RunSpool`) with
+    `lo ≤ key < hi` (lexicographic, strings by code point). Returns `(sql, params)`."""
 
     def lex(op: str, at: int) -> str:
         # `key op (${at}, …)`, spelled out: DuckDB rewrites two row comparisons to a BETWEEN, which rows don't support.
@@ -1011,10 +1074,9 @@ def _piece_sql(files: list[str], spans: list[tuple[int, int, int]], cols: list[s
             expr = f"{ident(key[i])} {op[0]} ${at + i} OR ({ident(key[i])} = ${at + i} AND ({expr}))"
         return f"({expr})"
 
-    src = " UNION ALL ".join(f"SELECT * FROM read_parquet({q(files[j])}) WHERE __i >= {a} AND __i < {z}" for j, a, z in spans)
     params = [*(lo or ()), *(hi or ())]
     where = [*([lex(">=", 1)] if lo is not None else []), *([lex("<", 1 + len(lo or ()))] if hi is not None else [])]
-    sql = f"SELECT {qcols(cols)} FROM ({src})" + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {qcols(key)}"
+    sql = f"SELECT {qcols(cols)} FROM {src}" + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {qcols(key)}"
     return sql, params
 
 
@@ -1090,8 +1152,10 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
     2. Pieces: a sort led by `(depth, path)` needs none: a segment is its runs' rows of it, in key order. The others
        (`MERGE_KEYS`, whose every run spans the key space) cut each segment of more than one run into key ranges of at
        most `piece_rows` rows (default the run budget's rows, ≥ `PIECE_MIN_ROWS`; `piece_plan`, exact from the fences
-       each run spool records every `stride` rows), and sort each piece — its rows of every run, read by `__i` — into a
-       piece spool: one DuckDB `ORDER BY` holding ≤ `piece_rows` rows, `procs` pieces at a time on cursors of `con`.
+       each run spool records every `stride` rows), and sort each piece — its spans of every run, read by row-group index
+       (`RunSpool`, each spool's footer parsed once) and streamed to DuckDB as Arrow batches — into a piece spool: one
+       DuckDB `ORDER BY` holding ≤ `piece_rows` rows, `procs` pieces at a time on cursors of `con`. Each piece's read,
+       sort and write seconds are logged per segment and summed per sort (`piece_summary`).
        Every segment's pieces run at once, so no segment, however large, is serial; (segment, piece) order is the
        sort's order.
     3. Write: `cut_plan` splits the groups into at most `procs` (default: the machine's cores; at least `part_rows` rows
@@ -1106,7 +1170,8 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
     stride = `share / (FENCE_SLACK × (runs + 1))`: < ½ of its share, ~¼ on average; filtered before the sort). Peak
     memory: DuckDB's limit (`procs` runs or pieces at once, each sized to its share) and ≤
     `tree_mem.SORT_COPIES` × `procs` × `spool_rows` rows of run or piece batches, plus a merged sort's fences (≈
-    `FENCE_SLACK` × (runs + 1) keys a piece); then per worker its imports and `tree_mem.worker_bytes` (writing or
+    `FENCE_SLACK` × (runs + 1) keys a piece) and its run spools' parsed footers (`RunSpool`, ~ a group's column
+    chunks × runs: no rows); then per worker its imports and `tree_mem.worker_bytes` (writing or
     joining): never the sort's size (`tree_mem.Budget.cut` sizes `procs` to a budget). Peak disk: the run spools (lz4,
     the sort's rows once), plus a merged sort's piece spools (once more) until the parts are written, then the parts
     (≈ `out`) beside `out`."""
@@ -1172,20 +1237,47 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
                  for lo, hi, spans in piece_plan([(a, z, got[i][1].get(s, [])) for i, a, z in at_run[s]], share)]
         if tasks:
             hb.set_stage(f"cut {sort}: pieces")
+            tf = monotonic()
+            spools = sn.each(con, lambda _, f: RunSpool(f), run_files, min(len(run_files), k))
+            footers_s = monotonic() - tf
             prog = hb.Progress(f"cut {sort} pieces", total=len(tasks), total_rows=sum(n for s, n in segs if any(t[0] == s for t in tasks)), unit="pieces")
             cols = [*schema.names, "__seg"]
+            reads = [*cols, *(c for c in key if c not in cols)]
+            stats: list[dict] = [{}] * len(tasks)
 
             def sort_piece(cur, j: int) -> int:
                 s, lo, hi, spans = tasks[j]
-                sql, params = _piece_sql(run_files, spans, cols, key, lo, hi)
-                c, _ = _sort_run(cur, sql, work / f"piece-{j:06d}.parquet", spool_rows, out.name, params=params)
+                st = {"spans": len(spans), "groups": 0, "decoded": 0, "read": 0.0}
+                rel = f"__piece_{j}"
+
+                def rows() -> Iterator[pa.RecordBatch]:
+                    for i, a, z in spans:
+                        yield from spools[i].batches(a, z, spool_rows, reads, st)
+
+                ab = spools[0].md.schema.to_arrow_schema()
+                cur.register(rel, pa.RecordBatchReader.from_batches(pa.schema([ab.field(c) for c in reads]), rows()))
+                try:
+                    sql, params = _piece_sql(ident(rel), cols, key, lo, hi)
+                    timing: dict = {}
+                    c, _ = _sort_run(cur, sql, work / f"piece-{j:06d}.parquet", spool_rows, out.name, params=params, timing=timing)
+                finally:
+                    cur.unregister(rel)
                 if set(c) - {s}:
                     raise RuntimeError(f"{out.name}: piece {j} of segment {s} holds segments {sorted(c)}")
+                # The source is read inside the sort (before its first row): the rest of that is the sort's.
+                stats[j] = {**st, "seg": s, "rows": c.get(s, 0), "sort": max(0.0, timing["first"] - st["read"]),
+                            "write": timing["s"] - timing["first"], "s": timing["s"]}
                 prog.tick(rows=c.get(s, 0))
                 return c.get(s, 0)
 
             rows = sn.each(con, sort_piece, list(range(len(tasks))), min(len(tasks), k))
             prog.done()
+            by_seg: dict[int, list[dict]] = {}
+            for x in stats:
+                by_seg.setdefault(x["seg"], []).append(x)
+            for s in sorted(by_seg):
+                err(f"  {sort} pieces, segment {s}: {piece_summary(by_seg[s])}")
+            err(f"  {sort} pieces: {len(spools)} run footers in {footers_s:.1f}s; {piece_summary(stats)}")
             for s in {t[0] for t in tasks}:
                 ins[s] = []
             for j, ((s, _, _, _), n) in enumerate(zip(tasks, rows)):
@@ -1513,6 +1605,7 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 @option("-D", "--no-dyadic", is_flag=True, help="One closed segment, not one per dyadic block of scans (`seg_sql`)")
 @option("-g", "--gen", required=True, help="Generation (its pv/, rd/ range files)")
 @option("-i", "--index", type=int, help="Task index → sort (path, bysize, reads, then `stats`: per-scan churn; default: $BATCH_TASK_INDEX)")
+@option("-J", "--as-jobs", default=1, type=IntRange(min=1), help="Size workers and runs as `cut_gen(jobs=N)` does for each of N sorts at once (a benchmark of one sort under a whole cut's split; default 1)")
 @option("-m", "--mount", help="Local mount of the data bucket")
 @option("-M", "--mem", default="80GB", help="DuckDB memory limit")
 @option("-o", "--out", default="/stage/out", help="Local output dir (uploaded, then removed)")
@@ -1522,9 +1615,12 @@ def _refuse_overwrite(store: Store, keys: list[str]) -> None:
 @option("-s", "--sort", "sorts", multiple=True, type=Choice(list(SORTS)), help="Sort(s) to cut (default: the task's)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
 @option("-U", "--no-upload", is_flag=True, help="Keep the outputs local")
+@option("-w", "--workers", type=IntRange(min=1), help="Workers a sort's runs, pieces and parts use (default: the cores over -J)")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
-def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload) -> None:
-    """Cut the served sorts from the range files: `served/<sort>.parquet` + `.groups.parquet`."""
+def cut_cmd(bucket, no_dyadic, profile, gen, index, as_jobs, mount, mem, out, to_gen, threads, rg_rows, sorts, tmp, no_upload, workers) -> None:
+    """Cut the served sorts from the range files: `served/<sort>.parquet` + `.groups.parquet`. With `-U -s SORT` (and
+    `-J`/`-w`), a benchmark of that one sort: each pass's seconds, and a merged sort's per-piece read / sort / write
+    summaries (per segment and in total), on stderr."""
     store = Store(_bucket(bucket, profile))
     prefix = f"{PREFIX}/{gen}"
     dst_prefix = f"{PREFIX}/{to_gen or gen}"
@@ -1549,6 +1645,10 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
         return
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
+    # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores split between them, each run and piece one share.
+    procs = workers or max(1, (os.cpu_count() or 1) // as_jobs)
+    budget = run_budget(con, as_jobs * procs)
+    err(f"cut: {procs} workers a sort, runs of ≤ {budget:,} B (as {as_jobs} sorts at once)")
     for sort in todo:
         sub, _, _ = SORTS[sort]
         if sub in ATTRIBUTION_SUBS and not attributed(scans):
@@ -1566,7 +1666,8 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         t0 = monotonic()
         dst = out_dir / f"{sort}.parquet"
         bounds = ilv.range_bounds(store.read_json(f"{prefix}/ranges.json")) if sort == LEVEL else None
-        doc = write_served(con, range_files(con, f"{root}/{sub}/r*.parquet"), sort, dst, schema, rg_rows=rg_rows, stamps=stamps, key_bounds=bounds)
+        doc = write_served(con, range_files(con, f"{root}/{sub}/r*.parquet"), sort, dst, schema, rg_rows=rg_rows, stamps=stamps, key_bounds=bounds,
+                           procs=procs, budget=budget)
         doc["s"] = round(monotonic() - t0, 1)
         err(f"cut {sort}: {doc['rows']:,} rows, {doc['groups']:,} groups, {doc['bytes']:,} B in {doc['s']}s")
         (out_dir / f"{sort}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
