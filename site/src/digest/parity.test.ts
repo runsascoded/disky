@@ -19,7 +19,8 @@ const fixtures = async (): Promise<[string, Fixture][]> => {
 describe('digest OP parity with the job', () => {
   it('covers every fixture the job writes', async () => {
     expect((await fixtures()).map(([n]) => n)).toEqual([
-      'cw-first.json', 'cw-sep.json', 'cw-tb.json', 'cw6-oct.json', 'gcs-aug-discord.json', 'gcs-aug.json', 'gcs-first.json',
+      'cw-first.json', 'cw-noquota.json', 'cw-sep.json', 'cw-tb.json', 'cw-two-weeks.json', 'cw6-oct.json', 'gcs-aug-discord.json',
+      'gcs-aug.json', 'gcs-first.json',
     ])
   })
   it('renders each fixture\'s OP text byte for byte', async () => {
