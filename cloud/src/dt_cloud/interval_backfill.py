@@ -299,7 +299,7 @@ def _publish_order(keys: list[str]) -> list[str]:
 @option("-g", "--gen", help="The source generation (default: the store's current, followed to its newest successor); never rewritten")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-l", "--listing", "template", required=True, help="Key template of a scan's raw listing shards under -s: `{id}` the scan id, globs allowed (e.g. `listing/{id}/*/*.parquet`)")
-@option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process, the cut's workers and the Arrow buffers leave")
 @option("-N", "--nulls", is_flag=True, help="GEN already carries `generation`: fill only its object versions whose `generation` is NULL (a repair: e.g. objects a lister recorded without one), each from the first listing within it that has one")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`), the readers' INDEX_R2 root")
 @option("-O", "--to-gen", required=True, help="The new generation: `<store>/interval-store/TO_GEN/` (must not exist)")

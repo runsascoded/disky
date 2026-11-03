@@ -212,7 +212,7 @@ def convert_cmd(gen, dry_run, store_root, scans_root) -> None:
 @command("backfill-attribution")
 @option("-g", "--gen", help="The source generation (default: the store's current, followed to its newest successor); never rewritten")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges, then served sorts, folded this many at a time (as `backfill-generation`); the output's bytes don't depend on it")
-@option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process, the cut's workers and the Arrow buffers leave")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`), the readers' INDEX_R2 root")
 @option("-O", "--to-gen", required=True, help="The new generation: `<store>/interval-store/TO_GEN/` (must not exist)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
