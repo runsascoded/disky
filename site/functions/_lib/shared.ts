@@ -333,6 +333,39 @@ export class Memo<T> {
   }
 }
 
+/** A request's lookups that don't depend on who asks, started beside its gate (`requireViewer`) instead of after it:
+ *  the fixed phase's steps overlapped. `later(f)` is `f`'s promise as a getter — started at once when `eager` (a
+ *  request that may pass the gate: `presentsCredentials`), else on its first call, so a request that can't pass
+ *  costs nothing past the gate. Nothing is used before the gate passes: the request awaits the gate first, and
+ *  every return path ends in `done()`, which evicts what is still pending (`Req.kill`: never left in a memo for
+ *  another request to join, frozen) — a failed gate's lookups, or those its answer didn't need. A rejection is the
+ *  awaiting caller's alone (an unawaited one is swallowed). */
+export interface Ahead {
+  later<T>(f: () => Promise<T>): () => Promise<T>
+  done(): void
+}
+export function ahead(env: object, eager: boolean): Ahead {
+  let pending = 0
+  return {
+    later<T>(f: () => Promise<T>): () => Promise<T> {
+      let p: Promise<T> | undefined
+      const get = (): Promise<T> => {
+        if (!p) {
+          pending++
+          p = f()
+          p.then(() => { pending-- }, () => { pending-- })
+        }
+        return p
+      }
+      if (eager) get()
+      return get
+    },
+    done(): void {
+      if (pending) reqOf(env)?.kill()
+    },
+  }
+}
+
 class Stall extends Error {
   constructor(key: string, ms: number) {
     super(`shared ${key}: no result after ${ms} ms`)
