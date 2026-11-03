@@ -14,9 +14,13 @@
  *  Each directory's answer depends on (generation, D1, D2, the directory, K, the measure) only, never the canvas: the
  *  endpoint keeps one edge-cache entry per directory (`api/diff/level.ts`). A batch of directories (a level) is read
  *  together, each group decoded once. A directory whose only changed child is a directory is followed into it in the
- *  same request (`next`), a round of reads per link, so a deep single change isn't a request per level. */
+ *  same request (`next`), a round of reads per link, so a deep single change isn't a request per level.
+ *
+ *  Where the generation and every run holding a scan of the range carry the level index (`interval_level.py`,
+ *  `openIvLevel`), a round reads it instead (`levelRound`): each asked directory's transitions in `(D1, D2]`, one key
+ *  range per file, every directory and file planned together and read in two waves (`readLevel`). Same answers. */
 import type { Env } from './auth.js'
-import { asOfScans, DiffUnavailable, type IndexHandle, ivChurnFrom, openIndex, planChanged, readChanged, readFits, type Rect, type Row, type Trace, withChurn, withTrace } from './index.js'
+import { asOfScans, DiffUnavailable, type IndexHandle, ivChurnFrom, type LevelHandle, type LevelRec, openIndex, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, type Trace, withChurn, withTrace } from './index.js'
 import { readRootAgg } from './view.js'
 
 /** The answer's version, in its edge-cache key: bumped with every change to what a level answers. */
@@ -128,6 +132,17 @@ const CHAIN_MAX = 64
 /** The level answers of `o.dirs` (and of the chains they lead into), by path. */
 export async function buildLevels(env0: Env, o: LevelOpts): Promise<Map<string, Level>> {
   const env = asOfScans(env0, [o.from, o.to])
+  const lh = await openIvLevel(env, o.from, o.to)
+  if (lh) {
+    const base = await ivChurnFrom(env)
+    if (base == null) throw new DiffUnavailable('churn', 'the interval store generation carries no churn')
+    if (lh.d1 < base) throw new DiffUnavailable('churn', `churn is counted from scan stamp ${base}; ${o.from} is before it`)
+    const got = await chained(o, dirs => levelRound(env, lh, dirs, o))
+    if (got) {
+      o.trace?.('level-index', 1)
+      return got
+    }
+  }
   const [hA, hB] = await Promise.all([openIndex(env, o.from, 'path'), openIndex(env, o.to, 'path')])
   const [d1, d2] = [hA.asOf, hB.asOf]
   if (d1 == null || d2 == null) throw new DiffUnavailable('a per-scan store', 'a level diff reads the interval store; one scan is per-scan')
@@ -137,14 +152,81 @@ export async function buildLevels(env0: Env, o: LevelOpts): Promise<Map<string, 
   const h0 = withChurn(hB)
   if (!h0) throw new DiffUnavailable('churn', 'the path sort has no churn columns')
   const h = withTrace(h0, o.trace)
+  return (await chained(o, dirs => round(env, h, dirs, d1, d2, o)))!
+}
+
+/** `o.dirs`' answers and their chains' (`next`), a round of `read` per link; null as soon as a round is (the level
+ *  index can't answer it: the caller reads the `path` sort). */
+async function chained(o: LevelOpts, read: (dirs: string[]) => Promise<Level[] | null>): Promise<Map<string, Level> | null> {
   const out = new Map<string, Level>()
   let todo = [...new Set(o.dirs)]
   for (let link = 0; todo.length && link <= CHAIN_MAX; link++) {
-    const got = await round(env, h, todo, d1, d2, o)
+    const got = await read(todo)
+    if (!got) return null
     for (const l of got) out.set(l.path, l)
     todo = o.chain === false ? [] : got.flatMap(l => (l.next && !out.has(l.next) ? [l.next] : []))
   }
   return out
+}
+
+/** A path's change over the range from its transitions there (`LevelRec`s, by `ts`): its values before the first and
+ *  after the last, its churn the last's `churnCum` less the first's `churnPrev`; null without any. */
+export function transitionsChange(ts: LevelRec[]): (Sides & { k: 'file' | 'dir'; s: LevelRow['s'] }) | null {
+  if (!ts.length) return null
+  const first = ts[0], last = ts[ts.length - 1]
+  const A = first.op !== 0, B = last.op !== 2
+  const kind = B ? last.kind : A ? first.kindPrev! : first.kind
+  return {
+    k: kind === 'file' ? 'file' : 'dir', s: !A ? (B ? 'added' : 'changed') : !B ? 'removed' : 'changed',
+    a: A ? first.sizePrev : 0, b: B ? last.size : 0, oa: A ? first.nFilesPrev : 0, ob: B ? last.nFiles : 0, churn: last.churnCum - first.churnPrev,
+  }
+}
+
+/** One round from the level index: `dirs`' transitions (`readLevel`), split while too wide as `round` splits. Null when a
+ *  directory's own transitions show it a file on some side in the range (its own rows are written for directories and
+ *  closings only, so a file's changes have none): that round is read from the `path` sort instead. */
+async function levelRound(env: Env, lh: LevelHandle, dirs: string[], o: LevelOpts): Promise<Level[] | null> {
+  let recs: LevelRec[]
+  try {
+    recs = await readLevel(lh, dirs, o.trace)
+  } catch (e) {
+    if (!String((e as Error).message).startsWith('query too wide') || dirs.length === 1) throw e
+    const m = dirs.length >> 1
+    const x = await levelRound(env, lh, dirs.slice(0, m), o)
+    const y = x && await levelRound(env, lh, dirs.slice(m), o)
+    return x && y ? [...x, ...y] : null
+  }
+  const by = new Map<string, LevelRec[]>()
+  for (const r of recs) {
+    const k = `${r.path}\0${r.name}`
+    const l = by.get(k)
+    if (l) l.push(r)
+    else by.set(k, [r])
+  }
+  const kids = new Map<string, (Sides & { p: string; k: 'file' | 'dir'; s: LevelRow['s'] })[]>(dirs.map(p => [p, []]))
+  const own = new Map<string, Sides>()
+  for (const [k, ts] of by) {
+    ts.sort((x, y) => x.ts - y.ts)
+    const [dir, nm] = k.split('\0')
+    if (nm === '') {
+      if (ts.some(r => r.kind !== 'dir' || (r.kindPrev != null && r.kindPrev !== 'dir'))) return null
+      const c = transitionsChange(ts)
+      if (c && dir !== '') own.set(dir, c)
+      continue
+    }
+    const c = transitionsChange(ts)
+    if (c) kids.get(dir)?.push({ p: dir ? `${dir}/${nm}` : nm, ...c })
+  }
+  return Promise.all(dirs.map(async p => {
+    const children = kids.get(p)!
+    let mine = own.get(p)
+    if (!mine) {
+      // The root (no transitions of its own), or a directory with none in the range: its totals as of each scan.
+      const [ra, rb] = await Promise.all([readRootAgg(env, { date: o.from, path: p }), readRootAgg(env, { date: o.to, path: p })])
+      mine = { a: ra?.b ?? 0, b: rb?.b ?? 0, oa: ra?.o ?? 0, ob: rb?.o ?? 0, churn: children.reduce((n, c) => n + c.churn, 0) }
+    }
+    return levelOf(p, mine, children, o.k, o.m)
+  }))
 }
 
 /** One read of `dirs`' changed children (and their own versions), split while it doesn't fit the decoder. */
