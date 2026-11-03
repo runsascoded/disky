@@ -27,7 +27,7 @@ def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: P
             "mtime": [100, 100], "version": pa.array([None, token], pa.string()),
         }), path)
     common = ["-g", "g", "-L", "index/{id}/path-index.parquet", "-s", str(source), "-o", str(store),
-              "-w", str(work), "-r", "4", "-p", "1", "-M", "512MB"]
+              "-w", str(work), "-r", "4", "-p", "1", "-M", "2GB"]
     result = CliRunner().invoke(il.build_cmd, [*common, "-k", "1", "-t", dates[1]], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     gen = store / "interval-store/g"
@@ -38,7 +38,7 @@ def test_etag_only_changes_survive_build_append_merge_and_compaction(tmp_path: P
     assert [p.name for p in runs] == [f"{dates[2]}_{dates[3]}"]
     compacted = tmp_path / "compacted"
     ic.compact_gen(gen, compacted, tmp_path / "compact-work", gen="g", new_gen="g.c001", level=None,
-                   rg_rows=4, threads=1, mem="512MB")
+                   rg_rows=4, threads=1, mem="2GB")
     rows = duckdb.connect().execute(
         f"SELECT vf, vt, version FROM read_parquet('{compacted}/pvl/*.parquet') WHERE kind = 'file' ORDER BY vf"
     ).fetchall()
@@ -65,12 +65,12 @@ def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observat
         elif i == 1:
             table = table.append_column("version", pa.array([None, '"first-seen"'], pa.string()))
         pq.write_table(table, file)
-    common = ["-L", "index/{id}/path-index.parquet", "-s", str(source), "-o", str(store), "-r", "4", "-p", "1", "-M", "512MB"]
+    common = ["-L", "index/{id}/path-index.parquet", "-s", str(source), "-o", str(store), "-r", "4", "-p", "1", "-M", "2GB"]
     result = CliRunner().invoke(il.build_cmd, ["-g", "old", *common, "-k", "1", "-t", dates[0]], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     data = Store(str(store))
     pointer = data.read_bytes("interval-store/CURRENT.json")
-    migrate(data, "old", "converted", tmp_path / "migrate", threads=1, mem="512MB", rg_rows=4)
+    migrate(data, "old", "converted", tmp_path / "migrate", threads=1, mem="2GB", rg_rows=4)
     assert data.read_bytes("interval-store/CURRENT.json") == pointer
     result = CliRunner().invoke(il.add_cmd, ["-g", "converted", *common, "-C", "none"], catch_exceptions=False)
     assert result.exit_code == 0, result.output
@@ -78,7 +78,7 @@ def test_adopting_shared_versions_preserves_unknowns_and_opens_at_first_observat
     identities = [ie.object_identities(str(store), date, "b", [""], gen="converted").select(["name", "version"]).to_pylist() for date in dates]
     assert identities == [[{"name": "f", "version": expected}], [{"name": "f", "version": '"first-seen"'}]]
     exported = tmp_path / "exported"
-    ie.export_scan(str(store), dates[0], str(exported), gen="converted", tiers=("path",), threads=1, mem="512MB")
+    ie.export_scan(str(store), dates[0], str(exported), gen="converted", tiers=("path",), threads=1, mem="2GB")
     assert pq.read_table(exported / "path-index.parquet").select(["path", "version"]).to_pylist() == [
         {"path": "b", "version": None}, {"path": "b/f", "version": expected},
     ]

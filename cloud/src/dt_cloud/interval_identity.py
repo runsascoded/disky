@@ -51,7 +51,7 @@ def migrate(store: Store, gen: str, target: str, work: Path, *, ranges_gen: str 
 
 @command("migrate-object-version")
 @option("-g", "--gen", required=True, help="Source generation (left unchanged)")
-@option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process, the cut's workers and the Arrow buffers leave")
 @option("-o", "--out", "store_root", required=True, help="Generation store, a dir or URL")
 @option("-O", "--to-gen", required=True, help="New generation; must not exist")
 @option("-p", "--threads", default=4, type=IntRange(min=1))

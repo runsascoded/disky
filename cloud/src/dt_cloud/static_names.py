@@ -434,45 +434,51 @@ class SortedWriter:
     """`write_sorted` fed incrementally: already-ordered batches through any number of `write` calls (e.g. one per key
     sub-range, in key order), then `close`, writing exact `rg_rows`-row groups (the last may be short), so the file's
     bytes depend only on its rows — not on how they were split across calls or batches. `on_group(table)` sees each
-    row group as written. `rows`: the rows written."""
+    row group as written. `rows`: the rows written.
+
+    Bounded by construction: pending rows stay below one group (`n_pending < rg_rows` between calls; `peak_pending`
+    records the most ever held, ≤ `rg_rows`), as slices of the batches they came from (each pinning its batch: fed
+    batches of ≤ `rg_rows` rows, an idle writer pins ≤ one group's rows, a fed one ≤ two), and a group is combined
+    (one copy of its rows) only when it is complete (`tree_mem.WRITER_IDLE` / `WRITER_ACTIVE`)."""
 
     def __init__(self, out: Path, schema: pa.Schema, rg_rows: int, on_group=None, dictionary: list[str] | bool = False):
         out.parent.mkdir(parents=True, exist_ok=True)
         self.schema, self.rg_rows, self.on_group = schema, rg_rows, on_group
         self.pending: list[pa.RecordBatch] = []
         self.n_pending = 0
+        self.peak_pending = 0
         self.rows = 0
         self.w = pq.ParquetWriter(out, schema, compression=CODEC, use_dictionary=dictionary, write_statistics=True,
                                   coerce_timestamps="ms", allow_truncated_timestamps=False)
 
-    def _flush(self, final: bool) -> None:
-        if not self.pending:
-            return
-        t = pa.Table.from_batches(self.pending, schema=self.schema).combine_chunks()
-        off = 0
-        while t.num_rows - off >= self.rg_rows or (final and off < t.num_rows):
-            g = t.slice(off, min(self.rg_rows, t.num_rows - off))
-            self.w.write_table(g, row_group_size=self.rg_rows)
-            if self.on_group:
-                self.on_group(g)
-            off += g.num_rows
-        rest = t.slice(off)
-        self.pending, self.n_pending = ([rest.combine_chunks().to_batches()[0]] if rest.num_rows else []), rest.num_rows
+    def _group(self) -> None:
+        """The pending rows (a whole group, or the last) written as one row group."""
+        g = pa.Table.from_batches(self.pending, schema=self.schema).combine_chunks()
+        self.pending, self.n_pending = [], 0
+        self.w.write_table(g, row_group_size=self.rg_rows)
+        if self.on_group:
+            self.on_group(g)
 
     def write(self, batches: Iterable[pa.RecordBatch]) -> None:
         for b in batches:
             if b.num_rows == 0:
                 continue
             b = b.cast(self.schema) if b.schema != self.schema else b
-            self.pending.append(b)
-            self.n_pending += b.num_rows
             self.rows += b.num_rows
-            if self.n_pending >= self.rg_rows:
-                self._flush(False)
+            off = 0
+            while off < b.num_rows:
+                take = min(self.rg_rows - self.n_pending, b.num_rows - off)
+                self.pending.append(b.slice(off, take))
+                self.n_pending += take
+                self.peak_pending = max(self.peak_pending, self.n_pending)
+                off += take
+                if self.n_pending == self.rg_rows:
+                    self._group()
 
     def close(self) -> int:
         try:
-            self._flush(True)
+            if self.pending:
+                self._group()
         finally:
             self.w.close()
         return self.rows
