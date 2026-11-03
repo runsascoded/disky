@@ -30,6 +30,7 @@ Runway → hue from green (120°, ≥ 60 d) to red (0°, ≤ 1 d), log-scaled, q
 - **Live params**: the deployment's chosen params (OP and replies) stored where both the job and the site read them, so a toggle sticks and the next cron converges to it instead of reverting to `job/digest.yml` (`params` there becomes the default).
 - **Replies preview**: the replies under the chosen params (today only Python renders them; the site gets a TS port, as it did for the OP).
 - **Push**: for a chosen month, edit its OP (the site renders it and holds the bot token: `chat.update`) and its replies (a Batch job, `dt-cloud digest -m M -E`, or the site directly once replies render in TS), all of them or one day's reply. Admin-only, with a confirm showing what changes.
+- **Selectors (built):** the push re-applies exactly what's chosen, never a whole-thread sweep. `dt-cloud digest -o/--op` (the OP, its plot re-rendered), `-d/--reply DAY` (repeatable) and `-y/--replies A..B` (an inclusive UTC-day range) edit only those already-posted messages to their current rendering: no new replies, no provisional reply, no alert, no plot unless `-o`; `-n` lists each message's ts and new body (`digest.apply_slack`). From a laptop: `job/cw-digest-local` (the CLI with cw's config, this checkout's code and its secrets from Secret Manager), e.g. `job/cw-digest-local -m 2026-11 -y 2026-11-01..2026-11-02 -c <channel> -n`.
 
 Live params: a D1 row (the admin page already writes D1; each change logged).
 

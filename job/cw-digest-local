@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# cw's Slack digest from this checkout: `dt-cloud digest -T cw -C job/digest.yml "$@"` with this worktree's code, the
+# deployment's buckets and gcloud, and its secrets fetched from Secret Manager into the command's environment only
+# (`dt-cloud secrets exec`: never in argv, never printed). The plot goes to `job/icons-cw` unless `-i` says otherwise.
+#
+#   job/cw-digest-local -m 2026-11 -c <channel> -n                                  # render the month; post nothing
+#   job/cw-digest-local -m 2026-11 -y 2026-11-01..2026-11-02 -c D0CE8QE83EH -n        # what re-applying 11/1–2 would edit
+#   job/cw-digest-local -m 2026-11 -y 2026-11-01..2026-11-02 -c D0CE8QE83EH           # …edit them (exactly those replies)
+#   job/cw-digest-local -m 2026-11 -o -c C0C1YR7D0KU                                  # re-render + edit only the OP
+set -euo pipefail
+cd "$(dirname "$0")/.."
+root=$PWD
+export PATH="$root/../../.venv/bin:$PATH" PYTHONPATH="$root/src:$root/cloud/src"
+export DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
+export CLOUDSDK_PYTHON=${CLOUDSDK_PYTHON:-/opt/homebrew/opt/python@3.12/bin/python3.12}
+: "${CLOUDSDK_CORE_ACCOUNT:?set CLOUDSDK_CORE_ACCOUNT to a gcloud account that can read the cw secrets}"
+export CLOUDSDK_CORE_ACCOUNT
+icons=(-i job/icons-cw)
+for a in "$@"; do case $a in -i|--icons-dir|--icons-dir=*) icons=() ;; esac; done
+exec dt-cloud secrets exec -p oa-internal-450019 \
+  -s SITE_TOKEN=cw-s3-job-grant \
+  -s SLACK_BOT_TOKEN=cw-s3-slack-bot-token \
+  -s CLOUDFLARE_API_TOKEN=cw-s3-cf-pages-token \
+  -s DISK_TREE_R2_ENDPOINT_URL=cw-s3-r2-endpoint \
+  -s AWS_ACCESS_KEY_ID=cw-s3-isolated-r2-access-key-id \
+  -s AWS_SECRET_ACCESS_KEY=cw-s3-isolated-r2-secret-access-key \
+  -- dt-cloud digest -T cw -C job/digest.yml "${icons[@]}" "$@"
