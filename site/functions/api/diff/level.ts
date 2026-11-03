@@ -8,7 +8,8 @@
  *  `{ from, to, k, m, levels: Level[] }`, the asked directories' and those their single-changed-directory chains lead
  *  into (`Level.next`). Each directory's answer is its own edge-cache entry (keyed by the store generation, both
  *  scans, the directory, `k` and `m`, never the canvas), so a later batch, view or drill reuses it; only the misses
- *  are read, together. Unscoped diffs of an interval store with churn only: anything else is a 409 (the client draws
+ *  are read, together. `nc=<nonce>` (a benchmark's cold read) joins that key for an admin only: anyone else's request
+ *  keys, and answers, as without it. Unscoped diffs of an interval store with churn only: anything else is a 409 (the client draws
  *  `/api/diff` then).
  *
  *  The fixed phase overlaps (`shared.ahead`): the gate (`requireViewer`) runs beside the path store's pointers, and,
@@ -89,9 +90,13 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
     const scans = early.later(() => Promise.all(['from', 'to'].map(key => scanArg(ctx.env, sp, key))))
     const gens = early.later(() => st.time('pre', pathGens(ctx.env, [from, to])))
     const tag = cacheEnvTag(ctx.env, ctx.request)
-    const keyOf = (g: string, p: string) => cacheKeyFor('level', tag, `${from}/${to}/${encodeURIComponent(p)}?k=${k}&m=${m}&g=${g}&v=${LEVEL_V}`, storeKey(ctx.env))
+    // A bench's cache-key nonce (`nc=`): an admin's only, so known once the gate passes; a request carrying one looks
+    // its directories up then, not beside the gate.
+    const nc = sp.get('nc') ?? ''
+    let nonce = ''
+    const keyOf = (g: string, p: string) => cacheKeyFor('level', tag, `${from}/${to}/${encodeURIComponent(p)}?k=${k}&m=${m}&g=${g}&v=${LEVEL_V}${nonce ? `&nc=${encodeURIComponent(nonce)}` : ''}`, storeKey(ctx.env))
     const lookup = (g: string, ps: string[]) => st.time('match', Promise.all(ps.map(async p => [p, await cacheMatch(ctx.env, keyOf(g, p))] as const)))
-    const asked = early.later(async () => lookup(await gens(), dirs))
+    const asked = nc ? null : early.later(async () => lookup(await gens(), dirs))
     // The first round's handles, beside the lookups: the level sort's (its tiers' footers) where the generation has
     // it; only where it hasn't, the `path` sort's and the plan (its footer reads). A read of every asked directory
     // takes them as they are; a read of fewer plans again over the footers they left held. A failed open or plan here
@@ -103,6 +108,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
     const gated = await gate
     if (gated instanceof Response) return gated
     early.commit()
+    if (gated?.admin) nonce = nc
     // A path-restricted link: a hidden directory (or one shown as a leaf) has no level; nothing under a visible one is
     // hidden.
     const restriction = restrictionFor(gated, ctx.env)
@@ -115,7 +121,7 @@ async function levelsOf(ctx0: Ctx, member?: MemberLevel): Promise<Response> {
       const g = await gens()
       const out = new Map<string, Level>()
       // Cached answers, and the chains they lead into, a link at a time.
-      let hits = await asked()
+      let hits = asked ? await asked() : await lookup(g, dirs)
       const todo: string[] = []
       while (hits.length) {
         const next: string[] = []
