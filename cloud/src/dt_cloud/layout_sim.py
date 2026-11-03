@@ -46,6 +46,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from click import IntRange, argument, command, option
 
+from .image_sha import expect_sha_options
 from .static_names import OPEN
 
 err = partial(print, file=sys.stderr, flush=True)
@@ -443,6 +444,7 @@ def slug(s: str) -> str:
 
 
 @command("layout-sim")
+@expect_sha_options("interval-store layout-sim")
 @option("-b", "--bands", default="1,2,4,8", help="Band counts to simulate (`(band, depth, path, vf)` layouts); `none` skips the band mode")
 @option("-c", "--cache", default="tmp/layout-sim", help="Local cache of fetched row groups (`depth, path, vf, vt` only), under `<cache>/<generation>/<sort>/<file>/`")
 @option("-C", "--cost", is_flag=True, help="With -l: the level sort's size over the whole generation (reads every row group's `path, vf, vt` once)")

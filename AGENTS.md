@@ -170,6 +170,13 @@ dt-cloud interval-store layout-sim GEN REQUESTS  # `/api/diff/level` reads of a 
                           # mirror `site/functions/_lib/index.ts`) at the sort's bytes/row; row groups cached under `-c`
                           # (`depth, path, vf, vt`), `-t` fetches over one footer, `-j` processes. JSONL out, p50/p90/p99/max
                           # summary (rows, runs, GET rounds at 2 and 3 waves) to stderr
+dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
+                          # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
+                          # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
+                          # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
+                          # clean (`-a` accepts dirty) and stamped. Benchmark harnesses (`interval-store cut`, `layout-sim`)
+                          # log the stamp at start and take `-E/--expect-sha` (+ `--allow-dirty`): refuse to start on any
+                          # other image. Job entrypoints (`scan head`/`step`, the `interval-store` stage tasks) log it
 dt-cloud diff-bench -a BEFORE -b AFTER [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
@@ -366,6 +373,13 @@ stay behind the site's auth.
 `gcs-usage-snapshot-daily` 07:00 UTC runs the `:latest` image built from this
 branch (live in GCP, body edited in place, never regenerated). A rebuild is how
 `job/` or pipeline changes reach prod.
+
+`build.sh` images the checkout it lives in, stamped with its `git rev-parse HEAD`
+and dirty state (`dt-cloud image-sha` reads it back). From a worktree, run that
+worktree's own `job/build.sh` (another checkout's is refused); a dirty tree is
+refused unless `ALLOW_DIRTY=1`. A benchmark on a throwaway tag:
+`IMAGE=…:bench-<sha7> job/build.sh`, then the job runs
+`dt-cloud image-sha -e <sha>` (or the harness's `-E <sha>`) before measuring.
 
 #### Dev workflow
 
