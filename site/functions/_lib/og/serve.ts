@@ -14,7 +14,7 @@ import { imagePath, ogKey, resolveImage, type OgTier } from './sign.js'
 import { credLive, pageTier } from './tier.js'
 import { imageParams, splitImageParams } from './cred.js'
 import { warmUrls } from './warm.js'
-import { anonymousPolicy, cardTier, genericCard, genericImagePath, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
+import { anonymousPolicy, cardTier, genericCard, genericImageOf, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
 import { BUILD } from '../build.js'
 
 import { canonId, loadRegistry } from '../identity.js'
@@ -93,7 +93,7 @@ export async function anonymousPage(env0: OgEnv, url: URL): Promise<Response | n
   if (anonymousPolicy(env) !== 'generic') return null
   if ((await pageTier(env, pv.kind, pv.params, url, now())).tier === 'full') return null
   const shell = await env.ASSETS.fetch(new Request(new URL('/', url)))
-  return uncachedHtml(stampMeta(shell, genericMeta(env, url)))
+  return uncachedHtml(stampMeta(shell, genericMeta(env, url, pv.kind)))
 }
 
 /** The kinds this build draws; the rest keep their static card. */
@@ -141,7 +141,7 @@ export async function stampPage(env0: OgEnv, url: URL, html: Response, warm?: (p
   const { pv, site } = page
   const env = await dataEnv(page.env, url.origin)
   const { tier, day, cred } = await pageTier(env, pv.kind, pv.params, url, now())
-  if (tier === 'anon' && anonymousPolicy(env) === 'generic') return uncachedHtml(stampMeta(html, genericMeta(env, url)))
+  if (tier === 'anon' && anonymousPolicy(env) === 'generic') return uncachedHtml(stampMeta(html, genericMeta(env, url, pv.kind)))
   if (!env.OG_CARDS) return html
   const keyP = deploymentKey(env)
   if (tier === 'full' && !keyP) return html
@@ -259,10 +259,10 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   if (r.tier === 'anon' && policy === 'generic') {
     // No ledger/scan/owner/data reads or warming, and never an old view cache key.
     // Even invalid/revoked credentials return identical content and tier headers.
-    const cacheKey = new Request(`${url.origin}${genericImagePath}&bld=${BUILD.sha}`)
+    const cacheKey = new Request(`${url.origin}${genericImageOf(r.kind)}&bld=${BUILD.sha}`)
     const cache = caches.default
     const hit = await cache.match(cacheKey)
-    const response = hit ?? await renderCard(env, url, genericCard(env))
+    const response = hit ?? await renderCard(env, url, genericCard(env, r.kind))
     if (!hit) await cache.put(cacheKey, stored(response.clone()))
     const headers = new Headers(response.headers)
     headers.set('x-og-tier', 'anon')
