@@ -228,13 +228,16 @@ export const isPartial = (r: Response): boolean => r.headers.has('x-cache-partia
  * counts ride as `dur` too — DevTools shows them the same way). `mark(name)`: the
  * time from the sink's creation (the request's start) to now, once — the first
  * call sticks (`fixed`: the request's fixed phase, up to its first data read). */
-export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; mark: (name: string) => void; header: () => string } {
+export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; mark: (name: string) => void; lap: (name: string) => void; header: () => string } {
   const t: Record<string, number> = {}
   // A phase's `desc`: the distinct labels its calls carried (the index sort
   // that answered a read — `bysize`, `path`, …), in first-seen order, so a
   // request that read both says `bysize+path`.
   const d: Record<string, string[]> = {}
   const t0 = performance.now()
+  // `lap`: the request's critical path as consecutive phases (`ph-<name>`, time since the previous lap), so they sum to
+  // `total` by construction, whatever overlapped; the header's `ph-rest` is what follows the last lap.
+  let last: number | null = null
   const trace = (name: string, ms: number, desc?: string) => {
     t[name] = (t[name] ?? 0) + ms
     if (desc && !(d[name] ??= []).includes(desc)) d[name].push(desc)
@@ -243,7 +246,15 @@ export function serverTiming(): { trace: (name: string, ms: number, desc?: strin
     trace,
     time: async (name, p) => { const s = performance.now(); try { return await p } finally { trace(name, performance.now() - s) } },
     mark: name => { if (!(name in t)) t[name] = performance.now() - t0 },
-    header: () => [...Object.entries(t), ['total', performance.now() - t0] as [string, number]]
-      .map(([k, v]) => `${k};dur=${Math.round(v)}${d[k] ? `;desc="${d[k].join('+')}"` : ''}`).join(', '),
+    lap: name => {
+      const n = performance.now()
+      trace(`ph-${name}`, n - (last ?? t0))
+      last = n
+    },
+    header: () => {
+      const n = performance.now()
+      return [...Object.entries(t), ...(last == null ? [] : [['ph-rest', n - last] as [string, number]]), ['total', n - t0] as [string, number]]
+        .map(([k, v]) => `${k};dur=${Math.round(v)}${d[k] ? `;desc="${d[k].join('+')}"` : ''}`).join(', ')
+    },
   }
 }
