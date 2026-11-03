@@ -329,7 +329,7 @@ def build_cmd(attribution, gen, jobs, k, layouts, mem, store_root, threads, rg_r
 @option("-K", "--compact-now", is_flag=True, help="Compact into a new generation now (when the generation has runs), whatever the policy says")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="A due compaction's key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
-@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`), every phase: the append's DuckDB gets what this process leaves, each cut (a run's, a carry's, a compaction's) and fold what its workers and Arrow buffers leave too; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`), every phase: the append's DuckDB gets what this process and its Arrow buffers leave, each cut (a run's, a carry's, a compaction's) and fold what its workers and Arrow buffers leave too; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs and compacted generations the prune would delete from the store; delete nothing")
 @option("-N", "--no-merge", is_flag=True, help="Skip the due carries and compaction (a later `add` makes them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
@@ -372,7 +372,8 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
         stale = sorted(key for key in before if key.startswith(redo)) if redo else []
         before = {key: n for key, n in before.items() if not (redo and key.startswith(redo))}
         tree = tm.Budget.measure(sn.mem_bytes(mem))
-        con = sn.connect(threads, tm.stage_mem(tree, f"add {gen}"), w / "duckdb")
+        inputs = [str(f) for t in ia.tables(ist.sliced(base), False) for f in sorted((gen_dir / t).glob("r*.parquet"))]
+        con = sn.connect(threads, ia.append_mem(tree, inputs, f"add {gen}"), w / "duckdb")
         if not ist.sliced(base):
             # No owner axis in the generation: a pending scan naming owners is refused before anything is appended.
             for s in pending:

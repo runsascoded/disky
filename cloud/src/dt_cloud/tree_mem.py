@@ -58,6 +58,11 @@ WRITER_ACTIVE = 4
 #: A fold job's row groups: one writer fed, the others idle.
 FOLD_GROUPS = WRITER_ACTIVE + (FOLD_WRITERS - 1) * WRITER_IDLE
 
+# ── A scan's append (`interval_append.append_range`, one range at a time) ──
+#: Range-file groups' worth of rows its one open writer holds: pending slices pinning ≤ 2 fetched batches (2 groups each:
+#: `static_names._batches`' default), the group's combined copy, and its encoding.
+APPEND_GROUPS = 6
+
 # ── The served sorts' cut (`interval_store.write_served`) ──────────────────
 #: Batches a run's or a piece's sort holds in this process (`_sort_run`): the fetched batch, and the spool writer's
 #: encoding of it.
@@ -227,6 +232,12 @@ class Budget:
         exceeds), DuckDB the rest (no workers)."""
         a = fold_arrow(jobs, min(rg_rows, rows or rg_rows), rb)
         return a, self.duck(a, 0, f"{jobs} fold jobs")
+
+    def append(self, rg_rows: int, rb: int) -> tuple[int, int]:
+        """A scan's append's `(arrow, duck)`: `APPEND_GROUPS` groups of `rg_rows` rows of `rb` bytes (the delta or state
+        file being written), DuckDB the rest (no workers; each run's cut re-splits it, `interval_store.plan_cut`)."""
+        a = APPEND_GROUPS * rg_rows * rb
+        return a, self.duck(a, 0, "the append")
 
     def cut(self, at_once: int, cores: int, rg_rows: int, rb: int, spool_rows: int, rows: int | None = None, *,
             meta: int = 0, sort_rows: int | None = None) -> CutPlan:

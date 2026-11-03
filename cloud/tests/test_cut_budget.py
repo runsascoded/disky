@@ -29,7 +29,7 @@ BASE_B, PROC_B = 200 * MIB, 80 * MIB
 @pytest.fixture
 def spy(monkeypatch):
     """Every budget measured, connection opened, cut planned and sort written, in order."""
-    log: dict[str, list] = {"budgets": [], "connects": [], "cuts": [], "writes": []}
+    log: dict[str, list] = {"budgets": [], "connects": [], "cuts": [], "writes": [], "appends": []}
 
     def measure(cls, total):
         b = cls(total, BASE_B, PROC_B)
@@ -45,6 +45,14 @@ def spy(monkeypatch):
         return plan
 
     monkeypatch.setattr(tm.Budget, "cut", cut)
+    real_append = tm.Budget.append
+
+    def append(self, *a, **kw):
+        got = real_append(self, *a, **kw)
+        log["appends"].append(got)
+        return got
+
+    monkeypatch.setattr(tm.Budget, "append", append)
     real_connect = sn.connect
 
     def connect(threads, mem, tmp):
@@ -128,6 +136,9 @@ def test_add_runs_carries_and_compaction(world, built, spy, tmp_path):  # noqa: 
                                           "-r", str(RG), "-p", "2", "-M", MEM, "-t", DATES[BASE + 1]]))
     assert (len(doc["added"]), [m["inputs"] for m in doc["merge"]["merged"]]) == (2, [[f"deltas/{d}" for d in DATES[BASE:BASE + 2]]])
     within(spy)
+    # The append's DuckDB leaves room for its writer's Arrow side (rows as wide as the range files': some real bytes).
+    [(arrow, duck)] = spy["appends"]
+    assert (arrow > tm.APPEND_GROUPS * ist.RANGE_RG, spy["connects"][0]) == (True, duck // MIB * MIB)
     runs = len(spy["writes"])
     _invoke(il.add_cmd, ["-g", "g", "-L", LAYOUT, "-s", str(world["root"]), "-o", str(store), "-w", str(tmp_path / "w2"), "-r", str(RG), "-p", "2",
                          "-M", MEM, "-j", "2", "-K", "-t", DATES[BASE + 1]])

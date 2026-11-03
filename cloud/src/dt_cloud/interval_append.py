@@ -338,6 +338,17 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
     return doc
 
 
+def append_mem(tree: tm.Budget, files: list[str], what: str) -> str:
+    """DuckDB's limit for a scan's append under the process tree's budget: what this process and the writer's Arrow side
+    (`Budget.append`, rows as `files`', the ranges' open versions, are wide) leave."""
+    from .interval_compact import row_bytes
+
+    rb = row_bytes(files)
+    arrow, duck = tree.append(ist.RANGE_RG, rb)
+    err(f"{what}: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + Arrow {arrow / tm.MIB:,.0f} ({rb} B a row) + DuckDB {duck / tm.MIB:,.0f}")
+    return f"{duck // tm.MIB}MiB"
+
+
 def append_attribution(con, prev: str, scan: dict, preds: list[str], name: str, out: Path, D: int, *, bucket: str, mount: str | None) -> dict:
     """The attribution table's append for one key range: `prev` its open versions. A covered scan (its entry names an
     `attribution.parquet`, `interval_store.ATTRIBUTION_SRC`) is appended as the path versions are (`append_intervals`,
@@ -1073,7 +1084,7 @@ def stage_options(f):
 @option("-f", "--force", is_flag=True, help="Redo ranges already done")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", required=True, help="Local mount of the data bucket (the scratch bucket beside it)")
-@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="100GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process and the append's Arrow buffers leave; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-n", "--per-task", default=1, type=IntRange(min=1), help="Ranges per task")
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
@@ -1084,6 +1095,11 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     previous scan's state, else (the first run) the base's range files. Each range's answer at D over the published
     store (the base's range files, the newest earlier manifest's runs, D's deltas) is checked against D's rows, row for
     row (`append_range`'s `check`), in its `ranges/r####.json`."""
+    with tm.watch(mem, f"ranges {scan}"):
+        _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp)
+
+
+def _ranges(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp) -> None:
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(scan, scan)}"
     store, sstore = Store(store_url(bucket)), Store(store_url(scratch))
@@ -1105,7 +1121,8 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     todo = plan[t] if t < len(plan) else []
     err(f"ranges task {t}: {len(todo)} ranges" + (f", {sum(counts[i] for i in todo):,} open rows at {prev} (max task "
                                                   f"{max(sum(counts[i] for i in p) for p in plan):,})" if counts else ", interleaved"))
-    con = sn.connect(threads, mem, tmp)
+    inputs = [f"{mount}/{PREFIX}/{ranges_gen}/{tb}/r{i:04d}.parquet" for tb in tables(sl, False) for i in todo]
+    con = sn.connect(threads, append_mem(tm.Budget.measure(sn.mem_bytes(mem)), inputs, f"ranges {scan}"), tmp)
     # What the store answers each range from once D's run is published beside them: the base's range files and the runs
     # the newest earlier manifest lists (`append_range`'s check).
     check = [f"{mount}/{PREFIX}/{ranges_gen}", *(f"{mount}/{prefix}/{r['key']}" for r in runs)]

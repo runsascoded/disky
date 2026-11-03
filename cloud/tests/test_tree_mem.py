@@ -80,6 +80,12 @@ def test_cut_plan_charges_the_writers_metadata():
     assert (big.procs, big.arrow) == (1, (35 + 16 + 5000) * MIB)
 
 
+def test_append_split():
+    """A scan's append: its one writer's 6 range-file groups of the ranges' rows, DuckDB the rest past this process."""
+    b = tm.Budget(total=1 << 30, base=200 * MIB, proc_base=50 * MIB)
+    assert b.append(65536, 100) == (39_321_600, (1 << 30) - 200 * MIB - 39_321_600)
+
+
 def test_too_small_names_the_least_budget():
     b = tm.Budget(total=300 * MIB, base=200 * MIB, proc_base=80 * MIB)
     with pytest.raises(tm.TooSmall, match=r"^memory budget 300 MiB too small for 1 fold jobs: this process 200 MiB, 0 workers × 80 MiB, "
