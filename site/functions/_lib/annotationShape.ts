@@ -18,7 +18,7 @@ export interface ChartAnnotation {
   path: string | null
   /** A link the note records (e.g. the Slack message it summarizes). */
   url: string | null
-  /** A short tag the chart's options toggle (e.g. `cleanup ask`). */
+  /** A short tag shown in the note's tooltip (e.g. `cleanup ask`). */
   kind: string | null
 }
 

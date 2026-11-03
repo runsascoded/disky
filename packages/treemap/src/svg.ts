@@ -33,6 +33,7 @@ export interface StaticLayoutOpts<T> {
   tiling?: Tiling
   borderWidth?: (depth: number, ctx: { w: number; h: number }) => number
   edgeEmphasis?: number
+  borderStep?: boolean
 }
 
 const defaultBorderWidth = (depth: number) => Math.max(1, 2 - depth)
@@ -67,6 +68,7 @@ export function staticLayout<T>(root: T, o: StaticLayoutOpts<T>): PlacedCell<T>[
     collapseChains: o.collapseChains ?? false,
     borderWidth: o.borderWidth ?? defaultBorderWidth,
     edgeEmphasis: o.edgeEmphasis ?? 0,
+    borderStep: o.borderStep ?? false,
     fold, layTiles,
     tilingFor: () => tiling,
   }

@@ -8,6 +8,7 @@ import { dateInk, useDateScale } from './dateScale'
 import { useStore } from './store'
 import { listingTime } from './listingTime'
 import { Tooltip } from './Tooltip'
+import { Loading } from './Busy'
 import { elideMid } from './CopyName'
 import { useRowSelection, useRowSelectionKeys } from './rowSelection'
 import { PrefixStageAction, tableCoverItem, useStagedIndex } from './StageAction'
@@ -300,7 +301,7 @@ export function ChildrenTable({ node, segs, scheme, home, bucketSchemes, scan, f
   // A flat mode's state with no rows to show yet (or none at all).
   const flatNote = flat && !shown.length && (
     lq.error ? <p className="err">Couldn’t list the largest {what}: {lq.error.message}</p>
-      : !lq.data || lq.isPlaceholderData ? <p className="loading">listing the largest {what}…</p>
+      : !lq.data || lq.isPlaceholderData ? <Loading label={`Listing the largest ${what}…`} />
       : <p className="loading">No {what} below {where}.</p>
   )
   const total = kids.reduce((s, k) => s + k.b, 0)

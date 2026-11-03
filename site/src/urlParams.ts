@@ -51,6 +51,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['300', '900', '3600'],
     pages: ['/staged', '/runs'],
   },
+  attr: {
+    label: 'Usage by',
+    description: 'Groups the Cloudflare usage page\'s attribution table by `caller` (a grant, token or `session`) or `route`. Defaults to `caller`.',
+    examples: ['route'],
+    pages: ['/admin/usage'],
+  },
   axis: {
     label: 'Right axis',
     description: 'On a run\'s progress chart, adds a second metric on the right axis: `rate`, `objects`, `bytes` or `byteRate`. Defaults to `none`, and a value equal to the left metric is ignored.',
@@ -82,6 +88,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Limits the view\'s bytes to the listed storage classes, one letter each, in order: `s` Standard, `n` Nearline, `c` Coldline, `a` Archive. When absent (or when all four are listed), every class is counted.',
     examples: ['s', 'nc', 'sna'],
   },
+  cx: {
+    label: 'Class table open',
+    description: 'When present, the storage-class row under the map\'s listing is expanded into its table: each class\'s bytes, share, list price and estimated $/mo for the drilled path. When absent, the row shows only the stacked bar (its tooltip has the same numbers).',
+    examples: [''],
+  },
   d: {
     label: 'Scan',
     description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report).',
@@ -93,9 +104,27 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Legacy spelling of the scan selection: an ISO or compact scan id for the shown scan. It is folded into `d` and rewritten on load.',
     examples: ['2026-10-06'],
   },
+  dc: {
+    label: 'Digest candidates',
+    description: 'The Slack digest page\'s candidate columns, `;`-separated, each the OP\'s params as `digest/codec` writes them: `w<days>` window, `t<p0>-<p1>` today\'s position, `d<w|m>` diff span, `h<m|w…>` headline figures, `k<w|m>` weeks; `.` is the defaults. Absent: one default candidate.',
+    examples: ['.', 'w14,dm', '.;w45,hw'],
+    pages: ['/admin/slack'],
+  },
+  days: {
+    label: 'Usage window',
+    description: 'The Cloudflare usage and cloud cost pages\' window: the last `7` or `30` days of daily snapshots. Defaults to 30.',
+    examples: ['7'],
+    pages: ['/admin/usage', '/admin/cost/gcp'],
+  },
   denied: {
     label: 'Denied address',
     description: 'Set when a verified address isn\'t on the access list. The login wall then opens the request-access form, pre-filled with that address.',
+  },
+  dk: {
+    label: 'Digest thread',
+    description: 'The Slack digest page\'s preview bundle: its key, `digest/preview/<channel>/<variant>/<YYYY-MM>.json`. Absent: the newest month\'s first.',
+    examples: ['digest/preview/C0C9G547AP7/sender/2026-11.json'],
+    pages: ['/admin/slack'],
   },
   dm: {
     label: 'Diff area mode',
@@ -235,10 +264,10 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Where to return after signing in. Only same-origin paths are accepted; anything else returns to `/`.',
     pages: ['/signin'],
   },
-  nh: {
-    label: 'Hidden note kinds',
-    description: 'Comma-separated note kinds (for example `cleanup ask`) the size-over-time chart hides; the chart\'s options toggle each kind its notes use. When absent, every kind shows.',
-    examples: ['cleanup ask'],
+  nn: {
+    label: 'Notes hidden',
+    description: 'When present (as a bare `?nn`), the size-over-time chart hides its notes (the markers pinned to dates); the chart\'s "notes" toggle sets it, and is offered only where the chart has notes. When absent, notes show.',
+    examples: [''],
   },
   o: {
     label: 'Owner',
@@ -415,6 +444,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Viewer / legend pin',
     description: 'On `/admin/sessions`, filters sessions to viewers whose address contains this text. On the map it is a legacy legend pin, rewritten to `o=<key>` on load.',
   },
+  um: {
+    label: 'Usage ranking',
+    description: 'The metric the Cloudflare usage page\'s attribution table ranks its top rows by: `requests`, `r2_reads`, `d1_rows_read` or `d1_rows_written`. Defaults to `requests`.',
+    examples: ['d1_rows_written'],
+    pages: ['/admin/usage'],
+  },
   w: {
     label: 'Run window',
     description: 'Lists only the scan runs that started in this UTC window, written as `START~END` stamps (`YYYY-MM-DDTHHMM`) and set by dragging on the duration chart. Esc clears it. When absent, every run is listed.',
@@ -429,8 +464,8 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   xr: {
     label: 'Time range',
-    description: 'The size-over-time chart\'s x-range: `1w` or `1m`. When absent, the chart shows all scans.',
-    examples: ['1w', '1m'],
+    description: 'The size-over-time chart\'s displayed x-range: `1w` or `1m` (the last week / 30 days of scans), or `<from>..<to>` (two scan ids: the stretch brushed on the strip under the chart, or fitted to the diff window). It only frames the chart; the diff window is `w`. When absent, the chart shows all scans.',
+    examples: ['1w', '1m', '2026-09-01..2026-10-01'],
   },
   ym: {
     label: 'Y values',

@@ -9,6 +9,7 @@ import { type FileMetaData, parquetMetadata, parquetReadObjects } from 'hyparque
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { names } from '../_lib/nameSummaryStatic.js'
 import { staticGen } from '../_lib/staticNames.js'
+import { withStaticGen } from '../_lib/index.js'
 import { compressors } from '../_lib/zstd.js'
 import { isScanId } from '../../src/scanSlug.js'
 
@@ -101,7 +102,7 @@ export async function onRequestGet(ctx: Ctx & { env: Env }): Promise<Response> {
   const url = new URL(ctx.request.url), key = (url.searchParams.get('q') ?? '').toLowerCase(), dates = url.searchParams.getAll('d')
   if ([...key].length < 3 || !dates.length || dates.some(d => !isScanId(d))) return json({ error: 'q (≥ 3 characters) and d=YYYY-MM-DD[THHMM] required' }, 400)
   const t0 = Date.now()
-  const { io, answer } = await names(r2, staticGen(ctx.env)).answer(key, dates)
+  const { io, answer } = await names(r2, staticGen(await withStaticGen(ctx.env))).answer(key, dates)
   const total_ms = await tick() - t0
   const answers = Object.fromEntries(Object.entries(answer!.answers).map(([d, t]) => [d, Object.fromEntries(Object.entries(t).map(([b, [x, o]]) => [b, [Number(x), Number(o)]]))]))
   const cf = (ctx.request as { cf?: { colo?: string } }).cf

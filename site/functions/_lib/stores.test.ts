@@ -74,6 +74,15 @@ describe('secondaryStores', () => {
 })
 
 describe('storeEnv', () => {
+  it('clears primary history locations and permits explicitly independent secondary stores', () => {
+    const env = { ...PRIMARY, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'primary', INTERVAL_STORE_PREFIX: 'history/primary', AGE_STORE_PREFIX: 'history/primary-age' } as Env
+    const own = { ...META, vars: { ...META.vars, PATH_STORE: 'intervals', INTERVAL_STORE_PREFIX: 'history/meta/interval-store', AGE_STORE_PREFIX: 'history/meta-age' } }
+    const keys = ['PATH_STORE', 'INTERVAL_STORE_GEN', 'INTERVAL_STORE_PREFIX', 'AGE_STORE_PREFIX'] as const
+    expect([META, own].map(config => keys.map(k => storeEnv(env, 'meta', config)[k]))).toEqual([
+      [undefined, undefined, undefined, undefined],
+      ['intervals', undefined, 'history/meta/interval-store', 'history/meta-age'],
+    ])
+  })
   it('clears every per-store var (and the GCS fallback creds), then applies the config and resolves secrets by name', () => {
     expect(storeEnv(PRIMARY, 'meta', META)).toEqual({
       BASE_SCOPE: 'cw',
@@ -175,9 +184,9 @@ describe('withStore', () => {
 
 describe('cache keys', () => {
   it('the primary’s are unchanged; a secondary store’s get an `@<store>/` segment', () => {
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=').url).toBe('https://series.cache/v6/a%2Fb?P=')
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v6/a%2Fb?P=')
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v6/@meta/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=').url).toBe('https://series.cache/v10/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v10/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v10/@meta/a%2Fb?P=')
   })
   it('over-time manifest datasets: `over-time` for the primary, `<store>:over-time` else', () => {
     expect([overTimeDataset(PRIMARY), overTimeDataset(storeEnv(PRIMARY, 'meta', META))]).toEqual(['over-time', 'meta:over-time'])

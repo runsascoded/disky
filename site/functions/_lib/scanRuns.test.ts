@@ -98,6 +98,26 @@ INSERT INTO scan_run_outputs (run_id, key, uri, bytes, objects, rows) VALUES
       const unknown = await get(db, '', env, '?store=nope')
       expect([unknown.status, await unknown.json()]).toEqual([404, { error: 'unknown store \'nope\'' }])
     })
+    it('a compaction is its own row beside its scan, never one of the scan\'s runs; its phases carry their notes', async () => {
+      const { db, raw } = await sqliteD1()
+      raw.exec(SEED)
+      raw.exec(`
+      INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_ts, job_name, region, gen, source, updated_ts, store)
+        VALUES ('iv', '2026-10-07', 'compact', NULL, 'succeeded', 2000, 9000, 'iv-compact-x', 'us-east1', 'interval-store/g → g.c001', 'job', 9000, 'primary');
+      INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note) VALUES
+        ('iv', 'read', 0, 2000, 2010, 'done', '57 files, 12.00 GiB'), ('iv', 'fold', 1, 2010, 8000, 'done', '64 ranges, 9 rows'),
+        ('iv', 'upload', 2, 8000, 9000, 'done', '70 files, 13.00 GiB');
+    `)
+      const list = await (await get(db, '')).json() as import('./scanRuns').ScanRunsList
+      expect(list.runs.map(s => [s.run.run_id, s.run.kind, s.downstream])).toEqual([['iv', 'compact', 0], ['b', 'scan', 0], ['a', 'scan', 1]])
+      const iv = await (await get(db, 'iv')).json() as import('./scanRuns').ScanRunDetail
+      expect([iv.spans.map(p => [p.phase, p.start, p.end, p.note]), iv.siblings.map(r => r.run_id), iv.prev_scan, iv.next_scan]).toEqual([
+        [['read', 0, 10, '57 files, 12.00 GiB'], ['fold', 10, 6000, '64 ranges, 9 rows'], ['upload', 6000, 7000, '70 files, 13.00 GiB']],
+        ['a'], null, '2026-10-08',
+      ])
+      const a = await (await get(db, 'a')).json() as import('./scanRuns').ScanRunDetail
+      expect(a.siblings).toEqual([])
+    })
     it('a D1 without the tables answers configured: false', async () => {
       const { db, raw } = await sqliteD1()
       raw.exec('DROP TABLE scan_run_outputs; DROP TABLE scan_run_phases; DROP TABLE scan_runs')

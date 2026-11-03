@@ -1,9 +1,10 @@
 // specs/done/health-page.md: /api/health over a fake `INDEX_R2` (both stores' `scans.json`, manifests and run files) and the
 // D1 schema (`index_schema` path rows, `scan_runs`). The interval store never got scan 04; the static index's
 // run for 05 has no `drill/`; scan 07's job is running.
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { onRequestGet as route } from '../api/health'
 import { IV_RUN_FILES } from './health'
+import { IV_STATE_TTL } from './index'
 import { sqliteD1 } from './testD1'
 import type { HealthDoc } from '../../src/healthModel'
 import { BUILD } from './build'
@@ -60,6 +61,18 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
   }
 
   describe('GET /api/health', () => {
+    it('reads a secondary history namespace and its scoped scan rows', async () => {
+      const { db } = await sqliteD1()
+      const objects = Object.fromEntries(Object.entries(OBJECTS).map(([k, v]) => [k.replace(/^interval-store\//, 'history/meta/interval-store/'), v]))
+      const response = await route({ request: new Request('http://localhost/api/health?store=meta&fresh=1'), env: {
+        DB: db, INDEX_R2: r2(objects), INTERVAL_STORE_GEN: 'primary-pin', PATH_STORE: 'intervals',
+        STORES_JSON: JSON.stringify({ meta: { vars: { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'iv1', INTERVAL_STORE_PREFIX: 'history/meta/interval-store' } } }),
+      } as never })
+      const doc = await response.json() as HealthDoc
+      expect([response.status, doc.stores.map(s => [s.kind, s.gen, s.base, s.runs.map(r => r.r2)])]).toEqual([
+        200, [['interval', 'iv1', ['01', '02', '03'].map(D), [true, true]]],
+      ])
+    })
     it('reads both stores and D1: stacks, coverage gaps, freshness inputs', async () => {
       const { db, raw } = await sqliteD1()
       raw.exec(SEED)
@@ -77,6 +90,16 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
         [D('06'), ['light', 'drill', 'anchors']],
       ])
       expect(doc.coverage.find(c => c.scan === D('07'))!.cells).toEqual({ path: 'pending', interval: 'pending', light: 'pending', drill: 'pending', anchors: 'pending', r2: 'na' })
+    })
+
+    it('a running compaction is not a scan in flight (its `scan` names the scan it follows)', async () => {
+      const { db, raw } = await sqliteD1()
+      raw.exec(SEED)
+      raw.exec(`UPDATE scan_runs SET status = 'succeeded', finished_ts = 2000 WHERE run_id = 'r7';
+        INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_ts, gen, source, updated_ts, store)
+          VALUES ('iv', '${D('07')}', 'compact', NULL, 'running', 3000, NULL, 'interval-store/iv1', 'job', 3000, 'primary');`)
+      const { doc } = await get({ DB: db })
+      expect([doc.scans, doc.unserved, doc.coverage.find(c => c.scan === D('07'))?.cells ?? null]).toEqual([['01', '02', '03', '04', '05'].map(D), ['06', '07'].map(D), null])
     })
 
     it('an unconfigured store is absent; a missing run file is a broken run', async () => {
@@ -107,6 +130,27 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
         const hit = await get({})
         expect([stored.build, [miss.cache, miss.doc.build], [hit.cache, hit.doc.build]]).toEqual([undefined, ['miss', BUILD], ['hit', BUILD]])
       } finally {
+        g.caches = was
+      }
+    })
+
+    it('unpinned, the static index is the generation `static-names/CURRENT.json` names, and the document is keyed by it', async () => {
+      const held = new Map<string, Response>()
+      const g = globalThis as unknown as { caches?: unknown }
+      const was = g.caches
+      g.caches = { default: { match: async (k: Request) => held.get(k.url)?.clone(), put: async (k: Request, r: Response) => { held.set(k.url, r) } } }
+      // past whatever pointer an earlier case's request left held in the isolate
+      const spy = vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2030, 0, 1))
+      try {
+        const { doc } = await get({ FILTER_STATIC: '1', INDEX_R2: r2({ ...OBJECTS, 'static-names/CURRENT.json': { gen: 'sn1' } }) })
+        expect([doc.stores.map(s => [s.kind, s.gen, s.base]), [...held.keys()].filter(k => k.startsWith('https://health.cache/'))])
+          .toEqual([[['static', 'sn1', ['01', '02'].map(D)]], ['https://health.cache/primary/-/sn1']])
+        // no pointer: no static store, as unpinned before (the colo's copy of the old pointer expired with the isolate's)
+        held.clear()
+        spy.mockImplementation(() => Date.UTC(2030, 0, 1) + IV_STATE_TTL)
+        expect((await get({ FILTER_STATIC: '1', INDEX_R2: r2(OBJECTS) })).doc.stores).toEqual([])
+      } finally {
+        spy.mockRestore()
         g.caches = was
       }
     })

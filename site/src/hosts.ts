@@ -20,6 +20,14 @@ export function otherHostUrl(href: string, pair: HostPair): string {
   return url.toString()
 }
 
+/** A URL as a short label: host, path, query and hash, without the scheme or a bare `/`, cut from the middle (the
+ * host and the tail kept) past `max` characters. */
+export function urlLabel(href: string, max = 48): string {
+  const { host, pathname, search, hash } = new URL(href)
+  const s = host + (pathname === '/' ? '' : pathname) + search + hash
+  return s.length <= max ? s : s.slice(0, max - 13) + '…' + s.slice(-12)
+}
+
 /** A sibling deployment: another host serving the same site over other buckets (its own scans, users and grants),
  * and which of the optional pages it serves (its `Store.owners` / `Store.staging`, a `/meta` tree). */
 export interface Peer { label: string; prod: string; dev?: string; owners?: boolean; staging?: boolean; meta?: boolean }

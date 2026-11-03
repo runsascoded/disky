@@ -259,3 +259,20 @@ def test_empty_bucket(tmp_path: Path):
     _run(_PLACEHOLDERS, tmp_path, out='full')
     full = sorted((tmp_path / 'full').glob('shard-*.parquet'))[0]
     assert pq.read_schema(tmp_path / 'listing/shard-00-0000.parquet').remove_metadata() == pq.read_schema(full).remove_metadata()
+
+
+def test_crc32c_listing_every_shard_carries_the_column(tmp_path: Path):
+    """A `-c` listing (a lister with `crc32c`): every shard, the empty bucket's one included, has the `crc32c` column
+    after `generation`, each object's value its checksum."""
+    import pyarrow.parquet as pq
+    from zlib import crc32
+
+    keys = _UNIFORM[:40]
+    for out, ks in (('full', keys), ('empty', ())):
+        list_bucket_adaptive(FakeLister(keys=ks, page_size=3, crc32c=True), bucket='b1', out_dir=str(tmp_path / out),
+                             procs=1, threads=4)
+    shards = sorted((tmp_path / 'full').glob('shard-*.parquet')) + sorted((tmp_path / 'empty').glob('shard-*.parquet'))
+    assert {tuple(pq.read_schema(p).names) for p in shards} == {
+        ('bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'version', 'crc32c')}
+    got = sorted((n, c) for p in shards for n, c in zip(*pq.read_table(p, columns=['name', 'crc32c']).to_pydict().values()))
+    assert got == sorted((k, crc32(k.encode())) for k in keys)

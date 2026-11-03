@@ -50,6 +50,9 @@ err = partial(print, file=sys.stderr)
 # re-run compares against (R2's multipart ETag is not an md5).
 MD5_META = "gcs-md5"
 SNAPSHOTS_SUBDIR = os.environ.get("SNAPSHOTS_SUBDIR", "")
+# Python's built-in map only: `mimetypes.guess_type` also reads the host's
+# `/etc/mime.types`, so a local file's content type would depend on the machine.
+MIME_TYPES = mimetypes.MimeTypes()
 
 
 def snapshots_prefix(scan: str, subdir: str = SNAPSHOTS_SUBDIR) -> str:
@@ -205,6 +208,13 @@ class Report:
         return f"publish-r2 {scan}: {verb} {len(self.copied)} ({self.bytes:,} B), skipped {len(self.skipped)} up to date"
 
 
+#: The R2 client's connection pool (`r2_client`).
+R2_POOL = 128
+#: Parts of one object a multipart upload to R2 sends at a time (`copy_one`; s3transfer's default is 10): R2 throttles
+#: concurrent writes to one object, and `R2_WORKERS` objects in flight already fill the pool.
+R2_PART_CONCURRENCY = 4
+
+
 def r2_client() -> "S3Client":
     """boto3 S3 client for R2 (creds from the env, see the module doc)."""
     import boto3
@@ -212,21 +222,23 @@ def r2_client() -> "S3Client":
 
     endpoint = os.environ.get("R2_ENDPOINT")
     if not endpoint:
-        raise SystemExit("publish-r2: need $R2_ENDPOINT (https://<account id>.r2.cloudflarestorage.com)")
+        raise SystemExit("R2: need $R2_ENDPOINT (https://<account id>.r2.cloudflarestorage.com)")
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
         region_name="auto",
         aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
         aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
-        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 10, "mode": "standard"}),
+        # Many objects in flight (`append_runner.R2_WORKERS`), each a multipart transfer of its own threads: botocore's
+        # default pool of 10 connections would serialize them.
+        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 10, "mode": "standard"}, max_pool_connections=R2_POOL),
     )
 
 
 def r2_bucket() -> str:
     b = os.environ.get("R2_BUCKET")
     if not b:
-        raise SystemExit("publish-r2: need $R2_BUCKET (the serving bucket)")
+        raise SystemExit("R2: need $R2_BUCKET (the serving bucket)")
     return b
 
 
@@ -256,7 +268,7 @@ def list_source(src_bucket: str, prefixes: list[str]) -> list[Obj]:
             for f in base.rglob("*"):
                 key = f.relative_to(root).as_posix()
                 if f.is_file() and key.startswith(prefix) and not f.name.startswith("."):
-                    found[key] = Obj(key=key, size=f.stat().st_size, md5=file_md5(f), content_type=mimetypes.guess_type(f.name)[0])
+                    found[key] = Obj(key=key, size=f.stat().st_size, md5=file_md5(f), content_type=MIME_TYPES.guess_type(f.name)[0])
         return sorted(found.values(), key=lambda o: o.key)
     from google.cloud import storage
 
@@ -286,15 +298,18 @@ def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
     extra: dict[str, Any] = {"Metadata": {MD5_META: obj.md5} if obj.md5 else {}}
     if obj.content_type:
         extra["ContentType"] = obj.content_type
+    from boto3.s3.transfer import TransferConfig
+
+    cfg = TransferConfig(max_concurrency=R2_PART_CONCURRENCY)
     root = local_root(src_bucket)
     if root is not None:
-        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra)
+        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra, Config=cfg)
         return
     from google.cloud import storage
 
     blob = storage.Client().bucket(src_bucket).blob(obj.key)
     with blob.open("rb") as f:
-        s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra)
+        s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra, Config=cfg)
 
 
 def publish(

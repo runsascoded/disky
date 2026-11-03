@@ -31,6 +31,69 @@ CONFIGS = [{"R": 3, "K": 2, "floor": 2, "rg": 4, "run_rg": 2}, {"R": 5, "K": 1, 
 NOISE = ["gof.txt", "x5418y", "nk080", "48.parquet", "a'b", "é5418", "sh", "ab", "ckpt_old.bin", "data.jsonl"]
 
 
+@pytest.mark.parametrize("n", [0, 3, 19])
+def test_state_writer_streams_with_the_same_parquet_bytes(tmp_path, monkeypatch, n):
+    """State is corpus-sized: Arrow must use fixed batches rather than materialize the entire result."""
+    monkeypatch.setattr(sd, "STATE_RG", 8, raising=False)
+    monkeypatch.setattr(sd, "STATE_BATCH_ROWS", 5)
+    con = sn.connect(1, "128MB", tmp_path / "spill")
+    con.execute(f"CREATE TABLE dcnt AS SELECT 'q' AS q, printf('dir/%03d', i) AS dir, i::BIGINT AS rows FROM range({n}) t(i)")
+    expected = tmp_path / "expected.parquet"
+    pq.write_table(con.execute("SELECT * FROM dcnt ORDER BY q, dir").to_arrow_table(5).cast(sd.DCOUNT_SCHEMA),
+                   expected, compression=sn.CODEC, row_group_size=8)
+
+    class StreamingOnly:
+        def execute(self, sql):
+            self.cursor = con.execute(sql)
+            return self
+
+        def to_arrow_table(self):
+            raise AssertionError("state writer materialized the complete result")
+
+        def to_arrow_reader(self, size):
+            assert size == 5
+            return self.cursor.to_arrow_reader(size)
+
+    sd.write_state(StreamingOnly(), tmp_path / "out", "long")
+    actual = tmp_path / "out/state/dcount-long.parquet"
+    assert actual.read_bytes() == expected.read_bytes()
+    assert pq.read_table(actual).to_pylist() == [{"q": "q", "dir": f"dir/{i:03d}", "rows": i} for i in range(n)]
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+@pytest.mark.parametrize("file_rows", [1, 7, 1000])
+def test_writing_sorted_chunks_writes_the_same_bytes(tmp_path, file_rows, threads):
+    """`write_kind` over `merge_tiers`' folded ranges (files each sorted, `q`-disjoint, in `q` order) streams them: the same
+    files and index as sorting their union, with files cut inside, at and across the ranges, one file at a time or several."""
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    rnd = random.Random(7)
+    lits = ["a", "ab", "b", "bé", "c", "d'x", "e"]
+    roots = [(lit, rnd.randrange(4), f"p/{rnd.randrange(30):02d}", rnd.choice(["u1", "u2"]), vf, vf + rnd.randrange(1, 9), rnd.randrange(1 << 40), rnd.randrange(1, 99))
+             for lit in lits for vf in rnd.sample(range(100), rnd.randrange(1, 12))]
+    rollups = [(lit, f"d/{d}", kind, f"c{c}", vf, rnd.randrange(1 << 30), rnd.randrange(99))
+               for lit in lits for d in range(rnd.randrange(1, 4)) for kind, c, vf in {(rnd.randrange(3), rnd.randrange(3), rnd.randrange(50)) for _ in range(5)}]
+    con.execute("CREATE TABLE dr (q VARCHAR, depth UTINYINT, path VARCHAR, usr VARCHAR, vf BIGINT, vt BIGINT, size BIGINT, n_files BIGINT)")
+    con.executemany("INSERT INTO dr VALUES (?, ?, ?, ?, ?, ?, ?, ?)", roots)
+    con.execute("CREATE TABLE dr1 AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files FROM dr GROUP BY q, path, usr, vf")
+    con.execute("CREATE TABLE rup (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
+    con.executemany("INSERT INTO rup VALUES (?, ?, ?, ?, ?, ?, ?)", rollups)
+    chunks = {"roots": [], "rollups": []}
+    for k, (lo, hi) in enumerate([("a", "b"), ("b", "c"), ("c", "e"), ("e", None)]):
+        where = f"q >= '{lo}'" + (f" AND q < '{hi}'" if hi else "")
+        for table, d, order in (("dr1", "roots", "q, path, usr, vf"), ("rup", "rollups", "q, dir, kind, child, vf")):
+            f = tmp_path / "folded" / d / f"c{k:06d}.parquet"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            con.execute(f"COPY (SELECT * FROM {table} WHERE {where} ORDER BY {order}) TO '{f}' (FORMAT parquet, COMPRESSION zstd)")
+            chunks[d].append(f)
+    sorted_doc = sd.write_kind(con, tmp_path / "sorted", "long", roots="dr1", rollups="rup", file_rows=file_rows, rg=3)
+    chunk_doc = sd.write_kind(con, tmp_path / "chunks", "long", file_rows=file_rows, rg=3, chunks=chunks, jobs=threads)
+    assert chunk_doc == sorted_doc
+    files = sorted(p.relative_to(tmp_path / "sorted").as_posix() for p in (tmp_path / "sorted").rglob("*") if p.is_file())
+    assert sorted(p.relative_to(tmp_path / "chunks").as_posix() for p in (tmp_path / "chunks").rglob("*") if p.is_file()) == files
+    assert [(f, (tmp_path / "sorted" / f).read_bytes() == (tmp_path / "chunks" / f).read_bytes()) for f in files] == [(f, True) for f in files]
+    con.close()
+
+
 def _files(j: int) -> dict[str, list[tuple[str | None, int]]]:
     """Scan `j`'s files `{path: [(owner, bytes)]}`; each a case for the runs (scans BASE … BASE + 3)."""
     rng = random.Random(100 + j)
@@ -177,6 +240,7 @@ def world(request, tmp_path_factory):
         # each scan's drill built over them; and the level-0 tiers it built (for the heaviness bound)
         counter: list[tuple[dict, sd.Tier]] = []
         counter_built: list[sd.Tier] = []
+        chunked: list[tuple[Path, Path]] = []
         counter_stacks: dict[int, list[sd.Tier]] = {}
 
         def build(scan: dict, run: Path, cdelta: list[str], over: list[sd.Tier], out: Path, runs: list[Path], deltas: list[list[str]], **kw) -> dict:
@@ -218,6 +282,15 @@ def world(request, tmp_path_factory):
             for ins, m in merges:
                 out = root / "counter" / m["key"] / "drill"
                 sd.merge_tiers(con, [tiers[r["key"]] for r in ins], out, tier={k: m[k] for k in ("key", "first", "last", "level", "scans")})
+                # again in chunks of 2 rows per merged-`q` range (every literal its own range): the same bytes
+                chunked.append((out, root / "chunked" / m["key"] / "drill"))
+                sd.merge_tiers(con, [tiers[r["key"]] for r in ins], chunked[-1][1], tier={k: m[k] for k in ("key", "first", "last", "level", "scans")},
+                               chunk_rows=2)
+                # and with those ranges spilled into 1, then 2 partitions (each split by range on reading)
+                for parts in (1, 2):
+                    chunked.append((out, root / f"chunked-p{parts}" / m["key"] / "drill"))
+                    sd.merge_tiers(con, [tiers[r["key"]] for r in ins], chunked[-1][1], tier={k: m[k] for k in ("key", "first", "last", "level", "scans")},
+                                   chunk_rows=2, spill_parts=parts)
                 tiers[m["key"]] = sd.Tier(out, m["key"])
             counter = [(r, tiers[r["key"]]) for r in after]
             counter_stacks[j] = [prior[0], *(t for _, t in counter)]
@@ -233,7 +306,18 @@ def world(request, tmp_path_factory):
     finally:
         sr.ROOT_RG, sr.IDX_RG = old_rg, old_idx
     return {"cfg": cfg, "base_out": base["out"], "run_dirs": runs, "scans": scans, "merged": merged, "drills": drills, "base": prior[0], "runs": prior[1:],
-            "counter": counter_stacks, "counter_built": counter_built, "metas": metas, "con": con, "backfill": backfill, "rebuilds": rebuilds}
+            "counter": counter_stacks, "counter_built": counter_built, "metas": metas, "con": con, "backfill": backfill, "rebuilds": rebuilds,
+            "chunked": chunked}
+
+
+def test_chunked_drill_merges_write_the_same_bytes(world):
+    """`merge_tiers` folded per merged-`q` range (`chunk_rows`=2: a range per literal) writes every file of the one-range
+    merge, byte for byte (spec: gcs's 10-22 L3 carry spilled 1.2 TiB folding its inputs in one table)."""
+    assert world["chunked"]
+    for one, two in world["chunked"]:
+        files = sorted(p.relative_to(one).as_posix() for p in one.rglob("*") if p.is_file())
+        assert files == sorted(p.relative_to(two).as_posix() for p in two.rglob("*") if p.is_file())
+        assert [(f, (one / f).read_bytes() == (two / f).read_bytes()) for f in files] == [(f, True) for f in files]
 
 
 # (name, last scan index, tiers, the level-0 tiers they were built from): every run apart, and the binary counter's
@@ -322,6 +406,24 @@ def test_rollups_equal_rebuild(world, stack, kind):
     assert len(want_heavy) > 20
 
 
+@pytest.mark.parametrize("stack", STACKS, ids=[s[0] for s in STACKS])
+@pytest.mark.parametrize("kind", sd.KINDS)
+def test_fleet_root_rows_equal_rebuild(world, stack, kind):
+    """Every member's root rows at the fleet root over base ⊕ runs (`TieredDrill.root_rows`, as the Worker counts a heavy
+    literal's `matchCount.n` with no drilldown) are the rebuild's, and brute force: its distinct `(path, usr, vf)` roots
+    over every scan. A run's close records restate roots an earlier tier holds, so they are never counted again (gcs
+    10-24: `.parquet` read 103,345,534 over `2026-10-08c` + runs, 94,487,544 over its compaction)."""
+    _, j, tiers_of, _ = stack
+    tiers, rebuilt = tiers_of(world), world["drills"][j]
+    versions = _coalesced_oracle(_oracle(world["merged"][:j + 1]))
+    got, want = sd.TieredDrill(tiers, kind), sd.TieredDrill([rebuilt], kind)
+    members = _members(rebuilt, kind)
+    brute = [(t, len({(v[1], v[2], v[3]) for v in _matching(versions, t)})) for t in members]
+    assert [(t, got.root_rows(t)) for t in members] == brute
+    assert [(t, want.root_rows(t)) for t in members] == brute
+    assert sum(n > 0 for _, n in brute) > 20
+
+
 def _matching(versions: list[tuple], t: str) -> list[tuple]:
     """The versions whose name holds `t` and whose parent doesn't: a member's roots, every date."""
     out = []
@@ -349,6 +451,7 @@ VIEW_STACKS = [s for s in STACKS if s[0] not in ("runs1-2", "runs1-3")]
 
 
 @pytest.mark.parametrize("stack", VIEW_STACKS, ids=[s[0] for s in VIEW_STACKS])
+@pytest.mark.slow
 def test_views_equal_brute_force(world, stack):
     """Every member's filtered view at every directory on every date, read over base ⊕ runs as the Worker reads it: a roots
     answer is brute force child for child; a rollup's kept children are brute force and its remainder the rest. Where the
@@ -395,6 +498,7 @@ def _as_children(v: dict, d: str) -> tuple[dict[str, list[int]], list[int]]:
 
 
 @pytest.mark.parametrize("j", range(BASE + 1, len(DAYS)), ids=lambda j: f"scan{j - BASE + 1}")
+@pytest.mark.slow
 def test_counter_reads_as_separate_runs(world, j):
     """`publish`'s merges change no answer: base ⊕ the binary counter's runs (merged by `merge_tiers`, later scans built
     over the merged ones) answers every member's view at every directory on every date as base ⊕ every run apart. Where
@@ -632,7 +736,7 @@ def test_today_rows_equal_the_range_join():
 #: below covers matched rows in every run but one.
 SETTLE_CALLS = {
     3: [[(4, 8), (34, 82)], [(0, 0), (0, 0)], [(3, 3), (16, 17)], [(1, 2), (13, 20)]],
-    5: [[(2, 6), (28, 85)], [(1, 1), (14, 18)], [(1, 4), (6, 18)], [(29, 32), (14, 26)]],
+    5: [[(2, 6), (28, 85)], [(1, 1), (14, 18)], [(1, 4), (6, 18)], [(2, 5), (11, 23)]],
 }
 
 
@@ -778,8 +882,8 @@ def _steps(long_settle: int, long_heavy: int, short_settle: int, short_heavy: in
 
 #: Per config (`R`) and run, the checkpointed build's saves (`_steps`: settled and newly heavy directories per kind).
 SAVES = {
-    3: [_steps(4, 36, 34, 160), _steps(10, 63, 30, 41), _steps(33, 9, 35, 32), _steps(8, 63, 26, 72)],
-    5: [_steps(2, 19, 27, 113), _steps(4, 12, 31, 59), _steps(4, 59, 23, 25), _steps(29, 26, 14, 90)],
+    3: [_steps(4, 26, 34, 93), _steps(10, 58, 30, 31), _steps(33, 6, 35, 21), _steps(8, 68, 26, 76)],
+    5: [_steps(2, 13, 27, 75), _steps(4, 7, 31, 44), _steps(4, 4, 23, 15), _steps(2, 76, 11, 79)],
 }
 
 
@@ -788,6 +892,7 @@ def _tables(con) -> set[str]:
 
 
 @pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+@pytest.mark.slow
 def test_an_interrupted_build_resumes_to_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
     """A checkpointed build (every loop item's part saved) writes the files of an uncheckpointed one, byte for byte;
     interrupted right after each of its saves (its connection's new tables and its output dir lost, as a reclaimed task's
@@ -918,3 +1023,16 @@ def test_the_build_inputs_checkpoint_round_trips(world, tmp_path):
     assert other.execute("SELECT * FROM pnew ORDER BY ALL").fetchall() == [(2, "b1/x"), (3, "b2/zoo/zebra9.txt")]
     got = other.execute("SELECT * FROM nmh").to_arrow_table()
     assert (got.schema, got.to_pylist()) == (history.schema, history.to_pylist())
+
+
+def test_every_file_a_run_drill_writes_is_served_to_r2_but_its_dcounts():
+    """`tier_files` (what a run's `drill/` holds, `fresh` and `digests` marked) against `static_names.R2_SERVED` (what
+    `r2-copy` sends and `r2-verify` checks): only the newly-heavy sums' state stays GCS-only. gcs 2026-10-25: a new
+    `<kind>-fresh.parquet` missing from R2 cut every later run off the Worker's drilldown, and the check passed."""
+    from dt_cloud.static_drill import DIGESTS_DELTA, FRESH_ROWS, tier_files
+    from dt_cloud.static_names import R2_SERVED
+
+    meta = {"fresh": FRESH_ROWS, "digests": DIGESTS_DELTA,
+            **{f"{k}_{s}": {"files": 1} for k in ("long", "short") for s in ("roots", "rollups")}}
+    assert [f for f in tier_files(meta) if not any(f"drill/{f}".startswith(p) for p in R2_SERVED)] == [
+        "state/dcount-long.parquet", "state/dcount-short.parquet"]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from aiohttp import ClientPayloadError
 from fsspec.exceptions import FSTimeoutError
 
 from dt_cloud import blobstore
@@ -43,6 +44,33 @@ def test_get_retries_a_timeout(store: Store, tmp_path: Path):
     store.get("a/b.parquet", tmp_path / "b.parquet")
     assert [c[0] for c in store.fs.calls] == ["get", "get", "get"]
     assert (tmp_path / "b.parquet").read_bytes() == b"x"
+
+
+def test_get_retries_a_truncated_response(
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(blobstore.time, "sleep", sleeps.append)
+    monkeypatch.setattr(blobstore, "RETRY_BASE_S", 2)
+    error = ClientPayloadError("Response payload is not completed")
+    store.fs = FlakyFs([error, error])
+    dst = tmp_path / "b.parquet"
+    store.get("a/b.parquet", dst)
+    assert store.fs.calls == [("get", "/bkt/root/a/b.parquet", str(dst))] * 3
+    assert sleeps == [2, 4]
+    assert dst.read_bytes() == b"x"
+
+
+def test_get_exhausts_truncated_response_retries(store: Store, tmp_path: Path) -> None:
+    errors = [ClientPayloadError(f"truncated attempt {i}") for i in range(blobstore.RETRIES)]
+    store.fs = FlakyFs(errors)
+    dst = tmp_path / "b.parquet"
+    with pytest.raises(ClientPayloadError) as raised:
+        store.get("a/b.parquet", dst)
+    assert raised.value is errors[-1]
+    assert store.fs.calls == [("get", "/bkt/root/a/b.parquet", str(dst))] * blobstore.RETRIES
 
 
 def test_put_retries_a_connection_error(store: Store, tmp_path: Path):

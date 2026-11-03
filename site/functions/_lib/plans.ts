@@ -60,7 +60,7 @@ export function relPrefix(raw: string, bucket: string): string {
 }
 
 /** What a plan item (or an owner action) names: a folder `prefix` — every
- * key under it — or one exact `object` key (specs/file-assign.md). Always
+ * key under it — or one exact `object` key (specs/done/file-assign.md). Always
  * carried explicitly (`plan_items.kind`, NULL = prefix), never read off the
  * string's shape. */
 export type ItemKind = 'prefix' | 'object'
@@ -164,7 +164,9 @@ export async function stageItems(
   note: string | null,
   shape: PrefixShape,
   asOf: string | null,
-): Promise<{ plan_id: number; /** null: nothing new (every item already staged or covered), so no batch */ batch_id: number | null; staged: string[]; /** The staged items that are exact objects (absent: none). */ staged_objects?: string[]; covered: string[]; absorbed: string[]; as_of: string | null } | { error: string }> {
+  /** Which of these canonical items hold data at the newest scan; the rest aren't staged (`gone`). */
+  present?: (keys: string[]) => Promise<Set<string>>,
+): Promise<{ /** null: nothing staged and no plan open */ plan_id: number | null; /** null: nothing new (every item already staged, covered or gone), so no batch */ batch_id: number | null; staged: string[]; /** The staged items that are exact objects (absent: none). */ staged_objects?: string[]; covered: string[]; absorbed: string[]; /** Refused: nothing under them at the newest scan (absent: none). */ gone?: string[]; as_of: string | null } | { error: string }> {
   const { prefixes: rawPrefixes = [], objects: rawObjects = [] } = Array.isArray(raw) ? { prefixes: raw } : raw
   const items: PlanItem[] = []
   const add = (i: PlanItem) => { if (!items.some(x => x.key === i.key && x.kind === i.kind)) items.push(i) }
@@ -179,8 +181,16 @@ export async function stageItems(
     add({ key: c, kind: 'object' })
   }
   if (!items.length) return { error: 'prefixes or objects required' }
+  // An item the newest scan holds nothing under (deleted since the scan it was picked at, or never there)
+  // would be a plan row with nothing to delete, which `/staged` settles and the map ignores (gcs 2026-10-02:
+  // a restore of old marks re-staged 5 prefixes a real run had deleted on 09-11).
+  const holding = present ? await present(items.map(i => i.key)) : null
+  const gone = holding ? items.filter(i => !holding.has(i.key)).map(i => i.key) : []
+  if (gone.length) items.splice(0, items.length, ...items.filter(i => holding!.has(i.key)))
+  const goneOut = gone.length ? { gone } : {}
   const ts = Math.floor(Date.now() / 1000)
   const open = await db.prepare("SELECT id FROM plans WHERE state = 'open' ORDER BY created_ts DESC LIMIT 1").first<{ id: number }>()
+  if (!items.length) return { plan_id: open?.id ?? null, batch_id: null, staged: [], covered: [], absorbed: [], ...goneOut, as_of: asOf }
   const have: PlanItem[] = open
     ? (await db.prepare('SELECT prefix, kind FROM plan_items WHERE plan_id = ?').bind(open.id).all<{ prefix: string; kind: string | null }>()).results
       .map(r => ({ key: r.prefix, kind: r.kind === 'object' ? 'object' : 'prefix' }))
@@ -192,7 +202,7 @@ export async function stageItems(
   const keys = (is: PlanItem[]) => is.map(i => i.key)
   const staged = keys(fresh), covered = keys(plan.covered), absorbed = keys(plan.absorbed)
   const stagedObjects = keys(fresh.filter(i => i.kind === 'object'))
-  if (open && !staged.length && !absorbed.length) return { plan_id: open.id, batch_id: null, staged, covered, absorbed, as_of: asOf }
+  if (open && !staged.length && !absorbed.length) return { plan_id: open.id, batch_id: null, staged, covered, absorbed, ...goneOut, as_of: asOf }
 
   // Every write below is ONE `db.batch` — one D1 transaction, all or nothing
   // (a request cut off mid-gesture used to leave a partial batch). Ids minted
@@ -222,13 +232,13 @@ export async function stageItems(
     `INSERT OR IGNORE INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts, as_of, kind)
      SELECT ${planId}, json_extract(value, '$.key'), ${batchId}, ?, ?, ?, json_extract(value, '$.kind') FROM json_each(?)`,
   ).bind(who, ts, asOf, JSON.stringify(fresh.map(i => ({ key: i.key, kind: i.kind === 'object' ? 'object' : null })))))
-  const audited = { staged, ...(stagedObjects.length ? { objects: stagedObjects } : {}), covered, batch_id: 0, note, as_of: asOf }
+  const audited = { staged, ...(stagedObjects.length ? { objects: stagedObjects } : {}), covered, ...goneOut, batch_id: 0, note, as_of: asOf }
   stmts.push(db.prepare(`${edit} SELECT 'plan_items', CAST(${planId} AS TEXT), 'insert', ?, ?, ?, json_set(?, '$.batch_id', ${batchId})`)
     .bind(who, ts, absorbed.length ? JSON.stringify({ absorbed }) : null, JSON.stringify(audited)))
   stmts.push(db.prepare(`SELECT ${planId} AS plan_id, ${batchId} AS batch_id`))
   const out = await db.batch<{ plan_id: number; batch_id: number }>(stmts)
   const ids = out[out.length - 1].results[0]
-  return { plan_id: ids.plan_id, batch_id: ids.batch_id, staged, ...(stagedObjects.length ? { staged_objects: stagedObjects } : {}), covered, absorbed, as_of: asOf }
+  return { plan_id: ids.plan_id, batch_id: ids.batch_id, staged, ...(stagedObjects.length ? { staged_objects: stagedObjects } : {}), covered, absorbed, ...goneOut, as_of: asOf }
 }
 
 /** Fold stage batches `ids` into batch `into`: one logical staging that went
@@ -278,7 +288,7 @@ export async function mergeBatches(
  * `staged` = the new items no existing prefix covers, `covered` = the new
  * items an existing prefix already names, `absorbed` = existing items a new
  * prefix covers (to remove). An item already in the plan stays as it is. Only
- * prefixes cover or absorb: an object names its one key (specs/file-assign.md). */
+ * prefixes cover or absorb: an object names its one key (specs/done/file-assign.md). */
 export function planStagingItems(have: readonly PlanItem[], add: readonly PlanItem[]): { staged: PlanItem[]; covered: PlanItem[]; absorbed: PlanItem[] } {
   const same = (a: PlanItem, b: PlanItem) => a.key === b.key && a.kind === b.kind
   const havePrefixes = new Set(have.filter(i => i.kind === 'prefix').map(i => i.key))
@@ -314,6 +324,7 @@ export interface PlanEdit { action: string; old_json: string | null; new_json: s
  * staged ancestor when it was staged, so never added. `staged` = the prefixes
  * it added. */
 export interface EmptiedBatch extends StageBatchRow {
+  prefixes: string[]
   staged: number
   covered: number
   absorbed: { into: number; n: number }[]
@@ -329,8 +340,8 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
   const parse = (s: string | null): Record<string, unknown> => { try { return (s ? JSON.parse(s) : {}) as Record<string, unknown> } catch { return {} } }
   const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
   const owner = new Map<string, number | null>()
-  const fate = new Map<number, { staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number }>()
-  const of = (b: number) => { let f = fate.get(b); if (!f) fate.set(b, f = { staged: 0, covered: 0, absorbed: new Map(), unstaged: 0, deleted: 0 }); return f }
+  const fate = new Map<number, { prefixes: Set<string>; staged: number; covered: number; absorbed: Map<number, number>; unstaged: number; deleted: number }>()
+  const of = (b: number) => { let f = fate.get(b); if (!f) fate.set(b, f = { prefixes: new Set(), staged: 0, covered: 0, absorbed: new Map(), unstaged: 0, deleted: 0 }); return f }
   for (const e of edits) {
     const o = parse(e.old_json)
     const n = parse(e.new_json)
@@ -346,7 +357,7 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
       for (const p of [...strs(n.staged), ...strs(n.prefixes)]) {
         if (owner.has(p)) continue
         owner.set(p, batch)
-        if (batch != null) of(batch).staged++
+        if (batch != null) { const f = of(batch); f.staged++; f.prefixes.add(p) }
       }
       if (batch != null) of(batch).covered += strs(n.covered).length
     } else if (e.action === 'update' && typeof n.merged_into === 'number') {
@@ -358,6 +369,7 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
         const f = fate.get(b)
         if (!f) continue
         const t = of(into)
+        for (const p of f.prefixes) t.prefixes.add(p)
         t.staged += f.staged; t.covered += f.covered; t.unstaged += f.unstaged; t.deleted += f.deleted
         for (const [k, v] of f.absorbed) t.absorbed.set(k, (t.absorbed.get(k) ?? 0) + v)
         fate.delete(b)
@@ -380,8 +392,8 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
     }
   }
   return batches.filter(b => !live.has(b.id)).map(b => {
-    const f = fate.get(b.id) ?? { staged: 0, covered: 0, absorbed: new Map<number, number>(), unstaged: 0, deleted: 0 }
-    return { ...b, staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged, deleted: f.deleted }
+    const f = of(b.id)
+    return { ...b, prefixes: [...f.prefixes].sort(), staged: f.staged, covered: f.covered, absorbed: [...f.absorbed].map(([into, n]) => ({ into, n })).sort((x, y) => x.into - y.into), unstaged: f.unstaged, deleted: f.deleted }
   })
 }
 
@@ -392,23 +404,24 @@ export function emptiedBatches(batches: readonly StageBatchRow[], items: readonl
 export async function planDetail(db: D1Database, id: number, staging: boolean): Promise<{ plan: PlanRow; items: PlanItemRow[]; batches: StageBatchRow[]; emptied: EmptiedBatch[]; runs: Record<string, unknown>[] } | null> {
   const plan = await db.prepare('SELECT * FROM plans WHERE id = ?').bind(id).first<PlanRow>()
   if (!plan) return null
-  const items = staging
-    ? await db.prepare(
+  const itemsQ = staging
+    ? db.prepare(
       `SELECT i.prefix, COALESCE(i.kind, 'prefix') AS kind, COALESCE(i.note, b.note) AS note, i.added_by, i.added_ts, i.batch_id, i.as_of
        FROM plan_items i LEFT JOIN stage_batches b ON b.id = i.batch_id
        WHERE i.plan_id = ? ORDER BY i.added_ts DESC, i.prefix`,
     ).bind(id).all<PlanItemRow>()
-    : await db.prepare("SELECT prefix, COALESCE(kind, 'prefix') AS kind, note, added_by, added_ts, NULL AS batch_id, as_of FROM plan_items WHERE plan_id = ? ORDER BY added_ts DESC, prefix").bind(id).all<PlanItemRow>()
-  const batches = staging
-    ? (await db.prepare('SELECT * FROM stage_batches WHERE plan_id = ? ORDER BY created_ts DESC').bind(id).all<StageBatchRow>()).results
-    : []
+    : db.prepare("SELECT prefix, COALESCE(kind, 'prefix') AS kind, note, added_by, added_ts, NULL AS batch_id, as_of FROM plan_items WHERE plan_id = ? ORDER BY added_ts DESC, prefix").bind(id).all<PlanItemRow>()
+  const batchesQ = staging
+    ? db.prepare('SELECT * FROM stage_batches WHERE plan_id = ? ORDER BY created_ts DESC').bind(id).all<StageBatchRow>()
+    : Promise.resolve({ results: [] as StageBatchRow[] })
   // Every run, not just this plan's: plans are bookkeeping, and /staged's runs
   // table is the deployment's run history.
-  const runs = await db.prepare('SELECT * FROM deletion_runs ORDER BY started_ts DESC LIMIT 500').all<Record<string, unknown>>()
-  const edits = staging
-    ? (await db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()).results
-    : []
-  return { plan, items: items.results, batches, emptied: emptiedBatches(batches, items.results, edits), runs: runs.results }
+  const runsQ = db.prepare('SELECT * FROM deletion_runs ORDER BY started_ts DESC LIMIT 500').all<Record<string, unknown>>()
+  const editsQ = staging
+    ? db.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'plan_items' AND pk = ? ORDER BY id").bind(String(id)).all<PlanEdit>()
+    : Promise.resolve({ results: [] as PlanEdit[] })
+  const [items, batches, runs, edits] = await Promise.all([itemsQ, batchesQ, runsQ, editsQ])
+  return { plan, items: items.results, batches: batches.results, emptied: emptiedBatches(batches.results, items.results, edits.results), runs: runs.results }
 }
 
 /** One run's D1 record and its per-band rows (largest first) — the run detail
@@ -487,7 +500,7 @@ export async function planItems(db: D1Database, planId: number, only?: readonly 
 export class NotInPlan extends Error {}
 
 /** `items` restricted to `only` (their `digestLines`: a prefix as itself, an object as `=<key>`): what a run acts on
- * when the person dispatching it checked some rows (specs/delete-what-you-see.md). Every selected line must be one
+ * when the person dispatching it checked some rows (specs/done/delete-what-you-see.md). Every selected line must be one
  * of the plan's; an empty selection selects nothing. */
 export function selectItems<T extends PlanItem>(items: readonly T[], only: readonly string[]): T[] {
   const want = new Set(only)
@@ -538,23 +551,34 @@ export async function audit(
     .run()
 }
 
-/** Take out of plan `planId` every item a finished real run of it fully
- * deleted since the item was staged: a band with no objects written or
- * rewritten during the run (`drift_new_objects`, `overwritten`), not undone.
- * A drifted or overwritten prefix stays queued (its new objects were never
- * reviewed; the next dry-run sees them). One `admin_edits` row per run
+/** Consume staging after a verified successful real run reviewed that item.
+ * New or replaced objects are outside that review and do not keep the item
+ * staged. Failed, partial, dry, restored and later-staged items stay untouched.
+ * The caller supplies provider-confirmed successful run ids. One `admin_edits` row per run
  * (`deleted_by`), so `/staged` shows those batches as deleted, not unstaged.
  * An undo deliberately does not re-stage: restoring means "keep these".
  * Idempotent; returns the prefixes removed. */
-export async function unstageDeleted(db: D1Database, planId: number): Promise<string[]> {
-  const { results } = await db.prepare(`
-    SELECT i.prefix, min(r.run_id) AS run_id FROM plan_items i
-    JOIN deletion_bands b ON b.prefix = i.prefix
-    JOIN deletion_runs r ON r.run_id = b.run_id
-    WHERE i.plan_id = ? AND r.plan_id = i.plan_id AND r.mode = 'real' AND r.finished_ts IS NOT NULL
-      AND r.started_ts >= i.added_ts AND b.drift_new_objects = 0 AND b.overwritten = 0 AND b.undone_objects = 0
-    GROUP BY i.prefix ORDER BY i.prefix
-  `).bind(planId).all<{ prefix: string; run_id: string }>()
+/** Run ids per `unstageDeleted` query: D1's 100 bound parameters, less the plan id. */
+const RUN_CHUNK = 99
+
+export async function unstageDeleted(db: D1Database, planId: number, succeededRuns: readonly string[]): Promise<string[]> {
+  // Each prefix's first deleting run, over the runs a chunk at a time: D1 binds at most 100 parameters a statement
+  // (the plan id is one), and an executor poll passes every succeeded run.
+  const first = new Map<string, string>()
+  for (let i = 0; i < succeededRuns.length; i += RUN_CHUNK) {
+    const runs = succeededRuns.slice(i, i + RUN_CHUNK)
+    const { results } = await db.prepare(`
+      SELECT i.prefix, min(r.run_id) AS run_id FROM plan_items i
+      JOIN deletion_bands b ON b.prefix = i.prefix
+      JOIN deletion_runs r ON r.run_id = b.run_id
+      WHERE i.plan_id = ? AND r.plan_id = i.plan_id AND r.mode = 'real' AND r.finished_ts IS NOT NULL
+        AND r.started_ts >= i.added_ts AND b.undone_objects = 0 AND r.plan_digest IS NOT ''
+        AND r.run_id IN (${runs.map(() => '?').join(',')})
+      GROUP BY i.prefix
+    `).bind(planId, ...runs).all<{ prefix: string; run_id: string }>()
+    for (const r of results) { const was = first.get(r.prefix); if (was === undefined || r.run_id < was) first.set(r.prefix, r.run_id) }
+  }
+  const results = [...first].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([prefix, run_id]) => ({ prefix, run_id }))
   const byRun = new Map<string, string[]>()
   for (const r of results) byRun.set(r.run_id, [...(byRun.get(r.run_id) ?? []), r.prefix])
   for (const [run, prefixes] of byRun) {
@@ -567,9 +591,9 @@ export async function unstageDeleted(db: D1Database, planId: number): Promise<st
 /** `unstageDeleted` on the open plan, if any: the executors' job polls call
  * it every time, so a run's deletions settle even when its finish was
  * reflected before this existed (or by another reader). */
-export async function settleOpenPlan(db: D1Database): Promise<string[]> {
+export async function settleOpenPlan(db: D1Database, succeededRuns: readonly string[]): Promise<string[]> {
   const id = await openPlanId(db)
-  return id == null ? [] : unstageDeleted(db, id)
+  return id == null ? [] : unstageDeleted(db, id, succeededRuns)
 }
 
 /** A run control (stop / undo / purge) into the audit log: who, when, and the
@@ -657,7 +681,7 @@ export type RealRun =
   | { ok: true; reviewed: RunRow | null }
   | { ok: false; reason: string }
 
-/** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/delete-what-you-see.md): never
+/** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/done/delete-what-you-see.md): never
  * while a run of the plan is in flight; no prior dry run required — the run's own manifest (each item held to its
  * staging scan, generation-pinned deletes) is the safety. `reviewed`: the newest finished dry run of exactly this set
  * at that scan, whose manifest the run may reuse (none: the run lists afresh). `date` absent: that dry run's scan,

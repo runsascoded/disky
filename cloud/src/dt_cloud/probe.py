@@ -21,7 +21,16 @@ replay exactly those requests without discovery. `-S` serializes them;
 otherwise they run concurrently. `-c` changes subtree/diff response-cache
 keys only: it does not flush underlying metadata/row-group caches or the
 series cache. Records retain the complete Server-Timing header and a bounded
-error-body excerpt for HTTP 5xx responses.
+error-body excerpt for failed responses.
+
+A search refusal for a scan the static name index doesn't hold (400 `scan-not-indexed`) is a FAILED request, unless
+the run's own phase record says its static-names step was skipped (`-i REASON`, which the scan step passes from that
+record): then it is SKIPPED, for that reason. Skips are counted apart (`n passed, n skipped (reason), n failed`) and
+never read as passes; 5xx, timeouts and every other refusal stay failed.
+
+That refusal on a scan the static name index does list (`/api/filter-scans`) is not a lag but a broken index, and is
+never skipped: cw 10-24 → 10-29, `merge: false` left 37 unmerged runs, the reader's light-read budget declined nearly
+every literal over them, and every search refused every scan while the healthcheck said the index "lags this scan".
 """
 
 from __future__ import annotations
@@ -41,6 +50,7 @@ from typing import Callable
 UA = "dt-cloud-probe/1.0"  # a real UA — CF edge-blocks bot UAs (1010)
 MISS_TERM = "zz-probe-no-match-zz"
 CACHED = ("hit", "kv")  # `x-cache` values served without a read
+NOT_INDEXED = "scan-not-indexed"  # the search's refusal for a scan the static name index doesn't hold (`indexedOnly.ts`)
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,11 @@ class Result:
     server_ms: int | None
     server_timing: str | None = None
     error: str | None = None
+    #: Why this request's refusal is skipped, not failed (`run`'s `unindexed`); None: not skipped
+    skip: str | None = None
+    #: A `scan-not-indexed` refusal's: whether the static name index lists every scan the request names (`indexed_scans`);
+    #: None for any other response, or when unknown (no scan named, or no list)
+    indexed: bool | None = None
 
 
 # Injected in tests: (path) -> Resp.
@@ -189,14 +204,57 @@ def request_paths(paths: tuple[str, ...], cold: str = "") -> list[str]:
     return out
 
 
-def run(fetch: Fetch, scens: dict[str, list[str]], *, parallel: bool = True) -> list[Result]:
-    """Scenarios in turn; each one's requests concurrently (a page load)."""
+def not_indexed(r: Resp) -> bool:
+    """Whether `r` is the search's `scan-not-indexed` refusal: a 400 whose JSON body carries that code."""
+    if r.status != 400:
+        return False
+    try:
+        body = json.loads(r.body)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("code") == NOT_INDEXED
+
+
+def named_scans(path: str) -> list[str]:
+    """The scans a request names: its `date`, `from` and `to` params."""
+    q = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+    return [v for k in ("date", "from", "to") for v in q.get(k, [])]
+
+
+def indexed_scans(fetch: Fetch) -> list[str] | None:
+    """The scans the static name index lists (`/api/filter-scans`); None when it answers otherwise (the static filter
+    off, an error)."""
+    r = fetch("/api/filter-scans")
+    try:
+        scans = json.loads(r.body)["scans"] if r.status == 200 else None
+    except (ValueError, UnicodeDecodeError, KeyError, TypeError):
+        return None
+    return scans if isinstance(scans, list) else None
+
+
+def run(fetch: Fetch, scens: dict[str, list[str]], *, parallel: bool = True, unindexed: str | None = None) -> list[Result]:
+    """Scenarios in turn; each one's requests concurrently (a page load). `unindexed`: the run's static-names step was
+    skipped, for this reason (from its phase record), so a `scan-not-indexed` refusal is skipped for it, not failed. A
+    refusal naming scans checks them against `indexed_scans` (fetched once, on the first): on scans it lists, the
+    refusal is `indexed` and never skipped."""
     out: list[Result] = []
+    held: list[list[str] | None] = []
     for name, paths in scens.items():
         with ThreadPoolExecutor(len(paths) if parallel else 1) as ex:
             for path, r in zip(paths, ex.map(fetch, paths)):
-                error = r.body.decode(errors="replace")[:1000] if r.status >= 500 else None
-                out.append(Result(name, path, r.status, r.ms, r.bytes, r.cache, r.server_ms, r.server_timing, error))
+                error = r.body.decode(errors="replace")[:1000] if r.status not in (200, 409) else None
+                if r.status == 200:
+                    try:
+                        json.loads(r.body)
+                    except (ValueError, UnicodeDecodeError):
+                        error = "invalid JSON response: " + r.body.decode(errors="replace")[:1000]
+                indexed = None
+                if not_indexed(r) and (named := named_scans(path)):
+                    if not held:
+                        held.append(indexed_scans(fetch))
+                    indexed = None if held[0] is None else all(s in held[0] for s in named)
+                skip = unindexed if unindexed and not_indexed(r) and not indexed else None
+                out.append(Result(name, path, r.status, r.ms, r.bytes, r.cache, r.server_ms, r.server_timing, error, skip, indexed))
     return out
 
 
@@ -226,14 +284,57 @@ def compare_requests(fetch: Fetch, baseline: Fetch, paths: list[str], *, paralle
     return results, before, parity
 
 
+def unindexed_refusal(r: Result) -> bool:
+    """Whether `r` failed as the search's `scan-not-indexed` refusal (`lagged` or `refused_indexed`)."""
+    try:
+        body = json.loads(r.error or "")
+    except ValueError:
+        return False
+    return r.status == 400 and isinstance(body, dict) and body.get("code") == NOT_INDEXED
+
+
 def failed(r: Result) -> bool:
-    return r.status == 0 or r.status >= 500
+    return r.skip is None and (r.status not in (200, 409) or r.error is not None)
+
+
+def lagged(r: Result) -> bool:
+    """A failed `scan-not-indexed` refusal on a scan the static name index doesn't list (or not known to): the index lags
+    this scan (a real gap, named apart from other failures so a lag doesn't read as a broken site)."""
+    return failed(r) and unindexed_refusal(r) and r.indexed is not True
+
+
+def refused_indexed(r: Result) -> bool:
+    """A failed `scan-not-indexed` refusal on scans the static name index lists: the reader declined it (over the tiers'
+    light-read row budget, cw's unmerged runs 10-24 → 10-29), not a lag."""
+    return failed(r) and unindexed_refusal(r) and r.indexed is True
+
+
+#: `summary_line`'s note on `refused_indexed` requests
+REFUSED_INDEXED = "refused on an indexed scan (over the tiers' row budget? check the static index's unmerged runs)"
+
+
+def counts(results: list[Result]) -> tuple[int, int, int]:
+    """(passed, skipped, failed) requests."""
+    skipped = sum(r.skip is not None for r in results)
+    bad = sum(failed(r) for r in results)
+    return len(results) - skipped - bad, skipped, bad
+
+
+def summary_line(results: list[Result]) -> str:
+    """`n passed, n skipped (reason), n failed`: each distinct skip reason named, so a skip never reads as a pass."""
+    passed, skipped, bad = counts(results)
+    reasons = "; ".join(dict.fromkeys(r.skip for r in results if r.skip is not None))
+    lag, broken = sum(map(lagged, results)), sum(map(refused_indexed, results))
+    return (f"{passed} passed, {skipped} skipped{f' ({reasons})' if reasons else ''}, {bad} failed"
+            + (f" ({lag} {NOT_INDEXED}: the static name index lags this scan)" if lag else "")
+            + (f" ({broken} {NOT_INDEXED} {REFUSED_INDEXED})" if broken else ""))
 
 
 def summarize(results: list[Result], budget_ms: int | None = None) -> tuple[bool, list[str]]:
     """Per-scenario lines (the slowest request = the page's wall time) and
-    pass/fail: any 5xx or transport failure fails; with `budget_ms`, so does
-    a scenario slower than it."""
+    pass/fail: only 200 and the site's explicit view refusal (409) pass; a skipped request (`run`'s `unindexed`) is
+    listed with its reason and neither passes nor fails (`–`: every request skipped). With `budget_ms`, a slower
+    scenario fails."""
     ok = True
     lines = []
     for name in dict.fromkeys(r.scenario for r in results):
@@ -243,12 +344,21 @@ def summarize(results: list[Result], budget_ms: int | None = None) -> tuple[bool
         over = budget_ms is not None and wall > budget_ms
         ok &= not bad and not over
         hits = sum(r.cache in CACHED for r in rs)
-        lines.append(f"  {'✗' if bad or over else '✓'} {name:<12} {wall / 1000:6.2f}s  {len(rs)} reqs, {hits} cached" + (f", {len(bad)} failed" if bad else ""))
+        skipped = [r for r in rs if r.skip is not None]
+        mark = "✗" if bad or over else "–" if len(skipped) == len(rs) else "✓"
+        lines.append(f"  {mark} {name:<12} {wall / 1000:6.2f}s  {len(rs)} reqs, {hits} cached"
+                     + (f", {len(skipped)} skipped" if skipped else "") + (f", {len(bad)} failed" if bad else ""))
         for r in bad:
-            lines.append(f"      {r.status} {r.ms / 1000:.2f}s {r.path}")
+            lines.append(f"      {r.status} {r.ms / 1000:.2f}s {r.path}" + (f" ({NOT_INDEXED} on an indexed scan)" if refused_indexed(r) else
+                                                                           f" ({NOT_INDEXED})" if unindexed_refusal(r) else ""))
+        for r in skipped:
+            lines.append(f"      skipped {r.status} {r.ms / 1000:.2f}s {r.path}: {r.skip}")
     return ok, lines
 
 
 def record(base: str, t: Targets, results: list[Result], now: dt.datetime | None = None) -> dict:
     now = now or dt.datetime.now(dt.timezone.utc)
-    return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "base": base, **asdict(t), "results": [asdict(r) for r in results]}
+    passed, skipped, bad = counts(results)
+    return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "base": base, **asdict(t), "results": [asdict(r) for r in results],
+            "summary": {"passed": passed, "skipped": skipped, "failed": bad, "lag": sum(map(lagged, results)),
+                        "refused_indexed": sum(map(refused_indexed, results)), "line": summary_line(results)}}

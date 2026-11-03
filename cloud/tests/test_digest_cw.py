@@ -8,16 +8,19 @@ Hand-built series (12-hourly, 00:00Z / 12:00Z): a lead day Mon 8/31 (700,
 705 TiB) then Tue 9/1 (710, 713) and Wed 9/2 (712, 715) — one ISO week, so
 the bullet label is unambiguous. Quota (main) = 910 TiB."""
 import datetime as dt
+import re
 import json
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
 import pytest
+from thrds.slack import SlackClient
 
 from dt_cloud import digest as E
 from dt_cloud import digest_cw as D
 
+from conftest import thrds_fake
 from digest_examples import CW_EXAMPLE, config_file
 
 CFG = CW_EXAMPLE
@@ -34,8 +37,8 @@ def post_digest(root, m, token, channel, variant="sender", client=None, reply_ho
     return E.converge_slack(_tpl(reply_hour), root, m, client, channel, variant)
 
 
-def redo_replies(root, m, token, channel, variant="sender", client=None, reply_hour=12, for_real=False):
-    return E.redo_replies(_tpl(reply_hour), root, m, client, channel, variant, for_real=for_real)
+def redo_replies(root, m, token, channel, variant="sender", client=None, reply_hour=12, for_real=False, since=None):
+    return E.redo_replies(_tpl(reply_hour), root, m, client, channel, variant, since=since, for_real=for_real)
 
 TIB = 1024**4
 UTC = dt.timezone.utc
@@ -145,6 +148,7 @@ def test_units_tb():
         "title": "HF usage — October 2026",
         "note": "cw.example.org · TB",
         "month": "2026-10",
+        "from": "2026-09-03",
         "points": [{"scan": s, "bytes": b * TB // 10} for s, b in (("2026-09-30T0800", 150), ("2026-10-01T0800", 155), ("2026-10-02T0800", 154))],
         "units": "TB",
         "quota": {"bytes": 253 * TB, "name": "253 TB public"},
@@ -216,6 +220,135 @@ def test_tail_zone_shared_quota():
         f" · [hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
         f" · [more-data]({u('more-data')}): 2 Ti"
     )
+
+
+def test_tail_circles_fullest_first():
+    """`quota_marks: circles`: the clauses fullest first (a bucket without a quota last, unmarked), red at or over
+    `mark_pct` (`alert_pct`, else 90), orange within 10 points below, yellow within 40, green under; the zone's fill is
+    its members' sum."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="circles", buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8"),
+        "side-data": E.Bucket("side", z8, "z8"),
+        "cold-data": E.Bucket("cold", z8),
+    })
+    day = D.DayRow(
+        date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0,
+        since=None, extra={"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 12.4},
+    )
+    u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"  # noqa: E731
+    main = f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
+    zone = f"[hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+    cold = f":large_green_circle: [cold]({u('cold-data')}): 12%"  # under `QUIET_PCT`: the bare share
+    more = f"[more-data]({u('more-data')}): 2 Ti"
+    assert D._tail(day, cfg).split(" · ") == [f":red_circle: {main}", f":large_orange_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=95)).split(" · ") == [f":large_orange_circle: {main}", f":large_orange_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=96)).split(" · ") == [f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", cold, more]
+    assert D._tail(day, replace(cfg, alert_pct=85)).split(" · ") == [f":red_circle: {main}", f":red_circle: {zone}", cold, more]
+    # past its quota a pool reads `over`, and stays red whatever `alert_pct` is
+    full = replace(day, extra={**day.extra, "cold-data": 101.3})
+    assert D._tail(full, replace(cfg, alert_pct=100)).split(" · ") == [
+        f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)", f":large_orange_circle: {main}", f":large_yellow_circle: {zone}", more]
+    # the default (`warning`): config order, full clauses, `:warning:` only at or over `alert_pct`
+    assert D._tail(day, replace(cfg, quota_marks="warning", alert_pct=90)).split(" · ") == [
+        f":warning: {main}", zone, more, f"[cold]({u('cold-data')}): 12.4% of 100Ti (87.6 Ti free)"]
+
+
+def test_runway_rules():
+    """`quota_marks: runway` (specs/digest-runway-marks.md §2): growth is the fastest net fill over 1, 3 and 7 days (a
+    one-day jump over a flat week shows); runway = free ÷ growth; the mark by runway, ≥ 95% full never calmer than 🟠;
+    the rate text only under 60 days. The site's `digest/pools.ts` mirrors these (its own spec, same numbers)."""
+    t = dt.datetime(2026, 9, 23, 12, tzinfo=UTC)
+    flat_then_jump = [(t - dt.timedelta(days=d), 80.0) for d in (7, 3, 1)]
+    assert D._growth(flat_then_jump, t, 90.0) == 10.0
+    assert D._growth([(t - dt.timedelta(days=7), 46.0), (t - dt.timedelta(days=3), 77.0), (t - dt.timedelta(days=1), 83.0)], t, 85.0) == 39 / 7
+    assert D._growth([(t - dt.timedelta(hours=12), 80.0)], t, 90.0) is None  # nothing a whole day back
+    assert [D._runway(15.0, 5.0), D._runway(15.0, 0.0), D._runway(15.0, -2.0), D._runway(15.0, None), D._runway(-1.3, 4.0)] == [
+        D.Runway(3.0, 5.0), D.Runway(D.math.inf, 0.0), D.Runway(D.math.inf, -2.0), D.Runway(D.math.inf, None), D.Runway(0.0, 4.0)]
+    R, O, Y, G = D.RED_MARK, D.ORANGE_MARK, D.YELLOW_MARK, D.GREEN_MARK
+    marks = [D._runway_mark(D.Runway(d, 1.0), fill) for d, fill in [
+        (0.0, 101.0), (2.9, 50.0), (3.0, 50.0), (13.9, 50.0), (14.0, 50.0), (14.0, 95.0), (29.9, 50.0), (30.0, 50.0),
+        (D.math.inf, 88.5), (D.math.inf, 96.0)]]
+    assert marks == [R, R, O, O, Y, O, Y, G, G, O]
+    texts = [D._runway_text(r, CFG) for r in [D.Runway(8.2, 4.1), D.Runway(0.5, 30.0), D.Runway(59.9, 1.0), D.Runway(60.0, 1.0),
+                                               D.Runway(D.math.inf, 0.0), D.Runway(0.0, 4.0)]]
+    assert texts == [", +4.1 Ti/d, ≈8d to full", ", +30.0 Ti/d, ≈<1d to full", ", +1.0 Ti/d, ≈60d to full", "", "", ""]
+
+
+def _hist_scan(scan: str, tb: float, extra: dict[str, float]) -> "D.Scan":
+    return D.Scan(scan=scan, tb=tb, objs=0, dtb=None, dobjs=None, hours=None, extra=extra)
+
+
+def test_tail_runway_fixed_order():
+    """`quota_marks: runway`: the clauses in the replies' fixed order (meta order, a zone at its first member), each
+    marked by its runway over the day's history: the primary flat at 90.8% is 🟢 (fully used, not filling); the zone
+    filling ~5.6 Ti/d with 15 Ti free is 🔴; `cold`, flat all week then +10 Ti yesterday, is 🟠 by its one-day rate;
+    past its quota a pool is 🔴 with no rate text."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway", buckets={
+        **CFG.buckets,
+        "hot-data": E.Bucket("hot", z8, "z8"),
+        "side-data": E.Bucket("side", z8, "z8"),
+        "cold-data": E.Bucket("cold", z8),
+    })
+    now = {"hot-data": 82.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 12.4}
+    hist = (
+        _hist_scan("2026-09-16T1201", 825.9, {"hot-data": 43.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-20T1201", 825.9, {"hot-data": 74.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-22T1201", 825.9, {"hot-data": 80.0, "more-data": 1.9, "side-data": 3.0, "cold-data": 2.4}),
+        _hist_scan("2026-09-23T1201", 825.9, now),
+    )
+    day = D.DayRow(date="2026-09-23", scan="2026-09-23T1201", tb=825.9, dtb=1.0, hours=24.0, since=None, extra=now, hist=hist)
+    u = lambda b: f"{SITE}/{b}?d=2609231201#over-time"  # noqa: E731
+    main = f"[main]({u('main-data')}): 90.8% of 1P (84.1 Ti free)"
+    zone = f"[hot]({u('hot-data')}) 82 + [side]({u('side-data')}) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+    more = f"[more-data]({u('more-data')}): 2 Ti"
+    assert D._tail(day, cfg).split(" · ") == [
+        f":large_green_circle: {main}",
+        f":red_circle: {zone}, +5.6 Ti/d, ≈3d to full",
+        more,
+        f":large_orange_circle: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+    ]
+    over = replace(day, extra={**now, "cold-data": 101.3}, hist=hist[:-1] + (_hist_scan("2026-09-23T1201", 825.9, {**now, "cold-data": 101.3}),))
+    assert D._tail(over, cfg).split(" · ")[3] == f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)"
+    # no history (a store's first day): nothing is filling, so only the 95% floor and an overage can mark it hot
+    assert D._tail(replace(day, hist=()), cfg).split(" · ") == [
+        f":large_green_circle: {main}", f":large_green_circle: {zone}", more, f":large_green_circle: [cold]({u('cold-data')}): 12%"]
+    # `circles` is unchanged by the history: fullest first, by fill
+    assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
+        f":red_circle: {main}", f":large_orange_circle: {zone}", f":large_green_circle: [cold]({u('cold-data')}): 12%", more]
+
+
+def test_day_rows_carry_runway_history():
+    """Each reply's `hist`: the window's scans up to and including its own, back past the longest look-back."""
+    rows = D.day_rows(MONTH, "sender", 12)
+    assert [[x.scan for x in r.hist] for r in rows] == [
+        ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200"],
+        ["2026-08-31T0000", "2026-08-31T1200", "2026-09-01T0000", "2026-09-01T1200", "2026-09-02T0000", "2026-09-02T1200"],
+    ]
+
+
+def test_runway_reaches_before_the_month():
+    """Early in a month the runway still looks back 7 days, into the previous month's scans (`Month.pre`, not just
+    the lead-in day): on 11/2 a zone that crept +0.1 Ti/d within November but filled from 45 a week before is 🔴 by its
+    7-day rate; the same day without `pre` reads 🟢."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, quota_marks="runway", buckets={**CFG.buckets, "hot-data": E.Bucket("hot", z8, "z8"), "side-data": E.Bucket("side", z8, "z8")})
+    s = lambda scan, hot: _hist_scan(scan, 825.9, {"hot-data": hot, "side-data": 3.0})  # noqa: E731
+    month = D.Month(pre=[s("2026-10-26T1201", 42.0)], lead=[s("2026-10-31T1201", 81.8)], rows=[s("2026-11-01T1201", 81.9), s("2026-11-02T1201", 82.0)])
+    links = lambda t: re.sub(r"\]\([^)]*\)", "](…)", t)  # noqa: E731
+    day2 = D.day_rows(month, "sender", 12)[1]
+    assert day2.date == "2026-11-02"
+    assert links(D._tail(day2, cfg).split(" · ")[1]) == ":red_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free), +5.7 Ti/d, ≈3d to full"
+    alone = D.day_rows(replace(month, pre=[]), "sender", 12)[1]
+    assert links(D._tail(alone, cfg).split(" · ")[1]) == ":large_green_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
+
+
+def test_quota_marks_must_be_known():
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "quota_marks": "squares"})
+    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway')"
 
 
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:
@@ -469,38 +602,40 @@ def test_no_quota():
 
     cfg = replace(CFG, buckets={})
     assert D.op_body(MONTH, SEP, None, cfg).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · 715 TiB · [dashboard]({SITE}/)",
+        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31]({SITE}/?d=26090212-2d12h#over-time) · 715 TiB · [dashboard]({SITE}/)",
         "_as of 9/2 12:00Z_",
         "",
         "*Weekly summaries*",
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB",
+        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB",
     ]
     assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"713 Ti [↗︎]({SITE}/main-data?d=26090112-1d#over-time)"
 
 
 def test_op_body():
     # month-to-date +10.0 on 705 over 2 days → 1.42%·3.5 = 5.0%/wk → deg40;
-    # the (partial) week +10.0 → 1.4% → deg20, linked over 8/31 12:00 → 9/2 12:00 = 2d
+    # nothing before 8/31 (a store younger than the window): the look-back figure and the (partial) week run from
+    # its first scan, 8/31 00:00 (700): +15.0 → 2.1% → deg30, linked over 8/31 00:00 → 9/2 12:00 = 2d12h
     assert D.op_body(MONTH, SEP, "https://x/p.png", CFG).split("\n") == [
-        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · 715 TiB · 78.6% of 1 PB · [dashboard]({SITE}/)",
+        f":arrow_deg40: **+10.0 TiB** [month-to-date]({SITE}/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31]({SITE}/?d=26090212-2d12h#over-time) · 715 TiB · 78.6% of 1 PB · [dashboard]({SITE}/)",
         "_as of 9/2 12:00Z_",
         "",
         "*Weekly summaries*",
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB · 78.6% of 1 PB",
+        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB · 78.6% of 1 PB",
         "",
         "![S3 usage — September 2026](https://x/p.png)",
     ]
-    assert D.op_body(MONTH, SEP, None, CFG).split("\n")[-1].startswith(":arrow_deg20: [wk of 8/31]")
+    assert D.op_body(MONTH, SEP, None, CFG).split("\n")[-1].startswith(":arrow_deg30: [wk of 8/31]")
 
 
 def test_op_body_two_weeks():
-    # a completed week (Sunday scanned) is not partial; the next week's bullet is Δ vs that week's end
+    # a completed week (Sunday scanned) is not partial, Δ from the store's first scan (8/31 00:00: none before the
+    # week); the next week's bullet is Δ vs that week's end
     metas = LEAD + [(f"2026-09-{d:02d}T{h}", _meta(700 + i)) for i, (d, h) in enumerate(((d, h) for d in range(1, 8) for h in ("0000", "1200")), start=1)]
     rows = D.rows_from_meta(metas, P)
     month = D.Month(lead=rows[:2], rows=rows[2:])
     bullets = D.op_body(month, SEP, None, CFG).split("\n")[4:]
     assert bullets == [
-        f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090612-6d#over-time): **+7.0 TiB** → 712 TiB · 78.2% of 1 PB",
+        f":arrow_deg30: [wk of 8/31]({SITE}/?d=26090612-6d12h#over-time): **+12.0 TiB** → 712 TiB · 78.2% of 1 PB",
         f":arrow_deg0: [wk of 9/7]({SITE}/?d=26090712-1d#over-time) _(partial)_: **+2.0 TiB** → 714 TiB · 78.5% of 1 PB",
     ]
 
@@ -548,6 +683,74 @@ def test_state_path():
     assert E.state_path("gs://b/snapshots/cw", SEP, CFG.state.format(channel="C1", variant="sender")) == "gs://b/digest/cw/C1/sender/2026-09.json"
 
 
+# ---- the OP's window (specs/digest-rolling-window.md) ------------------------
+
+
+@pytest.mark.parametrize("month, today, start", [
+    # 30 days of scans, inclusive: the 1st reaches back into the previous month
+    (date(2026, 11, 1), date(2026, 11, 1), date(2026, 10, 3)),
+    (date(2026, 11, 1), date(2026, 11, 15), date(2026, 10, 17)),
+    # from the month's 30th day on, just the month
+    (date(2026, 11, 1), date(2026, 11, 29), date(2026, 10, 31)),
+    (date(2026, 11, 1), date(2026, 11, 30), date(2026, 11, 1)),
+    (date(2026, 10, 1), date(2026, 10, 31), date(2026, 10, 1)),
+    # across a year boundary
+    (date(2027, 1, 1), date(2027, 1, 1), date(2026, 12, 3)),
+])
+def test_window_start(month: date, today: date, start: date):
+    assert E.window_start(month, today) == start
+
+
+def _daily(root: Path, first: date, last: date, tib) -> None:
+    """One 08:00Z scan a day, ``tib(i)`` TiB on the ``i``-th day."""
+    n = (last - first).days + 1
+    _publish(root, [(f"{first + dt.timedelta(days=i)}T0800", _meta(tib(i))) for i in range(n)])
+
+
+NOV = date(2026, 11, 1)
+
+
+def test_op_body_on_the_first(tmp_path: Path):
+    # 9/1, a day into the month: the window reaches back to 8/3 (its look-back from 8/2's scan, 30 days), its weeks
+    # from 8/3's (baselined on 8/2's scan); the four that ended in August are marked so; the headline puts the last 30
+    # days beside the one-day month-to-date; the OP links August's thread
+    root = tmp_path / "snapshots" / "cw"
+    _daily(root, date(2026, 7, 27), SEP, lambda i: 700 + i)
+    month = D.load_month(str(root), SEP, P)
+    assert D.op_body(month, SEP, None, CFG, "https://slack.example.org/archives/C1/p1").split("\n") == [
+        f":arrow_deg20: **+1.0 TiB** [month-to-date]({SITE}/?d=260901-1d#over-time) · **+30.0 TiB** [last 30d]({SITE}/?d=260901-30d#over-time) · 736 TiB · 80.9% of 1 PB · [dashboard]({SITE}/)",
+        "_as of 9/1 08:00Z_",
+        "",
+        "*Weekly summaries*",
+        f":arrow_deg20: [wk of 8/3]({SITE}/?d=260809-7d#over-time) (Aug): **+7.0 TiB** → 713 TiB · 78.4% of 1 PB",
+        f":arrow_deg20: [wk of 8/10]({SITE}/?d=260816-7d#over-time) (Aug): **+7.0 TiB** → 720 TiB · 79.1% of 1 PB",
+        f":arrow_deg20: [wk of 8/17]({SITE}/?d=260823-7d#over-time) (Aug): **+7.0 TiB** → 727 TiB · 79.9% of 1 PB",
+        f":arrow_deg20: [wk of 8/24]({SITE}/?d=260830-7d#over-time) (Aug): **+7.0 TiB** → 734 TiB · 80.7% of 1 PB",
+        f":arrow_deg0: [wk of 8/31]({SITE}/?d=260901-2d#over-time) _(partial)_: **+2.0 TiB** → 736 TiB · 80.9% of 1 PB",
+        "",
+        "[← August](https://slack.example.org/archives/C1/p1)",
+    ]
+    # the plot and its diff map: from the last scan before the window (8/2) on, the month shaded after 8/3
+    body = D.image_body(month, SEP, CFG)
+    assert (body["from"], body["points"][0]["scan"], body["points"][-1]["scan"], len(body["points"])) == ("2026-08-03", "2026-08-02T0800", "2026-09-01T0800", 31)
+    assert body["diff"] == {"from": "2026-08-02T0800", "to": "2026-09-01T0800", "path": P, "title": f"What changed in {P} — 8/2 → 9/1"}
+
+
+def test_converge_links_the_previous_months_thread(tmp_path: Path):
+    # October's thread converged first (OP m1); November's OP links it, by the client's permalink
+    root = tmp_path / "snapshots" / "cw"
+    _daily(root, date(2026, 10, 30), NOV, lambda i: 700 + i)
+    fake = _FakeSlack()
+    post_digest(str(root), date(2026, 10, 1), "xoxb", "C1", "sender", client=fake)
+    assert fake.calls[0][0] == "post" and "[← September]" not in fake.calls[0][1]
+    fake.calls.clear()
+    post_digest(str(root), NOV, "xoxb", "C1", "sender", client=fake)
+    op = fake.calls[0]
+    assert (op[0], op[3], op[1].split("\n")[-4:-1]) == (
+        "post", "S3 usage — November 2026", ["", "[← October](https://slack.example.org/archives/C1/pm1)", ""],
+    )
+
+
 # ---- converge mechanism ----------------------------------------------------
 
 
@@ -556,6 +759,7 @@ class _Msg:
         self.id = id
 
 
+@thrds_fake(SlackClient)
 class _FakeSlack:
     """Records `post`/`edit` calls as tuples; message ids are sequential."""
 
@@ -565,12 +769,15 @@ class _FakeSlack:
         self.fail_post_at = fail_post_at  # the n-th post raises
         self.fail_delete = fail_delete
 
-    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None):
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, broadcast=False):
         self.n += 1
         if self.n == self.fail_post_at:
             raise RuntimeError("slack down")
-        self.calls.append(("post", content, thread_id, username, icon_url, icon_emoji))
+        self.calls.append(("post", content, thread_id, username, icon_url, icon_emoji, *(["broadcast"] if broadcast else [])))
         return _Msg(f"m{self.n}")
+
+    def permalink(self, ts):
+        return f"https://slack.example.org/archives/C1/p{ts}"
 
     def edit(self, ts, content):
         self.calls.append(("edit", ts, content))
@@ -593,10 +800,11 @@ def test_load_month(tmp_path: Path):
     root = tmp_path / "snapshots" / "cw"
     _publish(root, [("2026-08-30T1200", _meta(690))] + LEAD + SEPT)
     month = D.load_month(str(root), SEP, P)
-    # lead = every scan of the last pre-month day (not 8/30); rows = the in-month scans
+    # lead = every scan of the last pre-month day; pre = the OP window's earlier scans (8/30); rows = the in-month scans
+    assert [r.scan for r in month.pre] == ["2026-08-30T1200"]
     assert [r.scan for r in month.lead] == ["2026-08-31T0000", "2026-08-31T1200"]
     assert [r.scan for r in month.rows] == [s for s, _ in SEPT]
-    assert (month.lead[0].dtb, month.rows[0].dtb, month.rows[0].hours) == (None, 5.0, 12.0)  # deltas only within the loaded window
+    assert (month.pre[0].dtb, month.lead[0].dtb, month.rows[0].dtb, month.rows[0].hours) == (None, 10.0, 5.0, 12.0)  # deltas only within the loaded window
     assert D.load_month(str(root), date(2026, 7, 1), P) is None
     _publish(tmp_path / "fresh", SEPT)
     assert D.load_month(str(tmp_path / "fresh"), SEP, P).lead == []
@@ -660,6 +868,78 @@ def test_post_digest_edit_replies(tmp_path: Path):
     fake.calls.clear()
     post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
     assert [_post(c) for c in fake.calls] == [("edit", "m1")]
+
+
+def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):
+    """`alert_pct`: a quota at or over it marks the day's clause `:warning:`, and the thread gets one alert reply also
+    sent to the channel (`broadcast`); it is deleted once every quota is back under (Slack can't un-broadcast), and a
+    later crossing posts a new one. RNO2A, 2026-10-29: 98 of 100 Ti for two days, no quota shown, writes suspended."""
+    tpl = E.template(replace(CFG, alert_pct=78.3))  # main: 78.0% → 78.35% → 78.24% → 78.6% of 1P
+    root = tmp_path / "snapshots" / "cw"
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    sender = ("S3 usage: quota alert", None, ":warning:", "broadcast")
+
+    def alert(slug: str, clause: str, at: str) -> str:
+        return (f":warning: **Quota alert**: [main]({u(slug)}): {clause} · _as of {at}Z_ "
+                "(≥ 78.3% of a quota; removed once every quota is back under)")
+
+    fake = _FakeSlack()
+
+    def step(scans):
+        _publish(root, scans)
+        fake.calls.clear()
+        return E.converge_slack(tpl, str(root), SEP, fake, "C1", "sender"), fake.calls
+
+    state, calls = step(LEAD + SEPT[:1])
+    assert ([c[0] for c in calls], "alert" in state) == (["post"], False)
+
+    state, calls = step(SEPT[1:2])
+    over = alert("26090112", "78.4% of 1P (197.0 Ti free)", "9/1 12:00")
+    assert calls[1:] == [("post", f":warning: [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)", "m1", "9/1 — 713 TiB (+8.0, 1.1%)",
+                          f"{AV}50.png?v=4", None),
+                         ("post", over, "m1", *sender)]
+    assert state["alert"] == {"ts": "m3", "body": over}
+
+    state, calls = step(SEPT[2:3])
+    assert (calls[1:], "alert" in state) == ([("delete", "m3")], False)
+
+    state, calls = step(SEPT[3:4])
+    over = alert("26090212", "78.6% of 1P (195.0 Ti free)", "9/2 12:00")
+    assert calls[1:] == [("post", f":warning: [main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)", "m1", "9/2 — 715 TiB (+2.0, 0.3%)",
+                          f"{AV}30.png?v=4", None),
+                         ("post", over, "m1", *sender)]
+    # a closed month's thread carries no alert: the next month's does
+    month = D.load_month(str(root), SEP, P)
+    assert (D.alert_body(month, tpl.cfg), D.alert_body(replace(month, closed=True), tpl.cfg)) == (over, None)
+
+
+def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp_path: Path):
+    """A quota still over when the month ends: the scheduled converge (`converge_slack_now`) closes the old month,
+    whose alert counts as resolved there (deleted), and the new month's thread posts the one alert: never both."""
+    tpl = E.template(replace(CFG, alert_pct=78.3))
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    sept = E.converge_slack(tpl, str(root), SEP, fake, "C1", "sender")
+    assert sept["alert"]["ts"] == "m4"  # OP m1, replies m2 + m3, alert m4
+
+    _publish(root, [("2026-10-01T1200", _meta(716))])  # 78.7% of 1P: still over
+    fake.calls.clear()
+    oct_ = E.converge_slack_now(tpl, str(root), date(2026, 10, 1), fake, "C1", "sender")
+    body = (f":warning: **Quota alert**: [main]({SITE}/main-data?d=261001#over-time): 78.7% of 1P (194.0 Ti free) · _as of 10/1 12:00Z_ "
+            "(≥ 78.3% of a quota; removed once every quota is back under)")
+    # the alert calls alone: September's deleted, October's posted under October's OP (m5; its reply is m6)
+    assert [c for c in fake.calls if c[0] == "delete" or c[-1] == "broadcast"] == [
+        ("delete", "m4"), ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
+    assert ("alert" in E.load_state(E.state_path(str(root), SEP, CFG.state.format(channel="C1", variant="sender"))), oct_["alert"]) == (
+        False, {"ts": "m7", "body": body})
+
+
+@pytest.mark.parametrize("pct", [0, 101, -5])
+def test_alert_pct_must_be_a_percent(pct):
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "alert_pct": pct})
+    assert str(e.value) == f"digest config alert_pct: {pct} is not a percent (0–100]"
 
 
 def test_post_digest_body_variant(tmp_path: Path):
@@ -726,6 +1006,8 @@ def test_redo_replies(tmp_path: Path):
     assert redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake) == {
         "old": [("2026-09-01", {"ts": "m2", "scan": "2026-09-01T0000"}), ("2026-09-02", {"ts": "m3", "scan": "2026-09-02T0000"})],
         "new": [("2026-09-01", "2026-09-01T1200", "9/1 — 713 TiB (+8.0, 1.1%)"), ("2026-09-02", "2026-09-02T1200", "9/2 — 715 TiB (+2.0, 0.3%)")],
+        "rekey": [],
+        "left": [],
     }
     assert fake.calls == []
     # for real: OP refreshed, the new replies appended to the same thread, THEN the old ones deleted in order
@@ -744,6 +1026,52 @@ def test_redo_replies(tmp_path: Path):
     fake.calls.clear()
     redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, for_real=True)
     assert [_call(c) for c in fake.calls] == [("edit", "m1"), ("post", "m1", "9/1 — 713 TiB (+8.0, 1.1%)", f"{AV}50.png?v=4", None), ("post", "m1", "9/2 — 715 TiB (+2.0, 0.3%)", f"{AV}30.png?v=4", None), ("delete", "m4"), ("delete", "m5")]
+
+
+def test_redo_replies_since(tmp_path: Path):
+    # only 9/2 on is redone; 9/1 keeps its reply (m2), and an old rule's extra 9/1 reply (m9) stays in the thread, as `extra`
+    root, fake = _old_rule_thread(tmp_path)
+    path = tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json"
+    st = json.loads(path.read_text())
+    st["posted"]["2026-09-01T1800"] = {"ts": "m9", "scan": "2026-09-01T1200"}
+    path.write_text(json.dumps(st))
+    assert redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2)) == {
+        "old": [("2026-09-02", {"ts": "m3", "scan": "2026-09-02T0000"})],
+        "new": [("2026-09-02", "2026-09-02T1200", "9/2 — 715 TiB (+2.0, 0.3%)")],
+        "rekey": [("2026-09-01", "2026-09-01")],
+        "left": ["2026-09-01T1800"],
+    }
+    assert fake.calls == []
+    state = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2), for_real=True)
+    assert [_call(c) for c in fake.calls] == [
+        ("edit", "m1"),
+        ("post", "m1", "9/2 — 715 TiB (+2.0, 0.3%)", f"{AV}30.png?v=4", None),
+        ("delete", "m3"),
+    ]
+    assert state["posted"] == {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T0000"}, "2026-09-02": {"ts": "m4", "scan": "2026-09-02T1200"}}
+    assert state["extra"] == {"2026-09-01T1800": {"ts": "m9", "scan": "2026-09-01T1200"}}
+    # a later unrestricted redo still finds m9, and deletes it with the rest
+    fake.calls.clear()
+    state = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, for_real=True)
+    assert [c for c in fake.calls if c[0] == "delete"] == [("delete", "m9"), ("delete", "m2"), ("delete", "m4")]
+    assert state.get("extra") is None
+
+
+def test_redo_replies_since_rekeys_to_the_days_earliest(tmp_path: Path):
+    # a day whose only replies are under old-rule keys keeps one, under the current key: its earliest
+    root, fake = _old_rule_thread(tmp_path)
+    path = tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json"
+    st = json.loads(path.read_text())
+    m2 = st["posted"].pop("2026-09-01")
+    st["posted"] = {"2026-09-01T1800": {"ts": "m9", "scan": "2026-09-01T1200"}, "2026-09-01T0000": m2, **st["posted"]}
+    path.write_text(json.dumps(st))
+    plan = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2))
+    assert (plan["rekey"], plan["left"]) == ([("2026-09-01", "2026-09-01T0000")], ["2026-09-01T1800"])
+    # one keyed by the unit's own scan (9/1's is the 12:00 one under the current rule) wins over the earliest
+    st["posted"]["2026-09-01T1200"] = {"ts": "m8", "scan": "2026-09-01T1200"}
+    path.write_text(json.dumps(st))
+    plan = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2))
+    assert (plan["rekey"], plan["left"]) == ([("2026-09-01", "2026-09-01T1200")], ["2026-09-01T1800", "2026-09-01T0000"])
 
 
 def test_redo_replies_post_failure_deletes_nothing(tmp_path: Path):
@@ -794,12 +1122,15 @@ def test_cli_cw_digest_binds_cw_template(tmp_path: Path, monkeypatch):
 
 
 def test_image_body():
-    # the site draws the OP image: every scan from the lead-in on, the primary's quota, the headline interval's diff
+    # the site draws the OP image: every scan in the window (from 8/4, 30 days to 9/2: all of these), the primary's
+    # quota, the window's diff (from its baseline: a store younger than it, its first scan)
     assert D.image_body(MONTH, SEP, CFG) == {
         "title": "S3 usage — September 2026",
         "note": "cw.example.org · TiB",
         "month": "2026-09",
+        "from": "2026-08-04",
         "points": [
+            {"scan": "2026-08-31T0000", "bytes": 700 * TIB},
             {"scan": "2026-08-31T1200", "bytes": 705 * TIB},
             {"scan": "2026-09-01T0000", "bytes": 710 * TIB},
             {"scan": "2026-09-01T1200", "bytes": 713 * TIB},
@@ -808,7 +1139,7 @@ def test_image_body():
         ],
         "units": "TiB",
         "quota": {"bytes": 910 * TIB, "name": "1 PB"},
-        "diff": {"from": "2026-08-31T1200", "to": "2026-09-02T1200", "path": "main-data", "title": "What changed in main-data — 8/31 → 9/2"},
+        "diff": {"from": "2026-08-31T0000", "to": "2026-09-02T1200", "path": "main-data", "title": "What changed in main-data — 8/31 → 9/2"},
     }
 
 
@@ -819,6 +1150,7 @@ def test_image_body_first_scan():
         "title": "S3 usage — September 2026",
         "note": "cw.example.org · TiB",
         "month": "2026-09",
+        "from": "2026-08-03",
         "points": [{"scan": "2026-09-01T0000", "bytes": 710 * TIB}],
         "units": "TiB",
         "quota": {"bytes": 910 * TIB, "name": "1 PB"},

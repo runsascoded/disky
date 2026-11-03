@@ -43,9 +43,12 @@ export interface DigestCardInput {
   /** Header's right side, e.g. `cw-s3.oa.dev · marin-us-east-02a · TiB`. */
   note: string
   points: DigestPoint[]
-  /** The x axis' span, epoch ms (the month). */
+  /** The x axis' span, epoch ms (the month, or the OP's window reaching back before it). */
   from: number
   to: number
+  /** The month's first instant, epoch ms: when the span starts days before it, the month is shaded from here, a rule
+   *  at its start. */
+  month?: number
   quota?: { bytes: number; name: string } | null
   diff?: { root: DiffNode; title: string } | null
   /** The y axis' unit and every size label's (default `TiB`). */
@@ -89,6 +92,27 @@ export function yRange(vals: number[], q: number | null): [number, number] {
   return [lo - span * 0.08, hi + span * 0.06]
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** A panel's current month when the span reaches back before it (the OP's window): the month shaded, a rule at its
+ *  start, labelled with both months' names (`label`, the top panel's) — none on a span that is just the month. */
+function monthShade(d: { from: number; month?: number }, f: Frame, y0: number, h: number, label = true): string[] {
+  if (d.month == null || d.month - d.from < 2 * 86400_000) return []
+  const x = f.X(d.month)
+  const prev = MONTHS[(new Date(d.month).getUTCMonth() + 11) % 12]
+  const cur = MONTHS[new Date(d.month).getUTCMonth()]
+  const out = [
+    `<rect x="${r1(x)}" y="${r1(y0)}" width="${r1(f.left + f.pw - x)}" height="${r1(h)}" fill="${INK}" fill-opacity="0.045"/>`,
+    `<line x1="${r1(x)}" x2="${r1(x)}" y1="${r1(y0)}" y2="${r1(y0 + h)}" stroke="${INK3}" stroke-opacity="0.8" stroke-width="1.5"/>`,
+  ]
+  if (label) {
+    // above the panel (under the header), clear of the quota label and the latest call-out inside it
+    out.push(text(x - 6, y0 - 4, `← ${prev}`, 11, { fill: INK3, anchor: 'end' }))
+    out.push(text(x + 6, y0 - 4, `${cur} →`, 11, { fill: INK2, weight: 600 }))
+  }
+  return out
+}
+
 /** The x frame shared by a card's panels: the plot's left edge (after the y labels), its width, and time → x. */
 interface Frame { left: number; pw: number; X: (t: number) => number }
 function frame(d: { from: number; to: number }, x0: number, w: number): Frame {
@@ -121,9 +145,11 @@ function chartSvg(d: DigestCardInput, x0: number, y0: number, w: number, h: numb
   let [lo, hi] = yRange(vals, q)
   const ticks = niceTicks(lo, hi)
   lo = Math.min(lo, ticks[0])
-  const { left, pw, X } = frame(d, x0, w)
+  const f = frame(d, x0, w)
+  const { left, pw, X } = f
   const Y = (v: number) => y0 + h - ((v - lo) / (hi - lo)) * h
   out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  out.push(...monthShade(d, f, y0, h))
   for (const v of ticks) {
     if (v < lo || v > hi) continue
     out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
@@ -237,9 +263,11 @@ export interface TiersCardInput {
   /** The stack's tiers, bottom → top. */
   tiers: { name: string; color: string }[]
   points: TierPoint[]
-  /** The x axis' span, epoch ms (the month). */
+  /** The x axis' span, epoch ms (the month, or the OP's window reaching back before it). */
   from: number
   to: number
+  /** The month's first instant, epoch ms (as `DigestCardInput.month`). */
+  month?: number
   /** The y axes' unit and every size label's (default `TiB`). */
   units?: DigestUnits
   /** The headline interval's diff map, under the legend (as `DigestCardInput.diff`). */
@@ -265,9 +293,11 @@ function stackSvg(d: TiersCardInput, x0: number, y0: number, w: number, h: numbe
   const top = Math.max(...pts.map(p => sum(p.bytes) / per), 1) * 1.04
   const ticks = niceTicks(0, top, 4)
   const hi = Math.max(ticks[ticks.length - 1], top)
-  const { left, pw, X } = frame(d, x0, w)
+  const f = frame(d, x0, w)
+  const { left, pw, X } = f
   const Y = (v: number) => y0 + h - (v / hi) * h
   out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  out.push(...monthShade(d, f, y0, h, false))
   for (const v of ticks) {
     out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
     out.push(text(left - 6, Y(v) + 4, v.toLocaleString('en-US'), 11, { fill: INK3, anchor: 'end' }))
@@ -302,7 +332,7 @@ export function tiersSvg(d: TiersCardInput): string {
   const out = [header(d.title, d.note)]
   let y = PAD + 36
   const totals = d.points.map(p => ({ t: p.t, bytes: sum(p.bytes) }))
-  out.push(chartSvg({ title: d.title, note: d.note, points: totals, from: d.from, to: d.to, units }, PAD, y, w, TOTAL_H, { xLabels: false, call: fmt }))
+  out.push(chartSvg({ title: d.title, note: d.note, points: totals, from: d.from, to: d.to, month: d.month, units }, PAD, y, w, TOTAL_H, { xLabels: false, call: fmt }))
   y += TOTAL_H + 12
   out.push(stackSvg(d, PAD, y, w, STACK_H))
   y += STACK_H + 30
@@ -317,5 +347,113 @@ export function tiersSvg(d: TiersCardInput): string {
   }
   y += 16
   if (d.diff) y = diffSection(d.diff, UNITS[units].fmt, y + 14, out)
+  return page(y, out)
+}
+
+// ---- the quota-pools card ---------------------------------------------------------------------------------------
+
+/** One quota pool's series: its name, quota (bytes) and used bytes per scan. */
+export interface PoolSeries { name: string; quota: number; points: DigestPoint[] }
+
+/** The pools' line colours, in request order. */
+export const POOL_COLORS = [S1, '#e3b341', '#2dd4bf', '#a78bfa', '#f472b6', '#4ade80', '#fb923c', '#94a3b8']
+/** The most pools a card draws. */
+export const MAX_POOLS = POOL_COLORS.length
+/** A pool that stayed under this share (%) across the span is drawn faint, unlabelled, and listed under the chart. */
+export const FAINT_PCT = 20
+const AMBER = '#e3b341'
+
+export interface PoolsCardInput {
+  title: string
+  note: string
+  pools: PoolSeries[]
+  from: number
+  to: number
+  month?: number
+  /** Where the amber band ends and the marks turn red (%); the band starts 10 points below. */
+  alertPct: number
+  diff?: { root: DiffNode; title: string } | null
+  units?: DigestUnits
+}
+
+/** Labels' y's pushed apart to at least `gap`, kept inside `[lo, hi]` (order preserved). */
+export function spread(ys: number[], gap: number, lo: number, hi: number): number[] {
+  const order = ys.map((y, i) => [y, i] as const).sort((a, b) => a[0] - b[0])
+  const out = order.map(([y]) => y)
+  for (let k = 1; k < out.length; k++) out[k] = Math.max(out[k], out[k - 1] + gap)
+  const over = out.length ? out[out.length - 1] - hi : 0
+  if (over > 0) for (let k = out.length - 1; k >= 0; k--) out[k] = Math.min(out[k] - over, k < out.length - 1 ? out[k + 1] - gap : Infinity)
+  for (let k = 0; k < out.length; k++) out[k] = Math.max(out[k], lo + k * gap)
+  const res = new Array<number>(ys.length)
+  order.forEach(([, i], k) => { res[i] = out[k] })
+  return res
+}
+
+/** The quota-pools digest image's SVG, `DIGEST_W` wide (specs/digest-quota-pressure.md): every pool's share of its
+ *  own quota on one % axis, the quota a rule at 100% (amber from `alertPct` − 10, red above 100), each line labelled
+ *  at its latest point; quiet pools faint and listed under the chart; then the diff map when given. */
+export function poolsSvg(d: PoolsCardInput): string {
+  const w = DIGEST_W - 2 * PAD
+  const { fmt } = UNITS[d.units ?? 'TiB']
+  const out = [header(d.title, d.note)]
+  const y0 = PAD + 36
+  const h = CHART_H
+  const series = d.pools.map((p, i) => {
+    const pcts = p.points.map(q => (100 * q.bytes) / p.quota)
+    return { ...p, color: POOL_COLORS[i % POOL_COLORS.length], pcts, faint: Math.max(...pcts) < FAINT_PCT }
+  })
+  const peak = Math.max(100, ...series.flatMap(s => s.pcts))
+  const hi = Math.ceil(peak / 10) * 10 + 5
+  // the loud pools' labels sit in a gutter right of the plot, never over the lines (the latest scan is often at the
+  // plot's right edge)
+  const loud = series.filter(s => !s.faint && s.points.length)
+  const labelOf = (s: (typeof series)[number]) => `${s.name} ${Math.round(s.pcts[s.pcts.length - 1])}%`
+  const gutter = loud.length ? Math.max(...loud.map(s => interWidth(labelOf(s), 12, 600))) + 14 : 0
+  const f = frame(d, PAD, w - gutter)
+  const { left, pw, X } = f
+  const Y = (v: number) => y0 + h - (v / hi) * h
+  out.push(`<rect x="${r1(left)}" y="${r1(y0)}" width="${r1(pw)}" height="${r1(h)}" fill="${PANEL}"/>`)
+  // the pressure bands: amber up to the quota, red past it
+  const amber = Math.max(0, d.alertPct - 10)
+  out.push(`<rect x="${r1(left)}" y="${r1(Y(100))}" width="${r1(pw)}" height="${r1(Y(amber) - Y(100))}" fill="${AMBER}" fill-opacity="0.10"/>`)
+  out.push(`<rect x="${r1(left)}" y="${r1(Y(hi))}" width="${r1(pw)}" height="${r1(Y(100) - Y(hi))}" fill="${DANGER}" fill-opacity="0.12"/>`)
+  out.push(...monthShade(d, f, y0, h))
+  for (const v of [0, 25, 50, 75, 100, ...(hi > 125 ? [125, 150, 175, 200].filter(t => t < hi) : [])]) {
+    out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(v))}" y2="${r1(Y(v))}" stroke="${LINE}" stroke-width="1"/>`)
+    out.push(text(left - 6, Y(v) + 4, `${v}%`, 11, { fill: INK3, anchor: 'end' }))
+  }
+  out.push(`<line x1="${r1(left)}" x2="${r1(left + pw)}" y1="${r1(Y(100))}" y2="${r1(Y(100))}" stroke="${DANGER}" stroke-width="2"/>`)
+  out.push(text(left + 6, Y(100) - 6, 'quota (each pool’s own)', 12, { fill: DANGER, weight: 600 }))
+  out.push(...mondays(d, X, y0 + h))
+  // faint pools first, so the pressing ones draw over them
+  const order = [...series].sort((a, b) => Number(b.faint) - Number(a.faint))
+  for (const s of order) {
+    if (!s.points.length) continue
+    const line = s.points.map((p, i) => `${r1(X(p.t))},${r1(Y(s.pcts[i]))}`).join(' ')
+    if (s.points.length === 1) out.push(`<circle cx="${r1(X(s.points[0].t))}" cy="${r1(Y(s.pcts[0]))}" r="3" fill="${s.faint ? INK3 : s.color}"/>`)
+    else out.push(`<polyline points="${line}" fill="none" stroke="${s.faint ? INK3 : s.color}" stroke-opacity="${s.faint ? 0.45 : 1}" stroke-width="${s.faint ? 1.5 : 2.2}" stroke-linejoin="round"/>`)
+  }
+  // each loud pool's latest point, its label in the gutter (pushed apart vertically, a leader when moved off its line)
+  const labels = loud.map(s => {
+    const i = s.points.length - 1
+    return { s, x: X(s.points[i].t), y: Y(s.pcts[i]), label: labelOf(s) }
+  })
+  const ys = spread(labels.map(l => l.y + 4), 15, y0 + 12, y0 + h - 2)
+  const gx = left + pw + 8
+  labels.forEach((l, k) => {
+    out.push(`<circle cx="${r1(l.x)}" cy="${r1(l.y)}" r="3.5" fill="${l.s.color}"/>`)
+    if (Math.abs(ys[k] - 4 - l.y) > 2 || gx - l.x > 12) {
+      out.push(`<polyline points="${r1(l.x + 4)},${r1(l.y)} ${r1(gx - 6)},${r1(l.y)} ${r1(gx - 2)},${r1(ys[k] - 4)}" fill="none" stroke="${l.s.color}" stroke-opacity="0.6"/>`)
+    }
+    out.push(text(gx, ys[k], l.label, 12, { fill: l.s.color, weight: 600 }))
+  })
+  let y = y0 + h + 30
+  const quiet = series.filter(s => s.faint && s.points.length)
+  if (quiet.length) {
+    const s = `also: ${quiet.map(q => `${q.name} ${Math.round(q.pcts[q.pcts.length - 1])}%`).join(' · ')}`
+    out.push(text(left, y, s, 12, { fill: INK3 }))
+    y += 16
+  }
+  if (d.diff) y = diffSection(d.diff, fmt, y, out)
   return page(y, out)
 }

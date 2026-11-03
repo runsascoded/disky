@@ -10,11 +10,14 @@
  */
 import { restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
-import { storeReady } from '../_lib/index.js'
+import { ivRefusal, storeReady, withPathStore } from '../_lib/index.js'
 import { MAX_PREFIXES, prefixesAt } from '../_lib/prefixes.js'
 import { scanArg } from '../_lib/scanArg.js'
 
-export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
+export const onRequestPost = async (ctx0: Ctx): Promise<Response> => {
+  // The interval store for the dates it holds (`withPathStore`), as the map's own reads: never per-scan rows an
+  // unpinned deployment's job no longer writes (`index-sync -R`).
+  const ctx = await withPathStore(ctx0)
   const { env, request } = ctx
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)
   const gated = await requireViewer(ctx)
@@ -31,6 +34,8 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
     const { stats, groups } = await prefixesAt(env, date, prefixes)
     return json({ date, stats, groups }, 200, { 'cache-control': 'private, no-store' })
   } catch (e) {
+    const refusal = ivRefusal(e)
+    if (refusal) return refusal
     return json({ error: (e as Error).message }, 503)
   }
 }

@@ -1,0 +1,418 @@
+{
+ "cfg": {
+  "template": "cw",
+  "title": "S3 usage",
+  "site_url": "https://cw.example.org",
+  "host": "cw.example.org",
+  "unit": {
+   "name": "TiB",
+   "bytes": 1099511627776,
+   "short": "Ti"
+  },
+  "primary": "main-data",
+  "buckets": {
+   "main-data": {
+    "label": "main",
+    "path": null,
+    "zone": null,
+    "quotas": [
+     {
+      "bytes": 1000555581276160,
+      "name": "1 PB",
+      "short": "1P",
+      "classes": []
+     }
+    ]
+   },
+   "hot-data": {
+    "label": "hot",
+    "path": null,
+    "zone": null,
+    "quotas": [
+     {
+      "bytes": 109951162777600,
+      "name": "100 TiB",
+      "short": "100Ti",
+      "classes": []
+     }
+    ]
+   }
+  },
+  "prices": {},
+  "icons_base": "https://icons.example.org"
+ },
+ "month": "2026-09",
+ "plot_url": "<plot-url>",
+ "prev_url": "<prev-thread>",
+ "rows": {
+  "template": "cw",
+  "closed": false,
+  "pre": [
+   {
+    "scan": "2026-08-02T0800",
+    "slug": "260802",
+    "tb": 706.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-03T0800",
+    "slug": "260803",
+    "tb": 707.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-04T0800",
+    "slug": "260804",
+    "tb": 708.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-05T0800",
+    "slug": "260805",
+    "tb": 709.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-06T0800",
+    "slug": "260806",
+    "tb": 710.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-07T0800",
+    "slug": "260807",
+    "tb": 711.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-08T0800",
+    "slug": "260808",
+    "tb": 712.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-09T0800",
+    "slug": "260809",
+    "tb": 713.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-10T0800",
+    "slug": "260810",
+    "tb": 714.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-11T0800",
+    "slug": "260811",
+    "tb": 715.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-12T0800",
+    "slug": "260812",
+    "tb": 716.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-13T0800",
+    "slug": "260813",
+    "tb": 717.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-14T0800",
+    "slug": "260814",
+    "tb": 718.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-15T0800",
+    "slug": "260815",
+    "tb": 719.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-16T0800",
+    "slug": "260816",
+    "tb": 720.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-17T0800",
+    "slug": "260817",
+    "tb": 721.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-18T0800",
+    "slug": "260818",
+    "tb": 722.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-19T0800",
+    "slug": "260819",
+    "tb": 723.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-20T0800",
+    "slug": "260820",
+    "tb": 724.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-21T0800",
+    "slug": "260821",
+    "tb": 725.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-22T0800",
+    "slug": "260822",
+    "tb": 726.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-23T0800",
+    "slug": "260823",
+    "tb": 727.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-24T0800",
+    "slug": "260824",
+    "tb": 728.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-25T0800",
+    "slug": "260825",
+    "tb": 729.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-26T0800",
+    "slug": "260826",
+    "tb": 730.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-27T0800",
+    "slug": "260827",
+    "tb": 731.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-28T0800",
+    "slug": "260828",
+    "tb": 732.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-29T0800",
+    "slug": "260829",
+    "tb": 733.0,
+    "extra": {},
+    "classes": {}
+   },
+   {
+    "scan": "2026-08-30T0800",
+    "slug": "260830",
+    "tb": 734.0,
+    "extra": {},
+    "classes": {}
+   }
+  ],
+  "lead": [
+   {
+    "scan": "2026-08-31T0800",
+    "slug": "260831",
+    "tb": 735.0,
+    "extra": {},
+    "classes": {}
+   }
+  ],
+  "rows": [
+   {
+    "scan": "2026-09-01T0800",
+    "slug": "260901",
+    "tb": 736.0,
+    "extra": {},
+    "classes": {}
+   }
+  ]
+ },
+ "op": ":arrow_deg20: **+1.0 TiB** [month-to-date](https://cw.example.org/?d=260901-1d#over-time) · **+30.0 TiB** [last 30d](https://cw.example.org/?d=260901-30d#over-time) · 736 TiB · 80.9% of 1 PB · [dashboard](https://cw.example.org/)\n_as of 9/1 08:00Z_\n\n*Weekly summaries*\n:arrow_deg20: [wk of 8/3](https://cw.example.org/?d=260809-7d#over-time) (Aug): **+7.0 TiB** → 713 TiB · 78.4% of 1 PB\n:arrow_deg20: [wk of 8/10](https://cw.example.org/?d=260816-7d#over-time) (Aug): **+7.0 TiB** → 720 TiB · 79.1% of 1 PB\n:arrow_deg20: [wk of 8/17](https://cw.example.org/?d=260823-7d#over-time) (Aug): **+7.0 TiB** → 727 TiB · 79.9% of 1 PB\n:arrow_deg20: [wk of 8/24](https://cw.example.org/?d=260830-7d#over-time) (Aug): **+7.0 TiB** → 734 TiB · 80.7% of 1 PB\n:arrow_deg0: [wk of 8/31](https://cw.example.org/?d=260901-2d#over-time) _(partial)_: **+2.0 TiB** → 736 TiB · 80.9% of 1 PB\n\n[← August](<prev-thread>)\n\n![S3 usage — September 2026](<plot-url>)",
+ "image": {
+  "title": "S3 usage — September 2026",
+  "note": "cw.example.org · TiB",
+  "month": "2026-09",
+  "from": "2026-08-03",
+  "points": [
+   {
+    "scan": "2026-08-02T0800",
+    "bytes": 776255209209856
+   },
+   {
+    "scan": "2026-08-03T0800",
+    "bytes": 777354720837632
+   },
+   {
+    "scan": "2026-08-04T0800",
+    "bytes": 778454232465408
+   },
+   {
+    "scan": "2026-08-05T0800",
+    "bytes": 779553744093184
+   },
+   {
+    "scan": "2026-08-06T0800",
+    "bytes": 780653255720960
+   },
+   {
+    "scan": "2026-08-07T0800",
+    "bytes": 781752767348736
+   },
+   {
+    "scan": "2026-08-08T0800",
+    "bytes": 782852278976512
+   },
+   {
+    "scan": "2026-08-09T0800",
+    "bytes": 783951790604288
+   },
+   {
+    "scan": "2026-08-10T0800",
+    "bytes": 785051302232064
+   },
+   {
+    "scan": "2026-08-11T0800",
+    "bytes": 786150813859840
+   },
+   {
+    "scan": "2026-08-12T0800",
+    "bytes": 787250325487616
+   },
+   {
+    "scan": "2026-08-13T0800",
+    "bytes": 788349837115392
+   },
+   {
+    "scan": "2026-08-14T0800",
+    "bytes": 789449348743168
+   },
+   {
+    "scan": "2026-08-15T0800",
+    "bytes": 790548860370944
+   },
+   {
+    "scan": "2026-08-16T0800",
+    "bytes": 791648371998720
+   },
+   {
+    "scan": "2026-08-17T0800",
+    "bytes": 792747883626496
+   },
+   {
+    "scan": "2026-08-18T0800",
+    "bytes": 793847395254272
+   },
+   {
+    "scan": "2026-08-19T0800",
+    "bytes": 794946906882048
+   },
+   {
+    "scan": "2026-08-20T0800",
+    "bytes": 796046418509824
+   },
+   {
+    "scan": "2026-08-21T0800",
+    "bytes": 797145930137600
+   },
+   {
+    "scan": "2026-08-22T0800",
+    "bytes": 798245441765376
+   },
+   {
+    "scan": "2026-08-23T0800",
+    "bytes": 799344953393152
+   },
+   {
+    "scan": "2026-08-24T0800",
+    "bytes": 800444465020928
+   },
+   {
+    "scan": "2026-08-25T0800",
+    "bytes": 801543976648704
+   },
+   {
+    "scan": "2026-08-26T0800",
+    "bytes": 802643488276480
+   },
+   {
+    "scan": "2026-08-27T0800",
+    "bytes": 803742999904256
+   },
+   {
+    "scan": "2026-08-28T0800",
+    "bytes": 804842511532032
+   },
+   {
+    "scan": "2026-08-29T0800",
+    "bytes": 805942023159808
+   },
+   {
+    "scan": "2026-08-30T0800",
+    "bytes": 807041534787584
+   },
+   {
+    "scan": "2026-08-31T0800",
+    "bytes": 808141046415360
+   },
+   {
+    "scan": "2026-09-01T0800",
+    "bytes": 809240558043136
+   }
+  ],
+  "units": "TiB",
+  "quota": {
+   "bytes": 1000555581276160,
+   "name": "1 PB"
+  },
+  "diff": {
+   "from": "2026-08-02T0800",
+   "to": "2026-09-01T0800",
+   "path": "main-data",
+   "title": "What changed in main-data — 8/2 → 9/1"
+  }
+ }
+}

@@ -1,4 +1,4 @@
-"""Exact (single-object) plan items through the sweep (specs/file-assign.md):
+"""Exact (single-object) plan items through the sweep (specs/done/file-assign.md):
 plan round-trip, manifest (gcs listing shards and cw layer-2), the `as_of`
 hold, execute (dry and real) and undo. An exact item matches only its own key:
 never `clip.mp3.bak`, never `clip.mp3/x`."""
@@ -266,7 +266,7 @@ def test_cw_manifest_as_of_exact(tmp_path: Path) -> None:
     # the clip's AS_OF mtime differs → held back; other.mp3 is as of the pinned scan
     out, summary = _cw_run(tmp_path, as_of_l2=[(CLIP, 1, 5, "file")])
     assert _cw_manifest(out) == [f"{CLIPS}/other.mp3", "tmp/a", "tmp/b/c"]
-    assert summary["skipped_after_as_of"] == {"objects": 1, "bytes": 1}
+    assert summary["skipped_after_as_of"] == {"objects": 1, "bytes": 1, "changed_objects": 1, "new_objects": 0}
 
 
 def test_cw_execute_exact_items(tmp_path: Path) -> None:

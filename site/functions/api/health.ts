@@ -6,22 +6,27 @@
 import { type Env, json, requireViewer } from '../_lib/auth.js'
 import { BUILD } from '../_lib/build.js'
 import { health } from '../_lib/health.js'
-import { ivGen } from '../_lib/index.js'
-import { storeKey } from '../_lib/stores.js'
+import { ivGen, withStaticGen } from '../_lib/index.js'
+import { storeKey, withStore } from '../_lib/stores.js'
 
 /** How long a computed document stands (s). */
 export const HEALTH_TTL = 60
 
 const colo = (): Cache | null => (typeof caches === 'undefined' ? null : (caches as unknown as { default: Cache }).default)
 
-export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
+export const onRequestGet = async (ctx0: { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
+  const ctx = withStore(ctx0)
+  if (ctx instanceof Response) return ctx
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
-  // The interval store's generation: the pin, else the store's current one (`ivGen`), fixed for the document.
-  const env: Env = ctx.env.PATH_STORE ? { ...ctx.env, INTERVAL_STORE_GEN: (await ivGen(ctx.env)) ?? undefined } : ctx.env
+  // The stores' generations, each the pin, else the store's current one, fixed for the document (and its key):
+  // the interval store's (`ivGen`), the static name index's (`withStaticGen`).
+  const st = await withStaticGen(ctx.env)
+  const env: Env = st.PATH_STORE ? { ...st, INTERVAL_STORE_GEN: (await ivGen(st)) ?? undefined } : st
   const headers = { 'cache-control': 'private, max-age=30' }
   const fresh = new URL(ctx.request.url).searchParams.has('fresh')
-  const key = new Request(`https://health.cache/${encodeURIComponent(storeKey(env))}/${encodeURIComponent(env.INTERVAL_STORE_GEN ?? '-')}/${encodeURIComponent(env.STATIC_GEN ?? '-')}`)
+  const generation = `${env.INTERVAL_STORE_PREFIX ? `${env.INTERVAL_STORE_PREFIX}:` : ''}${env.INTERVAL_STORE_GEN ?? '-'}`
+  const key = new Request(`https://health.cache/${encodeURIComponent(storeKey(env))}/${encodeURIComponent(generation)}/${encodeURIComponent(env.STATIC_GEN ?? '-')}`)
   const cache = colo()
   if (cache && !fresh) {
     const hit = await cache.match(key)

@@ -3,6 +3,9 @@ literal's (from the coalesced versions) are exactly its first-hit versions, and 
 equal brute force."""
 from __future__ import annotations
 
+import re
+
+import duckdb
 import pytest
 
 from dt_cloud import static_catalog as sc
@@ -312,3 +315,106 @@ def test_drill_verify(built, tmp_path, small, monkeypatch):  # noqa: F811
     (tmp_path / "r.jsonl").write_text("".join(json.dumps(r) + "\n" for r in refs))
     res = CliRunner().invoke(sr.drill_verify_cmd, [str(tmp_path / "r.jsonl"), str(tmp_path / "a.jsonl")])
     assert (res.exit_code, list(json.loads(res.output)["diff"])) == (1, [f"{bad['q']} {bad['P']} {bad['date']}"])
+
+
+@pytest.mark.parametrize("n_bounds", [1, 3, 100])
+def test_ranged_assigns_the_asof_ranges(tmp_path, n_bounds):
+    """`ranged`: every row with the range an ASOF join over every row assigns it (the last `lo <= q`), the same rows, at a
+    bound count under and over DuckDB's loop-join threshold; and over a given key query (`keys`) holding every `q`."""
+    import random
+
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    rnd = random.Random(3)
+    lits = sorted({"".join(rnd.choice("abcé'") for _ in range(rnd.randrange(1, 5))) for _ in range(300)})
+    con.execute("CREATE TABLE rt (q VARCHAR, x BIGINT)")
+    con.executemany("INSERT INTO rt VALUES (?, ?)", [(rnd.choice(lits), i) for i in range(2000)])
+    bounds = ["", *sorted(rnd.sample(lits, n_bounds - 1))]
+    con.execute("CREATE TABLE qg (lo VARCHAR, grp INTEGER)")
+    con.executemany("INSERT INTO qg VALUES (?, ?)", [(lo, g) for g, lo in enumerate(bounds)])
+    want = con.execute("SELECT r.*, g.grp FROM rt AS r ASOF JOIN qg AS g ON r.q >= g.lo ORDER BY x").fetchall()
+    assert len(want) == 2000
+    assert con.execute(f"SELECT * FROM ({sr.ranged('rt', 'qg', 'grp')}) ORDER BY x").fetchall() == want
+    con.execute("CREATE TABLE qk AS SELECT DISTINCT q FROM rt")
+    assert con.execute(f"SELECT * FROM ({sr.ranged('(SELECT * FROM rt)', 'qg', 'grp', keys='SELECT q FROM qk')}) ORDER BY x").fetchall() == want
+    # a row whose `q` the keys miss fails the query (the per-row ASOF join kept it): never a silently smaller spill
+    miss = con.execute("SELECT q FROM rt ORDER BY x LIMIT 1").fetchone()[0]
+    with pytest.raises(duckdb.InvalidInputException, match=f"^Invalid Input Error: ranged: q '{re.escape(miss)}' has no range$"):
+        con.execute(f"SELECT * FROM ({sr.ranged('rt', 'qg', 'grp', keys=f'SELECT q FROM qk WHERE q <> {sn.q(miss)}')})").fetchall()
+    con.close()
+
+
+def test_index_estimates_spread_each_group_over_its_keys(tmp_path):
+    """`index_estimates`: a group's rows over the keys in its `[q_min, q_max]`, evenly, the remainder to the first; a group
+    of one `q` exact; a group holding no key dropped; a key no group covers absent. Over several index files."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    groups = [("A", "A", 3), ("a", "a", 10), ("a", "c", 7), ("bb", "bc", 4), ("c", "c", 5), ("d", "z", 9)]
+    files = []
+    for k, part in enumerate((groups[:3], groups[3:])):
+        f = tmp_path / f"i{k}.parquet"
+        pq.write_table(pa.table({"q_min": [g[0] for g in part], "q_max": [g[1] for g in part], "rows": pa.array([g[2] for g in part], pa.int32())}), f)
+        files.append(str(f))
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    con.execute("CREATE TABLE ks AS SELECT unnest(['a', 'b', 'c', 'd', 'e', 'f', 'zz', NULL]) AS q")
+    sr.index_estimates(con, files, "SELECT q FROM ks", "est")
+    assert con.execute("SELECT q, n FROM est ORDER BY q").fetchall() == [("a", 13), ("b", 2), ("c", 7), ("d", 3), ("e", 3), ("f", 3)]
+    sr.index_estimates(con, [], "SELECT q FROM ks", "none")
+    assert con.execute("SELECT q, n FROM none").fetchall() == []
+    con.close()
+
+
+@pytest.mark.parametrize("parts", [1, 2, 3, 7, 64])
+def test_chunk_spill_reads_each_chunk_exactly(tmp_path, parts):
+    """`ChunkSpill`: at most `parts` partitions of consecutive chunks, and each chunk's files hold exactly its rows (both
+    inputs'), read in order; a partition is removed once the reader passes it."""
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    n = 7
+    con.execute("CREATE TABLE a AS SELECT (x % 7)::BIGINT AS ch, x, 'a' AS src FROM range(200) AS t(x)")
+    con.execute("CREATE TABLE b AS SELECT ((x * 3) % 7)::BIGINT AS ch, x, 'b' AS src FROM range(50) AS t(x)")
+    sp = sr.ChunkSpill(con, tmp_path / "s", n, parts)
+    sp.write("SELECT * FROM a", "t000")
+    sp.write("SELECT * FROM b", "t001")
+    p = min(parts, n)
+    assert (sp.p, [sp.part(k) for k in range(n)]) == (p, [k * p // n for k in range(n)])
+    assert [list(sp.chunks(g)) for g in range(p)] == [[k for k in range(n) if k * p // n == g] for g in range(p)]
+    assert sorted(d.name for d in (tmp_path / "s" / "in" / "t000").iterdir()) == sorted(f"sp={g}" for g in range(p))
+    got = {}
+    for k in range(n):
+        files = sp.files(k)
+        got[k] = con.execute(f"SELECT src, x FROM read_parquet([{', '.join(sn.q(str(f)) for f in files)}], hive_partitioning = false) ORDER BY src, x").fetchall()
+        # the partitions before this chunk's are gone; its own and the later ones are held
+        assert sorted({x for f in (tmp_path / "s").rglob("*.parquet") for x in f.parts if x.startswith("sp=")}) == [f"sp={g}" for g in range(sp.part(k), p)]
+    want = {k: con.execute(f"SELECT src, x FROM (SELECT * FROM a UNION ALL SELECT * FROM b) WHERE ch = {k} ORDER BY src, x").fetchall() for k in range(n)}
+    assert got == want
+    sp.close()
+    assert not (tmp_path / "s").exists()
+    con.close()
+
+
+@pytest.mark.parametrize("parts", [1, 2, 3, 7])
+def test_chunk_spill_prepared_partitions_read_in_any_order(tmp_path, parts):
+    """`ChunkSpill.prepare`: a partition's chunks' files, read in any order (here: last chunk first), hold exactly each
+    chunk's rows; `release` removes that partition only."""
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    n = 7
+    con.execute("CREATE TABLE a AS SELECT (x % 7)::BIGINT AS ch, x FROM range(200) AS t(x)")
+    sp = sr.ChunkSpill(con, tmp_path / "s", n, parts)
+    sp.write("SELECT * FROM a", "t000")
+    got = {}
+    for g in range(sp.p):
+        files = sp.prepare(g)
+        assert sorted(files) == list(sp.chunks(g))
+        for k in reversed(sorted(files)):
+            got[k] = con.execute(f"SELECT x FROM read_parquet([{', '.join(sn.q(str(f)) for f in files[k])}], hive_partitioning = false) ORDER BY x").fetchall()
+        sp.release(g)
+        assert sorted({x for f in (tmp_path / "s").rglob("*.parquet") for x in f.parts if x.startswith("sp=")}) == [f"sp={h}" for h in range(g + 1, sp.p)]
+    assert got == {k: [(x,) for x in range(k, 200, 7)] for k in range(n)}
+    sp.close()
+    con.close()
+
+
+def test_chunk_spill_defaults_to_one_partition_per_chunk_up_to_spill_direct(tmp_path):
+    """Up to `SPILL_DIRECT` chunks each gets its own partition (no split pass on reading); past it, `SPILL_PARTS`."""
+    sizes = [1, sr.SPILL_DIRECT, sr.SPILL_DIRECT + 1, 4858]
+    assert [sr.ChunkSpill(None, tmp_path / f"s{n}", n).p for n in sizes] == [1, sr.SPILL_DIRECT, sr.SPILL_PARTS, sr.SPILL_PARTS]

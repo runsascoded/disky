@@ -48,9 +48,20 @@ def session():
         import google.auth
         from google.auth.transport.requests import AuthorizedSession
 
-        creds, _ = google.auth.default(quota_project_id=gcp_project())
-        _session = AuthorizedSession(creds)
+        creds, _ = google.auth.default()
+        _session = AuthorizedSession(quota_creds(creds))
     return _session
+
+
+def quota_creds(creds):
+    """User credentials (`gcloud auth … login`) bill the deployment's project as their quota project; a service
+    account's already bill its own, and the `x-goog-user-project` header would demand `serviceusage.services.use`
+    of it (the job's `gcp-cost` step got a 403 on every bucket read, 2026-10-27)."""
+    from google.oauth2.credentials import Credentials
+
+    if isinstance(creds, Credentials) and not creds.quota_project_id:
+        return creds.with_quota_project(gcp_project())
+    return creds
 
 
 def _get(url: str, **params: Any) -> dict:
@@ -73,13 +84,17 @@ def batch_jobs(project: str | None = None, region: str = REGION) -> list[dict]:
 
 
 def _pages(url: str, key: str) -> list[dict]:
-    rows: list[dict] = []
-    params: dict[str, str] = {}
+    return [row for page in pages(url) for row in page.get(key, [])]
+
+
+def pages(url: str, **params: str) -> list[dict]:
+    """Every page a GET list endpoint answers with `params`, following `nextPageToken`."""
+    out: list[dict] = []
     while True:
         page = _get(url, **params)
-        rows.extend(page.get(key, []))
+        out.append(page)
         if not (token := page.get("nextPageToken")):
-            return rows
+            return out
         params["pageToken"] = token
 
 

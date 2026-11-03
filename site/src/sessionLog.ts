@@ -6,7 +6,9 @@
  * clicks on controls, the path filter, pickers, fetches, errors, console
  * errors, viewport and visibility — and returns its undo.
  */
-import { LIMITS, type Kind, type SlogBatch, type SlogEvent, TRUNC } from '../functions/_lib/sessionLogShape'
+import { benignError, bodySummary, LIMITS, type Kind, type SlogBatch, type SlogEvent, TRUNC } from '../functions/_lib/sessionLogShape'
+
+export { bodySummary }
 
 export const ENDPOINT = '/api/session-log'
 export const FLUSH_MS = 10_000
@@ -142,23 +144,6 @@ export function redactUrl(u: string, origin: string): string {
   for (const k of [...url.searchParams.keys()]) if (SECRET_PARAMS.includes(k.toLowerCase())) url.searchParams.set(k, '…')
   // `URLSearchParams` re-encodes `…`; keep the mask readable.
   return tr(url.pathname + url.search.replace(/%E2%80%A6/g, '…') + url.hash, TRUNC.url)
-}
-
-const KIND_KEYS = new Set(['kind', 'op', 'action', 'mode'])
-
-/** A JSON request body as counts and kinds only: per top-level key, an array's length, a short `kind`-like
- *  string, else the value's type. Not JSON (or not an object) → its type and length. */
-export function bodySummary(body: unknown): Record<string, string | number> | null {
-  if (body == null) return null
-  if (typeof body !== 'string') return { type: Object.prototype.toString.call(body).slice(8, -1) }
-  let j: unknown
-  try { j = JSON.parse(body) } catch { return { type: 'text', len: body.length } }
-  if (!j || typeof j !== 'object' || Array.isArray(j)) return Array.isArray(j) ? { type: 'array', len: j.length } : { type: typeof j }
-  const out: Record<string, string | number> = {}
-  for (const [k, v] of Object.entries(j as Record<string, unknown>).slice(0, 12)) {
-    out[tr(k, 30)] = Array.isArray(v) ? v.length : KIND_KEYS.has(k) && typeof v === 'string' ? tr(v, 30) : v === null ? 'null' : typeof v
-  }
-  return out
 }
 
 /** A control's log name and label: its `data-log` (nearest), and its `aria-label`, else text, else title. */
@@ -297,6 +282,7 @@ export function install(p: Page, logger: Logger): () => void {
   // Client exceptions and unhandled rejections.
   on(win, 'error', safe((e: Event) => {
     const ee = e as ErrorEvent
+    if (benignError(ee.message)) return
     logger.log('error', {
       msg: tr(ee.message || errMsg(ee.error), TRUNC.msg),
       ...(ee.filename ? { src: tr(`${redactUrl(ee.filename, origin)}:${ee.lineno}:${ee.colno}`, TRUNC.url) } : {}),

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dt_cloud.run_dag import Dag, from_nextflow, read
+from dt_cloud.run_dag import Dag, cached_tasks, from_nextflow, read, read_file
 
 # `nextflow run job/nf/scan.nf -preview -with-dag` over cw's profile (bucket-check + index-sync folded), Nextflow 26.10.2
 MERMAID = """flowchart TB
@@ -64,3 +64,24 @@ def test_unknown_engine_refused():
     with pytest.raises(ValueError) as e:
         read("airflow", "")
     assert str(e.value) == "no DAG reader for engine 'airflow' (have: nextflow)"
+
+
+def test_live_trace_cache_hits_are_explicit_and_deduplicated():
+    trace = ('name\tstatus\texit\nlist_source (s3://b)\tCACHED\t0\nindex\tCOMPLETED\t0\n'
+             'list_source (s3://a)\tCACHED\t0\nlist_source (s3://b)\tCACHED\t0\nstatic_names\tRUNNING\t\npost\tCAC')
+    assert cached_tasks(trace) == ('list_source (s3://a)', 'list_source (s3://b)')
+
+
+def test_preview_and_final_graph_keep_cache_provenance(tmp_path):
+    path = tmp_path / 'preview.mmd'
+    path.write_text(MERMAID)
+    assert read_file('nextflow', path) == from_nextflow(MERMAID)
+    (tmp_path / 'trace.tsv').write_text('name\tstatus\nindex\tCACHED\nstatic_names\tFAILED\n')
+    preview = read_file('nextflow', path)
+    assert preview.cached_tasks == ('index',)
+    doc = json.loads(preview.to_json())
+    assert doc.pop('cached_tasks') == ['index']
+    assert doc == json.loads(from_nextflow(MERMAID).to_json())
+    final = tmp_path / 'dag.mmd'
+    final.write_text(MERMAID)
+    assert read_file('nextflow', final) == preview

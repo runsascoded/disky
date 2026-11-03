@@ -1,5 +1,5 @@
 /**
- * The search index reader (specs/path-store-search.md §4): a filter query →
+ * The search index reader (specs/done/path-store-search.md §4): a filter query →
  * its match roots under a view root, from the generation's search sidecars
  * beside the `path` sort. Two layouts (§2):
  *

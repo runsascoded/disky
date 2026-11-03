@@ -421,16 +421,21 @@ def generation_parity(con, scan_file: str, served: str, runs: list[str], ts: int
     """The objects' `generation` at a scan, store against the scan's own sort, where both carry it (None otherwise): the
     scan's objects with one (a key that is also a folder's prefix excepted: the store folds it into the folder), and how
     many the store's version live at the scan (the `path` sort, base and runs) gives the same."""
-    from .interval_store import GENERATION, GENERATION_SORT, file_has_generation
+    from .interval_store import GENERATION_SORT, file_has_generation, identity_column
 
     files = [f"{served}/{GENERATION_SORT}.parquet", *(f"{r}/{GENERATION_SORT}.parquet" for r in runs)]
     if not file_has_generation(files[0]) or not file_has_generation(scan_file):
         return None
+    GENERATION = identity_column(file_has_generation(files[0]))
+    from disk_tree.object_version import version_sql
+
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(scan_file)})").fetchall()}
+    own_identity = version_sql(cols) if GENERATION == "version" else GENERATION
     union = " UNION ALL ".join(f"SELECT depth, path, vf, vt, kind, {GENERATION} FROM read_parquet({q(f)})" for f in files)
     live = f"""SELECT depth, path, {GENERATION} FROM (SELECT * FROM ({union}) QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
         WHERE vf <= {ts} AND {ts} < vt AND kind = 'file'"""
-    own = f"""SELECT depth::UTINYINT AS depth, path, any_value({GENERATION}) AS {GENERATION} FROM read_parquet({q(scan_file)})
-        GROUP BY depth, path HAVING bool_and(kind = 'file') AND count(*) = 1 AND any_value({GENERATION}) IS NOT NULL"""
+    own = f"""SELECT depth::UTINYINT AS depth, path, any_value({own_identity}) AS {GENERATION} FROM read_parquet({q(scan_file)})
+        GROUP BY depth, path HAVING bool_and(kind = 'file') AND count(*) = 1 AND any_value({own_identity}) IS NOT NULL"""
     n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{GENERATION} = o.{GENERATION})
         FROM ({own}) o LEFT JOIN ({live}) l USING (depth, path)""").fetchone()
     return {"objects": n, "equal": eq}
@@ -446,14 +451,53 @@ def _footers(src, key: str, version: int) -> dict[str, Footer]:
     return out
 
 
+def attribution_of(con, s: dict, src, mount: str | None, tmp: Path, served: str, runs: list[str]) -> dict:
+    """Scan `s`'s attribution table against its own `attribution.parquet` (beside its `path` sort, under `mount` or
+    through `src`), copied to `tmp` first; a covered scan without its file is every row missing (`rows` -1)."""
+    import shutil
+
+    from .interval_attribution import attribution_parity
+    from .interval_store import attribution_src
+
+    key = s.get("attribution_src") or attribution_src(s)
+    local = tmp / f"{s['id']}.attribution.parquet"
+    if mount:
+        if not Path(f"{mount}/{key}").is_file():
+            return {"rows": -1, "store": -1, "missing": 1, "extra": 0}
+        shutil.copyfile(f"{mount}/{key}", local)
+    elif src.exists(key):
+        src.get(key, local)
+    else:
+        return {"rows": -1, "store": -1, "missing": 1, "extra": 0}
+    try:
+        return attribution_parity(con, str(local), served, runs, s["ts"])
+    finally:
+        local.unlink(missing_ok=True)
+
+
+#: Verify's DuckDB memory on a dedicated verify VM (`interval-store verify` on Batch).
+VERIFY_MEM = 80 << 30
+VERIFY_THREADS = 16
+
+
+def verify_budget(ram: int, cpus: int) -> tuple[int, int]:
+    """Verify's DuckDB threads and memory limit (bytes) on a machine with `ram` bytes and `cpus` cores: `VERIFY_MEM` /
+    `VERIFY_THREADS`, capped at 3/4 of the RAM and the cores, so a smaller machine (a scan's `post`, where `scan retire`
+    verifies in the task) spills instead of being killed (2026-10-21: 80 GB on a 32 GB `post`)."""
+    return min(VERIFY_THREADS, cpus), min(VERIFY_MEM, ram * 3 // 4)
+
+
 def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
-                runs: list[str] = (), on_summary=None, *, changes: bool = False) -> list[dict]:
+                runs: list[str] = (), on_summary=None, *, changes: bool = False, covered: set[str] = frozenset(), share: int = 1) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
     each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
     a URL, a dir, or a bare GCS bucket name), then loaded into a table of a DuckDB database under `tmp` (`Scan`'s `table`;
     two scans' at a time at most: the diffs' `from` and the scan). `runs`: the newest manifest's runs' served dirs, read
     beside the base. `on_summary(summary)` runs as each scan completes (its marker written then: a later scan killed
-    mid-task loses only itself). `changes`: `run_date`'s."""
+    mid-task loses only itself). `changes`: `run_date`'s. `covered`: the scans the store's attribution table covers
+    (`interval_append.covered_scans`): each one's table is compared with its own `attribution.parquet`, whole
+    (`interval_attribution.attribution_parity`). `share`: this task's process is one of that many on the machine (its
+    DuckDB budget the machine's split that many ways)."""
     import duckdb
 
     from .blobstore import Store, store_url
@@ -468,7 +512,8 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     for f in (db, db.with_name(db.name + ".wal")):
         f.unlink(missing_ok=True)
     con = duckdb.connect(str(db))
-    con.execute(f"SET threads=16; SET memory_limit='80GB'; SET temp_directory={q(str(tmp / 'spill'))}")
+    threads, mem = verify_budget(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // share, max(1, (os.cpu_count() or 1) // share))
+    con.execute(f"SET threads={threads}; SET memory_limit='{mem >> 20}MB'; SET temp_directory={q(str(tmp / 'spill'))}")
     src = Store(store_url(scans["bucket"]))
     prev = None
     summaries = []
@@ -492,6 +537,10 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
                 if (g := generation_parity(con, str(local), served, list(runs), s["ts"])) is not None:
                     summary["generation"] = g
                     err(f"  {date} generation: {g['equal']:,} of {g['objects']:,} objects equal")
+                if date in covered:
+                    summary["attribution"] = attribution_of(con, s, src, mount, tmp, served, list(runs))
+                    a = summary["attribution"]
+                    err(f"  {date} attribution: {a['rows']:,} prefixes, the store {a['store']:,}; {a['missing']:,} missing, {a['extra']:,} extra")
                 summaries.append(summary)
                 if on_summary is not None:
                     on_summary(summary)
@@ -518,20 +567,55 @@ def marker(summary: dict, gen: str) -> dict:
     g = summary.get("generation")
     if g is not None:
         ok = ok and g["objects"] == g["equal"]
+    a = summary.get("attribution")
+    if a is not None:
+        ok = ok and a["missing"] == a["extra"] == 0
     return {"scan": summary["date"], "gen": gen, "pass": ok, **{k: summary[k] for k in ("views", "view_eq", "diffs", "diff_eq")},
-            **({"generation": g} if g is not None else {})}
+            **({"generation": g} if g is not None else {}), **({"attribution": a} if a is not None else {})}
 
 
-def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, changes: bool = False) -> dict[str, dict]:
+def rows_pass(m: dict) -> bool:
+    """Whether a marker's comparison, its objects' `generation` aside, passed: the sampled verify's views and diffs (and
+    the attribution table, where it was compared), or the append check's tables (the attribution table's among them) and
+    cut."""
+    if m.get("how") != "append":
+        a = m.get("attribution")
+        return m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"] and (a is None or a["missing"] == a["extra"] == 0)
+    return m["tables"].get("pvl", {}).get("rows", 0) > 0 and all(v["missing"] == v["extra"] == 0 for v in (*m["tables"].values(), *m["cut"].values()))
+
+
+def failure(m: dict) -> str:
+    """Why a failing marker failed: the sampled verify's views and diffs equal (`marker`), or the append check's rows
+    missing and extra per table and served sort, and objects' generations equal (`interval_append.append_marker`)."""
+    if m.get("how") != "append":
+        a = m.get("attribution")
+        return f"{m['view_eq']}/{m['views']} views, {m['diff_eq']}/{m['diffs']} diffs equal" + (
+            f"; attribution {a['missing']} missing, {a['extra']} extra" if a and (a["missing"] or a["extra"]) else "")
+    bad = [] if m["tables"].get("pvl", {}).get("rows") else ["no rows"]
+    bad += [f"{t} {v['missing']} missing, {v['extra']} extra" for t, v in m["tables"].items() if v["missing"] or v["extra"]]
+    bad += [f"cut {s} {v['missing']} missing, {v['extra']} extra" for s, v in m["cut"].items() if v["missing"] or v["extra"]]
+    if (g := m.get("generation")) and g["equal"] != g["objects"]:
+        bad.append(f"generation {g['equal']}/{g['objects']} equal")
+    return "; ".join(bad)
+
+
+def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, changes: bool = False, jobs: int = 1) -> dict[str, dict]:
     """Parity of `scans` (`{id, src, ts, version}`, oldest first; `src` under `root`, a dir or URL) against generation
     `gen` of `store` (a `blobstore.Store`: base + the newest manifest's runs, as the reader serves them), each scan's
-    marker written to `verify/<id>.json` in the generation; returns the markers by scan id."""
+    marker written to `verify/<id>.json` in the generation; returns the markers by scan id. `jobs`: the scans split into
+    that many contiguous shares (`verify_task`'s), each verified in a process of its own with that share of the
+    machine (cw's 10-24T1202 retire verified a backlog's 6 scans one after another: ~7–8 min each)."""
     from .interval_store import PREFIX, download_served, verify_runs
+
+    from .append_runner import latest_key
+    from .interval_append import covered_scans
 
     prefix = f"{PREFIX}/{gen}"
     download_served(store, prefix, tmp / "served")
     runs = verify_runs(store, prefix, tmp / "runs", {"scans": []})
     doc = {"bucket": root, "scans": scans}
+    newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
+    covered = covered_scans(store.read_json(f"{prefix}/scans.json"), store.read_json(f"{prefix}/{newest}") if newest else None)
     out = {}
 
     def write(s: dict) -> None:
@@ -539,5 +623,34 @@ def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, ch
         store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
         out[s["date"]] = m
 
-    verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes)
+    ids = [s["id"] for s in scans]
+    jobs = max(1, min(jobs, len(ids)))
+    if jobs == 1:
+        verify_task(ids, 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes,
+                    covered=covered)
+        return out
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as ex:
+        parts = [ex.submit(_verify_part, store.root, prefix, gen, ids, i, jobs, str(tmp / "served"), doc, str(tmp / f"part{i}"), runs, changes, covered)
+                 for i in range(jobs)]
+        for f in parts:
+            out |= f.result()
+    return out
+
+
+def _verify_part(root: str, prefix: str, gen: str, ids: list[str], i: int, jobs: int, served: str, doc: dict, tmp: str, runs: list[str],
+                 changes: bool, covered: set[str]) -> dict[str, dict]:
+    """`verify_scans`' share `i` of `jobs`, in a process of its own: its scans' markers written and returned."""
+    from .blobstore import Store
+
+    store, part, out = Store(root), Path(tmp), {}
+
+    def write(s: dict) -> None:
+        m = marker(s, gen)
+        store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
+        out[s["date"]] = m
+
+    verify_task(ids, i, jobs, served, doc, part / "verify.jsonl", part, None, runs, on_summary=write, changes=changes, covered=covered, share=jobs)
     return out

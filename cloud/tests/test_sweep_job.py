@@ -8,6 +8,8 @@ from dt_cloud.sweep_job import reviewed_job_spec, wait_drained
 
 
 IMAGE = "registry/image@sha256:" + "a" * 64
+#: The tests' deployment (`conftest`) and the sweep's component, on the job and its allocation.
+COST = {"app": "disky", "deployment": "test", "component": "sweep"}
 
 
 @pytest.fixture
@@ -28,6 +30,7 @@ def template():
 
 
 def test_reviewed_job_spec(template):
+    env = template["taskGroups"][0]["taskSpec"]["environment"]
     result = reviewed_job_spec(template, "gs://data/dry", "gs://data/plan.json", "gs://data/new", IMAGE, for_real=True, buckets=("b1",))
     assert result == {
         "taskGroups": [{"taskCount": 1, "taskSpec": {
@@ -38,13 +41,15 @@ def test_reviewed_job_spec(template):
             ])]}}],
             "computeResource": {"cpuMilli": 32000, "memoryMib": 250000},
             "maxRetryCount": 0, "maxRunDuration": "259200s",
-            "environment": template["taskGroups"][0]["taskSpec"]["environment"],
+            "environment": {**env, "variables": {**env["variables"], "DISKY_LABELS": "app=disky,deployment=test"}},
         }}],
         "allocationPolicy": {
             "instances": [{"policy": {"machineType": "n2-highmem-32"}}],
             "serviceAccount": {"email": "job@example.test"},
             "location": {"allowedLocations": ["regions/us-central1"]},
+            "labels": COST,
         },
+        "labels": COST,
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }
 

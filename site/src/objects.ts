@@ -151,6 +151,6 @@ export function filesRedirect(splat: string, proxy: ProxyInfo | null, stores: Pi
 /** What a row's trash / assign acts on: an object row is that one exact key
  * (`kind: 'object'` — it never matches `key.bak`), a directory its
  * `/`-terminated prefix (so `a/b/` never matches `a/bc`). The kind travels
- * with the item (specs/file-assign.md); the server never reads it off the slash. */
+ * with the item (specs/done/file-assign.md); the server never reads it off the slash. */
 export const actionItem = (uri: string, k: 'file' | 'dir' | undefined): PlanItem =>
   (k === 'file' ? { key: uri, kind: 'object' } : { key: `${uri}/`, kind: 'prefix' })

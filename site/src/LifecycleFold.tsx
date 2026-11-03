@@ -4,6 +4,7 @@ import { describeRule, displayId, groupRows, lifecycleDiffByBucket, parseLifecyc
 import type { BucketLifecycleRow, LifecycleSnapshot } from './lifecycle'
 import { storeUrl, type Store } from './stores'
 import { Tooltip } from './Tooltip'
+import { Loading } from './Busy'
 
 // Each bucket's lifecycle rules as the scan job snapshotted them
 // (`<store.base>/<scan>/lifecycle.json`), diffed per bucket against the
@@ -56,9 +57,9 @@ function RuleCells({ rule, change, prev }: Pick<BucketLifecycleRow, 'rule' | 'ch
         {change === 'removed' && <span className="chip removed">removed</span>}
         {change === 'changed' && prev && <ChangedChip rule={rule} prev={prev} />}
       </td>
-      <td>{prefix}</td>
-      <td>{describeRule(rule)}</td>
-      <td>{rule.Status}</td>
+      <td className="prefix">{prefix}</td>
+      <td className="action">{describeRule(rule)}</td>
+      <td className="status">{rule.Status}</td>
     </>
   )
 }
@@ -96,8 +97,9 @@ export function LifecycleFold({ store, asof, prevScan, note }: {
             <tr>
               {multi && !grouped && <th>bucket</th>}
               <th>rule</th>
-              {multi && grouped && <th>buckets</th>}
               <th>prefix</th><th>action</th><th>status</th>
+              {/* last, as each grouped row puts its buckets cell after the rule's own */}
+              {multi && grouped && <th>buckets</th>}
             </tr>
           </thead>
           <tbody>
@@ -123,7 +125,7 @@ export function LifecycleFold({ store, asof, prevScan, note }: {
         </table>
         </div>
       ) : (
-        <p className="tab-note">{loading ? 'loading…' : <>no snapshot for this scan{store.lifecycle?.recordedFrom && <> (recorded from {store.lifecycle.recordedFrom} on)</>}</>}</p>
+        <p className="tab-note">{loading ? <Loading label="Loading lifecycle rules…" /> : <>no snapshot for this scan{store.lifecycle?.recordedFrom && <> (recorded from {store.lifecycle.recordedFrom} on)</>}</>}</p>
       )}
       {rules && prevScan && prevQ.data === null && <p className="tab-note">Changes aren’t shown: the previous scan has no snapshot.</p>}
       {note && <p className="tab-note">{note}</p>}

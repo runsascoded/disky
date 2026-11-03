@@ -33,15 +33,24 @@ export function notesInView(notes: readonly ChartAnnotation[], xOf: (at: string)
 
 /** The notes for the chart at `prefix` (`bucket/a/b`, `''` the store's root): the store-wide ones (no `path`) and
  *  those whose `path` is `prefix` or above it (a note on `marin-us-east-02a` shows there and under it, not at the
- *  root), less any of a `hidden` kind. */
-export function notesHere(notes: readonly ChartAnnotation[], prefix: string, hidden: ReadonlySet<string>): ChartAnnotation[] {
+ *  root). A note's `kind` is only its tag (shown in its tooltip); the chart's one "notes" toggle shows or hides
+ *  them all. */
+export function notesHere(notes: readonly ChartAnnotation[], prefix: string): ChartAnnotation[] {
   const p = prefix.replace(/^\/+|\/+$/g, '')
-  return notes.filter(n => (n.path === null || p === n.path || p.startsWith(`${n.path}/`)) && !(n.kind !== null && hidden.has(n.kind)))
+  return notes.filter(n => n.path === null || p === n.path || p.startsWith(`${n.path}/`))
 }
 
-/** The kinds among the notes the chart at `prefix` could show, sorted: one toggle each. */
-export const noteKinds = (notes: readonly ChartAnnotation[], prefix: string): string[] =>
-  [...new Set(notesHere(notes, prefix, new Set()).flatMap(n => (n.kind === null ? [] : [n.kind])))].sort()
+/** The markers the chart draws: none while the "notes" toggle is off (`shown`), else this chart's notes inside
+ *  the plotted span (`notesHere` → `notesInView`). The toggle itself is offered only when `notesHere` is non-empty,
+ *  whatever the span (zooming never makes it come and go). */
+export const noteMarkers = (
+  notes: readonly ChartAnnotation[],
+  prefix: string,
+  shown: boolean,
+  xOf: (at: string) => number,
+  xMin: number,
+  xMax: number,
+): NoteMarker[] => (shown ? notesInView(notesHere(notes, prefix), xOf, xMin, xMax) : [])
 
 /** The date a new note's form starts at: the diff window's end when one is set, else the latest plotted scan. */
 export const defaultNoteAt = (window: [string, string] | undefined, latest: string | undefined): string =>

@@ -1,5 +1,8 @@
 """Specs for the cache warm-up plan (`dt_cloud.warm`): exact request lists."""
+from http.client import IncompleteRead, RemoteDisconnected
+
 from dt_cloud import warm as W
+import pytest
 
 DATES = [f"2026-08-{d:02d}" for d in range(10, 32)] + [f"2026-09-{d:02d}" for d in range(1, 16)]
 
@@ -118,3 +121,46 @@ def test_summary_counts_refusals_apart_from_failures():
     res = [("/a", 200, 1.2, "miss"), ("/b", 409, 0.3, ""), ("/c", 409, 0.2, ""), ("/d", 500, 2.0, ""), ("/e", 0, 0.1, "URLError")]
     assert W.summary(res, "2026-10-16T0716") == "warm-cache: 1/5 warmed for 2026-10-16T0716 in 4s of request time; 2 refused (409); 2 failed"
     assert W.summary(res[:1], "d") == "warm-cache: 1/1 warmed for d in 1s of request time"
+
+
+@pytest.mark.parametrize("statuses,code,summary", [
+    ([200, 409], 0, "warm-cache: 1/2 warmed for 2026-10-20 in 2s of request time; 1 refused (409)"),
+    ([200, 500], 1, "warm-cache: 1/2 warmed for 2026-10-20 in 2s of request time; 1 failed"),
+    ([403], 1, "warm-cache: 0/1 warmed for 2026-10-20 in 1s of request time; 1 failed"),
+])
+def test_warm_cli_exits_nonzero_for_failed_requests(monkeypatch, statuses, code, summary):
+    from click.testing import CliRunner
+    from dt_cloud import cli
+
+    monkeypatch.setenv("SITE_TOKEN", "test")
+    monkeypatch.setattr(W, "scan_dates", lambda _: ["2026-10-20"])
+    monkeypatch.setattr(W, "env_paths", lambda: ("",))
+    monkeypatch.setattr(W, "warm", lambda *a, **kw: [("/a", status, 1.0, "") for status in statuses])
+    logs = []
+    monkeypatch.setattr(cli, "err", logs.append)
+    result = CliRunner().invoke(cli.warm_cache, ["-r", "local", "-u", "https://site.test"])
+    assert (result.exit_code, result.stdout, logs) == (code, "", [summary])
+
+
+@pytest.mark.parametrize("error", [
+    lambda: IncompleteRead(b"{", 9),  # the 18:02 run's 09-23 full diff: a body cut short of its Content-Length
+    lambda: RemoteDisconnected("Remote end closed connection without response"),  # cw's 10-23T1801 warm-up
+])
+def test_warm_refetches_after_a_transport_error(monkeypatch, error):
+    """A transport error is fetched again before the request counts as failed; one that recurs every time is a
+    transport failure (status 0)."""
+    import io
+
+    class Broken(io.BytesIO):
+        def read(self, *a):
+            raise error()
+
+    class Whole(io.BytesIO):
+        status = 200
+        headers = {"x-cache": "miss"}
+
+    queue = {"/once": [Broken(), Whole(b"{}")], "/always": [Broken() for _ in range(W.TRANSPORT_RETRIES + 1)]}
+    monkeypatch.setattr(W.urllib.request, "urlopen", lambda req, timeout: queue[req.full_url.removeprefix("https://x.test")].pop(0))
+    res = W.warm("https://x.test", {}, ["/once", "/always"], jobs=1)
+    assert [(p, s, tier) for p, s, _, tier in res] == [("/once", 200, "miss"), ("/always", 0, type(error()).__name__)]
+    assert queue == {"/once": [], "/always": []}

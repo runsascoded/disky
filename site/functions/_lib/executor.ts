@@ -10,7 +10,7 @@
  * item set the run acts on (the rows checked on /staged, `req.items`; the whole
  * plan when absent) and its digest (recorded on the run), and the real run's
  * terms (`realRun`): no run of the plan in flight; no prior dry run required
- * (specs/delete-what-you-see.md: a real run once deleted a prefix its dry run
+ * (specs/done/delete-what-you-see.md: a real run once deleted a prefix its dry run
  * covered but the person had unchecked) — a dry run of exactly that set at that
  * scan is reused when there is one, else the run builds its own manifest.
  */

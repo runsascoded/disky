@@ -219,9 +219,9 @@ def test_a_local_dir_source_lists_its_files_with_md5s_and_uploads_them(tmp_path,
         def __init__(self):
             self.uploads = []
 
-        def upload_file(self, path, bucket, key, ExtraArgs):
-            self.uploads.append((Path(path).read_bytes(), bucket, key, ExtraArgs))
+        def upload_file(self, path, bucket, key, ExtraArgs, Config):
+            self.uploads.append((Path(path).read_bytes(), bucket, key, ExtraArgs, Config.max_concurrency))
 
     s3 = S3()
     P.copy_one(str(root), s3, "serve", objs[0])
-    assert s3.uploads == [(b"pi", "serve", "listing/laptop/S1/index/G1/path-index.parquet", {"Metadata": {"gcs-md5": hashlib.md5(b"pi").hexdigest()}})]
+    assert s3.uploads == [(b"pi", "serve", "listing/laptop/S1/index/G1/path-index.parquet", {"Metadata": {"gcs-md5": hashlib.md5(b"pi").hexdigest()}}, P.R2_PART_CONCURRENCY)]

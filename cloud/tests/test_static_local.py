@@ -9,7 +9,9 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import duckdb
 import fsspec
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
@@ -168,12 +170,23 @@ def test_build_drill_is_the_reference_drill(built):
     ref = tmp / "ref" / "drill"
     meas = _drill(staged["con"], staged, ref, R, KEEP, FLOOR)
     got, want = _files(gen / "drill"), _files(ref)
+    # the members' digests (the classes' source for a compaction: specs/static-incremental-compaction.md step 3) are the
+    # build's own; one row per member, the aliases' members
+    digests = got.pop("digests-long.parquet")
     assert sorted(got) == sorted(want)
     assert {k: v for k, v in got.items() if k != "meta.json"} == {k: v for k, v in want.items() if k != "meta.json"}
+    assert sorted(pq.read_table(pa.BufferReader(digests), columns=["q"]).column("q").to_pylist()) == sorted(
+        pq.read_table(gen / "drill" / "aliases.parquet", columns=["q"]).column("q").to_pylist())
     assert json.loads(got["meta.json"]) == {**json.loads(want["meta.json"]), "floor": FLOOR}
     for sub, kind in (("dirs", "long"), ("short/dirs", "short")):
         got_meas = pq.read_table(gen / "roots-measure" / sub / "s0000.parquet").to_pylist()
         assert got_meas == sorted(pq.read_table(meas[kind]).to_pylist(), key=lambda r: (r["q"], r["k"], r["dir"])), kind
+    # The fixture's preconditions for that comparison to cover the roots' sort (`measure_ranges`' per range,
+    # `write_kind`'s over the table): rows tying on `(q, path, usr)` (a path's versions) and a unique full key.
+    for kind in ("long", "short"):
+        keys = [tuple(r.values()) for r in pq.read_table(gen / "drill" / kind / "roots", columns=["q", "path", "usr", "vf"]).to_pylist()]
+        assert len(set(keys)) == len(keys), kind
+        assert len({k[:3] for k in keys}) < len(keys), kind
 
 
 def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
@@ -198,6 +211,55 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
         "chunks": sum(pq.ParquetFile(gen / "sx" / f"s{i:04d}.parquet").metadata.num_row_groups for i in held),
         "groups": {"long": len(long_qs), "short": len(short_qs)}}
     assert summary["drill"]["pieces"] > files
+
+
+@pytest.mark.parametrize("heavy_rows", [None, "1"])
+def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_rows):
+    """The drill's tail over process pools — each `q` range measured in a process of its own (`MEASURE_THREADS` 1 at
+    `-p 4`: 4 at a time; or every range heavy, `HEAVY_THREADS` 2: 2 at a time, heaviest first), the anchors' rollups and
+    starts-with catalog shard by shard (`ANCHOR_THREADS` 1; `write_kind`'s file pool:
+    `test_writing_sorted_chunks_writes_the_same_bytes`) — writes `drill/`, `roots-measure/`, `names/` and `anchors/`
+    byte for byte as the build at `-p 2` (one range, file and kind at a time on one database)."""
+    from dt_cloud import static_drill as sd
+
+    if heavy_rows:
+        monkeypatch.setenv(sl.HEAVY_ROWS_ENV, heavy_rows)
+        monkeypatch.setattr(sl, "HEAVY_THREADS", 2)
+    monkeypatch.setattr(sl, "MEASURE_THREADS", 1)
+    monkeypatch.setattr(an, "ANCHOR_THREADS", 1)
+    monkeypatch.setattr(sd, "WRITE_JOBS", 3)
+    root, scans, gen = built["root"], built["scans"], built["gen"]
+    with _small_groups():
+        summary = _build(root, scans, tmp_path / "store", tmp_path / "work", extra=("-c", "1", "-p", "4"))
+    par = tmp_path / "store" / sn.PREFIX / "g"
+    for sub in ("drill", "roots-measure", an.NAMES, an.ANCHORS):
+        assert _files(par / sub) == _files(gen / sub), sub
+    assert len(list((gen / "sx").glob("*.parquet"))) > 1  # the anchors' `end` rollups really ran per shard
+    assert min(summary["drill"]["groups"].values()) > 1  # and the measurement per range
+
+
+def test_measure_heavy_rows_is_relative_to_the_median_range():
+    assert sl.measure_heavy_rows([4_000_000] * 10 + [108_000_000, 260_000_000]) == sl.MEASURE_HEAVY_MIN_ROWS
+    assert sl.measure_heavy_rows([20_000_000] * 10 + [108_000_000]) == 80_000_000
+    assert sl.measure_heavy_rows([1_000, 2_000, 3_000]) == sl.MEASURE_HEAVY_MIN_ROWS
+    assert sl.measure_heavy_rows([]) == sl.MEASURE_HEAVY_MIN_ROWS
+
+
+@pytest.mark.parametrize("target_rows", [1, 7])
+def test_parallel_names_are_the_streamed_ones(built, tmp_path, target_rows):
+    """`write_names` at `jobs` 3 (shards planned from the prefixes' rows, spilled by shard, written in processes): the
+    stream's shards, sidecars, `sidecar.parquet` and `shards.json`, byte for byte, with shards cut at `target_rows`."""
+    cint = sorted(str(f) for f in (built["gen"] / "cintervals").glob("*.parquet"))
+    con = sn.connect(4, "1GB", tmp_path / "duckdb")
+    got = {}
+    with _small_groups():
+        for jobs in (1, 3):
+            doc = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), tmp_path / f"names{jobs}", target_rows, jobs=jobs)
+            got[jobs] = (doc, _files(tmp_path / f"names{jobs}"))
+    con.close()
+    assert got[3] == got[1]
+    assert got[1][0]["shards"] > 1
+    assert sorted(p.name for p in tmp_path.joinpath("duckdb").iterdir() if p.name.startswith("names-shards-")) == []
 
 
 def test_build_anchors_are_the_staged_anchors(built):
@@ -326,15 +388,34 @@ def _stored_rows(con, tier: Path, kind: str, alias: dict[str, str]) -> dict[tupl
     return out
 
 
+def _new_rows(con, base: Path, run: Path, kind: str, alias: dict[str, str]) -> dict[tuple[str, str], int]:
+    """A run's stored root rows new to the stack per `(q, dir)` (each ancestor directory of each root): those whose
+    `(q, path, usr, vf)` the base doesn't hold (a close record restates one it does), `q` the base's canonical."""
+    def keys(tier: Path) -> list[tuple]:
+        files = [str(f) for f in sorted((tier / kind / "roots").glob("*.parquet"))]
+        return [(alias.get(r[0], r[0]), *r[1:]) for r in con.execute(f"SELECT q, path, usr, vf FROM read_parquet({files})").fetchall()] if files else []
+    held = set(keys(base))
+    out: dict[tuple[str, str], int] = {}
+    for qq, path, usr, vf in keys(run):
+        if (qq, path, usr, vf) in held:
+            continue
+        segs = path.split("/")
+        for k in range(1, len(segs)):
+            key = (qq, "/".join(segs[:k]))
+            out[key] = out.get(key, 0) + 1
+    return out
+
+
 def _full_headers(con, tier: Path, kind: str, alias: dict[str, str]) -> set[tuple[str, str]]:
     files = [str(f) for f in sorted((tier / kind / "rollups").glob("*.parquet"))]
     return {(alias.get(qq, qq), d) for qq, d in con.execute(f"SELECT q, dir FROM read_parquet({files}) WHERE kind = 0").fetchall()} if files else set()
 
 
 def test_first_add_agrees_with_the_base_on_heaviness(appended):
-    """The first run over a fresh base makes heavy exactly the `(q, dir)`s its stored rows push over R: not heavy in the
-    base, base rows + the run's rows > R (the heavy rule counts stored rows, close records included). Nothing heavy in the
-    base turns heavy again: the base's rollups, `roots-measure/` and the run's `dcount` agree on what is already heavy."""
+    """The first run over a fresh base makes heavy exactly the `(q, dir)`s its roots new to the stack push over R: not
+    heavy in the base, base rows + the run's new rows > R (a close record restates a base root: not counted). Nothing heavy
+    in the base turns heavy again: the base's rollups, `roots-measure/` and the run's `dcount` agree on what is already
+    heavy."""
     import duckdb
 
     ids = scan_ids(appended["scans"])
@@ -346,7 +427,7 @@ def test_first_add_agrees_with_the_base_on_heaviness(appended):
     for kind in ("long", "short"):
         a = alias if kind == "long" else {}
         heavy = _full_headers(con, base, kind, a)
-        before, today = _stored_rows(con, base, kind, a), _stored_rows(con, run, kind, a)
+        before, today = _stored_rows(con, base, kind, a), _new_rows(con, base, run, kind, a)
         want = {k for k, n in today.items() if k not in heavy and before.get(k, 0) + n > R}
         assert _full_headers(con, run, kind, a) - heavy == want, kind
         assert {k for k in want if before.get(k, 0) > R} == set(), kind
@@ -364,6 +445,19 @@ def test_add_anchored_views_equal_brute_force(appended, stack):
     tiers = [gen / sa.run_key(d, d) for d in ids[-K:]] if stack == "level0" else [gen / sa.run_key(ids[-K], ids[-1])]
     markers = [sorted(p.relative_to(t).as_posix() for p in (t / an.ANCHORS).rglob("meta.json")) for t in tiers]
     assert markers == [["anchors/meta.json", "anchors/start/meta.json"]] * len(tiers)
+    # each run tier's census: a level-0 run's is its shards' rows per key, exactly; a merged run's sums its inputs', so it
+    # bounds its rows from above (the merge drops rows a later run closed)
+    con = duckdb.connect()
+    for t in tiers:
+        for kind in an.KINDS:
+            census = con.execute(f"SELECT s, n FROM read_parquet({an.q(str(an.Tier(t).census(kind)))})").fetchall()
+            rows = dict(con.execute(f"SELECT s, count(*) FROM ({an.files_sql(an.Tier(t).files(kind), 's, depth')}) WHERE depth >= 1 GROUP BY s").fetchall())
+            assert census
+            if stack == "level0":
+                assert census == sorted(rows.items())
+            else:
+                assert [(s, n >= rows.get(s, 0)) for s, n in census] == [(s, True) for s, _ in census]
+                assert sorted(rows) == sorted(s for s, n in census if s in rows)
     w = _world(appended)
     for kw in ({}, {"max_rows": 0, "start_max_rows": 0}):
         got, want, sources = _views(w, [gen, *tiers], ids, keys=AKEYS, **kw)
@@ -394,7 +488,7 @@ def test_add_with_nothing_pending_is_a_nop(appended):
     # the carry's revision is the newest manifest; the ones it and `b`'s superseded seconds ago are in the grace: nothing pruned
     prune = {"manifest": f"manifests/{b}.m001.json", "grace": [f"manifests/{a}.json", f"manifests/{b}.json"], "runs": [], "objects": 0,
              "bytes": 0, "deleted": 0}
-    assert out == {"gen": "g", "after": b, "added": [], "merge": None, "files": 0, "prune": prune}
+    assert out == {"gen": "g", "after": b, "added": [], "merge": None, "files": 0, "prune": prune, "compact": None}
     assert _files(appended["gen"]) == before
 
 
@@ -520,12 +614,60 @@ def test_publish_order():
                                       "deltas/a/anchors/start/meta.json", "deltas/a/anchors/meta.json", "deltas/a/drill/meta.json", "manifests/a.json"]
 
 
+def test_publish_steps():
+    """`upload_new`'s steps over `publish_order`: the data files (and only they) together; each marker, `scans.json` and
+    each manifest a step of its own, in order."""
+    from dt_cloud.blobstore import publish_steps
 
-def test_disk_peak_per_stage(monkeypatch, tmp_path):
+    keys = ["drill/long/roots/r0000.parquet", "drill/long/roots/r0001.parquet", "scans.json", "sx/s0000.parquet", "catalog/meta.json",
+            "deltas/a/meta.json", "drill/meta.json", "manifests/a.json", "manifests/b.json"]
+    assert publish_steps(sl.publish_order(keys), sl.publish_tier) == [
+        ["drill/long/roots/r0000.parquet", "drill/long/roots/r0001.parquet"], ["scans.json"], ["sx/s0000.parquet"],
+        ["catalog/meta.json"], ["deltas/a/meta.json"], ["drill/meta.json"], ["manifests/a.json"], ["manifests/b.json"]]
+    assert publish_steps(["a", "b"], None) == [["a"], ["b"]]
+
+
+def test_upload_new_puts_each_step_after_the_last(tmp_path):
+    """`upload_new` with a tier: a step's files are all up before the next step's first starts (data in parallel, a marker
+    after every data file before it), and every new file goes up once."""
+    import threading
+    import time
+
+    from dt_cloud import blobstore as bs
+
+    local = tmp_path / "gen"
+    data = [f"drill/long/roots/r{i:04d}.parquet" for i in range(12)]
+    for k in [*data, "drill/meta.json", "manifests/a.json", "old.parquet"]:
+        (local / k).parent.mkdir(parents=True, exist_ok=True)
+        (local / k).write_text(k)
+    events, lock, live, peak = [], threading.Lock(), [0], [0]
+
+    class Rec:
+        def put(self, src, key):
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+                events.append(("start", key))
+            time.sleep(0.02)
+            with lock:
+                live[0] -= 1
+                events.append(("end", key))
+
+    got = bs.upload_new(Rec(), local, "p", {"p/old.parquet": 1}, sl.publish_order, tier=sl.publish_tier, workers=4)
+    assert got == [*data, "drill/meta.json", "manifests/a.json"]
+    starts = [k for e, k in events if e == "start"]
+    assert sorted(starts) == sorted(f"p/{k}" for k in got)
+    pos = {(e, k): i for i, (e, k) in enumerate(events)}
+    assert max(pos[("end", f"p/{k}")] for k in data) < pos[("start", "p/drill/meta.json")]
+    assert pos[("end", "p/drill/meta.json")] < pos[("start", "p/manifests/a.json")]
+    assert peak[0] == 4
+
+
+
+def test_disk_peak_per_stage(tmp_path):
     """`DiskPeak`: each `take()` is the peak above the starting level since the previous one; `close()` the run's peak."""
     used = iter([100, 100 + 3 * sl.GB, 100 + sl.GB, 100 + 2 * sl.GB, 100])
-    monkeypatch.setattr(sl.shutil, "disk_usage", lambda p: type("U", (), {"used": next(used)}))
-    disk = sl.DiskPeak(tmp_path, every_s=3600)
+    disk = sl.DiskPeak(tmp_path, every_s=3600, usage=lambda: next(used))
     disk.sample()
     assert disk.take() == 3.0
     disk.sample()
@@ -544,3 +686,27 @@ def test_query_reads_a_non_gcs_store(built):
     assert res.exit_code == 0, res.output
     got = [json.loads(ln) for ln in res.stdout.splitlines()]
     assert [o["answers"] for o in got] == [{d: _brute_answer(oracle, t, d) for d in ids} for t in terms]
+
+
+def test_anchors_rerun_over_a_pinned_manifest_reproduces_a_published_run(appended, tmp_path):
+    """`static_anchors run -P manifests/<a>.json -o OUT` (a canary's re-run, specs/stage-canaries.md) after the carry
+    merged `a`: over the tiers `a`'s own manifest listed before it, into OUT, nothing uploaded: `a`'s published `anchors/`,
+    md5 for md5, in the report. R and K are the base's (no flags); a `-K` other than the base's is refused."""
+    import hashlib
+
+    ids = scan_ids(appended["scans"])
+    a, gen = ids[-2], appended["gen"]
+    out = tmp_path / "rerun"
+    with _small_groups(1):
+        # `-b`: its default reads the deployment profile; `-o` never touches a bucket
+        args = ["run", "-b", "unused", "-g", "g", "-d", a, "-m", str(gen.parent.parent), "-P", f"manifests/{a}.json", "-T", str(tmp_path / "t"), "-p", "2", "-M", "1GB"]
+        res = CliRunner().invoke(an.cli, [*args, "-o", str(out)], catch_exceptions=False)
+        refused = CliRunner().invoke(an.cli, [*args, "-o", str(tmp_path / "other-k"), "-K", str(KEEP + 1)])
+    assert res.exit_code == 0, res.output
+    assert (refused.exit_code, str(refused.exception)) == (
+        1, f"{gen / an.ANCHORS}: K {KEEP + 1} (the base's: {KEEP}): a run is built as its generation's base")
+    report = json.loads((out / "report.json").read_text())
+    published = gen / sa.run_key(a, a)
+    want = {f.relative_to(published).as_posix(): hashlib.md5(f.read_bytes()).hexdigest() for f in sorted((published / an.ANCHORS).rglob("*")) if f.is_file()}
+    assert (report["run"], report["manifest"], report["tiers"]) == (a, f"manifests/{a}.json", 1)
+    assert report["files"] == want

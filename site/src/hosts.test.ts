@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hostPair, otherHostUrl, peerUrl, type Peer } from './hosts'
+import { hostPair, otherHostUrl, peerUrl, urlLabel, type Peer } from './hosts'
 
 const pair = { prod: 'gcs.oa.dev', dev: 'dev.gcs.oa.dev' }
 
@@ -120,5 +120,20 @@ describe('peerUrl', () => {
       'https://hf.oa.dev/scans',
       'https://cw.oa.dev/scans',
     ])
+  })
+})
+
+describe('urlLabel', () => {
+  it('drops the scheme and a bare root', () => {
+    expect(urlLabel('https://cw.oa.dev/')).toBe('cw.oa.dev')
+    expect(urlLabel('https://cw.oa.dev/staged')).toBe('cw.oa.dev/staged')
+  })
+  it('keeps the query and hash when they fit', () => {
+    expect(urlLabel('https://dev.cw.oa.dev/scans?s=-t#runs')).toBe('dev.cw.oa.dev/scans?s=-t#runs')
+  })
+  it('cuts long ones from the middle, keeping the host and tail', () => {
+    const label = urlLabel('https://gcs.oa.dev/user/chi-heem-wong?p=marin-us-central2%2Fcheckpoints&c=age&u=iec')
+    expect(label).toBe('gcs.oa.dev/user/chi-heem-wong?p=mar…&c=age&u=iec')
+    expect(label.length).toBe(48)
   })
 })

@@ -22,6 +22,11 @@ export function batchCompletion(states: readonly StagedState[]) {
 /** Only unsettled prefixes still belong to the dispatchable staged set. */
 export const isCurrentlyStaged = (state: StagedState): boolean => state !== 'deleted' && state !== 'empty'
 
+/** The plan items `/staged` still lists, by their sizes at the newest scan alone (no run history): an
+ *  item that scan holds nothing under is settled; every item while `stats` is unknown. */
+export const liveStagedItems = <T extends { prefix: string }>(items: readonly T[], stats: Record<string, PrefixStat> | undefined): T[] =>
+  items.filter(it => isCurrentlyStaged(stagedState(stats?.[it.prefix], !!stats, null)))
+
 /** Explicit choices survive refreshes; linked batches and flat tables stay accessible. */
 export const batchIsCollapsed = (settled: boolean, override: boolean | undefined, linked = false, flat = false): boolean =>
   !flat && (override ?? (settled && !linked))

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { authorName, defaultNoteAt, noteKinds, notesHere, notesInView, shortLabel, type ChartAnnotation } from './chartNotes'
+import { authorName, defaultNoteAt, noteMarkers, notesHere, notesInView, shortLabel, type ChartAnnotation } from './chartNotes'
 
 const note = (id: number, at: string, text = `note ${id}`, path: string | null = null, kind: string | null = null): ChartAnnotation =>
   ({ id, at, text, author: 'ops@example.test', created: 0, updated: 0, path, url: null, kind })
@@ -39,7 +39,7 @@ describe('notesInView', () => {
   })
 })
 
-describe('notesHere / noteKinds', () => {
+describe('notesHere / noteMarkers', () => {
   const notes = [
     note(1, '2026-10-01', 'store-wide'),
     note(2, '2026-10-02', 'ask', 'marin-us-east-02a', 'cleanup ask'),
@@ -47,18 +47,28 @@ describe('notesHere / noteKinds', () => {
     note(4, '2026-10-04', 'scope', 'marin-us-east-02a', 'scope change'),
     note(5, '2026-10-05', 'sibling', 'marin-us-east-02ab'),
   ]
-  const ids = (prefix: string, hidden: string[] = []) => notesHere(notes, prefix, new Set(hidden)).map(n => n.id)
+  const ids = (prefix: string) => notesHere(notes, prefix).map(n => n.id)
 
-  it('a note shows at its path and below; store-wide ones everywhere; a sibling sharing a name prefix doesn’t match', () => {
+  it('a note shows at its path and below; store-wide ones everywhere; a sibling sharing a name prefix doesn’t match; kind never filters', () => {
     expect([ids(''), ids('marin-us-east-02a'), ids('/marin-us-east-02a/'), ids('marin-us-east-02a/marin'), ids('marin-us-east-02a/marin/grug/x'), ids('marin-us-east-02ab')]).toEqual([
       [1], [1, 2, 4], [1, 2, 4], [1, 2, 4], [1, 2, 3, 4], [1, 5],
     ])
   })
 
-  it('a hidden kind drops its notes; the kinds offered are those the chart could show here', () => {
-    expect([ids('marin-us-east-02a/marin/grug', ['cleanup ask']), noteKinds(notes, ''), noteKinds(notes, 'marin-us-east-02a')]).toEqual([
-      [1, 4], [], ['cleanup ask', 'scope change'],
-    ])
+  it('the "notes" toggle: offered where the chart has notes (whatever the span); off draws none, on draws those in the span', () => {
+    const xOf = (at: string) => midnight(at)
+    const keys = (prefix: string, shown: boolean, from: string, to: string) => noteMarkers(notes, prefix, shown, xOf, midnight(from), midnight(to)).map(m => m.key)
+    expect({
+      offered: [notesHere([], '').length > 0, notesHere([note(9, '2026-10-01', 'x', 'other-bucket')], '').length > 0, notesHere(notes, '').length > 0],
+      on: keys('marin-us-east-02a/marin/grug', true, '2026-09-01', '2026-10-31'),
+      zoomed: keys('marin-us-east-02a/marin/grug', true, '2026-10-02', '2026-10-03'),
+      off: keys('marin-us-east-02a/marin/grug', false, '2026-09-01', '2026-10-31'),
+    }).toEqual({
+      offered: [false, false, true],
+      on: ['note-1', 'note-2', 'note-3', 'note-4'],
+      zoomed: ['note-2', 'note-3'],
+      off: [],
+    })
   })
 })
 

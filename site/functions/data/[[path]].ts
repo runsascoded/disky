@@ -105,6 +105,9 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
       headers: { 'content-type': contentType ?? 'application/json; charset=utf-8', 'cache-control': CACHE },
     })
   } catch {
-    return new Response('not found', { status: 404 })
+    // `?optional=1`: a file a scan may lack (`non-live.json`) is answered 204, not a 404 every such scan logs
+    return new URL(ctx.request.url).searchParams.get('optional') === '1'
+      ? new Response(null, { status: 204, headers: { 'cache-control': CACHE } })
+      : new Response('not found', { status: 404 })
   }
 }

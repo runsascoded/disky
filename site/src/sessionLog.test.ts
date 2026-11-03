@@ -218,6 +218,7 @@ describe('install', () => {
     const err = new Error('kaboom')
     err.stack = 'Error: kaboom\n    at f (https://site.test/assets/index.js:1:2)'
     fire(win, 'error', undefined, { message: 'Uncaught Error: kaboom', filename: 'https://site.test/assets/index.js?key=x', lineno: 1, colno: 2, error: err })
+    fire(win, 'error', undefined, { message: 'ResizeObserver loop completed with undelivered notifications.', filename: '', lineno: 0, colno: 0 })
     fire(win, 'unhandledrejection', undefined, { reason: 'nope' })
     con.error('Warning:', new Error('bad prop'))
     // Viewport (debounced) and visibility.

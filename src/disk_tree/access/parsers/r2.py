@@ -168,7 +168,8 @@ def state_aggs(state: dict, before: "datetime | None" = None) -> list[str]:
 
 
 def _hour_start(hour: str) -> "datetime":
-    """A state hour key (``YYYY-MM-DDTHH``, UTC) → its start."""
+    """An hourly or minute-precision UTC collection-window key → its start."""
     from datetime import datetime, timezone
 
-    return datetime.strptime(hour, '%Y-%m-%dT%H').replace(tzinfo=timezone.utc)
+    fmt = '%Y-%m-%dT%H' if len(hour) == 13 else '%Y-%m-%dT%H:%M'
+    return datetime.strptime(hour, fmt).replace(tzinfo=timezone.utc)

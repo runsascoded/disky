@@ -13,10 +13,10 @@ dependencies = [
     "pyarrow>=16.0",
     "pyyaml>=6.0",
     # `dt-cloud digest` drives Slack via thrds; pinned to the `py` branch (has
-    # editable image blocks + per-message sender) at the SHA gcs runs in prod.
+    # editable image blocks, per-message sender, `reply_broadcast` for the quota alert).
     # GitHub tarball (not git+…) so `pip install ./marin` works in the git-less
     # python:slim image. Bump the SHA to update.
-    "thrds @ https://github.com/runsascoded/thrds/archive/70548988ac6827a81a770b938b36057f67ae0e3d.tar.gz",
+    "thrds @ https://github.com/Open-Athena/thrds/archive/6f207846b32012d6a1550011f95bc561caf8ff1c.tar.gz",
     # The shared engine: `dt_cloud` builds on `disk_tree` (listing normalization,
     # aggregation, backends). Workspace member of the parent repo (one lockfile;
     # specs/done/union-of-roots.md). The `gcs` + `s3` extras are what the overlay's
@@ -49,7 +49,7 @@ sheets = ["gspread>=6.0"]  # `sheet-push` → Google Sheets (ADC auth)
 dt-cloud = "dt_cloud.cli:main"
 
 [dependency-groups]
-test = ["pytest>=8.3"]
+test = ["pytest>=8.3", "pytest-xdist>=3.6"]
 
 [build-system]
 requires = ["hatchling"]
@@ -67,3 +67,6 @@ packages = ["src/dt_cloud"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: the long tail (byte-identity sweeps, brute-force oracles); CI runs them, `scripts/remote-test` skips them unless `-a`",
+]

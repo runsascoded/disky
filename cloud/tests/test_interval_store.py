@@ -251,11 +251,44 @@ def served(built, tmp_path_factory):
     out, scans, _, _ = built
     dst = tmp_path_factory.mktemp("served")
     con = duckdb.connect()
-    for sort, (sub, _, _) in ist.SORTS.items():
+    for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
         schema = ist.SUB_SCHEMA[sub]
         ist.write_served(con, f"read_parquet('{out}/{sub}/r*.parquet')", sort, dst / f"{sort}.parquet", schema, rg_rows=4,
                          stamps=[x["ts"] for x in scans["scans"]])
     return dst
+
+
+def test_served_pages_are_page_rows_aligned_with_a_page_index(built, tmp_path):
+    """Pages change the layout only: the same rows in the same groups as one page a group, the planning columns' pages
+    start every `page_rows` rows (a group's last short), and each chunk's page-index ranges are in the sidecar's tuple."""
+    from dt_cloud.parquet_pages import chunk_indexes, page_locations
+
+    out, scans, _, _ = built
+    con = duckdb.connect()
+    sub = ist.SORTS["path"][0]
+    src = f"read_parquet('{out}/{sub}/r*.parquet')"
+    stamps = [x["ts"] for x in scans["scans"]]
+    paged, whole = tmp_path / "paged" / "path.parquet", tmp_path / "whole" / "path.parquet"
+    ist.write_served(con, src, "path", paged, ist.SUB_SCHEMA[sub], rg_rows=8, stamps=stamps, page_rows=3)
+    ist.write_served(con, src, "path", whole, ist.SUB_SCHEMA[sub], rg_rows=8, stamps=stamps, page_rows=8)
+    pm, wm = pq.read_metadata(paged), pq.read_metadata(whole)
+    assert pq.read_table(paged).to_pylist() == pq.read_table(whole).to_pylist()
+    sizes = [pm.row_group(g).num_rows for g in range(pm.num_row_groups)]
+    assert sizes == [wm.row_group(g).num_rows for g in range(wm.num_row_groups)]
+    ixs = chunk_indexes(paged)
+    names = pm.schema.names
+    plan = ("depth", "path", "vf", "vt")
+    starts = [{n: [p.first_row_index for p in page_locations(paged, ix)] for n, ix in zip(names, ixs[g])} for g in range(pm.num_row_groups)]
+    # The columns a reader plans pages by start a page every 3 rows; any other column's pages start on those rows too (an
+    # all-null column never reaches the 1-byte target: one page a group).
+    assert [{n: v for n, v in st.items() if n in plan} for st in starts] == [{n: list(range(0, k, 3)) for n in plan} for k in sizes]
+    assert [n for st, k in zip(starts, sizes) for n, v in st.items() if not set(v) <= set(range(0, k, 3))] == []
+    assert [[[p.first_row_index for p in page_locations(whole, ix)] for ix in g] for g in chunk_indexes(whole)] == [[[0]] * wm.num_columns for _ in sizes]
+    tuples = [json.loads(r["rg_json"])[2] for r in pq.read_table(paged.with_name("path.groups.parquet")).to_pylist()]
+    assert [[c[3:] for c in t] for t in tuples] == [[list(ix) for ix in g] for g in ixs]
+    assert [[(n, bool(ix.column_index_length), bool(ix.offset_index_length)) for n, ix in zip(names, g) if n in plan] for g in ixs] == \
+        [[(n, True, True) for n in names if n in plan]] * len(ixs)
+    assert all(ix.offset_index_length for g in ixs for ix in g)
 
 
 def _scans(built):

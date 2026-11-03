@@ -4,6 +4,7 @@ import { NameQueryError, nameSummaryParams, namesEnabled, type NameSummaryEnv } 
 import { privateHeaders, staticSummary } from '../_lib/nameSummaryStatic.js'
 import { nameLiteral } from '../../src/nameModel.js'
 import { withReq } from '../_lib/shared.js'
+import { withStaticGen } from '../_lib/index.js'
 
 export async function onRequest(ctx: Ctx & { env: NameSummaryEnv }): Promise<Response> {
   const identity = await requireViewer({ request: ctx.request, env: { ...ctx.env, PUBLIC_READ: undefined } })
@@ -37,6 +38,6 @@ export async function onRequest(ctx: Ctx & { env: NameSummaryEnv }): Promise<Res
     throw error
   }
   // The env carries the request (`withReq`): its shared reads are owned by it, and its cancel evicts them.
-  return staticSummary(withReq(ctx.env, ctx.request.signal), params)
+  return staticSummary(withReq(await withStaticGen(ctx.env), ctx.request.signal), params)
 }
 export const onRequestGet = onRequest

@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import type { FoldedLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -37,6 +37,7 @@ import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
 import { planNegative, planPositive } from './searchQuery.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
+import { UPGRADE_DETAIL_GROUPS } from './edgeCache.js'
 import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticCompound, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
 import { type BoolAnswer, boolPlan, compound } from './staticBool.js'
 import { scanAt } from './staticNames.js'
@@ -58,7 +59,7 @@ const COARSE_EXPS = [16, 20, 24]
  * ~1.3M rows from `path`). The two span queries cost ~20 ms. */
 export const SMALL_SUBTREE_ROWS = 0
 /** On the interval store, a subtree with more rows than this (or an unknown count) reads `bysize`
- * without planning `path` (`planSubtree`). */
+ * without planning `path`, unless the size plan exceeds the read budget (`planSubtree`). */
 export const IV_PATH_PLAN_ROWS = 1 << 18
 /** On the interval store, a depth-band read (every rect depth-bounded) takes `path` when its plan holds
  *  at most this many rows (`planSubtree`). */
@@ -133,6 +134,8 @@ export interface ViewOpts {
   floorOnly?: boolean
   /** With `query`: ms the static roots' detail lookups may run past phase 2 (default `FILTER_DETAILS_MS`). */
   detailsWait?: number
+  /** With `query`: the most row groups the static roots' detail lookups read (default `DETAIL_GROUPS`). */
+  detailGroups?: number
   /** With `query`: phase 2's time budget, ms (default `FILTER_PHASE2_MS`, env or constant). */
   phase2Ms?: number
   /** With `query`: the request's phase-2 gate (`Phase2Gate`), shared by every read of one request. */
@@ -205,6 +208,9 @@ export interface View {
   dirsOnly?: true
   /** With `q=`: the search stopped at its time budget (`Coverage.searchLate`): kept briefly, recomputed. */
   searchLate?: true
+  /** With `q=`: the match roots' own rows (kind, ages, classes) missed their time budget (`Coverage.detailsLate`):
+   *  kept briefly, recomputed. */
+  detailsLate?: true
 }
 
 /** Whether a filtered read may be missing matches, and why (the response's
@@ -219,6 +225,10 @@ export interface Coverage {
   /** A search stopped at its time budget (`SearchFound.timedOut`): unlike a read budget's cut, a run with more
    *  time may answer more — so the answer is kept briefly and recomputed (`keepFor`). */
   searchLate?: true
+  /** The match roots' detail lookups (`FILTER_DETAILS_MS`) were cut, or narrowed to fit `DETAIL_GROUPS`: roots drawn
+   *  without kind, ages or classes (a file reads as a folder) — a run with more time and groups
+   *  (`UPGRADE_DETAIL_GROUPS`) decorates them, so kept briefly and recomputed. */
+  detailsLate?: true
 }
 export const APPROX_NO_INDEX = 'this scan has no search index; small matches may be missing'
 export const APPROX_V1_TOO_BIG = 'this scan has no search index and this view is too big to scan; small matches may be missing'
@@ -234,11 +244,12 @@ export function noteCoverage(cov: Coverage, flag: 'partial' | 'approximate' | 'd
   if (!have.includes(why)) have.push(why)
 }
 /** A coverage as response fields. */
-export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate'> => ({
+export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate' | 'detailsLate'> => ({
   ...(c.partial ? { partial: true as const, partialReason: c.partial.join(' · ') } : {}),
   ...(c.approximate ? { approximate: true as const, approximateReason: c.approximate.join(' · ') } : {}),
   ...(c.dirsOnly ? { dirsOnly: true as const } : {}),
   ...(c.searchLate ? { searchLate: true as const } : {}),
+  ...(c.detailsLate ? { detailsLate: true as const } : {}),
 })
 
 export class NotFound extends Error {}
@@ -339,7 +350,11 @@ function display(a: Agg): Record<string, unknown> {
   // A folder's date is its newest write, not a byte-weighted mean: a mean of
   // half-July, half-September reads "August", a date nothing was written on.
   // An mtime of 0 is a listing's "unknown" (no object was written in 1970): no date, as for none.
-  if (a.m) out.d = Math.floor(a.m / 86400)
+  if (a.m) {
+    out.d = Math.floor(a.m / 86400)
+    // …and that write's instant (epoch seconds): the map's "last created" reads it with a time of day.
+    out.t = a.m
+  }
   if (a.a != null) out.a = a.a
   if (a.ag?.some(v => v > 0)) out.ag = a.ag.map(v => Math.round(v))
   const desc = (m: Record<string, number>) =>
@@ -436,6 +451,7 @@ async function planSubtree(
 ): Promise<SubtreePlan> {
   const held = (plan: Span[]) => plan.reduce((n, x) => n + (x.rowEnd - x.rowStart), 0)
   const of = (variant: string, plan: Span[], read: SubtreePlan['read']): SubtreePlan => ({ variant, groups: plan.length, rows: held(plan), read })
+  const fromPath = (plan: Span[]) => of(pathIdx.variant, plan, stop => readRects(pathIdx, rects, thrAt, lens, plan, stop))
   // A store generation: plan the read on both sorts (span queries only, no
   // decode) and decode whichever holds fewer rows. The cost of a `path` read
   // is ~one group per depth of the subtree, of a `bysize` read ~one group per
@@ -453,13 +469,16 @@ async function planSubtree(
   // at depth 1: 3 groups against 24). Taken when it holds at most `IV_BAND_ROWS`; past that (a flat
   // directory's children) the size sort is planned too and the one holding fewer rows read.
   if (!pathOnly && pathIdx.asOf != null && (nDesc == null || nDesc > ivPlanRows)) {
-    const pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
-    if (pp && held(pp) <= IV_BAND_ROWS) return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
+    let pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
+    if (pp && held(pp) <= IV_BAND_ROWS) return fromPath(pp)
     const sized = (lens ? await tryOpen(env, date, 'bysize-user') : null) ?? await tryOpen(env, date, 'bysize')
     if (sized) {
       const sh = withTrace(sized, tr)
       const sp = await planSizeRects(sh, rects, thrAt, lens)
-      if (pp && held(pp) < held(sp)) return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
+      // A tiny subtree can have an unknown row count and a low byte floor: the size sort's
+      // boundary groups then exceed the decode budget though its path range fits easily.
+      if (!readFits(sp) && !pp) pp = await planRects(pathIdx, rects, thrAt, lens)
+      if (pp && (held(pp) < held(sp) || !readFits(sp) && readFits(pp))) return fromPath(pp)
       return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))
     }
   }
@@ -846,7 +865,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       return { all, mine, depth }
     }
     // Phase 1. A store generation with the search sidecars answers from
-    // them (specs/path-store-search.md): the match roots anywhere under P,
+    // them (specs/done/path-store-search.md): the match roots anywhere under P,
     // exact unless a budget cut the search; anything else reads as before.
     t0 = performance.now()
     let roots: string[] = []
@@ -927,7 +946,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       tr?.('static', performance.now() - t0, shits ? `${skey} ${shits.rollup ? `rollup ${shits.rollup.cells.length}` : shits.hits.length}` : skey ? `declined${off ? ` (${off})` : ''}` : undefined)
       if (shits?.rollup) {
         const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho), region: async T => (await regionFor(T, false)).idx, smallRows, ivPlanRows })
+        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho), region: async T => (await regionFor(T, false)).idx, smallRows, ivPlanRows, cov })
       }
       if (sb) {
         p1 = aggregateHits(sb.roots)
@@ -1092,19 +1111,13 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // The first paint skips both: the roots alone, exact, from the static read.
     const firstPaintStatic = staticRoots && !!o.firstPaint
     let detailsOff = false
+    const detailGroups = o.detailGroups ?? DETAIL_GROUPS
     const details = staticRoots && !firstPaintStatic && !(maxDepth != null && maxDepth <= 0) ? (async () => {
       const want = heaviest(roots.filter(r => drawn(r) && shown(r)), ROOT_DETAILS)
-      if (!want.length) return []
-      const asks = new Set(want.map(r => `${depthF.get(r)}\0${r}`))
-      try {
-        const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-        return (await readAsks(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), r => asks.has(`${r.depth}\0${r.path}`), { maxGroups: DETAIL_GROUPS, stop: () => detailsOff, rememberWide: true })).rows
-      } catch (e) {
-        if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-        tr?.('details', 0, 'too wide')
-        return []
-      }
-    })() : Promise.resolve([] as Row[])
+      if (!want.length) return { rows: [], cut: false }
+      const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
+      return readDetails(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), { maxGroups: detailGroups, stop: () => detailsOff, tr })
+    })() : Promise.resolve({ rows: [] as Row[], cut: false })
     let rows2: Row[] = []
     let variant: string | undefined
     let interiors: Read['interiors']
@@ -1126,16 +1139,22 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // The lookups ride beside phase 2 and may wait `FILTER_DETAILS_MS` past it, no longer: they are
     // display fields (kind, ages, classes) and their span plans cost seconds where roots spread over
     // many depths (`00241`: ~8.5 s for 48 roots, against 6 s for phase 2).
-    const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
+    const budget = o.detailsWait ?? filterDetailsMs(env)
     const late = Symbol('late')
-    const detailRows = budget === Infinity ? await details
-      : await Promise.race([details, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(x => {
+    const { rows: detailRows, cut: detailsCut } = budget === Infinity ? await details
+      : await within(details, budget, late).then(x => {
         if (x !== late) return x
         tr?.('details', performance.now() - t0, 'late')
+        // A diff side's `detailsWait: 0` skips them by design; a cut viewer-facing budget is upgraded.
+        if (budget > 0) cov.detailsLate = true
         detailsOff = true
         details.catch(() => {})
-        return [] as Row[]
+        return { rows: [] as Row[], cut: false }
       })
+    // Narrowed to fit the group budget: as of an older scan each root's row costs a group per segment and run
+    // its version may lie in (~12 as of gcs 10-20, ~5 as of the newest), so 16 groups hold one root or a few.
+    // The upgrade's wider budget decorates more; its own narrowing is final.
+    if (detailsCut && budget > 0 && detailGroups < UPGRADE_DETAIL_GROUPS) cov.detailsLate = true
     if (detailRows.length) {
       const d = aggregate(detailRows)
       for (const [r, m] of d.mine) {
@@ -1515,68 +1534,128 @@ async function readInteriors(env: Env, x: {
   let over = false
   const stop = () => over
   const expired = new Promise<typeof late>(r => { timer = setTimeout(() => { over = true; r(late) }, x.ms) })
-  const settle = async <X>(p: Promise<X>): Promise<X | typeof late | Error> => {
-    p.catch(() => {})
-    try { return await Promise.race([p, expired]) } catch (e) {
-      if (e instanceof TooWide || /too wide/.test(String((e as Error).message ?? e))) return e as Error
-      throw e
+  // Cleared on every way out: a plan or read that throws (an R2 fetch failing) left it pending, and its callback holds
+  // this scope (`x`, the view's forest behind `weight`) until it fires while `ivRetry` renders the view again.
+  try {
+    const settle = async <X>(p: Promise<X>): Promise<X | typeof late | Error> => {
+      p.catch(() => {})
+      try { return await Promise.race([p, expired]) } catch (e) {
+        if (e instanceof TooWide || /too wide/.test(String((e as Error).message ?? e))) return e as Error
+        throw e
+      }
     }
+    const capLevels = (q: Rect, r: { path: string }) => r.path === path ? q : { ...q, dHi: Math.min(q.dHi, q.dLo + FILTER_SUBDIV_LEVELS - 1) }
+    const planFor = (rs: { path: string; depth: number }[]) => {
+      const rects = rootRects(rs).map((q, i) => capLevels(q, rs[i])).map(q => maxDepth != null ? { ...q, dHi: Math.min(q.dHi, dP + maxDepth) } : q)
+      // Level-capped rects read the `path` sort alone: ~a group per level per root, so its worst case (a
+      // deep subtree's every level) can't happen, and planning `bysize` too doubled the span queries —
+      // D1 runs them in turn, and a diff's two sides' plans took seconds (`00241`: 15–17 s of spans).
+      // On the interval store there are no span queries (its plan reads footers it holds), and a big subtree's
+      // `path` plan touches most of its groups, so its interiors are planned as the unfiltered view plans them
+      // (`bysize` where cheaper).
+      const capped = x.idx.asOf == null && rs.every(r => r.path !== path)
+      return settle(planSubtree(env, date, x.idx, rects, rebasedThreshold(T, atten, rs[0].depth), undefined, x.nd(rs), x.smallRows, tr, capped, x.ivPlanRows))
+    }
+    const plans = await Promise.all(groups.map(planFor))
+    let room = x.groups
+    let roomRows = x.rows
+    const admitted: { rs: { path: string }[]; read: Promise<Row[] | typeof late | Error>; variant: string }[] = []
+    const admit = (rs: { path: string }[], pl: SubtreePlan | typeof late | Error): boolean => {
+      if (pl === late) skipped.late += rs.length
+      else if (pl instanceof Error) skipped.wide += rs.length
+      else if (pl.groups > room || pl.rows > roomRows) return false
+      else { room -= pl.groups; roomRows -= pl.rows; admitted.push({ rs, read: settle(pl.read(stop)), variant: pl.variant }) }
+      return true
+    }
+    // A depth's roots together over the budget: its heaviest `FILTER_SPLIT_ROOTS` planned one by one, each
+    // admitted if it fits (the lighter ones' rects can be most of a shared read).
+    const wide: { path: string; depth: number }[][] = []
+    plans.forEach((pl, i) => { if (!admit(groups[i], pl)) wide.push(groups[i]) })
+    for (const rs of wide) {
+      // Past the time budget no solo plan can land: none is started (each costs D1 span queries).
+      if (over) { skipped.late += rs.length; continue }
+      const each = rs.slice(0, rs.length > 1 ? FILTER_SPLIT_ROOTS : 0)
+      const solo = await Promise.all(each.map(r => planFor([r])))
+      each.forEach((r, i) => { if (!admit([r], solo[i])) skipped.budget++ })
+      skipped.budget += rs.length - each.length
+    }
+    const rows: Row[] = []
+    let variant: string | undefined
+    for (const a of admitted) {
+      const got = await a.read
+      if (got === late) skipped.late += a.rs.length
+      else if (got instanceof Error) skipped.wide += a.rs.length
+      else { rows.push(...got); variant ??= a.variant; for (const r of a.rs) done.add(r.path) }
+    }
+    if (x.gate && skipped.late && !rows.length) x.gate.dead = true
+    const left = skipped.budget + skipped.wide + skipped.late
+    if (left) tr?.('interiors', 0, `skipped ${left}`)
+    return { rows, variant, done, skipped }
+  } finally {
+    if (timer != null) clearTimeout(timer)
   }
-  const capLevels = (q: Rect, r: { path: string }) => r.path === path ? q : { ...q, dHi: Math.min(q.dHi, q.dLo + FILTER_SUBDIV_LEVELS - 1) }
-  const planFor = (rs: { path: string; depth: number }[]) => {
-    const rects = rootRects(rs).map((q, i) => capLevels(q, rs[i])).map(q => maxDepth != null ? { ...q, dHi: Math.min(q.dHi, dP + maxDepth) } : q)
-    // Level-capped rects read the `path` sort alone: ~a group per level per root, so its worst case (a
-    // deep subtree's every level) can't happen, and planning `bysize` too doubled the span queries —
-    // D1 runs them in turn, and a diff's two sides' plans took seconds (`00241`: 15–17 s of spans).
-    // On the interval store there are no span queries (its plan reads footers it holds), and a big subtree's
-    // `path` plan touches most of its groups, so its interiors are planned as the unfiltered view plans them
-    // (`bysize` where cheaper).
-    const capped = x.idx.asOf == null && rs.every(r => r.path !== path)
-    return settle(planSubtree(env, date, x.idx, rects, rebasedThreshold(T, atten, rs[0].depth), undefined, x.nd(rs), x.smallRows, tr, capped, x.ivPlanRows))
-  }
-  const plans = await Promise.all(groups.map(planFor))
-  let room = x.groups
-  let roomRows = x.rows
-  const admitted: { rs: { path: string }[]; read: Promise<Row[] | typeof late | Error>; variant: string }[] = []
-  const admit = (rs: { path: string }[], pl: SubtreePlan | typeof late | Error): boolean => {
-    if (pl === late) skipped.late += rs.length
-    else if (pl instanceof Error) skipped.wide += rs.length
-    else if (pl.groups > room || pl.rows > roomRows) return false
-    else { room -= pl.groups; roomRows -= pl.rows; admitted.push({ rs, read: settle(pl.read(stop)), variant: pl.variant }) }
-    return true
-  }
-  // A depth's roots together over the budget: its heaviest `FILTER_SPLIT_ROOTS` planned one by one, each
-  // admitted if it fits (the lighter ones' rects can be most of a shared read).
-  const wide: { path: string; depth: number }[][] = []
-  plans.forEach((pl, i) => { if (!admit(groups[i], pl)) wide.push(groups[i]) })
-  for (const rs of wide) {
-    // Past the time budget no solo plan can land: none is started (each costs D1 span queries).
-    if (over) { skipped.late += rs.length; continue }
-    const each = rs.slice(0, rs.length > 1 ? FILTER_SPLIT_ROOTS : 0)
-    const solo = await Promise.all(each.map(r => planFor([r])))
-    each.forEach((r, i) => { if (!admit([r], solo[i])) skipped.budget++ })
-    skipped.budget += rs.length - each.length
-  }
-  const rows: Row[] = []
-  let variant: string | undefined
-  for (const a of admitted) {
-    const got = await a.read
-    if (got === late) skipped.late += a.rs.length
-    else if (got instanceof Error) skipped.wide += a.rs.length
-    else { rows.push(...got); variant ??= a.variant; for (const r of a.rs) done.add(r.path) }
-  }
-  if (timer != null) clearTimeout(timer)
-  if (x.gate && skipped.late && !rows.length) x.gate.dead = true
-  const left = skipped.budget + skipped.wide + skipped.late
-  if (left) tr?.('interiors', 0, `skipped ${left}`)
-  return { rows, variant, done, skipped }
 }
 
 /** A heavy literal's rollup at P nested on `date` (`rollupRead`, which draws it): every node known exactly, the
  *  paths answered, and what the budgets left unread. Null: nothing under P on `date`. */
+/** A nest's node totals: every node known on `date`, its matched bytes and objects (exact), a full `Agg` built only
+ *  for the nodes asked for (`get`: the drawn ones, a diff's lookups). A match-roots answer's forest is its every root
+ *  and every ancestor between it and the answered path (gcs's fleet-root `q=tokenizer`: ~250K nodes), and an `Agg`
+ *  each (two maps and nine fields) was ~460 B in Node (`bench/view-mem.ts`): 112 MB for nodes no view drew. Here a
+ *  node not asked for is its two numbers and its kind; `bo` reads them without building one. */
+export class Totals extends Map<string, Agg> {
+  private lite = new Map<string, number>()
+  private vals: number[] = []
+  /** `p` known at `b` bytes and `o` objects, a directory or not (`kind` 'dir', else unknown): held as numbers. */
+  addLite(p: string, b: number, o: number, dir: boolean): void {
+    this.lite.set(p, this.vals.length)
+    this.vals.push(b, o, dir ? 1 : 0)
+  }
+  /** `p`'s bytes and objects grown by `b` and `o`, wherever it is held. */
+  grow(p: string, b: number, o: number): void {
+    const i = this.lite.get(p)
+    if (i != null) { this.vals[i] += b; this.vals[i + 1] += o; return }
+    const a = super.get(p)!
+    a.b += b; a.o += o
+  }
+  /** `p`'s bytes and objects (zeros if unknown), without building its `Agg`. */
+  bo(p: string): { b: number; o: number } {
+    const i = this.lite.get(p)
+    if (i != null) return { b: this.vals[i], o: this.vals[i + 1] }
+    const a = super.get(p)
+    return { b: a?.b ?? 0, o: a?.o ?? 0 }
+  }
+  override get(p: string): Agg | undefined {
+    const i = this.lite.get(p)
+    if (i == null) return super.get(p)
+    const a = newAgg()
+    a.b = this.vals[i]; a.o = this.vals[i + 1]
+    if (this.vals[i + 2]) a.kind = 'dir'
+    this.lite.delete(p)
+    super.set(p, a)
+    return a
+  }
+  override has(p: string): boolean { return super.has(p) || this.lite.has(p) }
+  override set(p: string, a: Agg): this {
+    this.lite.delete(p)
+    return super.set(p, a)
+  }
+  override get size(): number { return super.size + this.lite.size }
+  override *keys(): MapIterator<string> {
+    yield* super.keys()
+    yield* this.lite.keys()
+  }
+  // Iterating the values would see only the `Agg`s built so far, never the numbers-only nodes: a caller walks the keys
+  // and asks `get` (each built then) or `bo` (none built).
+  override entries(): MapIterator<[string, Agg]> { throw new Error('Totals: iterate keys() and get/bo each') }
+  override values(): MapIterator<Agg> { throw new Error('Totals: iterate keys() and get/bo each') }
+  override forEach(_f: (a: Agg, p: string, m: Map<string, Agg>) => void): void { throw new Error('Totals: iterate keys() and get/bo each') }
+  override [Symbol.iterator](): MapIterator<[string, Agg]> { throw new Error('Totals: iterate keys() and get/bo each') }
+}
+
 export interface Nest {
   /** Every node known on `date`: its matched bytes and objects (exact), and its depth. */
-  exact: Map<string, Agg>
+  exact: Totals
   depthOf: Map<string, number>
   /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's every one). */
   kidsOf: Map<string, string[]>
@@ -1622,7 +1701,7 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
   const { date, path, dP, w, h, minArea, atten, maxDepth, isRoot, rollup, trace: tr } = o
   const t0 = performance.now()
   /** Every node known on `date`, its matched bytes and objects (exact), and its depth. */
-  const exact = new Map<string, Agg>()
+  const exact = new Totals()
   const depthOf = new Map<string, number>()
   /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's every one); a
    *  rollup's children holding roots on any scan (its fold count); the paths answered by match roots. */
@@ -1646,28 +1725,37 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
     rollupKids.set(dir, r.children)
     return tot
   }
-  /** `dir`'s match roots live on `date`, and every ancestor between `dir` and them (their sums). */
+  /** `dir`'s match roots live on `date`, and every ancestor between `dir` and them (their sums, held as numbers,
+   *  `Totals`). Children are listed (`kidsOf`) only under the nodes a view can draw — `dir`, and below it each node
+   *  over its level's threshold within `maxDepth` under a drawable parent, `draw`'s own test, so every drawn node's
+   *  list (and fold count) is whole; the rest of the forest is never walked. */
   const addRoots = (dir: string, hits: Hit[]) => {
     rootsDirs.add(dir)
     const D = scanAt(date)
     const fresh: string[] = []
-    const node = (p: string, d: number, dir_: boolean): Agg => {
-      let a = exact.get(p)
-      if (!a) { exact.set(p, (a = newAgg())); depthOf.set(p, d); fresh.push(p); if (dir_) a.kind = 'dir' }
-      return a
+    const node = (p: string, d: number, dir_: boolean, size: number, n: number): void => {
+      if (exact.has(p)) { exact.grow(p, size, n); return }
+      exact.addLite(p, size, n, dir_); depthOf.set(p, d); fresh.push(p)
     }
     for (const hh of hits) {
       if (!(hh.vf <= D && D < hh.vt)) continue
       const size = Number(hh.size), n = Number(hh.n)
-      const a = node(hh.path, hh.depth, false)
-      a.b += size; a.o += n
-      for (let q = parentOf(hh.path), d = hh.depth - 1; q !== dir && q !== ''; q = parentOf(q), d--) {
-        const qa = node(q, d, true)
-        qa.b += size; qa.o += n
+      node(hh.path, hh.depth, false, size, n)
+      for (let q = parentOf(hh.path), d = hh.depth - 1; q !== dir && q !== ''; q = parentOf(q), d--) node(q, d, true, size, n)
+    }
+    const drawable = new Map<string, boolean>([[dir, true]])
+    const canDraw = (p: string): boolean => {
+      let v = drawable.get(p)
+      if (v == null) {
+        const d = depthOf.get(p)!
+        v = canDraw(parentOf(p)) && !(maxDepth != null && d > dP + maxDepth) && exact.bo(p).b >= thrAt(d)
+        drawable.set(p, v)
       }
+      return v
     }
     for (const p of fresh) {
       const par = parentOf(p)
+      if (!canDraw(par)) continue
       const ks = kidsOf.get(par)
       if (ks) ks.push(p); else kidsOf.set(par, [p])
     }
@@ -1698,46 +1786,49 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
     let timer: ReturnType<typeof setTimeout> | null = null
     let over = false
     const expired = new Promise<typeof late>(r => { timer = setTimeout(() => { over = true; r(late) }, ms) })
-    let frontier = (kidsOf.get(path) ?? []).filter(wants)
-    while (frontier.length) {
-      // Heaviest first; a path the diff's other side read (`nestForce`) whatever the budget (it is held).
-      frontier.sort((p, q) => exact.get(q)!.b - exact.get(p)!.b || (p < q ? -1 : p > q ? 1 : 0))
-      const take: string[] = []
-      for (const p of frontier) {
-        if (force?.has(p)) take.push(p)
-        else if (reads < (o.reads ?? FILTER_NEST_READS)) { take.push(p); reads++ }
-        else skipped.budget++
-      }
-      const got = new Map<string, Found | null>()
-      let i = 0
-      const worker = async () => {
-        while (i < take.length) {
-          const p = take[i++]
-          if (over) { skipped.late++; continue }
-          const ho: HitOpts = force?.has(p) ? {} : { maxRows: Math.max(0, rowsLeft) }
-          const f = fetch(p, ho)
-          f.catch(() => {})
-          const r = await Promise.race([f, expired])
-          if (r === late) { skipped.late++; continue }
-          if (ho.over) { skipped.budget++; continue }
-          // A roots answer costs its roots (decoded once, its forest built per view); a rollup its few cells.
-          if (r?.hits) rowsLeft -= r.hits.length
-          got.set(p, r)
+    try {
+      let frontier = (kidsOf.get(path) ?? []).filter(wants)
+      while (frontier.length) {
+        // Heaviest first; a path the diff's other side read (`nestForce`) whatever the budget (it is held).
+        frontier.sort((p, q) => exact.get(q)!.b - exact.get(p)!.b || (p < q ? -1 : p > q ? 1 : 0))
+        const take: string[] = []
+        for (const p of frontier) {
+          if (force?.has(p)) take.push(p)
+          else if (reads < (o.reads ?? FILTER_NEST_READS)) { take.push(p); reads++ }
+          else skipped.budget++
         }
+        const got = new Map<string, Found | null>()
+        let i = 0
+        const worker = async () => {
+          while (i < take.length) {
+            const p = take[i++]
+            if (over) { skipped.late++; continue }
+            const ho: HitOpts = force?.has(p) ? {} : { maxRows: Math.max(0, rowsLeft) }
+            const f = fetch(p, ho)
+            f.catch(() => {})
+            const r = await Promise.race([f, expired])
+            if (r === late) { skipped.late++; continue }
+            if (ho.over) { skipped.budget++; continue }
+            // A roots answer costs its roots (decoded once, its forest built per view); a rollup its few cells.
+            if (r?.hits) rowsLeft -= r.hits.length
+            got.set(p, r)
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(NEST_PAR, take.length) }, worker))
+        const next: string[] = []
+        for (const p of take) {
+          const f = got.get(p)
+          // Declined (the path holds the literal under the hex-run rule) or not exact on this scan: one tile.
+          if (!f || !covers(f, [date])) continue
+          fetched.add(p)
+          if (f.rollup) next.push(...(addRollup(p, f.rollup, depthOf.get(p)!), kidsOf.get(p)!.filter(wants)))
+          else addRoots(p, f.hits)
+        }
+        frontier = next
       }
-      await Promise.all(Array.from({ length: Math.min(NEST_PAR, take.length) }, worker))
-      const next: string[] = []
-      for (const p of take) {
-        const f = got.get(p)
-        // Declined (the path holds the literal under the hex-run rule) or not exact on this scan: one tile.
-        if (!f || !covers(f, [date])) continue
-        fetched.add(p)
-        if (f.rollup) next.push(...(addRollup(p, f.rollup, depthOf.get(p)!), kidsOf.get(p)!.filter(wants)))
-        else addRoots(p, f.hits)
-      }
-      frontier = next
+    } finally {
+      if (timer != null) clearTimeout(timer)
     }
-    if (timer != null) clearTimeout(timer)
     tr?.('nest', performance.now() - t0, `${fetched.size - 1} read, ${skipped.budget + skipped.late} left`)
   }
   return { exact, depthOf, kidsOf, rollupKids, rootsDirs, fetched, skipped, rowsLeft, total, T, thrAt }
@@ -1776,6 +1867,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   region: (T: number) => Promise<IndexHandle>
   smallRows: number
   ivPlanRows: number
+  cov: Coverage
 }): Promise<Read | null> {
   const { date, path, w, h, minArea, atten, query, maxDepth } = o
   const { dP, trace: tr } = x
@@ -1878,22 +1970,18 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
     if (f > 0) foldedOf.set(dir, f)
   }
   if (!foldedOf.has(path)) foldedOf.set(path, 0)
-  const matched = [...rootSet].map(p => [p, exact.get(p)!] as const).map(([p, a]) => ({ path: p, b: a.b, o: a.o })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
+  const matched = [...rootSet].map(p => ({ path: p, ...exact.bo(p) })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
   // The drawn match roots: their own rows (kind, ages, classes, owners — the whole root is matched) by point
   // lookups, heaviest first, within `FILTER_DETAILS_MS`; never on the first paint.
   const want = matched.filter(m => kept.has(m.path)).slice(0, ROOT_DETAILS)
   if (want.length && !o.firstPaint && !(maxDepth != null && maxDepth <= 0)) {
-    const asks = new Set(want.map(m => `${depthOf.get(m.path)}\0${m.path}`))
-    const look = readAsks(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), r => asks.has(`${r.depth}\0${r.path}`), { maxGroups: 60 }).then(r => r.rows).catch(e => {
-      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-      tr?.('details', 0, 'too wide')
-      return [] as Row[]
-    })
-    const budget = Number(env.FILTER_DETAILS_MS) || Infinity
+    const look = readDetails(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), { maxGroups: 60, tr }).then(d => d.rows)
+    const budget = o.detailsWait ?? filterDetailsMs(env)
     const late = Symbol('late')
-    const rows = budget === Infinity ? await look : await Promise.race([look, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(v => {
+    const rows = budget === Infinity ? await look : await within(look, budget, late).then(v => {
       if (v !== late) return v
       tr?.('details', performance.now() - t0, 'late')
+      if (budget > 0) x.cov.detailsLate = true
       look.catch(() => {})
       return [] as Row[]
     })
@@ -1915,6 +2003,10 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
     rootAll: x.rootAll, rootAgg: total, kept, aggDepth, foldedOf,
     threshold: T, thrAt, tier: 'rollup', idx: x.idx, truncated: false,
     matches: matched.map(m => m.path).sort(), matched: matched.map(m => ({ path: m.path, b: Math.round(m.b), o: Math.round(m.o) })),
+    // `n`: the rollup's root rows under P over every scan (every version of every owner slice, closed ones too), not
+    // this scan's live match roots; a child answered by its roots (`matchLists`) counts those instead, so a heavy
+    // literal's fleet-root `n` exceeds the sum of its buckets' wherever some bucket is light (gcs 10-24, `checkpoint`:
+    // 191,988 at the root, 185,709 over the six buckets; `.parquet`, every bucket heavy, equal). Definitional, not drift.
     matchCount: { n: rollup.rows ?? matched.length, b: Math.round(total.b), o: Math.round(total.o) },
     rollup: { children: rollup.children, kept: rollup.kept, rows: rollup.rows, ...(rollup.bucketsOnly ? { bucketsOnly: true as const } : {}), ...(rollup.scopedBelow ? { scopedBelow: true as const } : {}) },
     exact, complete, nested: insideDone.size || absent.size ? new Set([...fetched, ...insideDone, ...absent]) : fetched,
@@ -1963,8 +2055,14 @@ export const FILTER_PHASE2_ROWS = 1 << 19
 /** …a depth's roots over that budget together are planned one by one, its heaviest this many. */
 export const FILTER_SPLIT_ROOTS = 4
 /** …within this many ms (`FILTER_PHASE2_MS` overrides): a read still running then is dropped. With the
- *  root details' wait past it (`FILTER_DETAILS_MS`, dev 300) and the build, a full view lands in ~2 s. */
+ *  root details' wait past it (`FILTER_DETAILS_MS`) and the build, a full view lands in ~2 s. */
 export const FILTER_PHASE2_MS = 1500
+/** ms a static filter view's match-root detail lookups may run past phase 2 (`FILTER_DETAILS_MS` overrides;
+ *  `Infinity` waits until they land), then it answers without them (`detailsLate`: kept briefly, upgraded). A default,
+ *  not per-deployment config: unbounded, gcs prod's fleet-root `q=tokenizer` view ran out of memory (1102) on 8 of 10
+ *  scans (2026-10-29) while its dev, which set 300, rendered all 10; cw, hf and r2 had it unset too. */
+export const FILTER_DETAILS_MS = 300
+export const filterDetailsMs = (env: { FILTER_DETAILS_MS?: string }): number => Number(env.FILTER_DETAILS_MS) || FILTER_DETAILS_MS
 /** A heavy literal's rollup view nests at most this many static answers (`rollupRead`), `NEST_PAR` at a
  *  time: each is a few ranged GETs per drill tier (an index span, a data span), held per isolate after. */
 export const FILTER_NEST_READS = 48
@@ -2067,6 +2165,33 @@ const ROOT_DETAILS = 48
  *  ~20 groups to answer after phase 2 had already given up on them. */
 const DETAIL_GROUPS = 16
 
+/** The match roots' own rows (`readAsks`), `want` heaviest first: a lookup over `maxGroups` row groups is
+ *  retried on the heavier half, then quarter, …, so the heaviest roots keep their kind, ages and classes where all
+ *  of them at once span too many groups (gcs 10-27T1442, `q=safetensors`: 48 roots, none decorated). A plan over
+ *  budget fails before reading any group, so each retry costs span queries only. */
+async function readDetails(h: IndexHandle, want: { depth: number; path: string }[], o: { maxGroups: number; stop?: () => boolean; tr?: Trace }): Promise<{ rows: Row[]; cut: boolean }> {
+  for (let n = want.length; n > 0; n >>= 1) {
+    const asks = want.slice(0, n)
+    const keys = new Set(asks.map(a => `${a.depth}\0${a.path}`))
+    try {
+      return { rows: (await readAsks(h, asks, r => keys.has(`${r.depth}\0${r.path}`), { maxGroups: o.maxGroups, stop: o.stop, rememberWide: true })).rows, cut: n < want.length }
+    } catch (e) {
+      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
+      o.tr?.('details', 0, `too wide at ${n}`)
+    }
+  }
+  return { rows: [], cut: true }
+}
+
+/** `p`, or `late` once `ms` pass, the timer cleared as soon as either settles. A timer set in a view's own scope held
+ *  that scope (V8 shares one context across a function's closures) for its whole budget after the view was built:
+ *  gcs's fleet-root `q=tokenizer` view kept its 171K-root forest (`exact`, `kidsOf`, `depthOf`; ~160 MB in Node) for
+ *  the details' 10 s in each upgrade, beside the next render's — past the isolate's memory (1102). */
+function within<T, L>(p: Promise<T>, ms: number, late: L): Promise<T | L> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  return Promise.race([p, new Promise<L>(r => { timer = setTimeout(() => r(late), ms) })]).finally(() => { if (timer != null) clearTimeout(timer) })
+}
+
 /** `xs` in code-unit order: itself when it already is (a static literal's ~80K roots are), else a sorted copy. */
 function sortedOnce(xs: string[]): string[] {
   for (let i = 1; i < xs.length; i++) if (xs[i - 1] > xs[i]) return [...xs].sort()
@@ -2130,7 +2255,14 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
       if (pv) node.pv = pv
     }
     const childPaths = kidsOf.get(p) ?? []
-    if (!childPaths.length) return node
+    if (!childPaths.length) {
+      // The view's own folder with children but none over the threshold (a flat folder of many small objects) is
+      // drawn as one `(other)`, never as nothing; a frontier node below it, or a root standing for no children (a
+      // filter's lone remaining object), is a leaf cell.
+      const f = p === path && node.k === 'dir' ? a.nc ?? foldedOf.get(p) ?? 0 : 0
+      if (f > 0) node.c = [{ ...nodeOf('(other)', subtract(a, [])), f } as ViewNode]
+      return node
+    }
     const kids = childPaths
       .map(cp => build(cp, kept.get(cp)!))
       .sort((x, y) => y.b - x.b)
@@ -2180,6 +2312,14 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   /** The walk's lookup budgets, `LOOKUP_CAP` and (filtered) `FILTER_WALK_MS` by default (tests). */
   lookupCap?: number
   walkMs?: number
+  /** …by lazy descent over the interval store instead (`buildDiffDescent`): the route sets it with `DIFF_DESCENT`. Its
+   *  planner hands a busy, broad P to the as-of walk (`HandOff`). */
+  descent?: boolean
+  /** With `descent`: never hand off (tests of the descent itself). */
+  noHandOff?: boolean
+  /** With `descent`: its running-cost budgets (`DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS` by default; tests). */
+  descentBudgetMs?: number
+  descentBudgetRows?: number
 }
 
 export interface DiffRow {
@@ -2199,6 +2339,66 @@ export interface DiffRow {
   l?: 1 | 2
 }
 
+/** A diff's rows cut to `top` (every reader's tail): every expanded row (the skeleton), then the changed leaf rows by
+ *  |Δ|, at most `top` of them, and each expanded row's (and the root's, `root`: the diff's totals) `(other)` derived
+ *  from the invariant: its own bytes and objects less its drawn children's (kept, or unchanged: the renderer draws
+ *  those as filler), per side, clamped at 0. So an expanded row's children and `(other)` sum to it whatever left a
+ *  child out — the cut, a floor, a lookup budget, a skipped read. `(other)` rows are always kept (one per expanded row,
+ *  not counted in `top`); an unchanged one is left out (filler, as before). `cut`: leaves were cut.
+ *  A scan's rows are hierarchical, so this is the walk's own `(other)` plus the cut leaves wherever the walk read them
+ *  all. `additive` false (a filtered diff: a parent's totals are its matched bytes, not its children's sum): the walk's
+ *  own `(other)` plus the cut leaves instead. */
+export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: number; oa: number; ob: number }, additive = true): { rows: DiffRow[]; cut: boolean } {
+  const isOther = (r: DiffRow) => r.p === '(other)' || r.p.endsWith('/(other)')
+  const parentOf = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
+  const skeleton = rows.filter(r => r.x)
+  const leaves = rows.filter(r => !r.x && !isOther(r) && r.s !== 'unchanged').sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const kept = leaves.slice(0, top)
+  type T = { a: number; b: number; oa: number; ob: number }
+  const zero = (): T => ({ a: 0, b: 0, oa: 0, ob: 0 })
+  const add = (t: T, r: T) => { t.a += r.a; t.b += r.b; t.oa += r.oa; t.ob += r.ob }
+  // The walk's own `(other)`s, plus the leaves cut.
+  const fold = new Map<string, T>()
+  for (const r of [...rows.filter(isOther), ...leaves.slice(top)]) {
+    const q = parentOf(r.p)
+    const t = fold.get(q) ?? zero()
+    add(t, r)
+    fold.set(q, t)
+  }
+  // The invariant's: each expanded row less its drawn children (kept, or unchanged: filler).
+  const drawn = new Map<string, T>()
+  for (const r of [...skeleton, ...kept, ...rows.filter(r => !r.x && !isOther(r) && r.s === 'unchanged')]) {
+    const q = parentOf(r.p)
+    const t = drawn.get(q) ?? zero()
+    add(t, r)
+    drawn.set(q, t)
+  }
+  const others: DiffRow[] = []
+  // Every expanded row and the root, and any other parent the walk gave an `(other)` (a filtered diff's match root).
+  // The root only when it was expanded (a drawn child, or the walk's own `(other)`), as every other parent.
+  const pars: { p: string; d: number; a: number; b: number; oa: number; ob: number; own?: true }[] = [...(drawn.has('') || fold.has('') ? [{ p: '', d: 0, ...root }] : []), ...skeleton]
+  const known = new Set(pars.map(x => x.p))
+  for (const r of rows.filter(isOther)) {
+    const q = parentOf(r.p)
+    if (!known.has(q)) { known.add(q); pars.push({ p: q, d: r.d - 1, a: 0, b: 0, oa: 0, ob: 0, own: true }) }
+  }
+  for (const par of pars) {
+    const f = fold.get(par.p) ?? zero()
+    const t = drawn.get(par.p) ?? zero()
+    const o = additive && !par.own
+      ? { a: Math.max(0, par.a - t.a), b: Math.max(0, par.b - t.b), oa: Math.max(0, par.oa - t.oa), ob: Math.max(0, par.ob - t.ob) }
+      : f
+    // Zero-byte objects count too: an `(other)` of objects alone (no bytes either side) is kept when they differ.
+    const s: DiffRow['s'] = !o.a && !o.b
+      ? (o.oa === o.ob ? 'unchanged' : !o.oa ? 'added' : !o.ob ? 'removed' : 'changed')
+      : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
+    if (s === 'unchanged') continue
+    others.push({ p: par.p === '' ? '(other)' : `${par.p}/(other)`, d: par.d + 1, k: 'dir', s, ...o })
+  }
+  const tail = [...kept, ...others].sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  return { rows: [...skeleton, ...tail], cut: leaves.length > top }
+}
+
 export interface Diff {
   rows: DiffRow[]
   total_a: number
@@ -2210,6 +2410,8 @@ export interface Diff {
   threshold: number
   tier: string
   lookups: number
+  /** Directories a budgeted reader (the descent, at `top`) left unexpanded, each drawn as a leaf: cut, not complete. */
+  expansions_skipped?: number
   /** The lookup budget ran out: names one side drew that the other side's lookup didn't answer are folded into
    *  their parent's `(other)` on both sides (never drawn one-sided at 0). */
   lookups_capped: boolean
@@ -2233,7 +2435,7 @@ export interface Diff {
   searchLate?: true
 }
 
-const LOOKUP_CAP = 240
+export const LOOKUP_CAP = 240
 /** A filtered diff's one-sided lookups run this long, at most (each level's are one batched read a side). */
 export const FILTER_WALK_MS = 800
 /** …and its two sides' phase 2 this long (each; they run at once). */
@@ -2266,6 +2468,16 @@ const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null
  * `(other)` is parent − Σ named on each side, so its Δ is the sub-floor
  * churn, truthfully. */
 export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
+  if (o.descent) {
+    const { buildDiffDescent, HandOff } = await import('./diffDescent.js')
+    try {
+      return await buildDiffDescent(env0, { from: o.from, to: o.to, path: o.path, w: o.w, h: o.h, minArea: o.minArea, atten: o.atten, top: o.top, ...(o.depth != null ? { depth: o.depth } : {}), ...(o.trace ? { trace: o.trace } : {}), ...(o.noHandOff ? { noHandOff: true } : {}), ...(o.threshold !== undefined ? { threshold: o.threshold } : {}), ...(o.descentBudgetMs !== undefined ? { budgetMs: o.descentBudgetMs } : {}), ...(o.descentBudgetRows !== undefined ? { budgetRows: o.descentBudgetRows } : {}) })
+    } catch (e) {
+      // The planner (a busy, broad P) or the budget (a deep, busy one) declined: the as-of walk, as it is (`tier` says
+      // which answered, Server-Timing `handoff` which declined).
+      if (!(e instanceof HandOff)) throw e
+    }
+  }
   const env = sliced(asOfScans(env0, [o.from, o.to]), o)
   const { from, to, path, lens, owner, query } = o
   const dP = path === '' ? 0 : path.split('/').length
@@ -2293,12 +2505,13 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // floor: the match roots alone (phase 1, `maxDepth: 0` — the static index's are held per isolate) say
   // each side's floor, so both forests are read once, at the shared one. (Reading both first and then
   // re-reading the lighter side at the shared floor paid that side's phase 2 twice.)
-  let floor: number | undefined
+  // A union root's member diff draws at the union's threshold (`o.threshold`), filtered or not.
+  let floor: number | undefined = query ? o.threshold : undefined
   // A diff draws its roots' kinds only (no ages, no classes): the lookups that land by phase 2's end are
-  // taken, none waited for (with a deployment's finite `FILTER_DETAILS_MS`; unset waits, as views do).
+  // taken, none waited for (unless `FILTER_DETAILS_MS` is `Infinity`: then it waits, as views do).
   // Its phase 2 runs both sides at once, then the walk's lookups (`FILTER_WALK_MS`): a smaller share each
   // (`o.phase2Ms`, a background full run's, overrides).
-  const wait = { ...(Number(env.FILTER_DETAILS_MS) ? { detailsWait: 0 } : {}), phase2Ms: o.phase2Ms ?? Math.min(Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS, FILTER_DIFF_PHASE2_MS) }
+  const wait = { ...(filterDetailsMs(env) !== Infinity ? { detailsWait: 0 } : {}), phase2Ms: o.phase2Ms ?? Math.min(Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS, FILTER_DIFF_PHASE2_MS) }
   // Every read of this diff shares one phase-2 gate: a side whose round read nothing in time stops the
   // re-read at the shared floor from paying its budget again.
   const gate: Phase2Gate = o.phase2Gate ?? { dead: false }
@@ -2583,9 +2796,11 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       const restB = newAgg()
       restB.b = Math.max(0, (b?.b ?? 0) - sum.b.b)
       restB.o = Math.max(0, (b?.o ?? 0) - sum.b.o)
-      if (restA.b > 0 || restB.b > 0) {
+      // Zero-byte objects count too (an `(other)` of objects alone), as the tail's invariant (`capDiffRows`).
+      const has = (r: Agg) => r.b > 0 || r.o > 0
+      if (has(restA) || has(restB)) {
         const key = p === path ? '(other)' : `${rel(p)}/(other)`
-        emit(key, d - dP + 1, restA.b > 0 ? restA : null, restB.b > 0 ? restB : null, false)
+        emit(key, d - dP + 1, has(restA) ? restA : null, has(restB) ? restB : null, false)
       }
     }
     level = next
@@ -2595,15 +2810,12 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // the top-|Δ| changed frontier rows; unchanged frontier rows are inferred
   // as filler by the renderer.
   tr?.('walk', performance.now() - walkStart)
-  const skeleton = rows.filter(r => r.x)
-  const frontier = rows
-    .filter(r => !r.x && r.s !== 'unchanged')
-    .sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const capped0 = capDiffRows(rows, o.top, { a: totals.total_a, b: totals.total_b, oa: totals.objects_a, ob: totals.objects_b }, !query)
   return {
-    rows: [...skeleton, ...frontier.slice(0, o.top)],
+    rows: capped0.rows,
     ...totals,
     expansions,
-    truncated: frontier.length > o.top,
+    truncated: capped0.cut,
     lookups,
     lookups_capped: capped,
     ...(late ? { lookups_late: true as const } : {}),

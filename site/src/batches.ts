@@ -63,7 +63,7 @@ export async function assignInBatches<T, A>(
  *  (and is reviewed) as the one batch it is. `stage` / `merge` are the two API calls. */
 export async function stageInBatches<T>(
   prefixes: readonly T[],
-  stage: (part: T[]) => Promise<{ plan_id: number; batch_id: number | null }>,
+  stage: (part: T[]) => Promise<{ plan_id: number | null; batch_id: number | null }>,
   merge: (planId: number, into: number, ids: number[]) => Promise<unknown>,
   progress: (done: number, total: number) => void = () => {},
 ): Promise<{ plan_id: number | null; batch_id: number | null; batches: number }> {
@@ -72,7 +72,7 @@ export async function stageInBatches<T>(
   let done = 0
   for (const part of chunks(prefixes, STAGE_CHUNK)) {
     const r = await stage(part)
-    planId = r.plan_id
+    planId = r.plan_id ?? planId
     if (r.batch_id != null) ids.push(r.batch_id)
     done += part.length
     progress(done, prefixes.length)
@@ -83,7 +83,8 @@ export async function stageInBatches<T>(
 
 /** One `/api/plans/stage` answer (`plans.ts` `StageResult`). */
 export interface Staged {
-  plan_id: number
+  /** null: nothing staged and no plan open. */
+  plan_id: number | null
   /** null: nothing new staged, so no batch. */
   batch_id: number | null
   staged: string[]
@@ -91,6 +92,8 @@ export interface Staged {
   staged_objects?: string[]
   covered: string[]
   absorbed: string[]
+  /** Refused: nothing under them at the newest scan (absent: none). */
+  gone?: string[]
   as_of: string | null
 }
 
@@ -116,10 +119,11 @@ export async function stageMany(
     async part => { const x = await post<Staged>('/api/plans/stage', 'POST', stageBody(part, note, as_of)); all.push(x); return x },
     (planId, into, ids) => post(`/api/plans/${planId}/batches/merge`, 'POST', { into, ids }), progress)
   const objects = all.flatMap(x => x.staged_objects ?? [])
+  const gone = all.flatMap(x => x.gone ?? [])
   return {
-    plan_id: r.plan_id ?? all[0]?.plan_id, batch_id: r.batch_id ?? all[0]?.batch_id,
+    plan_id: r.plan_id ?? all.find(x => x.plan_id != null)?.plan_id ?? null, batch_id: r.batch_id ?? all[0]?.batch_id,
     staged: all.flatMap(x => x.staged), ...(objects.length ? { staged_objects: objects } : {}),
-    covered: all.flatMap(x => x.covered), absorbed: all.flatMap(x => x.absorbed), as_of: all[0]?.as_of ?? null,
+    covered: all.flatMap(x => x.covered), absorbed: all.flatMap(x => x.absorbed), ...(gone.length ? { gone } : {}), as_of: all[0]?.as_of ?? null,
   }
 }
 

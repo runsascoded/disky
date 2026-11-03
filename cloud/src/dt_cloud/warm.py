@@ -26,11 +26,15 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from http.client import HTTPException
 
 WIDTHS = (512, 1280, 1536, 1792, 1920)
 SPANS = (1, 3, 7, 14, 30)
 # Every request carries it: Cloudflare bans urllib's default User-Agent (error 1010, a 403)
 UA = "gcs-usage-warm/1.0"
+#: Refetches after a transport error before a request fails: a body cut short of its Content-Length (the site's Worker
+#: cut off mid-response) or a dropped connection (cw's 10-23T1801 warm-up: 989/990, one `RemoteDisconnected`).
+TRANSPORT_RETRIES = 2
 
 
 def env_paths() -> tuple[str, ...] | None:
@@ -120,14 +124,20 @@ def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, tim
     def one(path: str) -> tuple[str, int, float, str]:
         req = urllib.request.Request(url.rstrip("/") + path, headers={**headers, "User-Agent": UA})
         t0 = time.time()
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                r.read()
-                status, tier = r.status, r.headers.get("x-cache", "")
-        except urllib.error.HTTPError as e:
-            status, tier = e.code, ""
-        except Exception as e:  # noqa: BLE001 — a warm-up must never fail the job; the miss is just cold for the first viewer
-            status, tier = 0, type(e).__name__
+        for _ in range(TRANSPORT_RETRIES + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    r.read()
+                    status, tier = r.status, r.headers.get("x-cache", "")
+                break
+            except urllib.error.HTTPError as e:
+                status, tier = e.code, ""
+                break
+            except (HTTPException, OSError) as e:  # `IncompleteRead`, `RemoteDisconnected`, resets, `URLError`, timeouts
+                status, tier = 0, type(e).__name__
+            except Exception as e:  # noqa: BLE001 — a warm-up must never fail the job; the miss is just cold for the first viewer
+                status, tier = 0, type(e).__name__
+                break
         secs = time.time() - t0
         print(f"warm: {status} {secs:5.1f}s {tier:4s} {path}", file=sys.stderr)
         return path, status, secs, tier

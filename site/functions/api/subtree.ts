@@ -20,7 +20,7 @@ import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, type ViewNode } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
@@ -168,11 +168,11 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     }
     // The worker's answer: the view's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
-    const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; trace?: typeof st.trace } = {}) => {
+    const render = async (o: { phase2Ms?: number; detailsWait?: number; detailGroups?: number; searchLimits?: SearchLimits; trace?: typeof st.trace } = {}) => {
       // A broken interval-store run is cut out and the view read again: a scan before it answers, its own scans are a
       // 503 + `Retry-After` (`ivRefusal`), never read per-scan.
-      const view = await ivRetry(() => buildView(ctx.env, { date, path, w, h, minArea, atten, lens, owner, by, maxDepth: depth, query, classes, firstPaint: !!query && !full, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
-      // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
+      const view = await ivRetry(() => buildView(ctx.env, { date, path, w, h, minArea, atten, lens, owner, by, maxDepth: depth, query, classes, firstPaint: !!query && !full, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.detailsWait ? { detailsWait: o.detailsWait } : {}), ...(o.detailGroups ? { detailGroups: o.detailGroups } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
+      // Cut by a time budget (phase 2's, the search's or the roots' details'): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
       const keep = keepFor(view)
       const body = JSON.stringify({
         date,
@@ -197,7 +197,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     // A partial answer (phase 2 cut by its time budget) schedules the full one in the background, which
     // replaces it in the colo cache (`upgradePartial`): on the miss that produced it, and on a partial hit.
     const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
+      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, detailsWait: UPGRADE_DETAILS_MS, detailGroups: UPGRADE_DETAIL_GROUPS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
       return res
     }
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))

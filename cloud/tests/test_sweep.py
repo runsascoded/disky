@@ -1,4 +1,4 @@
-"""Plan-driven deletion engine: plan model, versioning guard, manifest builder, executor."""
+"""Plan-driven deletion engine: plan model, manifest builder, executor."""
 from __future__ import annotations
 
 import datetime as dt
@@ -21,7 +21,6 @@ from dt_cloud.sweep import (
     prefix_free,
     purge_run,
     undo_run,
-    versioning_enabled,
 )
 
 BUCKET = "marin-us-east-02a"
@@ -62,20 +61,6 @@ def test_load_plan_normalizes(tmp_path: Path) -> None:
     )
 
 
-class _FakeS3:
-    def __init__(self, status: str | None) -> None:
-        self._status = status
-
-    def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803 (boto3 kwarg name)
-        return {"Status": self._status} if self._status else {}
-
-
-def test_versioning_guard() -> None:
-    assert versioning_enabled(_FakeS3("Enabled"), BUCKET) is True
-    assert versioning_enabled(_FakeS3("Suspended"), BUCKET) is False
-    assert versioning_enabled(_FakeS3(None), BUCKET) is False
-
-
 def _write_l2(path: Path, rows: list[tuple[str, int, int, str]]) -> None:
     """Write a minimal layer-2 parquet: (path, size, mtime, kind)."""
     tbl = pa.table({
@@ -83,6 +68,7 @@ def _write_l2(path: Path, rows: list[tuple[str, int, int, str]]) -> None:
         "size": pa.array([r[1] for r in rows], pa.int64()),
         "mtime": pa.array([r[2] for r in rows], pa.int64()),
         "kind": [r[3] for r in rows],
+        "version": [f'"{r[0]}"' if r[3] == "file" else None for r in rows],
     })
     pq.write_table(tbl, path)
 
@@ -118,7 +104,7 @@ def test_build_manifest_covers_staged_prefixes(tmp_path: Path) -> None:
         "as_of": {},
         "objects": 2,
         "bytes": 300,
-        "skipped_after_as_of": {"objects": 0, "bytes": 0},
+        "skipped_after_as_of": {"objects": 0, "bytes": 0, "new_objects": 0, "changed_objects": 0},
         "manifest": str(out / "manifest" / f"{BUCKET}.parquet"),
     }
     assert json.loads((out / "plan-summary.json").read_text()) == summary
@@ -150,7 +136,7 @@ def test_build_manifest_holds_back_what_changed_after_as_of(tmp_path: Path) -> N
         "as_of": {"marin/ckpt/": "2026-10-06"},
         "objects": 2,
         "bytes": 900,
-        "skipped_after_as_of": {"objects": 2, "bytes": 600},
+        "skipped_after_as_of": {"objects": 2, "bytes": 600, "new_objects": 1, "changed_objects": 1},
     }
 
 
@@ -191,6 +177,7 @@ class _FakeStore:
         chunk = keys[start:start + self._page]
         contents = [
             {"Key": k, "Size": self.objects[k][0],
+             "ETag": f'"{k}"',
              "LastModified": dt.datetime.fromtimestamp(self.objects[k][1], tz=dt.timezone.utc)}
             for k in chunk
         ]
@@ -210,6 +197,16 @@ class _FakeStore:
                 self.objects.pop(k, None)
                 deleted.append({"Key": k})
         return {"Deleted": deleted, "Errors": errors}
+
+    def delete_object(self, Bucket: str, Key: str, IfMatch: str) -> dict:  # noqa: N803
+        from botocore.exceptions import ClientError
+
+        assert IfMatch == f'"{Key}"'
+        self.delete_calls += 1
+        if Key in self._fail:
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "DeleteObject")
+        self.objects.pop(Key, None)
+        return {}
 
 
 def _run_with_manifest(tmp_path: Path) -> Path:
@@ -271,12 +268,19 @@ def test_execute_for_real_deletes_matched(tmp_path: Path) -> None:
                            "gone": 1, "overwritten": 1, "drift_new": 1}]
 
 
-def test_execute_for_real_refused_without_versioning(tmp_path: Path) -> None:
+@pytest.mark.parametrize("versioning", ["Enabled", "Suspended", None])
+def test_execute_for_real_needs_no_versioning(
+    tmp_path: Path,
+    versioning: str | None,
+) -> None:
     run = _run_with_manifest(tmp_path)
-    store = _FakeStore(_LIVE, versioning="Suspended")
-    with pytest.raises(SweepError, match="versioning"):
-        execute_plan(str(run), for_real=True, client=store)
-    assert store.delete_calls == 0
+    store = _FakeStore(_LIVE, versioning=versioning)
+    s = execute_plan(str(run), for_real=True, client=store)
+    assert {k: s[k] for k in _COUNTS} == _COUNTS
+    assert s["versioning_guard"] is False
+    assert store.delete_calls == 1
+    assert store.objects == {k: v for k, v in _LIVE.items() if k != "marin/ckpt/a"}
+    assert json.loads((run / "deleted-summary.json").read_text()) == s
 
 
 def test_execute_records_delete_failure(tmp_path: Path) -> None:
@@ -284,7 +288,45 @@ def test_execute_records_delete_failure(tmp_path: Path) -> None:
     store = _FakeStore(_LIVE, versioning="Enabled", fail_keys={"marin/ckpt/a"})
     s = execute_plan(str(run), for_real=True, client=store)
     assert (s["deleted_objects"], s["delete_failed"]) == (0, 1)
-    assert "marin/ckpt/a" in store.objects  # failed delete left it in place
+    assert store.objects == _LIVE
+    assert duckdb.connect().execute(
+        f"SELECT name, decision FROM read_parquet('{s['log_dir']}/part-00000.parquet') ORDER BY name"
+    ).fetchall() == [
+        ("marin/ckpt/a", "delete_failed"),
+        ("marin/ckpt/gone", "skipped_gone"),
+        ("marin/ckpt/sub/d", "skipped_overwritten"),
+    ]
+
+
+@pytest.mark.parametrize("has_preservation_sidecar", [True, False])
+def test_preserved_keys_keep_their_review_reason(
+    tmp_path: Path,
+    has_preservation_sidecar: bool,
+) -> None:
+    then, now = tmp_path / "then.parquet", tmp_path / "now.parquet"
+    _write_l2(then, [("p/unchanged", 7, 100, "file"), ("p/changed", 7, 100, "file")])
+    _write_l2(now, [("p/unchanged", 7, 100, "file"), ("p/changed", 7, 200, "file"), ("p/new", 7, 200, "file")])
+    out = tmp_path / "run"
+    build_manifest(
+        str(now), Plan(name="p", bucket=BUCKET, sweep=["p/"], as_of={"p/": "then"}),
+        str(out), date="now", l2_for=lambda _: str(then),
+    )
+    sidecar = out / "manifest" / f"{BUCKET}-preserved.parquet"
+    assert pq.read_table(sidecar).to_pylist() == [
+        {"name": "p/changed", "reason": "changed_since_review"},
+        {"name": "p/new", "reason": "new_since_review"},
+    ]
+    if not has_preservation_sidecar:
+        sidecar.unlink()
+    store = _FakeStore({"p/unchanged": (7, 100), "p/changed": (7, 200), "p/new": (7, 200), "p/after": (7, 300)})
+    result = execute_plan(str(out), for_real=True, client=store)
+    assert result["preserved_breakdown"] == (
+        {"new_since_review": 1, "changed_since_review": 1, "new_since_scan": 1, "unclassified": 0}
+        if has_preservation_sidecar else
+        {"new_since_review": 0, "changed_since_review": 0, "new_since_scan": 0, "unclassified": 3}
+    )
+    assert (result["deleted_objects"], result["drift_new"], result["delete_failed"]) == (1, 3, 0)
+    assert store.objects == {"p/changed": (7, 200), "p/new": (7, 200), "p/after": (7, 300)}
 
 
 class _FakeVersionedStore:
@@ -316,10 +358,15 @@ class _FakeVersionedStore:
         keys = sorted(k for k in self.versions if k.startswith(Prefix) and self._live(k))
         contents = [
             {"Key": k, "Size": self._live(k)["Size"],  # type: ignore[index]
+             "ETag": f'"{k}"',
              "LastModified": dt.datetime.fromtimestamp(self._live(k)["mtime"], tz=dt.timezone.utc)}  # type: ignore[index]
             for k in keys
         ]
         return {"Contents": contents, "IsTruncated": False}
+
+    def delete_object(self, Bucket: str, Key: str, IfMatch: str) -> dict:  # noqa: N803
+        assert IfMatch == f'"{Key}"'
+        return self.delete_objects(Bucket=Bucket, Delete={"Objects": [{"Key": Key}]})
 
     def list_object_versions(self, Bucket: str, Prefix: str = "",  # noqa: N803
                              KeyMarker: str | None = None, VersionIdMarker: str | None = None) -> dict:
@@ -390,22 +437,40 @@ def test_undo_dry_run_touches_nothing(tmp_path: Path) -> None:
     assert store.versions["marin/ckpt/a"] == before  # unchanged
 
 
-# --- versioning guard opt-out ---------------------------------------------
+def test_execute_cli_needs_no_versioning_permission(tmp_path: Path, monkeypatch) -> None:
+    from click.testing import CliRunner
 
+    from dt_cloud.cli import main
 
-def test_execute_for_real_without_versioning_guard(tmp_path: Path, capsys) -> None:
-    # versioning off, guard disabled: the deletes proceed, loudly, and the summary says so
+    class NoVersioningPermission(_FakeStore):
+        def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803
+            raise AssertionError("execution must not query bucket versioning")
+
     run = _run_with_manifest(tmp_path)
-    store = _FakeStore(_LIVE, versioning="Suspended")
-    s = execute_plan(str(run), for_real=True, client=store, require_versioning=False)
-    assert {k: s[k] for k in _COUNTS} == _COUNTS
-    assert s["versioning_guard"] is False
-    assert "marin/ckpt/a" not in store.objects
-    assert capsys.readouterr().err == "WARNING: versioning guard disabled — deletes are permanent (bucket marin-us-east-02a)\n"
-    assert json.loads((run / "deleted-summary.json").read_text())["versioning_guard"] is False
-    # the default path records the guard as on (and stays silent)
-    (tmp_path / "again").mkdir()
-    run2 = _run_with_manifest(tmp_path / "again")
-    s2 = execute_plan(str(run2), for_real=True, client=_FakeStore(_LIVE, versioning="Enabled"))
-    assert (s2["versioning_guard"], capsys.readouterr().err) == (True, "")
-    assert execute_plan(str(run2), for_real=False, client=_FakeStore(_LIVE, versioning=None))["versioning_guard"] is True
+    store = NoVersioningPermission(_LIVE)
+    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda: store)
+    result = CliRunner().invoke(main, ["plan-sweep", "execute", "--for-real", str(run)])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.stdout)
+    assert {k: summary[k] for k in _COUNTS} == _COUNTS
+    assert (summary["mode"], summary["versioning_guard"]) == ("real", False)
+    assert json.loads((run / "deleted-summary.json").read_text()) == summary
+    assert store.objects == {k: v for k, v in _LIVE.items() if k != "marin/ckpt/a"}
+
+
+def test_execute_cli_fails_on_per_object_delete_errors(tmp_path: Path, monkeypatch) -> None:
+    from click.testing import CliRunner
+
+    from dt_cloud.cli import main
+
+    run = _run_with_manifest(tmp_path)
+    store = _FakeStore(_LIVE, fail_keys={"marin/ckpt/a"})
+    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda: store)
+    result = CliRunner().invoke(main, ["plan-sweep", "execute", "--for-real", str(run)])
+    assert result.exit_code == 1, result.output
+    summary = json.loads(result.stdout)
+    assert {k: summary[k] for k in _COUNTS} == {
+        **_COUNTS, "deleted_objects": 0, "deleted_bytes": 0, "delete_failed": 1,
+    }
+    assert json.loads((run / "deleted-summary.json").read_text()) == summary
+    assert store.objects == _LIVE

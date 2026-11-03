@@ -82,7 +82,7 @@ export const EXEC_CAPS: Record<'plan-sweep' | 'sweep' | 'laptop', ExecCaps> = {
   // cw: one bucket per run; its run dirs live in the dispatch's GCS data
   // bucket, which its `/v1/files` (the R2 index store) doesn't serve.
   'plan-sweep': {
-    stop: true, stopHint: 'Cancel the Batch job: deletes already made are logged and recoverable; a re-dispatch re-lists and skips them.',
+    stop: true, stopHint: 'Cancel the Batch job: deletes already made may be permanent; a re-dispatch re-lists and skips missing objects.',
     undo: true, undoUnwindowed: true, purge: true, bucketCut: false, runFiles: false,
     startHint: 'once the job starts (a few minutes while Batch brings up the VM)',
   },

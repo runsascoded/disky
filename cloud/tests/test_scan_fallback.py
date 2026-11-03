@@ -4,9 +4,9 @@ A google-batch profile's generated executor config, run under a fake Slurm (`fix
 executor keeps a task SUBMITTED while the queue reports it pending, as nf-google does while Batch reports QUEUED /
 SCHEDULED; the local executor starts every task at once, so it can't be stuck). A task whose machine type matches
 `$FAKE_SLURM_STUCK` stays pending forever, like a job in a stocked-out pool: Nextflow's `maxSubmitAwait` cancels it
-(`scancel`, as nf-google deletes the Batch job) and the label's errorStrategy resubmits it on the next type. Every step
-is faked (`DT_SCAN_STEP_FAKE`); `DT_SCAN_STEP_FAIL=interval-store` makes a genuine failure on the fallback, which is not
-retried.
+(`scancel`, as nf-google deletes the Batch job) and the label's (or a source's own) errorStrategy resubmits it on the
+next type. Every step is faked (`DT_SCAN_STEP_FAKE`); `DT_SCAN_STEP_FAIL=interval-store` makes a genuine failure on the
+fallback, which is not retried.
 
 Skipped without a working `nextflow` (it needs Java ≤ 25: `NXF_JAVA_HOME`) or its nf-google plugin installed (the
 generated config pins it; the run is offline)."""
@@ -46,7 +46,7 @@ executor: {kind: google-batch, project: p, region: r1, image: img}
 work: gs://wb/nf
 data: gs://wb
 layout: {layer2: 'l2/{scan}/', snapshots: ''}
-sources: [s3://a]
+sources: [{uri: s3://a, machine: m-src, fallback: [m-src2], queue_timeout: 1}]
 machines:
   list: m-list
   small: m-small
@@ -61,12 +61,15 @@ def test_queued_task_falls_back_and_a_real_failure_does_not(tmp_path):
     prof = tmp_path / "fixture.yml"
     prof.write_text(PROFILE)
     launch = tmp_path / "launch"
-    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1"}
+    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1", "DISKY_LABELS": "app=disky,deployment=fixture"}
     assert H.head(prof, REPO / "job/nf", launch, dry_run=True, env=env) == 0
     # the generated timeout is the profile's (minutes); 3 s here, so the test doesn't wait two minutes
     cfg = (launch / "executor.config").read_text()
     assert cfg.count("'1m'") == 1
     (launch / "executor.config").write_text(cfg.replace("'1m'", "'3s'"))
+    params = (launch / "params.json").read_text()
+    assert params.count('"1m"') == 1
+    (launch / "params.json").write_text(params.replace('"1m"', '"3s"'))
     (launch / "test.config").write_text(
         f"workDir = '{tmp_path}/work'\n"
         "process.executor = 'slurm'\n"
@@ -78,13 +81,14 @@ def test_queued_task_falls_back_and_a_real_failure_does_not(tmp_path):
     e = {k: v for k, v in os.environ.items() if k not in ("SCAN_RUNS_PROFILE", "DT_SCAN_STEP_FAIL", "DISKY_LABELS")}
     e.update(PATH=os.pathsep.join([str(FAKE_SLURM), str(Path(sys.executable).parent), e["PATH"]]), PYTHONPATH=pypath,
              NXF_OFFLINE="true", NXF_ANSI_LOG="false", DT_SCAN_STEP_FAKE=str(marks), DT_SCAN_STEP_FAIL="interval-store",
-             FAKE_SLURM=str(q), FAKE_SLURM_STUCK="m-primary|m-fb1")
+             FAKE_SLURM=str(q), FAKE_SLURM_STUCK="m-primary|m-fb1|m-src")
     argv = H.nextflow_argv(REPO / "job/nf", launch, H.session_id("fixture", env["SNAP_ID"])) + ["-c", str(launch / "test.config")]
     r = subprocess.run(argv, cwd=launch, env=e, capture_output=True, text=True, timeout=600)
     assert r.returncode == 1, r.stdout + r.stderr
 
     # index and interval_store (both `big`) waited on the primary and the first fallback, each cancelled, then ran on the
-    # last fallback; the other labels' tasks ran on their own machines, once each
+    # last fallback; the source's list task waited on its machine, then ran on its fallback; the other labels' tasks ran
+    # on their own machines, once each
     assert sorted((q / "submitted").read_text().splitlines()) == [
         "index m-fb1 PD",
         "index m-fb2 R",
@@ -93,18 +97,22 @@ def test_queued_task_falls_back_and_a_real_failure_does_not(tmp_path):
         "interval_store m-fb1 PD",
         "interval_store m-fb2 R",
         "interval_store m-primary PD",
-        "list_source m-list R",
+        "list_source m-src PD",
+        "list_source m-src2 R",
     ]
     assert sorted((q / "cancelled").read_text().splitlines()) == [
-        "index m-fb1", "index m-primary", "interval_store m-fb1", "interval_store m-primary",
+        "index m-fb1", "index m-primary", "interval_store m-fb1", "interval_store m-primary", "list_source m-src",
     ]
     # interval-store's genuine failure on m-fb2 was not retried (submitted once there), and stopped the run before post
     assert sorted(marks.read_text().splitlines()) == ["index", "index-rows", "list s3://a"]
-    assert sorted(re.sub(r"^.*?(scan head: )", r"\1", line) for line in r.stdout.splitlines() if "scan head: " in line) == [
+    # each fallback's warning, from the run's log (Nextflow's console doesn't carry `log.warn` to stdout)
+    log = (launch / ".nextflow.log").read_text()
+    assert sorted(re.sub(r"^.*?(scan head: )", r"\1", line) for line in log.splitlines() if "scan head: " in line) == [
         "scan head: index queued 1 min on m-fb1; retrying on m-fb2 (the last: no queue timeout)",
         "scan head: index queued 1 min on m-primary; retrying on m-fb1",
         "scan head: interval_store queued 1 min on m-fb1; retrying on m-fb2 (the last: no queue timeout)",
         "scan head: interval_store queued 1 min on m-primary; retrying on m-fb1",
+        "scan head: list_source queued 3s on m-src; retrying on m-src2 (the last: no queue timeout)",
     ]
     # each queue timeout is a FAILED row (no exit) followed by its retry's row; the run's reported failure is the real one
     with (launch / "trace.tsv").open() as f:

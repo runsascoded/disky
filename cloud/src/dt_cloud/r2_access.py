@@ -8,9 +8,62 @@ import json
 import re
 from collections.abc import Callable
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
+from urllib.parse import quote
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+
+def collector_status(
+    account: str,
+    token: str,
+    bucket: str,
+    *,
+    fetch: Callable[[str], dict] | None = None,
+) -> dict:
+    """Read only the collector's state and its current run manifest; return no event payloads or object keys."""
+    if not re.fullmatch(r"[a-f0-9]{32}", account) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket):
+        raise ValueError("invalid Cloudflare account or archive bucket")
+    if not token:
+        raise ValueError("Cloudflare token must not be empty")
+
+    def read(key: str) -> dict:
+        if fetch is not None:
+            return fetch(key)
+        url = f"https://api.cloudflare.com/client/v4/accounts/{account}/r2/buckets/{bucket}/objects/{quote(key, safe='/')}"
+        request = Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urlopen(request, timeout=30) as response:
+                return json.load(response)
+        except HTTPError as error:
+            raise RuntimeError(f"archive read failed: HTTP {error.code}") from error
+
+    state = read("state.json")
+    if state["account"] != account or state["schema_version"] != 2:
+        raise ValueError("collector state must match the account and schema version 2")
+    scheduled = state["scheduled_time"]
+    run = state["run_id"]
+    if type(scheduled) is not int or scheduled < 0 or not re.fullmatch(r"[a-zA-Z0-9-]+", run):
+        raise ValueError("invalid collector run identity")
+    manifest = read(f"runs/{scheduled}/{run}/_SUCCESS.json")
+    if manifest["account"] != account or manifest["scheduled_time"] != scheduled or manifest["run_id"] != run:
+        raise ValueError("collector manifest does not match the published state")
+
+    def instant(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat().replace("+00:00", "Z")
+
+    runs = {entry["bucket"]: entry for entry in manifest["buckets"]}
+    return {
+        "account": account, "archive": bucket, "scheduled_time": instant(scheduled), "run_id": run,
+        "budget": manifest["budget"],
+        "buckets": [{
+            "bucket": name, "collected_through": instant(value["collected_through"]),
+            "active_windows": len(value["hours"]), "frozen_windows": len(value["frozen"]),
+            "gaps": [[instant(start), instant(end)] for start, end in value["gaps"]],
+            "waiting": runs[name]["waiting"], "error": runs[name]["error"],
+            "drained": [{**{key: hour[key] for key in ["hour", "phase", "events", "capture", "changed"]}, "pages": len(hour["pages"])} for hour in runs[name]["hours"]],
+        } for name, value in sorted(state["buckets"].items())],
+    }
 
 
 def _millis(value: str) -> int:

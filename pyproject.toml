@@ -68,6 +68,12 @@ r2 = "disk_tree.r2fs.R2FileSystem"
 [dependency-groups]
 dev = [
     "pytest",
+    "pytest-xdist>=3.6",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: the long tail (byte-identity sweeps, brute-force oracles); CI runs them, `scripts/remote-test` skips them unless `-a`",
 ]
 
 [tool.uv.workspace]

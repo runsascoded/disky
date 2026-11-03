@@ -60,8 +60,8 @@ describe('offered at once: idle, prefetching, listed, over the cap', () => {
   it('idle (nothing listed yet): the actions, enabled; no count', () => {
     expect(render(undefined)).toBe(`<span class="bulkbar">${ACTS}</span>`)
   })
-  it('prefetching (a hover started the listing): the same actions, and a quiet note', () => {
-    expect(render(undefined, { loading: true })).toBe(`<span class="bulkbar" aria-busy="true">${ACTS}<span class="bb-scope">listing the matches…</span></span>`)
+  it('prefetching (a hover started the listing): the same actions, and visible progress', () => {
+    expect(render(undefined, { loading: true })).toBe(`<span class="bulkbar" aria-busy="true">${ACTS}<span class="inline-loading" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span>Listing the matches…</span></span>`)
   })
   it('over the cap (gcs 10-09 `nemotron`): the count, the actions still enabled (the click says why, muted)', () => {
     const c = cover({ complete: false, items: [], roots: { n: 70_450, b: 718, o: 6_580_000 }, reason: overCapReason(70_390) })

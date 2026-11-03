@@ -246,7 +246,8 @@ def test_cli_dry_run_counts_rows_and_lists_files(monkeypatch):
     assert r.exit_code == 0, r.output
     assert sent == [
         f"SELECT COUNT(*) AS n FROM index_row_groups WHERE date = '{S1}' AND gen <> COALESCE("
-        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '');",
+        "(SELECT s.gen FROM index_schema s WHERE s.store = index_row_groups.store AND s.date = index_row_groups.date "
+        "AND s.variant = index_row_groups.variant), '');",
         "SELECT date, variant, dir FROM index_schema ORDER BY date, variant;",
     ]
     assert logged == [

@@ -14,6 +14,10 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 from functools import cache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .append_runner import Policy
 
 #: The binary counter's compaction level when a profile sets none (deployments set theirs explicitly; the examples do).
 #: Carries stop below level L, so a stack holds at most 2^L − 1 scans in carried runs, and a compaction into a new base
@@ -59,6 +63,22 @@ class Profile:
     #: single-task stage restarts from zero on each preemption, so spot's discount can cost more than it saves.
     standard_stages: tuple[str, ...] = ()
     append_tasks: int = 16
+    #: A backlog's scans in flight at once (`runs add -c`): each stage of a scan starts once the same stage of the scan
+    #: before it and its own previous stage are done, publishes in order (specs/static-backlog-pipeline.md); 1: one scan
+    #: at a time.
+    pipeline_depth: int = 1
+    #: The compaction's drill measurement over this many tasks (`static_merge compact -D`: the compaction's own and
+    #: helper Batch tasks on the `measure` stage's machine; specs/static-measure-fanout.md); 1: the compaction alone.
+    measure_tasks: int = 1
+    #: The compaction's base anchors' rollups over this many tasks (`static_merge compact -A`: the compaction's own and
+    #: helper Batch tasks on the `anchor-shard` stage's machine; specs/static-anchors-fanout.md); 1: the compaction alone.
+    anchor_tasks: int = 1
+    #: The compaction's drill fold over this many tasks (`static_merge compact -L`: the compaction's own and helper Batch
+    #: tasks on the `fold-shard` stage's machine, a job per wave; specs/static-fold-fanout.md); 1: the compaction alone.
+    fold_tasks: int = 1
+    #: A compaction's new generation's kept children per heavy directory (`static_merge compact -k`: its drill's and
+    #: anchors' `K`); None: the generation's. Runs appended after it follow the generation's `K`.
+    keep: int | None = None
     #: Whether each run also gets the heavy-term drilldown (`drill/`, `static_drill`): needs the base generation's `drill/`.
     drill: bool = False
     #: Where the drill's tasks save each step (`static_drill build -S`: a store root, a bare bucket name meaning `gs://`), so
@@ -76,10 +96,40 @@ class Profile:
     #: `none`): unbounded, the cascade carries at every level and never asks for a compaction (≈ log2(n) runs live after
     #: n scans). Unset: `COMPACT_LEVEL`, the documented fallback; the examples set theirs explicitly.
     compact_level: int | None = COMPACT_LEVEL
+    #: The compaction policy (`append_runner.Policy`; JSON `{"level": L}`, `{"every": "7d"}`, `{"every": "30s"}`,
+    #: `{"geometric": 1}` or `"none"`; specs/static-compaction.md): when set, it replaces `compact_level`, which is
+    #: shorthand for `{"level": L}`. `policy` is the one in force.
+    compact: Policy | None = None
+    #: Which copy the builder reads a generation's base and runs from in a merge and a compaction (`append_runner.READ_FROM`):
+    #: `gcs` (the data bucket, in place) or `r2` (the R2 copy, mirrored locally; it must hold the builder's inputs).
+    read_from: str = "gcs"
+    #: Key ranges, then served sorts, the interval store's compaction folds at a time (`compact -j`: cursors of one DuckDB
+    #: database sharing its memory and threads). The served sorts are each ~35 min at gcs's size, so 1 runs them in series.
+    compact_jobs: int = 1
+    #: The static store's compaction: its drill fold's chunks folded at a time (`static_merge compact -j`: cursors of one
+    #: DuckDB database sharing its `-M` and `-p`). 0: sized from the compact machine (`static_runner.fold_jobs`).
+    fold_jobs: int = 0
+    #: Env var → Secret Manager secret name, for the merge and compaction jobs to record their runs on `/scans` with
+    #: (`maint_runs`): `{"CLOUDFLARE_API_TOKEN": <the D1 token's secret>}`, with the submitter's `$D1_DB_ID` and
+    #: `$CLOUDFLARE_ACCOUNT_ID` passed through (`append_runner.Runner.record_env`). Empty: the jobs run unrecorded.
+    record_secrets: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
+        if self.read_from not in ("gcs", "r2"):
+            raise SystemExit(f"read_from must be gcs or r2, not {self.read_from!r}")
         if self.compact_level is not None and (isinstance(self.compact_level, bool) or not isinstance(self.compact_level, int) or self.compact_level < 1):
             raise SystemExit(f"compact_level must be an integer ≥ 1 or none, not {self.compact_level!r}")
+        if self.compact is not None:
+            from .append_runner import parse_policy
+
+            object.__setattr__(self, "compact", parse_policy("compact", self.compact))
+
+    @property
+    def policy(self) -> Policy:
+        """The compaction policy in force: `compact`, else `compact_level` as `{level: L}` (None: `none`)."""
+        from .append_runner import level_policy
+
+        return self.compact if self.compact is not None else level_policy(self.compact_level)
 
     def machine_for(self, stage: str) -> str:
         """`stage`'s machine: its override in `machines`, else `machine`."""
@@ -124,8 +174,9 @@ ENV = {
     "r2_sa": "STATIC_NAMES_R2_SA", "machine": "STATIC_NAMES_MACHINE", "ssd_gb": "STATIC_NAMES_SSD", "spot": "STATIC_NAMES_SPOT",
     "machines": "STATIC_NAMES_MACHINES", "ssd_gbs": "STATIC_NAMES_SSDS",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
-    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
-    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL",
+    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "pipeline_depth": "STATIC_NAMES_PIPELINE_DEPTH", "measure_tasks": "STATIC_NAMES_MEASURE_TASKS", "anchor_tasks": "STATIC_NAMES_ANCHOR_TASKS", "fold_tasks": "STATIC_NAMES_FOLD_TASKS", "keep": "STATIC_NAMES_KEEP", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
+    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
+    "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "fold_jobs": "STATIC_NAMES_FOLD_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
 }
 
 
@@ -158,17 +209,21 @@ def _parse(name: str, raw: str):
                 raise SystemExit(f"STATIC_NAMES_R2_SECRETS: {part!r} is not endpoint=|key_id=|secret=<secret name>")
             out[k.strip()] = v.strip()
         return out
-    if name in ("machines", "ssd_gbs"):
+    if name in ("machines", "ssd_gbs", "record_secrets"):
         out = {}
         for part in filter(None, (p.strip() for p in raw.split(","))):
             k, _, v = part.partition("=")
             if not k.strip() or not v.strip():
-                raise SystemExit(f"{ENV[name]}: {part!r} is not <stage>=<value>")
+                raise SystemExit(f"{ENV[name]}: {part!r} is not " + ("<VAR>=<secret name>" if name == "record_secrets" else "<stage>=<value>"))
             out[k.strip()] = int(v) if name == "ssd_gbs" else v.strip()
         return out
     if name == "compact_level":
         return parse_compact_level(ENV[name], raw)
-    if name in ("ssd_gb", "append_tasks"):
+    if name == "compact":
+        from .append_runner import parse_policy
+
+        return parse_policy(ENV[name], raw)
+    if name in ("ssd_gb", "append_tasks", "pipeline_depth", "measure_tasks", "anchor_tasks", "fold_tasks", "compact_jobs", "fold_jobs", "keep"):
         return int(raw)
     if name in ("spot", "drill", "anchors"):
         return raw.strip() not in ("0", "false", "")
@@ -190,12 +245,15 @@ def from_mapping(d: Mapping) -> Profile:
 def to_mapping(p: Profile) -> dict:
     """`p` as a JSON-able mapping of every field: what a deployment checks in as its profile file (`from_mapping`'s
     inverse)."""
-    return {f.name: (list(v) if isinstance(v := getattr(p, f.name), tuple) else dict(v) if isinstance(v, Mapping) else v)
+    from .append_runner import Policy
+
+    return {f.name: (list(v) if isinstance(v := getattr(p, f.name), tuple) else dict(v) if isinstance(v, Mapping) else
+                     v.to_json() if isinstance(v, Policy) else v)
             for f in fields(Profile)}
 
 
 def load_profile(env: Mapping[str, str] | None = None) -> Profile:
-    """`STATIC_NAMES_PROFILE` (an example's name or a JSON file), then every field's env var over it."""
+    """`STATIC_NAMES_PROFILE` (an example's name, a JSON file, or the JSON itself), then every field's env var over it."""
     from .static_profile_examples import EXAMPLES
 
     env = os.environ if env is None else env
@@ -203,6 +261,9 @@ def load_profile(env: Mapping[str, str] | None = None) -> Profile:
     sel = (env.get("STATIC_NAMES_PROFILE") or "").strip()
     if sel in EXAMPLES:
         base = EXAMPLES[sel]
+    elif sel.startswith("{"):
+        # inline (`to_mapping`'s JSON): what the runner hands a compaction job that submits jobs of its own
+        base = from_mapping(json.loads(sel))
     elif sel:
         if not os.path.exists(sel):
             raise SystemExit(f"STATIC_NAMES_PROFILE: {sel!r} is neither an example ({', '.join(sorted(EXAMPLES))}) nor a file")

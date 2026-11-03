@@ -17,8 +17,10 @@ scheme's `start_offset` / `end_offset` cursor.
 Layer split (see `~/c/disk-tree/specs/gcs-backend-and-snapshot-diff.md`):
     - **This module produces layer-1** (raw per-object listing parquet with
       canonical columns `bucket, name, size_bytes, created, storage_class_id,
-      generation`). GCS generations make a scan's object identity usable by
-      deletion review; other backends write NULL.
+      generation`, + `crc32c` when asked: `bulk-list -c`). GCS generations make
+      a scan's object identity usable by deletion review; other backends write
+      NULL. A GCS object's CRC32C (an unsigned 32-bit int) proves two copies'
+      contents equal (`dt-cloud dups -l`).
     - Layer-2 aggregation (per-path scan parquet) is `disk-tree import`
       (`find/import_listing.py` + `find/aggregate_duckdb.py`), consuming this
       module's output.
@@ -29,6 +31,7 @@ the shared helpers below don't touch any cloud SDK.
 
 from __future__ import annotations
 
+import base64
 import heapq
 import json
 import math
@@ -77,6 +80,13 @@ class BlobRow:
     created: Optional[str]  # ISO-8601 with 'Z' suffix if UTC
     storage_class: Optional[str]
     generation: Optional[int] = None
+    crc32c: Optional[int] = None
+    version: Optional[str] = None
+
+
+def crc32c_int(b64: Optional[str]) -> Optional[int]:
+    """GCS's `crc32c` (base64 of the big-endian 4 bytes) as an unsigned int; None stays None."""
+    return int.from_bytes(base64.b64decode(b64), "big") if b64 else None
 
 
 class BulkLister(Protocol):
@@ -112,7 +122,7 @@ class BulkLister(Protocol):
         self,
         fs: "fsspec.AbstractFileSystem",
         root: str,
-    ) -> "tuple[list[tuple[str, int, Optional[str], Optional[str]]], list[str], list[str]]":
+    ) -> "tuple[list[tuple], list[str], list[str]]":
         """Walk ``root`` two levels: (shallow_files, depth2_prefixes, self_dirs).
 
         Default implementation (below) is fsspec-generic; GCS overrides only
@@ -124,7 +134,7 @@ class BulkLister(Protocol):
         self,
         bucket: str,
         self_dirs: list[str],
-    ) -> "list[tuple[str, int, Optional[str], Optional[str]]]":
+    ) -> "list[tuple]":
         """Return the placeholder objects behind ``self_dirs``.
 
         Only GCS surfaces zero-byte ``<name>/`` blobs as directories in an
@@ -138,7 +148,7 @@ class BulkLister(Protocol):
 def generic_discover(
     fs: "fsspec.AbstractFileSystem",
     root: str,
-) -> "tuple[list[tuple[str, int, Optional[str], Optional[str]]], list[str], list[str]]":
+) -> "tuple[list[tuple], list[str], list[str]]":
     """Two-level walk via fsspec, extracting shallow files, depth-2 prefixes,
     self-dir placeholders.
 
@@ -147,7 +157,7 @@ def generic_discover(
     parent, so skip them at both levels; their names are returned so the
     caller can fetch the placeholder *objects* separately.
     """
-    shallow: "list[tuple[str, int, Optional[str], Optional[str]]]" = []
+    shallow: "list[tuple]" = []
     stream_prefixes: list[str] = []
     self_dirs: list[str] = []
     for e1 in fs.ls(root, detail=True):
@@ -165,7 +175,11 @@ def generic_discover(
                 err(f"WARN: skipping unparseable listing entry {e2['name']!r} under {e1['name']!r}")
                 continue
             if e2["type"] == "file":
-                shallow.append((rel[1], e2["size"], e2.get("timeCreated"), e2.get("storageClass")))
+                stamp = e2.get("timeCreated") or e2.get("LastModified")
+                if hasattr(stamp, "isoformat"):
+                    stamp = stamp.isoformat()
+                shallow.append((rel[1], e2["size"], stamp, e2.get("storageClass") or e2.get("StorageClass"), e2.get("generation"),
+                                crc32c_int(e2.get("crc32c")), e2.get("ETag")))
             else:
                 stream_prefixes.append(rel[1] + "/")
     return shallow, stream_prefixes, self_dirs
@@ -282,18 +296,22 @@ def entries_to_frame(
     bucket: str,
     rows: "list[tuple]",
     class_ids: "dict[str, int]" = SII_CLASS_IDS,
+    crc32c: bool = False,
 ) -> pd.DataFrame:
     """Backend tuples → canonical listing columns.
 
     Four-field rows are the historical/S3 shape; a fifth field is the GCS
-    generation. Accepting both keeps discovery plug-ins simple while every
-    written shard has one stable schema. ``class_ids`` maps the raw class
-    string to ``storage_class_id`` (unknown → 0); Hugging Face passes
+    generation, a sixth its CRC32C, a seventh the opaque version (exact GCS
+    generation or S3/R2 ETag). Accepting each keeps discovery plug-ins simple
+    while every written shard has one stable schema: `version` is always
+    written, the `crc32c` column iff ``crc32c`` (a run's every shard alike),
+    never from the rows' shape. ``class_ids`` maps the raw class string to
+    ``storage_class_id`` (unknown → 0); Hugging Face passes
     :data:`~disk_tree.listing.HF_CLASS_IDS`.
     """
-    normalized = [(*row, None) if len(row) == 4 else row for row in rows]
-    names, sizes, created, classes, generations = zip(*normalized) if normalized else ((), (), (), (), ())
-    return pd.DataFrame(
+    normalized = [(*row, *([None] * (7 - len(row)))) for row in rows]
+    names, sizes, created, classes, generations, crcs, versions = zip(*normalized) if normalized else ((),) * 7
+    frame = pd.DataFrame(
         {
             "bucket": bucket,
             "name": list(names),
@@ -305,8 +323,12 @@ def entries_to_frame(
             "created": pd.to_datetime(list(created), utc=True, format='ISO8601'),
             "storage_class_id": [class_ids.get(c or "", 0) for c in classes],
             "generation": pd.array(generations, dtype="Int64"),
+            "version": pd.array([v if v is not None else str(g) if g is not None else None for g, v in zip(generations, versions)], dtype="string"),
         }
     )
+    if crc32c:
+        frame["crc32c"] = pd.array(crcs, dtype="Int64")
+    return frame
 
 
 # A shard holds one sorted run per listing range it collected, and layer-2's
@@ -339,7 +361,7 @@ def _write_shard(out_dir: str, name: str, frame: pd.DataFrame) -> None:
     )
 
 
-def write_empty_shard(out_dir: str, name: str) -> None:
+def write_empty_shard(out_dir: str, name: str, crc32c: bool = False) -> None:
     """An empty bucket's one shard: no rows, in the schema `entries_to_frame`'s frames write (an empty frame has nothing
     to infer `name`'s type or `created`'s unit from)."""
     import fsspec
@@ -347,7 +369,8 @@ def write_empty_shard(out_dir: str, name: str) -> None:
     import pyarrow.parquet as pq
 
     schema = pa.schema([("bucket", pa.large_string()), ("name", pa.large_string()), ("size_bytes", pa.int64()),
-                        ("created", pa.timestamp("us", tz="UTC")), ("storage_class_id", pa.int64()), ("generation", pa.int64())])
+                        ("created", pa.timestamp("us", tz="UTC")), ("storage_class_id", pa.int64()), ("generation", pa.int64()),
+                        ("version", pa.large_string()), *([("crc32c", pa.int64())] if crc32c else [])])
     out_fs, out_root = fsspec.core.url_to_fs(out_dir)
     out_fs.makedirs(out_root, exist_ok=True)
     pq.write_table(schema.empty_table(), f"{out_root}/{name}.parquet", filesystem=out_fs)
@@ -404,17 +427,18 @@ def _stream_prefixes_worker(
     q: Queue = Queue(maxsize=threads)
     done = object()
     produce_error: "list[BaseException]" = []
+    crc = getattr(lister, "crc32c", False)
 
     def one(item: StreamItem) -> None:
         pfx, start, end = item if isinstance(item, tuple) else (item, None, None)
         rows: "list[tuple]" = []
         for blob in lister.stream_prefix(bucket, pfx, start, end):
-            rows.append((blob.name, blob.size, blob.created, blob.storage_class, blob.generation))
+            rows.append((blob.name, blob.size, blob.created, blob.storage_class, blob.generation, blob.crc32c, blob.version))
             if len(rows) >= BATCH_ROWS:
-                q.put(entries_to_frame(bucket, rows))
+                q.put(entries_to_frame(bucket, rows, crc32c=crc))
                 rows = []
         if rows:
-            q.put(entries_to_frame(bucket, rows))
+            q.put(entries_to_frame(bucket, rows, crc32c=crc))
 
     def produce() -> None:
         try:
@@ -508,7 +532,7 @@ def list_bucket_to_parquet(
         f" {procs} procs × {threads} threads"
     )
 
-    _write_shard(out_dir, "shard-shallow", entries_to_frame(bucket, shallow))
+    _write_shard(out_dir, "shard-shallow", entries_to_frame(bucket, shallow, crc32c=getattr(lister, "crc32c", False)))
     total = len(shallow)
 
     weights = prefix_weights(weights_from) if weights_from else {}

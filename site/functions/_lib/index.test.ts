@@ -41,7 +41,7 @@ describe('blobKey', () => {
 // The store seam: `STORE_BUCKET` + the GCS endpoint and HMAC pair by default;
 // `STORE_*` points every proxy at an S3-compatible store (R2) —
 // specs/done/r2-serving-migration.md. The bucket has no default
-// (specs/oa-decoupling.md step 3).
+// (specs/done/oa-decoupling.md step 3).
 describe('store seam', () => {
   const gcs = { GCS_HMAC_KEY_ID: 'gk', GCS_HMAC_SECRET: 'gs', STORE_BUCKET: 'my-data' } as never
   const r2 = { ...(gcs as object), STORE_ENDPOINT: 'https://acct.r2.cloudflarestorage.com', STORE_BUCKET: 'idx', STORE_REGION: 'auto', STORE_ACCESS_KEY_ID: 'rk', STORE_SECRET_ACCESS_KEY: 'rs' } as never

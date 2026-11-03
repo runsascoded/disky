@@ -97,6 +97,26 @@ def test_gcs_parse_shape(tmp_path: Path):
     assert df['request_id'].tolist() == ['r1', 'r2', 'r3', 'r4']
 
 
+def test_gcs_parse_types_columns_empty_on_every_row(tmp_path: Path):
+    """An hour whose `cs_bytes` / `sc_bytes` / `sc_status` are empty on every row (only lifecycle operations: no body,
+    no HTTP status) still parses, as 0 bytes and a NULL status: CSV sniffing alone types such columns VARCHAR, and
+    `COALESCE(<VARCHAR>, 0)` failed every hourly ingest from 2026-11-01."""
+    from disk_tree.access.parsers.gcs import parse
+
+    csv_path = tmp_path / 'usage.csv'
+    rows = [
+        _gcs_row(1755300000_000_000, '', 'PUT', 'PUT_Object', 'b1', 'tmp/a', req_id='r1', user_agent='GCS Lifecycle Management'),
+        _gcs_row(1755300000_000_000, '', 'PUT', 'PUT_Object', 'b1', 'tmp/b', req_id='r1', user_agent='GCS Lifecycle Management'),
+    ]
+    _write_gcs_csv(csv_path, [(*r[:6], '', '', '', *r[9:]) for r in rows])
+
+    df = parse(str(csv_path), con=duckdb.connect()).df().sort_values('path').reset_index(drop=True)
+    assert df[['path', 'op', 'status', 'bytes_out', 'bytes_in', 'request_id']].astype(object).where(df.notna(), None).values.tolist() == [
+        ['tmp/a', 'PUT', None, 0, 0, 'r1'],
+        ['tmp/b', 'PUT', None, 0, 0, 'r1'],
+    ]
+
+
 def test_gcs_parse_deduplicates_identical_lines(tmp_path: Path):
     """Google documents rare duplicate log lines — byte-identical lines collapse."""
     from disk_tree.access.parsers.gcs import parse
@@ -624,6 +644,49 @@ def test_r2_state_aggs_names_each_hours_current_aggregate():
     assert state_aggs(state, before=datetime(2026, 10, 11, 1, tzinfo=timezone.utc)) == [
         'agg/a/2026-10-11/00/r1.json', 'agg/marin-na/2026-10-10/23/r0.json', 'agg/marin-na/2026-10-11/00/r3.json',
     ]
+
+
+def test_r2_state_aggs_reads_mixed_hourly_and_minute_windows_with_as_of_cut():
+    from datetime import datetime, timezone
+
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    state = _r2_state(b={'frozen': {'2026-10-10T23:55': 'old-window'}, 'hours': {
+        '2026-10-11T00': {'agg': 'hour'},
+        '2026-10-11T01:00': {'agg': 'first-window'},
+        '2026-10-11T01:02': {'agg': 'second-window'},
+        '2026-10-11T01:05': {'agg': 'third-window'},
+    }})
+    assert state_aggs(state) == ['old-window', 'hour', 'first-window', 'second-window', 'third-window']
+    assert state_aggs(state, before=datetime(2026, 10, 11, 1, 2, tzinfo=timezone.utc)) == ['old-window', 'hour', 'first-window']
+
+
+def test_r2_parse_sums_disjoint_hourly_and_adaptive_windows_once(tmp_path: Path):
+    from json import dumps
+
+    from disk_tree.access.parsers.r2 import parse
+
+    files = []
+    for i, (start, end, count, last) in enumerate([
+        ('07:00', '08:00', 2, '07:59'),
+        ('08:00', '08:02', 4, '08:01'),
+        ('08:02', '08:05', 3, '08:04'),
+    ]):
+        path = tmp_path / f'{i}.json'
+        start_iso = f'2026-10-12T{start}:00.000Z'
+        path.write_text(dumps({
+            'schema_version': 4, 'bucket': 'b', 'hour': start_iso,
+            **({'window_end': f'2026-10-12T{end}:00.000Z'} if i else {}),
+            'sampling': {'capture': 'unsampled'},
+            'rows': [['data/a', 'HeadObject', count, _ms(start_iso), _ms(f'2026-10-12T{last}:00Z')]],
+        }) + '\n')
+        files.append(str(path))
+    con = duckdb.connect()
+    rel = parse(files, con=con)
+    assert rel.order('hour').project("strftime(hour, '%H:%M'), n_ops").fetchall() == [('07:00', 2), ('08:00', 4), ('08:02', 3)]
+    assert rel.aggregate('sum(n_ops), count(*)').fetchone() == (9, 3)
+    cut = parse(files, con=con, as_of='2026-10-12T08:02:00Z')
+    assert cut.order('hour').project("strftime(hour, '%H:%M'), n_ops").fetchall() == [('07:00', 2), ('08:00', 4)]
 
 
 @pytest.mark.parametrize('state, message', [

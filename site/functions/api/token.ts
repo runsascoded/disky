@@ -17,6 +17,7 @@
  * grant would be privilege escalation, so grant-authenticated callers are 403.
  */
 import { baseAssignScope, baseScope, type Ctx, gateFor, identify, json } from '../_lib/auth.js'
+import { noteActivity } from '../_lib/activityHook.js'
 
 const TOKEN_NAME = 'CLI / agent token'
 
@@ -62,6 +63,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       'INSERT INTO agent_tokens (email, grant_id, created) VALUES (?, ?, ?) ' +
       'ON CONFLICT (email) DO UPDATE SET grant_id = ?2, created = ?3',
     ).bind(email, grant.id, created).run()
+    noteActivity(ctx, { line: prior?.grant_id ? 'rotated their agent token' : 'minted their agent token' })
     // The one and only time the raw token leaves the server.
     return json({ token, created })
   }
@@ -71,6 +73,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       .bind(email).first<{ grant_id: string }>()
     if (row?.grant_id) await gate.revoke(row.grant_id)
     await env.DB.prepare('DELETE FROM agent_tokens WHERE email = ?').bind(email).run()
+    if (row) noteActivity(ctx, { line: 'revoked their agent token' })
     return json({ revoked: !!row })
   }
 

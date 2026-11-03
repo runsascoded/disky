@@ -13,5 +13,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["*.ts", "../src/perf.ts"]
+  "include": ["*.ts", "../src/perf.ts"],
+  "exclude": ["view-mem.ts"]
 }

@@ -116,3 +116,31 @@ def test_slack_ok_false_is_a_failure():
     ]
     [(_, body, _)] = rec.calls
     assert json.loads(body) == {'channel': 'C0ALERTS', 'text': '*t*\nm', 'unfurl_links': False, 'unfurl_media': False}
+
+
+def test_cli_multiple_links_keep_task_logs_and_render_scan_navigation(monkeypatch):
+    for key, value in SLACK.items():
+        monkeypatch.setenv(key, value)
+    rec = Recorder()
+    monkeypatch.setattr(push, 'http_post', rec)
+    result = CliRunner().invoke(cli, ['notify', '-c', 'slack', '-t', 'scan failed', '-u', 'https://logs.test', '-l', 'task logs',
+                                    '-L', 'scan', 'https://site.test/scans/run', '-L', 'all scans', 'https://site.test/scans', 'failed'])
+    assert (result.exit_code, result.output) == (0, 'notify: slack: sent\n')
+    assert [json.loads(body) for _, body, _ in rec.calls] == [{
+        'channel': 'C0ALERTS',
+        'text': '*scan failed*\nfailed\n<https://logs.test|task logs> · <https://site.test/scans/run|scan> · <https://site.test/scans|all scans>',
+        'unfurl_links': False, 'unfurl_media': False,
+    }]
+
+
+def test_additional_links_are_rendered_for_discord_and_pushover():
+    rec = Recorder()
+    notice = Notice('t', 'm', links=(('scan', 'https://site.test/scans/r'), ('all scans', 'https://site.test/scans')))
+    assert send(notice, ['pushover', 'discord'], env=ENV, post=rec) == [('pushover', None), ('discord', None)]
+    assert parse_qs(rec.calls[0][1].decode()) == {
+        'token': ['tok'], 'user': ['usr'], 'title': ['t'], 'message': ['m\nscan: https://site.test/scans/r\nall scans: https://site.test/scans'], 'priority': ['0'],
+    }
+    assert json.loads(rec.calls[1][1]) == {
+        'content': '**t**\nm\n[scan](<https://site.test/scans/r>) · [all scans](<https://site.test/scans>)',
+        'username': 'disky', 'allowed_mentions': {'parse': []}, 'flags': 4,
+    }

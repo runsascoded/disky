@@ -9,6 +9,9 @@
     &.failed { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
     &.running { color: var(--s1); background: color-mix(in srgb, var(--s1) 10%, var(--surface)); }
     &.warn { color: color-mix(in srgb, var(--s4) 75%, var(--ink)); background: color-mix(in srgb, var(--s4) 14%, var(--surface)); }
+    // search behind: the data is published, only the static name index lags it (neither a failure nor a warning)
+    &.behind { color: var(--ink-2); background: var(--panel); outline: 1px dashed var(--ink-3, currentColor); outline-offset: -1px; }
+    &.lost { color: var(--danger); background: var(--surface); outline: 1px dashed color-mix(in srgb, var(--danger) 60%, transparent); outline-offset: -1px; }
   }
   .grew { color: var(--grew); }
   .shrank { color: var(--shrank); }
@@ -46,6 +49,7 @@
     .sr-col-hit { fill: transparent; }
     .sr-col-total { fill: var(--other); }
     &.failed .sr-col-total { fill: color-mix(in srgb, var(--danger) 70%, transparent); }
+    &.lost .sr-col-total { fill: color-mix(in srgb, var(--danger) 30%, transparent); }
     &:hover .sr-col-hit, &.brushed .sr-col-hit { fill: color-mix(in srgb, var(--ink) 10%, transparent); }
     &.dimmed { opacity: 0.35; }
   }
@@ -71,6 +75,7 @@
       .name { fill: var(--ink); font-size: 13px; font-weight: 600; font-family: ui-monospace, monospace; }
       .sub { fill: var(--ink-3); font-size: 11.5px; }
       &.done rect { stroke: var(--grew); fill: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
+      &.cached rect { stroke: var(--grew); stroke-dasharray: 2 3; fill: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
       &.running rect { stroke: var(--ink); stroke-dasharray: 4 3; fill: color-mix(in srgb, var(--ink) 6%, var(--surface)); }
       &.failed rect { stroke: var(--danger); fill: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
       &.failed .sub { fill: var(--danger); }
@@ -107,6 +112,9 @@
 .sr-tip { border-collapse: collapse; td { padding: 1px 6px 1px 0; } .num { text-align: right; } }
 .scans-page {
   .sr-kind { font-size: 12px; color: var(--ink-3); }
+  .sr-live { display: block; font-size: 12px; color: var(--ink-2); white-space: nowrap; .sr-quiet { color: var(--danger); }
+    &.inline { display: inline; font-size: inherit; } }
+  .sr-notes { margin-top: 10px; td { vertical-align: top; } td:last-child { overflow-wrap: anywhere; color: var(--ink-2); } }
   .sr-gantt { .lbl { font-size: 12.5px; } .dur, .tick { font-size: 11.5px; } .tail .lbl { fill: var(--ink-3); font-style: italic; } }
   .sr-strip .tick { font-size: 11.5px; }
   @media (max-width: 900px) { .hide-md { display: none; } }

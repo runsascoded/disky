@@ -31,6 +31,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 from click import IntRange, argument, command, option
 
+from . import heartbeat as hb
 from . import interval_compact as ic
 from . import interval_store as ist
 from . import static_names as sn
@@ -45,7 +46,7 @@ BACKFILL = "backfill.json"
 #: Where the listings' `(path, generation)` table lands in the work dir.
 GEN_INDEX = "gen-index.parquet"
 #: What the fold never reads from the source (`interval_local.UNREAD`).
-UNREAD = ("served/", "rd/", "digest/", "sv-digest/", "verify/")
+UNREAD = ("served/", "rd/", "digest/", "sv-digest/", "attribution-digest/", "verify/")
 
 
 #: Concurrent footer reads / shard copies per scan (a URL root's: each a ranged read or a whole-object GET).
@@ -105,14 +106,19 @@ def listing_files(root: Store, template: str, scan: str, local: Path, keys: list
         return [str(Path(root.root) / k) for k in keys]
     from concurrent.futures import ThreadPoolExecutor
 
+    prog = hb.Progress(f"backfill: {scan}: copy", len(keys), unit="shards")
+
     def one(k: str) -> str:
         dst = local / k
         if not (dst.is_file() and dst.stat().st_size == root.size(k)):
             root.get(k, dst)
         watch.beat()
+        prog.tick(nbytes=dst.stat().st_size)
         return str(dst)
     with ThreadPoolExecutor(IO_WORKERS) as ex:
-        return list(ex.map(one, keys))
+        out = list(ex.map(one, keys))
+    prog.done()
+    return out
 
 
 def _has_generation(root: Store, key: str) -> bool:
@@ -171,6 +177,7 @@ def gen_index(con, root: Store, template: str, scans: list[dict], work: Path, *,
                 skipped.append(s["id"])
                 continue
             t0 = monotonic()
+            hb.set_stage(f"backfill: {s['id']}: fold")
             src = prepare_listing(con, (files,))  # one source: per-file sources would keep each bucket's first shard only
             g = ist.GENERATION
             n = con.execute(f"""INSERT INTO lg SELECT c.path, c.{g}, {int(s['ts'])} FROM (
@@ -183,6 +190,7 @@ def gen_index(con, root: Store, template: str, scans: list[dict], work: Path, *,
     out = work / GEN_INDEX
     t0 = monotonic()
     err(f"backfill: writing {GEN_INDEX} ({len(read)} scans folded; sorting)")
+    hb.set_stage(f"backfill: write {GEN_INDEX}")
     con.execute(f"""COPY (SELECT len(string_split(path, '/'))::UTINYINT AS depth, path, generation, first_ts
         FROM lg ORDER BY depth, path, first_ts) TO {q(str(out))} (FORMAT PARQUET, ROW_GROUP_SIZE 65536)""")
     err(f"backfill: {GEN_INDEX} written in {monotonic() - t0:.0f}s")
@@ -195,34 +203,32 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
     """The fold's hook (`interval_compact.Fill`): each object path version `[vf, vt)` of the range takes the generation
     in effect at `vf` (the newest first listed at or before it), else, for a version that began before any listing
     had generations, the first listed within it; one first listed at or after `vt` never counts (`index`: `gen_index`'s
-    file). A `(path, generation)` never comes back once replaced, so a generation's first listing bounds it. Counted in
-    `counts`."""
+    file). A `(path, generation)` never comes back once replaced, so a generation's first listing bounds it. Only a version
+    whose `GENERATION` is NULL is filled (all of them, unless the source carries it: `backfill`'s `nulls`). Over the key
+    sub-range `pieces` the fold holds (None: the whole range), the index read only there. Counted in `counts`, per range."""
     by_name = {f"r{r['i']:04d}": r for r in ranges["ranges"]}
 
-    def fill(con, name: str) -> None:
+    def fill(con, name: str, pieces: list[str] | None = None) -> None:
         preds = " OR ".join(f"({p})" for p in sn.range_preds(by_name[name]))
+        if pieces is not None:
+            preds = f"({preds}) AND ({' OR '.join(f'({p})' for p in pieces)})"
         g = ist.GENERATION
         con.execute(f"""CREATE OR REPLACE TEMP TABLE __fill AS
             SELECT p.depth, p.path, p.vf,
                    arg_min(g.{g}, CASE WHEN g.first_ts <= p.vf THEN -g.first_ts ELSE {1 << 40} + g.first_ts END) AS {g}
             FROM pv p JOIN (SELECT * FROM read_parquet({q(index)}) WHERE {preds}) g ON g.depth = p.depth AND g.path = p.path
-            WHERE p.kind = 'file' AND g.first_ts < p.vt
+            WHERE p.kind = 'file' AND p.{g} IS NULL AND g.first_ts < p.vt
             GROUP BY p.depth, p.path, p.vf""")
         con.execute(f"UPDATE pv SET {g} = f.{g} FROM __fill f WHERE pv.depth = f.depth AND pv.path = f.path AND pv.vf = f.vf")
-        counts[name] = con.execute("SELECT count(*) FROM __fill").fetchone()[0]
+        counts[name] = counts.get(name, 0) + con.execute("SELECT count(*) FROM __fill").fetchone()[0]
         con.execute("DROP TABLE __fill")
     return fill
 
 
-def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: str, work: Path, *, ranges_gen: str | None = None,
-             since: str | None = None,
-             stall_s: float = STALL_S, rg_rows: int = ist.SERVED_RG,
-             threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
-    """Generation `gen` of `store` folded into `new_gen` with the objects' `generation` from the raw listings (`template`
-    under `listing_root`), published to the store (data first, `scans.json` last; `CURRENT.json` untouched). A staged
-    build's generation may borrow its key ranges and base range files from `ranges_gen` (its deployment's `ranges_gen`):
-    those are mirrored in beside its own, and the new generation holds its own copies. Returns a summary."""
-    t0 = monotonic()
+def mirror_source(store: Store, gen: str, new_gen: str, work: Path, ranges_gen: str | None = None) -> Path:
+    """Generation `gen` of `store` mirrored into `work/store/` for a fold into `new_gen` (refused when `new_gen` exists:
+    a generation is never rewritten), but for what no fold reads (`UNREAD`). A staged build's generation may borrow its
+    key ranges and base range files from `ranges_gen`: those are mirrored in beside its own. Returns its dir."""
     prefix, new_prefix = f"{PREFIX}/{gen}", f"{PREFIX}/{new_gen}"
     if store.listing(new_prefix):
         raise SystemExit(f"{store.root}/{new_prefix}/ exists: a generation is never rewritten")
@@ -238,9 +244,28 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
             raise SystemExit(f"{store.root}/{PREFIX}/{ranges_gen}/ranges.json: no such ranges generation")
     elif f"{prefix}/ranges.json" not in before:
         raise SystemExit(f"{store.root}/{prefix}/ranges.json: none; a staged build's generation names its ranges with -R")
+    return gen_dir
+
+
+def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: str, work: Path, *, ranges_gen: str | None = None,
+             since: str | None = None, nulls: bool = False,
+             stall_s: float = STALL_S, rg_rows: int = ist.SERVED_RG,
+             threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
+    """Generation `gen` of `store` folded into `new_gen` with the objects' `generation` from the raw listings (`template`
+    under `listing_root`), published to the store (data first, `scans.json` last; `CURRENT.json` untouched). A staged
+    build's generation may borrow its key ranges and base range files from `ranges_gen` (its deployment's `ranges_gen`):
+    those are mirrored in beside its own, and the new generation holds its own copies. `nulls`: `gen` already carries
+    `generation`, and only its NULL object versions are filled (the repair of a generation whose listings lacked some
+    objects' generations: gcs's shallow objects before 2026-10-22); refused on a source without it. Returns a summary."""
+    t0 = monotonic()
+    prefix, new_prefix = f"{PREFIX}/{gen}", f"{PREFIX}/{new_gen}"
+    gen_dir = mirror_source(store, gen, new_gen, work, ranges_gen)
     base = json.loads((gen_dir / "scans.json").read_text())
-    if ist.has_generation(base):
-        raise SystemExit(f"{store.root}/{prefix}: already carries `{ist.GENERATION}`")
+    has = ist.has_generation(base)
+    if has and not nulls:
+        raise SystemExit(f"{store.root}/{prefix}: already carries `{ist.GENERATION}` (-N fills only its NULLs)")
+    if nulls and has is not True:
+        raise SystemExit(f"{store.root}/{prefix}: carries no `{ist.GENERATION}` to fill the NULLs of (drop -N)")
     lstore = LocalRunStore(gen_dir, work / "lease", gen)
     newest = latest_key(lstore.keys("manifests/"))
     runs = lstore.read_json(newest)["runs"] if newest else []
@@ -255,9 +280,10 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
     doc, rows, sorts, stats = ic.fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs,
                                           fill=filler(str(work / GEN_INDEX), ranges, counts))
     rec = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "scans": len(doc["scans"]), "listings": idx["scans"],
-           "listed": idx["rows"], "filled": sum(counts.values())}
+           "listed": idx["rows"], "filled": sum(counts.values()), **({"nulls": True} if nulls else {})}
     (out / BACKFILL).write_text(json.dumps(rec, indent=1) + "\n")
-    files = upload_new(store, out, new_prefix, {}, _publish_order)
+    from .interval_local import publish_tier
+    files = upload_new(store, out, new_prefix, {}, _publish_order, tier=publish_tier)
     s = round(monotonic() - t0, 1)
     err(f"backfill {gen} → {new_gen}: {rec['filled']:,} object versions given a generation from {len(idx['scans'])} listings, "
         f"{stats['versions']:,} versions, {len(files)} files in {s}s")
@@ -274,6 +300,7 @@ def _publish_order(keys: list[str]) -> list[str]:
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-l", "--listing", "template", required=True, help="Key template of a scan's raw listing shards under -s: `{id}` the scan id, globs allowed (e.g. `listing/{id}/*/*.parquet`)")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-N", "--nulls", is_flag=True, help="GEN already carries `generation`: fill only its object versions whose `generation` is NULL (a repair: e.g. objects a lister recorded without one), each from the first listing within it that has one")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`), the readers' INDEX_R2 root")
 @option("-O", "--to-gen", required=True, help="The new generation: `<store>/interval-store/TO_GEN/` (must not exist)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
@@ -283,7 +310,7 @@ def _publish_order(keys: list[str]) -> list[str]:
 @option("-S", "--since", help="Skip, unread, the scans before this id (their listings carry no `generation`)")
 @option("-T", "--stall", "stall_s", default=STALL_S, type=IntRange(min=0), help="Exit 3 when no listing is read for this many seconds (0: never)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); the source generation is mirrored into it")
-def backfill_cmd(gen, jobs, template, mem, store_root, to_gen, threads, ranges_gen, rg_rows, listing_root, since, stall_s, work) -> None:
+def backfill_cmd(gen, jobs, template, mem, nulls, store_root, to_gen, threads, ranges_gen, rg_rows, listing_root, since, stall_s, work) -> None:
     """Fold a generation into a new one whose object versions carry their GCS `generation`, read from the raw listings:
     each version takes the first one listed within it; versions that ended before any listing had one stay NULL. The
     source and `CURRENT.json` are left as they are: verify the new generation, then `interval-store current -s TO_GEN`.
@@ -298,7 +325,8 @@ def backfill_cmd(gen, jobs, template, mem, store_root, to_gen, threads, ranges_g
             raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}): name one with -g")
     gen = ic.chain(store, gen)[-1]
     with workdir(work) as w:
-        print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, ranges_gen=ranges_gen, since=since, stall_s=stall_s, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs), indent=1))
+        print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, ranges_gen=ranges_gen, since=since, nulls=nulls, stall_s=stall_s, rg_rows=rg_rows,
+                                    threads=threads, mem=mem, jobs=jobs), indent=1))
 
 
 # ── Parity against the listings ────────────────────────────────────────────
@@ -355,7 +383,7 @@ def verify_listings(store: Store, gen: str, listing_root: str, template: str, wo
     `generation`, `pass` recomputed with it, written to `gen` (`views_gen`: where the views were compared). A scan with
     no marker gets none: its views were never checked. Returns per scan `{status, generation}`."""
     from .interval_store import download_served, verify_runs
-    from .interval_verify import marker_key
+    from .interval_verify import marker_key, rows_pass
     from .scan_retire import find_marker, lineage
 
     prefix = f"{PREFIX}/{gen}"
@@ -393,7 +421,7 @@ def verify_listings(store: Store, gen: str, listing_root: str, template: str, wo
             if m is None:
                 out[sid] = {"status": "no-marker", "generation": g}
                 continue
-            ok = m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"] and g["objects"] > 0 and g["equal"] == g["objects"]
+            ok = rows_pass(m) and g["objects"] > 0 and g["equal"] == g["objects"]
             store.write_text(marker_key(prefix, sid), json.dumps({**m, "gen": gen, "views_gen": m.get("views_gen", m["gen"]), "pass": ok,
                                                                    "generation": g}) + "\n")
             out[sid] = {"status": "pass" if ok else "fail", "generation": g}

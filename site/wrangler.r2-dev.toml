@@ -11,12 +11,24 @@
 name = "disk-tree-demo-dev"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-01"
+# Usage attribution (`functions/_lib/usage.ts`, specs/usage-metrics.md): one Analytics Engine point per Functions
+# request; `nodejs_als` gives the point its R2/D1/KV counters and cache tier.
+compatibility_flags = ["nodejs_als"]
+
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_r2_demo_dev"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "disk-tree-demo-db"
 database_id = "261d0c80-8f73-442e-979a-4e25725b2271"
 remote = true
+
+# The static name index and the interval store, as wrangler.r2.toml's (the same bucket, read through the binding).
+[[r2_buckets]]
+binding = "INDEX_R2"
+bucket_name = "disk-tree-demo"
 
 [observability]
 enabled = true
@@ -35,11 +47,22 @@ STORE_SCHEME = "r2://"
 PUBLIC_READ = "1"
 SNAPSHOTS_SUBDIR = "r2"
 FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
+# DEFAULT_SCAN = "searchable"    # unset (`newest`): open on the newest published scan, search disabled until the static name index appends it (`src/defaultScan.ts`)
+# Search and the Map's path store, as wrangler.r2.toml's (the static name index's generation; the interval store following
+# `interval-store/CURRENT.json`): without them dev searched nothing and read per-scan sorts (parity, 2026-10-22).
+STATIC_CURRENT_KEY = "static-names/primary-CURRENT.json"
+PATH_STORE = "intervals"
+# Pinned to the churn backfill (`demo-backfill-churn`) while its level diffs are checked against prod's; CURRENT.json
+# moves to it after, and this pin goes.
+INTERVAL_STORE_GEN = "2026-10-14.churn"
+FILTER_STATIC = "1"
+FILTER_STATIC_HEAVY = "1"        # heavy literals (catalog members, 1–2 characters) from the drilldown (`drill/`)
+# No CACHE_NS: dev's response-cache keys carry its host (`cacheEnvTag`), so its newer code never answers for prod.
 STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
 # The `/meta` store, as wrangler.r2.toml's (the same bucket, prefixes, static generation and read secrets).
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata (dev)","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_GEN":"2026-10-19meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata (dev)","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Store-read secrets (STORE_ENDPOINT, STORE_ACCESS_KEY_ID, STORE_SECRET_ACCESS_KEY)
 # are set on the dev project's production env (it serves the `dev` branch), the

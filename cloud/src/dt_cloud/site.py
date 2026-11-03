@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from http.client import IncompleteRead
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -15,6 +16,10 @@ from .deploy import site_token, site_url
 
 # a real UA — CF edge-blocks bot UAs (1010), same as healthcheck.UA
 UA = "gcs-usage-cli/1.0"
+
+#: Refetches of a response whose body ends short of its Content-Length: the site answered (200), then its Worker was cut
+#: off mid-body (cw, 2026-10-23: `/api/digest-image` sent 64,770 of 230,883 bytes). Every call here is a render, safe to repeat.
+TRUNCATED_RETRIES = 2
 
 
 class SiteError(Exception):
@@ -57,16 +62,21 @@ def post_json(url: str, token: str, endpoint_path: str, body: dict, timeout: int
 
 
 def _fetch(req: Request, endpoint: str, timeout: int) -> bytes:
-    """``req``'s response body; a non-2xx raises `SiteError` with the server's own error string."""
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except HTTPError as e:
-        body = e.read().decode(errors="replace")
+    """``req``'s response body; a non-2xx raises `SiteError` with the server's own error string. A truncated body is
+    fetched again, up to `TRUNCATED_RETRIES` times."""
+    for attempt in range(TRUNCATED_RETRIES + 1):
         try:
-            msg = json.loads(body).get("error", body)
-        except ValueError:
-            msg = body
-        raise SiteError(f"{endpoint} → HTTP {e.code}: {msg}", status=e.code) from e
-    except URLError as e:
-        raise SiteError(f"{endpoint} unreachable: {e.reason}") from e
+            with urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except IncompleteRead as e:
+            got, short = len(e.partial), e.expected
+        except HTTPError as e:
+            body = e.read().decode(errors="replace")
+            try:
+                msg = json.loads(body).get("error", body)
+            except ValueError:
+                msg = body
+            raise SiteError(f"{endpoint} → HTTP {e.code}: {msg}", status=e.code) from e
+        except URLError as e:
+            raise SiteError(f"{endpoint} unreachable: {e.reason}") from e
+    raise SiteError(f"{endpoint} → truncated body ({got} of {got + (short or 0)} bytes), {TRUNCATED_RETRIES + 1} tries")

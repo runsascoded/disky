@@ -1,16 +1,21 @@
 /** Private, bounded R2 Observability archive; no deletion-safety claims.
  *
- * The UTC hour is the unit: an hour's aggregate is a pure function of one complete drain of that hour,
- * and a re-drain replaces it. See README "Collection contract and limits".
+ * An aggregate is a pure function of one complete drain of a disjoint time window; a re-drain replaces it.
+ * Quiet deployments use UTC hours; busy ones opt into smaller windows. See README "Collection contract and limits".
  */
+import { EventIds } from './event-ids'
+import { hashJson, putJson } from './json-stream'
+
 const HOUR = 3_600_000
+// Leave three minutes of the cron's 15-minute wall limit for the last response, finalization and state publish.
+const RUN_MS = 12 * 60_000
 const STATE_KEY = 'state.json'
-/** Workers' per-invocation subrequest limit (paid plan; fetches and binding calls alike). `settings` refuses a
- * configuration whose worst case (`subrequestBound`) could exceed it. */
+/** Our conservative per-invocation subrequest budget, counting fetches and binding calls alike. */
 export const SUBREQUEST_LIMIT = 1000
 type Archive = Pick<Env['ARCHIVE'], 'put' | 'get' | 'delete'>
 type CollectorEnv = Omit<Env, 'ARCHIVE' | 'PUBLIC' | 'PUBLIC_BUCKETS' | 'PUBLIC_PREFIX' | 'EXCLUDED_ACCESS_KEY_IDS'> & {
   ARCHIVE: Archive
+  WINDOW_MINUTES?: string
   /** Optional: where the derived, public per-hour read files go (`PUBLIC_BUCKETS` names which sources). */
   PUBLIC?: Pick<Env['ARCHIVE'], 'put'>
   PUBLIC_BUCKETS?: string
@@ -37,9 +42,11 @@ function integer(value: string, min: number, max: number): number {
 
 /** Worst-case subrequests of one invocation: the state read and write, the manifest and the one batched delete of
  * superseded aggregates (4); per hour attempted, its count query, aggregate write and public write (3); per event
- * page, its query and raw write (2). */
-export function subrequestBound(maxPages: number, maxHours: number): number {
-  return 4 + 3 * maxHours + 2 * maxPages
+ * page, its query and raw write (2). Subhour windows also reserve count queries for adaptive bisection down to
+ * one minute. This intentionally overcounts splits when the last piece is shorter than the configured window. */
+export function subrequestBound(maxPages: number, maxHours: number, windowMinutes = 60): number {
+  const splitQueries = windowMinutes < 60 ? Math.ceil(Math.log2(windowMinutes)) : 0
+  return 4 + (3 + splitQueries) * maxHours + 2 * maxPages
 }
 
 export function settings(env: CollectorEnv, cron: string, scheduledTime: number) {
@@ -64,8 +71,10 @@ export function settings(env: CollectorEnv, cron: string, scheduledTime: number)
   const maxPages = integer(env.MAX_PAGES, 1, 450)
   const maxHours = integer(env.MAX_HOURS, 1, 168)
   const verifyHours = integer(env.VERIFY_HOURS, 0, 168)
+  const windowMinutes = integer(env.WINDOW_MINUTES ?? '60', 1, 60)
+  if (60 % windowMinutes) throw new CollectionError('invalid_config')
   if (lag + retention > 166 || lookback > retention || overlap > retention || verifyHours > maxHours) throw new CollectionError('invalid_config')
-  if (subrequestBound(maxPages, maxHours) > SUBREQUEST_LIMIT) throw new CollectionError('invalid_config')
+  if (subrequestBound(maxPages, maxHours, windowMinutes) > SUBREQUEST_LIMIT) throw new CollectionError('invalid_config')
   if (!Number.isSafeInteger(scheduledTime) || scheduledTime < 0) throw new CollectionError('invalid_config')
   const to = Math.floor(scheduledTime / HOUR) * HOUR - lag * HOUR
   return {
@@ -73,7 +82,7 @@ export function settings(env: CollectorEnv, cron: string, scheduledTime: number)
     published: published as string[], publicPrefix: env.PUBLIC_PREFIX ?? '', excluded: new Set(excluded as string[]),
     lookback: lookback * HOUR, overlap: overlap * HOUR,
     pageSize: integer(env.PAGE_SIZE, 1, 2000),
-    maxPages, maxHours, verifyHours,
+    maxPages, maxHours, verifyHours, window: windowMinutes * 60_000,
     maxBytes: integer(env.MAX_PAGE_BYTES, 1024, 8_388_608),
   }
 }
@@ -232,8 +241,10 @@ export type HourRow = [string | null, string, number, number, number]
 export interface HourAggregate {
   schema_version: 4
   bucket: string
-  /** ISO start of the UTC hour. */
+  /** ISO start of the collection window (UTC hour by default). */
   hour: string
+  /** Exclusive end, present for subhour windows. */
+  window_end?: string
   /** Distinct provider events in the drain, the deployment's own included. */
   events: number
   /** Of which made with an `EXCLUDED_ACCESS_KEY_IDS` key: in `actions`/`classes`, never in `rows`. */
@@ -248,22 +259,23 @@ export interface HourAggregate {
 /** Accumulates one hour's drain: dedupes event ids within the drain only, counts every action, keeps per-(key,
  * action) rows for `ROW_ACTIONS`. */
 export class HourAccumulator {
-  private readonly ids = new Set<string>()
-  private readonly cells = new Map<string, HourRow>()
+  private readonly ids: EventIds
+  private readonly cells = new Map<string, Map<string | null, HourRow>>()
   private readonly actions: Record<string, number> = {}
   private own = 0
 
+  constructor(expected = 0) { this.ids = new EventIds(expected) }
+
   add(event: Event): void {
-    if (this.ids.has(event.id)) return
-    this.ids.add(event.id)
+    if (!this.ids.add(event.id)) return
     this.actions[event.action] = (this.actions[event.action] ?? 0) + 1
     if (event.own) { this.own++; return }
     if (!ROW_ACTIONS.has(event.action)) return
-    // `\u0000` cannot occur in an R2 key or action name; it separates the two in the map key.
-    const id = `${event.key ?? ''}\u0000${event.key === null ? 0 : 1}\u0000${event.action}`
-    const row = this.cells.get(id)
+    let cells = this.cells.get(event.action)
+    if (!cells) { cells = new Map(); this.cells.set(event.action, cells) }
+    const row = cells.get(event.key)
     const at = minute(event.timestamp)
-    if (!row) this.cells.set(id, [event.key, event.action, 1, at, at])
+    if (!row) cells.set(event.key, [event.key, event.action, 1, at, at])
     else {
       row[2]++
       if (at < row[3]) row[3] = at
@@ -276,14 +288,15 @@ export class HourAccumulator {
   /** The drain already holds this event (a page can repeat one: the provider delivers some events twice). */
   has(id: string): boolean { return this.ids.has(id) }
 
-  finish(bucket: string, hour: number, estimated: number, maxInterval: number): HourAggregate {
+  finish(bucket: string, hour: number, estimated: number, maxInterval: number, end?: number): HourAggregate {
     const classes: Record<string, number> = {}
     for (const [action, n] of Object.entries(this.actions)) classes[actionClass(action)] = (classes[actionClass(action)] ?? 0) + n
-    const rows = [...this.cells.values()].sort((a, b) =>
+    const rows = [...this.cells.values()].flatMap(cells => [...cells.values()]).sort((a, b) =>
       a[0] === b[0] ? cmp(a[1], b[1]) : a[0] === null ? -1 : b[0] === null ? 1 : cmp(a[0], b[0]))
     const observed = this.ids.size
     return {
       schema_version: 4, bucket, hour: new Date(hour).toISOString(), events: observed, own: this.own,
+      ...end !== undefined ? { window_end: new Date(end).toISOString() } : {},
       actions: sorted(this.actions), classes: sorted(classes),
       sampling: { observed, estimated, max_sample_interval: maxInterval, capture: capture(observed, estimated, maxInterval) },
       rows,
@@ -298,6 +311,7 @@ export class HourAccumulator {
 export function publicHour(agg: HourAggregate): string {
   return JSON.stringify({
     schema_version: 1, bucket: agg.bucket, hour: agg.hour,
+    ...agg.window_end ? { window_end: agg.window_end } : {},
     capture: agg.sampling.capture, observed: agg.sampling.observed, estimated: agg.sampling.estimated,
     max_sample_interval: agg.sampling.max_sample_interval, excluded: agg.own,
     rows: agg.rows.map(([key, action, n, , last_ts]) => ({ key, action, n, last_ts })),
@@ -307,6 +321,7 @@ export function publicHour(agg: HourAggregate): string {
 export type Phase = 'new' | 'early' | 'verify'
 
 export interface HourEntry {
+  window_end?: number
   /** The aggregate object this hour's latest drain produced (or kept, when unchanged). */
   agg: string
   /** SHA-256 of the aggregate's text: a re-drain with the same result writes nothing. */
@@ -324,13 +339,16 @@ export interface HourEntry {
 }
 
 export interface BucketState {
+  /** Granularity switch: earlier hourly entries remain disjoint from new minute-keyed windows. */
+  window_from?: number
+  window_ms?: number
   /** Every hour before it has been drained (or recorded as a gap). */
   collected_through: number
   first_from: number
   gaps: [number, number][]
   /** Where the round-robin re-verify resumes (an hour start), or null before the first. */
   verify_cursor: number | null
-  /** `YYYY-MM-DDTHH` → its latest drain, for hours still within `RETENTION_HOURS`. */
+  /** `YYYY-MM-DDTHH` (hourly) or `YYYY-MM-DDTHH:mm` (subhour) → latest drain within retention. */
   hours: Record<string, HourEntry>
   /** `YYYY-MM-DDTHH` → aggregate key, for hours past retention (never re-drained again). */
   frozen: Record<string, string>
@@ -362,12 +380,12 @@ export function upgrade(state: State | LegacyState): Record<string, BucketState>
   }]))
 }
 
-export function hourKey(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 13)
+export function hourKey(ms: number, window = HOUR): string {
+  return new Date(ms).toISOString().slice(0, window < HOUR ? 16 : 13)
 }
 
 function hourStart(key: string): number {
-  return Date.parse(`${key}:00:00Z`)
+  return Date.parse(key + (key.length === 13 ? ':00:00Z' : ':00Z'))
 }
 
 function cmp(a: string, b: string): number {
@@ -396,10 +414,10 @@ export function plan(config: Settings, prior: BucketState | undefined) {
   const from = Math.max(start, config.floor)
   const gap: [number, number] | null = prior && from > prior.collected_through ? [prior.collected_through, from] : null
   const fresh: number[] = []
-  for (let hour = from; hour < config.to; hour += HOUR) fresh.push(hour)
+  for (let hour = from; hour < config.to; hour += config.window) fresh.push(hour)
   const early = Object.entries(prior?.hours ?? {})
     .map(([key, entry]) => [hourStart(key), entry] as const)
-    .filter(([hour, entry]) => !entry.final && hour >= config.floor && hour + HOUR + config.overlap <= config.now)
+    .filter(([hour, entry]) => !entry.final && hour >= config.floor && (entry.window_end ?? hour + HOUR) + config.overlap <= config.now)
     .map(([hour]) => hour)
     .sort((a, b) => a - b)
   return { from, gap, fresh, early }
@@ -407,10 +425,15 @@ export function plan(config: Settings, prior: BucketState | undefined) {
 
 /** Round-robin order of the re-verify candidates: collected hours within retention (`[max(floor, first_from),
  * through)`) from `cursor` on, then wrapping. */
-export function verifyOrder(config: Settings, state: Pick<BucketState, 'first_from' | 'collected_through' | 'verify_cursor'>): number[] {
+export function verifyOrder(config: Settings, state: Pick<BucketState, 'first_from' | 'collected_through' | 'verify_cursor'> & Partial<Pick<BucketState, 'window_from' | 'hours'>>): number[] {
   const hours: number[] = []
   const cursor = state.verify_cursor
-  for (let hour = Math.max(config.floor, state.first_from); hour < state.collected_through; hour += HOUR) hours.push(hour)
+  const legacyEnd = state.window_from ?? state.collected_through
+  for (let hour = Math.max(config.floor, state.first_from); hour < legacyEnd; hour += HOUR) hours.push(hour)
+  if (state.window_from !== undefined) {
+    hours.push(...Object.keys(state.hours ?? {}).map(hourStart).filter(hour => hour >= Math.max(config.floor, state.window_from!) && hour < state.collected_through))
+    hours.sort((a, b) => a - b)
+  }
   const at = cursor === null ? 0 : hours.findIndex(hour => hour >= cursor)
   return at <= 0 ? hours : [...hours.slice(at), ...hours.slice(0, at)]
 }
@@ -419,11 +442,6 @@ async function readJson<T>(archive: Archive, key: string): Promise<{ value: T, e
   const found = await archive.get(key)
   if (!found) return null
   return { value: JSON.parse(await found.text()) as T, etag: found.etag }
-}
-
-async function sha256(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
-  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 export interface HourReport {
@@ -450,6 +468,7 @@ export async function collect(
   fetchImpl: typeof fetch = fetch,
   runId: string = crypto.randomUUID(),
 ) {
+  const deadline = performance.now() + RUN_MS
   const config = settings(env, cron, scheduledTime)
   if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new CollectionError('invalid_run_id')
   const prefix = `runs/${scheduledTime}/${runId}`
@@ -463,34 +482,47 @@ export async function collect(
       // Workers' fetch takes only `follow` / `manual` (`error` throws a TypeError: the first scheduled run, 10-17 04:13Z,
       // failed on it in 151 ms); a manual 3xx isn't `ok`, so it fails the run as `provider_http_3xx`.
       redirect: 'manual',
-    })
+    }).catch(() => { throw new CollectionError('provider_unreachable') })
     if (!response.ok) {
-      await response.body?.cancel()
-      throw new CollectionError(`provider_http_${response.status}`)
+      // The API envelope's numeric error code says which refusal it was (OA's 403s, 2026-10-22, came 6–8 minutes
+      // into runs whose pages a laptop replay fetched fine); only that number is kept, never the message.
+      const code = await response.text().then(text => JSON.parse(text).errors?.[0]?.code, () => undefined).catch(() => undefined)
+      throw new CollectionError(`provider_http_${response.status}${Number.isInteger(code) ? `_${code}` : ''}`)
     }
     return boundedText(response, config.maxBytes)
   }
   let pagesLeft = config.maxPages
   const superseded: string[] = []
   let hoursLeft = config.maxHours
+  // A provider failure (`provider_*`) mid-run stops scheduling windows; those already complete still publish.
+  let halted: string | null = null
 
   /** Drains one hour into `state.hours`, or returns 'wait' when it doesn't fit what's left of the budget. */
-  const drain = async (bucket: string, state: BucketState, hour: number, phase: Phase, reports: HourReport[]): Promise<'done' | 'wait'> => {
-    if (!hoursLeft) return 'wait'
+  const drain = async (bucket: string, state: BucketState, hour: number, phase: Phase, reports: HourReport[]): Promise<number | 'wait'> => {
+    if (halted || !hoursLeft || performance.now() >= deadline) return 'wait'
     hoursLeft--
-    const to = hour + HOUR
-    const { estimated, maxInterval } = parseCalculation(await query(calculationBody(bucket, hour, to)))
+    const windowed = state.window_from !== undefined && hour >= state.window_from
+    const keyHour = hourKey(hour, windowed ? config.window : HOUR)
+    const known = state.hours[keyHour]
+    let to = known?.window_end ?? (windowed ? (Math.floor(hour / config.window) + 1) * config.window : hour + HOUR)
+    let counted = parseCalculation(await query(calculationBody(bucket, hour, to)))
+    while (reservePages(counted.estimated, config.pageSize) > config.maxPages && windowed && phase === 'new' && to - hour > 60_000) {
+      if (performance.now() >= deadline) return 'wait'
+      to = hour + Math.max(60_000, Math.floor((to - hour) / 120_000) * 60_000)
+      counted = parseCalculation(await query(calculationBody(bucket, hour, to)))
+    }
+    const { estimated, maxInterval } = counted
     const reserve = reservePages(estimated, config.pageSize)
     if (reserve > config.maxPages) throw new CollectionError('hour_over_cap')
     if (reserve > pagesLeft) return 'wait'
-    const acc = new HourAccumulator()
+    const acc = new HourAccumulator(estimated)
     const cursors = new Set<string>()
     const keys: string[] = []
     let offset: string | undefined
     for (;;) {
       // Late deliveries outgrew the reservation and the invocation's budget: the hour waits (its raw pages are
       // unpublished and expire with `runs/`).
-      if (!pagesLeft) return 'wait'
+      if (!pagesLeft || performance.now() >= deadline) return 'wait'
       const text = await query(eventsBody(bucket, hour, to, config.pageSize, offset))
       const page = parsePage(text, bucket, hour, to, config.excluded)
       pagesLeft--
@@ -501,7 +533,7 @@ export async function collect(
       if (page.length && page.length < config.pageSize && page.every(event => acc.has(event.id))) break
       const next = page.at(-1)?.id
       if (next && cursors.has(next)) throw new CollectionError('cursor_stalled')
-      const key = `${prefix}/${bucket}/${hourKey(hour)}/${String(keys.length).padStart(4, '0')}.json`
+      const key = `${prefix}/${bucket}/${keyHour}/${String(keys.length).padStart(4, '0')}.json`
       await env.ARCHIVE.put(key, text, { httpMetadata: { contentType: 'application/json' } })
       keys.push(key)
       for (const event of page) acc.add(event)
@@ -509,62 +541,69 @@ export async function collect(
       cursors.add(next)
       offset = next
     }
-    const agg = acc.finish(bucket, hour, estimated, maxInterval)
-    const text = JSON.stringify(agg)
-    const digest = await sha256(text)
-    const known = state.hours[hourKey(hour)]
+    const agg = acc.finish(bucket, hour, estimated, maxInterval, windowed ? to : undefined)
+    const { digest, bytes } = await hashJson(agg)
     const changed = known?.digest !== digest
     let aggKey = known?.agg ?? ''
     if (changed) {
       if (known?.agg) superseded.push(known.agg)
-      aggKey = `agg/${bucket}/${agg.hour.slice(0, 10)}/${agg.hour.slice(11, 13)}/${runId}.json`
-      await env.ARCHIVE.put(aggKey, text, { httpMetadata: { contentType: 'application/json' } })
+      aggKey = `agg/${bucket}/${agg.hour.slice(0, 10)}/${keyHour.slice(11)}/${runId}.json`
+      await putJson(env.ARCHIVE, aggKey, agg, bytes)
       // Rewritten whenever the hour's aggregate is replaced, before the state publish.
       if (config.published.includes(bucket)) {
-        await env.PUBLIC!.put(`${config.publicPrefix}/${bucket}/${agg.hour.slice(0, 10)}/${agg.hour.slice(11, 13)}.json`, publicHour(agg), { httpMetadata: { contentType: 'application/json' } })
+        await env.PUBLIC!.put(`${config.publicPrefix}/${bucket}/${agg.hour.slice(0, 10)}/${keyHour.slice(11)}.json`, publicHour(agg), { httpMetadata: { contentType: 'application/json' } })
       }
     }
-    state.hours[hourKey(hour)] = {
+    state.hours[keyHour] = {
+      ...windowed ? { window_end: to } : {},
       agg: aggKey, digest, drained_at: config.now, final: config.now >= to + config.overlap,
       events: agg.events, own: agg.own, estimated, max_sample_interval: maxInterval, capture: agg.sampling.capture, pages: keys.length,
     }
     reports.push({ hour: agg.hour, phase, events: agg.events, capture: agg.sampling.capture, changed, pages: keys })
-    return 'done'
+    return to
   }
 
   const buckets: Record<string, BucketState> = { ...previous }
   const runs = config.buckets.map(bucket => {
     const prior = previous[bucket]
+    if (prior?.window_ms !== undefined && prior.window_ms !== config.window) throw new CollectionError('window_size_changed')
     const planned = plan(config, prior)
     const state: BucketState = {
       collected_through: planned.from, first_from: prior?.first_from ?? planned.from,
       gaps: [...prior?.gaps ?? [], ...planned.gap ? [planned.gap] : []],
       verify_cursor: prior?.verify_cursor ?? null,
       hours: { ...prior?.hours }, frozen: { ...prior?.frozen },
+      ...config.window < HOUR ? { window_from: prior?.window_from ?? planned.from, window_ms: config.window } : {},
       ...prior?.legacy_days ? { legacy_days: prior.legacy_days } : {},
     }
     return { bucket, planned, state, reports: [] as HourReport[], waiting: 0, error: null as string | null }
   })
+  /** `hour_over_cap` holds one bucket's watermark; a provider failure halts the run (the 13:13Z 10-22 OA run lost
+   * 8 minutes of drained windows to one `provider_http_403`). Either way completed windows publish and the run
+   * then fails with the code. Anything else fails before the publish. */
   const overCap = async <T>(run: typeof runs[number], body: () => Promise<T>): Promise<T | 'over_cap'> => {
     try { return await body() } catch (error) {
-      if (!(error instanceof CollectionError) || error.code !== 'hour_over_cap') throw error
-      run.error = error.code
+      if (!(error instanceof CollectionError)) throw error
+      if (error.code.startsWith('provider_')) {
+        if (!runs.some(r => r.reports.length)) throw error
+        halted = error.code
+      } else if (error.code !== 'hour_over_cap') throw error
+      run.error ??= error.code
       return 'over_cap'
     }
   }
   // 1. New settled hours, oldest first; the watermark advances only over contiguous drained hours.
   for (const run of runs) {
-    const { fresh } = run.planned
-    for (let i = 0; i < fresh.length; i++) {
-      const result = await overCap(run, () => drain(run.bucket, run.state, fresh[i], 'new', run.reports))
-      if (result !== 'done') { run.waiting = fresh.length - i; break }
-      run.state.collected_through = fresh[i] + HOUR
+    while (run.state.collected_through < config.to) {
+      const result = await overCap(run, () => drain(run.bucket, run.state, run.state.collected_through, 'new', run.reports))
+      if (typeof result !== 'number') { run.waiting = Math.ceil((config.to - run.state.collected_through) / config.window); break }
+      run.state.collected_through = result
     }
   }
   // 2. Re-drains of hours last drained early.
   for (const run of runs) {
     for (const hour of run.planned.early) {
-      if (await overCap(run, () => drain(run.bucket, run.state, hour, 'early', run.reports)) !== 'done') break
+      if (typeof await overCap(run, () => drain(run.bucket, run.state, hour, 'early', run.reports)) !== 'number') break
     }
   }
   // 3. A bounded round-robin re-verify of older hours within retention.
@@ -575,8 +614,9 @@ export async function collect(
       if (!budget) break
       if (done.has(hour)) continue
       budget--
-      if (await overCap(run, () => drain(run.bucket, run.state, hour, 'verify', run.reports)) !== 'done') break
-      run.state.verify_cursor = hour + HOUR
+      const end = await overCap(run, () => drain(run.bucket, run.state, hour, 'verify', run.reports))
+      if (typeof end !== 'number') break
+      run.state.verify_cursor = end
     }
   }
   for (const run of runs) {
@@ -610,7 +650,8 @@ export async function collect(
   // Replaced aggregates are unreachable once the state above names their successors: delete them in one batch
   // (at marin-na's volume each version is ~5 MB/hour). A failure here leaves orphans, never a dangling state.
   if (superseded.length) await env.ARCHIVE.delete(superseded)
-  if (runs.some(run => run.error)) throw new CollectionError('hour_over_cap')
+  const failed = halted ?? runs.find(run => run.error)?.error
+  if (failed) throw new CollectionError(failed)
   const reports = runs.flatMap(run => run.reports)
   return {
     run_id: runId, buckets: runs.length, hours: reports.length, pages: config.maxPages - pagesLeft,

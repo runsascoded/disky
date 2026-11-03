@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { HotMaps } from './HotMaps'
+import { Loading } from './Busy'
 import { HotSearchForm, HotTotals } from './HotSearch'
 import { SiteKbd } from './SiteKbd'
 import type { HotRequest } from './hotModel'
@@ -134,10 +135,10 @@ export function NamePage() {
     </p>}
     {miss && <NoScanMatch what={endMiss ? 'scan' : 'baseline scan'} miss={miss} hrefFor={scan => hrefWithScan(location.pathname, location.search, sel, scan, !!endMiss)} />}
     {issue && <p role="alert">{issue}</p>}
-    {(registry.isPending || scansQ.isPending) && <p role="status">Loading available name-summary scans…</p>}
+    {(registry.isPending || scansQ.isPending) && <Loading label="Loading available name-summary scans…" />}
     {registry.error && <p role="alert">{registry.error.message}</p>}
     {scansQ.error && <p role="alert">Couldn’t load the scan list ({scansQ.error.message}), so this page can’t tell which scan the link names.</p>}
-    {request && !issue && query.isPending && <p role="status">Loading exact name summary…</p>}
+    {request && !issue && query.isPending && <Loading label="Loading exact name summary…" />}
     {request && !issue && query.error && <p role="alert">{query.error.message}</p>}
     {request && !issue && result?.hexRuns && <p className="hot-note hex-runs" aria-label="Hex-run note"><HexRunsInfo min={result.hexRuns.min} /> {hexRunsNote(result.hexRuns.min)}</p>}
     {request && !issue && result && <><NamePlanStatus result={result} /><HotMaps result={result} /><HotTotals result={result} />

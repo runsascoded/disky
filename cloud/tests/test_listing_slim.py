@@ -140,7 +140,7 @@ def test_sweep_manifests_are_byte_identical(layer2, tmp_path: Path):
     s1, s2 = out["v1"], out["v2"]
     assert {**s1, "manifest": None} == {**s2, "manifest": None} == {
         "plan_id": 1, "name": "p", "bucket": BUCKET, "sweep": ["marin/ckpt/"], "as_of": {},
-        "objects": 3, "bytes": 6000, "skipped_after_as_of": {"objects": 0, "bytes": 0}, "manifest": None,
+        "objects": 3, "bytes": 6000, "skipped_after_as_of": {"objects": 0, "bytes": 0, "new_objects": 0, "changed_objects": 0}, "manifest": None,
     }
 
 

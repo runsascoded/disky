@@ -37,20 +37,22 @@ A bucket's rows sum to its ``size`` (the tree is flat and versionless); a
 mismatch warns.
 
 **Columns.** ``created`` is a repo file's last-commit date
-(``expand=true``; ``commit_dates=False`` uses the repo's ``lastModified``
-instead, at 1000 entries per tree page rather than 50), an old version's
+(``expand=true`` with explicit 100-entry pages, rather than the 50-entry
+default; ``commit_dates=False`` uses the repo's ``lastModified`` instead,
+at 1000 entries per tree page), an old version's
 ``pushedAt``, the residual's repo ``lastModified`` (an upper bound on its
 bytes' age), and a bucket file's ``uploadedAt`` (falling back to its
 ``mtime``). ``storage_class_id`` is the billing class, per
 :data:`~disk_tree.listing.HF_CLASS_IDS`: public 1, private 5, unbilled git
 files 6 — so every non-6 byte is a billed byte. ``generation`` is NULL.
 
-**Rate limits.** The Hub answers with ``RateLimit: "api";r=<left>;t=<secs>``
-under a fixed 1000-request / 300 s window (a free account's quota). The
-client keeps ``concurrency`` requests in flight (≈8 drew 429s), stops issuing
+**Rate limits.** The Hub answers with ``RateLimit: "api";r=<left>;t=<secs>``;
+the quota depends on the authenticated account's plan. The client follows
+the returned remaining count and reset time, keeps ``concurrency`` requests
+in flight (≈8 drew 429s), stops issuing
 while the window is nearly spent until it resets, and retries 429 / 5xx
 honoring ``Retry-After``, and a reset / dropped / timed-out connection like a
-5xx. Throughput is therefore window-bound, ~3.3 req/s.
+5xx. A 1000-request / 300 s quota bounds throughput at ~3.3 req/s.
 
 Auth: ``HF_TOKEN`` (a read token sees private repos and buckets; none lists
 public ones only). ``HF_ENDPOINT`` overrides ``https://huggingface.co``.
@@ -85,6 +87,10 @@ REPO_KINDS = ("models", "datasets", "spaces")
 KINDS = ("buckets", *REPO_KINDS)
 HISTORY_DIR = "@history"
 UNLISTED = "@unlisted"
+# Hub OpenAPI: bucket tree pages default to 1000, with a maximum of 5000. Repos have separate limits.
+BUCKET_PAGE_SIZE = 5000
+# Expanded repo trees accept 100 entries: live checks preserve all file dates; 101 is refused.
+EXPANDED_REPO_PAGE_SIZE = 100
 
 
 # --- URIs --------------------------------------------------------------------
@@ -282,7 +288,7 @@ class UnitTotals:
 def list_bucket(client: HfClient, namespace: str, name: str, private: Optional[bool], size: Optional[int]) -> "tuple[list, UnitTotals]":
     rows = []
     cls = _visibility(private)
-    for e in client.paginate(f"/api/buckets/{namespace}/{quote(name)}/tree", [("recursive", "true")]):
+    for e in client.paginate(f"/api/buckets/{namespace}/{quote(name)}/tree", [("recursive", "true"), ("limit", str(BUCKET_PAGE_SIZE))]):
         if e["type"] != "file":
             continue
         rows.append((f"buckets/{name}/{e['path']}", int(e["size"]), e.get("uploadedAt") or e.get("mtime"), cls, None))
@@ -314,7 +320,9 @@ def list_repo(
     oids: "set[str]" = set()
     lfs_bytes = git_bytes = 0
     if info.get("sha"):  # an empty repo has no commit to list
-        params = [("recursive", "true")] + ([("expand", "true")] if commit_dates else [])
+        params = [("recursive", "true")] + (
+            [("expand", "true"), ("limit", str(EXPANDED_REPO_PAGE_SIZE))] if commit_dates else []
+        )
         for e in client.paginate(f"{base}/tree/{info['sha']}", params):
             if e["type"] != "file":
                 continue

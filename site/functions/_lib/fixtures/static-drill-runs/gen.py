@@ -15,7 +15,8 @@ layout, the Python reader (`TieredDrill`) and brute force from the versions.
 - `expected.json`: `dates`, `paths` (`''`, every directory, `nope`), `long`/`short` (the members through
   the last run) and `members1` (the long members through the first run); `views[t][P][d]`, brute force from the
   versions: per child of `P` holding a live match root under it `[bytes, objects]`, only the non-empty ones (a
-  view `P` itself matches is the plain one);
+  view `P` itself matches is the plain one); `rows[t]`, brute force too: each member's root rows over every scan (its
+  distinct `(path, usr, vf)` first hits: what the fleet root's `rows` counts, a run's close records never again);
   `py[stack][t][P]`, the Python `TieredDrill` over the base and the first run (`run1`) or both (`run2`), for every
   `P` but the fleet root (it reads the catalog): `[source, upper]` and for a rollup `[kept, rows, children]`.
 
@@ -124,6 +125,17 @@ def brute(versions: list[tuple], t: str, P: str, date: str) -> dict | None:
     return {k: v for k, v in sorted(acc.items()) if v != [0, 0]}
 
 
+def root_rows(versions: list[tuple], t: str) -> int:
+    """`t`'s root rows over every scan: its distinct `(path, usr, vf)` first hits."""
+    out = set()
+    for depth, path, usr, vf, _vt, _size, _n_files in versions:
+        name = path.rsplit("/", 1)[-1].lower()
+        parent = path.rsplit("/", 1)[0].lower() if "/" in path else ""
+        if depth >= 1 and t in name and t not in parent:
+            out.add((path, usr, vf))
+    return len(out)
+
+
 def untimed(doc):
     """`doc` without its timings (`s`), so a rerun writes the same bytes."""
     if isinstance(doc, dict):
@@ -182,7 +194,7 @@ def main() -> None:
                                  + ([[a["header"][k] for k in ("kept", "rows", "children")]] if a["source"] == "rollup" else []))
             py[stack] = doc
         expected = {"dates": DAYS, "paths": paths, "long": long, "short": short, "members1": _members(w["tiers"][1], "long"),
-                    "R": cfg["R"], "K": cfg["K"], "views": views, "py": py}
+                    "R": cfg["R"], "K": cfg["K"], "rows": {t: root_rows(versions, t) for t in [*long, *short]}, "views": views, "py": py}
         (out / "expected.json").write_text(json.dumps(expected, separators=(",", ":")) + "\n")
 
 

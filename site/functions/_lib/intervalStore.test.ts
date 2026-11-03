@@ -1,12 +1,14 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
-import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
+import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { indexedScan } from './scanArg'
+import { storeEnv } from './stores'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
 import { type D1Variant, fixture, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, type ViewNode } from './view'
+import { buildDiff, buildView, LOOKUP_CAP, type ViewNode } from './view'
+import { DESCENT_MAX_EXPANDABLE } from './diffDescent'
 import { type HitSource, injectedStores } from './staticFilter'
 import { type Hit, scanAt } from './staticNames'
 import { parseQuery } from './scope'
@@ -77,7 +79,10 @@ function flatten(t: ViewNode): Tiles {
   const rec = (n: ViewNode, p: string) => {
     let k = p
     for (let i = 2; k in out; i++) k = `${p}#${i}`
-    const { c, ...rest } = n
+    // `t` (the newest write's instant) isn't in the Python reference's views: it must name the same day as `d`, then
+    // the rest is compared exactly.
+    const { c, t, ...rest } = n
+    if (t !== undefined) expect([k, Math.floor((t as number) / 86400)]).toEqual([k, rest.d])
     const us = rest.us as [string, number][] | undefined
     out[k] = { ...rest, ...(us ? { us: [...us].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
     const kids = [...(c ?? [])].sort((a, b) => b.b - a.b || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))
@@ -102,6 +107,11 @@ beforeAll(async () => {
 })
 
 describe('interval store', () => {
+  it('prunes depth-boundary groups by the interval writer\'s exact path bounds', async () => {
+    const h = await openIndex(env, '2026-08-03', 'path')
+    expect(await planRects(h, [{ dLo: 2, dHi: 1e9, pLo: 'zzzz/', pHi: 'zzzz0' }])).toEqual([])
+  })
+
   it('opens a held date as of its scan, and nothing else', async () => {
     const h = await openIndex(env, '2026-08-03', 'bysize')
     expect([h.mode, h.version, h.variant, h.asOf, h.gen]).toEqual(['pq', 3, 'bysize', 1785715200, 'iv:g1'])
@@ -109,11 +119,33 @@ describe('interval store', () => {
     await expect(openIndex(env, '2026-08-03', 'bysize-user')).rejects.toThrow("index variant 'bysize-user' not synced for 2026-08-03")
   })
 
-  it('opts a request in with `ps=iv` under `PATH_STORE=opt-in`, out with `ps=scan` under `intervals`, never for a secondary store', async () => {
+  it('opts a configured store in with `ps=iv` under `opt-in`, out with `ps=scan` under `intervals`', async () => {
     const at = async (q: string, mode = 'opt-in') => (await withPathStore({ request: new Request(`https://x/api/subtree?${q}`), env: { ...env, PATH_STORE: mode } })).env.PATH_STORE
     expect(await Promise.all([at('date=d'), at('date=d&ps=iv'), at('date=d&ps=iv&store=meta'), at('date=d', 'intervals'), at('date=d&store=meta', 'intervals'),
       at('date=d&ps=scan', 'intervals'), at('date=d&ps=scan')]))
-      .toEqual([undefined, 'intervals', undefined, 'intervals', undefined, undefined, undefined])
+      .toEqual([undefined, 'intervals', 'intervals', 'intervals', 'intervals', undefined, undefined])
+  })
+
+  it('isolates equal generation names under different interval prefixes, including handles and decoded groups', async () => {
+    const base = r2([])
+    const seen: string[] = []
+    const bucket = {
+      get: async (key: string, options?: unknown) => {
+        seen.push(key)
+        const rewritten = key.replace(/^history\/[ab]\/interval-store/, 'interval-store')
+        return (base.get as (k: string, o?: unknown) => Promise<unknown>)(rewritten, options)
+      },
+      head: async () => ({}),
+      list: async () => ({ objects: [], truncated: false }),
+    } as unknown as R2Bucket
+    const a = { ...env, STORE_KEY: 'isolated-prefix', INDEX_R2: bucket, INTERVAL_STORE_PREFIX: 'history/a/interval-store' }
+    const b = { ...a, INTERVAL_STORE_PREFIX: 'history/b/interval-store' }
+    const ha = await openIndex(a, '2026-08-03', 'path')
+    const hb = await openIndex(b, '2026-08-03', 'path')
+    const ra = await readRows(ha, 0, 99, '', '\uffff')
+    const rb = await readRows(hb, 0, 99, '', '\uffff')
+    expect([ha.dir, hb.dir, ra.length > 0, rb]).toEqual(['history/a/interval-store/g1/served', 'history/b/interval-store/g1/served', true, ra])
+    expect([...new Set(seen.map(k => k.split('/').slice(0, 2).join('/')))].sort()).toEqual(['history/a', 'history/b'])
   })
 
   it('serves the store\'s current generation when unpinned, and a pin over it', async () => {
@@ -259,9 +291,8 @@ describe('interval store', () => {
         expect(a.trees).toEqual(views.map(c => Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))))
         expect(b.trees).toEqual(a.trees)
         expect([a.ds, b.ds]).toEqual([diffs, diffs])
-        // g3's 08-05 run's `bysize` data is read by nothing here: only 08-05's reads open that run, and they plan `path`
-        // (a small subtree reads the sort holding fewer rows).
-        const data = (d: string) => [...(d === 'deltas/2026-08-05/' ? [] : [`${d}served/bysize.parquet`]), `${d}served/path.parquet`]
+        // The runs' small subtree reads now prefer the path sort after exact boundary pruning.
+        const data = (d: string) => [...(d === '' ? [`${d}served/bysize.parquet`] : []), `${d}served/path.parquet`]
         const dirs = ['', ...(gen === 'g3' ? ['deltas/2026-08-04/', 'deltas/2026-08-05/'] : [])]
         expect([a.files, b.files]).toEqual([
           [...(gen === 'g3' ? ['manifests/2026-08-05.json'] : []), 'scans.json', ...dirs.flatMap(d => [`${d}served/bysize.groups.parquet`, `${d}served/path.groups.parquet`, ...data(d)])].sort(),
@@ -546,6 +577,31 @@ describe('interval store: base + runs', () => {
     ])
   })
 
+  it('lists and resolves a secondary store\'s held scans from its own interval store, beside its own D1 pointers only (S1)', async () => {
+    // A secondary store (`STORES_JSON` vars `PATH_STORE`, `INTERVAL_STORE_GEN`) serving the same store: its scans are its
+    // D1 pointers (`store = 'm'`) and every scan its generation holds, never the primary's pointers.
+    const { db, raw } = await sqliteD1()
+    raw.exec(`INSERT INTO index_schema (store, date, variant, version, schema_json, floor_bytes, gen, dir) VALUES
+      ('primary', '2026-07-28', 'path', 2, '{}', NULL, 'G', 'listing/2026-07-28/index/G'),
+      ('m', '2026-07-29', 'm:path', 2, '{}', NULL, 'G', 'm-l2/2026-07-29/index/G')`)
+    const primary = { ...at('g3', [], undefined, { rev: 's1-m' }), DB: db } as Env
+    const m = storeEnv(primary, 'm', { vars: { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g3', INTERVAL_STORE_REV: 's1-m' } })
+    expect([
+      (await pathScans(m, true)).results.map(r => r.date),
+      await indexedScan(m, '2026-08-05', true),
+      await indexedScan(m, '2026-08-05', false),
+      await indexedScan(m, '2026-07-29', true),
+      await indexedScan(m, '2026-07-28', true),
+    ]).toEqual([
+      // its D1's 07-29, the base's 07-30, 07-31, 08-02 and 08-03, the runs' 08-04 and 08-05; not the primary's 07-28
+      ['2026-07-29', '2026-07-30', '2026-07-31', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05'],
+      '2026-08-05',
+      '2026-08-05',
+      '2026-07-29',
+      null,
+    ])
+  })
+
   it('opens every scan with every run beside the base', async () => {
     const shape = async (gen: string, date: string) => {
       const h = await openIndex(at(gen), date, 'path')
@@ -660,7 +716,7 @@ describe('interval store: base + runs', () => {
       '2026-07-31': base().sort(),
       '2026-08-02': base().sort(),
       '2026-08-03': base(false).sort(),
-      '2026-08-04': [...base(), ...run('2026-08-04')].sort(),
+      '2026-08-04': [...base(false), ...run('2026-08-04', false)].sort(),
       '2026-08-05': [...base(false), ...run('2026-08-04', false), ...run('2026-08-05', false)].sort(),
     })
   })
@@ -756,6 +812,34 @@ describe('interval store: base + runs', () => {
     ]).toEqual([true, false, true, false, true, true, true, true, true])
   })
 
+  it('bounds a depth-straddling group of the path sort by its whole-depth neighbours', () => {
+    // A group of depths 2 → 3 between a group all of depth 2 and one all of depth 3: its 2s follow `b/m`, its 3s
+    // precede `a/c/x`. Its own min/max (`a/a` … `c/z`) is either depth's, nearly the whole keyspace.
+    const prev = { dMin: 2, dMax: 2, pMin: 'a/a', pMax: 'b/m', seg: 0 }
+    const g = { dMin: 2, dMax: 3, pMin: 'a/a', pMax: 'c/z', seg: 0 }
+    const next = { dMin: 3, dMax: 3, pMin: 'a/c/x', pMax: 'c/c/c', seg: 0 }
+    const at = (d: number, P: string, p: typeof prev | null = prev, n: typeof next | null = next, h: typeof g = g) =>
+      pathNeighbours(h, p ?? undefined, n ?? undefined, [{ dLo: d, dHi: d, pLo: P, pHi: P }])
+    expect([
+      at(2, 'b/x'), // a 2 (after `b/m`)
+      at(2, 'b/m'), // `b/m`'s later versions may open the group
+      at(2, 'a/q'), // a 2 before `b/m`: the previous group's
+      at(3, 'a/b/q'), // a 3 (before `a/c/x`)
+      at(3, 'a/c/x'), // `a/c/x`'s earlier versions may close the group
+      at(3, 'b/a/a'), // a 3 after `a/c/x`: the next group's
+      at(4, 'a/b/q/r'), // a depth the group lacks
+      at(2, 'a/q', null), // no previous group: 2s from `a/a`
+      at(3, 'b/a/a', prev, null), // no next group: 3s to `c/z`
+      at(2, 'a/q', { ...prev, seg: 1 }), // neighbours in another segment
+      at(3, 'b/a/a', prev, { ...next, dMax: 4 }), // a neighbour spanning depths itself
+      at(3, 'b/a/a', prev, next, { ...g, dMin: 1 }), // a group of 1 → 3: its 3s still precede `a/c/x`
+      at(2, 'a/q', prev, next, { ...g, dMin: 1 }), // …and it holds every 2
+      pathNeighbours({ ...g, seg: undefined }, prev, next, [{ dLo: 2, dHi: 2, pLo: 'a/q', pHi: 'a/q' }]), // an older footer: kept
+      pathNeighbours(g, prev, next, [{ dLo: 2, dHi: 3, pLo: 'a/q', pHi: 'a/q0' }]), // a rect over both depths: neither side's
+      pathNeighbours(g, prev, next, [{ dLo: 2, dHi: 3, pLo: 'b/n', pHi: 'b/o' }]), // …the 2s'
+    ]).toEqual([true, true, false, true, true, false, false, true, true, true, true, false, true, true, false, true])
+  })
+
   it('shapes only the rows a read\'s cheap test passes, as `all` would', () => {
     const raw = [
       { depth: 2, path: 'b1/a', size: 5, vf: 1, vt: 9 },
@@ -824,4 +908,170 @@ describe('interval store: base + runs', () => {
     }
     expect(totals).toEqual({ cases: 450, candidates: 1839, pruned: 58, rows: 108595 })
   }, 60_000)  // 450 cases over the fixture's sorts: seconds alone, past the 5 s default under the parallel suite
+})
+
+// Δ-mode diffs by lazy descent over the interval store (specs/diff-from-changes.md revision 3): over a base alone (`g2`,
+// `g7` unowned) and a base + run (`g5`), against the as-of walk. These generations are built from per-scan listings (a
+// path's descendants exist only with it); `g1`'s synthetic scans are not.
+describe('Δ diffs by descent', () => {
+  const DATES = ['2026-09-30T0007', '2026-09-30T0008', '2026-09-30T0009']
+  type R = { p: string; d: number; k: string; s: string; a: number; b: number; oa: number; ob: number; x?: true }
+  const key = (r: R) => `${r.p}|${r.s}|${r.a}|${r.b}|${r.oa}|${r.ob}|${r.k}`
+  const at = (gen: string, rs: string[], hide?: (k: string) => boolean) => ({ ...env, INTERVAL_STORE_GEN: gen, INDEX_R2: r2(rs, hide) }) as Env
+  /** Every directory down to depth 2 on any of the scans (and the root). */
+  const dirsOf = async (gen: string, depth = 2, dates = DATES): Promise<string[]> => {
+    const out = new Set([''])
+    for (const d of dates) {
+      const h = await openIndex(at(gen, []), d, 'path')
+      for (const r of await readRows(h, 1, depth, '', '\uffff')) if (r.kind === 'dir') out.add(r.path)
+    }
+    return [...out].sort()
+  }
+  const parentOf = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '')
+
+  it('cut to `top`, both readers keep every expanded row exact: its drawn children and `(other)` sum to its Δ', async () => {
+    let cut = 0
+    for (const gen of ['g2', 'g5']) for (let i = 0; i < DATES.length; i++) for (let j = i + 1; j < DATES.length; j++) for (const path of ['', 'bk', 'bk/flat']) {
+      for (const descent of [true, false]) {
+        const d = await buildDiff(at(gen, []), { from: DATES[i], to: DATES[j], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 3, ...(descent ? { descent, noHandOff: true } : {}) }).catch(() => null)
+        if (!d) continue
+        if (d.truncated) cut++
+        const rows = d.rows as R[]
+        for (const top of [{ p: '', a: d.total_a, b: d.total_b, oa: d.objects_a, ob: d.objects_b }, ...rows.filter(r => r.x)]) {
+          const kids = rows.filter(r => parentOf(r.p) === top.p && r.p !== top.p)
+          if (!kids.length) continue
+          const sum = (f: (r: R) => number) => kids.reduce((s, r) => s + f(r), 0)
+          expect([gen, path, descent, top.p, sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([gen, path, descent, top.p, top.b - top.a, top.ob - top.oa])
+        }
+      }
+    }
+    expect(cut).toBeGreaterThan(0)
+  }, 120_000)
+
+  it('descent: every row it draws is the as-of walk\'s, every expanded row sums, `tier` says descent', async () => {
+    let compared = 0
+    for (const gen of ['g2', 'g5', 'g7']) {
+      const paths = await dirsOf(gen)
+      for (let i = 0; i < DATES.length; i++) for (let j = i + 1; j < DATES.length; j++) for (const path of paths) for (const [w, h, top] of [[8, 6, 1e6], [1280, 768, 1e6], [1280, 768, 3]]) {
+        const o = { from: DATES[i], to: DATES[j], path, w, h, minArea: 12, atten: 2, top }
+        const got = await buildDiff(at(gen, []), { ...o, descent: true, noHandOff: true }).catch(e => (e as Error).message)
+        if (typeof got === 'string') {
+          expect([gen, path, got]).toEqual([gen, path, await buildDiff(at(gen, []), o).then(() => 'answered', e => (e as Error).message)])
+          continue
+        }
+        expect(got.tier).toBe('descent')
+        const want = await buildDiff(at(gen, []), { ...o, top: 1e6, threshold: Math.max(0.5, got.threshold * 0.999), lookupCap: 1e9 })
+        expect([got.total_a, got.total_b, got.objects_a, got.objects_b]).toEqual([want.total_a, want.total_b, want.objects_a, want.objects_b])
+        const ch = (r: R) => r.s !== 'unchanged' && !r.p.endsWith('(other)')
+        let wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+        // A row the walk at the final floor doesn't name (the descent read P's children at a lower first-level floor):
+        // compared with the walk at a floor under every row.
+        if ((got.rows as R[]).some(r => ch(r) && !wantBy.has(r.p))) {
+          const fine = await buildDiff(at(gen, []), { ...o, top: 1e6, threshold: 0.5, lookupCap: 1e9 })
+          wantBy = new Map((fine.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+        }
+        const bad = (got.rows as R[]).filter(ch).map(r => [r.p, key(r), wantBy.get(r.p) ?? null]).filter(([, a, b]) => a !== b)
+        expect([gen, DATES[i], DATES[j], path, w, top, bad]).toEqual([gen, DATES[i], DATES[j], path, w, top, []])
+        const rows = got.rows as R[]
+        for (const t of [{ p: '', a: got.total_a, b: got.total_b, oa: got.objects_a, ob: got.objects_b }, ...rows.filter(r => r.x)]) {
+          const kids = rows.filter(r => parentOf(r.p) === t.p && r.p !== t.p)
+          if (!kids.length) continue
+          const sum = (f: (r: R) => number) => kids.reduce((x, r) => x + f(r), 0)
+          expect([gen, path, top, t.p, sum(r => r.b - r.a), sum(r => r.ob - r.oa)]).toEqual([gen, path, top, t.p, t.b - t.a, t.ob - t.oa])
+        }
+        compared++
+      }
+    }
+    expect(compared).toBeGreaterThan(100)
+  }, 180_000)
+
+  it('descent: a fixed floor (a union root\'s threshold) is the walk\'s at that threshold, row for row', async () => {
+    let compared = 0
+    for (const gen of ['g2', 'g5']) {
+      for (const T of [1, 4096, 1e6]) {
+        const o = { from: DATES[0], to: DATES[2], path: '', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, threshold: T }
+        const got = await buildDiff(at(gen, []), { ...o, descent: true, noHandOff: true })
+        const want = await buildDiff(at(gen, []), { ...o, lookupCap: 1e9 })
+        const ch = (r: R) => r.s !== 'unchanged' && !r.p.endsWith('(other)')
+        const wantBy = new Map((want.rows as R[]).filter(ch).map(r => [r.p, key(r)]))
+        expect([gen, T, got.tier, got.threshold, got.total_b - got.total_a, (got.rows as R[]).filter(ch).map(r => [r.p, key(r), wantBy.get(r.p) ?? null]).filter(([, a, b]) => a !== b)])
+          .toEqual([gen, T, 'descent', T, want.total_b - want.total_a, []])
+        compared++
+      }
+    }
+    expect(compared).toBe(6)
+  })
+
+  it('descent: best first, stopped at `top`, says how many expansions it skipped, and every expanded row still sums', async () => {
+    const full = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6, descent: true, noHandOff: true })
+    const cut = await buildDiff(at('g2', []), { from: DATES[0], to: DATES[1], path: 'bk', w: 1280, h: 768, minArea: 12, atten: 2, top: 5, descent: true, noHandOff: true })
+    expect([full.expansions_skipped, full.truncated, cut.truncated, (cut.expansions_skipped ?? 0) > 0 || cut.expansions < full.expansions]).toEqual([undefined, false, true, true])
+    const rows = cut.rows as R[]
+    for (const t of [{ p: '', a: cut.total_a, b: cut.total_b, oa: cut.objects_a, ob: cut.objects_b }, ...rows.filter(r => r.x)]) {
+      const kids = rows.filter(r => parentOf(r.p) === t.p && r.p !== t.p)
+      if (!kids.length) continue
+      expect([t.p, kids.reduce((x, r) => x + r.b - r.a, 0), kids.reduce((x, r) => x + r.ob - r.oa, 0)]).toEqual([t.p, t.b - t.a, t.ob - t.oa])
+    }
+  })
+
+  it('descent: the planner hands a P with more than `DESCENT_MAX_EXPANDABLE` children to expand to the walk, unchanged', async () => {
+    let handed = 0, kept = 0
+    for (const path of await dirsOf('g2')) for (let i = 0; i + 1 < DATES.length; i++) {
+      const o = { from: DATES[i], to: DATES[i + 1], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6 }
+      const plan: number[] = []
+      const d = await buildDiff(at('g2', []), { ...o, descent: true, descentBudgetMs: Infinity, descentBudgetRows: Infinity, trace: (n, _ms, desc) => { if (n === 'plan') plan.push(Number(String(desc).split(' ')[0])) } }).catch(e => (e as Error).message)
+      if (typeof d === 'string') continue
+      if (d.tier === 'descent') { kept++; expect([path, plan.every(x => x <= DESCENT_MAX_EXPANDABLE)]).toEqual([path, true]); continue }
+      handed++
+      expect([path, plan, d]).toEqual([path, [plan[0]], await buildDiff(at('g2', []), o)])
+      expect(plan[0]).toBeGreaterThan(DESCENT_MAX_EXPANDABLE)
+    }
+    expect([handed > 0, kept > 0]).toEqual([true, true])
+  }, 120_000)
+
+  it('descent: over its running-cost budget, it hands off to the walk, unchanged, and says so (`handoff` budget)', async () => {
+    let handed = 0
+    for (const path of await dirsOf('g2')) {
+      const o = { from: DATES[0], to: DATES[1], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6 }
+      const why: string[] = []
+      const d = await buildDiff(at('g2', []), { ...o, descent: true, descentBudgetMs: 0, trace: (n, _ms, desc) => { if (n === 'handoff') why.push(String(desc).split(':')[0]) } }).catch(e => (e as Error).message)
+      if (typeof d === 'string' || !why.length) continue
+      handed++
+      expect([path, why, d]).toEqual([path, ['budget'], await buildDiff(at('g2', []), o)])
+    }
+    expect(handed).toBeGreaterThan(0)
+  }, 120_000)
+
+  it('descent: past its work budget (rows read), it hands off to the walk, unchanged, and says so (`handoff` work)', async () => {
+    let handed = 0
+    for (const path of await dirsOf('g2')) {
+      const o = { from: DATES[0], to: DATES[1], path, w: 1280, h: 768, minArea: 12, atten: 2, top: 1e6 }
+      const why: string[] = [], rows: number[] = []
+      const d = await buildDiff(at('g2', []), { ...o, descent: true, descentBudgetMs: Infinity, descentBudgetRows: 1, trace: (n, ms, desc) => {
+        if (n === 'handoff') why.push(String(desc).split(':')[0])
+        if (n === 'descent-rows') rows.push(ms)
+      } }).catch(e => (e as Error).message)
+      if (typeof d === 'string' || why[0] !== 'work') continue
+      handed++
+      expect([path, why, rows.length, rows[0] > 1, d]).toEqual([path, ['work'], 1, true, await buildDiff(at('g2', []), o)])
+    }
+    expect(handed).toBeGreaterThan(0)
+  }, 120_000)
+
+  it('descent: a subtree nothing changed under reads no level and draws nothing', async () => {
+    let found = 0
+    const G1 = ['2026-08-03', '2026-08-04', '2026-08-05']
+    for (const [gen, dates] of [['g2', DATES], ['g7', DATES], ['g1', G1]] as const) for (const path of await dirsOf(gen, 3, [...dates])) for (let i = 0; i + 1 < dates.length; i++) {
+      const [from, to] = [dates[i], dates[i + 1]]
+      const plain = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, threshold: 0.5, lookupCap: 1e9 }).catch(() => null)
+      if (!plain || plain.rows.some(r => r.s !== 'unchanged') || plain.total_a !== plain.total_b || plain.objects_a !== plain.objects_b) continue
+      const levels: string[] = []
+      const d = await buildDiff(at(gen, []), { from, to, path, w: 30, h: 30, minArea: 12, atten: 2, top: 1e6, descent: true, noHandOff: true, trace: n => { if (/^L\d+$/.test(n)) levels.push(n) } })
+      found++
+      expect([gen, path, d.rows.filter(r => r.s !== 'unchanged'), levels]).toEqual([gen, path, [], []])
+    }
+    expect(found).toBeGreaterThan(0)
+  }, 120_000)
+
+
 })

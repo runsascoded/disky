@@ -9,6 +9,7 @@ from time import monotonic
 
 import pyarrow as pa
 
+from .heartbeat import set_detail, set_stage
 from .static_names import err
 
 
@@ -74,6 +75,10 @@ _monitor: ContextVar[ResourceMonitor | None] = ContextVar("resource_monitor", de
 
 
 def resource_stage(stage: str, **progress) -> None:
+    """The monitor's stage (its next line), and the process's (`heartbeat.set_stage`: its liveness line), monitored or not."""
+    set_stage(stage)
+    if progress:
+        set_detail(" ".join(f"{k}={v}" for k, v in progress.items()))
     if monitor := _monitor.get():
         monitor.update(stage, **progress)
 

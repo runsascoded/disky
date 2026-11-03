@@ -129,6 +129,7 @@ class S3BulkLister:
                     size=int(head.get("ContentLength", 0) or 0),
                     created=created,
                     storage_class=head.get("StorageClass"),
+                    version=head.get("ETag"),
                 )
 
         paginator = client.get_paginator("list_objects_v2")
@@ -147,6 +148,7 @@ class S3BulkLister:
                     size=int(obj.get("Size", 0) or 0),
                     created=created,
                     storage_class=obj.get("StorageClass"),
+                    version=obj.get("ETag"),
                 )
 
     def stream_pages(
@@ -164,9 +166,9 @@ class S3BulkLister:
         """
         client = self._client()
 
-        def _row(key: str, size, lm, storage_class) -> BlobRow:
+        def _row(key: str, size, lm, storage_class, etag) -> BlobRow:
             created = lm.isoformat().replace("+00:00", "Z") if lm else None
-            return BlobRow(name=key, size=int(size or 0), created=created, storage_class=storage_class)
+            return BlobRow(name=key, size=int(size or 0), created=created, storage_class=storage_class, version=etag)
 
         # `''` (keyspace origin) is not a real key — no HEAD, no StartAfter.
         if start:
@@ -178,7 +180,7 @@ class S3BulkLister:
                 else:
                     raise
             if head is not None:
-                yield [_row(start, head.get("ContentLength"), head.get("LastModified"), head.get("StorageClass"))]
+                yield [_row(start, head.get("ContentLength"), head.get("LastModified"), head.get("StorageClass"), head.get("ETag"))]
 
         paginator = client.get_paginator("list_objects_v2")
         kw: dict = {"Bucket": bucket}
@@ -188,7 +190,7 @@ class S3BulkLister:
             kw["StartAfter"] = start
         for page in paginator.paginate(**kw):
             yield [
-                _row(o["Key"], o.get("Size"), o.get("LastModified"), o.get("StorageClass"))
+                _row(o["Key"], o.get("Size"), o.get("LastModified"), o.get("StorageClass"), o.get("ETag"))
                 for o in page.get("Contents", []) or []
             ]
 
@@ -199,7 +201,7 @@ class S3BulkLister:
         self,
         bucket: str,
         self_dirs: list[str],
-    ) -> "list[tuple[str, int, Optional[str], Optional[str]]]":
+    ) -> "list[tuple]":
         # No GCS-style placeholder objects in S3 land.
         return []
 

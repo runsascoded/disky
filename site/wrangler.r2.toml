@@ -14,6 +14,13 @@
 name = "disk-tree-demo"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-01"
+# Usage attribution (`functions/_lib/usage.ts`, specs/usage-metrics.md): one Analytics Engine point per Functions
+# request; `nodejs_als` gives the point its R2/D1/KV counters and cache tier.
+compatibility_flags = ["nodejs_als"]
+
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_r2_demo"
 
 # D1: this public deploy reads only the index footer (index_schema +
 # index_row_groups); its other tables (auth, grants, plans) stay empty
@@ -51,12 +58,12 @@ BASE_SCOPE = "r2"
 PUBLIC_READ = "1"                # anonymous viewer scope; reads open (_lib/auth.ts)
 SNAPSHOTS_SUBDIR = "r2"          # this store's snapshots: snapshots/r2/ (_lib/shared.ts)
 FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
-# The static name index (exact `?f=` literals; `_lib/staticFilter.ts`), in INDEX_R2 under `static-names/<STATIC_GEN>/`:
-# the daily ingest appends each scan to it (`dt-cloud static-names add`), and builds the generation when it doesn't exist
-# yet (`static-names build`), reading STATIC_GEN from here. A generation built since `static-names build` builds anchors
-# (`names/`, `anchors/`: `^q`, `^q$`, heavy `q$`, path terms) carries them, its runs too; an older one (2026-10-14) has
-# none; 2026-10-15 was built with anchors (the ingest builds a STATIC_GEN that does not exist yet).
-STATIC_GEN = "2026-10-15"
+# DEFAULT_SCAN = "searchable"    # unset (`newest`): open on the newest published scan, search disabled until the static name index appends it (`src/defaultScan.ts`)
+# The static name index (exact `?f=` literals; `_lib/staticFilter.ts`), in INDEX_R2 under `static-names/<gen>/`: the
+# daily ingest appends each scan to its lineage (`dt-cloud static-names add -u`, base generation 2026-10-15, built with
+# anchors), and publishes the generation it lands in to this pointer, which a compaction moves; the site follows it (a
+# `STATIC_GEN` pin would stop at a compacted generation, which receives no more appends).
+STATIC_CURRENT_KEY = "static-names/primary-CURRENT.json"
 # The interval store (every scan's tree as versioned intervals; `_lib/index.ts` `intervalsOn`), in INDEX_R2 under
 # `interval-store/<gen>/`: built by the daily ingest's `interval-store build` on its first run, then one `add` per scan,
 # which compacts it into a new generation every 2^5 scans and moves `interval-store/CURRENT.json` to it. No
@@ -73,11 +80,11 @@ STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
 # The "data behind this site" store (`_lib/stores.ts`, the frontend's `src/stores/meta.ts`), mounted at `/meta`: the
 # demo's own bucket, disk-tree-demo, scanned by the daily ingest after the primary (`meta-l2/` tiers,
-# `snapshots/meta/`), with its own static name index (its `STATIC_GEN`, built by the ingest when it doesn't exist yet).
+# `snapshots/meta/`), with its own static name index (its own lineage, followed by its `STATIC_CURRENT_KEY`).
 # Public as the primary is (no `scope`; `OG_ANONYMOUS` and the filter policy inherited); read with the primary's RO
 # keypair (the same Pages secrets). No `all` union view: the home page stays the three public buckets.
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_GEN":"2026-10-19meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"Public R2 Treemap Demo disky metadata","ROOT_TITLE":"Data behind this site: the daily scans’ indexes, snapshots and name index in disk-tree-demo (R2)","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"disk-tree-demo","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"disk-tree-demo","STORE_REGION":"auto","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Set as Pages env vars/secrets at deploy — NOT committed (disk-tree is a public
 # repo; the account id in the R2 endpoint stays out of git):

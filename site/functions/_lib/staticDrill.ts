@@ -35,7 +35,7 @@ import { subBlobs } from './staticRuns.js'
 import { compressors } from './zstd.js'
 import { type HexRule, occurs, ruleOf } from './hexRuns.js'
 import { isScanId } from '../../src/scanSlug.js'
-import { inFlight, Memo, type Req } from './shared.js'
+import { cellsBytes, heldAnswers, heldId, hitsBytes, inFlight, Memo, type Req } from './shared.js'
 
 export const DRILL_DIR = 'drill'
 
@@ -49,6 +49,8 @@ export interface DrillMeta {
   rg: number
   idx_rg: number
   dispatch_rows: number
+  /** `'rows'`: a run carrying its roots new to the stack per `q` (`<kind>-fresh.parquet`, `DrillTier.fresh`). */
+  fresh?: string
   /** Per set (`long_roots`, …): `row_groups` = the index's entries (the data files' row groups). */
   [set: string]: unknown
 }
@@ -62,9 +64,10 @@ export interface Rollup {
   dir: string
   /** Children kept by name. */
   kept: number
-  /** Root rows under `dir`, every date (an upper bound on any date's match roots); at the fleet root a long
-   *  member's base alias entry, a short one's counted from the base's roots index (`GroupFile.count`), plus
-   *  each run's stored rows. Null: unknown. */
+  /** Root rows under `dir`, every date (an upper bound on any date's match roots: closed versions and each owner
+   *  slice count); at the fleet root a long member's base alias entry, a short one's counted from the base's roots
+   *  index (`GroupFile.count`), plus each run's roots new to the stack (`DrillTier.fresh`): exactly the compacted
+   *  generation's count. Null: unknown. */
   rows: number | null
   /** Children holding roots, every date. */
   children: number
@@ -329,14 +332,61 @@ export class GroupFile {
 
 // --- one tier -----------------------------------------------------------------------------------
 
+/** A tier's alias map: every long member → its canonical (itself, or the member whose root set it shares) and, where
+ *  the tier records it, its root rows. Held as the members sorted (code units) with each canonical's index and each
+ *  `n`, looked up by binary search: as a `Map` of `{ c, n }` objects one tier's ~96K members took ~11–14 MB in Node
+ *  (`bench/view-mem.ts`, gcs `2026-10-08c.c002`), every tier of a heavy search held per isolate for its life. */
+export class Aliases {
+  private readonly qs: string[]
+  private readonly cs: Int32Array
+  private readonly ns: Float64Array
+  /** From `q[i]` → `canonical[i]` ('' = itself) and `n[i]` (−1 = unknown). */
+  constructor(q: string[], canonical: string[], n: number[]) {
+    const order = q.map((_, i) => i).sort((a, b) => cmp(q[a], q[b]))
+    this.qs = order.map(i => q[i])
+    const at = new Map<string, number>()
+    this.qs.forEach((x, i) => at.set(x, i))
+    this.cs = Int32Array.from(order, i => (canonical[i] && canonical[i] !== q[i] ? at.get(canonical[i]) ?? -2 : -1))
+    this.ns = Float64Array.from(order, i => n[i])
+    if (this.cs.includes(-2)) throw new Error('static drill: an alias names a canonical that is no member')
+  }
+  private find(t: string): number {
+    let lo = 0, hi = this.qs.length - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1, c = cmp(this.qs[mid], t)
+      if (c === 0) return mid
+      if (c < 0) lo = mid + 1
+      else hi = mid - 1
+    }
+    return -1
+  }
+  private entry(i: number): { c: string; n: number | null } {
+    return { c: this.cs[i] < 0 ? this.qs[i] : this.qs[this.cs[i]], n: this.ns[i] < 0 ? null : this.ns[i] }
+  }
+  has(t: string): boolean { return this.find(t) >= 0 }
+  get(t: string): { c: string; n: number | null } | undefined {
+    const i = this.find(t)
+    return i < 0 ? undefined : this.entry(i)
+  }
+  get size(): number { return this.qs.length }
+  /** The colo copy's columns (`TierCache.aliases`). */
+  columns(): [string[], string[], number[]] {
+    return [this.qs, Array.from(this.cs, c => (c < 0 ? '' : this.qs[c])), Array.from(this.ns)]
+  }
+  *[Symbol.iterator](): IterableIterator<[string, { c: string; n: number | null }]> {
+    for (let i = 0; i < this.qs.length; i++) yield [this.qs[i], this.entry(i)]
+  }
+}
+
 /** A tier's colo caches: its index tops and its alias map (`[q, canonical ('' = itself), n (−1 = unknown)]`). */
 export interface TierCache { top?: IndexCache<Top>; aliases?: IndexCache<[string[], string[], number[]]> }
 
 /** One tier's drill: the base generation's `drill/` (`dir` null) or a run's `<dir>/drill/`, in the same layout. */
 export class DrillTier {
-  /** `meta.json` and the alias map, held once read; one pending in another request is joined (`shared.ts`). */
+  /** `meta.json`, the alias map and the fresh counts, held once read; one pending in another request is joined (`shared.ts`). */
   private meta = new Memo<DrillMeta>('static-drill-meta')
-  private aliasMap = new Memo<Map<string, { c: string; n: number | null }>>('static-drill-aliases')
+  private aliasMap = new Memo<Aliases>('static-drill-aliases')
+  private freshMap = new Memo<Map<string, number>>('static-drill-fresh')
   readonly files: Record<Kind, Record<Set_, GroupFile>>
   constructor(readonly blobs: Blobs, readonly dir: string | null, readonly cache?: TierCache) {
     const meta = (req?: Req) => this.info(req)
@@ -354,14 +404,25 @@ export class DrillTier {
 
   /** Every long member of the tier → its canonical (itself, or the member whose root set it shares there) and,
    *  where the tier records it (the base), its root rows. */
-  aliases(req?: Req): Promise<Map<string, { c: string; n: number | null }>> {
+  aliases(req?: Req): Promise<Aliases> {
     return this.aliasMap.get('', async () => {
       const cached = await this.cache?.aliases?.get('aliases.parquet')
-      if (cached) return new Map(cached[0].map((q, i) => [q, { c: cached[1][i] || q, n: cached[2][i] < 0 ? null : cached[2][i] }]))
+      if (cached) return new Aliases(cached[0], cached[1], cached[2])
       const rows = await parquetReadObjects({ file: await this.blobs.range('aliases.parquet', 0), compressors }) as { q: string; canonical: string; n?: bigint }[]
-      const m = new Map(rows.map(r => [r.q, { c: r.canonical, n: r.n == null ? null : num(r.n) }]))
-      await this.cache?.aliases?.put('aliases.parquet', [[...m.keys()], [...m].map(([q, a]) => a.c === q ? '' : a.c), [...m.values()].map(a => a.n ?? -1)])
-      return m
+      const a = new Aliases(rows.map(r => r.q), rows.map(r => r.canonical), rows.map(r => (r.n == null ? -1 : num(r.n))))
+      await this.cache?.aliases?.put('aliases.parquet', a.columns())
+      return a
+    }, req)
+  }
+
+  /** A run's roots new to the stack per class canonical (long) or literal (short), `<kind>-fresh.parquet` (`static_drill.
+   *  write_fresh`: an existing member's opens, every root of a new member; absent = none); null: a tier without them
+   *  (`meta.json` `fresh`, a run built before them). */
+  async fresh(kind: Kind, req?: Req): Promise<Map<string, number> | null> {
+    if ((await this.info(req)).fresh !== 'rows') return null
+    return this.freshMap.get(kind, async () => {
+      const rows = await parquetReadObjects({ file: await this.blobs.range(`${kind}-fresh.parquet`, 0), compressors }) as { q: string; n: bigint }[]
+      return new Map(rows.map(r => [r.q, num(r.n)]))
     }, req)
   }
 }
@@ -375,7 +436,7 @@ const KIND_FULL = 0, KIND_DELTA = -1
  *  so the tests can break each rule and see the views go wrong; `DRILL_RULES` is the reader's. */
 export interface DrillRules {
   /** A literal's canonical in tier `i` (`maps[i]` its alias map): `aliases_i[t] ?? t`, each tier its own. */
-  canon(maps: Map<string, { c: string }>[], i: number, t: string): string
+  canon(maps: Pick<Aliases, 'get'>[], i: number, t: string): string
   /** The dispatch bound over the tiers' metas (base first): `R + 2·Σ rg`, since each tier's bound is at most its
    *  rows plus two of its row groups. */
   bound(metas: DrillMeta[]): number
@@ -594,7 +655,7 @@ export class Drill {
   /** The base tier's `meta.json`. */
   info(req?: Req): Promise<DrillMeta> { return this.tier(null).info(req) }
   /** The base tier's alias map. */
-  aliases(req?: Req): Promise<Map<string, { c: string; n: number | null }>> { return this.tier(null).aliases(req) }
+  aliases(req?: Req): Promise<Aliases> { return this.tier(null).aliases(req) }
 
   /** The generation's hex-run rule (`hexRuns.ts`): the catalog's `meta.json` `hex_runs` (null without a catalog
    *  `info`, or on a generation without the rule). */
@@ -665,8 +726,14 @@ export class Drill {
       const cells: RollupCell[] = got.member.cells.map(x => ({ kind: 1, child: x.bucket, vf: Number(x.vf) * 1000, b: x.b, o: x.o }))
       const buckets = new Set(cells.map(x => x.child)).size
       // Root rows, every date: a long member's base alias entry (else, and a short one's, counted from the base's
-      // roots index), plus each run's stored rows (opens and close records: an upper bound).
-      const counts = await perTier(tiers, async (x, i) => i === 0 && all != null ? all : x.files[kind].roots.count(lo(cs[i]), hi(cs[i]), io, req))
+      // roots index), plus each run's roots new to the stack — never its stored rows, whose close records restate roots
+      // an earlier tier holds (gcs 10-24: `.parquet` 103.3M over `2026-10-08c` + runs, 94.5M over its compaction). A run
+      // built before its fresh counts adds its stored rows: an upper bound.
+      const counts = await perTier(tiers, async (x, i) => {
+        if (i === 0 && all != null) return all
+        const fresh = i === 0 ? null : await x.fresh(kind, req)
+        return fresh ? fresh.get(cs[i]) ?? 0 : x.files[kind].roots.count(lo(cs[i]), hi(cs[i]), io, req)
+      })
       const rows = counts.reduce((s, x) => s + x, 0)
       // The catalog's own stack cut at a broken tier: its cells answer only the scans it still covers.
       const narrow = got.scans && st.scans.some(d => !got.scans!.includes(d)) ? { scans: st.scans.filter(d => got.scans!.includes(d)) } : {}
@@ -693,16 +760,13 @@ function hitOf(c: Record<string, unknown[]>, i: number): Hit {
   return { path, depth, usr: c.usr[i] as string, vf: Number(c.vf[i]) * 1000, vt: Number(c.vt[i]) * 1000, size: c.size[i] as bigint, n: c.n_files[i] as bigint }
 }
 
-/** Answers held per isolate, across (literal, path) views: the oldest dropped past this many hits + cells. */
-const HELD = 400_000
-
 /** The filter's heavy source over a drill: a view's match roots, or its rollup, exact on the live tiers' scans
  *  (`Found.scans`). Plain views and non-members decline (null): the caller reads as before. */
 export class DrillSource implements HitSource {
   /** Answers held per isolate (an `over` one never), their sizes; one pending in another request is joined
    *  (`shared.ts`). */
   private held = new Memo<DrillAnswer | DrillOver>('static-drill-answer')
-  private sizes = new Map<string, number>()
+  private id = heldId('static-drill-answer')
   /** `cache`: roots answers across isolates (the colo's Cache API) — decoding a member's ~80K roots from the
    *  drill's parquet is seconds of an edge isolate's CPU, each new isolate again. */
   constructor(readonly drill: Drill, readonly cache?: HitCache) {}
@@ -717,19 +781,13 @@ export class DrillSource implements HitSource {
   async answer(t: string, P: string, st: DrillState, maxRows?: number, req?: Req): Promise<DrillAnswer | DrillOver> {
     const k = DrillSource.key(t, P, st)
     const a = await this.held.get(k, () => this.drill.bounded(t, P, st, maxRows, req), req, x => x.source !== 'over')
-    if (this.held.has(k) && !this.sizes.has(k)) this.hold(k, a.source === 'roots' ? a.hits.length : 'rollup' in a ? a.rollup.cells.length : 0)
+    if (this.held.has(k)) this.hold(k, a)
     return a
   }
 
-  /** `k`'s answer is held, `n` hits + cells: the oldest dropped past `HELD`. */
-  private hold(k: string, n: number): void {
-    this.sizes.set(k, n)
-    let sum = [...this.sizes.values()].reduce((s, x) => s + x, 0)
-    for (const old of [...this.held.keys()]) {
-      if (sum <= HELD || old === k) break
-      sum -= this.sizes.get(old) ?? 0
-      this.held.delete(old); this.sizes.delete(old)
-    }
+  /** `k`'s answer held (`heldAnswers`, under the isolate's bound for the static sources' answers). */
+  private hold(k: string, a: DrillAnswer | DrillOver): void {
+    heldAnswers.keep(this.id + k, () => a.source === 'roots' ? hitsBytes(a.hits) : 'rollup' in a ? cellsBytes(a.rollup.cells) : 0, () => this.held.delete(k))
   }
 
   /** `key`'s view under `under`, exact on the live tiers' scans. A tier that fails to load is cut (`Drill.broke`)
@@ -772,8 +830,9 @@ export class DrillSource implements HitSource {
       if (hits) {
         if (opts?.maxRows != null && hits.length > opts.maxRows) { opts.over = true; return null }
         const kind: Kind = [...key].length <= 2 ? 'short' : 'long'
-        this.held.set(k, { source: 'roots', kind, c: key, upper: hits.length, hits, io: newIo() })
-        this.hold(k, hits.length)
+        const a: DrillAnswer = { source: 'roots', kind, c: key, upper: hits.length, hits, io: newIo() }
+        this.held.set(k, a)
+        this.hold(k, a)
         return { hits, io: { from: 'drill', source: 'roots', cache: 'colo', tiers: st.tiers.length, ms: Date.now() - t0 }, scans: st.scans }
       }
     }
@@ -784,7 +843,7 @@ export class DrillSource implements HitSource {
     if (fresh && a.source === 'roots' && this.cache) await this.cache.put(k, a.hits).catch(() => {})
     if (a.source === 'plain' || a.source === 'none') return null
     // An answer narrowed by the catalog's broken tier is not held: once that tier loads, the view widens again.
-    if ('scans' in a && a.scans) { this.held.delete(k); this.sizes.delete(k) }
+    if ('scans' in a && a.scans) { this.held.delete(k); heldAnswers.forget(this.id + k) }
     const io = { from: 'drill', source: a.source, kind: a.kind, c: a.c, upper: a.upper, tiers: st.tiers.length, ...a.io, ms: Date.now() - t0 }
     return a.source === 'roots' ? { hits: a.hits, io, scans: st.scans } : { rollup: a.rollup, io, scans: a.scans ?? st.scans }
   }

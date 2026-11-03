@@ -36,12 +36,11 @@ if ! $iac; then
 fi
 
 echo "== Cloud Run job (upsert) ==" >&2
-# Cost labels (specs/done/cost-labels.md): `$DISKY_LABELS` + `component=sheet-sync`, when set.
-labels=()
-if [ -n "${DISKY_LABELS:-}" ]; then labels=(--update-labels "$(dt-cloud cost-labels -c sheet-sync)"); fi
+# Cost labels (specs/done/cost-labels-required.md): `$DISKY_LABELS` (`app`, `deployment` required) + `component=sheet-sync`.
+labels=$(dt-cloud cost-labels -c sheet-sync)
 # `^@^`: gcloud's alternate list delimiter — base64 has no `@`, but may end in `=`.
 gcloud run jobs deploy "$JOB" --project "$PROJECT" --region "$REGION" \
-  --image "$IMAGE" --service-account "$SA" ${labels[@]+"${labels[@]}"} \
+  --image "$IMAGE" --service-account "$SA" --update-labels "$labels" \
   --set-env-vars "^@^SHEET_MIRROR_CONFIG_B64=$config_b64" \
   --set-secrets "SITE_TOKEN=$TOKEN_SECRET:latest" \
   --max-retries 1 --task-timeout 600

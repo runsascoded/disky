@@ -90,8 +90,9 @@ def test_tree_and_moved_groups_maximal(tmp_path):
         ("tree", "b/ds", 4 * G, 2, 2, 4 * G, 2, False, False, True, None),
     ]
     assert {k: s[k] for k in ("v", "floor", "suspect_copies", "classes", "checked_groups", "groups", "rows")} == {
-        "v": 1, "floor": G, "suspect_copies": 7, "classes": ["sum_storage_class_id_2"], "checked_groups": 0, "groups": 2, "rows": 5,
+        "v": 2, "floor": G, "suspect_copies": 7, "classes": ["sum_storage_class_id_2"], "checked_groups": 0, "groups": 2, "rows": 5,
     }
+    assert (s["verified_copies"], s["exact"]) == (0, [])
     assert s["net_by_tier"] == [
         {"tier": "moved", "groups": 1, "copies": 3, "bytes": 12 * G, "reclaimable": 8 * G},
         {"tier": "tree", "groups": 1, "copies": 2, "bytes": 8 * G, "reclaimable": 4 * G},
@@ -220,3 +221,106 @@ def test_cli_writes_both_files(tmp_path):
     assert (s["scan"], s["groups"], s["rows"]) == ("2026-10-18T0701", 2, 5)
     assert json.loads((out / "dups.json").read_text()) == s
     assert sorted(p.name for p in out.iterdir()) == ["dups.json", "dups.parquet"]
+
+
+LISTING = pa.schema([("bucket", pa.string()), ("name", pa.string()), ("size_bytes", pa.int64()), ("crc32c", pa.int64())])
+
+
+def listing(tmp: Path, objects: dict[str, tuple[int, int | None]], crc: bool = True) -> str:
+    """A raw listing shard (`bulk-list -c`'s columns) of `{"<bucket>/<key>": (size, crc32c)}`, plus an unrelated
+    object (another top-level dir: pruned) and one in a bucket no copy is in."""
+    objects = {**objects, "a/zzz/other": (5, 1), "q/ds/s0": (2 * G, 7)}
+    rows = [{"bucket": k.split("/", 1)[0], "name": k.split("/", 1)[1], "size_bytes": v[0], "crc32c": v[1]} for k, v in objects.items()]
+    t = pa.Table.from_pylist(rows, schema=LISTING)
+    if not crc:
+        t = t.drop_columns(["crc32c"])
+    p = tmp / "shard-00-0000.parquet"
+    pq.write_table(t, p)
+    return str(p)
+
+
+def fleet_objects(**over: tuple[int, int | None]) -> dict[str, tuple[int, int | None]]:
+    base = {f"{d}/s{i}": (2 * G, 100 + i) for d in ("a/ds", "b/ds", "c/old/ds") for i in (0, 1)}
+    return {**base, "a/f.bin": (3 * G, 9), "b/f.bin": (3 * G, 9), **over}
+
+
+def fleet_with_files() -> list[dict]:
+    return fleet() + [node("a/f.bin", 3 * G, created=5), node("b/f.bin", 3 * G, created=6)]
+
+
+VCOLS = ["tier", "path", "copies", "n_buckets", "keep", "exact", "check", "check_n", "check_eq"]
+
+
+def vtable(out: Path) -> list[tuple]:
+    return [tuple(r[c] for c in VCOLS) for r in pq.read_table(out / "dups.parquet").to_pylist()]
+
+
+def test_listing_proves_copies_exact(tmp_path):
+    """Every object equal by relative name, size and crc32c: the tree groups (dirs and an object) are `exact`, their
+    non-keep copies `equal`; the `moved` group's renamed copy (`c/old/ds`) differs in one object, so it is dropped,
+    which leaves the moved group with the tree group's copies: that group, gone."""
+    out = tmp_path / "out"
+    s = find_dups(write(tmp_path, fleet_with_files()), out, listings=[listing(tmp_path, fleet_objects(**{"c/old/ds/s1": (2 * G, 999)}))])
+    assert vtable(out) == [
+        ("tree", "a/ds", 2, 2, False, True, "equal", 2, 2),
+        ("tree", "b/ds", 2, 2, True, True, None, None, None),
+        ("tree", "a/f.bin", 2, 2, True, True, None, None, None),
+        ("tree", "b/f.bin", 2, 2, False, True, "equal", 1, 1),
+    ]
+    assert (s["verified_copies"], s["groups"], s["exact"]) == (4, 2, [
+        {"tier": "tree", "groups": 2, "copies": 4, "bytes": 14 * G, "reclaimable": 7 * G},
+    ])
+
+
+def test_listing_differs_marks_tree_and_drops_moved(tmp_path):
+    """`b/ds/s1`'s contents differ: the tree group stays, its other copy `differs` (not exact); every moved copy
+    differs from the keep copy (`b/ds`), so the moved group goes."""
+    out = tmp_path / "out"
+    find_dups(write(tmp_path, fleet()), out, listings=[listing(tmp_path, fleet_objects(**{"b/ds/s1": (2 * G, 999)}))])
+    assert vtable(out) == [
+        ("tree", "a/ds", 2, 2, False, False, "differs", 2, None),
+        ("tree", "b/ds", 2, 2, True, False, None, None, None),
+    ]
+
+
+def test_listing_without_checksums_gives_no_verdict(tmp_path):
+    """An object without a crc32c leaves its copy unverified (and its group for `-g`); a listing without the column
+    (no `bulk-list -c`) changes nothing: the output is the no-listing one."""
+    plain, unverified, nocol = (tmp_path / n for n in ("plain", "unverified", "nocol"))
+    for d in (plain, unverified, nocol):
+        d.mkdir()
+    find_dups(write(plain, fleet()), plain / "out")
+    find_dups(write(unverified, fleet()), unverified / "out", listings=[listing(unverified, fleet_objects(**{"a/ds/s0": (2 * G, None)}))])
+    find_dups(write(nocol, fleet()), nocol / "out", listings=[listing(nocol, fleet_objects(), crc=False)])
+    assert vtable(unverified / "out") == [
+        ("moved", "a/ds", 3, 3, False, False, None, None, None),
+        ("moved", "b/ds", 3, 3, True, False, None, None, None),
+        ("moved", "c/old/ds", 3, 3, False, False, "equal", 2, 2),
+        ("tree", "a/ds", 2, 2, False, False, None, None, None),
+        ("tree", "b/ds", 2, 2, True, False, None, None, None),
+    ]
+    assert pq.read_table(nocol / "out" / "dups.parquet") == pq.read_table(plain / "out" / "dups.parquet")
+
+
+def test_spot_check_skips_groups_the_listing_settled(tmp_path):
+    asked: list[str] = []
+
+    def lister(path: str, kind: str) -> Listing:
+        asked.append(path)
+        return Listing({}, True)
+
+    out = tmp_path / "out"
+    s = find_dups(write(tmp_path, fleet()), out, check=5, lister=lister, workers=1, listings=[listing(tmp_path, fleet_objects())])
+    assert (asked, s["checked_groups"], [r[5] for r in vtable(out)]) == ([], 0, [True] * 5)
+
+
+def test_cli_listing_flag(tmp_path):
+    src = write(tmp_path, fleet())
+    out = tmp_path / "o"
+    r = CliRunner().invoke(main, ["dups", "-o", str(out), "-l", listing(tmp_path, fleet_objects()), src])
+    assert r.exit_code == 0, r.output
+    assert [r[:6] for r in vtable(out)] == [
+        ("moved", "a/ds", 3, 3, False, True), ("moved", "b/ds", 3, 3, True, True), ("moved", "c/old/ds", 3, 3, False, True),
+        ("tree", "a/ds", 2, 2, False, True), ("tree", "b/ds", 2, 2, True, True),
+    ]
+

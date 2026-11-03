@@ -10,7 +10,8 @@ path-index` builds its listing this way when there is none (`scan_steps.path_ind
 - `storage_class_id`: the `N` of the one `sum_storage_class_id_<N>` pivot equal to a file's `size`. A 0-byte file adds
   0 to every pivot whatever its class, so its own is unknowable: 0-byte files carry, in turn, the classes no sized file
   has (whose columns hold only zeros, so import writes them again), else NULL; NULL with no pivots
-- `generation`: NULL (a layer-2 doesn't keep it)
+- `version`: the layer-2's `version` (each object's ETag / GCS generation, kept on its file row since `12cd2136`), so
+  import writes it again; NULL when the layer-2 has none. `generation`: NULL (a layer-2 keeps it as `version`)
 
 Only `kind = 'file'` rows (import re-derives the dirs), sorted by name; `-k` keeps paths under the given prefixes."""
 from __future__ import annotations
@@ -42,7 +43,8 @@ def l2_listing(l2: str, out: str | Path, bucket: str, keep: tuple[str, ...] = ()
             if zero_only else "NULL")
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     con.execute(f"""COPY (SELECT {q(bucket)} AS bucket, path AS name, size AS size_bytes, to_timestamp(mtime) AS created,
-            (CASE WHEN size > 0 THEN {sized} ELSE {zero} END)::INTEGER AS storage_class_id, NULL::BIGINT AS generation
+            (CASE WHEN size > 0 THEN {sized} ELSE {zero} END)::INTEGER AS storage_class_id, NULL::BIGINT AS generation,
+            {'version' if 'version' in cols else 'NULL'}::VARCHAR AS version
         FROM {src} ORDER BY name) TO {q(str(out))} (FORMAT PARQUET)""")
     n, b = con.execute(f"SELECT count(*), coalesce(sum(size_bytes), 0) FROM read_parquet({q(str(out))})").fetchone()
     return int(n), int(b)
@@ -55,6 +57,6 @@ def l2_listing(l2: str, out: str | Path, bucket: str, keep: tuple[str, ...] = ()
 @argument("out")
 def l2_listing_cmd(bucket, keep, l2, out) -> None:
     """A layer-2's file rows (L2) back to a layer-1 listing at OUT, which `disk-tree import` re-aggregates to the same
-    layer-2 (`generation`, and a 0-byte file's class, aren't kept)."""
+    layer-2 (a 0-byte file's class isn't kept)."""
     n, b = l2_listing(l2, out, bucket, tuple(keep))
     err(f"{out}: {n:,} files, {b:,} B")

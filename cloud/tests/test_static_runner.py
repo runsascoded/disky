@@ -168,6 +168,8 @@ def _py(module: str, *args: str, mount: bool = True) -> str:
         diagnostics = """trap 'rc=$?; printf "DRILL_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "DRILL_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
     elif module == "static_anchors" and args[0] == "run":
         diagnostics = """trap 'rc=$?; printf "ANCHOR_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "ANCHOR_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
+    elif module == "static_merge" and args[0] in ("carry", "probe"):
+        diagnostics = """trap 'rc=$?; printf "MERGE_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "MERGE_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
     return f"set -euo pipefail; {diagnostics}mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.{module} {' '.join(args)}{m}"
 
 
@@ -221,6 +223,32 @@ def test_one_scan_runs_every_stage_in_order():
     f = Fake({}, ["2026-10-09T0001"])
     assert f.daily().run("2026-10-09T0001") == ["2026-10-09T0001"]
     assert f.calls == _chain("2026-10-09T0001", ["2026-10-09T0001"])
+
+
+def test_the_run_holds_the_coordinator_lease_and_a_lost_one_stops_it_at_the_next_stage():
+    """`coordination` is entered for the whole run; once its check raises, no further stage starts (the one running
+    finishes: its Batch job is idempotent and post-checked)."""
+    from contextlib import contextmanager
+
+    d = "2026-10-09T0001"
+    f = Fake({}, [d])
+    events = []
+
+    def check():
+        if len(f.calls) >= 2:
+            raise sd.ar.LeaseLost("lost the coordinator lease: it was deleted")
+
+    @contextmanager
+    def lease():
+        events.append("take")
+        try:
+            yield check
+        finally:
+            events.append("release")
+
+    with pytest.raises(sd.ar.LeaseLost):
+        f.daily(coordination=lease).run(d)
+    assert (f.calls, events) == (_chain(d, [d])[:2], ["take", "release"])
 
 
 def test_catch_up_appends_each_pending_scan_in_order():
@@ -319,7 +347,7 @@ def test_r2_job_spec():
                 "runnables": [{"container": {"imageUri": "img@sha256:0", "entrypoint": "bash", "commands": ["-c", cmds[0]],
                                              "volumes": ["/mnt/disks/gcs/data:/gcs/data:ro", "/mnt/disks/stage:/stage:rw"]}}],
                 "environment": {
-                    "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", "R2_BUCKET": "idx"},
+                    "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", "R2_BUCKET": "idx", "DISKY_LABELS": "app=disky,deployment=test"},
                     "secretVariables": {"R2_ACCESS_KEY_ID": "projects/proj/secrets/s-id/versions/latest",
                                         "R2_ENDPOINT": "projects/proj/secrets/s-end/versions/latest",
                                         "R2_SECRET_ACCESS_KEY": "projects/proj/secrets/s-key/versions/latest"},
@@ -335,8 +363,9 @@ def test_r2_job_spec():
                                       "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": "375"}, "deviceName": "stage"}]}}],
             "serviceAccount": {"email": "copy@proj"},
             "location": {"allowedLocations": ["regions/us-east1"]},
+            "labels": {"app": "disky", "deployment": "test", "component": "static-names"},
         },
-        "labels": {"purpose": "static-names", "stage": "r2", "gen": "2026-10-09cw"},
+        "labels": {"purpose": "static-names", "stage": "r2", "gen": "2026-10-09cw", "app": "disky", "deployment": "test", "component": "static-names"},
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }
 
@@ -596,7 +625,10 @@ def test_the_merge_job_has_the_r2_env_when_it_runs_as_the_r2_account(r2_sa, r2_e
     r2 = {"R2_ACCESS_KEY_ID": "projects/proj/secrets/s-id/versions/latest", "R2_ENDPOINT": "projects/proj/secrets/s-end/versions/latest",
           "R2_SECRET_ACCESS_KEY": "projects/proj/secrets/s-key/versions/latest"}
     assert (spec["allocationPolicy"]["serviceAccount"]["email"], spec["taskGroups"][0]["taskSpec"]["environment"]) == ("build@proj", {
-        "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", **({"R2_BUCKET": "idx"} if r2_env else {}), "DT_JOB_NAME": name},
+        "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", **({"R2_BUCKET": "idx"} if r2_env else {}),
+                      "DISKY_LABELS": "app=disky,deployment=test", "SCAN_ID": SCANS[1], "DT_JOB_NAME": name,
+                      # its run's job facts (`maint_runs`); no `record_secrets` in the profile: no D1 env
+                      "DT_JOB_REGION": "us-east1", "DT_JOB_MACHINE": "n2-highmem-16", "DT_JOB_SPOT": "1", "DT_JOB_IMAGE": "img@sha256:0"},
         **({"secretVariables": r2} if r2_env else {}),
     })
 
@@ -845,3 +877,152 @@ def test_per_stage_machines():
     drill = next(c for c in f.calls if c[0] == "drill")
     assert drill == ("drill", 2, _py("static_drill", "build", f"-g {GEN} -d {d}", "-k", "task",
                                      *sd.drill_duckdb_args("n2-highmem-32")))
+
+
+class _SafeKeys(dict):
+    """The fake bucket's keys, iterable while another thread writes them (a pipelined backlog's jobs run at once)."""
+
+    def __iter__(self):
+        return iter(list(dict.keys(self)))
+
+
+PIPE_SCANS = ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201"]
+
+
+def _pipelined(f: Fake, depth: int = 3, **kw) -> sd.Runner:
+    from dataclasses import replace
+
+    f.keys = _SafeKeys(f.keys)
+    return f.daily(replace(CFG, pipeline_depth=depth), **kw)
+
+
+def test_a_pipelined_backlog_writes_what_one_at_a_time_does():
+    """Three pending scans at depth 3: the same jobs, manifests and merge as at depth 1, each step in scan order (the
+    publishes too), each scan's steps in chain order."""
+    serial, piped = Fake({}, PIPE_SCANS), Fake({}, PIPE_SCANS)
+    assert serial.daily().run(PIPE_SCANS[-1], catch_up=True) == PIPE_SCANS
+    assert _pipelined(piped).run(PIPE_SCANS[-1], catch_up=True) == PIPE_SCANS
+    assert sorted(map(repr, piped._calls)) == sorted(map(repr, serial._calls))
+    assert {k: v for k, v in piped.keys.items() if "/manifests/" in k} == {k: v for k, v in serial.keys.items() if "/manifests/" in k}
+    for stage in ("prepare", "append", "publish", "r2", "prune"):
+        assert [c for c in piped._calls if c[0] == stage] == [c for c in serial._calls if c[0] == stage]
+    for d in PIPE_SCANS:
+        at = [piped._calls.index((stage, d)) for stage in ("prepare", "publish", "prune")]
+        assert at == sorted(at)
+
+
+def test_a_pipelined_backlog_appends_the_next_scan_while_this_one_builds():
+    """The second scan's append starts while the first's drill is in flight (else this deadlocks: the drill job waits
+    for it)."""
+    from threading import Event
+
+    f = Fake({}, PIPE_SCANS[:2])
+    started = Event()
+    run_job = f.run_job
+
+    def job(name, spec, wait=None):
+        words = spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1].split()
+        d = words[words.index("-d") + 1] if "-d" in words else None
+        if spec["labels"]["stage"] == "append" and d == PIPE_SCANS[1]:
+            started.set()
+        if spec["labels"]["stage"] == "drill" and d == PIPE_SCANS[0]:
+            assert started.wait(5), "the second scan's append never started while the first's drill ran"
+        return run_job(name, spec, wait)
+
+    f.run_job = job
+    from dataclasses import replace
+
+    f.keys = _SafeKeys(f.keys)
+    assert f.daily(replace(CFG, pipeline_depth=2, drill=True)).run(PIPE_SCANS[1], catch_up=True) == PIPE_SCANS[:2]
+    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{PIPE_SCANS[0]}.json", f"{PIPE_SCANS[1]}.json", f"{PIPE_SCANS[1]}.m001.json"]
+
+
+def test_a_failed_step_stops_its_scan_and_the_later_ones_not_the_earlier():
+    """The second scan's shards fail: the first scan publishes, the second and third don't (the third stops before its
+    shards: it would read the second's), and the run raises the failure; a rerun at depth 1 resumes them."""
+    f = Fake({}, PIPE_SCANS)
+    run_job = f.run_job
+
+    def job(name, spec, wait=None):
+        if spec["labels"]["stage"] == "shards" and f"-d {PIPE_SCANS[1]}" in spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]:
+            raise RuntimeError(f"Batch job {name}: FAILED")
+        return run_job(name, spec, wait)
+
+    f.run_job = job
+    with pytest.raises(RuntimeError, match="FAILED"):
+        _pipelined(f).run(PIPE_SCANS[-1], catch_up=True)
+    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{PIPE_SCANS[0]}.json"]
+    assert [c[0] for c in f._calls if PIPE_SCANS[2] in repr(c) and c[0] in ("shards", "catalog", "publish")] == []
+    f.run_job = run_job
+    assert f.daily().run(PIPE_SCANS[-1], catch_up=True) == PIPE_SCANS[1:]
+
+
+def test_the_runs_before_a_scan_count_pending_listings_newer_than_its_manifest():
+    """`prior_key`: the newest manifest before the scan, unless a pending listing (`prepare`'s) of a later scan before it
+    exists; a pending listing at or before that manifest's scan is superseded by it (its publish removes it anyway)."""
+    from dt_cloud.append_runner import prior_key
+
+    keys = ["manifests/2026-10-09T0001.json", "manifests/2026-10-09T0001.m001.json", "pending/2026-10-09T0001.json",
+            "pending/2026-10-09T0601.json", "pending/2026-10-09T1201.json", "deltas/2026-10-09T0601/scans.json"]
+    assert [prior_key(keys, s) for s in ("2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201", "2026-10-09T1801")] == [
+        None, "manifests/2026-10-09T0001.m001.json", "pending/2026-10-09T0601.json", "pending/2026-10-09T1201.json"]
+    assert prior_key(["pending/2026-10-09T0001.json"], "2026-10-09T0601") == "pending/2026-10-09T0001.json"
+
+
+@pytest.mark.parametrize("newest, scan, behind, s, lagging", [
+    ("2026-10-09T0001", "2026-10-09T0001", [], 0, False),
+    ("2026-10-09T0001", "2026-10-09T0601", ["2026-10-09T0601"], 0, False),
+    ("2026-10-09T0001", "2026-10-09T1201", ["2026-10-09T0601", "2026-10-09T1201"], 6 * 3600, True),
+    ("2026-10-08T0001", "2026-10-09T1201", ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201"], 12 * 3600, True),
+    (None, "2026-10-09T0601", ["2026-10-09T0001", "2026-10-09T0601"], 6 * 3600, True),
+])
+def test_lag_counts_the_published_scans_past_the_index(newest, scan, behind, s, lagging):
+    published = ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201", "2026-10-09T1801"]
+    assert sd.lag_state(newest, published, scan) == {"newest": newest, "behind": behind, "s": s, "lagging": lagging}
+
+
+def test_one_behind_for_longer_than_lag_s_lags():
+    """One scan behind lags once it has been for more than `LAG_S` (12 h) by the scan's clock; exactly 12 h doesn't."""
+    assert sd.lag_state("2026-10-08T0001", ["2026-10-08T0601", "2026-10-09T0001"], "2026-10-08T1801")["lagging"] is False
+    assert sd.lag_state("2026-10-08T0001", ["2026-10-08T0601"], "2026-10-09T0001") == {
+        "newest": "2026-10-08T0001", "behind": ["2026-10-08T0601"], "s": 18 * 3600, "lagging": True}
+    assert sd.lag_state(None, ["2026-10-08T0601"], "2026-10-08T0601")["lagging"] is False
+
+
+def test_a_lag_episode_alerts_at_its_start_and_clears_at_its_end():
+    assert [sd.lag_episode(lagging, marked) for lagging, marked in ((True, False), (True, True), (False, True), (False, False))] == [
+        "start", None, "end", None]
+
+
+def test_check_priors_compares_each_tiers_recorded_priors_with_its_manifest():
+    """A run's drill built over its manifest's runs before it: `ok`; its anchors over one fewer: `differs`; a scan whose
+    anchors predate the field: `unrecorded`; a tier not built: `absent`."""
+    a, b = "2026-10-09T0001", "2026-10-09T0601"
+    keys = {
+        f"{ROOT}/manifests/{b}.json": {"runs": _runs(a, b)},
+        f"{ROOT}/deltas/{b}/drill/meta.json": {"prior": ["base", f"deltas/{a}"]},
+        f"{ROOT}/deltas/{b}/anchors/meta.json": {"prior": ["base"]},
+        f"{ROOT}/manifests/{a}.json": {"runs": _runs(a)},
+        f"{ROOT}/deltas/{a}/anchors/meta.json": {"R": 3},
+    }
+    check = lambda s: sd.check_priors(keys.__getitem__, keys.__contains__, ROOT, s)  # noqa: E731
+    assert check(b) == {"scan": b, "want": ["base", f"deltas/{a}"], "drill": "ok", "anchors": {"differs": ["base"]}}
+    assert check(a) == {"scan": a, "want": ["base"], "drill": "absent", "anchors": "unrecorded"}
+
+
+def test_the_r2_cli_reruns_a_manifests_r2_job(monkeypatch):
+    """`runs r2`: the newest manifest's R2 job (its runs, then it), or `-m`'s, as `runs add`'s r2 stage runs it: a
+    recovery (R2 lacking a run's files, a merge's revision published with `-w 0`)."""
+    from click.testing import CliRunner
+
+    f = Fake({}, SCANS[:2])
+    f.daily(merge=False).run(SCANS[1], catch_up=True)
+    monkeypatch.setattr(sd, "ready", lambda p, gen: CFG)
+    monkeypatch.setattr(sd, "profile", lambda: CFG)
+    monkeypatch.setattr(sd, "gcs_runner", lambda cfg, **kw: f.daily(cfg, merge=False))
+    f.calls = []
+    r = CliRunner().invoke(sd.r2_cmd, [])
+    assert (r.exit_code, f.calls) == (0, [_r2(SCANS[1], SCANS[:2])])
+    f.calls = []
+    r = CliRunner().invoke(sd.r2_cmd, ["-m", SCANS[0]])
+    assert (r.exit_code, f.calls) == (0, [_r2(SCANS[0], SCANS[:1])])

@@ -144,7 +144,7 @@ describe('unionRoot', () => {
         { ...leaf('ctbk', 900_000_000_000, 10), src: 'primary', at: 'A' },
         { ...leaf('crashes', 90_000_000_000, 10), src: 'primary', at: 'A' },
         { ...leaf('jc-taxes', 10_000_000_000, 10), src: 'primary', at: 'A' },
-        { n: 'oa-r2-usage-index', k: 'dir', b: 1_900_000_000, o: 4, d: 20000, src: 'meta', at: 'A' },
+        { n: 'oa-r2-usage-index', k: 'dir', b: 1_900_000_000, o: 4, d: 20000, t: 86400 * 20000 + 5, src: 'meta', at: 'A' },
         { n: 'disk-tree-demo', k: 'dir', b: 1_500_000_000, o: 2, src: 'meta', at: 'A' },
         { n: 'tiny', k: 'dir', b: 23_000_000, o: 1, src: 'meta', at: 'A' },
       ],

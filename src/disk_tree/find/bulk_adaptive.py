@@ -283,7 +283,7 @@ def _range_loop(
                     if end is not None:
                         page = [r for r in page if r.name < end]
                     if page:
-                        buf.extend((r.name, r.size, r.created, r.storage_class, r.generation) for r in page)
+                        buf.extend((r.name, r.size, r.created, r.storage_class, r.generation, r.crc32c, r.version) for r in page)
                         if len(buf) >= BATCH_ROWS:
                             flush_rows()
                         if first is None:
@@ -342,7 +342,7 @@ def _adaptive_proc(
     errors: list = []
 
     def emit(rows: "list[tuple]") -> None:
-        q.put(entries_to_frame(bucket, list(rows)))
+        q.put(entries_to_frame(bucket, list(rows), crc32c=getattr(lister, "crc32c", False)))
 
     # Only armed in spawned children: with procs<=1 this body runs in the CLI
     # process, where a ppid change is legitimate (nohup/disown reparenting).
@@ -484,7 +484,7 @@ def list_bucket_adaptive(
     if not total:
         # An empty bucket is a complete, empty listing: one empty shard in the listing schema, so `import`'s shard
         # glob (and the duplicate check below) find it
-        write_empty_shard(out_dir, "shard-00-0000")
+        write_empty_shard(out_dir, "shard-00-0000", crc32c=getattr(lister, "crc32c", False))
     _assert_no_duplicate_keys(out_dir)
 
     out_fs.pipe(

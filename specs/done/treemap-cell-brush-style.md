@@ -36,7 +36,7 @@ This flows through the **existing** `lens` / `colorForCell` path — no new top-
 
 - **gaps branch** — today the cell's `boxShadow` is `'0 0 0 1px var(--dt-treemap-cell-border, transparent)'`. Append the ring to that shadow list: `… , {inset?} 0 0 0 {width}px {color}`. Keep the existing 1px cell-border for structure; the ring stacks on top. gaps cells already have `borderRadius` 3 (1.5 for dust) — box-shadow follows the radius automatically, so the ring is rounded to match.
 - **shared branch** — today `inset 0 0 0 {edge}px {style.edge ?? builtinEdge ?? …}`. Append the ring as an **additional** box-shadow, so a brushed cell can be ringed independently of — and thicker than — its shared half-stroke. This also removes the need for a consumer to inflate the global `borderWidth` just to widen one cell's emphasis.
-- **canvas renderer** — paint the same ring in the canvas-backed path (a stroked rounded-rect on the cell box), so it survives the DOM→canvas migration in `specs/treemap-scaling.md`. A brushed cell is always a drillable-spine/individual cell, not folded dust, so this is a per-cell stroke, not a hit-tested region.
+- **canvas renderer** — paint the same ring in the canvas-backed path (a stroked rounded-rect on the cell box), so it survives the DOM→canvas migration in `specs/done/treemap-scaling.md`. A brushed cell is always a drillable-spine/individual cell, not folded dust, so this is a per-cell stroke, not a hit-tested region.
 
 ## Why a dedicated `ring`, not "honor `edge` in gaps too"
 

@@ -55,13 +55,14 @@ export async function reflectSweepRuns(cfg: Pick<BatchConfig, 'dataBucket'>, db:
   const done: FinishedRun[] = []
   for (const j of jobs) {
     if (!isSweepJob(j)) continue
+    if (!TERMINAL.has(j.status?.state ?? '')) continue
     const digest = j.taskGroups?.[0]?.taskSpec?.environment?.variables?.PLAN_DIGEST
     if (!digest) continue
     const logDir = runDir(cfg, jobIdOf(j))
     const finished = await db.prepare(
       'UPDATE deletion_runs SET plan_digest = ? WHERE log_dir = ? AND finished_ts IS NOT NULL AND plan_digest IS NULL RETURNING run_id',
-    ).bind(digest, logDir).all<{ run_id: string }>()
-    for (const { run_id } of finished.results) done.push({ run_id, ok: true })
+    ).bind(j.status?.state === 'SUCCEEDED' ? digest : '', logDir).all<{ run_id: string }>()
+    for (const { run_id } of finished.results) done.push({ run_id, ok: j.status?.state === 'SUCCEEDED' })
     if (!TERMINAL.has(j.status?.state ?? '')) continue
     const died = await db.prepare(
       "UPDATE deletion_runs SET finished_ts = ?, plan_digest = '' WHERE log_dir = ? AND finished_ts IS NULL RETURNING run_id",

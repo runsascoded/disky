@@ -201,6 +201,8 @@ describe('D1', () => {
         `get snapshots/${A}/lifecycle.json`,
         `get snapshots/${A}/meta.json`,
         'get snapshots/rules.json',
+        // the sidecar found through the scans' layout (its index generations listed), never a D1 pointer
+        `list listing/${A}/index/`,
       ])
     })
 
@@ -222,6 +224,7 @@ describe('D1', () => {
         `${GCS} get snapshots/${A}/lifecycle.json`,
         `${GCS} get snapshots/${A}/meta.json`,
         `${GCS} get snapshots/rules.json`,
+        `${GCS} list listing/${A}/index/`,
       ])
       const s = await world(false, { INDEX_R2: r2Of(new Map(), []) as unknown as R2Bucket })
       expect(await series(s)).toEqual(SERIES)
@@ -276,7 +279,14 @@ describe('D1', () => {
       walk(v.tree as never, 'bk/nest')
       expect(pv).toEqual(EXPECTED_PV)
       expect(keys(w.store).map(k => k.replace(/ get .*\//, ' get '))).toEqual([`${GCS} get path-index.parquet`])
-      expect(keys(w.r2)).toEqual([`get ${dirOf(A)}/attr.tsv`, `get ${dirOf(A)}/attr.tsv.idx.json`])
+      expect(keys(w.r2)).toEqual([`get ${dirOf(A)}/attr.tsv`, `get ${dirOf(A)}/attr.tsv.idx.json`, `list listing/${A}/index/`])
+    })
+
+    it('provenance survives a retired D1 pointer: the sidecar is found through the scans’ layout', async () => {
+      const w = await world(true)
+      const { sqliteD1: fresh } = await import('./testD1')
+      const env = { ...w.env, DB: (await fresh()).db } as Env // no `index_schema` row for A
+      expect((await w.mods.extras.extrasFor(env, A, 'bk'))?.provenance('bk/nest/a/z/q', 'alice')).toEqual(EXPECTED.provenance)
     })
   })
 

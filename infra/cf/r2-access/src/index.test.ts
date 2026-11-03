@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import config from '../wrangler.json'
+import oa from '../wrangler.oa.json'
 import worker, {
   actionClass, boundedText, capture, collect, HourAccumulator, type HourAggregate, minute, parseCalculation, parsePage, plan,
   publicHour, reservePages, settings, subrequestBound, timeframe, upgrade, verifyOrder,
@@ -63,16 +64,16 @@ function provider(rows: Row[], limit = 2) {
   })
 }
 
-function setup(vars: Partial<typeof config.vars> = {}) {
+function setup(vars: Partial<typeof config.vars> & { WINDOW_MINUTES?: string } = {}) {
   const archive = new Map<string, { text: string, etag: string }>()
   const order: string[] = []
   const pub = new Map<string, string>()
   let version = 0
   const put = vi.fn(async (key: string, value: unknown, options?: R2PutOptions) => {
-    if (typeof value !== 'string') throw new Error('collector must archive JSON text')
+    const text = typeof value === 'string' ? value : await new Response(value as ReadableStream).text()
     const match = (options?.onlyIf as R2Conditional | undefined)?.etagMatches
     if (match !== undefined && archive.get(key)?.etag !== match) return null
-    archive.set(key, { text: value, etag: `e${++version}` })
+    archive.set(key, { text, etag: `e${++version}` })
     order.push(key)
     return { key } as R2Object
   })
@@ -123,12 +124,19 @@ describe('settings', () => {
     const { env } = setup()
     expect(settings(env, env.HOURLY_CRON, time)).toEqual({
       buckets: ['jc-taxes'], now: time, to, floor: to - 144 * H, published: [], publicPrefix: '', excluded: new Set(),
-      lookback: 6 * H, overlap: 2 * H, pageSize: 500, maxPages: 50, maxHours: 48, verifyHours: 6, maxBytes: 4194304,
+      lookback: 6 * H, overlap: 2 * H, pageSize: 500, maxPages: 50, maxHours: 48, verifyHours: 6, window: H, maxBytes: 4194304,
     })
   })
 
-  it('bounds an invocation\'s subrequests under the Workers limit', () => {
-    expect([subrequestBound(50, 48), subrequestBound(450, 30), subrequestBound(450, 31)]).toEqual([248, 994, 997])
+  it('bounds subrequests including adaptive window count queries', () => {
+    expect([subrequestBound(50, 48), subrequestBound(450, 30), subrequestBound(450, 31), subrequestBound(400, 32, 5)]).toEqual([248, 994, 997, 996])
+  })
+
+  it('sizes OA for five-minute windows and one nominal hour of reverification per run', () => {
+    const { env } = setup(oa.vars)
+    const parsed = settings(env, env.HOURLY_CRON, time)
+    expect([parsed.window, parsed.maxHours, parsed.verifyHours, parsed.maxPages, parsed.pageSize]).toEqual([5 * M, 32, 12, 400, 2000])
+    expect(subrequestBound(parsed.maxPages, parsed.maxHours, parsed.window / M)).toBe(996)
   })
 
   it.each([
@@ -142,6 +150,9 @@ describe('settings', () => {
     { LOOKBACK_HOURS: '7', RETENTION_HOURS: '6' },
     { VERIFY_HOURS: '49' },
     { RETENTION_HOURS: '' },
+    { WINDOW_MINUTES: '0' },
+    { WINDOW_MINUTES: '7' },
+    { WINDOW_MINUTES: '5', MAX_PAGES: '400', MAX_HOURS: '33' },
   ])('rejects unsafe configuration %j', vars => {
     const { env } = setup(vars)
     expect(() => settings(env, env.HOURLY_CRON, time)).toThrow('r2-access: invalid_config')
@@ -400,6 +411,99 @@ describe('collect', () => {
     expect(read(`${prefix('r1')}/_SUCCESS.json`).buckets[0]).toMatchObject({ collected_through: hr('05'), waiting: 4, error: 'hour_over_cap' })
   })
 
+  it('splits a busy window and resumes at its saved boundary, preserving the earlier hourly history', async () => {
+    const { env, read } = setup({ PAGE_SIZE: '2', MAX_PAGES: '4', MAX_HOURS: '2', VERIFY_HOURS: '0', LOOKBACK_HOURS: '1' })
+    // Existing hourly deployment has published 07; collection switches at its 08 watermark.
+    await collect(time - H, env.HOURLY_CRON, env, provider([]), 'hourly')
+    const old = read('state.json').buckets['jc-taxes'].hours['2026-10-12T07']
+    const busy = [0, 1, M, 2 * M - 1, 2 * M, 3 * M, 5 * M - 1].map((delta, i) => ({
+      id: `busy-${i}`, timestamp: hr('08') + delta, action: 'HeadObject', key: 'data/a',
+    }))
+    const fetch = provider(busy)
+    const windowed = { ...env, WINDOW_MINUTES: '5' }
+    const run = (id: string) => collect(time, env.HOURLY_CRON, windowed, fetch, id)
+    expect(await run('w1')).toEqual({ run_id: 'w1', buckets: 1, hours: 1, pages: 3, events: 4, changed: 1, waiting: 12 })
+    let state = read('state.json').buckets['jc-taxes']
+    expect([state.window_from, state.window_ms, state.collected_through, state.hours['2026-10-12T07'], Object.keys(state.hours)]).toEqual([
+      hr('08'), 5 * M, hr('08') + 2 * M, old, ['2026-10-12T07', '2026-10-12T08:00'],
+    ])
+    expect(read(agg('08:00', 'w1'))).toEqual({
+      ...hourAgg('08', {
+        events: 4, actions: { HeadObject: 4 }, classes: { metadata_read: 4 },
+        rows: [['data/a', 'HeadObject', 4, hr('08'), hr('08') + M]],
+      }), window_end: '2026-10-12T08:02:00.000Z',
+    })
+    expect(state.hours['2026-10-12T08:00'].window_end).toBe(hr('08') + 2 * M)
+    fetch.mockClear()
+    expect(await run('w2')).toEqual({ run_id: 'w2', buckets: 1, hours: 1, pages: 3, events: 3, changed: 1, waiting: 11 })
+    state = read('state.json').buckets['jc-taxes']
+    expect([state.collected_through, Object.keys(state.hours), state.hours['2026-10-12T08:02'].window_end]).toEqual([
+      hr('08') + 5 * M, ['2026-10-12T07', '2026-10-12T08:00', '2026-10-12T08:02'], hr('08') + 5 * M,
+    ])
+    // No request repeats the completed 08:00–08:02 window, including its event exactly at 08:00.
+    expect(fetch.mock.calls.map(([, init]) => {
+      const body = JSON.parse(String(init?.body))
+      return [body.view, body.timeframe.from + 1, body.timeframe.to, body.offset ?? null]
+    })).toEqual([
+      ['calculations', hr('08') + 2 * M, hr('08') + 5 * M, null],
+      ['events', hr('08') + 2 * M, hr('08') + 5 * M, null],
+      ['events', hr('08') + 2 * M, hr('08') + 5 * M, 'busy-5'],
+      ['events', hr('08') + 2 * M, hr('08') + 5 * M, 'busy-4'],
+      ['calculations', hr('08') + 5 * M, hr('08') + 10 * M, null],
+    ])
+    expect(read(agg('08:02', 'w2')).rows).toEqual([['data/a', 'HeadObject', 3, hr('08') + 2 * M, hr('08') + 4 * M]])
+
+    // Reverification uses the saved short end, rather than overlapping the next window.
+    fetch.mockClear()
+    await collect(time, env.HOURLY_CRON, { ...windowed, MAX_PAGES: '40', MAX_HOURS: '20', VERIFY_HOURS: '2' }, fetch, 'w3')
+    state = read('state.json').buckets['jc-taxes']
+    expect(verifyOrder(settings(windowed, env.HOURLY_CRON, time), { ...state, verify_cursor: hr('08') })).toEqual([
+      hr('08'), hr('08') + 2 * M, ...Array.from({ length: 11 }, (_, i) => hr('08') + (i + 1) * 5 * M), hr('07'),
+    ])
+    const counts = fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body))).filter(b => b.view === 'calculations')
+    expect(counts.slice(-2).map(b => [b.timeframe.from + 1, b.timeframe.to])).toEqual([
+      [hr('08'), hr('08') + 2 * M], [hr('08') + 2 * M, hr('08') + 5 * M],
+    ])
+    expect(state.hours['2026-10-12T08:00'].agg).toBe(agg('08:00', 'w1'))
+    await expect(collect(time, env.HOURLY_CRON, { ...windowed, WINDOW_MINUTES: '10' }, fetch, 'bad')).rejects.toThrow('r2-access: window_size_changed')
+  })
+
+  it('holds the watermark with an explicit error when even a one-minute window exceeds the cap', async () => {
+    const { env, read } = setup({ WINDOW_MINUTES: '5', PAGE_SIZE: '2', MAX_PAGES: '4', MAX_HOURS: '1', VERIFY_HOURS: '0', LOOKBACK_HOURS: '1' })
+    const fetch = provider(Array.from({ length: 7 }, (_, i) => ({ id: `x${i}`, timestamp: hr('08') + i, action: 'PutObject' })))
+    await expect(collect(time, env.HOURLY_CRON, env, fetch, 'dense')).rejects.toThrow('r2-access: hour_over_cap')
+    expect(fetch.mock.calls.map(([, init]) => {
+      const body = JSON.parse(String(init?.body))
+      return [body.view, body.timeframe.from + 1, body.timeframe.to]
+    })).toEqual([5, 2, 1].map(n => ['calculations', hr('08'), hr('08') + n * M]))
+    expect([read('state.json').buckets['jc-taxes'].collected_through, read(`${prefix('dense')}/_SUCCESS.json`).buckets[0].error]).toEqual([
+      hr('08'), 'hour_over_cap',
+    ])
+  })
+
+  it('publishes completed windows before the cron wall limit, leaving an incomplete window for retry', async () => {
+    const { env, read } = setup({ WINDOW_MINUTES: '5', PAGE_SIZE: '2', MAX_HOURS: '3', VERIFY_HOURS: '0', LOOKBACK_HOURS: '1' })
+    let elapsed = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed)
+    const live = provider([{ id: 'slow', timestamp: hr('08') + 6 * M, action: 'HeadObject', key: 'k' }])
+    const slow = vi.fn<typeof fetch>(async (url, init) => {
+      const response = await live(url, init)
+      const body = JSON.parse(String(init?.body))
+      if (body.view === 'events' && body.timeframe.from + 1 === hr('08') + 5 * M) elapsed = 12 * M
+      return response
+    })
+    expect(await collect(time, env.HOURLY_CRON, env, slow, 'deadline')).toEqual({
+      run_id: 'deadline', buckets: 1, hours: 1, pages: 2, events: 0, changed: 1, waiting: 11,
+    })
+    const state = read('state.json').buckets['jc-taxes']
+    expect([state.collected_through, Object.keys(state.hours)]).toEqual([hr('08') + 5 * M, ['2026-10-12T08:00']])
+    elapsed = 0
+    expect(await collect(time, env.HOURLY_CRON, { ...env, MAX_HOURS: '1' }, live, 'retry')).toEqual({
+      run_id: 'retry', buckets: 1, hours: 1, pages: 2, events: 1, changed: 1, waiting: 10,
+    })
+    expect(read(agg('08:05', 'retry')).rows).toEqual([['k', 'HeadObject', 1, hr('08') + 6 * M, hr('08') + 6 * M]])
+  })
+
   it('marks ingestion-sampled and inconsistent hours without inflating observed counts', async () => {
     const { env, read } = setup()
     await collect(time, env.HOURLY_CRON, env, provider([
@@ -477,6 +581,28 @@ describe('collect', () => {
     expect([state.gaps, state.frozen, Object.keys(state.hours)]).toEqual([
       [[hr('04'), to + 200 * H - 144 * H]], { '2026-10-12T03': agg('03', 'r1') }, [hourKeyOf(to + 56 * H)],
     ])
+  })
+
+  it('publishes completed windows when the provider fails mid-run, then fails with its code (OA 2026-10-22T13:13Z)', async () => {
+    const { env, order, read } = setup({ WINDOW_MINUTES: '5', PAGE_SIZE: '2', MAX_HOURS: '3', VERIFY_HOURS: '0', LOOKBACK_HOURS: '1' })
+    const live = provider([{ id: 'w0', timestamp: hr('08') + M, action: 'HeadObject', key: 'k' }])
+    const flaky = vi.fn<typeof fetch>(async (url, init) => {
+      const body = JSON.parse(String(init?.body))
+      if (body.view === 'events' && body.timeframe.from + 1 === hr('08') + 5 * M) return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: 'private detail' }] }), { status: 403 })
+      return live(url, init)
+    })
+    await expect(collect(time, env.HOURLY_CRON, env, flaky, 'flaky')).rejects.toThrow('r2-access: provider_http_403_10000')
+    const state = read('state.json').buckets['jc-taxes']
+    expect([state.collected_through, Object.keys(state.hours)]).toEqual([hr('08') + 5 * M, ['2026-10-12T08:00']])
+    expect(read(`${prefix('flaky')}/_SUCCESS.json`).buckets[0]).toMatchObject({ collected_through: hr('08') + 5 * M, waiting: 11, error: 'provider_http_403_10000' })
+    expect(order.slice(-2)).toEqual(['state.json', `${prefix('flaky')}/_SUCCESS.json`])
+  })
+
+  it('fails before any write when the provider fails before a window completes', async () => {
+    const { env, order } = setup({ WINDOW_MINUTES: '5', VERIFY_HOURS: '0', LOOKBACK_HOURS: '1' })
+    const down = vi.fn<typeof fetch>(async () => { throw new TypeError('network') })
+    await expect(collect(time, env.HOURLY_CRON, env, down, 'down')).rejects.toThrow('r2-access: provider_unreachable')
+    expect(order).toEqual([])
   })
 
   it('refuses to publish over a concurrently advanced state', async () => {
@@ -572,8 +698,8 @@ describe('handlers', () => {
     const fetcher = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('private-object-key test-secret'))
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { env } = setup()
-    await expect(worker.scheduled({ scheduledTime: time, cron: env.HOURLY_CRON, noRetry() {} }, env)).rejects.toThrow('r2-access: collection_failed')
+    await expect(worker.scheduled({ scheduledTime: time, cron: env.HOURLY_CRON, noRetry() {} }, env)).rejects.toThrow('r2-access: provider_unreachable')
     expect(fetcher.mock.calls.length).toBe(1)
-    expect(log.mock.calls).toEqual([[JSON.stringify({ message: 'r2-access failed', code: 'collection_failed' })]])
+    expect(log.mock.calls).toEqual([[JSON.stringify({ message: 'r2-access failed', code: 'provider_unreachable' })]])
   })
 })

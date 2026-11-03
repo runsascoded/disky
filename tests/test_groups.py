@@ -80,7 +80,8 @@ def test_schema_json_is_hyparquet_shaped(tmp_path: Path):
     assert by_name['path'] == {'type': 'BYTE_ARRAY', 'repetition_type': 'OPTIONAL', 'name': 'path', 'converted_type': 'UTF8'}
     assert by_name['depth'] == {'type': 'INT64', 'repetition_type': 'OPTIONAL', 'name': 'depth', 'converted_type': 'INT_64'}
     assert by_name['size'] == {'type': 'INT64', 'repetition_type': 'OPTIONAL', 'name': 'size', 'converted_type': 'INT_64'}
-    assert schema['version'] == 1
+    # A store sort (`tier` in its metadata) is version 2, as `index-sync` records it: the reader picks its row columns by it.
+    assert schema['version'] == 2
     # The store's sorts have no floor (every byte floor is a prefix of `bysize`).
     assert 'floor_bytes' not in schema
     # A coarse tier's floor (mgu's `coarse_floor`, or `floor_bytes`) rides
@@ -88,7 +89,7 @@ def test_schema_json_is_hyparquet_shaped(tmp_path: Path):
     for key in ('floor_bytes', 'coarse_floor'):
         t = pa.table({'path': ['.', 'a'], 'depth': [0, 1], 'size': [7, 3]})
         pq.write_table(t.replace_schema_metadata({key: '512'}), tmp_path / f'{key}.parquet')
-        assert schema_json(pq.read_metadata(tmp_path / f'{key}.parquet'))['floor_bytes'] == 512
+        assert schema_json(pq.read_metadata(tmp_path / f'{key}.parquet')) | {'schema': None} == {'version': 1, 'schema': None, 'floor_bytes': 512}
 
 
 def test_group_rows_span_the_sorted_path_tier(tmp_path: Path):

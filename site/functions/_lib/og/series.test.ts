@@ -162,7 +162,7 @@ describe('seriesCard: the page\'s series, read in-process', () => {
     const d = await seriesCard(env, SITE, 'a · size over time', { path: 'a', o: 'Alan', d: SCANS[5] }, 'full', 'https://x.example')
     const [ctx, gate] = mocks.read.mock.calls[0]
     expect([ctx.request.url, ctx.env, await gate(ctx), mocks.scan.mock.calls, d.total]).toEqual([
-      'https://x.example/api/series?path=a&lens=user%3Aalan-turing', env, null, [[env, SCANS[5]]], '150 TiB · 3,600 objects',
+      'https://x.example/api/series?path=a&lens=user%3Aalan-turing', env, null, [[env, SCANS[5], false]], '150 TiB · 3,600 objects',
     ])
   })
   it('refusals are drawn as such; read errors as "series unavailable", never cached; `o=me` asks nothing', async () => {

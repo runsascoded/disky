@@ -1,7 +1,7 @@
 import { Tooltip } from './Tooltip'
 import { SectionAnchor } from './SectionAnchor'
 import { Explain } from './Help'
-import { TimeSeries } from '@disk-tree/react'
+import { TimeSeries, XOverview } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
 import { slotColor } from './colors'
 import { useQuery } from '@tanstack/react-query'
@@ -21,11 +21,13 @@ import { ApiError, apiError } from './filterCaps'
 import { LoadFailure } from './LoadFailure'
 import { SeriesEmpty } from './SeriesEmpty'
 import { SeriesMissingNote } from './UnionNotes'
-import { defaultNoteAt, noteKinds, notesHere, notesInView, type ChartAnnotation, type NoteMarker } from './chartNotes'
+import { defaultNoteAt, noteMarkers, notesHere, type ChartAnnotation, type NoteMarker } from './chartNotes'
 import { NoteForm, NoteTip, useChartNotes, useNoteWrite } from './NoteWidgets'
 import { manualScans } from './scanRunsModel'
 import { useScanRuns } from './scanRunsUi'
 import { useActions } from 'use-kbd'
+import { MdFitScreen, MdZoomOut } from 'react-icons/md'
+import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, presetOf, resolveXDomain, spanDomain, X_PRESETS, type XDomain } from './xDomain'
 
 // Stored bytes over the historical scans, scoped exactly like the map: the
 // drilled prefix, a user, or an owner pool (`/api/series` — one row read per
@@ -45,15 +47,13 @@ const DEFAULT_FLOOR_PCT = 10
 
 type YFrom = 'data' | 'zero'
 type Layout = 'stacked' | 'lines'
-type XRange = '1w' | '1m' | 'all'
 // What the y-axis measures: bytes, bytes gained since each trace's first shown
 // scan, or that as a percentage of the start.
 type Values = 'abs' | 'delta' | 'pct'
-const X_RANGES: [XRange, number | null][] = [['1w', 7], ['1m', 30], ['all', null]]
 
-// The x-range (`?xr=1w|1m`; all = default): the last N days before the
-// latest scan. A phone's chart is too narrow to read a month of 12-hourly
-// scans at the right edge.
+// The displayed x-range (`?xr=`, `xDomain.ts`): `1w` / `1m` (the last N days before the latest scan), a brushed
+// span of two scans (`<from>..<to>`), or every scan (the default). Separate from the diff window, which it only
+// frames: zooming never moves the window, and the chart keeps the context around it.
 // Scans a hand submit started (`manualScans`), drawn apart from the schedule's (`?mm`): a tick under the x-axis
 // (default), hollow dots (`h`), or not at all (`0`). The tooltip names them in every style, and the legend the mark.
 type ManualMark = 'hollow' | 'tick' | 'off'
@@ -76,14 +76,25 @@ function ManualMarkToggle({ v, set }: { v: ManualMark; set: (m: ManualMark) => v
   )
 }
 
-function XRangeToggle({ v, set }: { v: XRange; set: (r: XRange) => void }) {
+function XRangeToggle({ domain, set, onFit, canFit }: { domain: XDomain; set: (d: XDomain) => void; onFit: () => void; canFit: boolean }) {
+  const on = presetOf(domain)
   return (
-    <span className="gran" role="radiogroup" aria-label="X-axis range">
-      {X_RANGES.map(([r, days]) => (
+    <span className="gran x-range" role="group" aria-label="X-axis range">
+      {X_PRESETS.map(([r, days]) => (
         <Explain key={r} text={days ? `Only the last ${days === 7 ? 'week' : '30 days'} of scans` : 'Every scan'}>
-          <button role="radio" aria-checked={v === r} className={v === r ? 'on' : ''} onClick={() => set(r)}>{r}</button>
+          <button role="radio" aria-checked={on === r} className={on === r ? 'on' : ''} onClick={() => set(parseXr(r))}>{r}</button>
         </Explain>
       ))}
+      {canFit && (
+        <Explain text="Zoom to the diff window (with a scan of context each side); the strip under the chart shows where it sits">
+          <button type="button" className="icon" aria-label="zoom to the diff window" onClick={onFit}><MdFitScreen /></button>
+        </Explain>
+      )}
+      {domain.kind === 'span' && (
+        <Explain text="Show every scan again (or double-click the strip under the chart)">
+          <button type="button" className="icon" aria-label="reset zoom" onClick={() => set({ kind: 'all' })}><MdZoomOut /></button>
+        </Explain>
+      )}
     </span>
   )
 }
@@ -223,8 +234,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const layout: Layout = linesP ? 'lines' : 'stacked'
   const setLayout = (l: Layout) => setLinesP(l === 'lines')
   const [xrP, setXrP] = useUrlState('xr', stringParam())
-  const xRange: XRange = xrP === '1w' || xrP === '1m' ? xrP : 'all'
-  const setXRange = (r: XRange) => setXrP(r === 'all' ? undefined : r)
+  const xDomain = useMemo(() => parseXr(xrP), [xrP])
+  const setXDomain = (d: XDomain) => setXrP(fmtXr(d))
   const [ymP, setYmP] = useUrlState('ym', stringParam())
   const values: Values = ymP === 'd' ? 'delta' : ymP === 'p' ? 'pct' : 'abs'
   const setValues = (m: Values) => setYmP(m === 'delta' ? 'd' : m === 'pct' ? 'p' : undefined)
@@ -283,17 +294,20 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const tooMany = overMax && (!filterQs || (seriesQ.error instanceof ApiError && seriesQ.error.status === 400))
 
   const label = user ? shortName(user) : pool ?? (prefix || 'total')
-  // The x-range cut: points on or after (latest − N days). Applied to every
-  // trace, so the stack, the total and the callouts agree.
-  const xFrom = useMemo(() => {
-    const days = X_RANGES.find(([r]) => r === xRange)![1]
-    const last = seriesQ.data?.points.reduce((m, p) => Math.max(m, xOfScan(p.date, times)), 0) ?? 0
-    return days ? last - days * 86_400_000 : -Infinity
-  }, [seriesQ.data, xRange, times])
-  const toPts = (points: { date: string; b: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: p.b })).filter(p => p.x >= xFrom).sort((a, b) => a.x - b.x)
-  const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xFrom, times])
+  // Every scan's point (the overview strip draws them all), and the displayed range over them (`resolveXDomain`:
+  // null = all). The cut applies to every trace, so the stack, the total, the y-fit, the callouts and the notes
+  // all follow the visible window.
+  const fullTotal = useMemo(() => (seriesQ.data?.points ?? []).map(p => ({ x: xOfScan(p.date, times), y: p.b })).sort((a, b) => a.x - b.x), [seriesQ.data, times])
+  const xRange = useMemo(() => resolveXDomain(xDomain, fullTotal.map(p => p.x), id => xOfScan(id, times)), [xDomain, fullTotal, times])
+  // The diff window in x (shaded on the chart and the strip; callouts mark its ends).
+  const winX = useMemo(() => (win ? [xOfScan(win[0], times), xOfScan(win[1], times)] as [number, number] : undefined), [win, times])
+  const toPts = (points: { date: string; b: number }[]): Pt[] => points.map(p => ({ x: xOfScan(p.date, times), y: p.b })).filter(p => inXDomain(xRange, p.x)).sort((a, b) => a.x - b.x)
+  const total = useMemo(() => toPts(seriesQ.data?.points ?? []), [seriesQ.data, xRange, times])
   // Scans the answer doesn't cover (a filter's static index): gaps in the line, with a muted note — never zeros.
-  const gaps = useMemo(() => seriesGaps(seriesQ.data?.unindexed, total.map(p => p.x), d => xOfScan(d, times), xFrom, fmtX), [seriesQ.data, total, times, xFrom])
+  const gaps = useMemo(
+    () => seriesGaps(seriesQ.data?.unindexed?.filter(d => inXDomain(xRange, xOfScan(d, times))), total.map(p => p.x), d => xOfScan(d, times), -Infinity, fmtX),
+    [seriesQ.data, total, times, xRange],
+  )
   // x → the scan id it plots (a pick or brush names that exact scan, and the
   // tooltip labels it); an x no point sits on falls back to its UTC minute.
   const idOfX = useMemo(() => {
@@ -307,7 +321,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     [seriesQ.data, manual, times],
   )
   // the legend names the mark while one is drawn in view
-  const manualLegend = manualMark !== 'off' && manualXs.some(x => x >= xFrom)
+  const manualLegend = manualMark !== 'off' && manualXs.some(x => inXDomain(xRange, x))
   // The roots' traces (split mode), keyed by bucket, in the map's colours: slot by size at the latest scan (largest =
   // slot 0; a root that scan doesn't hold ranks last), each slot's `slotColor`, as the map colours the root's children.
   const roots = useMemo(() => {
@@ -318,7 +332,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     const bySize = [...rs].sort((a, b) => latest(b) - latest(a))
     const slot = new Map(bySize.map((r, i) => [r.path, i]))
     return rs.map(r => ({ key: r.path, color: slotColor(slot.get(r.path)!), points: toPts(r.points) }))
-  }, [seriesQ.data, xFrom, times])
+  }, [seriesQ.data, xRange, times])
   // The x before which the total lacks a root — the total is dashed there.
   const genesis = useMemo(() => youngestGenesis(roots), [roots])
   // The relative modes' traces: each root, and the total, against its own
@@ -371,7 +385,6 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const fmtFit = (y: number) => fmtBytesStep(y, tickStep, units, suffixB)
   const fmtY = values === 'pct' ? fmtPct : relative ? (y: number) => signed(y, fmtBytes(Math.abs(y))) : yFrom === 'data' ? fmtFit : fmtBytes
   const annotations = useMemo((): Annotation[] => {
-    const winX = win ? [xOfScan(win[0], times), xOfScan(win[1], times)] as [number, number] : undefined
     const radius = extrema ? radiusDays * DAY : undefined
     const floor = floorPct / 100
     if (roots.length && !stacked && !relative) return []
@@ -392,7 +405,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
       }
     }
     return out
-  }, [series, relTotal, roots, stacked, relative, win, extrema, radiusDays, floorPct, fmtY, fmtBytes])
+  }, [series, relTotal, roots, stacked, relative, winX, extrema, radiusDays, floorPct, fmtY, fmtBytes])
 
 
   // Hand-written notes pinned to dates (spec `chart-annotations.md`): drawn inside the plotted span only, so a
@@ -402,22 +415,22 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const isAdmin = admin
   const noteWrite = useNoteWrite()
   const [noteForm, setNoteForm] = useState<{ at: string; note?: ChartAnnotation } | null>(null)
-  // A note scoped to a path shows on its chart and those below it (`notesHere`); the options toggle each kind
-  // (`?nh=<kind>,…` hides those).
-  const [nhP, setNhP] = useUrlState('nh', stringParam())
-  const hiddenKinds = useMemo(() => new Set((nhP ?? '').split(',').filter(Boolean)), [nhP])
-  const setKindShown = (kind: string, on: boolean) => {
-    const next = new Set(hiddenKinds)
-    if (on) next.delete(kind)
-    else next.add(kind)
-    setNhP(next.size ? [...next].sort().join(',') : undefined)
-  }
-  const kinds = useMemo(() => noteKinds(notes, prefix), [notes, prefix])
+  // A note scoped to a path shows on its chart and those below it (`notesHere`); one "notes" toggle (`?nn` hides
+  // them) is offered when this chart has any.
+  const [nnP, setNnP] = useUrlState('nn', boolParam)
+  const notesShown = !nnP
+  const hasNotes = useMemo(() => notesHere(notes, prefix).length > 0, [notes, prefix])
   const markers = useMemo(
-    () => (total.length ? notesInView(notesHere(notes, prefix, hiddenKinds), at => xOfScan(at, times), total[0].x, total[total.length - 1].x) : []),
-    [notes, prefix, hiddenKinds, total, times],
+    () => (total.length ? noteMarkers(notes, prefix, notesShown, at => xOfScan(at, times), total[0].x, total[total.length - 1].x) : []),
+    [notes, prefix, notesShown, total, times],
   )
   const latestId = total.length ? idOfX(total[total.length - 1].x) : undefined
+  // "Fit" to the diff window: its scans plus one of context each side (`fitToWindow`), offered while
+  // that isn't already what the chart shows.
+  const allXs = useMemo(() => fullTotal.map(p => p.x), [fullTotal])
+  const fitR = useMemo(() => (winX ? fitToWindow(winX, allXs) : undefined), [winX, allXs])
+  const fitTarget = fitR !== undefined && (fitR?.[0] !== xRange?.[0] || fitR?.[1] !== xRange?.[1])
+  const fitWin = () => { if (fitR !== undefined) setXDomain(spanDomain(fitR, idOfX)) }
   // Alt held on the press that becomes a pick: an admin's alt-click opens the form at that point's scan.
   const altRef = useRef(false)
   const canNote = isAdmin && applied
@@ -460,11 +473,11 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
                     ? <>Stored bytes per scan, one {stacked ? 'band' : 'line'} per bucket{genesis != null && <> — the total is dashed before every bucket was in the scan</>}.</>
                     : <>Total stored bytes per scan ({scopeLabel}).</>}
           {relative && <> Shown as {values === 'pct' ? 'growth' : 'bytes gained'} since each trace’s first shown scan.</>}
-          {' '}Each point is that scan’s own index row — exact, at any depth. Click a point to view that scan; drag to set the diff window.
+          {' '}Each point is that scan’s own index row — exact, at any depth. Click a point to view that scan; drag to set the diff window. Drag across the strip under the chart to zoom (double-click it for every scan).
         </>}>
           <span className="info" aria-label="about this chart" tabIndex={0}>ⓘ</span>
         </Tooltip>
-        <XRangeToggle v={xRange} set={setXRange} />
+        <XRangeToggle domain={xDomain} set={setXDomain} onFit={fitWin} canFit={!!fitTarget} />
         <ValuesToggle v={values} set={setValues} />
         {!relative && <YFromToggle v={yFrom} set={setYFrom} stacked={stacked} />}
         {roots.length > 0 && !relative && <LayoutToggle v={layout} set={setLayout} />}
@@ -478,6 +491,11 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             style={{ background: 'none', border: 'none', cursor: 'pointer', font: 'inherit', color: 'inherit', opacity: gearOpen ? 1 : 0.55, padding: '0 2px' }}
           >⚙</button>
         </Explain>
+        {hasNotes && (
+          <Explain text={notesShown ? 'Hide the notes pinned to dates on this chart' : 'Show the notes pinned to dates on this chart'}>
+            <button type="button" className={`note-toggle${notesShown ? ' on' : ''}`} aria-pressed={notesShown} onClick={() => setNnP(notesShown)}>notes</button>
+          </Explain>
+        )}
         {isAdmin && (
           <Explain text={applied ? 'Add a note pinned to a date on this chart (or alt-click a point to note that scan)' : 'Notes are off here: this deployment’s D1 lacks the chart-annotations migration'}>
             <button type="button" className="note-add" disabled={!applied} aria-expanded={!!noteForm} onClick={() => setNoteForm(f => (f ? null : { at: defaultNoteAt(win, latestId) }))}>+ note</button>
@@ -513,12 +531,6 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
             <b style={{ minWidth: 30, textAlign: 'right' }}>{floorPct}%</b>
           </label>
           {manual.size > 0 && <ManualMarkToggle v={manualMark} set={setManualMark} />}
-          {kinds.map(k => (
-            <label key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-              <input type="checkbox" checked={!hiddenKinds.has(k)} onChange={e => setKindShown(k, e.target.checked)} />
-              {k} notes
-            </label>
-          ))}
         </div>
       )}
       {noteForm && <NoteForm key={noteForm.note?.id ?? 'new'} at={noteForm.at} path={prefix} note={noteForm.note} onClose={() => setNoteForm(null)} />}
@@ -552,11 +564,23 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           annotations={annotations}
           onPickX={onPickDate || canNote ? pickX : undefined}
           onBrush={onBrush && ((x0, x1) => onBrush(idOfX(x0), idOfX(x1)))}
-          window={win && [xOfScan(win[0], times), xOfScan(win[1], times)]}
+          window={winX}
           gaps={gaps.xs}
           markers={markers}
           renderMarker={renderMarker}
         />
+        {fullTotal.length > 2 && (
+          <Explain className="overview-help" text="Every scan: drag across this strip to zoom the chart to that stretch, double-click it to show every scan. The lit part is what the chart shows; the blue band is the diff window.">
+            <XOverview
+              className="over-time-overview"
+              points={fullTotal}
+              domain={xRange}
+              window={winX}
+              onDomain={(x0, x1) => { const d = brushDomain(x0, x1, allXs, idOfX); if (d) setXDomain(d) }}
+              onReset={() => setXDomain({ kind: 'all' })}
+            />
+          </Explain>
+        )}
         </div>
       ) : (
         <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />

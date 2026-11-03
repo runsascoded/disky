@@ -68,9 +68,23 @@ describe('static runs', () => {
     const t = tiers(files())
     const state = await t.tiers.state()
     const spies = state.tiers.slice(1).map(tier => vi.spyOn(tier.names, 'extent').mockResolvedValue({
-      shard: { i: 0, lo: 'ckp', hi: null, rows: 0 },
-      idx: { size: 0, sMin: [], sMax: [], rows, chunks: [] },
-      a: 0, b: rows.length, rows: rows.reduce((s, n) => s + n, 0),
+      parts: [{ shard: { i: 0, lo: 'ckp', hi: null, rows: 0 }, idx: { size: 0, sMin: [], sMax: [], rows, chunks: [] }, a: 0, b: rows.length }],
+      rows: rows.reduce((s, n) => s + n, 0),
+    }))
+    try { expect(await t.names.defaultMaxRows('ckpt', MAX_ROWS)).toBe(budget) }
+    finally { spies.forEach(spy => spy.mockRestore()) }
+  })
+
+  it.each([
+    { parts: [[100, 200, 300], [400, 500]], budget: MAX_ROWS + 4 * 600 },
+    { parts: [[], [700]], budget: MAX_ROWS + 4 * 700 },
+    { parts: [[800], [], [900]], budget: MAX_ROWS + 4 * 1700 },
+  ])('takes a range\'s boundary groups over its shards\' parts ($parts)', async ({ parts, budget }) => {
+    const t = tiers(files())
+    const state = await t.tiers.state()
+    const spies = state.tiers.slice(1).map(tier => vi.spyOn(tier.names, 'extent').mockResolvedValue({
+      parts: parts.map((rows, i) => ({ shard: { i, lo: 'ckp', hi: null, rows: 0 }, idx: { size: 0, sMin: [], sMax: [], rows, chunks: [] }, a: 0, b: rows.length })),
+      rows: parts.flat().reduce((s, n) => s + n, 0),
     }))
     try { expect(await t.names.defaultMaxRows('ckpt', MAX_ROWS)).toBe(budget) }
     finally { spies.forEach(spy => spy.mockRestore()) }
@@ -81,9 +95,8 @@ describe('static runs', () => {
     const full = await t.names.read('ckpt', Infinity)
     const state = await t.tiers.state()
     const spies = state.tiers.map((tier, i) => vi.spyOn(tier.names, 'extent').mockImplementation(async () => ({
-      shard: { i: 0, lo: 'ckp', hi: null, rows: 0 },
-      idx: { size: 0, sMin: [], sMax: [], rows: i === 0 ? [8192, 90000, 8192] : [8192, 8192], chunks: [] },
-      a: 0, b: i === 0 ? 3 : 2, rows: i === 0 ? 106384 : 16384,
+      parts: [{ shard: { i: 0, lo: 'ckp', hi: null, rows: 0 }, idx: { size: 0, sMin: [], sMax: [], rows: i === 0 ? [8192, 90000, 8192] : [8192, 8192], chunks: [] }, a: 0, b: i === 0 ? 3 : 2 }],
+      rows: i === 0 ? 106384 : 16384,
     })))
     try {
       expect(await t.names.defaultMaxRows('ckpt', MAX_ROWS)).toBe(MAX_ROWS + 4 * 16384)

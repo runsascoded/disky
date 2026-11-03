@@ -13,6 +13,15 @@ const job = (id: string, state: string, digest?: string): SweepBatchJob => ({
 
 describe('D1', () => {
   describe('reflectSweepRuns — gcs: the digest lands once the executor recorded the end', () => {
+    it('does not call a failed job successful just because the executor recorded final totals', async () => {
+      const { db, raw } = await sqliteD1()
+      const id = 'gcs-sweep-real-failed'
+      raw.exec("INSERT INTO plans (id,name,created_by,created_ts) VALUES (1,'review','actor',1)")
+      await db.prepare(`INSERT INTO deletion_runs (run_id,plan_id,${RUN_DIR},scan,head,exec_head,actor,mode,started_ts,finished_ts,log_dir)
+        VALUES ('run',1,'manifest','scan',0,0,'actor','real',100,500,?)`).bind(runDir(CFG, id)).run()
+      expect(await reflectSweepRuns(CFG, db, [job(id, 'FAILED', 'review')], 900)).toEqual([{ run_id: 'run', ok: false }])
+      expect(raw.prepare('SELECT finished_ts,plan_digest FROM deletion_runs').all()).toEqual([{ finished_ts: 500, plan_digest: '' }])
+    })
     it('copies PLAN_DIGEST onto finished rows, closes rows whose job died, leaves the rest; idempotent', async () => {
       const { db } = await sqliteD1()
       await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@openathena.ai', 1)").run()

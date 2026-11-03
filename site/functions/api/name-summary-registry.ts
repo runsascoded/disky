@@ -2,6 +2,7 @@ import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { NameQueryError, nameRegistryParams, namesEnabled, type NameSummaryEnv } from '../_lib/nameSummary.js'
 import { privateHeaders, staticRegistry } from '../_lib/nameSummaryStatic.js'
 import { withReq } from '../_lib/shared.js'
+import { withStaticGen } from '../_lib/index.js'
 
 export async function onRequest(ctx: Ctx & { env: NameSummaryEnv }): Promise<Response> {
   const identity = await requireViewer({ request: ctx.request, env: { ...ctx.env, PUBLIC_READ: undefined } })
@@ -14,6 +15,6 @@ export async function onRequest(ctx: Ctx & { env: NameSummaryEnv }): Promise<Res
     if (error instanceof NameQueryError) return json({ error: error.message }, 400, privateHeaders)
     throw error
   }
-  return staticRegistry(withReq(ctx.env, ctx.request.signal))
+  return staticRegistry(withReq(await withStaticGen(ctx.env), ctx.request.signal))
 }
 export const onRequestGet = onRequest

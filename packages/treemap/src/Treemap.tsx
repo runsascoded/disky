@@ -4,7 +4,7 @@ import { candidates, type CellText, fitCandidate, inlineRoom } from './cellText'
 import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
 import type { FoldedNode, LayoutConfig } from './layout'
-import { edgeEmphFactor, flattenPlaced, isFolded, layoutCells, layoutChildren } from './layout'
+import { cellStroke, flattenPlaced, isFolded, layoutCells, layoutChildren } from './layout'
 import { colorResolver } from './cssColor'
 import { foldSmall, foldThin, squarify, squarifyRemainder } from './squarify'
 import { TreemapCanvas, renderMapToCanvas, type CanvasHit } from './TreemapCanvas'
@@ -315,6 +315,15 @@ export interface TreemapProps<T> {
    */
   edgeEmphasis?: number
   /**
+   * Shared tiling only: round every stroke to whole pixels and keep each one
+   * ≥1px narrower than its parent's, so a parent's seam always reads wider
+   * than the seams between its children (down to the 1px floor). Fractional
+   * widths from `borderWidth` (e.g. a size cap) otherwise quantize to no
+   * visible difference. Pair with a `borderWidth` that steps by level.
+   * Default: false.
+   */
+  borderStep?: boolean
+  /**
    * In shared tiling, default each cell's half-stroke to a luminance-contrast
    * color derived from its own face (dark stroke on light cells, light on
    * dark) instead of the neutral `--dt-treemap-edge` gutter — so borders read
@@ -538,6 +547,7 @@ export function Treemap<T>({
   tiling = 'gaps',
   borderWidth = defaultBorderWidth,
   edgeEmphasis = 0,
+  borderStep = false,
   edgeContrast = true,
   dustTexture = true,
   nestedHues = false,
@@ -863,13 +873,13 @@ export function Treemap<T>({
     // `outlineGroups` overlay is present, not only for the canvas renderer.
     if (renderer !== 'canvas' && !outlineGroups && !branchOutline) return []
     const cfg: LayoutConfig<T> = {
-      getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+      getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, borderStep, fold, layTiles, tilingFor,
       getTitleWidth: reclaimTitleSpace ? getTitleWidth : undefined,
     }
     return layoutCells(rects, path, rootMode, cfg)
   }, [
     renderer, !!outlineGroups, branchOutline, rects, path, rootMode, getSize, getLabel, childrenOf,
-    showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
+    showLabels, collapseChains, borderWidth, edgeEmphasis, borderStep, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
   ])
 
   // Stable style bundle for the canvas paint. Memoized so the paint effect
@@ -945,6 +955,7 @@ export function Treemap<T>({
     r: { x: number; y: number; w: number; h: number },
     depth: number,
     mode: Tiling,
+    parentBw: number,
   ): ReactNode => {
     const folded = isFolded(kid0)
     // Single-child wrapper chains render as ONE cell labeled `a/…/z`: each
@@ -990,7 +1001,7 @@ export function Treemap<T>({
     const shared = mode === 'shared'
     // This cell's own stroke (shared mode): half of it is drawn inside this
     // cell as an inset ring, the neighbor draws the other half.
-    const bw = shared ? Math.min(borderWidth(depth, { w: r.w, h: r.h }) * edgeEmphFactor(depth, edgeEmphasis), dust ? 1 : Infinity) : 0
+    const bw = shared ? cellStroke({ borderWidth, edgeEmphasis, borderStep }, depth, r.w, r.h, dust, parentBw) : 0
     const edge = bw / 2
     // Built-in adaptive half-stroke, computed once the cell's face is resolved
     // (below). Filled after `style` is known.
@@ -1005,7 +1016,7 @@ export function Treemap<T>({
     const boxH = shared ? r.h : r.h - (dust ? 1 : 2)
     const { rects: kids, mode: kidsMode, titleWidth } = layoutChildren(kid as T, kidPath, chainLabels, kidChildren,
       { w: r.w, h: r.h, boxW, boxH, edge, showLbl, depth },
-      { getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+      { getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, borderStep, fold, layTiles, tilingFor,
         getTitleWidth: reclaimTitleSpace ? getTitleWidth : undefined })
 
     // Cell color falls through: consumer override → default categorical.
@@ -1294,7 +1305,7 @@ export function Treemap<T>({
           >
             {kids
               .filter(s => s.w >= 3 && s.h >= 3)
-              .map(s => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it as T], s, depth + 1, kidsMode))}
+              .map(s => cell(s.it, isFolded(s.it) ? kidPath : [...kidPath, s.it as T], s, depth + 1, kidsMode, shared ? bw : Infinity))}
           </div>
         )}
       </CellTag>
@@ -1325,7 +1336,7 @@ export function Treemap<T>({
       if (!src) {
         if (size.w <= 0 || size.h <= 0) return
         const cfg: LayoutConfig<T> = {
-          getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
+          getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, borderStep, fold, layTiles, tilingFor,
           getTitleWidth: reclaimTitleSpace ? getTitleWidth : undefined,
         }
         const cells = layoutCells(rects, path, rootMode, cfg)
@@ -1374,7 +1385,7 @@ export function Treemap<T>({
     [
       exportOpts, path, node, getLabel, getSize, formatSize, onExport, size, rects, rootMode,
       styleOpts, sizeAlign, inlineSizeMinWidth, dustTexture, branchOutline, placedCells,
-      childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
+      childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, borderStep, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
     ],
   )
   const showExport = !!exportOpts
@@ -1569,7 +1580,7 @@ export function Treemap<T>({
                 }}
               />
             ))
-          : rects.filter(r => r.w >= 3 && r.h >= 3).map(r => cell(r.it, isFolded(r.it) ? path : [...path, r.it as T], r, 0, rootMode))}
+          : rects.filter(r => r.w >= 3 && r.h >= 3).map(r => cell(r.it, isFolded(r.it) ? path : [...path, r.it as T], r, 0, rootMode, Infinity))}
         {outlineGroups && size.w > 0 && size.h > 0 && (
           <OutlineOverlay<T> cells={placedCells} width={size.w} height={size.h} groups={outlineGroups} />
         )}

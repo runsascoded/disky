@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from csv import DictReader
+from dataclasses import dataclass, replace
+from io import StringIO
+from pathlib import Path
 
 #: Engines with a reader here, by name (`scan_run_dags.engine`).
 ENGINES = ("nextflow",)
@@ -21,10 +24,25 @@ _EDGE = re.compile(r"^\s*(v\d+)\s*-->\s*(?:\|[^|]*\|\s*)?(v\d+)\s*$")
 class Dag:
     nodes: tuple[str, ...]
     edges: tuple[tuple[str, str], ...]
+    cached_tasks: tuple[str, ...] = ()
 
     def to_json(self) -> str:
-        return json.dumps({"nodes": [{"id": n, "label": n} for n in self.nodes], "edges": [list(e) for e in self.edges]},
+        return json.dumps({"nodes": [{"id": n, "label": n} for n in self.nodes], "edges": [list(e) for e in self.edges],
+                           **({"cached_tasks": list(self.cached_tasks)} if self.cached_tasks else {})},
                           separators=(",", ":"))
+
+
+def cached_tasks(trace: str) -> tuple[str, ...]:
+    """Completed cache hits reported by Nextflow; an incomplete live trace row contributes nothing."""
+    return tuple(sorted({r['name'] for r in DictReader(StringIO(trace), delimiter='\t')
+                         if r.get('status') == 'CACHED' and r.get('name')}))
+
+
+def read_file(engine: str, path: Path) -> Dag:
+    """Read the graph and its sibling Nextflow trace, including while the head is still running."""
+    dag = read(engine, path.read_text())
+    trace = path.with_name('trace.tsv')
+    return replace(dag, cached_tasks=cached_tasks(trace.read_text())) if engine == 'nextflow' and trace.exists() else dag
 
 
 def from_nextflow(mermaid: str) -> Dag:

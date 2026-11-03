@@ -14,6 +14,9 @@ import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
 import { PRIMARY_STORE, requestedStore, StoreConfigError, unionViews, withStore } from '../_lib/stores.js'
 import { addNote, deleteNote, editNote, listNotes, missingScope, missingTable } from '../_lib/annotations.js'
 import { type AnnotationsBody, type NoteFields, parseNote } from '../_lib/annotationShape.js'
+import { noteActivity } from '../_lib/activityHook.js'
+
+const clip = (s: string): string => s.length > 120 ? `${s.slice(0, 119)}…` : s
 
 export const NOT_APPLIED = 'chart annotations are not enabled here: apply D1 migration chart-annotations'
 export const SCOPE_NOT_APPLIED = 'chart notes can’t be written here until D1 migration chart-annotation-scope is applied (path, url, kind)'
@@ -66,16 +69,22 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       }
       const note = parseNote(body, request.method === 'PATCH')
       if ('error' in note) return json(note, 400)
-      if (request.method === 'POST') return json({ annotation: await addNote(db, st.key, note as NoteFields & { at: string; text: string }, who, now()) }, 201)
+      if (request.method === 'POST') {
+        const row = await addNote(db, st.key, note as NoteFields & { at: string; text: string }, who, now())
+        noteActivity(ctx, { line: `added a note on ${row.at}: "${clip(row.text)}"`, note: row.id })
+        return json({ annotation: row }, 201)
+      }
       const nid = (body as { id?: unknown }).id
       if (typeof nid !== 'number' || !Number.isInteger(nid)) return json({ error: 'id: want an integer' }, 400)
       const row = await editNote(db, st.key, nid, note, who, now())
+      if (row) noteActivity(ctx, { line: `edited the note on ${row.at}: "${clip(row.text)}"`, note: row.id })
       return row ? json({ annotation: row }) : json({ error: 'no such annotation' }, 404)
     }
     if (request.method === 'DELETE') {
       const raw = new URL(request.url).searchParams.get('id') ?? ''
       if (!/^\d+$/.test(raw)) return json({ error: 'id: want an integer' }, 400)
       const row = await deleteNote(db, st.key, Number(raw), who, now())
+      if (row) noteActivity(ctx, { line: `removed the note on ${row.at}: "${clip(row.text)}"`, note: row.id })
       return row ? json({ deleted: row }) : json({ error: 'no such annotation' }, 404)
     }
   } catch (e) {

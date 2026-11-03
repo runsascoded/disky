@@ -14,12 +14,22 @@ from disk_tree.cli.base import cli
 @cli.command('notify')
 @option('-c', '--channels', help='Comma-separated channels, in order (default: `$DISKY_NOTIFY`, else every configured one)')
 @option('-f', '--first', is_flag=True, help='Stop at the first channel that succeeds (a fallback chain) instead of posting to all')
+@option('-L', '--link', 'links', nargs=2, multiple=True, metavar='LABEL URL', help='Additional labeled link (repeatable)')
 @option('-l', '--url-title', help='Label for `-u`')
 @option('-p', '--priority', type=int, default=0, help="Pushover priority: -2 (silent) … 1 (high)")
 @option('-t', '--title', default='disky', help='Notification title')
 @option('-u', '--url', help='A link to attach (e.g. the run on the site)')
 @argument('message')
-def notify_cmd(channels: str | None, first: bool, url_title: str | None, priority: int, title: str, url: str | None, message: str):
+def notify_cmd(
+    channels: str | None,
+    first: bool,
+    links: tuple[tuple[str, str], ...],
+    url_title: str | None,
+    priority: int,
+    title: str,
+    url: str | None,
+    message: str,
+):
     """Push MESSAGE to the configured channels. Exit 2 when none is configured, 1 when every attempt failed."""
     import os
 
@@ -33,7 +43,7 @@ def notify_cmd(channels: str | None, first: bool, url_title: str | None, priorit
     if not chans:
         print('notify: no channel configured (PUSHOVER_TOKEN + PUSHOVER_USER, DISCORD_NOTIFY_WEBHOOK, or SLACK_BOT_TOKEN + SLACK_ALERT_CHANNEL)', file=sys.stderr)
         sys.exit(2)
-    results = push.send(push.Notice(title, message, url, url_title, priority), chans, first=first, env=env, post=push.http_post)
+    results = push.send(push.Notice(title, message, url, url_title, priority, links), chans, first=first, env=env, post=push.http_post)
     for c, e in results:
         print(f'notify: {c}: {e or "sent"}', file=sys.stderr)
     if all(e for _, e in results):

@@ -45,7 +45,7 @@ def head(tmp_path: Path, marks: Path, *args: str, extra: str = "", sources: str 
                     "machines: {list: {type: m2, disk: 100}, big: {cpus: 1}}\n"
                     f"options: {options}\n" + extra)
     pypath = os.pathsep.join(str(Path(m.__file__).parents[1]) for m in (dt_cloud, disk_tree))
-    e = {k: v for k, v in os.environ.items() if k not in ("SCAN_RUNS_PROFILE", "DT_SCAN_STEP_FAIL", "DISKY_LABELS")}
+    e = {k: v for k, v in os.environ.items() if k not in ("SCAN_RUNS_PROFILE", "DT_SCAN_STEP_FAIL")}
     e.update(PATH=os.pathsep.join([*map(str, path), str(Path(sys.executable).parent), e["PATH"]]), PYTHONPATH=pypath, NXF_OFFLINE="true",
              DT_SCAN_STEP_FAKE=str(marks), SNAP_ID="2026-10-16T1200", GEN="G1", DT_JOB_START="1", **env)
     return subprocess.run([sys.executable, "-m", "dt_cloud.cli", "scan", "head", *args, "-N", str(REPO / "job/nf"), str(prof)],
@@ -70,7 +70,8 @@ def test_dag_order_and_resume(tmp_path):
     assert at["bucket-check"] < at["list s3://a"]
     assert max(lists) < at["index"]
     assert at["index"] < min(at["static-names"], at["publish-r2"], at["index-rows"])
-    assert at["publish-r2"] < at["interval-store"]
+    # publish-r2 copies what index-rows wrote (its footers, cw 10-30), then the interval store reads it
+    assert at["index-rows"] < at["publish-r2"] < at["interval-store"]
     assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
     # post runs its steps in order; over-time is its own task beside it, once the stores are written
     assert [x for x in ran[at["index-sync"]:] if x != "over-time"] == ["index-sync", "index-gc", "warm-cache"]

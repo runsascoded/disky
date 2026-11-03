@@ -111,6 +111,45 @@ def _roll_sql(con: "duckdb.DuckDBPyConnection", src: str) -> str:
     )
 
 
+def group_source(
+    scan: str,
+    path_index: str,
+    work: Path,
+    *,
+    interval_store: str | None,
+    mem: str,
+    threads: int,
+) -> str:
+    """A group's live per-scan sort, or a narrow directory reconstruction after retirement.
+
+    Per-scan D1 pointers deliberately survive retirement. Their files can be gone while the interval store still
+    holds their exact rows. Reconstruct only directory totals, sharing the downloaded IS sorts across the group.
+    """
+    from disk_tree.blobfs import exists
+
+    if exists(path_index):
+        return path_index
+    if interval_store is None:
+        raise FileNotFoundError(f"{path_index}: per-scan index is unavailable and no interval-store source is configured")
+    from . import interval_export as ie
+    from .blobstore import Store
+    from .static_names import connect, q
+
+    store = Store(interval_store)
+    gen = ie.store_gen(store, None)
+    prefix = f"interval-store/{gen}"
+    entry, runs = ie.scan_entry(store, prefix, scan)
+    keys = [f"{prefix}/served/path.parquet", *(f"{prefix}/{r['key']}/served/path.parquet" for r in runs)]
+    files = ie.local_files(store, keys, work / "interval-source")
+    live = ie.live_sql(files, False, int(entry["ts"]))
+    out = work / "reconstructed" / scan / "path-index.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with connect(threads, mem, work / "interval-spill") as con:
+        con.execute(f"COPY (SELECT depth::INTEGER AS depth, path, size AS b, n_files AS o FROM ({live}) WHERE kind = 'dir' AND depth > 0 ORDER BY depth, path) TO {q(str(out))} (FORMAT PARQUET, COMPRESSION ZSTD)")
+    err(f"over-time-groups: {scan}: per-scan index retired; reconstructed directory totals from interval-store/{gen}")
+    return str(out)
+
+
 def write_over_time_index(
     scans: list[tuple[str, str | Path]],
     out_dir: str | Path,

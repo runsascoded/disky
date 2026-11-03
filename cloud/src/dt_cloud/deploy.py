@@ -1,4 +1,4 @@
-"""The deployment's own resources, from its environment (specs/oa-decoupling.md).
+"""The deployment's own resources, from its environment (specs/done/oa-decoupling.md).
 
 dt-cloud carries no deployment's bucket or site as a default: each job script
 (or an operator's `.envrc`) exports them. A missing one is an error naming the

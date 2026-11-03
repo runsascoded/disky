@@ -1,6 +1,6 @@
 /**
  * The path filter's query, independent of how it was written
- * (specs/path-store-search.md §1, "Syntaxes"). A `QuerySyntax` turns the
+ * (specs/done/path-store-search.md §1, "Syntaxes"). A `QuerySyntax` turns the
  * filter box's text into a `QueryAst`; everything downstream — the path
  * predicate (`pathQuery.ts` `compileQuery`), the search index's plan
  * (`searchQuery.ts`), the NOT subtraction (`view.ts`) — reads only the AST.

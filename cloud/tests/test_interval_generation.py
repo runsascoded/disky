@@ -74,11 +74,10 @@ def _ts(sec: int) -> dt.datetime:
     return dt.datetime.fromtimestamp(T0 + sec, dt.timezone.utc)
 
 
-@pytest.fixture(scope="module")
-def world(tmp_path_factory):
-    root = tmp_path_factory.mktemp("ivg")
+def _write_world(root: Path, obj: dict) -> Path:
+    """Each scan's raw listing (`generation` from `GEN_FROM` on) and its `ON` / `OFF` sorts under `root`."""
     for j, d in enumerate(SCANS):
-        rows = sorted((name, *v[j]) for name, v in OBJ.items() if v[j] is not None)
+        rows = sorted((name, *v[j]) for name, v in obj.items() if v[j] is not None)
         cols = {
             "bucket": pa.array([B] * len(rows)), "name": pa.array([r[0] for r in rows]),
             "size_bytes": pa.array([r[1] for r in rows], pa.int64()),
@@ -94,6 +93,11 @@ def world(tmp_path_factory):
         for layout, gen in ((ON, True), (OFF, False)):
             write_path_index((str(shard),), root / "snap" / layout.split("/")[0] / d, d, path_index=root / layout.replace("{id}", d), generation=gen)
     return root
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory):
+    return _write_world(tmp_path_factory.mktemp("ivg"), OBJ)
 
 
 def _build(world: Path, store: Path, work: Path, layout: str, through: int, gen: str = "g") -> dict:
@@ -172,8 +176,8 @@ def test_versions_carry_generation_through_build_append_and_carries(world, on, t
     assert _versions(full / ist.PREFIX / "g") == _through(5)
     # Served: the `path` sort carries it, last; `bysize` and the slice sorts never do.
     for served in [gen / "served", *(r / "served" for r in _newest_runs(gen))]:
-        assert _columns(served / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
-        assert _columns(served / "bysize.parquet") == ist.PVL_SCHEMA.names
+        assert _columns(served / "path.parquet") == ist.served_schema("path", True, churn=True).names
+        assert _columns(served / "bysize.parquet") == ist.served_schema("bysize", True, churn=True).names
     assert _columns(gen / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
@@ -183,7 +187,7 @@ def test_compaction_keeps_generation(on, tmp_path):
     ic.compact_gen(tmp_path / "g", out, tmp_path / "w", gen="g", new_gen="g.c001", level=None, rg_rows=RG, threads=2, mem="1GB")
     assert _versions(out) == _through(5)
     assert json.loads((out / "scans.json").read_text())["generation"] is True
-    assert _columns(out / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+    assert _columns(out / "served" / "path.parquet") == ist.served_schema("path", True, churn=True).names
     assert _columns(out / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
@@ -222,6 +226,19 @@ def test_export_reproduces_generation(world, on, tmp_path):
 def _verify(store: Path, gen: str, world: Path, j: int, tmp: Path) -> dict:
     s = {"id": SCANS[j], "src": ON.replace("{id}", SCANS[j]), "ts": sn.scan_epoch(SCANS[j]), "version": 2}
     return iv.verify_scans(Store(str(store)), gen, str(world), [s], tmp)[SCANS[j]]
+
+
+def test_the_appends_markers_compare_generation(world, on, off, tmp_path):
+    """Each appended scan's parity marker (its append's check) counts the objects with a generation and the store's
+    equal ones as the sampled verify does, all equal; a store without the column has no such count."""
+    store = tmp_path / "store"
+    shutil.copytree(on["store"], store)
+    marks = {p.stem: json.loads(p.read_text()) for p in sorted((store / ist.PREFIX / "g" / "verify").glob("*.json"))}
+    sampled = {SCANS[j]: _verify(store, "g", world, j, tmp_path / f"v{j}")["generation"] for j in (3, 4, 5)}
+    assert {d: (m["how"], m["pass"], m["generation"]) for d, m in marks.items()} == {d: ("append", True, g) for d, g in sampled.items()}
+    assert all(g["objects"] > 0 for g in sampled.values())
+    off_marks = {p.stem: json.loads(p.read_text()) for p in sorted((off["gen"] / "verify").glob("*.json"))}
+    assert {d: (m["pass"], "generation" in m) for d, m in off_marks.items()} == {SCANS[4]: (True, False), SCANS[5]: (True, False)}
 
 
 def test_verify_compares_generation(world, on, off, tmp_path):
@@ -274,7 +291,7 @@ def test_backfill_fills_versions_live_since_the_first_generation(world, backfill
     assert _parquets(store / ist.PREFIX / "g") == backfilled["before"]
     assert json.loads((store / ic.CURRENT).read_text()) == {"gen": "g"}
     # Served as a build over generation-bearing sorts serves it (its versions are that build's: `_through(5)` above).
-    assert _columns(g2 / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+    assert _columns(g2 / "served" / "path.parquet") == ist.served_schema("path", True, churn=True).names
 
 
 def test_a_parallel_backfill_writes_the_serial_ones_bytes(world, off, backfilled, tmp_path):
@@ -311,7 +328,50 @@ def test_backfill_refuses_an_existing_generation_or_one_that_has_it(world, backf
     res = CliRunner().invoke(ib.backfill_cmd, args)
     assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2/ exists: a generation is never rewritten")
     res = CliRunner().invoke(ib.backfill_cmd, [*args[:2], "-g", "g2", "-O", "g3", *args[4:]])
-    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2: already carries `generation`")
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (
+        1, f"{backfilled['store']}/{ist.PREFIX}/g2: already carries `generation` (-N fills only its NULLs)")
+    res = CliRunner().invoke(ib.backfill_cmd, [*args[:2], "-g", "g", "-O", "g3", *args[4:], "-N"])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (
+        1, f"{backfilled['store']}/{ist.PREFIX}/g: carries no `generation` to fill the NULLs of (drop -N)")
+
+
+#: `OBJ` plus an object listed without its generation until scan 5, though the column is there from `GEN_FROM` (gcs's
+#: shallow objects: discovery recorded none until 2026-10-22). Its version opens at scan 0 with none, and an append
+#: carries that on (a continuing version keeps its own), so the store holds NULL where later scans have one.
+LATE = {**OBJ, "d/late.bin": [(10, 100, 100, None)] * 5 + [(10, 100, 100, 91)] * 2}
+
+
+@pytest.fixture(scope="module")
+def late(tmp_path_factory):
+    """A store over `LATE`'s generation-bearing sorts: the base built over five scans, two added."""
+    root = _write_world(tmp_path_factory.mktemp("ivg-late"), LATE)
+    _build(root, root / "store", root / "w-build", ON, 4)
+    _add(root, root / "store", root / "w-add", ON, 6)
+    return root
+
+
+def test_backfill_nulls_repairs_versions_their_listings_lacked(late, tmp_path):
+    """`-N`: a generation carrying `generation` refolded into a new one where each NULL object version takes the first
+    generation listed within it (`-S`: from the scans whose listings have them all); every other version is unchanged
+    and the source untouched. The appends' markers failed on the object; the new generation verifies."""
+    store = tmp_path / "store"
+    shutil.copytree(late / "store", store)
+    g = store / ist.PREFIX / "g"
+    before = _parquets(g)
+    assert _versions(g) == sorted([*_through(6), ("b/d/late.bin", 0, None, None)])
+    marks = {p.stem: json.loads(p.read_text()) for p in sorted((g / "verify").glob("*.json"))}
+    assert {d: (m["pass"], m["generation"]) for d, m in marks.items()} == {
+        SCANS[5]: (False, {"objects": 7, "equal": 6}), SCANS[6]: (False, {"objects": 8, "equal": 7})}
+    out = _backfill(store, tmp_path / "w", late, "g2", "-N", "-S", SCANS[5])
+    g2 = store / ist.PREFIX / "g2"
+    assert _versions(g2) == sorted([*_through(6), ("b/d/late.bin", 0, None, 91)])
+    assert json.loads((g2 / ib.BACKFILL).read_text()) == {
+        "from": "g", "manifest": f"manifests/{SCANS[6]}.m001.json", "runs": [f"deltas/{SCANS[5]}_{SCANS[6]}"], "scans": 7,
+        "listings": SCANS[5:], "listed": 8, "filled": 1, "nulls": True}
+    assert (out["skipped"], out["filled"]) == (SCANS[:5], 1)
+    assert (_parquets(g), json.loads((store / ic.CURRENT).read_text())) == (before, {"gen": "g"})
+    m = _verify(store, "g2", late, 6, tmp_path / "verify")
+    assert (m["pass"], m["generation"]) == (True, {"objects": 8, "equal": 8})
 
 
 def test_backfill_refuses_a_template_matching_files_with_and_without_generation(world, off, tmp_path):
@@ -362,7 +422,8 @@ def test_verify_generation_checks_the_store_against_each_listing(world, backfill
     gens = [99 if n == "d/keep.bin" else g for n, g in zip(t["name"].to_pylist(), t["generation"].to_pylist())]
     pq.write_table(t.set_column(t.schema.get_field_index("generation"), "generation", pa.array(gens, pa.int64())), shard)
     verify = store / ist.PREFIX / "g" / "verify"
-    verify.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(verify, ignore_errors=True)  # the appends' own markers: these stand in for sampled ones
+    verify.mkdir(parents=True)
     for d in (*SCANS[:4], SCANS[5]):
         (verify / f"{d}.json").write_text(json.dumps({"scan": d, "gen": "g", "pass": True, "views": 9, "view_eq": 9, "diffs": 1, "diff_eq": 1}))
     args = ["-o", str(store), "-g", "g2", "-s", str(root), "-l", LISTING, "-w", str(tmp_path / "w")]

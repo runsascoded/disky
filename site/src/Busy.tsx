@@ -20,3 +20,8 @@ export function Busy({ label, corner = false }: { label?: string; corner?: boole
     </div>
   )
 }
+
+/** Compact progress for text/table contexts; errors and empty states never spin. */
+export function Loading({ label = 'Loading…' }: { label?: string }) {
+  return <span className="inline-loading" role="status" aria-live="polite"><span className="spin" aria-hidden="true" />{label}</span>
+}

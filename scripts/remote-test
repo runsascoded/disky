@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Run the test suites on a remote dev node, never on this machine.
+#
+# The worktree as it stands (HEAD + uncommitted changes + untracked, non-ignored files) is snapshotted into a
+# commit on top of HEAD (a throwaway index; the real index is untouched) and pushed to a per-worktree clone on the
+# node (`~/disky-test/<worktree name>`), which is checked out at it. The history comes along, so tests that read
+# git (`test_d1_schema.py`'s recipe pre-images) see the same history they do here. The node's uv env is synced
+# `--frozen` from the lock (a no-op unless the lock or a pyproject changed); node + pnpm are installed in user
+# space if missing.
+#
+# Usage:
+#   scripts/remote-test [opts] [pytest args/paths…]   # engine (`tests/`) and dt-cloud (`cloud/tests/`) suites
+#   scripts/remote-test --site [opts] [vitest args…]   # site vitest (`site/`)
+# Paths under `cloud/` run in the dt-cloud suite (from `cloud/`, as CI does), others in the engine suite; with no
+# paths, both suites run. Options:
+#   -a        include `slow`-marked tests (default: `-m 'not slow'`)
+#   -c REV    only the tests affected by changes since REV (`scripts/affected-tests`; uncommitted changes count)
+#   -d DIR    remote dir (default `disky-test/<worktree name>`, relative to the remote home)
+#   -h HOST   ssh host (default `$REMOTE_TEST_HOST`; required)
+#   -n N      xdist workers (default `auto`, `--dist loadgroup`; `0` = serial)
+#   -P VER    Python version for the remote env (default `$REMOTE_TEST_PYTHON`, else 3.13)
+#   -s        sync only (the source and the Python env from the lock), run nothing
+# Output streams here and is saved to `tmp/remote-test-<timestamp>.log`; the exit code is the test runner's (the
+# first suite's nonzero code, a suite that selected no tests excepted).
+#
+# The node is per machine, not in the repo: `$REMOTE_TEST_CONFIG` (default `~/.config/disky/remote-test.env`) is
+# sourced first when it exists, and sets any of (the environment wins over it when it uses `: "${VAR:=…}"`):
+#   REMOTE_TEST_HOST         ssh host
+#   REMOTE_TEST_INSTANCE     the host's EC2 instance id: started first when the host doesn't answer (e.g. a node that
+#                            stops itself when idle); unset, a host that doesn't answer is an error
+#   REMOTE_TEST_AWS_PROFILE  AWS profile that starts it (default: the ambient credentials)
+#   REMOTE_TEST_REGION       its region (default us-east-1)
+#   REMOTE_TEST_PYTHON       Python version for the remote env (default 3.13)
+set -euo pipefail
+
+config=${REMOTE_TEST_CONFIG:-$HOME/.config/disky/remote-test.env}
+# shellcheck source=/dev/null
+[ -f "$config" ] && . "$config"
+host=${REMOTE_TEST_HOST:-}
+py=${REMOTE_TEST_PYTHON:-3.13}
+all=
+changed_since=
+rdir=
+workers=auto
+site=
+sync_only=
+
+need() { [ $# -ge 2 ] || { echo "remote-test: $1 needs a value" >&2; exit 2; }; }
+# This script's options come first; the first argument that isn't one (or `--`) starts the test runner's.
+while [ $# -gt 0 ]; do
+  case $1 in
+    --site) site=1; shift ;;
+    -a) all=1; shift ;;
+    -s) sync_only=1; shift ;;
+    -c) need "$@"; changed_since=$2; shift 2 ;;
+    -d) need "$@"; rdir=$2; shift 2 ;;
+    -h) need "$@"; host=$2; shift 2 ;;
+    -n) need "$@"; workers=$2; shift 2 ;;
+    -P) need "$@"; py=$2; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
+[ -n "$host" ] || { echo "remote-test: no host: pass -h HOST, or set REMOTE_TEST_HOST (e.g. in $config)" >&2; exit 2; }
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+name=$(basename "$root")
+rdir=${rdir:-disky-test/$name}
+mkdir -p tmp
+ts=$(date +%Y%m%dT%H%M%S)
+log=tmp/remote-test-$ts.log
+
+# Snapshot the worktree into a commit on top of HEAD, through a throwaway index.
+idx=$(mktemp "$root/tmp/remote-test-index.XXXXXX")
+trap 'rm -f "$idx"' EXIT
+cp "$(git rev-parse --git-path index)" "$idx"
+GIT_INDEX_FILE=$idx git add -A .
+tree=$(GIT_INDEX_FILE=$idx git write-tree)
+if [ "$tree" = "$(git rev-parse 'HEAD^{tree}')" ]; then
+  sha=$(git rev-parse HEAD)
+else
+  sha=$(git commit-tree "$tree" -p HEAD -m "remote-test snapshot of $name")
+fi
+
+# A node that stops itself when idle is started on demand (`$REMOTE_TEST_INSTANCE`).
+instance=${REMOTE_TEST_INSTANCE:-}
+if ! ssh -o ConnectTimeout=5 "$host" true 2>/dev/null; then
+  [ -n "$instance" ] || { echo "remote-test: $host doesn't answer" >&2; exit 1; }
+  aws=(aws ${REMOTE_TEST_AWS_PROFILE:+--profile "$REMOTE_TEST_AWS_PROFILE"} --region "${REMOTE_TEST_REGION:-us-east-1}")
+  echo "remote-test: $host doesn't answer; starting $instance" >&2
+  if ! err=$("${aws[@]}" ec2 start-instances --instance-ids "$instance" 2>&1 >/dev/null); then
+    if [[ $err == *[Tt]oken* || $err == *[Cc]redential* || $err == *SSO* || $err == *expired* || $err == *profile* ]]; then
+      echo "remote-test: no AWS credentials to start $host: run \`aws sso login${REMOTE_TEST_AWS_PROFILE:+ --profile $REMOTE_TEST_AWS_PROFILE}\` (or start it by hand)" >&2
+    else
+      echo "remote-test: starting $instance failed: $err" >&2
+    fi
+    exit 1
+  fi
+  "${aws[@]}" ec2 wait instance-running --instance-ids "$instance" || exit 1
+  for _ in $(seq 36); do  # SSH up within ~3 min
+    ssh -o ConnectTimeout=5 "$host" true 2>/dev/null && break
+    sleep 5
+  done
+  ssh -o ConnectTimeout=5 "$host" true 2>/dev/null || { echo "remote-test: $host is running but SSH isn't up after 3 min" >&2; exit 1; }
+fi
+
+ssh "$host" "set -e; [ -d $rdir/.git ] || { mkdir -p $rdir && git init -q $rdir; }"
+out=$(git push -q -f "$host:$rdir" "$sha:refs/heads/remote-test" 2>&1) || { echo "$out" >&2; exit 1; }
+
+# The tests to run: engine paths, cloud paths (relative to `cloud/`), and options for both.
+opts=()
+engine=()
+cloud=()
+takes_value='^(-k|-m|-p|-o|-W|--deselect|--ignore|--ignore-glob|--durations|--maxfail|--rootdir|-c|--confcutdir)$'
+if [ -z "$site" ]; then
+  while [ $# -gt 0 ]; do
+    a=$1; shift
+    if [[ $a =~ $takes_value ]] && [ $# -gt 0 ]; then opts+=("$a" "$1"); shift
+    elif [[ $a == -* ]]; then opts+=("$a")
+    elif [[ $a == cloud/* ]]; then cloud+=("${a#cloud/}")
+    else engine+=("$a")
+    fi
+  done
+  if [ -n "$changed_since" ]; then
+    [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ] || { echo "remote-test: -c takes no paths" >&2; exit 2; }
+    while IFS= read -r t; do
+      if [ -z "$t" ]; then continue; elif [[ $t == cloud/* ]]; then cloud+=("${t#cloud/}"); else engine+=("$t"); fi
+    done < <(python3 scripts/affected-tests "$changed_since")
+    if [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
+      echo "remote-test: no tests affected by changes since $changed_since" >&2
+      exit 0
+    fi
+    echo "remote-test: $(( ${#engine[@]} + ${#cloud[@]} )) test files affected since $changed_since" >&2
+  elif [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
+    engine=(tests); cloud=(tests)
+  fi
+  [ -n "$all" ] || opts=(-m 'not slow' "${opts[@]}")
+  [ "$workers" = 0 ] || opts=(-n "$workers" --dist loadgroup "${opts[@]}")
+fi
+
+q() { [ $# -eq 0 ] || printf '%q ' "$@"; }
+remote=$(cat <<EOF
+set -uo pipefail
+export PATH=\$HOME/.local/bin:\$HOME/.local/node/bin:\$PATH
+cd $rdir
+exec 9>.git/remote-test.lock
+flock 9
+git checkout -qf --detach $sha
+git clean -fdq -e .venv -e node_modules -e .pytest_cache -e __pycache__ -e tmp -e .duckdb-tmp -e site/dist
+if [ -n "$site" ] && [ -z "$sync_only" ]; then
+  if ! command -v node >/dev/null; then
+    arch=\$(uname -m); case \$arch in aarch64) arch=arm64 ;; x86_64) arch=x64 ;; esac
+    v=\$(curl -fsSL https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt | grep -o "node-v[0-9.]*-linux-\$arch.tar.xz" | head -1)
+    mkdir -p \$HOME/.local/node
+    curl -fsSL https://nodejs.org/dist/latest-v24.x/\$v | tar -xJ -C \$HOME/.local/node --strip-components=1
+  fi
+  command -v pnpm >/dev/null || npm install -g --prefix \$HOME/.local/node pnpm@10 >/dev/null
+  PUPPETEER_SKIP_DOWNLOAD=1 pnpm install --frozen-lockfile --reporter=silent
+  cd site && exec pnpm vitest run $(q "$@")
+fi
+command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+export VIRTUAL_ENV=\$PWD/.venv PATH=\$PWD/.venv/bin:\$PATH  # as \`uv run\`: tests run the env's CLIs (\`dt-cloud\`)
+key=\$(cat uv.lock pyproject.toml cloud/pyproject.toml | sha256sum | cut -c1-16)-$py
+if [ "\$(cat .venv/.remote-test-key 2>/dev/null)" != "\$key" ]; then
+  uv sync -q --frozen --all-packages --all-extras --all-groups -p $py && echo "\$key" > .venv/.remote-test-key || exit 1
+fi
+[ -n "$sync_only" ] && exit 0  # -s: the source and the uv env, so a later direct pytest there runs the lock deps
+rc=0; ran=0
+suite() {  # suite <dir> <pytest args…>: run one suite from <dir>, folding its exit code into rc
+  local dir=\$1; shift
+  (cd "\$dir" && pytest "\$@"); local r=\$?
+  if [ \$r = 5 ]; then return; fi  # no tests selected in this suite
+  ran=1
+  [ \$rc != 0 ] || rc=\$r
+}
+start=\$(date +%s)
+$( [ ${#engine[@]} -gt 0 ] && echo "suite . $(q "${opts[@]}" "${engine[@]}")" )
+$( [ ${#cloud[@]} -gt 0 ] && echo "suite cloud $(q "${opts[@]}" "${cloud[@]}")" )
+echo "remote-test: \$(( \$(date +%s) - start ))s on \$(hostname) ($sha)"
+[ \$ran = 1 ] || rc=5
+exit \$rc
+EOF
+)
+
+echo "remote-test: $host:$rdir @ ${sha:0:12} → $log" >&2
+set +e
+# `-t` (when this is a terminal): ^C reaches the remote run; the log drops the terminal's `\r`s
+ssh -t -o LogLevel=QUIET "$host" "bash -c $(printf %q "$remote")" 2>&1 | tee >(tr -d '\r' > "$log")
+rc=${PIPESTATUS[0]}
+exit "$rc"

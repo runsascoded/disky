@@ -18,7 +18,8 @@
  */
 import { type Auth, createGate, type Gate, hasScope, type Subject } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
-import type { D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
+import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
+import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
   DB?: D1Database
@@ -80,6 +81,9 @@ export interface Env {
    *  of a name, unscoped, on a scan the index covers (`_lib/indexedOnly.ts`); anything else is a 400 with a
    *  reason code, never a path-store scan. */
   FILTER_INDEXED_ONLY?: string
+  /** The scan a view with no `?d=` opens on (`src/defaultScan.ts`): `newest` (unset), the newest published scan, its
+   *  search box disabled until the static name index appends it; `searchable`, the newest scan that index covers. */
+  DEFAULT_SCAN?: string
   /** `1`: the search box answers path terms (`a/b`) from the static name index (`_lib/indexedOnly.ts` `pathTerms`);
    *  unset, a term holding `/` is `unsupported-slash` on an indexed-only deployment and walked elsewhere. */
   SEARCH_PATH_TERMS?: string
@@ -107,16 +111,27 @@ export interface Env {
    *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
    *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */
   PATH_STORE?: string
+  /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its
+   *  planner hands busy, broad paths to the as-of walk). Needs no index beyond the store's. */
+  DIFF_DESCENT?: string
   /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
    *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`), a pin; unset: the store's current one,
    *  `interval-store/CURRENT.json` (`index.ts` `ivGen`), which a compaction moves. */
   INTERVAL_STORE_GEN?: string
+  /** Store-relative namespace; secondary and age stores use independent pointers and generations. */
+  INTERVAL_STORE_PREFIX?: string
+  /** Root holding the age histogram's interval store (without the trailing `interval-store`). */
+  AGE_STORE_PREFIX?: string
   /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
   INTERVAL_STORE_REV?: string
-  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`); required with `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
+  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`): a pin; unset, the primary's is
+   *  `static-names/CURRENT.json`'s (`index.ts` `withStaticGen`, resolved per request). Required (pinned or pointed) with
+   *  `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
   STATIC_GEN?: string
+  /** Optional independent pointer for this static lineage; a STATIC_GEN pin still wins. */
+  STATIC_CURRENT_KEY?: string
   STORE_ACCESS_KEY_ID?: string
   STORE_SECRET_ACCESS_KEY?: string
   /** Global second cache tier behind the colo cache (`_lib/edgeCache.ts`). */
@@ -168,11 +183,15 @@ export interface Env {
   LAPTOP_FILES_DENY?: string
   LAPTOP_FILES_MAX_BYTES?: string
   LAPTOP_FILES_PER_MIN?: string
+  /** The Analytics Engine dataset the usage points go to (`_lib/usage.ts`, specs/usage-metrics.md); unset = none. */
+  USAGE?: AnalyticsEngineDataset
 }
 
 export interface Ctx {
   request: Request
   env: Env
+  /** Pages' per-request object, shared by the middleware and the route (each gets its own `Request` copy). */
+  data?: Record<string, unknown>
 }
 
 export const GCS_SCOPE = 'gcs'
@@ -293,7 +312,23 @@ function authIdentity(auth: Auth): Identity {
 const allScopes = (env: Env): string[] =>
   [...new Set([GCS_SCOPE, CW_SCOPE, ADMIN_SCOPE, REQUESTS_SCOPE, baseScope(env), baseAssignScope(env)])]
 
-export async function identify(ctx: Ctx): Promise<Identity | null> {
+/** Per request and env: its identity lookup (a D1 read for a session or a grant), so the middleware's gate
+ *  (`restrictGate`) and the route, handed the same Request and env, share one. The env is part of the key: the identity
+ *  depends on its database, secret and scope policy, and a union member's env (`withStore`) is its own. */
+const identified = new WeakMap<Request, WeakMap<object, Promise<Identity | null>>>()
+
+export function identify(ctx: Ctx): Promise<Identity | null> {
+  let byEnv = identified.get(ctx.request)
+  if (!byEnv) identified.set(ctx.request, byEnv = new WeakMap())
+  const env = ctx.env as unknown as object
+  const hit = byEnv.get(env)
+  if (hit) return hit
+  const id = identifyOnce(ctx)
+  byEnv.set(env, id)
+  return id
+}
+
+async function identifyOnce(ctx: Ctx): Promise<Identity | null> {
   // Local dev has no minted session, so `wrangler pages
   // dev` requests would 401 — leaving the client `DEV_IDENTITY` stub (which
   // only fakes the *client's* whoami) disagreeing with the server. Treat any
@@ -302,12 +337,20 @@ export async function identify(ctx: Ctx): Promise<Identity | null> {
   // gcs.oa.dev request's URL host is never `localhost`/`127.0.0.1`.
   const host = new URL(ctx.request.url).hostname
   if (host === 'localhost' || host === '127.0.0.1') {
+    meterOf(ctx)?.identified('session', 'session')
     return withAdmin({ email: ctx.env.DEV_EMAIL ?? 'dev@example.test', name: null, scopes: allScopes(ctx.env), via: 'session', subject: null })
   }
   const gate = gateFor(ctx.env)
   if (!gate) return null
   const auth = await gate.authenticate(ctx.request)
-  return auth ? authIdentity(auth) : null
+  if (!auth) return null
+  // The usage point's caller (`_lib/usage.ts`): what this lookup just proved, so the middleware needs none of its own.
+  const m = meterOf(ctx)
+  if (m) {
+    if (auth.kind === 'sso') m.identified('session', 'session')
+    else { const c = grantCaller(ctx.request, auth.grant); m.identified(c.via, c.caller) }
+  }
+  return authIdentity(auth)
 }
 
 /** Gate a handler on a scope; 401/403 as JSON. */

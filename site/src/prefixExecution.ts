@@ -9,7 +9,7 @@ export interface PrefixBandRecord extends RunBand {
   undo_state: string
 }
 export type PrefixExecution = null | {
-  kind: 'recorded'; runId: string; objects: number; bytes: number; undone: number; deadline: number | null; expired: boolean
+  kind: 'recorded'; runId: string; objects: number; bytes: number; preserved: number; undone: number; deadline: number | null; expired: boolean
 } | {
   kind: 'live-prefix'; runId: string; objects: number; bytes: number
 } | { kind: 'live-bucket'; runId: string; done: boolean }
@@ -23,10 +23,10 @@ export function conservativeDeadline(r: { started_ts: number; finished_ts: numbe
 export function prefixExecution(prefix: string, records: readonly PrefixBandRecord[], live: { runId: string; progress: ProgressFile } | undefined, now: number): PrefixExecution {
   const band = live?.progress.bands?.[prefix]
   if (band) return { kind: 'live-prefix', runId: live!.runId, objects: band.objects ?? 0, bytes: band.bytes ?? 0 }
-  const r = records.filter(r => r.prefix === prefix && r.objects > 0).sort((a, b) => b.started_ts - a.started_ts)[0]
+  const r = records.filter(r => r.prefix === prefix && (r.objects > 0 || r.drift_new_objects > 0 || r.overwritten > 0)).sort((a, b) => b.started_ts - a.started_ts)[0]
   if (r) {
     const deadline = conservativeDeadline(r)
-    return { kind: 'recorded', runId: r.run_id, objects: r.objects, bytes: r.bytes, undone: r.undone_objects, deadline, expired: deadline != null && now >= deadline }
+    return { kind: 'recorded', runId: r.run_id, objects: r.objects, bytes: r.bytes, preserved: r.drift_new_objects + r.overwritten, undone: r.undone_objects, deadline, expired: deadline != null && now >= deadline }
   }
   return live ? { kind: 'live-bucket', runId: live.runId, done: live.progress.done } : null
 }

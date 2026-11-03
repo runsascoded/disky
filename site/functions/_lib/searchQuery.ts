@@ -1,5 +1,5 @@
 /**
- * The search index's query planner (specs/path-store-search.md §1, §4.1): a
+ * The search index's query planner (specs/done/path-store-search.md §1, §4.1): a
  * query AST (`queryAst.ts`) → the candidate condition on a match
  * root's **last segment**, as an OR of branches, each a trigram formula (what
  * the postings can narrow) plus the exact name test (what a candidate must

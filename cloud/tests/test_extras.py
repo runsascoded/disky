@@ -11,7 +11,7 @@ def test_write_extras(tmp_path: Path):
         {"key": "b/grug", "user": "calvin", "source": "wandb-run"},
         {"key": "b/data", "user": "ryan", "source": "manual"},
     ])
-    assert write_extras(pfx, tmp_path) == {"attr": 2}
+    assert write_extras(pfx, tmp_path) == {"attribution": 2, "attr": 2}
     assert (tmp_path / ATTR_FILE).read_text() == "b/data\tryan\tmanual\t\nb/grug\tcalvin\twandb-run\t\n"
     assert json.loads((tmp_path / (ATTR_FILE + ".idx.json")).read_text()) == {"v": 1, "n": 2, "size": 45, "keys": ["b/data"], "offsets": [0]}
 

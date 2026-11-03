@@ -18,7 +18,7 @@
  *  never a failed request: the stack is cut at it (`Tiers`), the scans before it answer exactly as before, and
  *  its scans and every later one's are `scan-not-indexed` until it loads. */
 import { type CatalogIo, type CatalogMeta, type Member, StaticCatalog } from './staticCatalog.js'
-import { type Blobs, cmp, FirstHits, type Io, type IndexCache, type GroupIndex, StaticNames } from './staticNames.js'
+import { type Blobs, cmp, type ExtentPart, FirstHits, type Io, type IndexCache, type GroupIndex, StaticNames } from './staticNames.js'
 import { type HexRule, ruleOf, sameRule } from './hexRuns.js'
 import { newestManifest } from './manifests.js'
 import { inFlight, type Req } from './shared.js'
@@ -243,6 +243,14 @@ const sumIo = (ios: Io[]): Io => {
 }
 
 const noIo = (): Io => ({ shard: null, groups: 0, bytes: 0, rows_read: 0, rows_matching: 0, index: 'none', ms: {} })
+/** The rows of a key's range's two boundary groups (its first and last, one when the range is one group), over its
+ *  shards' parts in order. */
+const edgeRows = (parts: ExtentPart[]): number => {
+  const ps = parts.filter(p => p.b > p.a)
+  if (!ps.length) return 0
+  const first = ps[0], last = ps[ps.length - 1]
+  return first.idx.rows[first.a] + (first !== last || first.b - first.a > 1 ? last.idx.rows[last.b - 1] : 0)
+}
 
 /** The suffix reader over every usable tier (`Tiers.each`), with `StaticNames`' interface; each answer carries the
  *  stack it was read over (`version`) and the scans it is exact on (`scans`). */
@@ -260,8 +268,7 @@ export class TieredNames {
    *  A non-member's matching rows fit V, but each tier can add two groups of nonmatching boundary rows. */
   async defaultMaxRows(key: string, baseMaxRows: number, req?: Req): Promise<number> {
     const { got } = await this.tiers.each(t => t.names.extent(key, noIo(), req), req)
-    const extra = got.slice(1).reduce((sum, e) => sum + (e && e.b > e.a
-      ? e.idx.rows[e.a] + (e.b - e.a > 1 ? e.idx.rows[e.b - 1] : 0) : 0), 0)
+    const extra = got.slice(1).reduce((sum, e) => sum + (e ? edgeRows(e.parts) : 0), 0)
     return Math.min(baseMaxRows * 2, baseMaxRows + extra)
   }
 
@@ -272,7 +279,7 @@ export class TieredNames {
     const exts = got.map(g => g.e)
     Object.assign(io, { shard: got[0]?.x.shard ?? null, index: got[0]?.x.index ?? 'none', tiers: state.tiers.length })
     if (exts.every(e => e == null)) return null
-    io.groups = exts.reduce((a, e) => a + (e ? e.b - e.a : 0), 0)
+    io.groups = exts.reduce((a, e) => a + (e ? e.parts.reduce((n, p) => n + p.b - p.a, 0) : 0), 0)
     return { rows: exts.reduce((a, e) => a + (e?.rows ?? 0), 0), scans: state.scans }
   }
 

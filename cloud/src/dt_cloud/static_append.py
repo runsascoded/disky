@@ -21,8 +21,11 @@ Per scan `D`, under `static-names/<gen>/deltas/<D>/`:
 from __future__ import annotations
 
 import json
+import os
 import shutil
+from collections import deque
 from collections.abc import Callable, Collection
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from pathlib import Path
 from time import monotonic
 
@@ -80,7 +83,7 @@ def append_open(con, prev_sql: str, scan: dict, r: dict, name: str, out: Path, *
 def write_run_shards(batches, out: Path, target_rows: int = RUN_SHARD_ROWS, plan: dict | None = None) -> dict:
     """Sorted suffix-row batches (`SX_SCHEMA`) as shards, cut on the fly. Without `plan`, a shard closes at the first
     three-character-prefix boundary after it holds `target_rows` rows (a prefix is never split, so a literal's rows
-    are one contiguous range of one file). With `plan` (a `shards.json`), at its boundaries instead: shard `i` holds
+    are one contiguous range of one file), wherever the batches break: the cuts depend only on the rows. With `plan` (a `shards.json`), at its boundaries instead: shard `i` holds
     the prefixes in `[lo, hi)`, written (empty or not) as the build writes it — a compaction cut to a full build's
     plan is that build, byte for byte. Writes `sx/s####.parquet` in `SX_RG`-row groups, `sidecar/s####.parquet`,
     `sidecar.parquet` and `shards.json` (`[lo, hi)` per shard)."""
@@ -108,13 +111,15 @@ def write_run_shards(batches, out: Path, target_rows: int = RUN_SHARD_ROWS, plan
                         i = pc.index(pc.greater_equal(rp3, los[state["sid"] + 1]), True).as_py()
                         if i > 0:
                             cut = i
-                elif state["n"] >= target_rows:
-                    i = pc.index(pc.not_equal(rp3, state["last"]), True).as_py()
-                    if i == 0:
+                else:
+                    if state["n"] >= target_rows and state["last"] is not None and rp3[0].as_py() != state["last"]:
                         state["sid"] += 1
                         state["n"] = 0
-                    elif i > 0:
-                        cut = i
+                    need = max(target_rows - state["n"], 1)
+                    if need < rest.num_rows:
+                        i = pc.index(pc.not_equal(rp3.slice(need), rp3[need - 1]), True).as_py()
+                        if i >= 0:
+                            cut = need + i
                 if plan is None and state["n"] == 0 and state["sid"] == len(shards):
                     shards.append({"i": state["sid"], "lo": rp3[0].as_py(), "rows": 0, "p3": set()})
                 sh = shards[state["sid"]]
@@ -128,28 +133,36 @@ def write_run_shards(batches, out: Path, target_rows: int = RUN_SHARD_ROWS, plan
     out.mkdir(parents=True, exist_ok=True)
     (out / "sidecar").mkdir(parents=True, exist_ok=True)
 
-    def write(sid: int, batches_) -> None:
-        name = f"s{sid:04d}"
-        stats: list[tuple[str, str, int]] = []
-
-        def on_group(g: pa.Table) -> None:
-            col = g.column("s")
-            stats.append((col[0].as_py(), col[g.num_rows - 1].as_py(), g.num_rows))
-
-        dst = out / "sx" / f"{name}.parquet"
-        write_sorted(batches_, dst, SX_SCHEMA, SX_RG, on_group=on_group, dictionary=["usr"])
-        pq.write_table(sidecar_rows(dst, f"sx/{name}.parquet", stats), out / "sidecar" / f"{name}.parquet", compression=CODEC)
-
     written = set()
     for sid, grp in groupby(tagged(), key=lambda x: x[0]):
-        write(sid, (b for _, b in grp))
-        written.add(sid)
+        _write_shard((b for _, b in grp), out, shards[sid]["i"], SX_RG)
+        written.add(shards[sid]["i"])
     for sh in shards:
         if sh["i"] not in written:
-            write(sh["i"], iter(()))
+            _write_shard(iter(()), out, sh["i"], SX_RG)
+    for sh in shards:
+        sh["prefixes"] = len(sh.pop("p3"))
+    return _finish_shards(out, shards, target_rows, plan)
+
+
+def _write_shard(batches, out: Path, i: int, rg_rows: int) -> None:
+    """Shard `i`'s sorted rows as `sx/s####.parquet` (exact `rg_rows`-row groups) and `sidecar/s####.parquet`."""
+    name = f"s{i:04d}"
+    stats: list[tuple[str, str, int]] = []
+
+    def on_group(g: pa.Table) -> None:
+        col = g.column("s")
+        stats.append((col[0].as_py(), col[g.num_rows - 1].as_py(), g.num_rows))
+
+    dst = out / "sx" / f"{name}.parquet"
+    write_sorted(batches, dst, SX_SCHEMA, rg_rows, on_group=on_group, dictionary=["usr"])
+    pq.write_table(sidecar_rows(dst, f"sx/{name}.parquet", stats), out / "sidecar" / f"{name}.parquet", compression=CODEC)
+
+
+def _finish_shards(out: Path, shards: list[dict], target_rows: int, plan: dict | None) -> dict:
+    """The written shards (`{i, lo, rows, prefixes}` each, in order) → `shards.json` and `sidecar.parquet`; the doc."""
     for k, sh in enumerate(shards):
         sh["hi"] = shards[k + 1]["lo"] if k + 1 < len(shards) else None
-        sh["prefixes"] = len(sh.pop("p3"))
         if plan is not None and sh["rows"] != plan["shards"][k]["rows"]:
             raise RuntimeError(f"shard {k}: {sh['rows']:,} rows written, {plan['shards'][k]['rows']:,} planned")
     total = sum(sh["rows"] for sh in shards)
@@ -182,14 +195,347 @@ def _run_batches(d: Path, columns: list[str] | None = None):
         yield from parquet_batches(f, columns)
 
 
-def merge_shards(run_dirs: list[Path], out: Path, target_rows: int = RUN_SHARD_ROWS, plan: dict | None = None) -> dict:
-    """Runs (oldest first; the base first for a compaction) merged by `pyrmts.runs.merge_sorted` (streaming k-way):
-    rows equal on `(s, path, usr, vf)` are one version's row, and the smallest `vt` wins (a close record over the row
-    it closes). `plan`: cut to that shard plan (a compaction into a new base) instead of by `target_rows`."""
+#: The suffix rows' merge key; rows equal on all of it are one version's row (the smallest `vt` wins).
+MERGE_KEY = ["s", "path", "usr", "vf"]
+#: Rows per read from an input's shard file in `merge_shards` (consecutive row groups as one batch): fewer, bigger
+#: merge steps than one `SX_RG` group at a time, the same rows out.
+READ_ROWS = 1 << 16
+#: `merge_shards` without a plan: merge ranges per job (load balance), and the fewest estimated rows worth a range.
+RANGES_PER_JOB = 4
+MIN_RANGE_ROWS = 1 << 22
+#: Row groups of `merge_shards`' intermediate pieces (re-read by global row offset when cutting shards).
+PIECE_RG = 1 << 17
+
+
+def merge_shards_serial(run_dirs: list[Path], out: Path, target_rows: int = RUN_SHARD_ROWS, plan: dict | None = None) -> dict:
+    """`merge_shards` as one streaming k-way merge (`pyrmts.runs.merge_sorted` over every input's rows) into
+    `write_run_shards`: the reference the parallel merge is byte-identical to."""
     from pyrmts.runs import merge_sorted
 
-    stream = merge_sorted([_run_batches(d) for d in run_dirs], ["s", "path", "usr", "vf"], reduce={"vt": "min"})
+    stream = merge_sorted([_run_batches(d) for d in run_dirs], MERGE_KEY, reduce={"vt": "min"})
     return write_run_shards(stream, out, target_rows, plan)
+
+
+def _p3(a) -> pa.Array:
+    import pyarrow.compute as pc
+
+    return pc.utf8_slice_codeunits(a, 0, 3)
+
+
+#: A merge range's bound: an `(s, path)` key (the rows of one version, equal on `(s, path, usr, vf)`, always fall in one
+#: range); `None`: unbounded. A shard plan's prefix `lo` is the key `(lo, "")`: `s[:3] ≥ lo` exactly when `s ≥ lo`.
+Key = tuple[str, str]
+#: Above every key.
+TOP: Key = ("\U0010ffff" * 4, "")
+
+
+def _file_groups(f: Path) -> tuple[str, list[Key], list[Key], list[int]]:
+    """A shard file's row groups' `(s, path)` bounds from its footer statistics — `lo` at most the group's first key,
+    `hi` above its last — made monotone (a running min of `lo` from the end, a running max of `hi`: still bounds), so
+    they bisect; and their rows. A group of one `s` is bounded by its `path` statistics too, so a heavy `s` splits (one
+    suffix can hold 50M+ rows: `_warc_examples.parquet`)."""
+    md = pq.ParquetFile(f).metadata
+    names = md.schema.to_arrow_schema().names
+    si, pi = names.index("s"), names.index("path")
+    los: list[Key] = []
+    his: list[Key] = []
+    rows = []
+    for g in range(md.num_row_groups):
+        rg = md.row_group(g)
+        ss, ps = rg.column(si).statistics, rg.column(pi).statistics
+        if ss is None or not ss.has_min_max:
+            lo, hi = ("", ""), TOP
+        elif ss.min == ss.max and ps is not None and ps.has_min_max:
+            lo, hi = (ss.min, ps.min), (ss.min, ps.max + "\0")
+        else:
+            lo, hi = (ss.min, ""), (ss.max + "\0", "")
+        los.append(lo)
+        his.append(max(hi, his[-1]) if his else hi)
+        rows.append(rg.num_rows)
+    for k in range(len(los) - 2, -1, -1):
+        los[k] = min(los[k], los[k + 1])
+    return str(f), los, his, rows
+
+
+def _input_groups(run_dirs: list[Path], threads: int = 16) -> list[list[tuple[str, list[Key], list[Key], list[int]]]]:
+    """Each input's shard files in key order (`_file_groups`), the footers read `threads` at a time (a mount's latency)."""
+    files = [sorted((d / "sx").glob("*.parquet")) for d in run_dirs]
+    with ThreadPoolExecutor(threads) as tx:
+        groups = iter(list(tx.map(_file_groups, [f for fs in files for f in fs])))
+    return [[next(groups) for _ in fs] for fs in files]
+
+
+def _select(inputs: list, lo: Key | None, hi: Key | None) -> list[list[tuple[str, int, int, list[int]]]]:
+    """Per input, the files with row groups that may hold keys in `[lo, hi)`: `(file, its row groups, its rows, those
+    groups)` (the counts checked against the file as it is read)."""
+    from bisect import bisect_left, bisect_right
+
+    got = []
+    for files in inputs:
+        sel = []
+        for f, los, his, rows in files:
+            a = 0 if lo is None else bisect_right(his, lo)
+            b = len(los) if hi is None else bisect_left(los, hi)
+            if a < b:
+                sel.append((f, len(rows), sum(rows), list(range(a, b))))
+        got.append(sel)
+    return got
+
+
+def _before(t: pa.Table, k: Key) -> int:
+    """How many of `t`'s rows (sorted by `(s, path)`) have keys before `k`."""
+    import pyarrow.compute as pc
+
+    s = t.column("s")
+    m = pc.less(s, k[0])
+    if k[1]:
+        m = pc.or_(m, pc.and_(pc.equal(s, k[0]), pc.less(t.column("path"), k[1])))
+    return pc.sum(m).as_py() or 0
+
+
+def _clip(t: pa.Table, lo: Key | None, hi: Key | None) -> pa.Table:
+    """`t`'s rows (sorted by `(s, path)`) with keys in `[lo, hi)`."""
+    a = 0 if lo is None else _before(t, lo)
+    b = t.num_rows if hi is None else _before(t, hi)
+    return t.slice(a, max(0, b - a))
+
+
+def _range_batches(files: list[tuple[str, int, int, list[int]]], lo: Key | None, hi: Key | None):
+    """One input's rows with keys in `[lo, hi)`, in order: its selected row groups, `READ_ROWS` at a time."""
+    for f, n_groups, n_rows, sel in files:
+        pf = pq.ParquetFile(f)
+        md = pf.metadata
+        if md.num_row_groups != n_groups or md.num_rows != n_rows:
+            raise RuntimeError(f"{f}: {md.num_row_groups} row groups / {md.num_rows:,} rows, its sidecar says {n_groups} / {n_rows:,}")
+        k = 0
+        while k < len(sel):
+            chunk, n = [sel[k]], md.row_group(sel[k]).num_rows
+            k += 1
+            while k < len(sel) and sel[k] == chunk[-1] + 1 and n < READ_ROWS:
+                chunk.append(sel[k])
+                n += md.row_group(sel[k]).num_rows
+                k += 1
+            t = _clip(pf.read_row_groups(chunk), lo, hi)
+            if t.num_rows:
+                yield from t.combine_chunks().to_batches()
+
+
+def _counted(batches, counts: list[list]):
+    """`batches` (sorted by `s`), appending each three-character prefix's rows to `counts` (`[p3, rows]`, in order)."""
+    import pyarrow.compute as pc
+
+    for b in batches:
+        vc = pc.value_counts(_p3(b.column("s")))
+        for v, n in zip(vc.field("values").to_pylist(), vc.field("counts").to_pylist()):
+            if counts and counts[-1][0] == v:
+                counts[-1][1] += n
+            else:
+                counts.append([v, n])
+        yield b
+
+
+def _merge_range(inputs: list, lo: Key | None, hi: Key | None):
+    from pyrmts.runs import merge_sorted
+
+    return merge_sorted([_range_batches(files, lo, hi) for files in inputs], MERGE_KEY, reduce={"vt": "min"})
+
+
+def _shard_task(inputs: list, lo: Key | None, hi: Key | None, out: str, i: int, rg_rows: int) -> tuple[int, int]:
+    """A planned shard: the inputs' rows in `[lo, hi)` merged into `sx/s####.parquet`; its `(rows, prefixes)`."""
+    counts: list[list] = []
+    _write_shard(_counted(_merge_range(inputs, lo, hi), counts), Path(out), i, rg_rows)
+    return sum(n for _, n in counts), len(counts)
+
+
+def _piece_task(inputs: list, lo: Key | None, hi: Key | None, dst: str, piece_rg: int) -> list[list]:
+    """A range's merged rows as an intermediate piece (`piece_rg`-row groups; none written when empty); its
+    `[p3, rows]` in order."""
+    counts: list[list] = []
+    write_sorted(_counted(_merge_range(inputs, lo, hi), counts), Path(dst), SX_SCHEMA, piece_rg, dictionary=["usr"])
+    if not counts:
+        Path(dst).unlink()
+    return counts
+
+
+def _cut_task(segs: list[tuple[str, int, int]], out: str, i: int, rg_rows: int, piece_rg: int) -> None:
+    """A shard cut from the pieces: rows `[a, b)` of each piece in `segs`, concatenated."""
+    def batches():
+        for f, a, b in segs:
+            pf = pq.ParquetFile(f)
+            for g in range(a // piece_rg, (b - 1) // piece_rg + 1):
+                off = g * piece_rg
+                t = pf.read_row_group(g)
+                yield from t.slice(max(a - off, 0), min(b, off + t.num_rows) - max(a, off)).to_batches()
+
+    _write_shard(batches(), Path(out), i, rg_rows)
+
+
+def _worker_init() -> None:
+    pa.set_cpu_count(1)
+
+
+class _Inline:
+    """`ProcessPoolExecutor`'s `submit` run in this process (`jobs` = 1)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def submit(self, fn, *args):
+        f: Future = Future()
+        try:
+            f.set_result(fn(*args))
+        except BaseException as e:
+            f.set_exception(e)
+        return f
+
+
+def _bounds(inputs: list, n: int) -> list[Key]:
+    """Up to `n` − 1 keys splitting the inputs' rows (each row group's counted at its lower bound) evenly."""
+    w: dict[Key, int] = {}
+    for files in inputs:
+        for _, los, _, rows in files:
+            for k, r in zip(los, rows):
+                w[k] = w.get(k, 0) + r
+    total = sum(w.values())
+    bounds, acc, k = [], 0, 1
+    for key in sorted(w):
+        if acc and k < n and acc >= k * total / n:
+            bounds.append(key)
+            while k < n and acc >= k * total / n:
+                k += 1
+        acc += w[key]
+    return bounds
+
+
+def default_jobs() -> int:
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def merge_shards(run_dirs: list[Path], out: Path, target_rows: int = RUN_SHARD_ROWS, plan: dict | None = None, *,
+                 jobs: int | None = None, tmp: Path | None = None, ranges: int | None = None) -> dict:
+    """Runs (oldest first; the base first for a compaction) merged (`pyrmts.runs.merge_sorted`, streaming k-way):
+    rows equal on `(s, path, usr, vf)` are one version's row, and the smallest `vt` wins (a close record over the row
+    it closes). `plan`: cut to that shard plan (a compaction into a new base) instead of by `target_rows`.
+
+    In parallel (`jobs` processes, default every core), partitioned by `(s, path)` key ranges, each worker reading only
+    the input row groups whose footer statistics may meet its range. With `plan`, one task per shard (its prefixes'
+    keys; the biggest first), writing it directly. Without, `ranges` (default `RANGES_PER_JOB` × `jobs`, at least
+    `MIN_RANGE_ROWS` estimated rows each) balanced key ranges — not prefix ranges: one suffix can hold 50M+ rows —
+    merge into intermediate pieces under `tmp` (default beside `out`), counting each prefix's rows; the shards are cut
+    from those counts exactly as `write_run_shards` cuts the stream (a shard closes at the first prefix after
+    `target_rows`), each written from the pieces' rows once it closes (each piece deleted once its shards are).
+    Byte-identical to `merge_shards_serial`."""
+    import tempfile
+    from multiprocessing import get_context
+
+    jobs = jobs or default_jobs()
+    rg_rows, piece_rg = SX_RG, PIECE_RG
+    t0 = monotonic()
+    inputs = _input_groups(run_dirs)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "sidecar").mkdir(parents=True, exist_ok=True)
+    pool = _Inline() if jobs == 1 else ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_worker_init)
+    with pool as ex:
+        if plan is not None:
+            keys: list[Key] = [(x["lo"], "") for x in plan["shards"]]
+            tasks = []
+            for k, x in enumerate(plan["shards"]):
+                lo = keys[k] if k else None
+                hi = keys[k + 1] if k + 1 < len(keys) else None
+                sel = _select(inputs, lo, hi)
+                tasks.append((sum(len(g) for fs in sel for *_, g in fs), k, sel, lo, hi))
+            futs: dict = {}
+            for _, k, sel, lo, hi in sorted(tasks, key=lambda t: (-t[0], t[1])):  # the biggest first: the shortest tail
+                futs[k] = ex.submit(_shard_task, sel, lo, hi, str(out), plan["shards"][k]["i"], rg_rows)
+            shards = [{"i": x["i"], "lo": x["lo"], "rows": r, "prefixes": p}
+                      for x, (r, p) in zip(plan["shards"], (futs[k].result() for k in range(len(keys))))]
+            err(f"merge_shards: {len(shards)} planned shards, {sum(sh['rows'] for sh in shards):,} rows, {jobs} jobs in {monotonic() - t0:.1f}s")
+            return _finish_shards(out, shards, target_rows, plan)
+        est = sum(sum(rows) for files in inputs for *_, rows in files)
+        n = ranges or max(1, min(RANGES_PER_JOB * jobs, est // MIN_RANGE_ROWS))
+        bounds = _bounds(inputs, n)
+        los, his = [None, *bounds], [*bounds, None]
+        (tmp or out.parent).mkdir(parents=True, exist_ok=True)
+        pdir = Path(tempfile.mkdtemp(prefix=f".{out.name}.pieces.", dir=tmp or out.parent))
+        try:
+            # Ranges go to the pool `jobs` at a time, and each shard's cut as soon as it closes, ahead of the ranges
+            # still queued; results are consumed in range order (a shard's cut needs the counts of every range before).
+            paths = [str(pdir / f"p{k:05d}.parquet") for k in range(len(los))]
+            queue = deque(range(len(los)))
+            pieces: dict[int, Future] = {}
+            cuts: dict[Future, dict] = {}
+            active: set[Future] = set()
+            refs: dict[int, int] = {}
+            shards: list[dict] = []
+
+            def fill() -> None:
+                while queue and len(active) < jobs:
+                    k = queue.popleft()
+                    pieces[k] = ex.submit(_piece_task, _select(inputs, los[k], his[k]), los[k], his[k], paths[k], piece_rg)
+                    active.add(pieces[k])
+
+            def cut(sh: dict) -> None:
+                for s in sh["segs"]:
+                    refs[s[0]] = refs.get(s[0], 0) + 1
+                f = ex.submit(_cut_task, [(paths[k], a, b) for k, a, b in sh["segs"]], str(out), sh["i"], rg_rows, piece_rg)
+                cuts[f] = sh
+                active.add(f)
+
+            def reap(f: Future) -> None:
+                f.result()
+                if f in cuts:
+                    first_open = shards[-1]["segs"][0][0] if shards and shards[-1]["segs"] and "cut" not in shards[-1] else len(los)
+                    for k, _, _ in cuts[f]["segs"]:
+                        refs[k] -= 1
+                        if not refs[k] and k < min(first_open, nxt):
+                            Path(paths[k]).unlink()
+
+            fill()
+            nxt, last, t1 = 0, None, None  # `last`: the prefix the previous range ended in (a range may begin inside it)
+            while active:
+                done, _ = wait(active, return_when=FIRST_COMPLETED)
+                active.difference_update(done)
+                while nxt < len(los) and nxt in pieces and pieces[nxt].done():
+                    off = 0
+                    for p3, rows in pieces.pop(nxt).result():
+                        if p3 != last:
+                            if not shards or shards[-1]["rows"] >= target_rows:
+                                if shards:
+                                    shards[-1]["cut"] = True
+                                    cut(shards[-1])
+                                shards.append({"i": len(shards), "lo": p3, "rows": 0, "prefixes": 0, "segs": []})
+                            shards[-1]["prefixes"] += 1
+                            last = p3
+                        sh = shards[-1]
+                        if sh["segs"] and sh["segs"][-1][0] == nxt and sh["segs"][-1][2] == off:
+                            sh["segs"][-1][2] += rows
+                        else:
+                            sh["segs"].append([nxt, off, off + rows])
+                        sh["rows"] += rows
+                        off += rows
+                    nxt += 1
+                    if nxt == len(los):
+                        t1 = monotonic()
+                        err(f"merge_shards: {len(los)} ranges merged into pieces, {sum(sh['rows'] for sh in shards):,} rows, "
+                            f"{jobs} jobs in {t1 - t0:.1f}s")
+                        if shards:
+                            shards[-1]["cut"] = True
+                            cut(shards[-1])
+                for f in done:
+                    reap(f)
+                fill()
+            err(f"merge_shards: {len(shards)} shards cut from the pieces, {monotonic() - (t1 or t0):.1f}s after the last range")
+            for sh in shards:
+                del sh["segs"], sh["cut"]
+        finally:
+            shutil.rmtree(pdir, ignore_errors=True)
+        return _finish_shards(out, shards, target_rows, None)
 
 
 def merge_cdeltas(files_oldest_first: list[str], out: Path) -> int:
@@ -213,7 +559,7 @@ def merge_drills(dirs: list[Path], out: Path, run: dict, tmp: str | Path | None 
         raise ValueError(f"{run['key']}: inputs without drill/: {lack}")
     con = connect(threads, mem, tmp)
     return merge_tiers(con, [Tier(d / "drill", d.name) for d in dirs], out,
-                       tier={k: run[k] for k in ("key", "first", "last", "level", "scans")})
+                       tier={k: run[k] for k in ("key", "first", "last", "level", "scans")}, work=Path(tmp) / "drill-merge" if tmp else None)
 
 
 def merge_catalogs(tiers: list[Path], out: Path, membership: dict | None = None, rule: HexRule | None = None) -> dict:
@@ -251,17 +597,37 @@ def missing_files(runs: list[dict], exists: Callable[[str], bool], drill_meta: C
     return out
 
 
+def run_tiers(gen_dir: Path, runs: list[dict]) -> list[sc.RunTier]:
+    """The live runs' shards under `gen_dir` (each run's `sx/` through its `sidecar.parquet`) as the catalog's history."""
+    return [sc.RunTier(str(gen_dir / r["key"]), pq.read_table(gen_dir / r["key"] / "sidecar.parquet"), scan_epoch(r["first"])) for r in runs]
+
+
+def carried_inputs(con, state_root: Path, gen_dir: Path, runs: list[dict]) -> tuple[Path | None, list[sc.RunTier] | None]:
+    """The catalog's carried inputs for the scan after `runs` (the newest earlier manifest's): the previous scan's
+    `<state_root>/<prev>/catalog/xcount.parquet` when trusted (it names that scan and the runs' scan count, and its digest
+    matches: `trusted_xcount`), with the runs' shards under `gen_dir` as history; else `(None, None)`, a refold."""
+    days = [s for r in runs for s in r["scans"]]
+    if not days:
+        return None, None
+    state = sc.trusted_xcount(con, state_root / days[-1] / "catalog", days[-1], len(days))
+    return (state, run_tiers(gen_dir, runs)) if state is not None else (None, None)
+
+
 def catalog_delta(con, tiers: list[Path], base: sc.BaseShards, deltas: list[list[str]], V: int, out: Path, tmp: Path,
-                  rule: HexRule | None = None) -> dict:
+                  rule: HexRule | None = None, *, state: Path | None = None, history: list[sc.RunTier] | None = None,
+                  state_out: Path | None = None, scan: str | None = None) -> dict:
     """A run's catalog: `static_catalog.append` from the merged `tiers` (the base and every live run) and every
     scan's `cdelta` since the base (`deltas`, oldest first, the last = this run's scan), minus what the tiers
-    hold: the new cells and the new or changed headers."""
+    hold: the new cells and the new or changed headers. `state` + `history` (the previous scan's trusted `xcount`,
+    the live runs' shards) carry the earlier deltas' counts instead of expanding them; `state_out` gets this scan's
+    (specs/append-open-state.md). The cells are the same either way."""
     prev, full = tmp / "prev", tmp / "full"
     for d in (prev, full):
         if d.exists():
             shutil.rmtree(d)
     merge_catalogs(tiers, prev)
-    doc = sc.append(con, prev=prev, base=base, deltas=deltas, V=V, out=full, rule=rule)
+    doc = sc.append(con, prev=prev, base=base, deltas=deltas, V=V, out=full, rule=rule, state=state, history=history,
+                    state_out=state_out, scan=scan)
     pf, ff = q(str(prev / "cells.parquet")), q(str(full / "cells.parquet"))
     gone = con.execute(f"SELECT count(*) FILTER (WHERE bucket <> ''), count(*) FROM (SELECT * FROM read_parquet({pf}) EXCEPT SELECT * FROM read_parquet({ff}))").fetchone()
     if gone[0]:
@@ -490,12 +856,19 @@ def _gcs():
 
 
 def _latest_manifest(bucket: str, gen: str, before: str | None = None) -> dict | None:
-    """The newest manifest of the generation (of a scan strictly before `before`, when given), or None: the greatest
-    `manifests/<id>.json` or merge revision `manifests/<id>.m<NNN>.json` (`append_runner.latest_key`), which sort by
-    scan, then revision."""
+    """The newest manifest of the generation, or None: the greatest `manifests/<id>.json` or merge revision
+    `manifests/<id>.m<NNN>.json` (`append_runner.latest_key`), which sort by scan, then revision. With `before`: the
+    listing of the runs before that scan (`append_runner.prior_key`): a pending scan's listing (`pending/<id>.json`,
+    `prepare`'s) newer than the newest manifest before it counts, so a pipelined backlog's later scans build over the
+    earlier ones' runs before those publish."""
+    from .append_runner import PENDING, prior_key
+
     prefix = f"{PREFIX}/{gen}/"
-    keys = latest_key([b.name.removeprefix(prefix) for b in _gcs().list_blobs(bucket, prefix=f"{prefix}manifests/")], before)
-    return read_json(f"gs://{bucket}/{prefix}{keys}") if keys else None
+    names = [b.name.removeprefix(prefix) for b in _gcs().list_blobs(bucket, prefix=f"{prefix}manifests/")]
+    if before is not None:
+        names += [b.name.removeprefix(prefix) for b in _gcs().list_blobs(bucket, prefix=f"{prefix}{PENDING}")]
+    key = latest_key(names) if before is None else prior_key(names, before)
+    return read_json(f"gs://{bucket}/{prefix}{key}") if key else None
 
 
 def _state(bucket: str, gen: str, date: str) -> tuple[dict, list[dict]]:
@@ -524,7 +897,13 @@ def prepare_cmd(bucket, date, gen) -> None:
     s = nxt[0]
     s["version"] = _version_from_footer(_gcs().bucket(bucket), s["src"])
     doc = {"bucket": bucket, "scans": [s]}
-    _gcs().bucket(bucket).blob(f"{PREFIX}/{gen}/{run_key(date, date)}/scans.json").upload_from_string(json.dumps(doc, indent=1) + "\n")
+    gb = _gcs().bucket(bucket)
+    gb.blob(f"{PREFIX}/{gen}/{run_key(date, date)}/scans.json").upload_from_string(json.dumps(doc, indent=1) + "\n")
+    # the runs through this one, for the scans after it to build over before it publishes (a pipelined backlog)
+    from .append_runner import PENDING
+
+    pending = {"gen": gen, "date": date, "runs": [*runs, {"key": run_key(date, date), "first": date, "last": date, "level": 0, "scans": [date]}]}
+    gb.blob(f"{PREFIX}/{gen}/{PENDING}{date}.json").upload_from_string(json.dumps(pending, indent=1) + "\n")
     print(json.dumps(doc, indent=1))
 
 
@@ -610,9 +989,13 @@ def shards_cmd(bucket, date, gen, mount, mem, target_rows, out, threads, tmp) ->
 @option("-m", "--mount", required=True, help="Local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-R", "--refold", is_flag=True, help="Expand every scan's `cdelta` since the base even when the previous scan's `xcount` is trusted")
+@option("-S", "--scratch", default=scratch_bucket, help="Bucket for the carried counts (`state/<D>/catalog/xcount.*`)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
-def catalog_cmd(bucket, date, gen, mount, mem, threads, tmp) -> None:
-    """The run's catalog delta → `deltas/<D>/catalog/{cells,index}.parquet`, `meta.json`."""
+def catalog_cmd(bucket, date, gen, mount, mem, threads, refold, scratch, tmp) -> None:
+    """The run's catalog delta → `deltas/<D>/catalog/{cells,index}.parquet`, `meta.json` (last), and its carried counts →
+    `state/<D>/catalog/xcount.{parquet,json}` (scratch, before `meta.json`). The earlier scans' counts come from the previous
+    scan's `xcount` when it is trusted (specs/append-open-state.md), else every scan's `cdelta` since the base is expanded."""
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(date, date)}"
     _, runs = _state(bucket, gen, date)
@@ -623,10 +1006,15 @@ def catalog_cmd(bucket, date, gen, mount, mem, threads, tmp) -> None:
     side = pq.read_table(f"{mount}/{prefix}/sidecar.parquet")
     con = connect(threads, mem, tmp)
     t0 = monotonic()
+    state, history = (None, None) if refold else carried_inputs(con, Path(mount).parent / scratch / prefix / "state", Path(mount) / prefix, runs)
+    err(f"catalog {date}: xcount {'carried from ' + days[-2] if state is not None else 'refold'} ({len(days)} scans past the base)")
     out = Path(tmp) / "catalog-run"
+    xout = Path(tmp) / "catalog-state"
     meta = catalog_delta(con, tiers, sc.BaseShards(f"{mount}/{prefix}", side), deltas, V, out, Path(tmp) / "catalog-work",
-                         gen_rule_at(bucket, gen))
-    upload_tree(out, bucket, f"{run}/catalog")
+                         gen_rule_at(bucket, gen), state=state, history=history, state_out=xout, scan=date)
+    upload_tree(xout, scratch, f"{prefix}/state/{date}/catalog", last=("xcount.json",))
+    shutil.rmtree(xout)
+    upload_tree(out, bucket, f"{run}/catalog", last=("meta.json",))
     shutil.rmtree(out)
     meta["s"] = round(monotonic() - t0, 1)
     print(json.dumps(meta, indent=1))
@@ -639,7 +1027,7 @@ def publish_run(store, date: str, rule: HexRule | None = None, dry_run: bool = F
     publish takes seconds however big a carry it makes due. Refuses (`SystemExit`) a manifest that exists, whose runs lack
     a reader file, or whose drill covers fewer scans than the last's. Returns the manifest (dry run: and the carries due,
     none reaching `max_level`, the compaction level; None: unbounded)."""
-    from .append_runner import plan_carries, publish_scan
+    from .append_runner import PENDING, plan_carries, publish_scan
     from .static_merge import drilled_runs, missing, refuse
 
     base = store.read_json("scans.json")
@@ -661,7 +1049,11 @@ def publish_run(store, date: str, rule: HexRule | None = None, dry_run: bool = F
                                                      **rule_json(rule)}, indent=1) + "\n")
     # A manifest only after every file of every run it lists exists (the readers need each tier whole), and never one
     # whose drill covers fewer scans than the last's.
-    return publish_scan(store, date, new, doc, lambda runs: missing(store, runs), lambda before, after: refuse(store, before, after))
+    published = publish_scan(store, date, new, doc, lambda runs: missing(store, runs), lambda before, after: refuse(store, before, after))
+    # the pending listings through this scan are superseded by its manifest
+    if done := [k for k in store.keys(PENDING) if k.removeprefix(PENDING).removesuffix(".json") <= date]:
+        store.delete(done)
+    return published
 
 
 @cli.command("publish")

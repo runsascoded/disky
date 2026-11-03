@@ -253,6 +253,12 @@ describe('prefetch on intent: deduped, then the click reuses it', () => {
     const [r1, r2] = await Promise.all([rowCover(qc2, g.f, 'primary', view, 'b/x'), rowCover(qc2, g.f, 'primary', view, 'b/x')])
     expect([r1.items, r2.items, g.urls]).toEqual([[item('b/x/tomat')], [item('b/x/tomat')], [url('b/x')]])
   })
+  it('a row inside a view item (the view matched whole) asks for its own cover: the row, whole', async () => {
+    const qc = new QueryClient()
+    const { f, urls } = fetcher({ '': cover('', [item('b/tomat')]), 'b/tomat/x': cover('b/tomat/x', [item('b/tomat/x')]) })
+    await fetchCover(qc, f, 'primary', view)
+    expect([(await rowCover(qc, f, 'primary', view, 'b/tomat/x')).items, urls]).toEqual([[item('b/tomat/x')], [url(''), url('b/tomat/x')]])
+  })
   it('a row under an over-cap view asks for its own cover (which may be under the cap)', async () => {
     const qc = new QueryClient()
     const { f, urls } = fetcher({ '': cover('', [], false), 'c': cover('c', [item('c/tomat')]) })

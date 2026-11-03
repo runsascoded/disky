@@ -4,23 +4,23 @@ The flow is stage -> dispatch -> run. A **plan** is the staged set (or an
 admin's curated list of prefixes); the plan *is* the eligibility decision, so
 no classification / owner logic applies.
 
-This module carries the plan model, the CAIOS boto3 client + the
-versioning-enabled guard, and the **manifest builder**: it expands a plan's
-prefixes into an object-level manifest from the pinned layer-2 parquet (the
+This module carries the plan model, the CAIOS boto3 client, and the
+**manifest builder**: it expands a plan's prefixes into an object-level
+manifest from the pinned layer-2 parquet (the
 canonical per-object scan output at `cw-l2/<date>/<bucket>.parquet`), so a run
 only ever deletes what was reviewed. The executor (the boto3 delete loop)
 consumes this manifest.
 
-A key is swept iff some plan prefix covers it. The layer-2 parquet has no
-ETag, so the run's overwrite guard keys off (size, mtime) captured here, not a
-version id.
+A key is swept iff some plan prefix covers it. Its reviewed opaque `version`
+is the ETag used in the atomic delete precondition, alongside a size/mtime
+check at LIST. Unknown identities cannot authorize deletion.
 
 A plan item staged "as of" another scan than the pinned one (plan.json
 `as_of`) holds back what changed since: a key under it is swept only if that
-scan's layer-2 has it with the same mtime (the layer-2 has no generation).
+scan's layer-2 has it with the same size, mtime and object version.
 What is held back is counted as `skipped_after_as_of`.
 
-A plan's `objects` are exact items (specs/file-assign.md): relative keys that
+A plan's `objects` are exact items (specs/done/file-assign.md): relative keys that
 match `path == key` only — never `key.bak` or `key/…`. The kind is which list
 an item is in; an exact key ending in `/` is refused.
 """
@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -69,7 +68,7 @@ OBJECT_RE = re.compile(r"^(?!/)[^\\]+(?<!/)$")
 
 
 class SweepError(Exception):
-    """A caller-fixable sweep error (bad plan, versioning off, missing input)."""
+    """A caller-fixable sweep error (bad plan, missing input)."""
 
 
 @dataclass
@@ -157,26 +156,19 @@ def s3_client(endpoint: str | None = None) -> "S3Client":
     )
 
 
-def versioning_enabled(client: "S3Client", bucket: str) -> bool:
-    """The delete-safety guard: a real sweep is refused unless the bucket has
-    versioning `Status=Enabled`, so every delete writes a recoverable delete
-    marker (CAIOS has no separate soft-delete; see specs/cw-sweep.md)."""
-    resp = client.get_bucket_versioning(Bucket=bucket)
-    return resp.get("Status") == "Enabled"
-
-
-def _eligible_query() -> str:
+def _eligible_query(version: str = "NULL::VARCHAR") -> str:
     """DuckDB SELECT of the file rows eligible under a plan.
 
     Reads the layer-2 parquet from the `L2` DuckDB variable; `$sweep` binds a
     list of relative key prefixes, `$exact` the exact keys. A row is kept iff
     some sweep prefix covers its path or it is an exact key.
     """
-    return """
+    return f"""
         SELECT
           path AS name,
           size AS size_bytes,
           mtime,
+          {version} AS version,
           CASE WHEN path LIKE '%/%' THEN regexp_replace(path, '/[^/]*$', '/') ELSE '' END AS dir
         FROM read_parquet(getvariable('L2'))
         WHERE kind = 'file'
@@ -213,7 +205,12 @@ def build_manifest(
     con.execute(f"SET memory_limit='{os.environ.get('DUCKDB_MEM', '8GB')}'")
     con.execute("SET VARIABLE L2 = ?", [l2_path])
     params: dict = {"sweep": plan.sweep, "exact": plan.objects}
-    query = _eligible_query()
+    from disk_tree.object_version import version_sql
+
+    def identity(source: str) -> str:
+        return version_sql({r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()})
+
+    query = _eligible_query(identity("read_parquet(getvariable('L2'))"))
     if held:
         # A held key (under a held item, under no current one) stays only if
         # its item's `as_of` layer-2 vouches for it: same path, same mtime.
@@ -225,8 +222,9 @@ def build_manifest(
             con.execute(f"SET VARIABLE AS_OF_{i} = ?", [l2_for(scan)])
             params[f"held_{i}"] = prefixes
             params[f"held_x_{i}"] = keys
+            source = f"read_parquet(getvariable('AS_OF_{i}'))"
             refs.append(
-                f"SELECT path, mtime FROM read_parquet(getvariable('AS_OF_{i}')) WHERE kind = 'file'"
+                f"SELECT path, size, mtime, {identity(source)} AS version FROM {source} WHERE kind = 'file'"
                 f" AND (len(list_filter($held_{i}, p -> starts_with(path, p))) > 0 OR list_contains($held_x_{i}, path))"
             )
         params["held"] = sorted(p for p in held if p in plan.sweep)
@@ -239,17 +237,25 @@ def build_manifest(
               (len(list_filter($held, p -> starts_with(e.name, p))) > 0 OR list_contains($held_x, e.name))
               AND len(list_filter($current, p -> starts_with(e.name, p))) = 0
               AND NOT list_contains($current_x, e.name)
-              AND NOT EXISTS (SELECT 1 FROM ref WHERE ref.path = e.name AND ref.mtime = e.mtime)
-            ) AS skip
+              AND NOT EXISTS (SELECT 1 FROM ref WHERE ref.path = e.name AND ref.mtime = e.mtime
+                AND ref.size = e.size_bytes AND ref.version IS NOT DISTINCT FROM e.version)
+            ) AS skip,
+              EXISTS (SELECT 1 FROM ref WHERE ref.path = e.name) AS reviewed_path_exists
             FROM e
         """
     else:
-        query = f"SELECT *, false AS skip FROM ({query})"
+        query = f"SELECT *, false AS skip, false AS reviewed_path_exists FROM ({query})"
     con.execute(f"CREATE TEMP TABLE m AS {query}", params)
-    con.execute(f"COPY (SELECT * EXCLUDE (skip) FROM m WHERE NOT skip ORDER BY name) TO '{manifest_path}' (FORMAT PARQUET)")
-    objects, byts, skipped, skipped_bytes = con.execute(
+    con.execute(f"COPY (SELECT * EXCLUDE (skip, reviewed_path_exists) FROM m WHERE NOT skip ORDER BY name) TO '{manifest_path}' (FORMAT PARQUET)")
+    preserved_path = manifest_path.with_name(f"{plan.bucket}-preserved.parquet")
+    con.execute(f"""COPY (SELECT name, CASE WHEN reviewed_path_exists THEN 'changed_since_review'
+        ELSE 'new_since_review' END AS reason FROM m WHERE skip ORDER BY name)
+        TO '{preserved_path}' (FORMAT PARQUET)""")
+    objects, byts, skipped, skipped_bytes, new_objects, changed_objects = con.execute(
         "SELECT count(*) FILTER (WHERE NOT skip), coalesce(sum(size_bytes) FILTER (WHERE NOT skip), 0),"
-        " count(*) FILTER (WHERE skip), coalesce(sum(size_bytes) FILTER (WHERE skip), 0) FROM m"
+        " count(*) FILTER (WHERE skip), coalesce(sum(size_bytes) FILTER (WHERE skip), 0),"
+        " count(*) FILTER (WHERE skip AND NOT reviewed_path_exists),"
+        " count(*) FILTER (WHERE skip AND reviewed_path_exists) FROM m"
     ).fetchone()
 
     summary = {
@@ -261,7 +267,8 @@ def build_manifest(
         "as_of": dict(sorted(held.items())),
         "objects": int(objects),
         "bytes": int(byts),
-        "skipped_after_as_of": {"objects": int(skipped), "bytes": int(skipped_bytes)},
+        "skipped_after_as_of": {"objects": int(skipped), "bytes": int(skipped_bytes),
+                                "new_objects": int(new_objects), "changed_objects": int(changed_objects)},
         "manifest": str(manifest_path),
     }
     (out / "plan-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -327,17 +334,14 @@ def execute_plan(
     client: "S3Client | None" = None,
     delete_workers: int = 16,
     mtime_tol: int = 1,
-    require_versioning: bool = True,
 ) -> dict:
     """Execute the manifest under `run_dir` against CoreWeave S3 (boto3).
 
     Lists each curated root, merge-checks every live object against the reviewed
     manifest, and deletes only the reviewed keys whose (size, mtime) still match
     — new keys since the scan are left alone (drift), changed ones skipped
-    (overwritten), vanished ones noted (gone). A real delete writes a recoverable
-    delete marker (guarded by bucket versioning); a dry run touches nothing.
-    `require_versioning=False` skips that guard — deletes are then PERMANENT —
-    loudly, and the summary records `versioning_guard: false`.
+    (overwritten), vanished ones noted (gone). Bucket versioning is not required
+    or queried: a real deletion may be permanent. A dry run touches nothing.
 
     Writes a decision-log parquet + `<deleted|would-delete>-summary.json` under
     `run_dir` and returns the summary. Does NOT write D1 — the Functions layer
@@ -352,30 +356,39 @@ def execute_plan(
     roots = listing_roots(plan_summary)
 
     client = client or s3_client()
-    if for_real and require_versioning and not versioning_enabled(client, bucket):
-        raise SweepError(
-            f"refusing real delete: bucket {bucket} versioning is not Status=Enabled "
-            "(no recoverable delete marker; see specs/cw-sweep.md)"
-        )
-    if for_real and not require_versioning:
-        print(f"WARNING: versioning guard disabled — deletes are permanent (bucket {bucket})", file=sys.stderr)
 
     manifest_path = run / "manifest" / f"{bucket}.parquet"
-    manifest = {
-        name: (size, mtime)
-        for name, size, mtime in duckdb.connect()
-        .execute(f"SELECT name, size_bytes, mtime FROM read_parquet('{manifest_path}') ORDER BY name")
-        .fetchall()
-    }
+    from botocore.exceptions import ClientError
+    from disk_tree.object_version import version_sql
+
+    with duckdb.connect() as con:
+        con.execute("SET VARIABLE manifest = ?", [str(manifest_path)])
+        source = "read_parquet(getvariable('manifest'))"
+        cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {source}").fetchall()}
+        manifest = {name: (size, mtime, token) for name, size, mtime, token in con.execute(
+            f"SELECT name, size_bytes, mtime, {version_sql(cols)} FROM {source} ORDER BY name",
+        ).fetchall()}
+        preserved_path = manifest_path.with_name(f"{bucket}-preserved.parquet")
+        if preserved_path.exists():
+            con.execute("SET VARIABLE preserved = ?", [str(preserved_path)])
+            review_omissions = dict(con.execute("SELECT name, reason FROM read_parquet(getvariable('preserved'))").fetchall())
+        else:
+            review_omissions = None
+    unknown = sum(token in (None, "", "*") for _, _, token in manifest.values())
+    if unknown:
+        raise SweepError(f"manifest has {unknown} object{'s' if unknown != 1 else ''} without a usable reviewed ETag; take a new scan and re-stage")
 
     counters = {k: 0 for k in ("deleted_objects", "deleted_bytes", "skipped_gone",
                                "skipped_overwritten", "drift_new", "delete_failed")}
     bands: dict[str, dict] = {}
+    preservation = dict.fromkeys(("new_since_review", "changed_since_review", "new_since_scan", "unclassified"), 0)
 
     def band_rec(b: str) -> dict:
         return bands.setdefault(b, {k: 0 for k in ("bytes", "objects", "gone", "overwritten", "drift_new")})
 
     seen: set[str] = set()
+    failed_keys: set[str] = set()
+    raced_keys: set[str] = set()
     log_rows: list[tuple] = []
     to_delete: list[tuple[str, int, str]] = []
 
@@ -391,9 +404,9 @@ def execute_plan(
                 band = band_for(key, sweep, objects, root)
                 if key in manifest:
                     seen.add(key)
-                    size, mtime = manifest[key]
+                    size, mtime, token = manifest[key]
                     live_mtime = int(obj["LastModified"].timestamp())
-                    if obj["Size"] == size and abs(live_mtime - mtime) <= mtime_tol:
+                    if obj["Size"] == size and abs(live_mtime - mtime) <= mtime_tol and obj.get("ETag") == token:
                         to_delete.append((key, size, band))
                         log_rows.append((key, size, mtime, "delete", _dir_of(key), band))
                     else:
@@ -404,36 +417,46 @@ def execute_plan(
                     # live, under a swept prefix, but not in the reviewed manifest → new since scan
                     counters["drift_new"] += 1
                     band_rec(band)["drift_new"] += 1
+                    reason = review_omissions.get(key, "new_since_scan") if review_omissions is not None else "unclassified"
+                    if reason not in preservation:
+                        raise SweepError(f"unknown preservation reason {reason!r}")
+                    preservation[reason] += 1
                 # else: outside the plan — expected, ignore
             token = resp.get("NextContinuationToken")
             if not resp.get("IsTruncated"):
                 break
 
-    for key, (size, mtime) in manifest.items():
+    for key, (size, mtime, _token) in manifest.items():
         if key not in seen:
             counters["skipped_gone"] += 1
             band = band_for(key, sweep, objects)
             band_rec(band)["gone"] += 1
             log_rows.append((key, size, mtime, "skipped_gone", _dir_of(key), band))
 
-    def _apply(batch: list[tuple[str, int, str]]) -> tuple[list, set]:
-        resp = client.delete_objects(
-            Bucket=bucket, Delete={"Objects": [{"Key": k} for k, _, _ in batch], "Quiet": True}
-        )
-        return batch, {e["Key"] for e in resp.get("Errors", [])}
+    def _apply(item: tuple[str, int, str]) -> tuple[tuple[str, int, str], str]:
+        key = item[0]
+        try:
+            client.delete_object(Bucket=bucket, Key=key, IfMatch=manifest[key][2])
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            return item, "skipped_overwritten" if code in ("PreconditionFailed", "412") else "delete_failed"
+        return item, "delete"
 
     if for_real and to_delete:
         with ThreadPoolExecutor(max_workers=delete_workers) as ex:
-            batches = [to_delete[i:i + DELETE_BATCH] for i in range(0, len(to_delete), DELETE_BATCH)]
-            for batch, errs in ex.map(_apply, batches):
-                for key, size, band in batch:
-                    if key in errs:
-                        counters["delete_failed"] += 1
-                    else:
-                        counters["deleted_objects"] += 1
-                        counters["deleted_bytes"] += size
-                        band_rec(band)["objects"] += 1
-                        band_rec(band)["bytes"] += size
+            for (key, size, band), decision in ex.map(_apply, to_delete):
+                if decision == "delete_failed":
+                    failed_keys.add(key)
+                    counters["delete_failed"] += 1
+                elif decision == "skipped_overwritten":
+                    raced_keys.add(key)
+                    counters["skipped_overwritten"] += 1
+                    band_rec(band)["overwritten"] += 1
+                else:
+                    counters["deleted_objects"] += 1
+                    counters["deleted_bytes"] += size
+                    band_rec(band)["objects"] += 1
+                    band_rec(band)["bytes"] += size
     else:
         for _key, size, band in to_delete:
             counters["deleted_objects"] += 1
@@ -444,15 +467,19 @@ def execute_plan(
     mode = "deleted" if for_real else "would-delete"
     log_dir = run / mode / bucket
     log_dir.mkdir(parents=True, exist_ok=True)
-    _write_log(log_dir / "part-00000.parquet", sorted(log_rows))
+    _write_log(log_dir / "part-00000.parquet", sorted(
+        (name, size, mtime, "delete_failed" if name in failed_keys else "skipped_overwritten" if name in raced_keys else decision, directory, band)
+        for name, size, mtime, decision, directory, band in log_rows
+    ))
 
     out_summary = {
         "plan_id": plan_summary.get("plan_id"),
         "name": plan_summary.get("name"),
         "bucket": bucket,
         "mode": "real" if for_real else "dry",
-        "versioning_guard": require_versioning,
+        "versioning_guard": False,
         **counters,
+        "preserved_breakdown": preservation,
         "bands": [{"prefix": b, **v} for b, v in sorted(bands.items())],
         "started_ts": started,
         "finished_ts": int(time.time()),

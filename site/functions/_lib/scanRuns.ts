@@ -5,7 +5,7 @@
 // answers `configured: false` rather than 500.
 import type { D1Database } from '@cloudflare/workers-types'
 import {
-  byRunTime, failedAt, outputIndex, type OutputDelta, phaseSpans, type PhaseSpan, runSecs, type RunSummary, type ScanRun,
+  byRunTime, failedAt, isMaintenance, liveUntil, outputIndex, type OutputDelta, phaseSpans, type PhaseSpan, runSecs, type RunSummary, type ScanRun,
   type ScanRunOutput, type ScanRunPhase, type PhaseIssue, type PhaseRecovery, phaseIssues, phaseRecoveries, summarize, withDeltas,
 } from '../../src/scanRunsModel.js'
 import type { Dag, RunDagRow } from '../../src/runDag.js'
@@ -67,11 +67,12 @@ export function scanRunDetail(rows: ScanRunRows, id: string, now: number): ScanR
   const run = rows.runs.find(r => r.run_id === id)
   if (!run) return null
   const phases = rows.phases.filter(p => p.run_id === id).sort((a, b) => a.seq - b.seq)
-  const heads = rows.runs.filter(r => !r.parent)
+  // a scan's runs (attempts, REPROCs): a maintenance run is never one, though its `scan` names the scan it follows
+  const heads = rows.runs.filter(r => !r.parent && !isMaintenance(r.kind))
   const scans = [...new Set(heads.map(r => r.scan))].sort()
   const i = scans.indexOf(run.scan)
   return {
-    run, secs: runSecs(run, now), failed_at: failedAt(run, phases), phases, spans: phaseSpans(run, phases, now),
+    run, secs: runSecs(run, now), failed_at: failedAt(run, phases), phases, spans: phaseSpans(run, phases, liveUntil(run, now)),
     outputs: withDeltas(run, rows.outputs, outputIndex(rows.runs, rows.outputs)),
     downstream: rows.runs.filter(r => r.parent === id).sort(byRunTime),
     siblings: heads.filter(r => r.scan === run.scan && r.run_id !== id).sort(byRunTime),

@@ -1,5 +1,35 @@
+import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
+import { isForever, lastDay } from '../functions/_lib/sessionLogShape'
 import { DEFAULT_STORE } from './stores'
+
+interface LogConfig { on?: boolean; until?: number | null; retainDays?: number }
+
+/** The usage log's state, as `/api/session-log` tells anyone (specs/done/activity-feed.md § Always-on session logging). */
+function useUsageLog(): LogConfig | null {
+  const q = useQuery({
+    queryKey: ['session-log', 'config'],
+    queryFn: async () => {
+      const r = await fetch('/api/session-log', { credentials: 'same-origin', cache: 'no-store' })
+      return r.ok ? (await r.json()) as LogConfig : {}
+    },
+    staleTime: 60_000,
+  })
+  return q.data ?? null
+}
+
+/** The usage-log paragraph, while the log is on. */
+export function UsageLogNotice({ log }: { log: LogConfig }) {
+  if (!log.on || typeof log.until !== 'number') return null
+  return (
+    <p>
+      <b>A usage log</b>, {isForever(log.until) ? 'on now' : `on now, through ${lastDay(log.until)} (UTC)`}: what signed-in people
+      do in the site (pages opened, URL changes, clicks on controls, the path filter, picker choices, failed requests and
+      errors) and when. It never records what you type in other fields, and never keys or tokens. Only the site's
+      admins see it, to see how the site is used and to reproduce reported problems; it is kept for {log.retainDays ?? 30} days.
+    </p>
+  )
+}
 
 // `/privacy` — the public privacy notice Google requires on a consent screen
 // published to production (an External audience can't leave "Testing" without
@@ -9,6 +39,7 @@ import { DEFAULT_STORE } from './stores'
 // deciding whether to sign in.
 export function PrivacyPage() {
   const { title } = DEFAULT_STORE
+  const log = useUsageLog()
   return (
     <div className="authwall">
       <div className="card prose privacy">
@@ -27,6 +58,11 @@ export function PrivacyPage() {
           <b>An access log</b>: which pages a signed-in identity or share link opened, and when. It exists so the person who
           shared a link can see it was used, and to revoke it.
         </p>
+        <p>
+          <b>Changes you make</b> (assigning owners, notes, staging deletions, sharing links) are recorded with who made
+          them and when, and the site's admins are told about them.
+        </p>
+        {log && <UsageLogNotice log={log} />}
         <h2>What is not collected</h2>
         <p>
           No third-party analytics, advertising or tracking scripts. No data is sold or shared with third parties. Google is used only to

@@ -59,6 +59,26 @@ describe('dagNodes', () => {
       ['interval_store', 'unrecorded'], ['index_rows', 'unrecorded'], ['post', 'unrecorded'],
     ])
   })
+  it('shows reported cache hits separately from running, waiting and unrecorded nodes', () => {
+    const dag = { ...DAG, cached_tasks: ['list_source (s3://b1)', 'list_source (s3://b2)', 'index', 'publish_r2', 'interval_store', 'index_rows'] }
+    const active = [ph('static-names', 0, 'static_names', 950, null)]
+    expect(dagNodes(dag, active, true).map(n => [n.id, n.status, n.cachedTasks, n.start, n.end])).toEqual([
+      ['list_source', 'cached', ['list_source (s3://b1)', 'list_source (s3://b2)'], null, null],
+      ['index', 'cached', ['index'], null, null],
+      ['static_names', 'running', [], 950, null],
+      ['publish_r2', 'cached', ['publish_r2'], null, null],
+      ['interval_store', 'cached', ['interval_store'], null, null],
+      ['index_rows', 'cached', ['index_rows'], null, null],
+      ['post', 'pending', [], null, null],
+    ])
+    expect(dagNodes(dag, [ph('list b3', 0, 'list_source (s3://b3)', 950, null)], true)[0]).toMatchObject({
+      status: 'running', cachedTasks: ['list_source (s3://b1)', 'list_source (s3://b2)'], start: 950, end: null,
+    })
+    expect(dagNodes(dag, [], false).map(n => [n.id, n.status])).toEqual([
+      ['list_source', 'cached'], ['index', 'cached'], ['static_names', 'unrecorded'], ['publish_r2', 'cached'],
+      ['interval_store', 'cached'], ['index_rows', 'cached'], ['post', 'unrecorded'],
+    ])
+  })
 })
 
 describe('brushRole', () => {

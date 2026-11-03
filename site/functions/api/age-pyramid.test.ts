@@ -2,14 +2,27 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
 import { onRequestGet } from './age-pyramid'
 
-const { openIndex, readPoint } = vi.hoisted(() => ({ openIndex: vi.fn(), readPoint: vi.fn() }))
-vi.mock('../_lib/index.js', () => ({ openIndex, perScan: (e: Env) => e, readPoint, storeReady: () => true, num: Number }))
+const { openIndex, readPoint, readAgePoint } = vi.hoisted(() => ({ openIndex: vi.fn(), readPoint: vi.fn(), readAgePoint: vi.fn() }))
+vi.mock('../_lib/index.js', () => ({ openIndex, perScan: (e: Env) => e, readPoint, storeReady: () => true, num: Number, ivRefusal: () => null }))
+vi.mock('../_lib/ageStore.js', () => ({ readAgePoint }))
 vi.mock('../_lib/auth.js', () => ({ requireViewer: async () => ({}) }))
 vi.mock('../_lib/scanArg.js', () => ({ scanArg: async () => '2026-10-12T1809' }))
 
 beforeEach(() => {
   vi.resetAllMocks()
   openIndex.mockResolvedValue({})
+  readAgePoint.mockResolvedValue(null)
+})
+
+it('serves verified age history after per-scan files have been retired, including zero-byte cells', async () => {
+  readAgePoint.mockResolvedValue([{ binstart: 1000, b: 0, o: 3 }])
+  const response = await onRequestGet({ request: new Request('https://hf.oa.dev/api/age-pyramid?date=2026-10-12T1809'), env: {} as Env })
+  expect(await response.json()).toEqual({ records: [{ dt: 1000, b: 0, o: 3 }], plan: { outputBin: '1h', tier: '1h', binBudget: 512 } })
+  expect(openIndex.mock.calls).toEqual([])
+  readAgePoint.mockResolvedValue([])
+  const empty = await onRequestGet({ request: new Request('https://hf.oa.dev/api/age-pyramid?date=2026-10-12T1809'), env: {} as Env })
+  expect(await empty.json()).toEqual({ records: [], plan: { outputBin: '1h', tier: '1h', binBudget: 512 } })
+  expect(openIndex.mock.calls).toEqual([])
 })
 
 it('revalidates an empty histogram when the age index is published later', async () => {

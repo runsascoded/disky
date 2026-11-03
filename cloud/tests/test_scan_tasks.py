@@ -115,7 +115,8 @@ def test_cli_submit_resume_and_failure(monkeypatch, mode, state, expected_code):
     from dt_cloud import batch, gcp
 
     root = controller()
-    for k, v in {**CONTEXT, "BATCH_JOB_UID": "root-uid"}.items():
+    # the controller's env is its spec's: its own `$DISKY_LABELS`, not the tests' deployment
+    for k, v in {**CONTEXT, "BATCH_JOB_UID": "root-uid", "DISKY_LABELS": "app=disky,deployment=gcs"}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(gcp, "batch_jobs", lambda *_: [root])
     monkeypatch.setattr(gcp, "gcp_project", lambda: "p")

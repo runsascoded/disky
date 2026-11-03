@@ -20,7 +20,7 @@
  */
 import { type Env as AuthEnv, isAdmin } from '../_lib/auth.js'
 import { dispatchPlan, type ExecEnv, executorOf, notifyDispatched } from '../_lib/executor.js'
-import { pathScans } from '../_lib/index.js'
+import { pathScans, withPathStore } from '../_lib/index.js'
 import { audit } from '../_lib/plans.js'
 import { slackUserEmail, verifySlackSignature } from '../_lib/slack.js'
 import { notifyPlan, planGate, slackNames, updateReplies } from '../_lib/stagedSlack.js'
@@ -124,6 +124,7 @@ export const onRequestPost = async (ctx: PagesCtx): Promise<Response> => {
   if (p.type !== 'block_actions' || !p.actions?.length) return new Response('', { status: 200 })
   if (p.actions[0].action_id === 'staged_open') return new Response('', { status: 200 })
   const siteUrl = new URL(request.url).origin
-  ctx.waitUntil(handle(env, p, siteUrl).catch(e => tell(p.response_url, `Something went wrong: ${(e as Error).message}`)))
+  // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
+  ctx.waitUntil(withPathStore(ctx).then(c => handle(c.env, p, siteUrl)).catch(e => tell(p.response_url, `Something went wrong: ${(e as Error).message}`)))
   return new Response('', { status: 200 })
 }

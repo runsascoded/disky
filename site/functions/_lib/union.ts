@@ -27,7 +27,7 @@ import { type Env, json, type Identity, requireViewer } from './auth.js'
 import { ivRetry, pathScans, storeReady, withPathStore } from './index.js'
 import { indexedScan, noScan } from './scanArg.js'
 import { scanTimes } from './scanTimes.js'
-import { PRIMARY_STORE, StoreConfigError, type UnionView, unionViews, withStore } from './stores.js'
+import { PRIMARY_STORE, StoreConfigError, storeKey, type UnionView, unionViews, withStore } from './stores.js'
 import { readRootRows, type ViewNode } from './view.js'
 
 type Ctx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -101,13 +101,42 @@ export async function memberCtxs(ctx: Ctx, view: UnionView): Promise<Ctx[] | Res
 
 const iso = (ms: number): string => new Date(ms).toISOString()
 
+/** How long an isolate reuses a member's observations: its scan list changes only when a scan lands, and a union's
+ *  warm cache hits re-read it every request otherwise (r2: most of a warm union subtree's 60–215 ms prelude). So a
+ *  union's cutoffs (and `latest`) can lag a newly landed scan by up to this long in an isolate that already holds them. */
+export const OBSERVATIONS_TTL = 60_000
+
+/** Per isolate, per D1 binding (a deployment) and store: the observations, in flight or settled, and when asked; behind
+ *  it the colo's copy (the Cache API, `max-age` `OBSERVATIONS_TTL`, keyed by deployment host and store), so a request on
+ *  another isolate in the colo reads it there instead of D1. A lag of up to twice the TTL (colo, then isolate). */
+const observed = new WeakMap<object, Map<string, { at: number; obs: Promise<Observation[]> }>>()
+
 /** A member's indexed scans as observations: each id observed through its
  * own instant (`scanInstant`: a timed id's minute, a date-only id's recorded
- * start, else its midnight). One D1 query for the ids, one for the starts. */
-async function observations(env: Env): Promise<Observation[]> {
-  const dates = (await pathScans(env, true)).results.map(r => r.date)
-  const times = await scanTimes(env, dates)
-  return dates.map(id => { const t = iso(scanInstant(id, times)); return { id, revision: '', observed_through: t, published_at: t } })
+ * start, else its midnight). One D1 query for the ids, one for the starts;
+ * reused for `OBSERVATIONS_TTL` (a failed read isn't). */
+function observations(env: Env): Promise<Observation[]> {
+  const db = env.DB as unknown as object
+  let byStore = observed.get(db)
+  if (!byStore) observed.set(db, byStore = new Map())
+  const key = storeKey(env)
+  const hit = byStore.get(key)
+  if (hit && Date.now() - hit.at < OBSERVATIONS_TTL) return hit.obs
+  const obs = (async () => {
+    // Then the colo's copy, so any isolate there reuses it (r2: one client's requests land on different isolates).
+    const colo = typeof caches === 'undefined' ? null : (caches as unknown as { default: Cache }).default
+    const ck = new Request(`https://union-observations.cache/${encodeURIComponent(env.PROD_HOST ?? '-')}/${encodeURIComponent(key)}`)
+    const hit = await colo?.match(ck)
+    if (hit) return await hit.json<Observation[]>()
+    const dates = (await pathScans(env, true)).results.map(r => r.date)
+    const times = await scanTimes(env, dates)
+    const got = dates.map(id => { const t = iso(scanInstant(id, times)); return { id, revision: '', observed_through: t, published_at: t } })
+    await colo?.put(ck, new Response(JSON.stringify(got), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${OBSERVATIONS_TTL / 1000}` } }))
+    return got
+  })()
+  byStore.set(key, { at: Date.now(), obs })
+  obs.catch(() => { if (byStore!.get(key)?.obs === obs) byStore!.delete(key) })
+  return obs
 }
 
 /** A union opened for a request: its members' contexts (gated) and indexed scans, and the caller's identity. */
@@ -116,6 +145,9 @@ export interface Union {
   ctxs: Ctx[]
   obs: Observation[][]
   id: Identity | null
+  /** Where opening it went, in ms (Server-Timing `union-*`): the members' contexts, then their gates and observations
+   *  concurrently, each until its last member's settled. */
+  timing: { ctxs: number; gate: number; obs: number }
 }
 
 /** A cutoff: the scan id that names it (the client's as-of) and its instant. */
@@ -128,21 +160,24 @@ export interface Cutoff { date: string; at: string }
  * scans as observations.
  */
 export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promise<Union | Response> {
+  const t0 = performance.now()
   const ctxs = await memberCtxs(ctx, view)
+  const t1 = performance.now()
   if (ctxs instanceof Response) return ctxs
   for (const c of ctxs) {
     if (!c.env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
     if (!storeReady(c.env)) return json({ error: 'index reader not configured (missing index store creds)' }, 503)
   }
-  let id: Identity | null = null
-  if (gate) {
-    for (const c of ctxs) {
-      const g = await requireViewer(c as never)
-      if (g instanceof Response) return g
-      id ??= g
-    }
-  }
-  return { view, ctxs, obs: await Promise.all(ctxs.map(c => observations(c.env))), id }
+  // Each member's gate and its observations, all at once (in turn they were most of a union request's time before its
+  // member's diff, cache hits included: r2, 0.4–0.8 s).
+  const timing = { ctxs: t1 - t0, gate: 0, obs: 0 }
+  const [gates, obs] = await Promise.all([
+    (gate ? Promise.all(ctxs.map(c => requireViewer(c as never))) : Promise.resolve([])).finally(() => { timing.gate = performance.now() - t1 }),
+    Promise.all(ctxs.map(c => observations(c.env))).finally(() => { timing.obs = performance.now() - t1 }),
+  ])
+  const refused = gates.find(g => g instanceof Response)
+  if (refused) return refused as Response
+  return { view, ctxs, obs, id: (gates[0] as Identity | undefined) ?? null, timing }
 }
 
 /** The `at`-form param beside a scan-id param: `date` → `at`, `from` → `from_at`, `to` → `to_at`. */
@@ -249,7 +284,7 @@ export function unionRoot(view: UnionView, label: string, members: readonly { st
       const prev = seen.get(r.path)
       if (prev) throw new UnionOverlap(`union view '${view.key}': root '${r.path}' is in stores ${prev}, ${m.store}`)
       seen.set(r.path, m.store)
-      kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m ? { d: Math.floor(r.m / 86400) } : {}), src: m.store, at: m.date })
+      kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m ? { d: Math.floor(r.m / 86400), t: r.m } : {}), src: m.store, at: m.date })
       other.b -= r.b; other.o -= r.o
       if (other.f !== undefined) other.f -= 1
     }
@@ -314,13 +349,23 @@ const named = (store: string, reason: string): string => `${store}: ${reason}`
 
 /**
  * A union root's filtered answer (`q=`): every answering member's filtered root (each read under the union's one
- * threshold), merged as the plain root merges — the tree by `unionRoot`, the match lists concatenated (each
+ * threshold), merged as the plain root merges — the tree by `unionRoot`, the filter fields by `unionFilterFields`.
+ */
+export function unionFiltered(view: UnionView, label: string, members: readonly { store: string; date: string; body: FilteredRoot }[], refused: readonly Refusal[]): Omit<FilteredRoot, 'tree'> & { tree: ViewNode; partial?: true; approximate?: true } {
+  return {
+    ...unionFilterFields(members, refused),
+    tree: unionRoot(view, label, members.map(m => ({ store: m.store, date: m.date, tree: m.body.tree }))),
+  }
+}
+
+/**
+ * The filter fields of a union root's filtered answer (a subtree's or a diff's): the match lists concatenated (each
  * member's paths are under its own roots), `matchCount` and the rollup counts summed, a flag set when any member
  * set it. A member that refused the filter for its mount (`refused`) contributes nothing and makes the answer
  * partial, named in `partialReason` (`<store>: <why>`, as each member's own partial reason is) — never a zero
  * for its mount.
  */
-export function unionFiltered(view: UnionView, label: string, members: readonly { store: string; date: string; body: FilteredRoot }[], refused: readonly Refusal[]): Omit<FilteredRoot, 'tree'> & { tree: ViewNode; partial?: true; approximate?: true } {
+export function unionFilterFields(members: readonly { store: string; body: Omit<FilteredRoot, 'tree'> }[], refused: readonly Refusal[]): Omit<FilteredRoot, 'tree'> & { partial?: true; approximate?: true } {
   const bodies = members.map(m => m.body)
   const counts = bodies.flatMap(b => (b.matchCount ? [b.matchCount] : []))
   const rollups = bodies.flatMap(b => (b.rollup ? [b.rollup] : []))
@@ -351,6 +396,5 @@ export function unionFiltered(view: UnionView, label: string, members: readonly 
     ...(partial.length ? { partial: true as const, partialReason: partial.join(' · ') } : {}),
     ...(approximate.length ? { approximate: true as const, approximateReason: approximate.join(' · ') } : {}),
     ...(bodies.some(b => b.dirsOnly) ? { dirsOnly: true as const } : {}),
-    tree: unionRoot(view, label, members.map(m => ({ store: m.store, date: m.date, tree: m.body.tree }))),
   }
 }

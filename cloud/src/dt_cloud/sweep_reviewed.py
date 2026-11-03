@@ -88,7 +88,7 @@ def _prepare_reviewed(
 
     original = read_json("plan-summary.json")
     dry = read_json("would-delete-summary.json")
-    # Prefix bands and exact items (`approved_objects`, specs/file-assign.md)
+    # Prefix bands and exact items (`approved_objects`, specs/done/file-assign.md)
     # both name the reviewed set; the kind is which list an item is in.
     approved = sorted(item for bucket in plan.buckets for item in (*plan.bands(bucket), *(f"={o}" for o in plan.exact(bucket))))
     if any(bucket not in plan.buckets for bucket in only_buckets):

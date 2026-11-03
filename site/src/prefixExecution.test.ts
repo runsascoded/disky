@@ -17,6 +17,12 @@ it('uses explicit per-prefix live counters when the executor supplies them', () 
 it('links recorded outcomes with conservative retention, excluding other prefixes', () => {
   expect(conservativeDeadline(record)).toBe(700)
   expect(conservativeDeadline({ ...record, finished_ts: null })).toBeNull()
-  expect(prefixExecution(prefix, [{ ...record, prefix: 'gs://b/ab/', started_ts: 500 }, record], undefined, 300)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, undone: 0, deadline: 700, expired: false })
-  expect(prefixExecution(prefix, [record], undefined, 700)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, undone: 0, deadline: 700, expired: true })
+  expect(prefixExecution(prefix, [{ ...record, prefix: 'gs://b/ab/', started_ts: 500 }, record], undefined, 300)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: 700, expired: false })
+  expect(prefixExecution(prefix, [record], undefined, 700)).toEqual({ kind: 'recorded', runId: 'real', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: 700, expired: true })
+})
+
+it('explains preserved changed/new objects even when the run deleted none of a prefix', () => {
+  expect(prefixExecution(prefix, [{ ...record, objects: 0, bytes: 0, drift_new_objects: 9, overwritten: 1 }], undefined, 300)).toEqual({
+    kind: 'recorded', runId: 'real', objects: 0, bytes: 0, preserved: 10, undone: 0, deadline: 700, expired: false,
+  })
 })

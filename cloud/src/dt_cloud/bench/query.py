@@ -3,7 +3,7 @@
 `searchQuery.ts` (`termBranch`, `planPositive` / `planNegative`), plus their
 DuckDB renderings — what the ground truth (`truth.py`) evaluates.
 
-Semantics (specs/path-store-search.md §1): a query is `pos ∧ ¬neg` on the
+Semantics (specs/done/path-store-search.md §1): a query is `pos ∧ ¬neg` on the
 lowercased full index path (`bucket/dir/sub`); `pos` is an OR of AND-groups of
 matchers, `neg` an OR of matchers (the whole query's). A matcher is `sub` (a
 substring), `glob` (literal pieces joined by `[^/]*`) or `regex` (a full-path

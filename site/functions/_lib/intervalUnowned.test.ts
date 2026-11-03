@@ -3,7 +3,7 @@ import type { Env } from './auth'
 import { openIndex, slices } from './index'
 import type { OwnerScope } from './scope'
 import { sqliteD1, withLedger } from './testD1'
-import { type D1Variant, fixture, GETS, readJson, seedGeneration } from './testStore'
+import { type D1Variant, fixture, getsOf, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
@@ -77,11 +77,7 @@ async function seed(ledger = LEDGER): Promise<{ perScan: Env; iv: Env }> {
 }
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
-async function perScanGets<T>(f: () => Promise<T>): Promise<[T, string[]]> {
-  const n = GETS.length
-  const v = await f()
-  return [v, [...new Set(GETS.slice(n).map(g => g.key))]]
-}
+const perScanGets = getsOf
 
 const err = (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`
 let envs: { perScan: Env; iv: Env }

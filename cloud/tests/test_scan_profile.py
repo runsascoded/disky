@@ -179,22 +179,50 @@ def test_machine_fallback_refused():
     ]
 
 
+def test_source_fallback():
+    """A source's `fallback` types + `queue_timeout`: its list task's types by submit attempt, `machine` first."""
+    src = {"uri": "s3://a", "machine": "n2-standard-16", "disk": {"request": 375, "type": "local-ssd"},
+           "fallback": ["n2d-standard-16"], "queue_timeout": 10}
+    s = parse({**gb(), "sources": [src, "s3://b"]}).sources
+    assert s[0] == Source("s3://a", "n2-standard-16", Disk(375, "local-ssd"), fallback=("n2d-standard-16",), queue_timeout=10)
+    assert s[0].types == ("n2-standard-16", "n2d-standard-16")
+    assert s[1].types == ()
+
+
+def test_source_fallback_refused():
+    assert problems({**gb(), "sources": [
+        {"uri": "s3://a", "machine": "t", "fallback": ["u"]},
+        {"uri": "s3://b", "fallback": ["u"], "queue_timeout": 5},
+        {"uri": "s3://c", "machine": "t", "fallback": ["t"], "queue_timeout": 5},
+    ]}) == [
+        "sources[0].fallback: needs `queue_timeout` (a queued task never fails, so nothing else moves it on)",
+        "sources[1].fallback: needs the primary `machine`",
+        "sources[2].fallback: each machine type once (with `machine`)",
+    ]
+    assert problems(minimal(sources=[{"uri": "s3://a", "machine": "t", "fallback": ["u"], "queue_timeout": 5}])) == [
+        "sources[0].fallback: google-batch only (the only executor whose tasks take a machine type)",
+    ]
+
+
 META = Path(__file__).parent / "fixtures" / "scan_profiles" / "meta-store.yml"
 
 
 def test_store():
     """`store` (default the primary) names the site store; a store other than the primary runs only the steps that can
-    serve it (no interval store, warm-up or probe: they read the primary's)."""
+    serve it (an interval store needs its own explicit root; warm-up/probe remain primary-only)."""
     assert (parse(minimal()).store, parse(minimal()).primary) == ("primary", True)
     p = load(META)
     assert (p.store, p.primary, p.enabled()) == ("meta", False, ("list", "index", "static-names", "publish-r2", "index-rows", "index-sync", "index-gc"))
     assert problems(minimal(store="Meta")) == ["store: a `STORES_JSON` key: lowercase letters, digits and '-' (got 'Meta')"]
     assert problems(minimal(store="meta")) == [
-        "store meta: skip interval-store (the site serves another store's scans per scan, and the interval store's "
-        "`interval-store/CURRENT.json` is the primary's)",
+        "options.interval-store.store: required for a secondary store (an independent namespace)",
         "store meta: skip warm-cache (its requests carry no `store=`: it would warm the primary's views)",
         "store meta: skip probe (its requests carry no `store=`: it would probe the primary's views)",
     ]
+    data = minimal(store="meta", skip=["warm-cache", "probe"])
+    data["options"]["interval-store"] = {"store": "r2://idx/history/meta"}
+    own = parse(data)
+    assert (own.store, own.opts("interval-store")) == ("meta", {"store": "r2://idx/history/meta"})
 
 
 def test_secrets_overlay():
