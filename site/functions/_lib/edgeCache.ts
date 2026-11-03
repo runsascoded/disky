@@ -226,8 +226,10 @@ export const resetUpgrades = (): void => { upgrading.clear(); gaveUp.clear() }
 export const isPartial = (r: Response): boolean => r.headers.has('x-cache-partial')
 
 /** A `Trace` sink plus its `Server-Timing` rendering (`fetch;dur=812,…`;
- * counts ride as `dur` too — DevTools shows them the same way). */
-export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; header: () => string } {
+ * counts ride as `dur` too — DevTools shows them the same way). `mark(name)`: the
+ * time from the sink's creation (the request's start) to now, once — the first
+ * call sticks (`fixed`: the request's fixed phase, up to its first data read). */
+export function serverTiming(): { trace: (name: string, ms: number, desc?: string) => void; time: <T>(name: string, p: Promise<T>) => Promise<T>; mark: (name: string) => void; header: () => string } {
   const t: Record<string, number> = {}
   // A phase's `desc`: the distinct labels its calls carried (the index sort
   // that answered a read — `bysize`, `path`, …), in first-seen order, so a
@@ -241,6 +243,7 @@ export function serverTiming(): { trace: (name: string, ms: number, desc?: strin
   return {
     trace,
     time: async (name, p) => { const s = performance.now(); try { return await p } finally { trace(name, performance.now() - s) } },
+    mark: name => { if (!(name in t)) t[name] = performance.now() - t0 },
     header: () => [...Object.entries(t), ['total', performance.now() - t0] as [string, number]]
       .map(([k, v]) => `${k};dur=${Math.round(v)}${d[k] ? `;desc="${d[k].join('+')}"` : ''}`).join(', '),
   }

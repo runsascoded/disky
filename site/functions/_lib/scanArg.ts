@@ -28,8 +28,13 @@ export async function indexedScan(env: Env, prefix: string, exact: boolean): Pro
   const where = isPrimary(env) ? "variant = 'path'" : 'store = ? AND variant = ?'
   const scope = isPrimary(env) ? [] : [storeKey(env), d1Variant(env, 'path')]
   if (exact) {
+    // A scan the interval store holds is indexed whatever D1 says (`storeHeldScans`, its state held per isolate): asked
+    // first, so an interval-store deployment's exact id costs no D1 round trip. A failed read of the state falls back
+    // to D1 first, as before.
+    const held = await storeHeldScans(env).catch(() => null)
+    if (held?.includes(prefix)) return prefix
     const r = await env.DB.prepare(`SELECT MAX(date) AS d FROM index_schema WHERE ${where} AND date = ?`).bind(...scope, prefix).first<{ d: string | null }>()
-    return r?.d ?? ((await storeHeldScans(env)).includes(prefix) ? prefix : null)
+    return r?.d ?? (held ? null : (await storeHeldScans(env)).includes(prefix) ? prefix : null)
   }
   const r = await env.DB.prepare(`SELECT DISTINCT date FROM index_schema WHERE ${where} AND date LIKE ?`).bind(...scope, `${prefix.slice(0, 10)}%`).all<{ date: string }>()
   const held = (await storeHeldScans(env)).filter(d => d.startsWith(prefix.slice(0, 10)))

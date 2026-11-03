@@ -362,8 +362,12 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
   if (!env.DB || !dates.length) return ''
   const gens = new Map<string, string>()
   const uniq = [...new Set(dates)]
-  for (let i = 0; i < uniq.length; i += 90) {
-    const chunk = uniq.slice(i, i + 90)
+  // The interval store's dates (below) are keyed by its generation whatever D1 says: only the others ask D1 (an
+  // interval-store deployment's request then costs no D1 round trip here; its state is held per isolate).
+  const ivDates = intervalsOn(env) ? ivKeyed(await ivState(env), uniq) : new Set<string>()
+  const asked = uniq.filter(d => !ivDates.has(d))
+  for (let i = 0; i < asked.length; i += 90) {
+    const chunk = asked.slice(i, i + 90)
     const marks = chunk.map(() => '?').join(', ')
     // Both sorts' generations: a view may read either, and `bysize` is repointed on its own (a re-cut,
     // `index-sync -v bysize`), so a key over `path` alone kept serving the old cut's cached views.
@@ -376,15 +380,16 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
   // The interval store's dates: their answers are the store's generation's (and its reader's, `IV_ANSWER_V`), keyed apart.
   // A date a broken run cuts out (`IvState.refused`) keeps its key: what was cached for it was the store's answer
   // (the store is append-only), and a miss refuses (`IvUnavailable`), never reads per-scan.
-  if (intervalsOn(env)) {
-    const st = await ivState(env)
-    for (const d of uniq) if (st.scans.has(d) || st.refused.has(d)) gens.set(d, `iv:${ivPrefix(env)}:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
-  }
+  for (const d of ivDates) gens.set(d, `iv:${ivPrefix(env)}:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
   for (const d of [...uniq].sort()) {
     for (const ch of `${d}=${gens.get(d) ?? ''};`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193)
   }
   return (h >>> 0).toString(36)
 }
+
+/** Of `dates`, those whose cache keys are the interval store's (`pathGens`): the scans its state holds, and those a
+ *  broken run cuts out (`IvState.refused`). */
+const ivKeyed = (st: IvState, dates: string[]): Set<string> => new Set(dates.filter(d => st.scans.has(d) || st.refused.has(d)))
 
 /** Every scan of the env's store: each one D1 points at (a synced floor-free `path` index; the primary's query as it
  *  always was, a secondary store's scoped), and, where the store serves its interval store (`PATH_STORE=intervals`),
@@ -519,13 +524,13 @@ export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals'
  *  (`withStaticGen`), whatever the path store. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const w = (ctx as { waitUntil?: unknown }).waitUntil
-  const env = await withStaticGen(ctx.env)
   const out = (e: Env): C => (e === ctx.env ? ctx : { ...ctx, env: e, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) })
-  if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return out(env)
-  const u = new URL(ctx.request.url).searchParams
-  const ps = u.get('ps')
-  const on = ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
-  const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
+  const store = ctx.env.PATH_STORE === 'opt-in' || ctx.env.PATH_STORE === 'intervals'
+  const ps = new URL(ctx.request.url).searchParams.get('ps')
+  const on = store && ps !== 'scan' && (ctx.env.PATH_STORE === 'intervals' || ps === 'iv')
+  // The two pointers at once (neither reads what the other sets): a cold isolate's two colo lookups overlap.
+  const [env, gen] = await Promise.all([withStaticGen(ctx.env), on ? ivGen(ctx.env) : Promise.resolve(ctx.env.INTERVAL_STORE_GEN)])
+  if (!store) return out(env)
   return out({ ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined })
 }
 
