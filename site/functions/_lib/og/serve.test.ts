@@ -95,7 +95,6 @@ describe('restricted anonymous OG responses', () => {
   })
   it.each([
     '/og/map.png?path=secret/path&f=private&d=missing',
-    '/og/staged.png?q=private',
     '/og/users.png',
     '/og/user.png?id=private',
     '/og/assignments.png',
@@ -110,6 +109,21 @@ describe('restricted anonymous OG responses', () => {
       .toEqual({ status: 200, tier: 'anon', cache: 'no-store' })
     expect(textNodes(await response.text())).toEqual(['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''])
     expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls, mocks.warm.mock.calls, waitUntil.mock.calls, mocks.diff.mock.calls, mocks.pair.mock.calls, mocks.series.mock.calls]).toEqual([[], [], [], [], [], [], [], []])
+  })
+
+  it('`/staged`, anonymous: names the page, with no data read and no `q`, in its own cached card', async () => {
+    const response = await serveCard({ request: request('/og/staged.png?q=private&policy=generic&r=8'), env: env() })
+    expect([textNodes(await response.text()), response.headers.get('cache-control'), mocks.match.mock.calls.map(call => call[0].url), mocks.data.mock.calls, mocks.head.mock.calls]).toEqual([
+      ['CW storage', 'Staged for deletion', '', 'Sign in to review', ''],
+      'public, max-age=86400',
+      [`https://cw.example/og/staged.png?policy=generic&r=8&bld=${BUILD.sha}`],
+      [], [],
+    ])
+    await stampPage(env({ OG_CARDS: '1' }), new URL('https://cw.example/staged?q=private'), new Response('shell'))
+    expect(mocks.stamp.mock.calls[0][1]).toEqual({
+      title: 'Staged for deletion · CW storage', desc: 'Prefixes staged for deletion, for review. Sign in to see them.',
+      image: 'https://cw.example/og/staged.png?policy=generic&r=8', imageType: 'image/png', page: 'https://cw.example/staged',
+    })
   })
 
   it('the size-over-time section: a full card pins the scan and describes the span; the image re-checks the original view and draws the chart', async () => {
