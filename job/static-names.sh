@@ -31,8 +31,9 @@ S=${STATIC_NAMES_SCRATCH:-oa-cw-s3-usage-scratch}
 REPO=us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan
 SA=${SA:-cw-s3-job@$PROJECT.iam.gserviceaccount.com}
 R2_BUCKET=${R2_BUCKET:-oa-cw-s3-usage-index}
-# The verified isolated CW image, pinned so a rerun computes with the same engines.
-IMAGE=${IMAGE:-$REPO@sha256:4e53f34a042122498d9c9762c6ccf4b85fd2887f215575a3cf1bde922ed9c413}
+# The deployment's image. To pin a rerun's engines pass `IMAGE=…@sha256:D`, from within the registry's 14 days: cleanup
+# (`IMAGE_DELETE_AFTER_S` in infra/gcp) deletes older images unless they're tagged `latest*` or among the newest 10.
+IMAGE=${IMAGE:-$REPO:latest}
 MACHINE=${MACHINE:-n2-highmem-16}
 SSD=${SSD:-750}
 

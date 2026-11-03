@@ -15,7 +15,7 @@ from click import command, option
 PROJECT = "oa-internal-450019"
 REGION = "us-central1"
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan@sha256:4e53f34a042122498d9c9762c6ccf4b85fd2887f215575a3cf1bde922ed9c413"
+IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest"
 SCRIPT = '''import json, os
 from uuid import uuid4
 from boto3 import client as s3_client
