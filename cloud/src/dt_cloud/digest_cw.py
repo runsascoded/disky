@@ -114,7 +114,9 @@ def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestC
 #: `quota_marks: circles` / `runway`: a pool under this share renders as a bare `NN%` (no quota, no headroom).
 QUIET_PCT = 25
 #: The `quota_marks` whose clauses are brief (`QUIET_PCT`) and marked by a circle.
-BRIEF_MARKS = ("circles", "runway")
+BRIEF_MARKS = ("circles", "runway", "runway-hue")
+#: The `quota_marks` that mark each pool by its runway, in config order.
+RUNWAY_MARKS = ("runway", "runway-hue")
 
 
 def _quota_clause(tb: float, q: Quota, u: Units = UNITS["TiB"], brief: bool = False) -> str:
@@ -163,9 +165,10 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
     cs = _clauses(day, cfg)
-    if cfg.quota_marks == "runway":
+    if cfg.quota_marks in RUNWAY_MARKS:
         # config order: a reply series reads by position, the marks draw the eye (specs/digest-runway-marks.md)
-        return " · ".join(f"{_runway_mark(r, fill)} {c}{_runway_text(r, cfg)}" if fill is not None else c for c, fill, _, r in cs)
+        mark = _runway_hue if cfg.quota_marks == "runway-hue" else _runway_mark
+        return " · ".join(f"{mark(r, fill)} {c}{_runway_text(r, cfg)}" if fill is not None else c for c, fill, _, r in cs)
     if cfg.quota_marks == "circles":
         cs = sorted(cs, key=lambda c: -1.0 if c[1] is None else -c[1])
     return " · ".join(f"{m} {c}" if (m := _mark(fill, over, cfg)) else c for c, fill, over, _ in cs)
@@ -235,6 +238,21 @@ def _runway_mark(r: Runway, fill: float) -> str:
     return YELLOW_MARK if r.days < RUNWAY_YELLOW_D else GREEN_MARK
 
 
+#: `quota_marks: runway-hue` (specs/digest-runway-marks.md §3): the workspace emoji `:runway-1:` (red) … `:runway-8:`
+#: (green), the step one more than the number of these cut points (days to full) the runway reaches: under 1.8 days
+#: (or over quota) 1, 60 days or more (or not filling) 8; log-spaced, 60^(k/7). The names carry no thresholds, so
+#: these can move without re-uploading the emoji. A pool ≥ `RUNWAY_FULL_PCT` full is never calmer than
+#: `RUNWAY_HUE_FULL_N` (the site's `digest/pools.ts` mirrors all three).
+RUNWAY_HUE_D = (1.8, 3, 6, 10, 19, 33, 60)
+RUNWAY_HUE_FULL_N = 3
+
+
+def _runway_hue(r: Runway, fill: float) -> str:
+    """A pool's `:runway-N:` by its runway (`RUNWAY_HUE_*`)."""
+    n = 1 + sum(r.days >= c for c in RUNWAY_HUE_D)
+    return f":runway-{min(n, RUNWAY_HUE_FULL_N) if fill >= RUNWAY_FULL_PCT else n}:"
+
+
 def _runway_text(r: Runway, cfg: DigestConfig) -> str:
     """`, +4.1 Ti/d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days (commas: ` · ` separates the pools);
     `''` otherwise (flat, shrinking, far off, or already over: its clause says so)."""
@@ -299,7 +317,7 @@ def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, float | None, bo
         clause = (_bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
                   if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug))
         fill = _fill(g, day, cfg)
-        r = _group_runway([b for b, _ in g], day, cfg) if cfg.quota_marks == "runway" else None
+        r = _group_runway([b for b, _ in g], day, cfg) if cfg.quota_marks in RUNWAY_MARKS else None
         out.append((clause, fill, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct, r))
     return out
 

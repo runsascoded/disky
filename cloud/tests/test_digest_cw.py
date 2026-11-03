@@ -276,6 +276,17 @@ def test_runway_rules():
     assert texts == [", +4.1 Ti/d, ≈8d to full", ", +30.0 Ti/d, ≈<1d to full", ", +1.0 Ti/d, ≈60d to full", "", "", ""]
 
 
+def test_runway_hue_steps():
+    """`quota_marks: runway-hue` (specs/digest-runway-marks.md §3): `:runway-N:`, N one more than the cut points
+    (1.8, 3, 6, 10, 19, 33, 60 days) the runway reaches; over quota 1, not filling 8; ≥ 95% full never calmer than 3."""
+    days = [0.0, 1.79, 1.8, 2.9, 3.0, 5.9, 6.0, 9.9, 10.0, 18.9, 19.0, 32.9, 33.0, 59.9, 60.0, D.math.inf]
+    assert [D._runway_hue(D.Runway(d, 1.0), 50.0) for d in days] == [
+        ":runway-1:", ":runway-1:", ":runway-2:", ":runway-2:", ":runway-3:", ":runway-3:", ":runway-4:", ":runway-4:",
+        ":runway-5:", ":runway-5:", ":runway-6:", ":runway-6:", ":runway-7:", ":runway-7:", ":runway-8:", ":runway-8:"]
+    assert [D._runway_hue(D.Runway(d, 1.0), fill) for d, fill in [(D.math.inf, 94.9), (D.math.inf, 95.0), (2.0, 99.0), (0.0, 101.0)]] == [
+        ":runway-8:", ":runway-3:", ":runway-2:", ":runway-1:"]
+
+
 def _hist_scan(scan: str, tb: float, extra: dict[str, float]) -> "D.Scan":
     return D.Scan(scan=scan, tb=tb, objs=0, dtb=None, dobjs=None, hours=None, extra=extra)
 
@@ -315,6 +326,13 @@ def test_tail_runway_fixed_order():
     # no history (a store's first day): nothing is filling, so only the 95% floor and an overage can mark it hot
     assert D._tail(replace(day, hist=()), cfg).split(" · ") == [
         f":large_green_circle: {main}", f":large_green_circle: {zone}", more, f":large_green_circle: [cold]({u('cold-data')}): 12%"]
+    # `runway-hue`: the same order, rate text and runways, each as its `:runway-N:` step
+    assert D._tail(day, replace(cfg, quota_marks="runway-hue")).split(" · ") == [
+        f":runway-8: {main}",
+        f":runway-2: {zone}, +5.6 Ti/d, ≈3d to full",
+        more,
+        f":runway-4: [cold]({u('cold-data')}): 12%, +10.0 Ti/d, ≈9d to full",
+    ]
     # `circles` is unchanged by the history: fullest first, by fill
     assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
         f":red_circle: {main}", f":large_orange_circle: {zone}", f":large_green_circle: [cold]({u('cold-data')}): 12%", more]
@@ -348,7 +366,7 @@ def test_runway_reaches_before_the_month():
 def test_quota_marks_must_be_known():
     with pytest.raises(ValueError) as e:
         E.config_from_dict({"template": "cw", "quota_marks": "squares"})
-    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway')"
+    assert str(e.value) == "digest config quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue')"
 
 
 def _meta2(primary_tib: float, hero_tib: float, objs: int = 1_000_000) -> dict:

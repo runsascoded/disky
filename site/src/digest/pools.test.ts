@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_PARAMS, type DigestCfg, type DigestParams, type DigestRows, imageRequest, opText } from './index'
 import type { CwRows, CwScan } from './cw'
-import { growth, mark, quotaLine, runway, runwayMark, runwayText } from './pools'
+import { growth, mark, quotaLine, runway, runwayHue, runwayMark, runwayText } from './pools'
 
 interface Fs { readFile(p: string, enc: 'utf8'): Promise<string> }
 const fsp = () => import(/* @vite-ignore */ 'node:fs/promises' as string) as Promise<Fs>
@@ -67,6 +67,13 @@ describe('quota pressure', () => {
       .map(r => runwayText(r, f.cfg))).toEqual([', +4.1 Ti/d, ≈8d to full', ', +30.0 Ti/d, ≈<1d to full', ', +1.0 Ti/d, ≈60d to full', '', '', ''])
   })
 
+  it('runway-hue: :runway-N: one more than the cut points reached; ≥ 95% never calmer than 3 (digest_cw._runway_hue)', () => {
+    const days = [0, 1.79, 1.8, 2.9, 3, 5.9, 6, 9.9, 10, 18.9, 19, 32.9, 33, 59.9, 60, Infinity]
+    expect(days.map(d => runwayHue({ days: d, growth: 1 }, 50))).toEqual([1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8].map(n => `:runway-${n}: `))
+    expect(([[Infinity, 94.9], [Infinity, 95], [2, 99], [0, 101]] as [number, number][]).map(([d, pct]) => runwayHue({ days: d, growth: 1 }, pct)))
+      .toEqual([':runway-8: ', ':runway-3: ', ':runway-2: ', ':runway-1: '])
+  })
+
   it('the runway quota line looks back into the previous month: day 2 of November sees October’s 7-day fill', async () => {
     const f = await load()
     const s = (scan: string, hot: number): CwScan => ({ scan, slug: null, tb: 790, extra: { 'hot-data': hot }, classes: null })
@@ -89,6 +96,9 @@ describe('quota pressure', () => {
     // no history: nothing filling; hot ≥ 95% stays orange
     expect(quotaLine(last, f.cfg, 90, 'runway', [last])).toBe(
       '*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_orange_circle: hot 99.5% of 100Ti (0.5 Ti free)')
+    // `runway-hue`: the same order and text, as `:runway-N:` steps
+    expect(quotaLine(last, f.cfg, 90, 'runway-hue', seen)).toBe(
+      '*Quotas:* :runway-8: main 86.8% of 1P (120.0 Ti free) · :runway-1: hot 99.5% of 100Ti (0.5 Ti free), +9.5 Ti/d, ≈<1d to full')
     // `circles` ignores the history: most full first, by share
     expect(quotaLine(last, f.cfg, 90, 'circles', seen)).toBe(
       '*Quotas:* :red_circle: hot 99.5% of 100Ti (0.5 Ti free) · :large_orange_circle: main 86.8% of 1P (120.0 Ti free)')
