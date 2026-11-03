@@ -203,15 +203,20 @@ export const planLevel = (p: LevelPrep, dirs: string[]): Promise<ChangedPlan> =>
   return planChanged(h, levelRects([...new Set(dirs)]), p.d1, p.d2)
 }
 
+/** The level sort's handles for the range (`openIvLevel`: its tiers' footers), or null when some tier the range touches
+ *  lacks it: what a request opens beside its gate, before the `path` sort's prep (only wanted on null). */
+export const openLevelIndex = (env0: Env, o: { from: string; to: string }): Promise<LevelHandle | null> =>
+  openIvLevel(asOfScans(env0, [o.from, o.to]), o.from, o.to)
+
 /** Links followed at most: well past any store's depth. */
 const CHAIN_MAX = 64
 
 /** The level answers of `o.dirs` (and of the chains they lead into), by path: from the generation's `level` sort when
- *  every tier the range touches has it, else from the `path` sort through `given`'s prep and first-round plan (made
- *  beside the request's gate) or fresh ones. */
-export async function buildLevels(env0: Env, o: LevelOpts, given?: { prep?: LevelPrep; plan?: ChangedPlan }): Promise<Map<string, Level>> {
+ *  every tier the range touches has it (`given.level`, opened beside the request's gate: null, it hasn't; absent, opened
+ *  here), else from the `path` sort through `given`'s prep and first-round plan (made beside the gate) or fresh ones. */
+export async function buildLevels(env0: Env, o: LevelOpts, given?: { level?: LevelHandle | null; prep?: LevelPrep; plan?: ChangedPlan }): Promise<Map<string, Level>> {
   const env = asOfScans(env0, [o.from, o.to])
-  const lh = await openIvLevel(env, o.from, o.to)
+  const lh = given?.level !== undefined ? given.level : await openIvLevel(env, o.from, o.to)
   if (lh) {
     const base = await ivChurnFrom(env)
     if (base == null) throw new DiffUnavailable('churn', 'the interval store generation carries no churn')

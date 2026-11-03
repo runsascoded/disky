@@ -13,6 +13,8 @@ const lag = { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 }
 const calls: string[] = []
 /** The wrapped lookups that settled, in order. */
 const settled: string[] = []
+/** The wrapped lookups' settles and `INDEX_R2`'s reads (`r2 <key>`), in order. */
+const timeline: string[] = []
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 const slowed = <A extends unknown[], R>(name: keyof typeof lag, f: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
   calls.push(name)
@@ -21,6 +23,7 @@ const slowed = <A extends unknown[], R>(name: keyof typeof lag, f: (...a: A) => 
     return await f(...a)
   } finally {
     settled.push(name)
+    timeline.push(name)
   }
 }
 
@@ -82,6 +85,7 @@ function r2(dir: string, gets = { n: 0 }): R2Bucket {
   const get = async (key: string, o?: { range?: { offset: number; length: number } }) => {
     gets.n++
     await sleep(r2Lag.ms)
+    timeline.push(`r2 ${key}`)
     const fs = await nodeFs()
     if (!fs.existsSync(path(key))) return null
     const buf = fs.readFileSync(path(key))
@@ -120,6 +124,7 @@ beforeEach(async () => {
   await cold()
   calls.length = 0
   settled.length = 0
+  timeline.length = 0
   Object.assign(lag, { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 })
   r2Lag.ms = 0
   knobs.credentials = true
@@ -180,6 +185,26 @@ describe('a level request\'s fixed phase', () => {
     expect(t.fixed).toBeLessThan(330)
   })
 
+  it('a generation with the level sort opens it beside the gate, and not the path sort', async () => {
+    // `interval-store-level/`: the same store, every tier carrying the level sort.
+    env = { ...env, INTERVAL_STORE_PREFIX: 'interval-store-level' } as Env
+    const [from, to] = ['2026-08-02', '2026-08-06']
+    const built = await buildLevels(env, { from, to, dirs: [''], k: 32, m: 'churn' })
+    const want = JSON.stringify({ from, to, k: 32, m: 'churn', levels: [...built.values()] })
+    await cold()
+    timeline.length = 0
+    calls.length = 0
+    lag.auth = 200
+    const r = await ask(from, to)
+    // Before the gate settled: the store's state and the level sort's footers of the three tiers the range touches;
+    // no `path` sort handle or plan (`prepareLevels` never runs).
+    const early = timeline.slice(0, timeline.indexOf('auth')).filter(e => e.startsWith('r2 ')).map(e => e.slice('r2 interval-store-level/g/'.length))
+    expect([r.status, await r.text(), timing(r)['level-index'], [...new Set(calls)].sort(), early]).toEqual([
+      200, want, 1, ['auth', 'gens', 'match', 'scan'],
+      ['scans.json', 'manifests/2026-08-06.m001.json', 'served/level.groups.parquet', 'deltas/2026-08-04_2026-08-05/served/level.groups.parquet', 'deltas/2026-08-06/served/level.groups.parquet'],
+    ])
+  })
+
   it('a path-restricted identity asking a hidden dir is 404, though an unrestricted request left its level cached', async () => {
     const { gateFor } = await import('../../_lib/auth')
     const { hideScope } = await import('../../_lib/restrict')
@@ -193,6 +218,39 @@ describe('a level request\'s fixed phase', () => {
     const hidden = await at('example.test', { authorization: `Bearer ${token}` })
     expect([primed.status, primed.headers.get('x-cache'), again.headers.get('x-cache'), hidden.status, await hidden.text()])
       .toEqual([200, 'miss', 'hit', 404, 'path not found'])
+  })
+})
+
+describe('a bench\'s cache-key nonce (`nc=`)', () => {
+  const at = (host: string, nc: string | null, headers?: Record<string, string>) =>
+    level({ request: new Request(`http://${host}/api/diff/level?from=2026-08-02&to=2026-08-06&p=b1${nc == null ? '' : `&nc=${nc}`}`, { headers }), env })
+  const cached = async (r: Response) => [r.status, r.headers.get('x-cache')]
+  beforeEach(async () => {
+    // What earlier tests left landing (their deferred puts), then cold again.
+    await quiesce()
+    await cold()
+    // One cache namespace for both hosts: localhost's admin and a viewer's token share keys but for the nonce.
+    env = { ...env, BASE_SCOPE: 'laptop', SESSION_SECRET: 'test-secret', CACHE_NS: '' } as Env
+  })
+
+  it('an admin\'s nonce is its own cache key: a miss per new nonce, a hit on its repeat', async () => {
+    // `localhost`: the dev identity, an admin.
+    const got = []
+    for (const nc of [null, 'a', 'a', 'b', null]) got.push(await cached(await at('localhost', nc)))
+    expect(got).toEqual([[200, 'miss'], [200, 'miss'], [200, 'hit'], [200, 'miss'], [200, 'hit']])
+  })
+
+  it('anyone else\'s nonce is ignored: the same key, and answer, as without it', async () => {
+    const { gateFor } = await import('../../_lib/auth')
+    const { token } = await gateFor(env)!.mint({ email: null, scopes: ['laptop'], name: 'viewer link', createdBy: 'ryan@example.test', expiresAt: null, maxRedeems: null })
+    const viewer = { authorization: `Bearer ${token}` }
+    const primed = await at('localhost', null)
+    const want = await primed.text()
+    const rs = [await at('example.test', 'x1', viewer), await at('example.test', 'x2', viewer)]
+    expect([primed.headers.get('x-cache'), ...await Promise.all(rs.map(async r => [...await cached(r), await r.text() === want]))])
+      .toEqual(['miss', [200, 'hit', true], [200, 'hit', true]])
+    // The admin's nonce was never written by them: still a miss.
+    expect(await cached(await at('localhost', 'x1'))).toEqual([200, 'miss'])
   })
 })
 
