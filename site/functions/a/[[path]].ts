@@ -16,7 +16,7 @@ export async function onRequest(ctx: AvatarCtx): Promise<Response> {
   if (!ctx.env.DB) return notFound()
   const img = await readAvatar(ctx.env.DB, new URL(ctx.request.url).pathname)
   if (!img) return notFound()
-  return new Response(method === 'HEAD' ? null : img.bytes, {
+  return new Response(method === 'HEAD' ? null : new Uint8Array(img.bytes), {
     headers: {
       'content-type': img.type,
       'cache-control': 'public, max-age=31536000, immutable',

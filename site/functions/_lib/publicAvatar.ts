@@ -17,7 +17,8 @@ const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', '
 
 const hex = (b: ArrayBuffer | Uint8Array): string => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('')
 
-export const sha256Hex = async (bytes: Uint8Array): Promise<string> => hex(await crypto.subtle.digest('SHA-256', bytes))
+/** A copy, so `digest` gets an `ArrayBuffer`-backed view (`BufferSource` rejects a `SharedArrayBuffer`-typed one). */
+export const sha256Hex = async (bytes: Uint8Array): Promise<string> => hex(await crypto.subtle.digest('SHA-256', new Uint8Array(bytes)))
 
 /** A stored face (`data:image/…;base64,…`) as validated raster bytes; null for anything else (an `asset://` ref, a
  *  remote URL, a malformed or non-raster URI). */
