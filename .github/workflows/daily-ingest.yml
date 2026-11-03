@@ -17,8 +17,9 @@
 # `/meta`): the demo's own bucket, disk-tree-demo, listed after the primary's
 # outputs landed → its path store under `meta-l2/` + snapshot under
 # `snapshots/meta/` → its own static name index (its own lineage and pointer,
-# `static-names/meta-CURRENT.json`, built once when it doesn't exist yet; no
-# interval store: a secondary store is served per scan) → D1 under store `meta`.
+# `static-names/meta-CURRENT.json`, built once when it doesn't exist yet) → its
+# own interval store (`meta/interval-store/`, following its own `CURRENT.json`)
+# → D1 under store `meta`.
 # Idempotent per date: a date already scanned is
 # not scanned again (the scan id is the date; the indexes append by it), and a
 # date the indexes already hold is not re-appended; each store separately. Run it by
@@ -208,8 +209,8 @@ jobs:
       # The meta store (`STORES_JSON` `meta` in site/wrangler.r2.toml, the site's `/meta`): the demo's own storage,
       # disk-tree-demo, scanned after the primary's outputs landed, as r2.oa.dev's `r2-meta.yml` profile does (there
       # over its data + serving buckets; the demo has no data bucket, its GHA work dir is ephemeral). Same date, its
-      # own prefixes (`meta-l2/`, `snapshots/meta/`), its own static-names generation, its own D1 store; no interval
-      # store (a secondary store is served per scan). Never blocks the primary: each step continues on error, and the
+      # own prefixes (`meta-l2/`, `snapshots/meta/`), its own static-names generation, its own interval store (under
+      # `meta/`, the site's meta `INTERVAL_STORE_PREFIX`), its own D1 store. Never blocks the primary: each step continues on error, and the
       # last step fails the run.
       - name: Meta store — list disk-tree-demo → path store + snapshot → upload
         id: meta
@@ -252,6 +253,22 @@ jobs:
           # Build with r2.oa.dev's meta rule (`-x 16,8`: the store's keys carry hex runs — generation stamps, shard ids).
           cd cloud && uv run dt-cloud static-names "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
             -w "$RUNNER_TEMP/static-names-meta" -p 4 -M 10GB -u static-names/meta-CURRENT.json $([ "$cmd" = build ] && echo "-x 16,8")
+      - name: Meta store — interval store, append the scan
+        id: meta_intervals
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_DEMO_RW_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_DEMO_RW_SECRET_ACCESS_KEY }}
+          DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+        run: |
+          set -euo pipefail
+          # Meta's own store root (`r2://disk-tree-demo/meta`): its generation is `meta/interval-store/CURRENT.json`'s,
+          # which a compaction moves and the site follows (meta's `INTERVAL_STORE_PREFIX`). Built once by hand
+          # (`interval-store build -g 2026-11-03meta`); a date already appended is a no-op.
+          cd cloud && uv run dt-cloud interval-store add -L 'meta-l2/{id}/index/{gen}/path-index.parquet' \
+            -s "r2://$BUCKET" -o "r2://$BUCKET/meta" -w "$RUNNER_TEMP/interval-store-meta" -p 4 -M 10GB
       - name: Meta store — publish footers → D1
         id: meta_sync
         if: ${{ !cancelled() && steps.meta.outcome == 'success' }}
@@ -270,7 +287,7 @@ jobs:
             -k "meta-l2/${{ steps.d.outputs.date }}/index/${{ steps.d.outputs.gen }}" \
             -d "$GITHUB_WORKSPACE/work/meta/index" -v path -v bysize
       - name: Fail on an index append or a meta step that failed
-        if: ${{ !cancelled() && (steps.names.outcome == 'failure' || steps.intervals.outcome == 'failure' || steps.meta.outcome == 'failure' || steps.meta_names.outcome == 'failure' || steps.meta_sync.outcome == 'failure') }}
+        if: ${{ !cancelled() && (steps.names.outcome == 'failure' || steps.intervals.outcome == 'failure' || steps.meta.outcome == 'failure' || steps.meta_names.outcome == 'failure' || steps.meta_intervals.outcome == 'failure' || steps.meta_sync.outcome == 'failure') }}
         run: |
           echo "static names: ${{ steps.names.outcome }}, interval store: ${{ steps.intervals.outcome }}"
           echo "meta: scan ${{ steps.meta.outcome }}, static names ${{ steps.meta_names.outcome }}, D1 ${{ steps.meta_sync.outcome }}"
