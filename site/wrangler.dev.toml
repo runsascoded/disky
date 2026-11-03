@@ -56,6 +56,8 @@ FILTER_INDEXED_ONLY = "1"
 # The interval store (`interval-store/CURRENT.json`, appended by each ingest; specs/m3-interval-store.md) serves the
 # path sorts; `?ps=scan` reads a request from the per-scan sorts instead (the parity check).
 PATH_STORE = "intervals"
+# The age pyramids' history on INDEX_R2 (the profile's `age-store` step, specs/age-store.md); uncovered scans read their own files
+AGE_STORE_PREFIX = "history/m3-age"
 # The meta store (`/meta`, `src/stores/meta.ts`, admins only): the bucket itself, scanned beside each laptop
 # capture (`meta-l2/`, `snapshots/meta/`, D1 store `meta`); its STATIC_GEN is the job env's META_STATIC_GEN.
 STORES_EXTRA = "nas,meta"

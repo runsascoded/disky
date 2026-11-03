@@ -25,7 +25,9 @@ skip: [bucket-check, over-time, warm-cache, probe, digest]
 # interval store vouches for it (specs/lean-scans.md §2): a scan without a parity marker is verified in the task first.
 # Executing since 2026-10-18 (the dry run's plan: 22 scans, 10.56 GB); the per-scan sorts are rebuildable from the
 # captures (`aws/submit -w`), so no backup.
-steps: [retire]
+# `age-store`: the age pyramids as change intervals on R2 (specs/age-store.md), read by the site's `AGE_STORE_PREFIX`;
+# then the covered pyramids older than the newest `keep` retired. Runs before `retire` (registry order).
+steps: [age-store, retire]
 fold: []
 env:
   SCAN_RUNS_PROFILE: /app/infra/aws/scan-runs.json
@@ -49,3 +51,5 @@ options:
   index-gc: {dry: true}
   # Not `layer1`: the captures (`captures/m3/root/<stamp>/`) aren't keyed by scan id, and §3 keeps 30 days anyway.
   retire: {keep: 7, execute: true}
+  # `gen` names the first generation only (the store's `interval-store/CURRENT.json` is followed after)
+  age-store: {store: "r2://disk-tree/history/m3-age", gen: 2026-11-03m3-age, keep: 2, execute: true}
