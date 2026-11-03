@@ -41,9 +41,15 @@ export const RUN_DIR: string = await (async () => {
   return hits[0]
 })()
 
+/** D1's cap on a statement's bound parameters (SQLite's own is far higher, so the shim enforces it). */
+export const D1_MAX_PARAMS = 100
+
 function d1Of(raw: Sqlite): D1Database {
   const prepare = (sql: string, params: unknown[] = []) => ({
-    bind: (...args: unknown[]) => prepare(sql, args),
+    bind: (...args: unknown[]) => {
+      if (args.length > D1_MAX_PARAMS) throw new Error(`D1_ERROR: too many SQL variables (${args.length} > ${D1_MAX_PARAMS}): SQLITE_ERROR`)
+      return prepare(sql, args)
+    },
     async first<T>(col?: string): Promise<T | null> {
       const row = raw.prepare(sql).all(...params)[0]
       if (!row) return null
