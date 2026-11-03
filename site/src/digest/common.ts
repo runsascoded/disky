@@ -35,7 +35,7 @@ export interface DigestParams {
   /** cw: a quota line under the headline: every pool most full first, marked by pressure
    *  (specs/digest-quota-pressure.md); every pool in the replies' order, marked by runway (specs/digest-runway-marks.md);
    *  or none. */
-  quotas: 'off' | 'circles' | 'runway'
+  quotas: 'off' | 'circles' | 'runway' | 'runway-hue'
   /** cw: the plot's chart: the primary's usage against its quota, or every pool's % of its quota. */
   plot: 'usage' | 'pools'
   /** The share (%) a pool is marked red at; orange from 10 points below. */

@@ -101,6 +101,17 @@ export function runwayMark(r: Runway, pct: number): string {
   return r.days < RUNWAY_YELLOW_D ? ':large_yellow_circle: ' : ':large_green_circle: '
 }
 
+/** `quotas: 'runway-hue'` (specs/digest-runway-marks.md §3; `digest_cw.RUNWAY_HUE_*` / `_runway_hue`): the workspace
+ *  emoji `:runway-1:` (red) … `:runway-8:` (green), one more than the cut points (days to full) the runway reaches;
+ *  a pool ≥ `RUNWAY_FULL_PCT` full is never calmer than `RUNWAY_HUE_FULL_N`. */
+export const RUNWAY_HUE_D = [1.8, 3, 6, 10, 19, 33, 60]
+export const RUNWAY_HUE_FULL_N = 3
+
+export function runwayHue(r: Runway, pct: number): string {
+  const n = 1 + RUNWAY_HUE_D.filter(c => r.days >= c).length
+  return `:runway-${pct >= RUNWAY_FULL_PCT ? Math.min(n, RUNWAY_HUE_FULL_N) : n}: `
+}
+
 export function runwayText(r: Runway, cfg: DigestCfg): string {
   if (!(r.days > 0 && r.days < RUNWAY_TEXT_D) || r.growth == null) return ''
   const days = r.days < 1 ? '<1d' : `${fixed(r.days, 0)}d`
@@ -119,10 +130,11 @@ function ordered(r: CwScan, cfg: DigestCfg): Pool[] {
 }
 
 /** The OP's quota line at scan `r`: every pool the scan has, each marked and with its headroom. `circles`: most full
- *  first, marked by share; `runway`: the replies' order, marked by runway over `seen` (every scan, in order). */
-export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' = 'circles', seen: CwScan[] = []): string {
+ *  first, marked by share; `runway`: the replies' order, marked by runway over `seen` (every scan, in order);
+ *  `runway-hue`: the same, as `:runway-N:` steps. */
+export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'circles' | 'runway' | 'runway-hue' = 'circles', seen: CwScan[] = []): string {
   const u = cfg.unit
-  const rows = (mode === 'runway' ? ordered(r, cfg) : pools(cfg)).flatMap(p => {
+  const rows = (mode === 'circles' ? pools(cfg) : ordered(r, cfg)).flatMap(p => {
     const v = used(p, r, cfg)
     return v == null ? [] : [{ p, v, pct: pctOf(p, v, cfg) }]
   })
@@ -132,11 +144,11 @@ export function quotaLine(r: CwScan, cfg: DigestCfg, alertAt: number, mode: 'cir
   const clauses = rows.map(({ p, v, pct }) => {
     let m = mark(pct, alertAt)
     let tail = ''
-    if (mode === 'runway') {
+    if (mode !== 'circles') {
       const hist = seen.filter(x => x.scan < r.scan && scanTime(x.scan) >= reach)
         .flatMap(x => { const y = used(p, x, cfg); return y == null ? [] : [[scanTime(x.scan), y] as [number, number]] })
       const rw = runway(p.quota.bytes / u.bytes - v, growth(hist, t, v))
-      m = runwayMark(rw, pct)
+      m = mode === 'runway-hue' ? runwayHue(rw, pct) : runwayMark(rw, pct)
       tail = runwayText(rw, cfg)
     }
     if (pct < QUIET_PCT) return `${m}${p.name} ${fixed(pct, 0)}%${tail}`
