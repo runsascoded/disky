@@ -101,7 +101,10 @@ export const onRequestPost = async (ctx: Ctx): Promise<Response> => {
   const out = `gs://${cfg.dataBucket}/digest/reapply/${jobId}.txt`
   const script = reapplyScript(reapplyArgs(req), `/gcs/${cfg.dataBucket}/digest/reapply/${jobId}.txt`)
   const spec = sweepBatchSpec(cfg, env.JOB_SA, script, "", {
-    JOB_ID: jobId, SITE_URL: new URL(ctx.request.url).origin, ...(cfg.cfAccountId ? { CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId } : {}),
+    // `R2_BUCKET`: `job/r2-profile.sh` (sourced by `cw-env.sh`) sets up R2 only with it; the digest writes its
+    // preview bundle there (`job/digest.yml` `preview: r2://…`), as the scan job's (`job/profiles/cw.yml`).
+    JOB_ID: jobId, SITE_URL: new URL(ctx.request.url).origin, R2_BUCKET: 'oa-cw-s3-usage-index',
+    ...(cfg.cfAccountId ? { CLOUDFLARE_ACCOUNT_ID: cfg.cfAccountId } : {}),
   }, {
     SITE_TOKEN: secretRef(cfg, 'cw-s3-job-grant'),
     SLACK_BOT_TOKEN: secretRef(cfg, 'cw-s3-slack-bot-token'),
