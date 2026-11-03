@@ -154,6 +154,15 @@ dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE 
                           # from the scans whose listings have them all: gcs's depth-2/3 objects had none before 2026-10-22)
                           # `-j N` (also `add`'s compaction; `build`'s cut): N key ranges, then N served sorts, at a time on
                           # cursors of one DuckDB database (`-p`/`-M` shared; each ends in a serial pyarrow writer), same bytes
+dt-cloud interval-store layout-sim GEN REQUESTS  # `/api/diff/level` reads of a generation's served sort (`-s`, default
+                          # `path`; GEN a dir or `gs://`/`s3://`/`r2://` URL through `blobstore.Store`) simulated offline
+                          # (specs/diff-progressive.md §3b): per `{path, from, to}` request, rows decoded and GET runs for
+                          # today's kept groups, `-p` page sizes within them, `-b` band counts (`(band, depth, path, vf)`)
+                          # and `-k` chunked dyadic K0s (levels < K0 in 2^K0-scan chunks); `-H R` re-runs the layouts in a
+                          # store R× as old. Runs merge as the site's `planRuns` (`RUN_GAP`/`RUN_BYTES`/`RUN_READS`
+                          # mirror `site/functions/_lib/index.ts`) at the sort's bytes/row; row groups cached under `-c`
+                          # (`depth, path, vf, vt`), `-t` fetches over one footer, `-j` processes. JSONL out, p50/p90/p99/max
+                          # summary (rows, runs, GET rounds at 2 and 3 waves) to stderr
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for
