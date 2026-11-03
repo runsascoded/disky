@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from thrds import Image
+
 from dt_cloud import digest as E
 from dt_cloud import digest_gcs as D
 
@@ -267,13 +269,13 @@ class _FakeHook:
         self.calls: list[tuple] = []
         self.n = 0
 
-    def post(self, content, thread_id=None, *, username=None, icon_url=None, files=()):
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, images=()):
         self.n += 1
-        self.calls.append(("post", content, thread_id, username, icon_url, list(files)))
+        self.calls.append(("post", content, thread_id, username, icon_url, list(images)))
         return _Msg(f"m{self.n}")
 
-    def edit(self, message_id, content, *, files=()):
-        self.calls.append(("edit", message_id, content, list(files)))
+    def edit(self, message_id, content, *, images=(), keep_attachments=True):
+        self.calls.append(("edit", message_id, content, list(images)))
         return _Msg(message_id)
 
     def delete(self, message_id):
@@ -313,7 +315,7 @@ def test_converge_discord_fresh_then_incremental():
     # fresh month, one scan in: OP (webhook, calendar sender, plot attached) → bot opens the thread → one reply
     state = E.converge_discord(TPL, D.Month(ROWS[:1]), AUG, {}, hook=hook, bot=bot, emoji=EMOJI, plot=plot, save=lambda s: saves.append(dict(s)))
     assert hook.calls == [
-        ("post", OP_ONE_SCAN, None, "GCS usage — August 2026", CAL, [plot]),
+        ("post", OP_ONE_SCAN, None, "GCS usage — August 2026", CAL, [Image(path=plot)]),
         ("post", "$19,784/mo (+$615) \u00b7 [view \u2192](https://site.example.org/?d=260803#diff)", "t1", "8/3 — 3,030 TiB (+30.0, 1.0%)", f"{AV}50.png?v=4", []),
     ]
     assert bot.calls == [("create_thread", "m1", "GCS usage — August 2026")]
@@ -329,7 +331,7 @@ def test_converge_discord_fresh_then_incremental():
     bot.calls.clear()
     state = E.converge_discord(TPL, D.Month(ROWS), AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot=plot)
     assert hook.calls == [
-        ("edit", "m1", OP_TWO_SCANS, [plot]),
+        ("edit", "m1", OP_TWO_SCANS, [Image(path=plot)]),
         ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TiB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
     ]
     assert bot.calls == []
@@ -338,7 +340,7 @@ def test_converge_discord_fresh_then_incremental():
     # same scans again: nothing but the OP refresh
     hook.calls.clear()
     E.converge_discord(TPL, D.Month(ROWS), AUG, state, hook=hook, bot=bot, emoji=EMOJI, plot=plot)
-    assert hook.calls == [("edit", "m1", OP_TWO_SCANS, [plot])]
+    assert hook.calls == [("edit", "m1", OP_TWO_SCANS, [Image(path=plot)])]
 
 
 def test_converge_discord_edit_replies():
