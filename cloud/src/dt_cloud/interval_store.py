@@ -31,6 +31,7 @@ from click import Choice, IntRange, group, option
 
 from . import heartbeat as hb
 from . import static_names as sn
+from . import tree_mem as tm
 from .blobstore import Store, store_url
 from .image_sha import log_job_stamp
 from .interval_churn import has_churn, with_churn
@@ -768,6 +769,9 @@ MERGE_MIN_BATCH = 4096
 #: The most inputs one merge pass reads, so its batches stay ≥ `MERGE_MIN_BATCH` within `MERGE_ROWS`: a segment of more
 #: runs merges in passes, each `MERGE_FAN_IN` inputs into one, until one pass holds them all.
 MERGE_FAN_IN = MERGE_ROWS // MERGE_MIN_BATCH
+#: Bytes a spooled row carries past its range-file row (`write_served`'s `__seg` and computed merge keys: `__b`, `__un`,
+#: `__u`, a copy of `usr` as a short string), charged on top of `interval_compact.row_bytes` (`cut_gen`'s plan).
+SPOOL_EXTRA = 3 * 8 + 16
 #: Copies of a run's estimated in-memory input (`interval_compact.group_spans`) DuckDB holds while sorting it: the sort's
 #: key + payload rows, and the blocks its merge phase writes.
 SORT_COPIES = 2
@@ -906,7 +910,8 @@ def _sort_run(con, sql: str, out: Path, rg: int, name: str) -> dict[int, int]:
     return counts
 
 
-def merge_seg(inputs: list[tuple[str, int, int]], key: list[str], columns: list[str], out: str, batch: int, fan_in: int) -> int:
+def merge_seg(inputs: list[tuple[str, int, int]], key: list[str], columns: list[str], out: str, batch: int, fan_in: int,
+              spool_rows: int = CUT_SPOOL_RG) -> int:
     """One segment of a merged sort: its rows in each run spool (`(file, first row, rows)`, each sorted by `key`) k-way
     merged (`pyrmts.runs.merge_sorted`, `batch` rows an input at a time) into spool `out`, at most `fan_in` inputs a
     pass: more merge in passes of `fan_in` consecutive inputs into intermediate spools beside `out` (`batch`-row groups;
@@ -937,7 +942,7 @@ def merge_seg(inputs: list[tuple[str, int, int]], key: list[str], columns: list[
         for f in tmp:
             Path(f).unlink()
         tmp, inputs, level = [f for f, _, _ in nxt], nxt, level + 1
-    rows = one(inputs, out, CUT_SPOOL_RG)
+    rows = one(inputs, out, spool_rows)
     for f in tmp:
         Path(f).unlink()
     return rows
@@ -978,7 +983,8 @@ def cut_part(pieces: list[tuple[str, int, int]], groups: list[tuple[int, int, in
 
 def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Schema, *, rg_rows: int = SERVED_RG,
                  stamps: list[int] | None = None, page_rows: int | None = None, procs: int | None = None,
-                 part_rows: int = CUT_PART_ROWS, budget: int | None = None) -> dict:
+                 part_rows: int = CUT_PART_ROWS, budget: int | None = None, merge_rows: int = MERGE_ROWS,
+                 spool_rows: int = CUT_SPOOL_RG) -> dict:
     """One served sort to `out`: its segments in order (`seg_sql`: the open versions, then the closed ones — one
     segment, or with `stamps` one per dyadic block of scans), each in the sort's order and cut in `rg_rows`-row groups (a
     segment's last may be short, so no group mixes segments), zstd. `src` is a relation of `schema` rows, or a
@@ -997,14 +1003,16 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
        `ORDER BY` holding one run — `procs` runs at a time on cursors of `con`.
     2. Merge: a sort led by `(depth, path)` needs none: a segment is its runs' rows of it, in key order. The others
        (`MERGE_KEYS`) k-way merge each segment's rows of every run (`merge_seg`) into a segment spool: a process per
-       segment, `procs` at once, each holding ~3 × `MERGE_ROWS` rows (over `MERGE_FAN_IN` runs, in passes). A
+       segment, `procs` at once, each holding ≤ `tree_mem.MERGE_COPIES` × `merge_rows` rows (over at most
+       `merge_rows // MERGE_MIN_BATCH` runs a pass, `MERGE_FAN_IN` at most, in passes). A
        segment's merge is serial.
     3. Write: `cut_plan` splits the groups into at most `procs` (default: the machine's cores; at least `part_rows` rows
        each) contiguous parts, a process each writes its part's groups (`cut_part`) from the spools, and
        `parquet_pages.concat` joins the parts on the same processes: the bytes one writer of every group leaves, whatever
        the parts, runs or budget.
-    Peak memory: DuckDB's limit (the runs sized to it), or `procs` × ~3 × `MERGE_ROWS` rows merging, or a spool batch
-    and a group per writer: never the sort's size. Peak disk: the run spools (lz4, the sort's rows once), plus a merged
+    Peak memory: DuckDB's limit (the runs sized to it) and ≤ `tree_mem.SORT_COPIES` × max(`merge_rows`, `procs` ×
+    `spool_rows`) rows of run batches; then per worker its imports and `tree_mem.worker_bytes` (merging, writing or
+    joining): never the sort's size (`tree_mem.Budget.cut` sizes `procs` and `merge_rows` to a budget). Peak disk: the run spools (lz4, the sort's rows once), plus a merged
     sort's segment spools (once more; a segment of over `MERGE_FAN_IN` runs also holds two of its passes' intermediate
     spools while merging) until the parts are written, then the parts (≈ `out`) beside `out`."""
     from concurrent.futures import ProcessPoolExecutor
@@ -1029,7 +1037,8 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         runs = cut_runs(src, run_budget(con, k) if budget is None else budget)
         computed = [x for x in MERGE_KEYS.get(sort, []) if not isinstance(x, str)]
         by = ", ".join(merge_key(sort)) if merged else order
-        batch = MERGE_ROWS // min(len(runs), MERGE_FAN_IN) if merged and len(runs) > 1 else CUT_SPOOL_RG
+        fan_in = min(MERGE_FAN_IN, max(2, merge_rows // MERGE_MIN_BATCH))
+        batch = merge_rows // min(len(runs), fan_in) if merged and len(runs) > 1 else spool_rows
         run_files = [str(work / f"run-{i:05d}.parquet") for i in range(len(runs))]
         sel = f"{qcols(schema.names)}, {seg_sql(stamps)} AS __seg" + "".join(f", {e} AS {n}" for n, e in computed)
 
@@ -1051,11 +1060,11 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         nproc = max(len(parts), min(k, len(merges)))
 
         t1 = monotonic()
-        with ProcessPoolExecutor(nproc, mp_context=get_context("spawn")) if nproc > 1 else nullcontext() as ex:
+        with ProcessPoolExecutor(nproc, mp_context=get_context("spawn"), initializer=tm.worker_init) if nproc > 1 else nullcontext() as ex:
             if merges:
                 hb.set_stage(f"cut {sort}: merge")
                 cols = [*schema.names, "__seg", *(n for n, _ in computed)]
-                margs = [(ins[s], merge_key(sort), cols, str(work / f"seg-{i:05d}.parquet"), batch, MERGE_FAN_IN) for i, s in enumerate(merges)]
+                margs = [(ins[s], merge_key(sort), cols, str(work / f"seg-{i:05d}.parquet"), batch, fan_in, spool_rows) for i, s in enumerate(merges)]
                 merged_rows = list(ex.map(merge_seg, *zip(*margs))) if ex else [merge_seg(*a) for a in margs]
                 for s, a, n in zip(merges, margs, merged_rows):
                     if n != sum(x[2] for x in ins[s]):
@@ -1129,14 +1138,18 @@ def write_groups(out: Path, bounds: list[dict], sort: str, summary) -> dict:
     return {"sort": sort, "rows": start, "groups": len(rows), "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
-def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None) -> tuple[dict, dict]:
+def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None,
+            tree: tm.Budget | None = None) -> tuple[dict, dict]:
     """A generation's served sorts from its range files under `gen_dir` (every `served_sorts` entry of its owner axis and
     attribution table,
     dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
     (`served/stats.json`). What a base build (`interval_local.build_gen`) and a compaction (`interval_compact`) cut.
     `jobs` sorts at a time (`static_names.each`, the largest sources first), the cores split between the sorts: each its
     range files' runs sorted, merged and written in parallel (`write_served`), every run sized so the runs sorting at
-    once, across the sorts, fit DuckDB's memory limit (`run_budget`). Returns `({sort: {rows, groups, bytes}}, stats)`."""
+    once, across the sorts, fit DuckDB's memory limit (`run_budget`). `tree`: the process tree's budget
+    (`tree_mem.Budget`): the workers, their merge batches and DuckDB's limit (set here) planned under it
+    (`Budget.cut`, rows of the range files' widest + `SPOOL_EXTRA`); None: every core, `MERGE_ROWS`, DuckDB's limit as
+    set. Returns `({sort: {rows, groups, bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
     served = gen_dir / "served"
     gen, churn = has_generation(scans), has_churn(scans)
@@ -1144,13 +1157,24 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
     at_once = max(1, min(jobs, len(todo)))
     procs = max(1, (os.cpu_count() or 1) // at_once)
+    merge_rows = MERGE_ROWS
+    if tree is not None:
+        from .interval_compact import row_bytes
+
+        rb = row_bytes(str(p) for sub in sorted(size) for p in sorted((gen_dir / sub).glob("r*.parquet"))) + SPOOL_EXTRA
+        plan = tree.cut(at_once, os.cpu_count() or 1, rg_rows, rb, CUT_SPOOL_RG, MERGE_ROWS)
+        procs, merge_rows = plan.procs, plan.merge_rows
+        con.execute(tm.duck_sql(plan.duck))
+        err(f"cut: memory {tree.total / tm.MIB:,.0f} MiB = this process {tree.base / tm.MIB:,.0f} + {at_once} sorts × {procs} workers × "
+            f"{tree.proc_base / tm.MIB:,.0f} + Arrow {plan.arrow / tm.MIB:,.0f} (merge {merge_rows:,} rows × {rb} B) + DuckDB {plan.duck / tm.MIB:,.0f}")
     budget = run_budget(con, at_once * procs)
 
     def one(cur, sort: str) -> dict:
         sub, _, _ = SORTS[sort]
         t1 = monotonic()
         sd = write_served(cur, [str(p) for p in sorted((gen_dir / sub).glob("r*.parquet"))], sort, served / f"{sort}.parquet",
-                          served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget)
+                          served_schema(sort, gen, churn), rg_rows=rg_rows, stamps=stamps, procs=procs, budget=budget,
+                          merge_rows=merge_rows)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
         return sd

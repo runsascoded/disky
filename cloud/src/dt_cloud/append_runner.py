@@ -2617,7 +2617,7 @@ def compact_options(fn):
         option("-j", "--jobs", default=1, type=int, help="Folded at a time: the interval store's key ranges / sorts; the static store's drill-fold chunks"),
         option("-K", "--compact-now", "force", is_flag=True, help="Compact whatever the policy says (when the generation has runs)"),
         option("-m", "--mount", required=True, help="Local mount of the data bucket (the fold reads the generation from it)"),
-        option("-M", "--mem", default="100GB", help="DuckDB memory limit"),
+        option("-M", "--mem", default="100GB", help="The interval store's fold: its whole process tree's memory (`tree_mem`); the static store's: DuckDB's limit"),
         option("-N", "--no-promote", "promote", is_flag=True, default=True, flag_value=False, help="A candidate: the new generation published (and copied to R2 with -r) but nothing pointed at it, the compaction lease not held (appends go on); `promote` points prod at it"),
         option("-p", "--threads", default=16, type=int, help="DuckDB threads"),
         option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy (`r2_publish_gen`: the new generation, its pointer last): the job has the R2 env"),

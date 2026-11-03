@@ -324,7 +324,7 @@ def build_cmd(attribution, gen, jobs, k, layouts, mem, store_root, threads, rg_r
 @option("-K", "--compact-now", is_flag=True, help="Compact into a new generation now (when the generation has runs), whatever the policy says")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="A due compaction's key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
-@option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-M", "--mem", default="4GB", help="DuckDB memory limit of the append; a due compaction's whole process tree (`tree_mem`: DuckDB gets what this process, the cut's workers and the Arrow buffers leave)")
 @option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs and compacted generations the prune would delete from the store; delete nothing")
 @option("-N", "--no-merge", is_flag=True, help="Skip the due carries and compaction (a later `add` makes them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")

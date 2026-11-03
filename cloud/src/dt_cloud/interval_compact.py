@@ -45,6 +45,7 @@ from . import interval_append as ia
 from .interval_churn import has_churn, with_churn
 from . import interval_store as ist
 from . import static_names as sn
+from . import tree_mem as tm
 from .append_runner import LocalRunStore, latest_key
 from .blobstore import Store
 from .static_names import err, q
@@ -167,6 +168,10 @@ RESERVE = 1 / 4
 MIB = 1 << 20
 
 Key = tuple[int, str]
+#: The tables a range's fold reads (`compact_range`): their row groups' widest rows size its Arrow side (`row_bytes`).
+FOLD_TABLES = ("pvl", "sv", "svt", ist.ATTRIBUTION)
+#: The fewest rows a row group's own bytes a row count from in `row_bytes`.
+WIDE_ROWS = 4096
 #: Below and above every `(depth, path)` key (`depth` a uint8): a row group without statistics spans them.
 LOW: Key = (-1, "")
 HIGH: Key = (256, "")
@@ -197,6 +202,31 @@ def group_spans(path: str) -> list[tuple[Key, Key, int]]:
         lo, hi = ((d.min, p.min), (d.max, p.max)) if ok else (LOW, HIGH)
         out.append((lo, hi, rg.total_byte_size + rg.num_rows * STRING_T * strings))
     return out
+
+
+def row_bytes(files: Iterable[str]) -> int:
+    """The estimated in-memory bytes a row of `files` (missing ones skipped; at least 1), what the Arrow side's bounds
+    (`tree_mem`) charge a row of these tables: uncompressed bytes a row + `STRING_T` a string column (`group_spans`'),
+    the widest of the files' rows on the whole and of each row group of at least `WIDE_ROWS` rows (a batch's rows are
+    some group's; a smaller group's bytes a row are mostly its pages' and dictionaries' overhead)."""
+    out, size, rows = 1, 0, 0
+    for f in files:
+        if not Path(f).exists():
+            continue
+        md = pq.read_metadata(f)
+        per = STRING_T * sum(1 for c in md.schema.to_arrow_schema() if pa.types.is_string(c.type) or pa.types.is_large_string(c.type))
+        for g in range(md.num_row_groups):
+            rg = md.row_group(g)
+            size, rows = size + rg.total_byte_size + rg.num_rows * per, rows + rg.num_rows
+            if rg.num_rows >= WIDE_ROWS:
+                out = max(out, -(-rg.total_byte_size // rg.num_rows) + per)
+    return max(out, -(-size // rows) if rows else 1)
+
+
+def _fetch(con, sql: str) -> Iterable[pa.RecordBatch]:
+    """`sql`'s rows as batches of at most one range-file row group (`RANGE_RG`): what a `SortedWriter` pins stays within
+    a group or two (`tree_mem.FOLD_GROUPS`)."""
+    return sn._batches(con, sql, ist.RANGE_RG)
 
 
 def sub_ranges(files: list[str], budget: int | None) -> list[tuple[Key | None, Key | None, int]]:
@@ -300,10 +330,10 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
             for kind, n in con.execute("SELECT kind, count(DISTINCT path) FROM pv GROUP BY kind").fetchall():
                 paths["kinds"][kind] = paths["kinds"].get(kind, 0) + n
             paths["all"] += con.execute("SELECT count(DISTINCT (depth, path)) FROM pv").fetchone()[0]
-            w_pvl.write(sn._batches(con, f"SELECT {', '.join(pvl_schema.names)} FROM pvl ORDER BY depth, path, vf"))
-            w_pv.write(sn._batches(con, f"SELECT {', '.join(pv_schema.names)} FROM pv ORDER BY depth, path, vf"))
+            w_pvl.write(_fetch(con, f"SELECT {', '.join(pvl_schema.names)} FROM pvl ORDER BY depth, path, vf"))
+            w_pv.write(_fetch(con, f"SELECT {', '.join(pv_schema.names)} FROM pv ORDER BY depth, path, vf"))
             con.execute(f"CREATE OR REPLACE TEMP TABLE rd AS {_islands_sql('SELECT * FROM pvl', ['last_read'], ['last_read'], 'last_read >= 0')}")
-            w_rd.write(sn._batches(con, "SELECT depth, path, vf, vt, last_read FROM rd ORDER BY depth, path, vf"))
+            w_rd.write(_fetch(con, "SELECT depth, path, vf, vt, last_read FROM rd ORDER BY depth, path, vf"))
             con.execute("DROP TABLE pvl; DROP TABLE pv; DROP TABLE rd")
     rows.update(pvl=w_pvl.rows, pv=w_pv.rows, rd=w_rd.rows)
     if sliced:
@@ -313,7 +343,7 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
         with sn.SortedWriter(rf("sv"), ist.SV_SCHEMA, ist.RANGE_RG, dictionary=["kind", "usr"]) as w:
             for lo, hi, _ in plan:
                 con.execute(f"CREATE OR REPLACE TEMP TABLE sv AS {_versions_sql(base, runs, 'sv', name, pieces=sub_pieces(lo, hi))}")
-                w.write(sn._batches(con, f"SELECT {sel} FROM sv ORDER BY depth, path, usr, vf"))
+                w.write(_fetch(con, f"SELECT {sel} FROM sv ORDER BY depth, path, usr, vf"))
                 con.execute("DROP TABLE sv")
         rows["sv"] = w.rows
         plan = plans["svt"] = sub_ranges(inputs("svt"), budget)
@@ -321,7 +351,7 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
             for lo, hi, _ in plan:
                 con.execute(f"""CREATE OR REPLACE TEMP TABLE svt AS SELECT * REPLACE (nullif(usr, '') AS usr)
                     FROM ({_versions_sql(base, runs, 'svt', name, pieces=sub_pieces(lo, hi))})""")
-                w.write(sn._batches(con, f"SELECT {', '.join(ist.SVT_SCHEMA.names)} FROM svt ORDER BY depth, path, usr NULLS FIRST, vf"))
+                w.write(_fetch(con, f"SELECT {', '.join(ist.SVT_SCHEMA.names)} FROM svt ORDER BY depth, path, usr NULLS FIRST, vf"))
                 con.execute("DROP TABLE svt")
         rows["svt"] = w.rows
     if attributed:
@@ -330,7 +360,7 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
         with sn.SortedWriter(rf(t), ist.AT_SCHEMA, ist.RANGE_RG, dictionary=["user", "source"]) as w:
             for lo, hi, _ in plan:
                 sql = attribution_versions_sql(base, runs, name, sub_pieces(lo, hi))
-                w.write(sn._batches(con, f"SELECT {ist.qcols(ist.AT_SCHEMA.names)} FROM ({sql}) ORDER BY depth, path, vf"))
+                w.write(_fetch(con, f"SELECT {ist.qcols(ist.AT_SCHEMA.names)} FROM ({sql}) ORDER BY depth, path, vf"))
         rows[t] = w.rows
     return {"rows": rows, "paths": paths, "subs": {t: len(p) for t, p in plans.items()}, "est": max(e for p in plans.values() for *_, e in p)}
 
@@ -363,8 +393,13 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     record's hook (`append_runner.compact_store`): each range's `i/k` note, then the ranges' total with `next_phase`
     `sorts` as the served sorts' cut begins. `before_cut(con, out, doc)`: a hook over the folded range files before the
     cut (`interval_churn.backfill` sets `churn_cum` there, and records it in `doc`). Each range folds in key sub-ranges of
-    at most `budget` estimated input bytes (default `sub_budget(mem, jobs)`: what the `jobs` ranges at once hold stays
-    within `mem`, at any store size; the bytes don't depend on it). Returns `(scans.json, rows per table, sorts, stats)`."""
+    at most `budget` estimated input bytes (default `sub_budget(<DuckDB's limit>, jobs)`: what the `jobs` ranges at once
+    hold stays within DuckDB's limit, at any store size; the bytes don't depend on it).
+
+    `mem` is the whole process tree's budget (`tree_mem`): the fold's DuckDB limit is `mem − <this process> − jobs ×
+    FOLD_GROUPS × RANGE_RG × rb` (`Budget.fold`; `rb` the inputs' widest rows, `row_bytes`), the cut's `mem − <this
+    process> − <its workers> − <its Arrow buffers>` (`Budget.cut`, via `cut_gen`); a budget leaving DuckDB less than
+    `DUCK_MIN` is refused (`TooSmall`). Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = (ist.has_generation(base) or fill is not None) if identity is None else identity
@@ -380,9 +415,16 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     out.mkdir(parents=True)
     shutil.copyfile(gen_dir / "ranges.json", out / "ranges.json")
     k = json.loads((out / "ranges.json").read_text())["k"]
-    con = sn.connect(threads, mem, work / "duckdb-compact")
-    budget = sub_budget(mem, jobs) if budget is None else budget
     run_dirs = [str(gen_dir / r["key"]) for r in runs]
+    # `mem` is the process tree's: DuckDB gets what the fold's Arrow side (`jobs` × `FOLD_GROUPS` range-file groups of
+    # the inputs' widest rows) and this process leave (`tree_mem`); the cut re-splits it (`cut_gen`).
+    tree = tm.Budget.measure(sn.mem_bytes(mem))
+    rb = row_bytes(str(f) for d in (str(gen_dir), *run_dirs) for t in FOLD_TABLES for f in sorted(Path(d, t).glob("r*.parquet")))
+    arrow, duck = tree.fold(jobs, ist.RANGE_RG, rb)
+    err(f"fold {gen}: memory {tree.total / MIB:,.0f} MiB = this process {tree.base / MIB:,.0f} + Arrow {arrow / MIB:,.0f} "
+        f"({jobs} jobs × {tm.FOLD_GROUPS} groups × {ist.RANGE_RG:,} rows × {rb} B) + DuckDB {duck / MIB:,.0f}")
+    con = sn.connect(threads, f"{duck // MIB}MiB", work / "duckdb-compact")
+    budget = sub_budget(duck, jobs) if budget is None else budget
     lock, done = Lock(), [0]
     t_all = monotonic()
 
@@ -415,7 +457,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
     if progress is not None:
         progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
-    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=paths)
+    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=paths, tree=tree)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
