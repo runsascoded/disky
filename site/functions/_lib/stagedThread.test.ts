@@ -129,7 +129,7 @@ describe('D1', () => {
       await notifyPlan(env, db, 1, SITE, await stage(db, 1, run(1, 1), { by: KAI }), { now: 1000 })
       await notifyPlan(env, db, 1, SITE, { text: (name: string) => `:leftwards_arrow_with_hook: ${name} unstaged 1 prefix`, by: { email: KAI, verb: 'unstaged' } }, { now: 1100 })
       expect(calls.filter(c => c.method === 'chat.postMessage').map(c => [c.body.username, c.body.icon_url, c.body.icon_emoji, c.body.blocks ? sectionText(c.body.blocks) : c.body.text])).toEqual([
-        ['Kai · staged', 'https://avatars.githubusercontent.com/kai-gh?s=192', undefined, ':wastebasket: *Kai* staged 1 path · *1.0 TiB* · 10 objects\nin `b/ckpt/run-1/step-0/`'],
+        ['Kai · staged', 'https://avatars.githubusercontent.com/kai-gh?s=192', undefined, ':wastebasket: *Kai* staged 1 path · *1.0 TiB* · 10 objects\n`b/ckpt/run-1/step-0/` 1.0 TiB'],
         ['Kai · unstaged', 'https://avatars.githubusercontent.com/kai-gh?s=192', undefined, ':leftwards_arrow_with_hook: Kai unstaged 1 prefix'],
       ])
     })
