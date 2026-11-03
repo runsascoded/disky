@@ -223,6 +223,12 @@ def row_bytes(files: Iterable[str]) -> int:
     return max(out, -(-size // rows) if rows else 1)
 
 
+def input_rows(files: Iterable[str]) -> int:
+    """The rows of `files` (missing ones skipped), from their footers: no batch or group of them holds more, so the Arrow
+    side's bounds (`tree_mem`) charge `min(<rows a holder takes>, input_rows)`."""
+    return sum(pq.read_metadata(f).num_rows for f in files if Path(f).exists())
+
+
 def _fetch(con, sql: str) -> Iterable[pa.RecordBatch]:
     """`sql`'s rows as batches of at most one range-file row group (`RANGE_RG`): what a `SortedWriter` pins stays within
     a group or two (`tree_mem.FOLD_GROUPS`)."""
@@ -397,7 +403,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     hold stays within DuckDB's limit, at any store size; the bytes don't depend on it).
 
     `mem` is the whole process tree's budget (`tree_mem`): the fold's DuckDB limit is `mem − <this process> − jobs ×
-    FOLD_GROUPS × RANGE_RG × rb` (`Budget.fold`; `rb` the inputs' widest rows, `row_bytes`), the cut's `mem − <this
+    FOLD_GROUPS × min(RANGE_RG, <input rows>) × rb` (`Budget.fold`; `rb` the inputs' widest rows, `row_bytes`), the cut's `mem − <this
     process> − <its workers> − <its Arrow buffers>` (`Budget.cut`, via `cut_gen`); a budget leaving DuckDB less than
     `DUCK_MIN` is refused (`TooSmall`). Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
@@ -419,10 +425,11 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     # `mem` is the process tree's: DuckDB gets what the fold's Arrow side (`jobs` × `FOLD_GROUPS` range-file groups of
     # the inputs' widest rows) and this process leave (`tree_mem`); the cut re-splits it (`cut_gen`).
     tree = tm.Budget.measure(sn.mem_bytes(mem))
-    rb = row_bytes(str(f) for d in (str(gen_dir), *run_dirs) for t in FOLD_TABLES for f in sorted(Path(d, t).glob("r*.parquet")))
-    arrow, duck = tree.fold(jobs, ist.RANGE_RG, rb)
+    ins = [str(f) for d in (str(gen_dir), *run_dirs) for t in FOLD_TABLES for f in sorted(Path(d, t).glob("r*.parquet"))]
+    rb, group = row_bytes(ins), min(ist.RANGE_RG, max(1, input_rows(ins)))
+    arrow, duck = tree.fold(jobs, ist.RANGE_RG, rb, group)
     err(f"fold {gen}: memory {tree.total / MIB:,.0f} MiB = this process {tree.base / MIB:,.0f} + Arrow {arrow / MIB:,.0f} "
-        f"({jobs} jobs × {tm.FOLD_GROUPS} groups × {ist.RANGE_RG:,} rows × {rb} B) + DuckDB {duck / MIB:,.0f}")
+        f"({jobs} jobs × {tm.FOLD_GROUPS} groups × {group:,} rows × {rb} B) + DuckDB {duck / MIB:,.0f}")
     con = sn.connect(threads, f"{duck // MIB}MiB", work / "duckdb-compact")
     budget = sub_budget(duck, jobs) if budget is None else budget
     lock, done = Lock(), [0]
