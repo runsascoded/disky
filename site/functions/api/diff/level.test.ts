@@ -24,10 +24,13 @@ const slowed = <A extends unknown[], R>(name: keyof typeof lag, f: (...a: A) => 
   }
 }
 
+/** `credentials: false`: the request presents none, so `ahead` starts nothing before the gate (a test's baseline). */
+const knobs = vi.hoisted(() => ({ credentials: true }))
+
 vi.mock('../../_lib/auth.js', async orig => {
   const m = await orig<typeof import('../../_lib/auth.js')>()
   // `x-deny`: the gate refuses (a session it can't find), after its latency.
-  return { ...m, requireViewer: slowed('auth', async (ctx: Parameters<typeof m.requireViewer>[0]) => (ctx.request.headers.has('x-deny') ? m.json({ error: 'unauthenticated' }, 401) : m.requireViewer(ctx))) }
+  return { ...m, presentsCredentials: (ctx: Parameters<typeof m.presentsCredentials>[0]) => knobs.credentials && m.presentsCredentials(ctx), requireViewer: slowed('auth', async (ctx: Parameters<typeof m.requireViewer>[0]) => (ctx.request.headers.has('x-deny') ? m.json({ error: 'unauthenticated' }, 401) : m.requireViewer(ctx))) }
 })
 vi.mock('../../_lib/scanArg.js', async orig => {
   const m = await orig<typeof import('../../_lib/scanArg.js')>()
@@ -48,7 +51,7 @@ vi.mock('../../_lib/diffLevel.js', async orig => {
 
 const { onRequestGet: level } = await import('./level')
 const { buildLevels } = await import('../../_lib/diffLevel')
-const { AHEAD, clearIsolate, isolateSnapshot, loadScopes } = await import('../../_lib/shared')
+const { clearIsolate, isolateSnapshot, loadScopes } = await import('../../_lib/shared')
 const { coloPutsSettled } = await import('../../_lib/index')
 await loadScopes()
 
@@ -107,7 +110,7 @@ beforeEach(async () => {
   calls.length = 0
   settled.length = 0
   Object.assign(lag, { auth: 0, scan: 0, gens: 0, match: 0, prep: 0 })
-  AHEAD.eager = true
+  knobs.credentials = true
 })
 
 /** A level request for the root between two scans; `localhost`: the gate's dev identity (and credentials presented). */
@@ -218,11 +221,11 @@ describe('what a level request starts beside its gate (`ahead`) lands only once 
   it('a passed gate commits them: what the request leaves is what the same lookups started after the gate leave', async () => {
     const run = async (eager: boolean) => {
       await cold()
-      AHEAD.eager = true
+      knobs.credentials = true
       expect((await askAt('localhost', '2026-08-02', '2026-08-04', '')).status).toBe(200)
       await quiesce()
       const warm = keys()
-      AHEAD.eager = eager
+      knobs.credentials = eager
       settled.length = 0
       lag.auth = 100
       const r = await askAt('localhost', '2026-08-04', '2026-08-06', 'b1')
