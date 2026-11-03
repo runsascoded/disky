@@ -25,10 +25,13 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from thrds import DiscordClient, DiscordWebhookClient
+from thrds.slack import SlackClient
 
 from dt_cloud import cli
 from dt_cloud import digest as DG
 
+from conftest import thrds_fake
 from digest_examples import CW_EXAMPLE, GCS_EXAMPLE, config_file
 
 TIB = 1024**4
@@ -168,6 +171,7 @@ class _Msg:
         self.id = id
 
 
+@thrds_fake(SlackClient)
 class FakeSlack:
     """Logs every call with all its arguments; message ids are sequential."""
 
@@ -189,19 +193,21 @@ class FakeSlack:
         self.log.append({"op": "delete", "ts": message_id, "orphans_ok": orphans_ok})
 
 
+@thrds_fake(DiscordWebhookClient)
 class FakeHook:
     def __init__(self, log: list, name: str = "hook"):
         self.log, self.name = log, name
 
-    def post(self, content, thread_id=None, *, username=None, icon_url=None, files=()):
-        self.log.append({"op": f"{self.name}.post", "content": content, "thread_id": thread_id, "username": username, "icon_url": icon_url, "files": [str(f) for f in files]})
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, images=()):
+        self.log.append({"op": f"{self.name}.post", "content": content, "thread_id": thread_id, "username": username, "icon_url": icon_url, "files": [str(i.path) for i in images]})
         return _Msg(f"d{sum(c['op'].endswith('.post') for c in self.log)}")
 
-    def edit(self, message_id, content, *, files=()):
-        self.log.append({"op": f"{self.name}.edit", "id": message_id, "content": content, "files": [str(f) for f in files]})
+    def edit(self, message_id, content, *, images=(), keep_attachments=True):
+        self.log.append({"op": f"{self.name}.edit", "id": message_id, "content": content, "files": [str(i.path) for i in images]})
         return _Msg(message_id)
 
 
+@thrds_fake(DiscordClient)
 class FakeBot:
     def __init__(self, log: list):
         self.log = log

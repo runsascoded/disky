@@ -120,3 +120,33 @@ def fake_r2(monkeypatch, tmp_path) -> Path:
 
     monkeypatch.setattr(blobfs, "_s3fs", fake_s3fs)
     return root
+
+
+def thrds_fake(real: type):
+    """A class decorator for a test's fake of a thrds client (`real`): every method the fake defines must exist on
+    `real`, and every call to it must bind to `real`'s signature for that method, so a keyword thrds renames or drops
+    fails the test instead of production (thrds 0.6.0's `files=` → `images=` passed CI against a fake that still took
+    `files=`)."""
+    import functools
+    import inspect
+
+    def wrap(fake: type) -> type:
+        for name, fn in list(vars(fake).items()):
+            if name.startswith("_") or not callable(fn):
+                continue
+            if not hasattr(real, name):
+                raise TypeError(f"{fake.__name__}.{name}: {real.__name__} has no {name}")
+            sig = inspect.signature(getattr(real, name))
+
+            def checked(self, *args, __fn=fn, __sig=sig, __name=name, **kw):
+                try:
+                    __sig.bind(self, *args, **kw)
+                except TypeError as e:
+                    raise TypeError(f"{real.__name__}.{__name}{__sig}: {e}") from None
+                return __fn(self, *args, **kw)
+
+            setattr(fake, name, functools.wraps(fn)(checked))
+        return fake
+
+    return wrap
+
