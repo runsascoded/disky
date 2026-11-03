@@ -266,6 +266,65 @@ def test_a_parallel_compaction_writes_the_serial_ones_bytes(run, tmp_path):
     assert gens["3"] == gens["1"]
 
 
+def _regroup(gen_dir: Path, rows: int) -> list[Path]:
+    """The fold's inputs under `gen_dir` (the base's range files, every run's deltas: `pvl/`, `sv/`, `svt/`) rewritten in
+    `rows`-row groups, the same rows. Returns them."""
+    got = []
+    for p in sorted(gen_dir.rglob("*.parquet")):
+        if p.parent.name in ("pvl", "sv", "svt") and "state" not in p.relative_to(gen_dir).parts:
+            pq.write_table(pq.read_table(p), p, row_group_size=rows)
+            got.append(p)
+    return got
+
+
+def _keys(f: Path) -> list[list[tuple[int, str]]]:
+    """Each row group's `(depth, path)` keys, in file order."""
+    pf = pq.ParquetFile(f)
+    return [list(zip(*pf.read_row_group(g, columns=["depth", "path"]).to_pydict().values())) for g in range(pf.num_row_groups)]
+
+
+def test_sub_ranges_fold_the_whole_ranges_bytes(run, tmp_path):
+    """Folded in key sub-ranges (a 1-byte budget: a cut at every row-group start of the inputs, rewritten in 3-row
+    groups), every file of the compacted generation is the one-pass fold's, byte for byte (the sorts' records but their
+    seconds), and the generation `add` compacted into (range files, served sorts, `stats.json`). The cuts fall between
+    two paths at one depth, and at a path whose versions an input's row groups split: it moves whole into the later
+    sub-range."""
+    gen_dir = tmp_path / "g"
+    shutil.copytree(run["store"] / ist.PREFIX / "g", gen_dir)
+    newest = sorted((gen_dir / "manifests").iterdir(), key=lambda p: ar.parse_manifest(p.name))[-1]
+    runs = json.loads(newest.read_text())["runs"]
+    inputs = _regroup(gen_dir, 3)
+    k = json.loads((gen_dir / "ranges.json").read_text())["k"]
+    dirs = [gen_dir, *(gen_dir / r["key"] for r in runs)]
+    plans = {(t, i): ic.sub_ranges([str(d / t / f"r{i:04d}.parquet") for d in dirs], 1)
+             for t in ("pvl", *(["sv", "svt"] if run["owned"] else [])) for i in range(k)}
+    assert [ic.sub_ranges([str(d / "pvl" / f"r{i:04d}.parquet") for d in dirs], 1 << 62) for i in range(k)] == [
+        [(None, None, sum(b for f in dirs for *_, b in ic.group_spans(str(f / "pvl" / f"r{i:04d}.parquet"))))] for i in range(k)]
+    cuts = {hi for plan in plans.values() for _, hi, _ in plan if hi is not None}
+    assert all(len(plan) > 1 for plan in plans.values())
+    # Every sub-range [lo, hi) after the first starts where the one before it ends.
+    assert all([lo for lo, _, _ in plan] == [None, *(hi for _, hi, _ in plan[:-1])] and plan[-1][1] is None for plan in plans.values())
+    keys = sorted({key for f in inputs for g in _keys(f) for key in g})
+    assert any(keys[keys.index(c) - 1][0] == c[0] for c in cuts)
+    straddled = {g1[0] for f in inputs for g0, g1 in zip(_keys(f), _keys(f)[1:]) if g0[-1] == g1[0]}
+    assert straddled & cuts
+
+    def fold(out: str, budget: int) -> dict[str, bytes]:
+        ic.fold_gen(gen_dir, tmp_path / out, tmp_path / f"work-{out}", gen="g", runs=runs, rg_rows=RG, threads=2, mem="1GB", budget=budget)
+        return _timeless(tmp_path / out)
+
+    whole, split = fold("whole", 1 << 62), fold("split", 1)
+    assert sorted(split) == sorted(whole)
+    assert split == whole
+    c001 = _timeless(run["store"] / ist.PREFIX / "g.c001")
+    assert {k: c001.get(k) for k in whole} == whole
+
+
+def test_sub_budget():
+    """`mem × (1 − RESERVE) / (jobs × COPIES)`: 12 GB over 4 jobs → 12e9 · ¾ / 16."""
+    assert [ic.sub_budget("12GB", 4), ic.sub_budget(1 << 30, 1), ic.sub_budget("1GB", 0)] == [562_500_000, 201_326_592, 187_500_000]
+
+
 def test_each_keeps_the_items_order_and_raises_the_first_failure():
     con = sn.connect(2, "1GB", None)
     assert sn.each(con, lambda cur, i: cur.execute(f"SELECT {i} * 2").fetchone()[0], list(range(7)), 3) == [0, 2, 4, 6, 8, 10, 12]

@@ -860,7 +860,7 @@ def write_groups(out: Path, bounds: list[dict], sort: str, summary) -> dict:
     return {"sort": sort, "rows": start, "groups": len(rows), "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
-def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1) -> tuple[dict, dict]:
+def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1, paths: dict | None = None) -> tuple[dict, dict]:
     """A generation's served sorts from its range files under `gen_dir` (every `served_sorts` entry of its owner axis and
     attribution table,
     dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
@@ -886,7 +886,7 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
     got = dict(zip(order, sn.each(con, one, order, jobs)))
     sorts = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
-    stats = {**churn_stats(con, str(gen_dir), scans), "slices": scans["slices"]}
+    stats = {**churn_stats(con, str(gen_dir), scans, paths), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
     return sorts, stats
 
@@ -975,18 +975,22 @@ def build_ranges_cmd(bucket, profile, force, gen, index, mount, mem, per_task, o
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
 
 
-def churn_stats(con, root: str, scans: dict) -> dict:
+def churn_stats(con, root: str, scans: dict, paths: dict | None = None) -> dict:
     """Per scan: path versions opened and closed there, read versions likewise, and live rows — the
-    delta a per-scan append writes — plus totals by kind."""
+    delta a per-scan append writes — plus totals by kind. `paths`: the distinct paths, already counted by whoever wrote
+    the range files (`{"all": n, "kinds": {kind: n}}`, `interval_compact.compact_range`'s, summed over key-disjoint
+    sub-ranges), so no `count(DISTINCT …)` holds every path of the generation at once."""
+    kind_paths, all_paths = ("0", "0") if paths is not None else ("count(DISTINCT path)", "count(DISTINCT (depth, path))")
     ids = {s["ts"]: s["id"] for s in scans["scans"]}
     pv, rd = f"read_parquet({q(root + '/pv/r*.parquet')})", f"read_parquet({q(root + '/rd/r*.parquet')})"
     per = {i: {"id": i, "opened": 0, "closed": 0, "reads_opened": 0, "reads_closed": 0} for i in ids.values()}
     for col, key, src in (("vf", "opened", pv), ("vt", "closed", pv), ("vf", "reads_opened", rd), ("vt", "reads_closed", rd)):
         for t, n in con.execute(f"SELECT {col}, count(*) FROM {src} WHERE {col} <> {OPEN} GROUP BY {col}").fetchall():
             per[ids[t]][key] = n
-    kinds = {k: {"versions": n, "open": o, "paths": p} for k, n, o, p in con.execute(
-        f"SELECT kind, count(*), count(*) FILTER (WHERE vt = {OPEN}), count(DISTINCT path) FROM {pv} GROUP BY kind ORDER BY kind").fetchall()}
-    tot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}), count(DISTINCT (depth, path)) FROM {pv}").fetchone()
+    kinds = {k: {"versions": n, "open": o, "paths": paths["kinds"][k] if paths is not None else p} for k, n, o, p in con.execute(
+        f"SELECT kind, count(*), count(*) FILTER (WHERE vt = {OPEN}), {kind_paths} FROM {pv} GROUP BY kind ORDER BY kind").fetchall()}
+    tot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}), {all_paths} FROM {pv}").fetchone()
+    tot = (tot[0], tot[1], paths["all"]) if paths is not None else tot
     rtot = con.execute(f"SELECT count(*), count(*) FILTER (WHERE vt = {OPEN}) FROM {rd}").fetchone()
     return {"versions": tot[0], "open": tot[1], "paths": tot[2], "reads": rtot[0], "reads_open": rtot[1], "kinds": kinds,
             "scans": [per[s["id"]] for s in scans["scans"]]}

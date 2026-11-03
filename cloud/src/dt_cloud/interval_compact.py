@@ -30,11 +30,14 @@ from __future__ import annotations
 
 import json
 import shutil
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Callable
+from itertools import accumulate
 from pathlib import Path
 from threading import Lock
 from time import monotonic
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from . import append_runner as ar
@@ -100,11 +103,13 @@ def _class_renames(path: str) -> dict[str, str]:
     return {o: n for o, n in zip(old, ist.CLS) if o != n}
 
 
-def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: ist.Identity = False, churn: bool = False) -> str:
+def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: ist.Identity = False, churn: bool = False,
+                  pieces: list[str] | None = None) -> str:
     """Key range `name`'s versions of table `t`: the base's range file and every run's delta, one row per version
     (`IDENT`, `usr` as '') with the smallest `vt`, in the base's columns (`interval_store.SUB_SCHEMA[t]`, `usr` '';
     `GENERATION` last in `pvl` with `generation`). Class columns of an older generation are read by position, under
-    `CLASS_COLS`' names. `churn`: `pvl` carries `churn_cum` (`interval_churn`)."""
+    `CLASS_COLS`' names. `churn`: `pvl` carries `churn_cum` (`interval_churn`). `pieces`: only the rows of a key
+    sub-range (`sub_pieces`; each read separately, so it prunes the inputs' row groups by their statistics)."""
     names = ist.with_generation(with_churn(ist.SUB_SCHEMA[t], churn and t == "pvl"), generation if t == "pvl" else False).names
 
     def sel(path: str) -> str:
@@ -115,7 +120,7 @@ def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: ist
                          else f"{back[c]} AS {c}" if c in back else c for c in names)
 
     files = [f"{base}/{t}/{name}.parquet", *(f"{r}/{t}/{name}.parquet" for r in runs)]
-    parts = [f"SELECT {sel(f)} FROM read_parquet({q(f)})" for f in files]
+    parts = [f"SELECT {sel(f)} FROM read_parquet({q(f)}) WHERE {p}" for f in files for p in (pieces or ["true"])]
     ident = ", ".join(ia.IDENT[t])
     return f"""SELECT * FROM ({" UNION ALL ".join(parts)}) QUALIFY row_number() OVER (PARTITION BY {ident} ORDER BY vt) = 1"""
 
@@ -131,75 +136,203 @@ def _islands_sql(src: str, same: list[str], keep: list[str], where: str = "true"
         SELECT depth, path, min(vf) AS vf, max(vt) AS vt, {first} FROM g GROUP BY depth, path, __run"""
 
 
-#: A `compact_range` hook: `(con, name)` sets `GENERATION` on table `pv`'s versions where it is NULL (the range's path
-#: versions: the column added NULL, or read from a source that carries it), which the folded pieces (`pvl`) without one
-#: then take from their path version (`interval_backfill`).
-Fill = Callable[[object, str], None]
+#: A `compact_range` hook: `(con, name, pieces)` sets `GENERATION` on table `pv`'s versions where it is NULL (the range's
+#: path versions in its key sub-range `pieces`, `sub_pieces`'s, None for the whole range: the column added NULL, or read
+#: from a source that carries it), which the folded pieces (`pvl`) without one then take from their path version
+#: (`interval_backfill`).
+Fill = Callable[[object, str, "list[str] | None"], None]
 
 
-def attribution_versions_sql(base: str, runs: list[str], name: str) -> str:
+# ── Bounded memory: key sub-ranges ─────────────────────────────────────────
+#
+# Every statement of `compact_range` is local to a path: versions dedup per `IDENT` (led by `depth, path`), islands per
+# `(depth, path)`, and every writer reads `ORDER BY depth, path, …`. So a range folds as the concatenation, in key order,
+# of its `(depth, path)` sub-ranges folded alone, streamed into one writer per file (`static_names.SortedWriter`: exact
+# row groups, so the bytes don't depend on the cut). A range's input grows with the store (its base range file and
+# every run's delta, under key ranges fixed when the store was built), so the sub-ranges are cut from the inputs'
+# footers alone, each one's estimated in-memory input ≤ `sub_budget`: what a job holds is bounded by the memory limit,
+# not by the store.
+
+#: DuckDB's in-memory string (`string_t`): 16 bytes a value, its bytes past 12 in a heap. A PLAIN-encoded string's
+#: uncompressed parquet bytes (a 4-byte length + its bytes) already count that heap; a dictionary-encoded one's count its
+#: dictionary once per row group (`kind`, `us`, `usr`, `user`, `source`: short values, inline in the 16 bytes up to 12).
+STRING_T = 16
+#: Copies of a sub-range's input live at once at the peak of `compact_range`'s heaviest statement, `pv`'s islands: the
+#: `pvl` table (≤ its input: one row per version), the first window's materialized (partitioned) input, the second
+#: window's, and the aggregate's groups (each ≤ `pvl`). The versions' dedup (the union's window input, its partitioned
+#: copy, the table it fills) and the sorted read behind each writer hold no more.
+COPIES = 4
+#: DuckDB's memory beyond the relations: per-thread scan and sort buffers, the parquet metadata cache.
+RESERVE = 1 / 4
+MIB = 1 << 20
+
+Key = tuple[int, str]
+#: Below and above every `(depth, path)` key (`depth` a uint8): a row group without statistics spans them.
+LOW: Key = (-1, "")
+HIGH: Key = (256, "")
+
+
+def sub_budget(mem: str | int, jobs: int) -> int:
+    """A key sub-range's estimated input bytes (`group_spans`) when `jobs` ranges fold at once under DuckDB's memory
+    limit `mem` (shared by their cursors): `mem × (1 − RESERVE) / (jobs × COPIES)`. Every job's relations then fit the
+    limit together, whatever the store's size."""
+    m = sn.mem_bytes(mem) if isinstance(mem, str) else mem
+    return int(m * (1 - RESERVE) / (max(1, jobs) * COPIES))
+
+
+def group_spans(path: str) -> list[tuple[Key, Key, int]]:
+    """Each row group of a `(depth, path)`-sorted parquet, from its footer: its keys' bounds `(lo, hi)` (the statistics'
+    `(min depth, min path)` and `(max depth, max path)` bound every key in it lexicographically, also where its depth
+    varies; `LOW`, `HIGH` without statistics) and its estimated in-memory bytes: uncompressed bytes + `STRING_T` per
+    string value."""
+    md = pq.read_metadata(path)
+    schema = md.schema.to_arrow_schema()
+    di, pi = schema.names.index("depth"), schema.names.index("path")
+    strings = sum(1 for f in schema if pa.types.is_string(f.type) or pa.types.is_large_string(f.type))
+    out = []
+    for g in range(md.num_row_groups):
+        rg = md.row_group(g)
+        d, p = rg.column(di).statistics, rg.column(pi).statistics
+        ok = all(st is not None and st.has_min_max for st in (d, p))
+        lo, hi = ((d.min, p.min), (d.max, p.max)) if ok else (LOW, HIGH)
+        out.append((lo, hi, rg.total_byte_size + rg.num_rows * STRING_T * strings))
+    return out
+
+
+def sub_ranges(files: list[str], budget: int | None) -> list[tuple[Key | None, Key | None, int]]:
+    """`[lo, hi)` key sub-ranges (None: unbounded) covering every key of `files` (key-sorted parquets; missing ones
+    skipped), each with its estimate: the bytes of every row group whose keys it may hold (group `lo < hi`, group
+    `hi ≥ lo`). Cut at row-group starts only, greedily as far as the estimate stays ≤ `budget`, but at least one start
+    on: a path's versions are never split, so the floor is the groups overlapping one start (about one per input file,
+    plus groups holding one path's versions alone). `budget` None, or all of it within `budget`: one sub-range, the whole
+    range (read unfiltered). With `P(c)` the bytes of groups starting before `c` and `H(s)` of those ending before `s`,
+    `[s, c)`'s estimate is `P(c) − H(s)`."""
+    groups = [g for f in files if Path(f).exists() for g in group_spans(f)]
+    if budget is None or sum(b for *_, b in groups) <= budget:
+        return [(None, None, sum(b for *_, b in groups))]
+    by_lo, by_hi = sorted((lo, b) for lo, _, b in groups), sorted((hi, b) for _, hi, b in groups)
+    lo_keys, lo_cum = [k for k, _ in by_lo], list(accumulate((b for _, b in by_lo), initial=0))
+    hi_keys, hi_cum = [k for k, _ in by_hi], list(accumulate((b for _, b in by_hi), initial=0))
+    P = lambda c: lo_cum[bisect_left(lo_keys, c)]  # noqa: E731
+    H = lambda s: 0 if s is None else hi_cum[bisect_left(hi_keys, s)]  # noqa: E731
+    cuts = sorted(set(lo_keys) - {LOW})[1:]
+    pc = [P(c) for c in cuts]
+    out: list[tuple[Key | None, Key | None, int]] = []
+    s: Key | None = None
+    j = 0
+    while j < len(cuts) and lo_cum[-1] - H(s) > budget:
+        m = max(j, bisect_right(pc, budget + H(s), lo=j) - 1)
+        out.append((s, cuts[m], pc[m] - H(s)))
+        s, j = cuts[m], m + 1
+    out.append((s, None, lo_cum[-1] - H(s)))
+    return out
+
+
+def sub_pieces(lo: Key | None, hi: Key | None) -> list[str] | None:
+    """Sub-range `[lo, hi)` as conjunctive predicates (`static_names.range_preds`'); None for the whole range."""
+    if lo is None and hi is None:
+        return None
+    from pyrmts.intervals import key_range_pieces
+
+    return key_range_pieces(sn.RANGE_COLS, list(lo) if lo is not None else None, list(hi) if hi is not None else None)
+
+
+def attribution_files(base: str, runs: list[str], name: str) -> list[str]:
+    """Key range `name`'s attribution inputs: the base's range file and every run's delta that hold the table."""
+    t = ist.ATTRIBUTION
+    return [f for f in (f"{base}/{t}/{name}.parquet", *(f"{r}/{t}/{name}.parquet" for r in runs)) if Path(f).exists()]
+
+
+def attribution_versions_sql(base: str, runs: list[str], name: str, pieces: list[str] | None = None) -> str:
     """Key range `name`'s attribution versions: the base's range file and every run's delta that hold the table (a base
     or run from before it opened holds none), one row per version (`IDENT`) with the smallest `vt`, in `AT_SCHEMA`'s
     columns. A version runs on across uncovered scans in both build and append, so these are `build`'s versions as
-    they are: no islands to re-form."""
+    they are: no islands to re-form. `pieces`: only a key sub-range's rows (`_versions_sql`)."""
     t = ist.ATTRIBUTION
-    files = [f for f in (f"{base}/{t}/{name}.parquet", *(f"{r}/{t}/{name}.parquet" for r in runs)) if Path(f).exists()]
+    files = attribution_files(base, runs, name)
     cols = ist.qcols(ist.AT_SCHEMA.names)
-    parts = " UNION ALL ".join(f"SELECT {cols} FROM read_parquet({q(f)})" for f in files) or ist.empty_sql(ist.AT_SCHEMA)
+    parts = " UNION ALL ".join(f"SELECT {cols} FROM read_parquet({q(f)}) WHERE {p}" for f in files for p in (pieces or ["true"])) or ist.empty_sql(ist.AT_SCHEMA)
     return f"""SELECT * FROM ({parts}) QUALIFY row_number() OVER (PARTITION BY {', '.join(ia.IDENT[t])} ORDER BY vt) = 1"""
 
 
 def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False,
-                  fill: Fill | None = None, fill_nulls: bool = False, attributed: bool = False, churn: bool = False) -> dict:
+                  fill: Fill | None = None, fill_nulls: bool = False, attributed: bool = False, churn: bool = False,
+                  budget: int | None = None) -> dict:
     """Key range `name` of the generation folded from the base under `base` and the runs `runs` (dirs, oldest first) into
     `out`'s range files, as `build` writes them: `pvl/`, `pv/` and `rd/` (the islands of `pvl`'s pieces), and with the
     owner axis `sv/` and `svt/`. `generation`: the path versions carry `GENERATION` — read from the inputs, or, with
     `fill`, set by it on the path versions and taken by their pieces (`fill_nulls`: the inputs carry it, and only its NULLs
     are filled). `churn`: the folded path versions carry `churn_cum`, kept as the inputs have it (`pv`'s islands don't
-    split on it). Its tables are `con`'s temp tables, so ranges
-    run concurrently on cursors of one database (`fold_gen` `jobs`). Returns their row counts."""
-    rf = lambda sub: out / sub / f"{name}.parquet"
+    split on it). Each table's pass folds key sub-ranges of at most `budget` estimated input bytes apiece (`sub_ranges`;
+    None: the whole range at once), in key order, into one writer per file: the same bytes at any `budget`. Its tables
+    are `con`'s temp tables, so ranges run concurrently on cursors of one database (`fold_gen` `jobs`). Returns `{rows:
+    {table: rows}, paths: {all, kinds} (distinct paths, `churn_stats`'), subs: {pass: sub-ranges}, est: the largest
+    sub-range's estimate}`."""
+    rf = lambda sub: out / sub / f"{name}.parquet"  # noqa: E731
+    inputs = lambda t: [f"{base}/{t}/{name}.parquet", *(f"{r}/{t}/{name}.parquet" for r in runs)]  # noqa: E731
     gen_in = generation if fill is None or fill_nulls else False
     gcol = [ist.identity_column(gen_in)] if gen_in else []
-    con.execute(f"CREATE OR REPLACE TEMP TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in, churn)}")
     # A path version is the run of its pieces with equal change columns (`dr` as `build` derives it); `wts` (and
     # `GENERATION`) is carried from the version's first scan, which every piece shares (`fold`).
     change = [c for c in ist.change_cols(gen_in) if c != "dr"]
     pv_src = f"SELECT *, {ia.DR} AS dr FROM pvl"
-    con.execute(f"CREATE OR REPLACE TEMP TABLE pv AS {_islands_sql(pv_src, ist.change_cols(gen_in), list(dict.fromkeys([*change, 'wts', *gcol])))}")
-    if fill is not None:
-        if not fill_nulls:
-            for t in ("pv", "pvl"):
-                con.execute(f"ALTER TABLE {t} ADD COLUMN {ist.GENERATION} BIGINT")
-        fill(con, name)
-        g = ist.GENERATION
-        con.execute(f"""UPDATE pvl SET {g} = p.{g} FROM pv p
-            WHERE p.depth = pvl.depth AND p.path = pvl.path AND p.vf <= pvl.vf AND pvl.vf < p.vt AND pvl.{g} IS NULL AND p.{g} IS NOT NULL""")
     pvl_schema, pv_schema = (ist.with_generation(s, generation) for s in (with_churn(ist.PVL_SCHEMA, churn), ist.PV_SCHEMA))
-    doc = {"pvl": sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pvl_schema.names)} FROM pvl ORDER BY depth, path, vf"), rf("pvl"),
-                                  pvl_schema, ist.RANGE_RG, dictionary=["kind", "us"])}
-    doc["pv"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pv_schema.names)} FROM pv ORDER BY depth, path, vf"), rf("pv"), pv_schema,
-                                ist.RANGE_RG, dictionary=["kind", "us"])
-    con.execute(f"CREATE OR REPLACE TEMP TABLE rd AS {_islands_sql('SELECT * FROM pvl', ['last_read'], ['last_read'], 'last_read >= 0')}")
-    doc["rd"] = sn.write_sorted(sn._batches(con, "SELECT depth, path, vf, vt, last_read FROM rd ORDER BY depth, path, vf"), rf("rd"),
-                                ist.RD_SCHEMA, ist.RANGE_RG)
-    con.execute("DROP TABLE pvl; DROP TABLE pv; DROP TABLE rd")
+    rows: dict[str, int] = {}
+    plans: dict[str, list] = {}
+    paths: dict = {"all": 0, "kinds": {}}
+    plan = plans["pvl"] = sub_ranges(inputs("pvl"), budget)
+    with (sn.SortedWriter(rf("pvl"), pvl_schema, ist.RANGE_RG, dictionary=["kind", "us"]) as w_pvl,
+          sn.SortedWriter(rf("pv"), pv_schema, ist.RANGE_RG, dictionary=["kind", "us"]) as w_pv,
+          sn.SortedWriter(rf("rd"), ist.RD_SCHEMA, ist.RANGE_RG) as w_rd):
+        for lo, hi, _ in plan:
+            pieces = sub_pieces(lo, hi)
+            con.execute(f"CREATE OR REPLACE TEMP TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in, churn, pieces)}")
+            con.execute(f"CREATE OR REPLACE TEMP TABLE pv AS {_islands_sql(pv_src, ist.change_cols(gen_in), list(dict.fromkeys([*change, 'wts', *gcol])))}")
+            if fill is not None:
+                if not fill_nulls:
+                    for t in ("pv", "pvl"):
+                        con.execute(f"ALTER TABLE {t} ADD COLUMN {ist.GENERATION} BIGINT")
+                fill(con, name, pieces)
+                g = ist.GENERATION
+                con.execute(f"""UPDATE pvl SET {g} = p.{g} FROM pv p
+                    WHERE p.depth = pvl.depth AND p.path = pvl.path AND p.vf <= pvl.vf AND pvl.vf < p.vt AND pvl.{g} IS NULL AND p.{g} IS NOT NULL""")
+            # The distinct paths `churn_stats` reports, counted here: sub-ranges (and ranges) hold disjoint paths.
+            for kind, n in con.execute("SELECT kind, count(DISTINCT path) FROM pv GROUP BY kind").fetchall():
+                paths["kinds"][kind] = paths["kinds"].get(kind, 0) + n
+            paths["all"] += con.execute("SELECT count(DISTINCT (depth, path)) FROM pv").fetchone()[0]
+            w_pvl.write(sn._batches(con, f"SELECT {', '.join(pvl_schema.names)} FROM pvl ORDER BY depth, path, vf"))
+            w_pv.write(sn._batches(con, f"SELECT {', '.join(pv_schema.names)} FROM pv ORDER BY depth, path, vf"))
+            con.execute(f"CREATE OR REPLACE TEMP TABLE rd AS {_islands_sql('SELECT * FROM pvl', ['last_read'], ['last_read'], 'last_read >= 0')}")
+            w_rd.write(sn._batches(con, "SELECT depth, path, vf, vt, last_read FROM rd ORDER BY depth, path, vf"))
+            con.execute("DROP TABLE pvl; DROP TABLE pv; DROP TABLE rd")
+    rows.update(pvl=w_pvl.rows, pv=w_pv.rows, rd=w_rd.rows)
     if sliced:
         # `build -S`'s and `fold -S`'s statements, over the same relations (`sv` with `usr` '', `svt` with it NULL).
-        con.execute(f"CREATE OR REPLACE TEMP TABLE sv AS {_versions_sql(base, runs, 'sv', name)}")
         sel = ", ".join("nullif(usr, '') AS usr" if c == "usr" else c for c in ist.SV_SCHEMA.names)
-        doc["sv"] = sn.write_sorted(sn._batches(con, f"SELECT {sel} FROM sv ORDER BY depth, path, usr, vf"), rf("sv"), ist.SV_SCHEMA, ist.RANGE_RG,
-                                    dictionary=["kind", "usr"])
-        con.execute(f"CREATE OR REPLACE TEMP TABLE svt AS SELECT * REPLACE (nullif(usr, '') AS usr) FROM ({_versions_sql(base, runs, 'svt', name)})")
-        doc["svt"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(ist.SVT_SCHEMA.names)} FROM svt ORDER BY depth, path, usr NULLS FIRST, vf"),
-                                     rf("svt"), ist.SVT_SCHEMA, ist.RANGE_RG, dictionary=["kind", "usr"])
-        con.execute("DROP TABLE sv; DROP TABLE svt")
+        plan = plans["sv"] = sub_ranges(inputs("sv"), budget)
+        with sn.SortedWriter(rf("sv"), ist.SV_SCHEMA, ist.RANGE_RG, dictionary=["kind", "usr"]) as w:
+            for lo, hi, _ in plan:
+                con.execute(f"CREATE OR REPLACE TEMP TABLE sv AS {_versions_sql(base, runs, 'sv', name, pieces=sub_pieces(lo, hi))}")
+                w.write(sn._batches(con, f"SELECT {sel} FROM sv ORDER BY depth, path, usr, vf"))
+                con.execute("DROP TABLE sv")
+        rows["sv"] = w.rows
+        plan = plans["svt"] = sub_ranges(inputs("svt"), budget)
+        with sn.SortedWriter(rf("svt"), ist.SVT_SCHEMA, ist.RANGE_RG, dictionary=["kind", "usr"]) as w:
+            for lo, hi, _ in plan:
+                con.execute(f"""CREATE OR REPLACE TEMP TABLE svt AS SELECT * REPLACE (nullif(usr, '') AS usr)
+                    FROM ({_versions_sql(base, runs, 'svt', name, pieces=sub_pieces(lo, hi))})""")
+                w.write(sn._batches(con, f"SELECT {', '.join(ist.SVT_SCHEMA.names)} FROM svt ORDER BY depth, path, usr NULLS FIRST, vf"))
+                con.execute("DROP TABLE svt")
+        rows["svt"] = w.rows
     if attributed:
         t = ist.ATTRIBUTION
-        doc[t] = sn.write_sorted(sn._batches(con, f"SELECT {ist.qcols(ist.AT_SCHEMA.names)} FROM ({attribution_versions_sql(base, runs, name)}) ORDER BY depth, path, vf"),
-                                 rf(t), ist.AT_SCHEMA, ist.RANGE_RG, dictionary=["user", "source"])
-    return doc
-
+        plan = plans[t] = sub_ranges(attribution_files(base, runs, name), budget)
+        with sn.SortedWriter(rf(t), ist.AT_SCHEMA, ist.RANGE_RG, dictionary=["user", "source"]) as w:
+            for lo, hi, _ in plan:
+                sql = attribution_versions_sql(base, runs, name, sub_pieces(lo, hi))
+                w.write(sn._batches(con, f"SELECT {ist.qcols(ist.AT_SCHEMA.names)} FROM ({sql}) ORDER BY depth, path, vf"))
+        rows[t] = w.rows
+    return {"rows": rows, "paths": paths, "subs": {t: len(p) for t, p in plans.items()}, "est": max(e for p in plans.values() for *_, e in p)}
 
 def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
     """The `scans.json` entries of every scan the runs `runs` hold (their `deltas/<id>/scans.json`, kept on folded runs by
@@ -217,7 +350,8 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
              mem: str = "4GB", jobs: int = 1, fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None,
              progress: Callable[..., None] | None = None,
-             identity: ist.Identity | None = None, before_cut: Callable[[object, Path, dict], None] | None = None) -> tuple[dict, dict, dict, dict]:
+             identity: ist.Identity | None = None, before_cut: Callable[[object, Path, dict], None] | None = None,
+             budget: int | None = None) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
@@ -228,8 +362,9 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     range (a caller's heartbeat; in completion order, one call at a time). `progress(note[, next_phase])`: the run
     record's hook (`append_runner.compact_store`): each range's `i/k` note, then the ranges' total with `next_phase`
     `sorts` as the served sorts' cut begins. `before_cut(con, out, doc)`: a hook over the folded range files before the
-    cut (`interval_churn.backfill` sets `churn_cum` there, and records it in `doc`). Returns `(scans.json, rows per table,
-    sorts, stats)`."""
+    cut (`interval_churn.backfill` sets `churn_cum` there, and records it in `doc`). Each range folds in key sub-ranges of
+    at most `budget` estimated input bytes (default `sub_budget(mem, jobs)`: what the `jobs` ranges at once hold stays
+    within `mem`, at any store size; the bytes don't depend on it). Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = (ist.has_generation(base) or fill is not None) if identity is None else identity
@@ -246,17 +381,20 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     shutil.copyfile(gen_dir / "ranges.json", out / "ranges.json")
     k = json.loads((out / "ranges.json").read_text())["k"]
     con = sn.connect(threads, mem, work / "duckdb-compact")
+    budget = sub_budget(mem, jobs) if budget is None else budget
     run_dirs = [str(gen_dir / r["key"]) for r in runs]
     lock, done = Lock(), [0]
     t_all = monotonic()
 
     def one(cur, i: int) -> dict:
         t0 = monotonic()
-        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill, fill_nulls, attributed, has_churn(base))
+        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill, fill_nulls, attributed, has_churn(base),
+                            budget)
         with lock:
             done[0] += 1
-            err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s "
-                f"({done[0]}/{k} done, {monotonic() - t_all:.0f}s so far)")
+            subs = " ".join(f"{t} {n}" for t, n in got["subs"].items())
+            err(f"fold {gen}: range {i + 1}/{k}: {sum(got['rows'].values()):,} rows in {monotonic() - t0:.1f}s, sub-ranges {subs} "
+                f"(largest ≈{got['est'] / MIB:,.0f} of {budget / MIB:,.0f} MiB) ({done[0]}/{k} done, {monotonic() - t_all:.0f}s so far)")
             if on_range is not None:
                 on_range(i, k)
             if progress is not None:
@@ -264,16 +402,20 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
         return got
 
     rows: dict[str, int] = {}
+    paths: dict = {"all": 0, "kinds": {}}
     for got in sn.each(con, one, list(range(k)), jobs):
-        for t, n in got.items():
+        for t, n in got["rows"].items():
             rows[t] = rows.get(t, 0) + n
+        paths["all"] += got["paths"]["all"]
+        for kind, n in got["paths"]["kinds"].items():
+            paths["kinds"][kind] = paths["kinds"].get(kind, 0) + n
     if before_cut is not None:
         before_cut(con, out, doc)
     t0 = monotonic()
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
     if progress is not None:
         progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
-    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs)
+    sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs, paths=paths)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
